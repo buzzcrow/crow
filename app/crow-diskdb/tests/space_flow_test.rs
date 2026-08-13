@@ -58,10 +58,12 @@ fn make_dg() -> Arc<DdbDiskGroup> {
 }
 
 /// Fill all capacity across 3 disks × 4 zones × 128 units = 1536
-/// units. Verify rotation across all 4 zones per disk. Free all,
-/// reclaim, re-allocate.
+/// units. Verify rotation across all 4 zones per disk. In the
+/// persist-only model, free does NOT reclaim space (the bitmap stays
+/// set until compaction) — so this test verifies fill + rotation only.
+/// The reclaim flow is verified in the compaction integration tests.
 #[test]
-fn single_thread_fill_free_reclaim() {
+fn single_thread_fill_and_rotate() {
     let dg = make_dg();
     let total_cap = u64::from(DISK_COUNT) * u64::from(ZONE_COUNT) * u64::from(ZONE_CAP);
 
@@ -92,22 +94,19 @@ fn single_thread_fill_free_reclaim() {
     assert_eq!(usage.busy_bytes, total_cap * u64::from(UNIT_SIZE));
     assert_eq!(usage.free_bytes, 0);
 
-    // Free all.
+    // Free all — persist-only: increments backlog but does NOT clear
+    // the bitmap or reclaim space.
     for (did, zi, offset, count) in &allocated {
         assert!(dg.free_block(did, *zi, *offset, *count));
     }
 
-    // Verify aggregate usage is empty.
+    // Aggregate usage is still full (bitmap not cleared).
     let usage = dg.aggregate_usage();
-    assert_eq!(usage.busy_bytes, 0);
-    assert_eq!(usage.free_bytes, total_cap * u64::from(UNIT_SIZE));
+    assert_eq!(usage.busy_bytes, total_cap * u64::from(UNIT_SIZE));
+    assert_eq!(usage.free_bytes, 0);
 
-    // Re-allocate all (reclaim).
-    let mut reclaimed = 0u64;
-    while dg.allocate_block(1, &[], CAS_RETRY, ZONE_ROTATE).is_ok() {
-        reclaimed += 1;
-    }
-    assert_eq!(reclaimed, total_cap);
+    // No space can be reclaimed without compaction.
+    assert!(dg.allocate_block(1, &[], CAS_RETRY, ZONE_ROTATE).is_err());
 }
 
 /// 8 concurrent tasks × 192 units each = 1536 total. Verify no

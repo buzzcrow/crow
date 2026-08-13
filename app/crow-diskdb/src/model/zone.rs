@@ -4,7 +4,7 @@
 //! Zone bitmap-scan allocator — per-zone allocation state + Phase 1
 //! (sync) allocate/free via per-bit CAS on the usage bitmap.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use crow_common::metrics::Counter;
@@ -31,6 +31,19 @@ pub struct AllocatedRange {
     pub unit_count: u32,
 }
 
+/// Result of `compact_zone_inner` — the in-memory compaction step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactResult {
+    /// The new `compact_ts` (monotonically advanced).
+    pub new_compact_ts: u64,
+    /// Count of new free records (`freed_ts > old compact_ts`) that
+    /// were `range_clear`ed.
+    pub new_free_count: u32,
+    /// Count of stale free records (`freed_ts <= old compact_ts`) that
+    /// were dropped without touching the bitmap.
+    pub stale_free_count: u32,
+}
+
 /// Per-zone allocation state. One `Zone` per zone on a disk.
 ///
 /// The in-memory `usage_bits` bitmap is a performance cache; the
@@ -51,8 +64,21 @@ pub struct DdbZone {
     pub used_count: AtomicU32,
     /// Last compacted snapshot slot (R73).
     pub snapshot_slot: AtomicU64,
+    /// Compaction watermark — max `freed_ts` of all free records merged
+    /// into the bitmap. Free records with `freed_ts <= compact_ts` are
+    /// stale (already merged); `freed_ts > compact_ts` are new.
+    pub compact_ts: AtomicU64,
+    /// `true` when the zone has been compacted and its bitmap is
+    /// accurate (eligible for rotation into the active set). Set by
+    /// compaction and recovery; cleared when published into the active
+    /// set.
+    pub compacted_ready: AtomicBool,
+    /// Zone-level lock for non-allocate operations (compaction, scanner,
+    /// health checks). Not held across `.await` (I9). Allocate uses
+    /// per-bit CAS (lock-free) and does not acquire this lock.
+    pub zone_lock: RwLock<()>,
     /// Compaction backlog gauge — incremented on free, decremented by
-    /// R73 compaction.
+    /// compaction.
     pub uncompacted_free_record_count: AtomicU32,
     /// Per-zone CAS retry counter (§11: `zone.allocate.retry.cms.bit.count`).
     /// Incremented on each failed `cas_bit` in the allocate path.
@@ -76,6 +102,9 @@ impl DdbZone {
             last_pos_64: AtomicU64::new(0),
             used_count: AtomicU32::new(0),
             snapshot_slot: AtomicU64::new(0),
+            compact_ts: AtomicU64::new(0),
+            compacted_ready: AtomicBool::new(false),
+            zone_lock: RwLock::new(()),
             uncompacted_free_record_count: AtomicU32::new(0),
             cas_retry_count: AtomicU64::new(0),
             metrics_cas_retry: None,
@@ -317,14 +346,12 @@ impl DdbZone {
     /// Returns `false` if any bit was already clear (double-free
     /// detection). Decrements `used_count` on success.
     ///
-    /// The bitmap clear happens after the durable `FreeBlockValue`
-    /// persist (persist-before-bitmap-clear). If diskdb crashes after
-    /// the persist but before the clear, the bit is set in memory but
-    /// no `BusyBlockKey` exists on disk — R73's full scan clears the
-    /// bit (no busy record → block is free). This is a ghost-busy
-    /// (self-correcting on restart; §12 scanner reconciles during live
-    /// operation).
-    pub fn free(&self, unit_offset: u64, unit_count: u32) -> bool {
+    /// This is the **allocate-only** bitmap clear (I8), used only by
+    /// the allocate Phase 2 failure path to undo Phase 1's bitmap
+    /// claim. It is **never** called by the free path — the free path
+    /// is persist-only (the bitmap is not touched on free; compaction
+    /// is the sole bit-clearer for freed blocks).
+    pub fn rollback_allocate(&self, unit_offset: u64, unit_count: u32) -> bool {
         if unit_count == 0 {
             return false;
         }
@@ -340,7 +367,7 @@ impl DdbZone {
             let word_idx = bit as usize / 64;
             let mask = 1u64 << (bit % 64);
             if self.usage_bits.load_word(word_idx) & mask == 0 {
-                return false; // double-free: bit already clear
+                return false; // bit already clear
             }
         }
 
@@ -348,8 +375,8 @@ impl DdbZone {
         for i in 0..unit_count {
             let bit = start + i;
             if !self.usage_bits.cas_bit(bit, false) {
-                // Bit was already clear (race with another free) —
-                // re-set the bits we already cleared and fail.
+                // Bit was already clear — re-set the bits we already
+                // cleared and fail.
                 for j in 0..i {
                     let rb = start + j;
                     let _ = self.usage_bits.cas_bit(rb, true);
@@ -359,8 +386,97 @@ impl DdbZone {
         }
 
         self.used_count.fetch_sub(unit_count, Ordering::AcqRel);
-        self.uncompacted_free_record_count.fetch_add(1, Ordering::Relaxed);
         true
+    }
+
+    /// Record a persist-only free in memory: increment
+    /// `uncompacted_free_record_count`. No bitmap mutation, no
+    /// `used_count` decrement — the bitmap is a conservative over-
+    /// estimate (I1). Compaction is the sole bit-clearer (I3).
+    pub fn record_free(&self) {
+        self.uncompacted_free_record_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// In-memory compaction step: partition free records by the
+    /// `compact_ts` watermark, `range_clear` only the **new** free
+    /// records (stale ones are already merged), recompute `used_count`,
+    /// and advance `compact_ts` monotonically. The zone lock is held
+    /// only for the in-memory bitmap mutation (I9).
+    ///
+    /// The caller reads the free records from KV (no lock), calls this
+    /// method, then writes the new `ZoneValue` + deletes all free
+    /// records in one atomic `batch_write` (I6). Returns the partition
+    /// counts so the caller knows how many records it will delete.
+    pub fn compact_zone_inner(&self, free_records: &[crate::model::records::FreeRecord]) -> CompactResult {
+        let current_compact_ts = self.compact_ts.load(Ordering::Acquire);
+
+        // Partition by watermark (no lock needed — read-only).
+        let mut new_records: Vec<&crate::model::records::FreeRecord> = Vec::new();
+        let mut stale_count: u32 = 0;
+        for free in free_records {
+            if free.value.freed_ts <= current_compact_ts {
+                stale_count += 1;
+            } else {
+                new_records.push(free);
+            }
+        }
+
+        // Acquire zone lock for the in-memory bitmap mutation.
+        let _guard = self.zone_lock.write().unwrap();
+
+        // range_clear only the new free records (stale ones are already
+        // merged — clearing them again could corrupt a re-allocated
+        // block, I7).
+        for free in &new_records {
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = free.key.unit_offset as u32;
+            let _ = self.usage_bits.range_clear(offset, free.value.unit_count);
+        }
+
+        // Recompute used_count = popcount of the merged bitmap.
+        let popcount = self.usage_bits.count_set();
+        self.used_count
+            .store(u32::try_from(popcount).unwrap_or(u32::MAX), Ordering::Release);
+
+        // Advance compact_ts monotonically: max(current, max(new
+        // freed_ts)). The max with current prevents regression when the
+        // step-1 read was stale (another compaction ran in between).
+        let max_new_freed_ts = new_records.iter().map(|f| f.value.freed_ts).max().unwrap_or(0);
+        let new_compact_ts = current_compact_ts.max(max_new_freed_ts);
+        self.compact_ts.store(new_compact_ts, Ordering::Release);
+
+        #[allow(clippy::cast_possible_truncation)]
+        CompactResult {
+            new_compact_ts,
+            new_free_count: new_records.len() as u32,
+            stale_free_count: stale_count,
+        }
+    }
+
+    /// Mark the zone as compacted and ready for rotation.
+    pub fn mark_compacted_ready(&self) {
+        self.compacted_ready.store(true, Ordering::Release);
+    }
+
+    /// Mark the zone as not ready (published into the active set — will
+    /// need re-compaction after being allocated from and freed).
+    pub fn clear_compacted_ready(&self) {
+        self.compacted_ready.store(false, Ordering::Release);
+    }
+
+    /// Scanner stub — replay journal and compare bitmap under the zone
+    /// lock. Full implementation is R75; this establishes the lock
+    /// discipline.
+    pub fn scan_zone_inner(&self) {
+        let _guard = self.zone_lock.read().unwrap();
+        // R75: compare in-memory bitmap with record-derived bitmap.
+    }
+
+    /// Health-check stub — verify zone records and CRC under the zone
+    /// lock. Full implementation is R76.
+    pub fn health_check_zone_inner(&self) {
+        let _guard = self.zone_lock.read().unwrap();
+        // R76: verify CRC + snapshot integrity.
     }
 
     /// Snapshot current `usage_bits` + `snapshot_slot` + `crc32` into a
@@ -373,7 +489,7 @@ impl DdbZone {
             usage_bitmap: self.usage_bits.snapshot(),
             snapshot_slot: self.snapshot_slot.load(Ordering::Acquire),
             crc32: 0,
-            compact_ts: 0,
+            compact_ts: self.compact_ts.load(Ordering::Acquire),
         };
         zv.compute_checksum();
         zv
@@ -408,6 +524,9 @@ impl DdbZone {
             last_pos_64: AtomicU64::new(0),
             used_count: AtomicU32::new(u32::try_from(used_count).unwrap_or(u32::MAX)),
             snapshot_slot: AtomicU64::new(value.snapshot_slot),
+            compact_ts: AtomicU64::new(value.compact_ts),
+            compacted_ready: AtomicBool::new(true),
+            zone_lock: RwLock::new(()),
             uncompacted_free_record_count: AtomicU32::new(0),
             cas_retry_count: AtomicU64::new(0),
             metrics_cas_retry: None,
@@ -465,8 +584,8 @@ mod accessor_tests {
         let r = z.allocate(5, 100).expect("alloc 5");
         assert_eq!(z.busy_blocks(), 5);
         assert_eq!(z.free_blocks(), 123);
-        // Free 2 of the 5 units — freed space is reusable immediately.
-        assert!(z.free(r.unit_offset, 2));
+        // Rollback 2 of the 5 units (allocate-only bitmap clear).
+        assert!(z.rollback_allocate(r.unit_offset, 2));
         assert_eq!(z.busy_blocks(), 3);
         assert_eq!(z.free_blocks(), 125);
     }
@@ -487,7 +606,7 @@ mod accessor_tests {
         let z = make_zone(128);
         let r = z.allocate(5, 100).expect("alloc 5");
         assert!((z.usage_ratio() - 5.0 / 128.0).abs() < f64::EPSILON);
-        assert!(z.free(r.unit_offset, 2));
+        assert!(z.rollback_allocate(r.unit_offset, 2));
         assert!((z.usage_ratio() - 3.0 / 128.0).abs() < f64::EPSILON);
     }
 

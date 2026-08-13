@@ -46,22 +46,22 @@ fn zone_allocate_fills_capacity() {
 }
 
 #[test]
-fn zone_free_then_reallocate() {
+fn zone_rollback_then_reallocate() {
     let zone = make_zone(64);
     let r = zone.allocate(1, CAS_RETRY).unwrap();
-    assert!(zone.free(r.unit_offset, r.unit_count));
+    assert!(zone.rollback_allocate(r.unit_offset, r.unit_count));
     assert_eq!(zone.used_count.load(Ordering::Acquire), 0);
-    // Re-allocate should find the freed bit.
+    // Re-allocate should find the rolled-back bit.
     let r2 = zone.allocate(1, CAS_RETRY).unwrap();
     assert_eq!(r2.unit_offset, r.unit_offset);
 }
 
 #[test]
-fn zone_double_free_detected() {
+fn zone_double_rollback_detected() {
     let zone = make_zone(64);
     let r = zone.allocate(1, CAS_RETRY).unwrap();
-    assert!(zone.free(r.unit_offset, r.unit_count));
-    assert!(!zone.free(r.unit_offset, r.unit_count));
+    assert!(zone.rollback_allocate(r.unit_offset, r.unit_count));
+    assert!(!zone.rollback_allocate(r.unit_offset, r.unit_count));
 }
 
 // ── Multi-unit ──────────────────────────────────────────────────
@@ -80,13 +80,13 @@ fn zone_allocate_multi_unit_contiguous() {
 }
 
 #[test]
-fn zone_free_multi_unit() {
+fn zone_rollback_multi_unit() {
     let zone = make_zone(128);
     let r = zone.allocate(8, CAS_RETRY).unwrap();
-    assert!(zone.free(r.unit_offset, r.unit_count));
+    assert!(zone.rollback_allocate(r.unit_offset, r.unit_count));
     assert_eq!(zone.used_count.load(Ordering::Acquire), 0);
-    // Double-free the multi-unit range.
-    assert!(!zone.free(r.unit_offset, r.unit_count));
+    // Double-rollback the multi-unit range.
+    assert!(!zone.rollback_allocate(r.unit_offset, r.unit_count));
 }
 
 #[test]
@@ -191,9 +191,9 @@ fn zone_cas_retry_counter_increments_under_contention() {
         if zone.cas_retry_count.load(Ordering::Relaxed) > 0 {
             return; // contention observed
         }
-        // Free all units for the next round.
+        // Rollback all units for the next round.
         for i in 0u64..64 {
-            zone.free(i, 1);
+            zone.rollback_allocate(i, 1);
         }
     }
     panic!(

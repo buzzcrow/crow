@@ -143,9 +143,10 @@ fn zone_shape_out_of_range() {
     assert!(dg.zone_usage(disk_id(999), 0).is_none());
 }
 
-/// Free updates usage: allocate 10, free 4, verify busy decreases.
+/// Persist-only free: allocate 10, free 4 — `busy_bytes` stays at 10
+/// (the bitmap is not cleared; compaction is the sole bit-clearer).
 #[test]
-fn free_updates_usage() {
+fn free_is_persist_only() {
     let dg = make_dg();
     // Allocate 10 units.
     let mut allocs = Vec::new();
@@ -156,15 +157,15 @@ fn free_updates_usage() {
     let usage_after_alloc = dg.aggregate_usage();
     assert_eq!(usage_after_alloc.busy_bytes, 10 * u64::from(UNIT_SIZE));
 
-    // Free 4 units.
+    // Free 4 units — persist-only: bitmap not cleared.
     for (did, zi, off, count) in allocs.iter().take(4) {
         assert!(dg.free_block(did, *zi, *off, *count));
     }
     let usage_after_free = dg.aggregate_usage();
-    assert_eq!(usage_after_free.busy_bytes, 6 * u64::from(UNIT_SIZE));
+    assert_eq!(usage_after_free.busy_bytes, 10 * u64::from(UNIT_SIZE));
     assert_eq!(
         usage_after_free.free_bytes,
-        usage_after_free.capacity_bytes - 6 * u64::from(UNIT_SIZE)
+        usage_after_free.capacity_bytes - 10 * u64::from(UNIT_SIZE)
     );
 }
 

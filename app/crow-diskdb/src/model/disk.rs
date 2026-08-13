@@ -178,14 +178,18 @@ impl DdbDisk {
         !ctx_guard.is_empty()
     }
 
-    /// Free a range in a specific zone.
-    pub fn free(&self, zone_index: u32, unit_offset: u64, unit_count: u32) -> bool {
+    /// Record a persist-only free in a specific zone: increment
+    /// `uncompacted_free_record_count`. No bitmap mutation, no
+    /// `used_count` decrement — the bitmap is a conservative over-
+    /// estimate (I1). Compaction is the sole bit-clearer (I3).
+    pub fn free(&self, zone_index: u32, _unit_offset: u64, _unit_count: u32) -> bool {
         let zones = self.zones.read().unwrap();
         let idx = zone_index as usize;
         if idx >= zones.len() {
             return false;
         }
-        zones[idx].free(unit_offset, unit_count)
+        zones[idx].record_free();
+        true
     }
 
     /// Build the initial active zone set with the first

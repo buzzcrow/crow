@@ -340,10 +340,12 @@ fn zone_to_from_zone_value_roundtrip() {
     let _ = zone.usage_bits.range_set(0, 4);
     zone.used_count.store(4, std::sync::atomic::Ordering::Release);
     zone.snapshot_slot.store(42, std::sync::atomic::Ordering::Release);
+    zone.compact_ts.store(123, std::sync::atomic::Ordering::Release);
 
     let zv = zone.to_zone_value();
     assert!(zv.verify_checksum(), "CRC should be valid after to_zone_value");
     assert_eq!(zv.snapshot_slot, 42);
+    assert_eq!(zv.compact_ts, 123);
 
     let restored = DdbZone::from_zone_value(disk_id, 0, 100, 128, &zv)
         .expect("from_zone_value should succeed with valid CRC");
@@ -352,6 +354,13 @@ fn zone_to_from_zone_value_roundtrip() {
         restored.snapshot_slot.load(std::sync::atomic::Ordering::Acquire),
         42
     );
+    assert_eq!(
+        restored.compact_ts.load(std::sync::atomic::Ordering::Acquire),
+        123
+    );
+    assert!(restored
+        .compacted_ready
+        .load(std::sync::atomic::Ordering::Acquire));
     assert!(restored.usage_bits.is_set(0));
     assert!(restored.usage_bits.is_set(3));
     assert!(!restored.usage_bits.is_set(4));

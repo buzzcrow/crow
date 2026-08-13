@@ -47,6 +47,12 @@ pub async fn rebuild_zone_bitmap_full_scan(
         std::sync::atomic::Ordering::Release,
     );
 
+    // Full-scan recovery rebuilds from busy records only (no free
+    // records scanned), so compact_ts = 0. The next compaction will
+    // advance it. The bitmap is accurate from records → compacted_ready.
+    zone.compacted_ready
+        .store(true, std::sync::atomic::Ordering::Release);
+
     // Optionally write a fresh ZoneValue snapshot so the next restart
     // can use strategy 2. Anchor it at the current applied frontier.
     let snapshot_slot = match kv.get_applied_slot(bind).await {

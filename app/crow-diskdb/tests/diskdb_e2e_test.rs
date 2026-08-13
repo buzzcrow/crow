@@ -658,11 +658,13 @@ async fn diskdb_e2e_allocate_all_free_all() {
     }
     eprintln!("freed all {} units", all_segments.len());
 
-    // Verify aggregate usage is empty + invariant holds.
-    verify_invariant("empty after free");
+    // Persist-only model: free does NOT clear the bitmap. Aggregate
+    // usage still shows full — the bitmap is a conservative over-
+    // estimate. Compaction is the sole bit-clearer (I3).
+    verify_invariant("after free (persist-only)");
     let usage = dg.aggregate_usage();
-    assert_eq!(usage.busy_bytes, 0);
-    assert_eq!(usage.free_bytes, total_cap_bytes);
+    assert_eq!(usage.busy_bytes, total_cap_bytes);
+    assert_eq!(usage.free_bytes, 0);
 
     // Sample-verify: FreeBlockValue exists + BusyBlockKey is gone.
     let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
@@ -700,20 +702,19 @@ async fn diskdb_e2e_allocate_all_free_all() {
     }
     eprintln!("sample free records verified, busy records gone");
 
-    // ── Phase 3: Re-allocate to confirm space was truly reclaimed ──
-    let mut reclaimed = 0u64;
+    // ── Phase 3: Persist-only — no space reclaimable without compaction
+    // The bitmap still shows all blocks busy. Allocation must fail
+    // (NoSpace). Compaction (tested separately) is required to reclaim.
     let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    while alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
-        .await
-        .is_ok()
-    {
-        reclaimed += 1;
-    }
-    eprintln!("re-allocated {reclaimed} units (expected {total_cap})");
-    assert_eq!(reclaimed, total_cap, "should reclaim all capacity after free");
+    let result = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4).await;
+    assert!(
+        result.is_err(),
+        "persist-only free should not make space available without compaction"
+    );
+    eprintln!("no space reclaimable without compaction (persist-only model)");
 
-    // Final invariant check: full again after re-allocation.
-    verify_invariant("full after reclaim");
+    // Final invariant check: still full.
+    verify_invariant("still full after free (persist-only)");
 
     eprintln!("diskdb_e2e_allocate_all_free_all: ALL CHECKS PASSED");
 }

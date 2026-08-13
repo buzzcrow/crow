@@ -31,11 +31,11 @@ pub async fn recover_zone_inner(
     // Step a: load the latest ZoneValue snapshot.
     let snapshot = kv.get_zone_value(bind, &disk_id, zone_idx).await?;
 
-    let (usage_bits, snapshot_slot, dg_id) = match &snapshot {
+    let (usage_bits, snapshot_slot, snapshot_compact_ts, dg_id) = match &snapshot {
         Some(zv) if zv.verify_checksum() => {
-            // Valid snapshot — restore bitmap + snapshot_slot.
+            // Valid snapshot — restore bitmap + snapshot_slot + compact_ts.
             let bits = crow_protocol::UsageBitmap::restore(&zv.usage_bitmap);
-            (bits, zv.snapshot_slot, 0)
+            (bits, zv.snapshot_slot, zv.compact_ts, 0)
         }
         Some(_zv) => {
             // CRC fail — fall back to strategy 1.
@@ -43,7 +43,7 @@ pub async fn recover_zone_inner(
         }
         None => {
             // No snapshot — empty bitmap, replay from slot 0.
-            (crow_protocol::UsageBitmap::new(unit_capacity), 0, 0)
+            (crow_protocol::UsageBitmap::new(unit_capacity), 0, 0, 0)
         }
     };
 
@@ -101,7 +101,29 @@ pub async fn recover_zone_inner(
         }
     }
 
-    // Step e: build the recovered Zone.
+    // Step e: build the recovered Zone. compact_ts is advanced to
+    // max(snapshot.compact_ts, max(freed_ts of replayed free records))
+    // — this is critical: replay clears bits for Delete BusyBlockKey
+    // ops (frees after the snapshot), so the bitmap is accurate, but
+    // the free records still exist on disk. Without advancing
+    // compact_ts, the next compaction would classify those free
+    // records as "new" and range_clear their bits — if a block was
+    // freed then re-allocated during replay, the bit is SET and
+    // range_clear would corrupt the live allocation (double-free).
+    let max_replayed_freed_ts = free_ops
+        .iter()
+        .filter_map(|op| {
+            if op.is_delete {
+                return None;
+            }
+            bincode::deserialize::<FreeBlockValue>(&op.value)
+                .ok()
+                .map(|fv| fv.freed_ts)
+        })
+        .max()
+        .unwrap_or(0);
+    let recovered_compact_ts = snapshot_compact_ts.max(max_replayed_freed_ts);
+
     let zone = DdbZone {
         disk_id,
         zone_index: zone_idx,
@@ -112,6 +134,9 @@ pub async fn recover_zone_inner(
         last_pos_64: std::sync::atomic::AtomicU64::new(0),
         used_count: std::sync::atomic::AtomicU32::new(u32::try_from(used_count).unwrap_or(u32::MAX)),
         snapshot_slot: std::sync::atomic::AtomicU64::new(snapshot_slot),
+        compact_ts: std::sync::atomic::AtomicU64::new(recovered_compact_ts),
+        compacted_ready: std::sync::atomic::AtomicBool::new(true),
+        zone_lock: std::sync::RwLock::new(()),
         uncompacted_free_record_count: std::sync::atomic::AtomicU32::new(0),
         cas_retry_count: std::sync::atomic::AtomicU64::new(0),
         metrics_cas_retry: None,

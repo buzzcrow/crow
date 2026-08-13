@@ -88,12 +88,33 @@ fn disk_allocate_returns_none_when_all_zones_full() {
 }
 
 #[test]
-fn disk_free_then_reallocate() {
+fn disk_free_is_persist_only() {
+    // In the persist-only model, disk.free increments
+    // uncompacted_free_record_count but does NOT clear the bitmap.
+    // The block stays busy in memory until compaction reclaims it.
     let disk = make_disk(1, 1, 64);
-    let (_, r) = disk.disk_allocate(4, CAS_RETRY, ZONE_ROTATE).unwrap();
-    assert!(disk.free(0, r.unit_offset, r.unit_count));
-    let (_, r2) = disk.disk_allocate(4, CAS_RETRY, ZONE_ROTATE).unwrap();
-    assert_eq!(r2.unit_offset, r.unit_offset);
+    // Fill the zone completely.
+    while disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE).is_some() {}
+    let zones = disk.zones.read().unwrap();
+    assert_eq!(zones[0].used_count.load(std::sync::atomic::Ordering::Acquire), 64);
+    let backlog_before = zones[0]
+        .uncompacted_free_record_count
+        .load(std::sync::atomic::Ordering::Acquire);
+    // Free 4 units — persist-only: bitmap NOT cleared.
+    assert!(disk.free(0, 0, 4));
+    let backlog_after = zones[0]
+        .uncompacted_free_record_count
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert_eq!(backlog_after, backlog_before + 1);
+    // Bitmap NOT cleared — used_count unchanged.
+    assert_eq!(zones[0].used_count.load(std::sync::atomic::Ordering::Acquire), 64);
+    drop(zones);
+    // disk_allocate cannot find the freed space (bitmap still shows busy).
+    let result = disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE);
+    assert!(
+        result.is_none(),
+        "persist-only free should not make space available without compaction"
+    );
 }
 
 #[test]
@@ -178,9 +199,10 @@ fn dg_allocate_blocks_succeeds_when_count_equals_disks() {
 fn node_free_block_by_disk_id() {
     let dg = make_dg_with_disks(&[(1, 1, 128)]);
     let (disk, _, r) = dg.allocate_block(4, &[], CAS_RETRY, ZONE_ROTATE).unwrap();
+    // Persist-only free: always succeeds (increments backlog). Double-
+    // free detection is deferred to the KV persist layer + scanner.
     assert!(dg.free_block(&disk.disk_id, 0, r.unit_offset, r.unit_count));
-    // Double-free.
-    assert!(!dg.free_block(&disk.disk_id, 0, r.unit_offset, r.unit_count));
+    assert!(dg.free_block(&disk.disk_id, 0, r.unit_offset, r.unit_count));
 }
 
 #[test]

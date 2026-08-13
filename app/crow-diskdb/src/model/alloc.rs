@@ -117,7 +117,7 @@ pub async fn allocate_block(
         .await
     {
         // Rollback Phase 1.
-        let _ = zone.free(range.unit_offset, range.unit_count);
+        let _ = zone.rollback_allocate(range.unit_offset, range.unit_count);
         tracing::warn!("allocate persist failed, rolled back bitmap: {e}");
         return Err(AllocError::NoSpace);
     }
@@ -187,7 +187,7 @@ pub async fn allocate_blocks(
     if let Err(e) = kv.persist_busy_batch(bind, &records).await {
         // Rollback ALL Phase 1 claims.
         for (_, zone, range) in &claims {
-            let _ = zone.free(range.unit_offset, range.unit_count);
+            let _ = zone.rollback_allocate(range.unit_offset, range.unit_count);
         }
         tracing::warn!("allocate_blocks persist failed, rolled back {count} claims: {e}");
         return Err(AllocError::NoSpace);
