@@ -22,13 +22,13 @@ pub struct DdbConfig {
 }
 
 impl DdbConfig {
-    /// Load config from a JSON file.
+    /// Load config from a TOML file.
     ///
     /// # Errors
-    /// Returns `Err` if the file cannot be read or parsed as JSON.
+    /// Returns `Err` if the file cannot be read or parsed as TOML.
     pub fn load_from_file(path: &Path) -> std::result::Result<Self, std::io::Error> {
         let data = std::fs::read_to_string(path)?;
-        serde_json::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        toml::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 

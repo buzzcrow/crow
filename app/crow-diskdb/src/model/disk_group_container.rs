@@ -34,6 +34,14 @@ impl DdbDiskGroupContainer {
         self.disk_groups.write().unwrap().insert(dg_id, dg);
     }
 
+    /// Replace an existing disk-group with a recovered one (same
+    /// `disk_group_id`). Used by startup recovery to swap in the
+    /// fully-reconstructed disk-group.
+    pub fn replace_disk_group(&self, dg: Arc<DdbDiskGroup>) {
+        let dg_id = dg.disk_group_id;
+        self.disk_groups.write().unwrap().insert(dg_id, dg);
+    }
+
     pub(crate) fn remove_disk_group(&self, dg_id: DiskGroupId) {
         self.disk_groups.write().unwrap().remove(&dg_id);
     }

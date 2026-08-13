@@ -83,13 +83,10 @@ async fn main() {
 
     let bootstrap = parse_and_validate_cli_args(&args);
 
-    // Load config: from --config file if provided, else defaults. CLI
-    // args override individual fields after loading.
-    let mut config = match &args.config {
-        Some(path) => CrowKVConfig::load_from_file(path)
-            .unwrap_or_else(|e| panic!("failed to load config from {}: {e}", path.display())),
-        None => CrowKVConfig::default(),
-    };
+    // Load config: from --config file (required). CLI args override
+    // individual fields after loading.
+    let mut config = CrowKVConfig::load_from_file(&args.config)
+        .unwrap_or_else(|e| panic!("failed to load config from {}: {e}", args.config.display()));
 
     // CLI overrides.
     config.election = match args.election_profile.as_str() {

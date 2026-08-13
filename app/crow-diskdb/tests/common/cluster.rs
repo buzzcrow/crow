@@ -23,6 +23,7 @@ struct ServerHandle {
     child: Child,
     base_url: String,
     _wal_dir: tempfile::TempDir,
+    _config_dir: tempfile::TempDir,
 }
 
 impl ServerHandle {
@@ -265,10 +266,16 @@ async fn start_kv_node_with_groups(
     let group_str = group_ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
     let wal_dir = tempfile::tempdir()?;
     let wal_root = wal_dir.path().join("wal");
+    // Write a minimal TOML config so --config is satisfied.
+    let config_dir = tempfile::tempdir()?;
+    let config_path = config_dir.path().join("crow_kv_server_config.toml");
+    std::fs::write(&config_path, "# test config\n")?;
     let bin = crow_kv_server_bin()
         .ok_or_else(|| std_io::Error::new(std_io::ErrorKind::NotFound, "crow-kv-server binary not found"))?;
     let mut cmd = Command::new(bin);
     cmd.args([
+        "--config",
+        config_path.to_str().unwrap(),
         "--stores",
         &node_id.to_string(),
         "--groups",
@@ -326,6 +333,7 @@ async fn start_kv_node_with_groups(
         child,
         base_url: format!("http://{addr}"),
         _wal_dir: wal_dir,
+        _config_dir: config_dir,
     };
     handle.wait_for_ready(Duration::from_secs(10)).await?;
     Ok(KvNode {

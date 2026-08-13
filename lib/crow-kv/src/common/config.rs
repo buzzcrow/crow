@@ -469,13 +469,13 @@ impl Default for CrowKVConfig {
 }
 
 impl CrowKVConfig {
-    /// Load from a JSON file. Missing fields use sub-struct defaults.
+    /// Load from a TOML file. Missing fields use sub-struct defaults.
     ///
     /// # Errors
-    /// Returns the `serde_json::Error` on parse failure.
-    pub fn load_from_file(path: &std::path::Path) -> Result<Self, serde_json::Error> {
-        let file = std::fs::File::open(path).map_err(serde_json::Error::io)?;
-        let mut config: Self = serde_json::from_reader(file)?;
+    /// Returns `Err` if the file cannot be read or parsed as TOML.
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
+        let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let mut config: Self = toml::from_str(&data).map_err(|e| e.to_string())?;
         // Fill runtime defaults if the file didn't set them (they're
         // serde-skip so they're always default-initialized by
         // deserialization).
@@ -545,17 +545,17 @@ mod tests {
     #[test]
     fn crow_kv_config_default_round_trip() {
         let config = CrowKVConfig::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let restored: CrowKVConfig = serde_json::from_str(&json).unwrap();
+        let toml_str = toml::to_string(&config).unwrap();
+        let restored: CrowKVConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(restored.max_inflight(), config.max_inflight());
         assert_eq!(restored.wal_early_ack, config.wal_early_ack);
         assert_eq!(restored.election.election_min_ms, config.election.election_min_ms);
     }
 
     #[test]
-    fn crow_kv_config_partial_json_uses_defaults() {
-        let json = r#"{"wal_early_ack": true}"#;
-        let config: CrowKVConfig = serde_json::from_str(json).unwrap();
+    fn crow_kv_config_partial_toml_uses_defaults() {
+        let toml_str = "wal_early_ack = true";
+        let config: CrowKVConfig = toml::from_str(toml_str).unwrap();
         assert!(config.wal_early_ack);
         assert_eq!(
             config.paxos.max_inflight_proposals,
@@ -563,7 +563,7 @@ mod tests {
         );
     }
 
-    /// The tracked `app/crow-kv-server/conf/crow_kv_server_config.json`
+    /// The tracked `app/crow-kv-server/conf/crow_kv_server_config.toml`
     /// must parse without error — guards against stale/mismatched
     /// template edits.
     #[test]
@@ -575,7 +575,7 @@ mod tests {
             .join("app")
             .join("crow-kv-server")
             .join("conf")
-            .join("crow_kv_server_config.json");
+            .join("crow_kv_server_config.toml");
         if !config_path.exists() {
             // Running from a published crate (no workspace layout).
             return;

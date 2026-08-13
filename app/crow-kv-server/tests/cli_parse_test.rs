@@ -57,6 +57,8 @@ fn parse_port_valid() {
 fn parse_wal_root_cli_option() {
     let cli = Cli::parse_from([
         "crow-kv-server",
+        "--config",
+        "conf/crow_kv_server_config.toml",
         "--management-port",
         "9910",
         "--wal-root",

@@ -18,16 +18,15 @@ use crow_diskdb::recovery::compaction::CompactionEngine;
 use crow_diskdb::recovery::RecoveryEngine;
 use crow_diskdb::service::DiskdbService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
-use crow_protocol::DiskIdExt;
 use tracing::info;
 
 /// CROW diskdb server CLI.
 #[derive(Parser, Debug)]
 #[command(name = "crow-diskdb", about = "CROW distributed disk-block allocator")]
 struct Cli {
-    /// Config file path (JSON).
+    /// Required: config file path (TOML). Example: `conf/crow_diskdb_config.toml`
     #[arg(long)]
-    config: Option<String>,
+    config: String,
 
     /// gRPC listen address (overrides config).
     #[arg(long)]
@@ -180,96 +179,49 @@ async fn main() {
 }
 
 /// Run R73 recovery for all owned disk-groups, then set phase to Up.
+/// Uses `RecoveryEngine::recover_disk_group` (strategy 2 journal
+/// replay with strategy 1 full-scan fallback) and replaces each
+/// disk-group in the container with its recovered counterpart.
 async fn run_recovery(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContainer>, config: &DdbConfig) {
     info!("running R73 recovery (background)");
     let recovery_engine = RecoveryEngine::new(kv, config.persistence.recovery_concurrency);
     for dg_id in container.disk_group_ids() {
-        if let Some(dg) = container.get_disk_group(dg_id) {
-            let bind = *dg.bind.read().unwrap();
-            let disks: Vec<(
-                crow_protocol::common::DiskId,
-                crow_protocol::diskdb::rpc::DiskValue,
-            )> = {
-                let disks_guard = dg.disks.read().unwrap();
-                disks_guard
-                    .iter()
-                    .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
-                    .collect()
-            };
-            for (disk_id, disk_value) in &disks {
-                let zone_count = disk_value.zone_count;
-                let zone_size_units = disk_value.zone_size_units;
-                for zi in 0..zone_count {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let unit_capacity = if zi == zone_count - 1 {
-                        let remaining = disk_value.capacity_units - (u64::from(zi) * zone_size_units);
-                        let rounded = (remaining / 64) * 64;
-                        rounded as u32
-                    } else {
-                        zone_size_units as u32
-                    };
-                    // Strategy 1 (full scan) — strategy 2 is used
-                    // internally by recover_disk_group; this per-zone
-                    // rebuild is the on-demand path.
-                    match recovery_engine
-                        .rebuild_zone_bitmap_full_scan(bind, *disk_id, zi, unit_capacity)
-                        .await
-                    {
-                        Ok((recovered_zone, stats)) => {
-                            if let Some(disk) = dg
-                                .disks
-                                .read()
-                                .unwrap()
-                                .iter()
-                                .find(|d| d.disk_id == *disk_id)
-                                .cloned()
-                            {
-                                let mut zones = disk.zones.write().unwrap();
-                                if (zi as usize) < zones.len() {
-                                    zones[zi as usize] = Arc::new(recovered_zone);
-                                }
-                            }
-                            info!(
-                                disk = %disk_id.to_display_string(),
-                                zone = zi,
-                                used_units = stats.used_units,
-                                free_units = stats.free_units,
-                                "zone recovered (strategy 1)"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                disk = %disk_id.to_display_string(),
-                                zone = zi,
-                                error = %e,
-                                "zone recovery failed; leaving empty zone"
-                            );
-                        }
-                    }
-                }
-            }
-            // Rebuild active zone sets + allocatable disks after
-            // recovery.
+        let Some(dg) = container.get_disk_group(dg_id) else {
+            continue;
+        };
+        let bind = *dg.bind.read().unwrap();
+        let disks: Vec<(
+            crow_protocol::common::DiskId,
+            crow_protocol::diskdb::rpc::DiskValue,
+        )> = {
             let disks_guard = dg.disks.read().unwrap();
-            for disk in disks_guard.iter() {
-                disk.rebuild_active_zones(config.storage.zone_rotate_count);
-            }
-            dg.rebuild_allocating_disks();
-        }
+            disks_guard
+                .iter()
+                .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
+                .collect()
+        };
+        let recovered = recovery_engine
+            .recover_disk_group(
+                dg_id,
+                dg.node_id,
+                dg.rack_id,
+                bind,
+                &disks,
+                config.storage.zone_rotate_count,
+            )
+            .await;
+        container.replace_disk_group(recovered);
+        info!(dg_id, "disk-group recovered (strategy 2 + strategy 1 fallback)");
     }
     container.set_lifecycle_phase(StartupPhase::Up);
     info!("R73 recovery complete; phase = Up");
 }
 
 fn load_config(args: &Cli) -> DdbConfig {
-    let mut config = if let Some(path) = &args.config {
-        let p = std::path::Path::new(path);
-        DdbConfig::load_from_file(p).unwrap_or_else(|e| {
-            panic!("failed to load config file {path}: {e}");
-        })
-    } else {
-        DdbConfig::default()
-    };
+    let config_path = &args.config;
+    let mut config = DdbConfig::load_from_file(std::path::Path::new(config_path)).unwrap_or_else(|e| {
+        panic!("failed to load config file {config_path}: {e}");
+    });
 
     if let Some(addr) = &args.listen_addr {
         config.server.listen_addr.clone_from(addr);

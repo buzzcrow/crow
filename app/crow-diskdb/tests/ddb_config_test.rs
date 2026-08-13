@@ -81,12 +81,12 @@ fn config_defaults_match_design() {
     assert_eq!(config.persistence.free_flush_max_batch, 256);
 }
 
-/// The tracked `conf/crow_diskdb_config.json` must parse and validate
+/// The tracked `conf/crow_diskdb_config.toml` must parse and validate
 /// without error — guards against stale/mismatched template edits.
 #[test]
 fn tracked_config_file_loads_and_validates() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let config_path = manifest_dir.join("conf/crow_diskdb_config.json");
+    let config_path = manifest_dir.join("conf/crow_diskdb_config.toml");
     let config = DdbConfig::load_from_file(&config_path).expect("load tracked config");
     validate(&config).expect("tracked config validates");
 }
@@ -94,9 +94,9 @@ fn tracked_config_file_loads_and_validates() {
 #[test]
 fn config_load_from_file_roundtrip() {
     let config = DdbConfig::default();
-    let json = serde_json::to_string_pretty(&config).expect("serialize");
-    let tmp = std::env::temp_dir().join("ddb_config_test.json");
-    std::fs::write(&tmp, &json).expect("write temp");
+    let toml = toml::to_string_pretty(&config).expect("serialize");
+    let tmp = std::env::temp_dir().join("ddb_config_test.toml");
+    std::fs::write(&tmp, &toml).expect("write temp");
     let loaded = DdbConfig::load_from_file(&tmp).expect("load");
     assert_eq!(loaded.storage.block_size_bytes, config.storage.block_size_bytes);
     assert_eq!(loaded.server.listen_addr, config.server.listen_addr);

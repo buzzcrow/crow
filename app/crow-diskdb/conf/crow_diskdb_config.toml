@@ -1,0 +1,79 @@
+# CROW diskdb server configuration
+#
+# Every field below has a matching doc comment in src/ddb_config.rs.
+# Fields not listed here fall back to their Default impl values.
+
+# ── gRPC + HTTP server ──────────────────────────────────────────
+[server]
+# gRPC listen address for the disk-block allocator service.
+listen_addr = "0.0.0.0:5600"
+# HTTP management listen address (metrics, health, debug).
+http_listen_addr = "0.0.0.0:5601"
+# Unique instance ID. Leave empty to auto-generate a UUID.
+instance_id = ""
+# crow-kv-server HTTP management endpoints (http://host:port) used
+# to discover the system group (store 0, group 0) leader and, via
+# /topology, the data-group leaders. At least one must be reachable.
+kv_server_mgmt_seeds = ["http://127.0.0.1:5500"]
+
+# ── Storage defaults ────────────────────────────────────────────
+[storage]
+# Default zone size in bytes (16 GB). Must be a multiple of
+# block_size_bytes.
+zone_size_bytes = 17179869184
+# Block size in bytes (1 MB). Must be a power of 2 in [512 KB, 2 MB].
+block_size_bytes = 1048576
+# Allocation granularity in bytes. v1 enforces == block_size_bytes.
+allocate_granularity = 1048576
+# Number of zones in the disk-level active zone set (round-robin).
+zone_rotate_count = 4
+# Per-bit CAS retry cap in the zone bitmap-scan allocator. On
+# exhaustion, falls through to the next bit / word / zone.
+cas_retry_limit = 100
+# Strict ownership validation before free. When true, the free path
+# reads BusyBlockValue first and validates owner_chunk (one extra
+# paxos round-trip, doubles free latency).
+validate_owner_on_free = false
+
+# ── Heartbeat / liveness ────────────────────────────────────────
+[heartbeat]
+# Heartbeat interval in seconds.
+interval_secs = 10
+# Missed heartbeats before entering degraded mode.
+miss_threshold = 3
+# Duration in TempFailure before transitioning to Offline (seconds).
+temp_failure_timeout_secs = 900
+
+# ── Free batch flush + compaction + recovery ────────────────────
+[persistence]
+# Free batching toggle. When false, frees are immediate (one
+# batch_write per free). When true, frees are grouped and flushed
+# when the batch reaches free_flush_max_batch.
+free_batch_enabled = false
+# Free batch max size before forced flush.
+free_flush_max_batch = 256
+# Periodic compaction interval in seconds.
+compaction_cadence_secs = 300
+# Compact a zone when its uncompacted_free_record_count exceeds
+# this. Cadence OR threshold — whichever fires first.
+snapshot_compaction_threshold = 4096
+# Max concurrent zone recoveries in recover_disk_group.
+recovery_concurrency = 16
+
+# ── Background scanner ─────────────────────────────────────────
+[scanner]
+# Scanner run interval in seconds.
+scan_interval_secs = 600
+# Enable ghost allocation detection.
+detect_ghost_allocations = true
+# Enable record integrity checks.
+verify_record_integrity = true
+
+# ── Group-0 sync ───────────────────────────────────────────────
+[sync]
+# Group-0 store id (always 0).
+group0_store_id = 0
+# Group-0 group id (always 0).
+group0_group_id = 0
+# Sync interval in seconds.
+sync_interval_secs = 10

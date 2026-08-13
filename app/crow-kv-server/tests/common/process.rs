@@ -12,6 +12,7 @@ pub struct ServerHandle {
     child: Child,
     base_url: String,
     _wal_dir: tempfile::TempDir,
+    _config_dir: tempfile::TempDir,
 }
 
 impl ServerHandle {
@@ -76,6 +77,11 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
     let wal_dir = tempfile::tempdir()?;
     let wal_root = wal_dir.path().join("wal");
 
+    // Write a minimal TOML config so --config is satisfied.
+    let config_dir = tempfile::tempdir()?;
+    let config_path = config_dir.path().join("crow_kv_server_config.toml");
+    std::fs::write(&config_path, "# test config\n")?;
+
     let ports_str = ports.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
 
     // `parse_id_list` dedupes via a HashSet, so `0,0` collapses to a single
@@ -87,6 +93,8 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
     let bin = crow_kv_server_bin();
     let mut cmd = Command::new(bin);
     cmd.args(args)
+        .arg("--config")
+        .arg(&config_path)
         .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
@@ -167,6 +175,7 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
         child,
         base_url: format!("http://{addr}"),
         _wal_dir: wal_dir,
+        _config_dir: config_dir,
     };
     handle.wait_for_ready(Duration::from_secs(10)).await?;
     Ok(handle)

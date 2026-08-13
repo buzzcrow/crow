@@ -70,8 +70,10 @@ impl DdbDisk {
         *self.effective_status.read().unwrap() == HwStatus::Up
     }
 
-    /// Set the effective status (called by `StatusManager`). When
-    /// `Bad`, marks all zones `Bad`.
+    /// Directly set the effective status, bypassing transition
+    /// legality. When `Bad`, marks all zones `Bad`. Production code
+    /// uses `HwStateMachine::transition_disk` (which validates + applies
+    /// + runs entry side-effects); this is a test/direct-set helper.
     pub fn set_effective_status(&self, status: HwStatus) {
         *self.effective_status.write().unwrap() = status;
         if status == HwStatus::Bad {
