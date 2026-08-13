@@ -3,10 +3,14 @@
 
 //! R73 recovery integration tests.
 //!
-//! Verifies that `RecoveryEngine::rebuild_zone_bitmap_full_scan`
-//! (strategy 1) correctly reconstructs zone bitmaps after a simulated
-//! restart, and that `Zone::to_zone_value`/`from_zone_value` round-trip
-//! correctly.
+//! Verifies that:
+//! - `RecoveryEngine::rebuild_zone_bitmap_full_scan` (strategy 1)
+//!   correctly reconstructs zone bitmaps after a simulated restart.
+//! - `RecoveryEngine::recover_disk_group` (strategy 2 journal replay
+//!   with strategy 1 fallback) correctly reconstructs after restart.
+//! - `CompactionEngine::compact_zone` merges free records into a new
+//!   snapshot and deletes the free records.
+//! - `Zone::to_zone_value`/`from_zone_value` round-trip correctly.
 
 mod common;
 
@@ -14,16 +18,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::KvCluster;
-use crow_diskdb::ddb_config::KeepAliveConfig;
+use crow_diskdb::ddb_config::{CompactionConfig, KeepAliveConfig};
 use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::keepalive::KeepAlive;
 use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::model::zone::DdbZone;
+use crow_diskdb::recovery::compaction::CompactionEngine;
 use crow_diskdb::recovery::RecoveryEngine;
-use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
+use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
+use crow_protocol::key::BinaryKey;
 use crow_protocol::{DiskGroupId, ZoneValueExt};
 
 const RACK_ID: u64 = 1;
@@ -363,4 +369,287 @@ fn zone_from_zone_value_rejects_bad_crc() {
     // Corrupt the bitmap (CRC no longer matches).
     zv.usage_bitmap[0] ^= 0xFF;
     assert!(DdbZone::from_zone_value(disk_id, 0, 100, 128, &zv).is_none());
+}
+
+/// Strategy 2 (journal replay) recovery: allocate + free blocks, then
+/// recover via `RecoveryEngine::recover_disk_group` (which tries
+/// strategy 2 first, strategy 1 fallback). Verify the bitmap matches.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn recovery_strategy2_journal_replay() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+
+    let cluster = KvCluster::start().await;
+    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    seed_hardware(&hw).await;
+
+    // 1. First tick — populates state + writes baseline ZoneValues.
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
+    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
+    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let keepalive_cfg = KeepAliveConfig {
+        interval: Duration::from_secs(10),
+        miss_threshold: 3,
+        zone_rotate_count: 4,
+        cas_retry_limit: 100,
+        temp_failure_timeout_secs: 900,
+    };
+    let mut keepalive =
+        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
+    let outcome = keepalive.tick().await;
+    assert_eq!(outcome.groups_added, 1);
+    assert_eq!(outcome.disks_added, 3);
+
+    let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
+    let bind = *dg.bind.read().unwrap();
+
+    // 2. Allocate 3 blocks, free 1. 2 remain busy.
+    let owner_chunk = make_chunk_id(0, 0, 42);
+    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let segments = alloc::allocate_blocks(&dg, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        .await
+        .expect("allocate 3");
+    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
+        .await
+        .expect("free 1");
+    let remaining_segments: Vec<_> = segments[1..].to_vec();
+
+    // 3. Simulate restart: drop container, fresh tick.
+    drop(dg);
+    drop(container);
+    let container2 = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
+    let svc2 = make_service_registry_client(&cluster.group0_leader_endpoint);
+    let hw3 = make_hardware_client(&cluster.group0_leader_endpoint);
+    let dg_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let mut keepalive2 = KeepAlive::new(
+        hw3,
+        svc2,
+        Arc::clone(&container2),
+        KeepAliveConfig {
+            interval: Duration::from_secs(10),
+            miss_threshold: 3,
+            zone_rotate_count: 4,
+            cas_retry_limit: 100,
+            temp_failure_timeout_secs: 900,
+        },
+    )
+    .with_ddb_kv_client(dg_kv2);
+    let outcome2 = keepalive2.tick().await;
+    assert_eq!(outcome2.groups_added, 1);
+
+    let dg2 = container2.get_disk_group(DG_ID).expect("dg exists after restart");
+    let bind2 = *dg2.bind.read().unwrap();
+    assert_eq!(bind, bind2);
+
+    // 4. Recover via recover_disk_group (strategy 2 with fallback).
+    let disks: Vec<(DiskId, DiskValue)> = {
+        let disks_guard = dg2.disks.read().unwrap();
+        disks_guard
+            .iter()
+            .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
+            .collect()
+    };
+    let recovery_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let recovery = RecoveryEngine::new(Arc::clone(&recovery_kv), 4);
+    let recovered_dg = recovery
+        .recover_disk_group(DG_ID, NODE_ID, RACK_ID, bind2, &disks, 4)
+        .await;
+
+    // 5. Verify busy segments' bits are set, freed segments' bits are clear.
+    for seg in &remaining_segments {
+        let disk = recovered_dg
+            .disks
+            .read()
+            .unwrap()
+            .iter()
+            .find(|d| d.disk_id == seg.disk_id.unwrap_or_default())
+            .cloned()
+            .expect("disk exists");
+        let zones = disk.zones.read().unwrap();
+        let zone = &zones[seg.zone_index as usize];
+        #[allow(clippy::cast_possible_truncation)]
+        let bit = seg.unit_offset as u32;
+        assert!(
+            zone.usage_bits.is_set(bit),
+            "bit {bit} should be set after strategy 2 recovery (busy segment)"
+        );
+    }
+    for seg in &segments[0..1] {
+        let disk = recovered_dg
+            .disks
+            .read()
+            .unwrap()
+            .iter()
+            .find(|d| d.disk_id == seg.disk_id.unwrap_or_default())
+            .cloned()
+            .expect("disk exists");
+        let zones = disk.zones.read().unwrap();
+        let zone = &zones[seg.zone_index as usize];
+        #[allow(clippy::cast_possible_truncation)]
+        let bit = seg.unit_offset as u32;
+        assert!(
+            !zone.usage_bits.is_set(bit),
+            "bit {bit} should be clear after strategy 2 recovery (freed segment)"
+        );
+    }
+
+    // 6. Total used = 2 (2 remaining busy blocks of 1 unit each).
+    let total_used: u64 = recovered_dg
+        .disks
+        .read()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            d.zones
+                .read()
+                .unwrap()
+                .iter()
+                .map(|z| u64::from(z.used_count.load(std::sync::atomic::Ordering::Acquire)))
+                .sum::<u64>()
+        })
+        .sum();
+    assert_eq!(total_used, 2, "total used after strategy 2 recovery should be 2");
+
+    eprintln!("recovery_strategy2_journal_replay: ALL CHECKS PASSED");
+}
+
+/// Compaction: allocate + free blocks, run `compact_zone`, verify the
+/// snapshot is written and free records are deleted.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+
+    let cluster = KvCluster::start().await;
+    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    seed_hardware(&hw).await;
+
+    // 1. First tick — populates state + writes baseline ZoneValues.
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
+    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
+    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let mut keepalive = KeepAlive::new(
+        hw2,
+        svc,
+        Arc::clone(&container),
+        KeepAliveConfig {
+            interval: Duration::from_secs(10),
+            miss_threshold: 3,
+            zone_rotate_count: 4,
+            cas_retry_limit: 100,
+            temp_failure_timeout_secs: 900,
+        },
+    )
+    .with_ddb_kv_client(dg_kv);
+    let outcome = keepalive.tick().await;
+    assert_eq!(outcome.groups_added, 1);
+
+    let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
+    let bind = *dg.bind.read().unwrap();
+
+    // 2. Allocate 1 block, then free it. This creates 1 free record.
+    let owner_chunk = make_chunk_id(0, 0, 42);
+    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        .await
+        .expect("allocate");
+    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    alloc::free_block(&dg, &segment, &free_kv, false)
+        .await
+        .expect("free");
+
+    // 3. Get the zone that has the free record.
+    let disk_id = segment.disk_id.unwrap();
+    let disk = dg
+        .disks
+        .read()
+        .unwrap()
+        .iter()
+        .find(|d| d.disk_id == disk_id)
+        .cloned()
+        .expect("disk exists");
+    let zone_idx = segment.zone_index;
+    let zone = {
+        let zones = disk.zones.read().unwrap();
+        Arc::clone(&zones[zone_idx as usize])
+    };
+
+    // Verify the free record exists before compaction.
+    let free_key = crow_protocol::key::FreeBlockKey {
+        disk_id,
+        zone_index: zone_idx,
+        unit_offset: segment.unit_offset,
+    };
+    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_before = verify_kv
+        .kv()
+        .get(
+            STORE_ID,
+            DATA_GROUP_ID,
+            &free_key.to_bytes(),
+            crow_kv_client::ReadMode::Linearizable,
+            None,
+        )
+        .await
+        .expect("get");
+    assert!(
+        matches!(free_before, GetOutcome::Found { .. }),
+        "free record should exist before compaction"
+    );
+
+    // 4. Run compaction on the zone.
+    let compaction_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let compaction = CompactionEngine::new(compaction_kv, CompactionConfig::default());
+    compaction
+        .compact_zone(bind, disk_id, &zone, zone_idx)
+        .await
+        .expect("compaction should succeed");
+
+    // 5. Verify the free record is deleted after compaction.
+    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_after = verify_kv2
+        .kv()
+        .get(
+            STORE_ID,
+            DATA_GROUP_ID,
+            &free_key.to_bytes(),
+            crow_kv_client::ReadMode::Linearizable,
+            None,
+        )
+        .await
+        .expect("get");
+    assert!(
+        matches!(free_after, GetOutcome::NotFound),
+        "free record should be deleted after compaction"
+    );
+
+    // 6. Verify the zone's used_count is 0 (the block was freed).
+    assert_eq!(
+        zone.used_count.load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "used_count should be 0 after compaction of a freed block"
+    );
+
+    // 7. Verify a ZoneValue snapshot exists (compaction writes one).
+    let verify_kv3 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let snapshot = verify_kv3
+        .get_zone_value(bind, &disk_id, zone_idx)
+        .await
+        .expect("get_zone_value");
+    assert!(snapshot.is_some(), "snapshot should exist after compaction");
+    assert!(
+        snapshot.unwrap().verify_checksum(),
+        "snapshot CRC should be valid"
+    );
+
+    eprintln!("compaction_compact_zone_writes_snapshot_and_deletes_free_records: ALL CHECKS PASSED");
 }

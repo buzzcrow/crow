@@ -72,8 +72,8 @@ name = "recovery_test"
 path = "tests/recovery_test.rs"
 
 [[test]]
-name = "config_test"
-path = "tests/config_test.rs"
+name = "ddb_config_test"
+path = "tests/ddb_config_test.rs"
 
 [[test]]
 name = "status_machine_test"
@@ -82,3 +82,7 @@ path = "tests/status_machine_test.rs"
 [[test]]
 name = "lifecycle_test"
 path = "tests/lifecycle_test.rs"
+
+[[test]]
+name = "bg_task_test"
+path = "tests/bg_task_test.rs"

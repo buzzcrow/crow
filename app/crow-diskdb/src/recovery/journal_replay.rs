@@ -73,19 +73,16 @@ pub async fn recover_zone_inner(
     let mut used_count = usage_bits.count_set();
     for op in &merged {
         if op.is_delete {
-            // Delete of a BusyBlockKey → range_clear. The unit_count
-            // comes from the matching FreeBlockValue at the same slot
-            // (the free batch_write deletes BusyBlockKey + puts
-            // FreeBlockKey atomically). Decode the FreeBlockValue to
-            // get unit_count.
-            if let Ok(fk) = FreeBlockKey::from_bytes(&op.key) {
-                // Look for a matching FreeBlockKey Put at the same
-                // slot with the same unit_offset. The free ops list
-                // was merged in; find it.
-                let unit_count = find_free_unit_count_at_slot(&merged, op.slot, fk.unit_offset);
+            // Delete of a BusyBlockKey → range_clear. The key is a
+            // BusyBlockKey (type tag 0x0006); parse it as such to get
+            // unit_offset. The unit_count comes from the matching
+            // FreeBlockValue Put at the same slot (the free batch_write
+            // deletes BusyBlockKey + puts FreeBlockKey atomically).
+            if let Ok(bk) = BusyBlockKey::from_bytes(&op.key) {
+                let unit_count = find_free_unit_count_at_slot(&merged, op.slot, bk.unit_offset);
                 if let Some(count) = unit_count {
                     #[allow(clippy::cast_possible_truncation)]
-                    let offset = fk.unit_offset as u32;
+                    let offset = bk.unit_offset as u32;
                     let _ = usage_bits.range_clear(offset, count);
                     used_count = used_count.saturating_sub(u64::from(count));
                 }

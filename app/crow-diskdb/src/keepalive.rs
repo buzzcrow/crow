@@ -14,8 +14,8 @@ use crow_common::metrics::Counter;
 use crow_kv_client::{HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
+use crow_protocol::DiskIdExt;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
-use crow_protocol::{DiskIdExt, ZoneValueExt};
 use tracing::{info, warn};
 
 use crate::ddb_config::KeepAliveConfig;
@@ -369,14 +369,19 @@ impl KeepAlive {
                     "disk-add init: snapshots already exist, skipping baseline write (recovery will replay)"
                 );
             } else {
-                for zi in 0..zone_count {
-                    let mut zv = crow_protocol::diskdb::rpc::ZoneValue {
-                        usage_bitmap: vec![],
-                        snapshot_slot: 0,
-                        crc32: 0,
-                    };
-                    zv.compute_checksum();
-                    if let Err(e) = kv.put_zone(bind, &disk_id, zi, &zv).await {
+                let zone_values: Vec<(u32, crow_protocol::diskdb::rpc::ZoneValue)> = {
+                    let zones = disk.zones.read().unwrap();
+                    zones
+                        .iter()
+                        .enumerate()
+                        .map(|(zi, zone)| {
+                            #[allow(clippy::cast_possible_truncation)]
+                            (zi as u32, zone.to_zone_value())
+                        })
+                        .collect()
+                };
+                for (zi, zv) in &zone_values {
+                    if let Err(e) = kv.put_zone(bind, &disk_id, *zi, zv).await {
                         warn!(error = %e, disk = %disk_id.to_display_string(), zone = zi, "disk-add init: put_zone failed");
                     }
                 }
