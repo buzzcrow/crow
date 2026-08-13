@@ -373,6 +373,7 @@ impl DdbZone {
             usage_bitmap: self.usage_bits.snapshot(),
             snapshot_slot: self.snapshot_slot.load(Ordering::Acquire),
             crc32: 0,
+            compact_ts: 0,
         };
         zv.compute_checksum();
         zv

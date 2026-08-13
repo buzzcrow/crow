@@ -53,7 +53,8 @@ message ZoneValue {
   reserved 1, 2, 3, 4;  // dropped: disk_offset_units, zone_size_units, alloc_state, used_units
   bytes  usage_bitmap   = 5;  // serialized bitmap
   uint64 snapshot_slot  = 6;  // slot at which this snapshot was written; replay after this
-  uint32 crc32          = 7;  // CRC32 over usage_bitmap for integrity
+  uint32 crc32          = 7;  // CRC32 over usage_bitmap + compact_ts for integrity
+  uint64 compact_ts     = 8;  // max freed_ts of all free records merged into this snapshot
 }
 
 // ── Disk value ──────────────────────────────────────────────────
@@ -114,7 +115,7 @@ message BusyBlockValue {
 message FreeBlockValue {
   uint32 unit_count        = 1;  // how many units
   crow.common.ChunkId previous_owner = 2;  // who owned it before free
-  reserved 3;  // dropped: free_count (no refcount, no version)
+  uint64 freed_ts          = 3;  // wall-clock nanoseconds at free time (per-disk-group monotonic source)
 }
 
 // ── Query response types ────────────────────────────────────────

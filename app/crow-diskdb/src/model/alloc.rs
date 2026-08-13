@@ -278,6 +278,7 @@ pub async fn free_block(
     let value = FreeBlockValue {
         unit_count: segment.unit_count,
         previous_owner: segment.owner_chunk,
+        freed_ts: 0,
     };
     kv.persist_free(bind, &disk_id, segment.zone_index, segment.unit_offset, &value)
         .await
@@ -383,6 +384,7 @@ pub async fn free_blocks(
                     FreeBlockValue {
                         unit_count: seg.unit_count,
                         previous_owner: seg.owner_chunk,
+                        freed_ts: 0,
                     },
                 )
             })

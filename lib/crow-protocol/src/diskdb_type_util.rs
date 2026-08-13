@@ -86,15 +86,17 @@ impl ZoneAllocationStateExt for ZoneAllocationState {
 
 /// Extension trait for `ZoneValue` CRC32 integrity.
 ///
-/// The CRC32 is computed over `usage_bitmap` only and stored in the
-/// dedicated `crc32` field (proto field 7). The baseline `ZoneValue`
-/// written during disk-add init has an empty bitmap and
-/// `crc32 = crc32fast::hash(&[])` (= 0); `snapshot_slot = 0`.
+/// The CRC32 is computed over `usage_bitmap` + `compact_ts` and stored
+/// in the dedicated `crc32` field (proto field 7). The baseline
+/// `ZoneValue` written during disk-add init has an empty bitmap,
+/// `compact_ts = 0`, `snapshot_slot = 0`. A corrupted `compact_ts`
+/// would break the watermark logic, so it is integrity-protected
+/// alongside the bitmap.
 pub trait ZoneValueExt {
-    /// Compute and set `crc32` from the current `usage_bitmap`.
+    /// Compute and set `crc32` from `usage_bitmap` + `compact_ts`.
     fn compute_checksum(&mut self);
 
-    /// Verify `crc32` matches the current `usage_bitmap`.
+    /// Verify `crc32` matches `usage_bitmap` + `compact_ts`.
     #[must_use]
     fn verify_checksum(&self) -> bool;
 
@@ -114,11 +116,17 @@ pub trait ZoneValueExt {
 
 impl ZoneValueExt for ZoneValue {
     fn compute_checksum(&mut self) {
-        self.crc32 = crc32fast::hash(&self.usage_bitmap);
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&self.usage_bitmap);
+        hasher.update(&self.compact_ts.to_le_bytes());
+        self.crc32 = hasher.finalize();
     }
 
     fn verify_checksum(&self) -> bool {
-        self.crc32 == crc32fast::hash(&self.usage_bitmap)
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&self.usage_bitmap);
+        hasher.update(&self.compact_ts.to_le_bytes());
+        self.crc32 == hasher.finalize()
     }
 
     fn to_bytes(&self) -> Vec<u8> {
