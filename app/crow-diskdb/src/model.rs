@@ -14,8 +14,8 @@ pub mod records;
 pub mod zone;
 
 pub use alloc::FreeError;
-pub use disk::{ActiveZoneContext, DdbDisk};
-pub use disk_group::{AllocClaim, AllocError, AllocateDiskContext, DdbDiskGroup};
+pub use disk::{ActiveZoneContext, DdbDisk, DiskUsage};
+pub use disk_group::{AllocClaim, AllocError, AllocateDiskContext, DdbDiskGroup, DiskGroupUsage};
 pub use disk_group_container::DdbDiskGroupContainer;
 pub use records::{BusyRecord, FreeRecord, ZoneRecords};
-pub use zone::{AllocatedRange, DdbZone, DdbZoneHealth};
+pub use zone::{AllocatedRange, DdbZone, DdbZoneHealth, ZoneUsage};

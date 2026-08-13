@@ -99,6 +99,11 @@ pub async fn allocate_block(
     // Phase 1: bitmap CAS.
     let (disk, zone, range) = dg.allocate_block(unit_count, &[], cas_retry_limit, zone_rotate_count)?;
 
+    // Record per-disk event counter after Phase 1 CAS succeeds.
+    if let Some(m) = &disk.metrics {
+        m.record_allocate(range.unit_count, unit_size);
+    }
+
     // Phase 2: persist BusyBlockValue.
     let value = BusyBlockValue {
         unit_count: range.unit_count,
@@ -152,6 +157,13 @@ pub async fn allocate_blocks(
         cas_retry_limit,
         zone_rotate_count,
     )?;
+
+    // Record per-disk event counters after Phase 1 CAS succeeds.
+    for (disk, _zone, range) in &claims {
+        if let Some(m) = &disk.metrics {
+            m.record_allocate(range.unit_count, unit_size);
+        }
+    }
 
     // Phase 2: persist all in one batch_write.
     let records: Vec<(DiskId, u32, u64, BusyBlockValue)> = claims
@@ -272,6 +284,12 @@ pub async fn free_block(
         }));
     }
 
+    // Record per-disk event counter after Phase 1 clear succeeds.
+    let unit_size = dg.disk_unit_size(disk_id).unwrap_or(0);
+    if let Some(m) = dg.disk_metrics(disk_id) {
+        m.record_free(segment.unit_count, unit_size);
+    }
+
     // Phase 2: persist FreeBlockValue.
     let value = FreeBlockValue {
         unit_count: segment.unit_count,
@@ -345,6 +363,11 @@ pub async fn free_blocks(
                     seg.zone_index,
                     seg.unit_offset
                 );
+            }
+            // Record per-disk event counter after Phase 1 clear succeeds.
+            let unit_size = dg.disk_unit_size(disk_id).unwrap_or(0);
+            if let Some(m) = dg.disk_metrics(disk_id) {
+                m.record_free(seg.unit_count, unit_size);
             }
         }
     }

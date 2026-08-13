@@ -23,4 +23,5 @@ service DiskdbService {
   rpc GetDiskGroupInfo(GetDiskGroupInfoRequest) returns (GetDiskGroupInfoResponse);
   rpc GetDiskInfo(GetDiskInfoRequest)           returns (GetDiskInfoResponse);
   rpc RebuildZoneBitmap(RebuildZoneBitmapRequest) returns (RebuildZoneBitmapResponse);
+  rpc RecalcDiskUsage(RecalcDiskUsageRequest) returns (RecalcDiskUsageResponse);
 }

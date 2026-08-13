@@ -97,3 +97,15 @@ path = "tests/bg_task_test.rs"
 [[test]]
 name = "health_test"
 path = "tests/health_test.rs"
+
+[[test]]
+name = "usage_aggregation_test"
+path = "tests/usage_aggregation_test.rs"
+
+[[test]]
+name = "space_flow_test"
+path = "tests/space_flow_test.rs"
+
+[[test]]
+name = "query_handler_test"
+path = "tests/query_handler_test.rs"

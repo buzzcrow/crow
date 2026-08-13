@@ -42,6 +42,14 @@ message FreeResponse {
 message QueryCapacityStatsRequest {
   // If disk_group_id set = specific group; 0 = all owned.
   uint64 disk_group_id = 1;
+  // R74 drill-down: set for disk-level or zone-level query (0 = not set
+  // → disk-group level). The owning diskdb instance is selected by
+  // disk_group_id.
+  optional crow.common.DiskId disk_id = 2;
+  // R74 drill-down: set with disk_id for zone-level query (absent =
+  // disk-level). proto3 `optional` so zone 0 is distinguishable from
+  // "not set".
+  optional uint32 zone_index = 3;
 }
 
 message QueryCapacityStatsResponse {
@@ -86,4 +94,38 @@ message RebuildZoneBitmapResponse {
   uint32 rebuilt_zone_count = 1;
   uint64 total_busy_units   = 2;
   uint64 total_free_units   = 3;
+}
+
+// ── Recalc disk usage (drift verification, R74 §5) ───────────────
+
+// Replays the journal into a separate bitmap per zone and compares
+// against the live in-memory bitmap. v1 reports drift only — does not
+// auto-correct (operator runs RebuildZoneBitmap to correct).
+message RecalcDiskUsageRequest {
+  // 0 = recalc all owned disk-groups; set = recalc one.
+  optional uint64 disk_group_id = 1;
+}
+
+message RecalcDiskUsageResponse {
+  repeated DiskGroupRecalcResult results = 1;
+}
+
+message DiskGroupRecalcResult {
+  uint64 disk_group_id = 1;
+  bool   drift_detected = 2;
+  repeated ZoneRecalcResult zones = 3;
+}
+
+message ZoneRecalcResult {
+  crow.common.DiskId disk_id           = 1;
+  uint32             zone_index        = 2;
+  bool               matches           = 3;
+  bool               drift_detected    = 4;
+  uint32             live_busy_blocks  = 5;
+  uint32             replayed_busy_blocks = 6;
+  uint64             live_snapshot_slot   = 7;
+  uint64             replayed_snapshot_slot = 8;
+  // Why strategy 2 fell back to strategy 1 (absent if strategy 2
+  // succeeded).
+  optional string    fallback_reason   = 9;
 }

@@ -19,6 +19,7 @@ pub struct DdbConfig {
     pub persistence: PersistenceConfig,
     pub scanner: ScannerConfig,
     pub sync: SyncConfig,
+    pub reporting: ReportingConfig,
 }
 
 impl BaseConfig for DdbConfig {
@@ -134,6 +135,19 @@ impl Default for SyncConfig {
             group0_group_id: 0,
             sync_interval_secs: 10,
         }
+    }
+}
+
+/// Reporting loop configuration (R74 §7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportingConfig {
+    /// dynamic: reporting loop interval in seconds (default: 10).
+    pub interval_secs: u32,
+}
+
+impl Default for ReportingConfig {
+    fn default() -> Self {
+        Self { interval_secs: 10 }
     }
 }
 
@@ -301,6 +315,9 @@ pub fn validate(config: &DdbConfig) -> Result<(), String> {
     }
     if config.heartbeat.miss_threshold == 0 {
         return Err("heartbeat.miss_threshold must be > 0".to_string());
+    }
+    if config.reporting.interval_secs == 0 {
+        return Err("reporting.interval_secs must be > 0".to_string());
     }
     Ok(())
 }

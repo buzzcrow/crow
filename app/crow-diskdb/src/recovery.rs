@@ -31,6 +31,7 @@ use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
+use crate::metrics::DiskMetrics;
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::zone::DdbZone;
@@ -123,7 +124,10 @@ impl RecoveryEngine {
         *dg.bind.write().unwrap() = bind;
 
         for (disk_id, disk_value) in disks {
-            let disk = Arc::new(DdbDisk::new(*disk_id, dg_id, node_id, rack_id, *disk_value));
+            let mut disk = DdbDisk::new(*disk_id, dg_id, node_id, rack_id, *disk_value);
+            // Attach per-disk hot-path counters (R74 §3).
+            disk.metrics = Some(Arc::new(DiskMetrics::new()));
+            let disk = Arc::new(disk);
 
             let zone_count = disk_value.zone_count;
             let zone_size_units = disk_value.zone_size_units;

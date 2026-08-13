@@ -7,8 +7,9 @@ use super::disk_group::DdbDiskGroup;
 use crate::liveness::lifecycle::LifecycleState;
 use crow_protocol::DiskGroupId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 /// Per-instance singleton managing all owned disk-groups.
@@ -17,6 +18,10 @@ pub struct DdbDiskGroupContainer {
     pub(crate) instance_id: u64,
     pub(crate) degraded: AtomicBool,
     pub(crate) lifecycle: LifecycleState,
+    /// Epoch millis of the last successful keepalive sync (R74
+    /// `last_sync_age_secs` gauge). Initialized to construction time
+    /// so the age starts at 0.
+    last_sync_at_ms: AtomicU64,
 }
 
 impl DdbDiskGroupContainer {
@@ -26,6 +31,7 @@ impl DdbDiskGroupContainer {
             instance_id,
             degraded: AtomicBool::new(false),
             lifecycle: LifecycleState::new(),
+            last_sync_at_ms: AtomicU64::new(now_ms()),
         }
     }
 
@@ -73,6 +79,26 @@ impl DdbDiskGroupContainer {
         self.degraded.load(Ordering::SeqCst)
     }
 
+    /// Record a successful keepalive sync (called by the keepalive
+    /// loop on each successful tick). Updates `last_sync_at_ms`.
+    pub fn record_sync_success(&self) {
+        self.last_sync_at_ms.store(now_ms(), Ordering::Release);
+    }
+
+    /// Seconds since the last successful sync (R74 `last_sync_age_secs`).
+    #[must_use]
+    pub fn last_sync_age_secs(&self) -> u64 {
+        let last = self.last_sync_at_ms.load(Ordering::Acquire);
+        let now = now_ms();
+        (now.saturating_sub(last)) / 1000
+    }
+
+    /// Number of owned disk-groups (R74 `owned_disk_group_count` gauge).
+    #[must_use]
+    pub fn disk_group_count(&self) -> usize {
+        self.disk_groups.read().unwrap().len()
+    }
+
     /// Current startup phase.
     pub fn lifecycle_phase(&self) -> crate::liveness::lifecycle::StartupPhase {
         self.lifecycle.get()
@@ -82,4 +108,11 @@ impl DdbDiskGroupContainer {
     pub fn set_lifecycle_phase(&self, phase: crate::liveness::lifecycle::StartupPhase) {
         self.lifecycle.set(phase);
     }
+}
+
+/// Current epoch time in milliseconds.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis().try_into().unwrap_or(u64::MAX))
 }

@@ -116,6 +116,56 @@ impl DdbZone {
         *self.zone_state.write().unwrap() = health;
     }
 
+    // ── R74 space-metrics accessors ───────────────────────────────
+    // CROW reuses freed space immediately via bitmap scan (no
+    // append-only `allocate_pos`, §3.4/§8), so `free = capacity -
+    // busy`. These read the live atomics; `UsageBitmap::count_set()`
+    // is reserved for the recalc verifier (§5) which needs an
+    // independent popcount.
+
+    /// Busy block units (live `used_count`).
+    #[must_use]
+    pub fn busy_blocks(&self) -> u32 {
+        self.used_count.load(Ordering::Acquire)
+    }
+
+    /// Free block units = `unit_capacity - used_count`.
+    #[must_use]
+    pub fn free_blocks(&self) -> u32 {
+        self.unit_capacity.saturating_sub(self.busy_blocks())
+    }
+
+    /// Busy bytes = `busy_blocks * unit_size_bytes`.
+    #[must_use]
+    pub fn busy_bytes(&self, unit_size_bytes: u32) -> u64 {
+        u64::from(self.busy_blocks()) * u64::from(unit_size_bytes)
+    }
+
+    /// Free bytes = `free_blocks * unit_size_bytes`.
+    #[must_use]
+    pub fn free_bytes(&self, unit_size_bytes: u32) -> u64 {
+        u64::from(self.free_blocks()) * u64::from(unit_size_bytes)
+    }
+
+    /// Capacity bytes = `unit_capacity * unit_size_bytes`.
+    #[must_use]
+    pub fn capacity_bytes(&self, unit_size_bytes: u32) -> u64 {
+        u64::from(self.unit_capacity) * u64::from(unit_size_bytes)
+    }
+
+    /// Usage ratio = `used_count / unit_capacity` as f64 (0.0 when
+    /// capacity is 0).
+    #[must_use]
+    pub fn usage_ratio(&self) -> f64 {
+        let used = f64::from(self.busy_blocks());
+        let cap = f64::from(self.unit_capacity);
+        if cap == 0.0 {
+            0.0
+        } else {
+            used / cap
+        }
+    }
+
     /// Phase 1 (sync) allocate — scan the usage bitmap from
     /// `last_pos_64` (rotating), find `unit_count` consecutive zero
     /// bits, CAS-set each. On CAS failure, retry the same word
@@ -358,5 +408,102 @@ impl DdbZone {
             cas_retry_count: AtomicU64::new(0),
             metrics_cas_retry: None,
         })
+    }
+}
+
+// ── R74 usage structs ───────────────────────────────────────────
+
+/// Per-zone brief usage — counts only (no bitmap bytes). The full
+/// `usage_bitmap` is returned only by the specific-zone query path
+/// (R74 §4) via `UsageBitmap::snapshot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneUsage {
+    pub zone_index: u32,
+    pub capacity_bytes: u64,
+    pub busy_bytes: u64,
+    pub free_bytes: u64,
+    pub busy_block_count: u32,
+    pub free_block_count: u32,
+    pub alloc_state: ZoneAllocationState,
+    pub zone_state: DdbZoneHealth,
+}
+
+impl ZoneUsage {
+    /// Build a brief `ZoneUsage` from a live `DdbZone`.
+    #[must_use]
+    pub fn from_zone(zone: &DdbZone, unit_size_bytes: u32) -> Self {
+        Self {
+            zone_index: zone.zone_index,
+            capacity_bytes: zone.capacity_bytes(unit_size_bytes),
+            busy_bytes: zone.busy_bytes(unit_size_bytes),
+            free_bytes: zone.free_bytes(unit_size_bytes),
+            busy_block_count: zone.busy_blocks(),
+            free_block_count: zone.free_blocks(),
+            alloc_state: zone.derived_alloc_state(),
+            zone_state: *zone.zone_state.read().unwrap(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod accessor_tests {
+    use super::*;
+
+    fn make_zone(cap: u32) -> DdbZone {
+        DdbZone::new(DiskId { high: 0, low: 1 }, 0, 100, cap)
+    }
+
+    #[test]
+    fn busy_free_blocks_track_allocations_and_frees() {
+        let z = make_zone(128);
+        assert_eq!(z.busy_blocks(), 0);
+        assert_eq!(z.free_blocks(), 128);
+        let r = z.allocate(5, 100).expect("alloc 5");
+        assert_eq!(z.busy_blocks(), 5);
+        assert_eq!(z.free_blocks(), 123);
+        // Free 2 of the 5 units — freed space is reusable immediately.
+        assert!(z.free(r.unit_offset, 2));
+        assert_eq!(z.busy_blocks(), 3);
+        assert_eq!(z.free_blocks(), 125);
+    }
+
+    #[test]
+    fn bytes_accessors_scale_by_unit_size() {
+        let z = make_zone(128);
+        let _ = z.allocate(5, 100);
+        assert_eq!(z.busy_bytes(1), 5);
+        assert_eq!(z.free_bytes(1), 123);
+        assert_eq!(z.capacity_bytes(1), 128);
+        assert_eq!(z.busy_bytes(1024), 5 * 1024);
+        assert_eq!(z.capacity_bytes(1024), 128 * 1024);
+    }
+
+    #[test]
+    fn usage_ratio_tracks_used_over_capacity() {
+        let z = make_zone(128);
+        let r = z.allocate(5, 100).expect("alloc 5");
+        assert!((z.usage_ratio() - 5.0 / 128.0).abs() < f64::EPSILON);
+        assert!(z.free(r.unit_offset, 2));
+        assert!((z.usage_ratio() - 3.0 / 128.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn usage_ratio_zero_capacity_is_zero() {
+        let z = DdbZone::new(DiskId { high: 0, low: 1 }, 0, 100, 0);
+        assert!(z.usage_ratio() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn zone_usage_from_zone_is_brief() {
+        let z = make_zone(128);
+        let _ = z.allocate(5, 100);
+        let u = ZoneUsage::from_zone(&z, 1024);
+        assert_eq!(u.zone_index, 0);
+        assert_eq!(u.busy_block_count, 5);
+        assert_eq!(u.free_block_count, 123);
+        assert_eq!(u.capacity_bytes, 128 * 1024);
+        assert_eq!(u.busy_bytes, 5 * 1024);
+        assert_eq!(u.alloc_state, ZoneAllocationState::ZoneAllocAvailable);
+        assert_eq!(u.zone_state, DdbZoneHealth::Healthy);
     }
 }

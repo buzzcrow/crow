@@ -11,7 +11,8 @@ use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
-use crate::model::zone::{AllocatedRange, DdbZone, DdbZoneHealth};
+use crate::metrics::DiskMetrics;
+use crate::model::zone::{AllocatedRange, DdbZone, DdbZoneHealth, ZoneUsage};
 
 /// RCU-published active zone set — `zone_rotate_count` allocatable
 /// zones, replaced via `Arc` swap on rotation.
@@ -34,6 +35,10 @@ pub struct DdbDisk {
     pub pos_v_zone_ctx: AtomicU64,
     /// Effective `HwStatus` for this disk (node/group/disk combined).
     pub effective_status: RwLock<HwStatus>,
+    /// R74 per-disk hot-path counters. `None` in tests that don't
+    /// track metrics; attached during `disk_add_init` and
+    /// `recover_disk_group`.
+    pub metrics: Option<Arc<DiskMetrics>>,
 }
 
 impl DdbDisk {
@@ -55,6 +60,7 @@ impl DdbDisk {
             active_zone_context: RwLock::new(Arc::new(Vec::new())),
             pos_v_zone_ctx: AtomicU64::new(0),
             effective_status: RwLock::new(HwStatus::Up),
+            metrics: None,
         }
     }
 
@@ -198,4 +204,76 @@ impl DdbDisk {
         }
         *self.active_zone_context.write().unwrap() = Arc::new(new_ctx);
     }
+
+    // ── R74 space-metrics accessors ───────────────────────────────
+
+    /// The disk's `unit_size_bytes` (from `disk_value`).
+    fn unit_size_bytes(&self) -> u32 {
+        self.disk_value.read().unwrap().unit_size_bytes
+    }
+
+    /// Aggregated usage across all zones (R74 §2). Reads `disk_value`
+    /// and `zones` under their read locks; `active_zone_count` is the
+    /// RCU active-set size. A `Bad` disk is still summed (its zones
+    /// carry their last-known `used_count`); it is excluded from
+    /// `allocatable_disk_count` at the disk-group level, not here.
+    #[must_use]
+    pub fn usage(&self) -> DiskUsage {
+        let unit_size_bytes = self.unit_size_bytes();
+        let zones = self.zones.read().unwrap();
+        let mut capacity_bytes = 0u64;
+        let mut busy_bytes = 0u64;
+        let mut busy_zone_count = 0u32;
+        for zone in zones.iter() {
+            capacity_bytes += zone.capacity_bytes(unit_size_bytes);
+            busy_bytes += zone.busy_bytes(unit_size_bytes);
+            if zone.busy_blocks() == zone.unit_capacity {
+                busy_zone_count += 1;
+            }
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let zone_count = zones.len() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let active_zone_count = self.active_zone_context.read().unwrap().len() as u32;
+        let free_bytes = capacity_bytes.saturating_sub(busy_bytes);
+        let free_zone_count = zone_count.saturating_sub(busy_zone_count);
+        DiskUsage {
+            disk_id: self.disk_id,
+            capacity_bytes,
+            busy_bytes,
+            free_bytes,
+            zone_count,
+            active_zone_count,
+            busy_zone_count,
+            free_zone_count,
+        }
+    }
+
+    /// Build a list of brief per-zone `ZoneUsage` entries (counts only
+    /// — no bitmap bytes). Used by the disk-level `QueryCapacityStats`
+    /// shape (R74 §4).
+    #[must_use]
+    pub fn zone_usages(&self) -> Vec<ZoneUsage> {
+        let unit_size_bytes = self.unit_size_bytes();
+        let zones = self.zones.read().unwrap();
+        zones
+            .iter()
+            .map(|z| ZoneUsage::from_zone(z, unit_size_bytes))
+            .collect()
+    }
+}
+
+/// Per-disk usage (aggregated across zones, R74 §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskUsage {
+    pub disk_id: DiskId,
+    pub capacity_bytes: u64,
+    pub busy_bytes: u64,
+    pub free_bytes: u64,
+    pub zone_count: u32,
+    pub active_zone_count: u32,
+    /// Zones with `used_count == unit_capacity`.
+    pub busy_zone_count: u32,
+    /// Zones with `used_count < unit_capacity`.
+    pub free_zone_count: u32,
 }

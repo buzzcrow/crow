@@ -14,7 +14,7 @@ use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::health;
 use crow_diskdb::liveness::keepalive::KeepAlive;
 use crow_diskdb::liveness::lifecycle::StartupPhase;
-use crow_diskdb::metrics::DiskdbMetrics;
+use crow_diskdb::metrics::{DiskdbMetrics, RecalcEngine, ReportingTask};
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::compaction::CompactionEngine;
 use crow_diskdb::recovery::RecoveryEngine;
@@ -126,7 +126,9 @@ async fn main() {
     let keepalive = KeepAlive::new(hw, svc, container.clone(), keepalive_cfg)
         .with_ddb_kv_client(dg_kv_sync)
         .with_cas_retry_metric(Arc::clone(&metrics.allocate_retry_cas_bit))
-        .with_config_handle(Arc::clone(&config));
+        .with_config_handle(Arc::clone(&config))
+        .with_grpc_endpoint(config.load().server.listen_addr.clone())
+        .with_metrics(metrics.clone());
 
     info!("running blocking initial keep-alive tick");
     let init_outcome = keepalive.tick().await;
@@ -145,6 +147,7 @@ async fn main() {
         Arc::clone(&dg_kv),
         config.load().persistence.recovery_concurrency,
     ));
+    let recalc_engine = Arc::new(RecalcEngine::new(Arc::clone(&dg_kv), Arc::clone(&container)));
     let listen_addr: SocketAddr = config
         .load()
         .server
@@ -156,6 +159,7 @@ async fn main() {
         Arc::clone(&dg_kv),
         config.load().storage.clone(),
         Arc::clone(&recovery_engine),
+        Arc::clone(&recalc_engine),
     )
     .into_server();
     info!(%listen_addr, "gRPC server listening (recovery pending)");
@@ -184,9 +188,12 @@ async fn main() {
         CompactionEngine::new(Arc::clone(&dg_kv), compaction_cfg).with_config_handle(Arc::clone(&config)),
     );
     let keepalive_task: Arc<dyn crow_diskdb::bg_task::BackgroundTask> = Arc::new(keepalive);
+    let reporting_task: Arc<dyn crow_diskdb::bg_task::BackgroundTask> =
+        Arc::new(ReportingTask::new(metrics.clone(), Arc::clone(&config)));
     let runner = BgRunner::new()
         .register(keepalive_task)
-        .register(compaction_engine);
+        .register(compaction_engine)
+        .register(reporting_task);
     let stop = runner.stop_handle();
     let bg_ctx = Arc::new(BgCtx {
         container: Arc::clone(&container),

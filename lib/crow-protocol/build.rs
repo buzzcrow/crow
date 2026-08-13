@@ -53,6 +53,7 @@ fn main() {
         // Query response types (key + value fields flattened).
         .type_attribute("DiskInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("DiskGroupInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("ZoneUsage", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("RackInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("NodeInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Common sysdata value types (serde for bincode/JSON storage).

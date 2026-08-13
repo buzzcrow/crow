@@ -77,3 +77,8 @@ group0_store_id = 0
 group0_group_id = 0
 # Sync interval in seconds.
 sync_interval_secs = 10
+
+# ── Reporting loop ─────────────────────────────────────────────
+[reporting]
+# Reporting loop interval in seconds (gauges + period-counter flush).
+interval_secs = 10

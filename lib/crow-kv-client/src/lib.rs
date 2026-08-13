@@ -27,6 +27,7 @@ mod kv_cluster;
 mod metrics;
 mod pool;
 mod service_registry;
+mod space_usage;
 mod topology;
 
 pub use client::{
@@ -39,6 +40,7 @@ pub use hardware::HardwareClient;
 pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 pub use service_registry::ServiceRegistryClient;
+pub use space_usage::{ClusterUsage, NodeUsage, RackUsage, SpaceUsageClient};
 
 /// Re-exported so callers don't need a direct `crow_kv` dependency just to
 /// pick a read mode.

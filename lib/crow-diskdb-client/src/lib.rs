@@ -3,9 +3,15 @@
 
 //! Client library for CROW diskdb.
 //!
-//! Provides allocate/free/query APIs with retry and topology caching,
-//! mirroring `crow-kv-client`'s pattern. Skeleton — functionality
-//! filled in by follow-up requirements.
+//! Provides allocate/free/query APIs with retry and endpoint caching,
+//! mirroring `crow-kv-client`'s pattern. The client discovers diskdb
+//! instances via the service registry (group 0), caches
+//! `disk_group_id -> grpc_endpoint`, and lazily refreshes on cache
+//! miss or `Unavailable`.
+
+pub mod client;
+
+pub use client::{DiskdbClient, RetryConfig};
 
 use thiserror::Error;
 

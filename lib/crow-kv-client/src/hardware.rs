@@ -81,7 +81,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(kv: &CrowkvClient, key: &str) 
     }
 }
 
-async fn scan_prefix<T: serde::de::DeserializeOwned>(
+pub(crate) async fn scan_prefix<T: serde::de::DeserializeOwned>(
     kv: &CrowkvClient,
     prefix: &str,
 ) -> Result<Vec<(String, T)>> {

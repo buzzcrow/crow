@@ -11,8 +11,9 @@ use std::sync::{Arc, RwLock};
 use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::DiskGroupId;
 
-use crate::model::disk::DdbDisk;
-use crate::model::zone::{AllocatedRange, DdbZone};
+use crate::metrics::DiskMetrics;
+use crate::model::disk::{DdbDisk, DiskUsage};
+use crate::model::zone::{AllocatedRange, DdbZone, ZoneUsage};
 
 /// RCU-published set of allocatable disks within the named
 /// disk-group, replaced via `Arc` swap on add/remove/status-change.
@@ -184,6 +185,97 @@ impl DdbDiskGroup {
             None => false,
         }
     }
+
+    // ── R74 space-metrics accessors ───────────────────────────────
+
+    /// Aggregated usage across all disks (R74 §2). `disk_count` =
+    /// total disks; `allocatable_disk_count` = RCU `allocating_disks`
+    /// size (disks currently `Up` and allocatable). A `Bad` disk's
+    /// capacity still counts in the total.
+    #[must_use]
+    pub fn aggregate_usage(&self) -> DiskGroupUsage {
+        let disks_guard = self.disks.read().unwrap();
+        let mut capacity_bytes = 0u64;
+        let mut busy_bytes = 0u64;
+        let mut disk_usages: Vec<DiskUsage> = Vec::with_capacity(disks_guard.len());
+        for disk in disks_guard.iter() {
+            let u = disk.usage();
+            capacity_bytes += u.capacity_bytes;
+            busy_bytes += u.busy_bytes;
+            disk_usages.push(u);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let disk_count = disks_guard.len() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let allocatable_disk_count = self.allocating_disks.read().unwrap().len() as u32;
+        let free_bytes = capacity_bytes.saturating_sub(busy_bytes);
+        DiskGroupUsage {
+            disk_group_id: self.disk_group_id,
+            capacity_bytes,
+            busy_bytes,
+            free_bytes,
+            disk_count,
+            allocatable_disk_count,
+            disks: disk_usages,
+        }
+    }
+
+    /// Brief per-zone usage for `(disk_id, zone_index)` (R74 §2).
+    /// Returns `None` for an unknown disk or out-of-range zone.
+    #[must_use]
+    pub fn zone_usage(&self, disk_id: DiskId, zone_index: u32) -> Option<ZoneUsage> {
+        let disk = {
+            let idx = self.disk_index.read().unwrap();
+            idx.get(&disk_id).cloned()
+        }?;
+        let zones = disk.zones.read().unwrap();
+        let idx = zone_index as usize;
+        if idx >= zones.len() {
+            return None;
+        }
+        let unit_size_bytes = disk.disk_value.read().unwrap().unit_size_bytes;
+        Some(ZoneUsage::from_zone(&zones[idx], unit_size_bytes))
+    }
+
+    /// Per-disk hot-path metrics handle for `disk_id` (R74 §3).
+    /// Returns `None` for an unknown disk or a disk with no metrics
+    /// attached (test disks).
+    #[must_use]
+    pub fn disk_metrics(&self, disk_id: DiskId) -> Option<Arc<DiskMetrics>> {
+        let idx = self.disk_index.read().unwrap();
+        let disk = idx.get(&disk_id)?;
+        disk.metrics.clone()
+    }
+
+    /// The disk's `unit_size_bytes` (from `disk_value`), or `None` for
+    /// an unknown disk. Used by the free path to record byte counters.
+    #[must_use]
+    pub fn disk_unit_size(&self, disk_id: DiskId) -> Option<u32> {
+        let idx = self.disk_index.read().unwrap();
+        let disk = idx.get(&disk_id)?;
+        let unit_size = disk.disk_value.read().unwrap().unit_size_bytes;
+        Some(unit_size)
+    }
+
+    /// Get a cloned `Arc<DdbDisk>` by `disk_id` (R74 query handler).
+    /// Returns `None` for an unknown disk.
+    #[must_use]
+    pub fn get_disk(&self, disk_id: DiskId) -> Option<Arc<DdbDisk>> {
+        let idx = self.disk_index.read().unwrap();
+        idx.get(&disk_id).cloned()
+    }
+}
+
+/// Per-disk-group usage (aggregated across disks, R74 §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskGroupUsage {
+    pub disk_group_id: DiskGroupId,
+    pub capacity_bytes: u64,
+    pub busy_bytes: u64,
+    pub free_bytes: u64,
+    pub disk_count: u32,
+    pub allocatable_disk_count: u32,
+    pub disks: Vec<DiskUsage>,
 }
 
 /// Allocation errors.

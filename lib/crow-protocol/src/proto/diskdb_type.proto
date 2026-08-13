@@ -119,8 +119,26 @@ message FreeBlockValue {
 
 // ── Query response types ────────────────────────────────────────
 
+// Per-zone brief usage — counts only. The full `usage_bitmap` is
+// populated only for a specific-zone query (R74 §4); omitted at disk
+// level to keep the response small when a disk has thousands of zones.
+message ZoneUsage {
+  uint32             zone_index       = 1;
+  uint64             capacity_bytes   = 2;
+  uint64             busy_bytes       = 3;
+  uint64             free_bytes       = 4;
+  uint32             busy_block_count = 5;
+  uint32             free_block_count = 6;
+  ZoneAllocationState alloc_state     = 7;
+  // Populated only for a specific-zone query; omitted at disk level.
+  optional bytes     usage_bitmap     = 8;
+}
+
 // Disk info for query responses — key fields + value fields flattened.
 // Replaces the former DiskEntry { DiskKey key; DiskValue value }.
+// R74 adds live usage fields (busy/free units + bytes, active zone
+// count) and a repeated ZoneUsage list (brief counts at disk level,
+// full bitmap only for a specific-zone query).
 message DiskInfo {
   // Key fields (from DiskKey text-path key).
   uint64             rack_id       = 1;
@@ -134,10 +152,21 @@ message DiskInfo {
   uint32             unit_size_bytes = 8;
   uint32             zone_count      = 9;
   crow.common.HwStatus status        = 10;
+  // R74 live usage (bitmap-derived; 0 when not populated).
+  uint64             busy_units        = 11;
+  uint64             free_units        = 12;
+  uint64             capacity_bytes    = 13;
+  uint64             busy_bytes        = 14;
+  uint64             free_bytes        = 15;
+  uint32             active_zone_count = 16;
+  // Brief per-zone entries (disk-level query only; empty at disk-group
+  // level). Each entry carries counts only — no `usage_bitmap` bytes.
+  repeated ZoneUsage zone_usages       = 17;
 }
 
 // Disk-group info for query responses — key + value fields flattened
-// plus member disks.
+// plus member disks. R74 adds aggregated capacity/busy/free bytes +
+// allocatable_disk_count.
 message DiskGroupInfo {
   // Key fields (from DiskGroupKey text-path key).
   uint64             rack_id       = 1;
@@ -148,4 +177,9 @@ message DiskGroupInfo {
   repeated crow.common.DiskId disk_ids         = 5;
   // Member disks.
   repeated DiskInfo   disks        = 6;
+  // R74 aggregated usage (bitmap-derived; 0 when not populated).
+  uint64             capacity_bytes         = 7;
+  uint64             busy_bytes             = 8;
+  uint64             free_bytes             = 9;
+  uint32             allocatable_disk_count = 10;
 }

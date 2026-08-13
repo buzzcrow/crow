@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crow_common::metrics::Counter;
 use crow_kv_client::{HardwareClient, ServiceRegistryClient};
-use crow_protocol::common::{DiskId, HwStatus};
+use crow_protocol::common::{DiskGroupUsageSummary, DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::DiskIdExt;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
@@ -23,6 +23,7 @@ use crate::bg_task::{BackgroundTask, BgCtx, CycleFut, Trigger};
 use crate::ddb_config::KeepAliveConfig;
 use crate::ddb_kv_client::DdbKvClient;
 use crate::liveness::state_machine::HwStateMachine;
+use crate::metrics::{DiskMetrics, DiskdbMetrics};
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
@@ -31,6 +32,11 @@ use crate::model::zone::DdbZone;
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
     start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+/// Elapsed nanos as u64 (saturating cast from u128).
+fn elapsed_ns(start: std::time::Instant) -> u64 {
+    start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
 /// Outcome of one sync tick.
@@ -64,6 +70,12 @@ pub struct KeepAlive {
     /// `heartbeat.interval_secs` from this handle each tick; when
     /// `None`, falls back to the fixed `config.interval` snapshot.
     config_handle: Option<Arc<arc_swap::ArcSwap<crate::ddb_config::DdbConfig>>>,
+    /// gRPC endpoint to register with the service registry (R74
+    /// keepalive piggyback). When empty, passes `""` (test mode).
+    grpc_endpoint: String,
+    /// Optional metrics handle for sync latency/success/failure
+    /// observations (R74 §11).
+    metrics: Option<DiskdbMetrics>,
 }
 
 impl KeepAlive {
@@ -84,6 +96,8 @@ impl KeepAlive {
             kv: None,
             cas_retry_metric: None,
             config_handle: None,
+            grpc_endpoint: String::new(),
+            metrics: None,
         }
     }
 
@@ -114,6 +128,24 @@ impl KeepAlive {
         self
     }
 
+    /// Attach the gRPC endpoint to register with the service registry
+    /// (R74 keepalive piggyback). When set, `heartbeat` passes this
+    /// endpoint + per-disk-group usage summaries to
+    /// `heartbeat_diskdb`.
+    #[must_use]
+    pub fn with_grpc_endpoint(mut self, endpoint: String) -> Self {
+        self.grpc_endpoint = endpoint;
+        self
+    }
+
+    /// Attach a metrics handle for sync latency/success/failure
+    /// observations (R74 §11).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: DiskdbMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
     /// Run one sync tick — a thin orchestrator calling the four
     /// concerns in order: heartbeat, observe ownership, observe
     /// disks. Returns the aggregate outcome.
@@ -122,6 +154,9 @@ impl KeepAlive {
 
         // a. Keep-alive heartbeat.
         if !self.heartbeat().await {
+            if let Some(m) = &self.metrics {
+                m.sync_failure_total.inc();
+            }
             return KeepAliveOutcome {
                 sync_duration_ms: elapsed_ms(start),
                 ..Default::default()
@@ -130,6 +165,9 @@ impl KeepAlive {
 
         // b+c. Observe ownership (owner map + bind map).
         let Some((owned, groups_added, groups_removed)) = self.observe_ownership().await else {
+            if let Some(m) = &self.metrics {
+                m.sync_failure_total.inc();
+            }
             return KeepAliveOutcome {
                 sync_duration_ms: elapsed_ms(start),
                 ..Default::default()
@@ -145,6 +183,13 @@ impl KeepAlive {
         let prev = self.missed_count.swap(0, Ordering::SeqCst);
         if prev > 0 {
             self.container.exit_degraded_mode();
+        }
+
+        // Record successful sync.
+        self.container.record_sync_success();
+        if let Some(m) = &self.metrics {
+            m.sync_success_total.inc();
+            m.sync_latency.observe(elapsed_ns(start));
         }
 
         outcome.sync_duration_ms = elapsed_ms(start);
@@ -163,7 +208,32 @@ impl KeepAlive {
     /// enters degraded mode on threshold breach.
     async fn heartbeat(&self) -> bool {
         let instance_id = self.container.instance_id;
-        if let Err(e) = self.svc.heartbeat_diskdb(instance_id, "", &[], &[]).await {
+        // Compute per-disk-group usage summaries from the in-memory
+        // bitmap (R74 §8 keepalive piggyback). Recomputed each tick
+        // (not cached); derived, not a source of truth.
+        let owned_dg_ids: Vec<u64> = self.container.disk_group_ids();
+        let group_usages: Vec<DiskGroupUsageSummary> = self
+            .container
+            .disk_group_ids()
+            .into_iter()
+            .filter_map(|dg_id| {
+                let dg = self.container.get_disk_group(dg_id)?;
+                let u = dg.aggregate_usage();
+                Some(DiskGroupUsageSummary {
+                    disk_group_id: dg_id,
+                    capacity_bytes: u.capacity_bytes,
+                    used_bytes: u.busy_bytes,
+                    free_bytes: u.free_bytes,
+                    disk_count: u.disk_count,
+                    allocatable_disk_count: u.allocatable_disk_count,
+                })
+            })
+            .collect();
+        if let Err(e) = self
+            .svc
+            .heartbeat_diskdb(instance_id, &self.grpc_endpoint, &owned_dg_ids, &group_usages)
+            .await
+        {
             warn!(error = %e, "sync: heartbeat failed");
             let count = self.missed_count.fetch_add(1, Ordering::SeqCst) + 1;
             if count >= self.config.miss_threshold {
@@ -383,13 +453,10 @@ impl KeepAlive {
         let unit_size_bytes = disk_value.unit_size_bytes;
         let _ = unit_size_bytes;
 
-        let disk = Arc::new(DdbDisk::new(
-            disk_id,
-            dg.disk_group_id,
-            dg.node_id,
-            dg.rack_id,
-            *disk_value,
-        ));
+        let mut disk = DdbDisk::new(disk_id, dg.disk_group_id, dg.node_id, dg.rack_id, *disk_value);
+        // Attach per-disk hot-path counters (R74 §3).
+        disk.metrics = Some(Arc::new(DiskMetrics::new()));
+        let disk = Arc::new(disk);
 
         for zi in 0..zone_count {
             // Last zone may be smaller; round down to multiple of 64.
