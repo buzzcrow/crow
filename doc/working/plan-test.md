@@ -14,18 +14,20 @@ For test strategy, layer scope, and coverage details, see [`design/kv/design-cro
 
 ## Suite Timing
 
-Measured on 2026-08-04 (clean build, macOS, build 88.0 s) and 2026-08-06 (clean build, Linux, build 80.0 s).
+Measured on 2026-08-13 (warm build, macOS) and 2026-08-06 (clean build, Linux, build 80.0 s).
+macOS times are wall-clock `time pixi run test-*` with build + test binaries cached.
 Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 354 | 6.4 s | 21.0 s |
-| `test-tree-ffi` | 29 | 27.6 s | 78.9 s |
-| `test-kv-core` | 536 | 47.4 s | 60.8 s |
-| `test-kv-server` | 68 | 54.1 s | 66.8 s |
-| `test-console-cli` | 13 | 26.6 s | 67.5 s |
-| `test-console-server` | 50 | 45.3 s | 53.7 s |
-| `test-console-ui` | 51 | 72.5 s | 108.5 s |
+| `test-tree-ct` | 387 | 7.6 s | 21.0 s |
+| `test-tree-ffi` | 30 | 7.8 s | 78.9 s |
+| `test-kv-core` | 554 | 76.1 s | 60.8 s |
+| `test-kv-server` | 69 | 143.9 s | 66.8 s |
+| `test-diskdb` | 48 | 70.5 s | — |
+| `test-console-cli` | 13 | 95.0 s | 67.5 s |
+| `test-console-server` | 53 | 199.6 s | 53.7 s |
+| `test-console-ui` | 80 | 179.7 s | 108.5 s |
 
 ---
 
