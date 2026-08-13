@@ -92,7 +92,7 @@ impl RecalcEngine {
         // Strategy 2: journal replay into a throwaway zone.
         let (replayed_busy_blocks, replayed_snapshot_slot, fallback_used) =
             match recover_zone_inner(&self.kv, bind, disk_id, zone_idx, unit_capacity).await {
-                Ok(replayed) => {
+                Ok((replayed, _max_freed_ts)) => {
                     let popcount = replayed.usage_bits.count_set();
                     let slot = replayed.snapshot_slot.load(std::sync::atomic::Ordering::Acquire);
                     (u32::try_from(popcount).unwrap_or(u32::MAX), slot, None)

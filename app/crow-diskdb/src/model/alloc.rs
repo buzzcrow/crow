@@ -17,6 +17,7 @@ use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, FreeBlockValue, Seg
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group::{AllocClaim, AllocError, DdbDiskGroup};
+use crate::recovery::compaction::compact_zone;
 
 /// Errors from the free path when `validate_owner_on_free` is enabled.
 #[derive(Debug)]
@@ -75,6 +76,48 @@ impl From<crow_kv_client::Error> for FreeError {
     }
 }
 
+/// Synchronous compaction fallback: when `dg.allocate_block` returns
+/// `NoSpace`, compact non-active zones on all disks in the disk-group
+/// (up to `zone_rotate_count` per disk), then retry. This reclaims
+/// freed space that hasn't been compacted yet (persist-only free
+/// leaves bits set). See §5 Preparatory thread — Fallback.
+async fn compact_fallback(dg: &Arc<DdbDiskGroup>, kv: &DdbKvClient, zone_rotate_count: u32) {
+    let bind = *dg.bind.read().unwrap();
+    let disks = dg.disks.read().unwrap().clone();
+    for disk in disks {
+        // Collect active zone indices to skip (I4).
+        let active_zone_indices: std::collections::HashSet<u32> = {
+            let active = disk.active_zone_context.read().unwrap();
+            active.iter().map(|z| z.zone_index).collect()
+        };
+        let zones = disk.zones.read().unwrap().clone();
+        let mut compacted = 0u32;
+        for zone in zones {
+            if compacted >= zone_rotate_count {
+                break;
+            }
+            // Skip active zones — no concurrent allocate (I4).
+            if active_zone_indices.contains(&zone.zone_index) {
+                continue;
+            }
+            // Skip zones that are already ready.
+            if zone.compacted_ready.load(std::sync::atomic::Ordering::Acquire) {
+                continue;
+            }
+            if let Err(e) = compact_zone(kv, bind, disk.disk_id, &zone, zone.zone_index).await {
+                tracing::warn!(
+                    disk_id = ?disk.disk_id,
+                    zone_index = zone.zone_index,
+                    error = %e,
+                    "synchronous compaction fallback failed"
+                );
+            } else {
+                compacted += 1;
+            }
+        }
+    }
+}
+
 /// Two-phase allocate a single block.
 ///
 /// Phase 1 (sync): bitmap CAS via `dg.allocate_block`.
@@ -83,9 +126,14 @@ impl From<crow_kv_client::Error> for FreeError {
 /// On Phase 2 failure, rolls back the bitmap bits (Phase 1 undo) and
 /// returns the error. See §4.5.
 ///
+/// Synchronous compaction fallback: if Phase 1 returns `NoSpace`,
+/// compacts non-active zones on all disks (reclaiming freed space),
+/// then retries Phase 1 once. See §5 Preparatory thread — Fallback.
+///
 /// # Errors
 /// Returns `AllocError::NoSpace` if no disk/zone can satisfy the
-/// request, or a KV client error if the persist fails.
+/// request (even after compaction fallback), or a KV client error if
+/// the persist fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn allocate_block(
     dg: &Arc<DdbDiskGroup>,
@@ -97,7 +145,16 @@ pub async fn allocate_block(
     zone_rotate_count: u32,
 ) -> std::result::Result<Segment, AllocError> {
     // Phase 1: bitmap CAS.
-    let (disk, zone, range) = dg.allocate_block(unit_count, &[], cas_retry_limit, zone_rotate_count)?;
+    let (disk, zone, range) = match dg.allocate_block(unit_count, &[], cas_retry_limit, zone_rotate_count) {
+        Ok(claim) => claim,
+        Err(AllocError::NoSpace) => {
+            // Synchronous compaction fallback: compact non-active
+            // zones to reclaim freed space, then retry once.
+            tracing::info!("allocate NoSpace — running synchronous compaction fallback");
+            compact_fallback(dg, kv, zone_rotate_count).await;
+            dg.allocate_block(unit_count, &[], cas_retry_limit, zone_rotate_count)?
+        }
+    };
 
     // Record per-disk event counter after Phase 1 CAS succeeds.
     if let Some(m) = &disk.metrics {
@@ -134,9 +191,14 @@ pub async fn allocate_block(
 /// Two-phase allocate multiple blocks (one `batch_write` per data
 /// group). See §4.5.
 ///
+/// Synchronous compaction fallback: if Phase 1 cannot place all
+/// `count` blocks, compacts non-active zones on all disks (reclaiming
+/// freed space), then retries Phase 1 once.
+///
 /// # Errors
 /// Returns `AllocError::NoSpace` if not all `count` blocks can be
-/// placed, or a KV client error if the batch persist fails.
+/// placed (even after compaction fallback), or a KV client error if
+/// the batch persist fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn allocate_blocks(
     dg: &Arc<DdbDiskGroup>,
@@ -150,13 +212,44 @@ pub async fn allocate_blocks(
     zone_rotate_count: u32,
 ) -> std::result::Result<Vec<Segment>, AllocError> {
     // Phase 1: bitmap CAS for all blocks.
-    let claims: Vec<AllocClaim> = dg.allocate_blocks(
+    let claims: Vec<AllocClaim> = match dg.allocate_blocks(
         unit_count,
         count,
         exclude_disks,
         cas_retry_limit,
         zone_rotate_count,
-    )?;
+    ) {
+        Ok(claims) if claims.len() == count as usize => claims,
+        Ok(partial) => {
+            // Partial allocation — not enough space. Try compaction
+            // fallback to reclaim freed space, then retry.
+            tracing::info!(
+                requested = count,
+                placed = partial.len(),
+                "allocate_blocks partial — running synchronous compaction fallback"
+            );
+            compact_fallback(dg, kv, zone_rotate_count).await;
+            dg.allocate_blocks(
+                unit_count,
+                count,
+                exclude_disks,
+                cas_retry_limit,
+                zone_rotate_count,
+            )?
+        }
+        Err(AllocError::NoSpace) => {
+            // No space at all — try compaction fallback then retry.
+            tracing::info!("allocate_blocks NoSpace — running synchronous compaction fallback");
+            compact_fallback(dg, kv, zone_rotate_count).await;
+            dg.allocate_blocks(
+                unit_count,
+                count,
+                exclude_disks,
+                cas_retry_limit,
+                zone_rotate_count,
+            )?
+        }
+    };
 
     // Record per-disk event counters after Phase 1 CAS succeeds.
     for (disk, _zone, range) in &claims {

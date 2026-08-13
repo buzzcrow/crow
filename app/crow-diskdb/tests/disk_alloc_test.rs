@@ -123,6 +123,43 @@ fn disk_free_wrong_zone_index_fails() {
     assert!(!disk.free(99, 0, 1));
 }
 
+#[test]
+fn rotate_clears_compacted_ready_on_published_zones() {
+    // When zones are published into the active set via rotation,
+    // compacted_ready must be cleared — they will need re-compaction
+    // after being allocated from and freed (I5).
+    let disk = make_disk(1, 8, 64);
+    // rebuild_active_zones picks the first 4 zones. Mark all zones
+    // compacted_ready = true first (simulating recovery / compaction).
+    {
+        let zones = disk.zones.read().unwrap();
+        for zone in zones.iter() {
+            zone.mark_compacted_ready();
+        }
+    }
+    // Fill all 4 active zones (256 units) to force rotation.
+    for _ in 0..(64 * 4) {
+        disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE);
+    }
+    // One more allocate triggers rotation (all active zones full).
+    // This picks the next 4 zones (4-7) and clears compacted_ready.
+    disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE);
+    // After rotation, the new active zones should have
+    // compacted_ready = false (cleared on publish).
+    let active = disk.active_zone_context.read().unwrap();
+    assert!(
+        !active.is_empty(),
+        "active set should not be empty after rotation"
+    );
+    for zone in active.iter() {
+        assert!(
+            !zone.compacted_ready.load(std::sync::atomic::Ordering::Acquire),
+            "zone {} in active set should have compacted_ready = false after rotation",
+            zone.zone_index
+        );
+    }
+}
+
 // ── DdbDiskGroup ────────────────────────────────────────────────
 
 #[test]

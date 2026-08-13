@@ -123,6 +123,10 @@ impl RecoveryEngine {
         let dg = Arc::new(DdbDiskGroup::new(dg_id, node_id, rack_id));
         *dg.bind.write().unwrap() = bind;
 
+        // Track max freed_ts across all zones in all disks — used to
+        // seed the per-disk-group monotonic timestamp source (§8).
+        let mut max_freed_ts_in_dg: u64 = 0;
+
         for (disk_id, disk_value) in disks {
             let mut disk = DdbDisk::new(*disk_id, dg_id, node_id, rack_id, *disk_value);
             // Attach per-disk hot-path counters (R74 §3).
@@ -149,8 +153,8 @@ impl RecoveryEngine {
 
             for (zi, handle) in zone_handles {
                 let unit_capacity = unit_capacity_for_zone(disk_value, zi, zone_count, zone_size_units);
-                let zone = match handle.await {
-                    Ok(Ok(zone)) => zone,
+                let (zone, zone_max_freed_ts) = match handle.await {
+                    Ok(Ok((zone, max_freed_ts))) => (zone, max_freed_ts),
                     Ok(Err(e)) => {
                         tracing::warn!(
                             disk_id = ?*disk_id,
@@ -158,7 +162,9 @@ impl RecoveryEngine {
                             error = %e,
                             "zone recovery failed; falling back to strategy 1 (full scan)"
                         );
-                        // Fallback: strategy 1 full scan.
+                        // Fallback: strategy 1 full scan. No freed_ts
+                        // available (strategy 1 doesn't scan free
+                        // records).
                         match full_scan::rebuild_zone_bitmap_full_scan(
                             &self.kv,
                             bind,
@@ -168,7 +174,7 @@ impl RecoveryEngine {
                         )
                         .await
                         {
-                            Ok((zone, _stats)) => zone,
+                            Ok((zone, _stats)) => (zone, 0),
                             Err(e2) => {
                                 tracing::error!(
                                     disk_id = ?*disk_id,
@@ -176,7 +182,7 @@ impl RecoveryEngine {
                                     error = %e2,
                                     "strategy 1 fallback also failed; using empty zone"
                                 );
-                                DdbZone::new(*disk_id, zi, dg_id, unit_capacity)
+                                (DdbZone::new(*disk_id, zi, dg_id, unit_capacity), 0)
                             }
                         }
                     }
@@ -187,16 +193,29 @@ impl RecoveryEngine {
                             error = %e,
                             "zone recovery task panicked; using empty zone"
                         );
-                        DdbZone::new(*disk_id, zi, dg_id, unit_capacity)
+                        (DdbZone::new(*disk_id, zi, dg_id, unit_capacity), 0)
                     }
                 };
                 disk.add_zone(Arc::new(zone));
+                // Track max freed_ts across all zones for timestamp
+                // source seeding (§8).
+                if zone_max_freed_ts > max_freed_ts_in_dg {
+                    max_freed_ts_in_dg = zone_max_freed_ts;
+                }
             }
 
             disk.rebuild_active_zones(zone_rotate_count);
             dg.add_disk(disk);
             dg.rebuild_allocating_disks();
         }
+
+        // Seed the per-disk-group monotonic timestamp source to
+        // max(now(), max(freed_ts of all scanned free records) + 1)
+        // (§8). This ensures new frees get freed_ts values strictly
+        // greater than any pre-existing free record — critical for
+        // ownership transfer where the prior owner's clock may be
+        // ahead of ours.
+        dg.init_free_ts_source_after_recovery(max_freed_ts_in_dg);
 
         dg
     }

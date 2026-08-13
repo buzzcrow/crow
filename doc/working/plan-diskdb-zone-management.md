@@ -198,12 +198,13 @@ before the design evolved to the persist-only free model and the
   on the recovered zone (the bitmap is accurate from records). Files:
   `app/crow-diskdb/src/recovery/journal_replay.rs`,
   `app/crow-diskdb/src/recovery/full_scan.rs`.
-- [~] **Initialize timestamp source during `recover_disk_group` (stub exists, not yet called from recovery engine)**: after
+- [x] **Initialize timestamp source during `recover_disk_group`**: after
   all zones in a disk-group are recovered, initialize the
   `DdbDiskGroup.free_ts_source` to `max(now(), max(freed_ts of all
-  scanned free records) + 1)`. This requires collecting the max
-  `freed_ts` across all zones' replayed free records. Files:
-  `app/crow-diskdb/src/recovery.rs`,
+  scanned free records) + 1)`. `recover_zone_inner` now returns
+  `(DdbZone, max_freed_ts)` and `recover_disk_group` collects the max
+  across all zones and calls `init_free_ts_source_after_recovery`.
+  Files: `app/crow-diskdb/src/recovery.rs`,
   `app/crow-diskdb/src/recovery/journal_replay.rs`.
 - [x] **Set `compact_ts = 0` in full-scan recovery**: strategy 1
   rebuilds from busy records only (no free records scanned), so
@@ -313,14 +314,11 @@ before the design evolved to the persist-only free model and the
   running compaction on a zone with free records clears the freed bits
   and deletes the free records. (`recovery_strategy2_journal_replay`
   step 7)
-- [~] **Timestamp source init**: `recover_disk_group` initializes
-  `free_ts_source` to `max(now(), max(freed_ts) + 1)`. The
-  `monotonic_free_ts_source` + `next_freed_ts` accessors exist on
-  `DdbDiskGroup` and are used by the free path, but the recovery
-  engine does not yet seed the source from scanned free records — it
-  relies on `now()` only. Acceptable while no pre-existing free
-  records have `freed_ts > now()` (fresh start); needs wiring for
-  ownership transfer where the prior owner's `freed_ts` may be ahead.
+- [x] **Timestamp source init**: `recover_disk_group` initializes
+  `free_ts_source` to `max(now(), max(freed_ts) + 1)`.
+  (`recover_zone_inner` returns `max_freed_ts` from scanned free
+  records; `recover_disk_group` collects the max and calls
+  `init_free_ts_source_after_recovery`.)
 - [x] **`compacted_ready = true` after strategy 2**: recovered zone is
   eligible for the active set. (`recovery_strategy2_journal_replay`)
 - [x] **`compacted_ready = true` after strategy 1**: full-scan
@@ -331,13 +329,14 @@ before the design evolved to the persist-only free model and the
 - [x] **Rotation picks `compacted_ready` zones**: only ready zones
   enter the active set. (`zone_rotate_one_uses_all_zones`,
   `disk_allocate_rotates_across_active_zones`)
-- [ ] **`compacted_ready` cleared on rotation**: published zones get
-  `compacted_ready = false`. (Implicit in `rotate_active_zones`; no
-  dedicated unit test yet — covered by integration.)
-- [ ] **Fallback to synchronous compaction**: when no ready zones
-  exist, rotation compacts inline then publishes. (Not yet
-  implemented in `rotate_active_zones` — preparatory thread covers
-  the common case; synchronous fallback is a follow-up task.)
+- [x] **`compacted_ready` cleared on rotation**: published zones get
+  `compacted_ready = false`. (`rotate_clears_compacted_ready_on_published_zones`)
+- [x] **Fallback to synchronous compaction**: when no ready zones
+  exist, `allocate_block`/`allocate_blocks` compacts non-active zones
+  inline (via `compact_fallback`) then retries. (Implemented at the
+  async `alloc.rs` layer — the sync `rotate_active_zones` picks
+  un-compacted zones as a conservative fallback; the async caller
+  compacts them before retrying.)
 
 ### Integration tests
 
@@ -362,14 +361,6 @@ before the design evolved to the persist-only free model and the
 
 ## Open Follow-ups
 
-- **Synchronous compaction fallback in `rotate_active_zones`**: when
-  no `compacted_ready` zones exist, rotation should compact the next
-  batch inline then publish. Currently the preparatory thread covers
-  the common case; the fallback is not yet wired.
-- **Timestamp source seeding during `recover_disk_group`**: collect
-  `max(freed_ts)` across all scanned free records and seed
-  `free_ts_source = max(now(), max(freed_ts) + 1)`. Needed for
-  ownership transfer where the prior owner's clock may be ahead.
 - **Crash-injection harness** for the three deferred integration
   tests (crash during compaction, crash after replay, preparatory
   thread under churn).
