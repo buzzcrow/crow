@@ -89,8 +89,11 @@ before the design evolved to the persist-only free model and the
   where `compacted_ready == true` and not in the current active set.
   Clear `compacted_ready` when publishing a zone into the active set.
   If fewer than `zone_rotate_count` ready zones exist, fall back to
-  synchronous compaction for the remainder (call `compact_zone_inner`
-  inline). Files: `app/crow-diskdb/src/model/disk.rs`.
+  any allocatable zone (conservative — the bitmap is an over-estimate).
+  The async caller (`alloc.rs::allocate_block`/`allocate_blocks`)
+  compacts non-active zones via `compact_fallback` before retrying.
+  Files: `app/crow-diskdb/src/model/disk.rs`,
+  `app/crow-diskdb/src/model/alloc.rs`.
 - [x] **Update `rebuild_active_zones` for `compacted_ready`**: during
   disk-add init and recovery, pick zones that are `compacted_ready`
   (recovery sets it; fresh zones from `disk_add_init` need compaction
@@ -214,9 +217,9 @@ before the design evolved to the persist-only free model and the
 ## Server Wiring
 
 - [x] **Wire preparatory thread startup/shutdown**: the server startup
-  path must spawn the preparatory thread (owned by `CompactionEngine`)
-  after recovery completes. Shutdown must cancel it. Files:
-  `app/crow-diskdb/src/service.rs` or `app/crow-diskdb/src/main.rs`.
+  path spawns the preparatory thread (owned by `BgRunner`) after
+  recovery completes. Shutdown cancels it via the `BgRunner` stop
+  signal. Files: `app/crow-diskdb/src/main.rs`.
 
 ## File List
 
@@ -230,11 +233,12 @@ before the design evolved to the persist-only free model and the
   `compact_ts`, zone lock, `rollback_allocate`, `compact_zone_inner`,
   `to_zone_value`/`from_zone_value` updates, test fixes.
 - `app/crow-diskdb/src/model/disk.rs` — persist-only `free`,
-  `compacted_ready`-based rotation, preparatory thread.
+  `compacted_ready`-based rotation.
 - `app/crow-diskdb/src/model/disk_group.rs` — monotonic timestamp
   source, persist-only `free_block`.
 - `app/crow-diskdb/src/model/alloc.rs` — persist-only free path with
-  `freed_ts`, `rollback_allocate` for allocate rollback.
+  `freed_ts`, `rollback_allocate` for allocate rollback,
+  `compact_fallback` synchronous compaction on `NoSpace`.
 - `app/crow-diskdb/src/ddb_kv_client.rs` — `compact_zone_batch`
   (atomic Put ZoneValue + Delete free records).
 - `app/crow-diskdb/src/recovery/compaction.rs` — watermark partition,
@@ -246,8 +250,8 @@ before the design evolved to the persist-only free model and the
   `compact_ts = 0`.
 - `app/crow-diskdb/src/recovery.rs` — timestamp source init in
   `recover_disk_group`.
-- `app/crow-diskdb/src/service.rs` / `app/crow-diskdb/src/main.rs` —
-  preparatory thread lifecycle.
+- `app/crow-diskdb/src/main.rs` — preparatory thread lifecycle
+  (registered with `BgRunner`).
 - `lib/crow-protocol/src/proto/diskdb_op.proto` — `CompactZoneRequest`
   / `CompactZoneResponse` / `ZoneCompactionResult` messages.
 - `lib/crow-protocol/src/proto/diskdb_service.proto` — `CompactZone`
