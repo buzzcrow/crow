@@ -16,4 +16,5 @@
 
 pub mod keepalive;
 pub mod lifecycle;
+pub mod notify;
 pub mod state_machine;

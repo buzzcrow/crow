@@ -189,6 +189,9 @@ service KvService {
   rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
   rpc SnapshotScan(SnapshotScanRequest) returns (SnapshotScanResponse);
   rpc ReleaseSnapshot(ReleaseSnapshotRequest) returns (ReleaseSnapshotResponse);
+  // Watch/Notify bidi stream: clients subscribe to key-prefix changes
+  // and receive push notifications when watched keys change.
+  rpc WatchNotify(stream WatchNotifyRequest) returns (stream WatchNotifyResponse);
 }
 
 // Snapshot versioning API (R59): pin a point-in-time-consistent L1 view
@@ -291,4 +294,54 @@ message KvJournalScanResponse {
   string not_leader_hint = 9;
   uint64 request_id = 10;
   uint64 request_create_ms = 11;
+}
+
+// ── Watch/Notify ────────────────────────────────────────────────
+//
+// Client-to-leader watch subscription. The client opens a WatchNotify
+// bidi stream to a node, sends WatchSubscribe frames for each
+// (group_id, prefix) it wants to watch, and receives WatchNotify
+// frames when watched keys change. If the node is not the leader of
+// the subscribed group_id, it returns a WatchNotifyError with
+// not_leader_hint and the client reconnects to the leader.
+
+message WatchSubscribe {
+  uint32 version   = 1;
+  uint64 group_id  = 2;
+  bytes  prefix    = 3;  // watch all keys with this byte prefix
+}
+
+message WatchUnsubscribe {
+  uint64 group_id  = 1;
+  bytes  prefix    = 2;
+}
+
+// Pushed from leader to watcher when a watched key changes. Carries
+// the changed keys (not values) so the watcher can re-read via the
+// normal path. slot = the apply slot of the triggering write.
+message WatchNotify {
+  uint64 group_id      = 1;
+  bytes  prefix        = 2;  // which watched prefix matched
+  repeated bytes keys  = 3;  // changed keys (deduplicated, coalesced)
+  uint64 slot          = 4;
+}
+
+message WatchNotifyError {
+  uint64 group_id        = 1;
+  string not_leader_hint = 2;  // empty for non-leader errors
+  string error           = 3;
+}
+
+message WatchNotifyRequest {
+  oneof frame {
+    WatchSubscribe   subscribe   = 1;
+    WatchUnsubscribe unsubscribe = 2;
+  }
+}
+
+message WatchNotifyResponse {
+  oneof frame {
+    WatchNotify       notify = 1;
+    WatchNotifyError  error  = 2;
+  }
 }

@@ -21,13 +21,15 @@ use crate::metrics::{Bandwidth, Counter, LatencyHistogram, LatencySummary, Metri
 use crate::rpc::kv_service_client::KvServiceClient;
 use crate::rpc::kv_service_server::KvService;
 use crate::rpc::{
-    CreateSnapshotRequest, CreateSnapshotResponse, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest,
-    KvJournalScanRequest, KvJournalScanResponse, KvResponse, KvScanRequest, KvScanResponse, KvSetRequest,
-    ListSnapshotsRequest, ListSnapshotsResponse, ReleaseSnapshotRequest, ReleaseSnapshotResponse,
-    SnapshotScanRequest, SnapshotScanResponse,
+    watch_notify_request, watch_notify_response, CreateSnapshotRequest, CreateSnapshotResponse,
+    KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvJournalScanRequest, KvJournalScanResponse,
+    KvResponse, KvScanRequest, KvScanResponse, KvSetRequest, ListSnapshotsRequest, ListSnapshotsResponse,
+    ReleaseSnapshotRequest, ReleaseSnapshotResponse, SnapshotScanRequest, SnapshotScanResponse,
+    WatchNotifyError, WatchNotifyRequest, WatchNotifyResponse,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use tokio_stream::StreamExt as _;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
@@ -791,6 +793,98 @@ impl KvService for KvStoreService {
             .kv_release_snapshot(req.group_id, req.snapshot_handle)
             .await;
         Ok(Response::new(resp))
+    }
+
+    type WatchNotifyStream =
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<WatchNotifyResponse, Status>> + Send + 'static>>;
+
+    async fn watch_notify(
+        &self,
+        request: Request<tonic::Streaming<WatchNotifyRequest>>,
+    ) -> Result<Response<Self::WatchNotifyStream>, Status> {
+        let mut inbound = request.into_inner();
+        let store = self.store.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<WatchNotifyResponse, Status>>(64);
+        let store_id = store.store_id;
+
+        tokio::spawn(async move {
+            let mut watcher_ids: Vec<(u64, Vec<u8>)> = Vec::new();
+            let mut current_group_id: Option<u64> = None;
+            while let Some(item) = inbound.next().await {
+                let frame = match item {
+                    Ok(req) => req.frame,
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        break;
+                    }
+                };
+                let Some(frame) = frame else { continue };
+                match frame {
+                    watch_notify_request::Frame::Subscribe(sub) => {
+                        let group_id = sub.group_id;
+                        current_group_id = Some(group_id);
+                        let Some(group) = store.get_group(group_id) else {
+                            let _ = tx
+                                .send(Ok(WatchNotifyResponse {
+                                    frame: Some(watch_notify_response::Frame::Error(WatchNotifyError {
+                                        group_id,
+                                        not_leader_hint: String::new(),
+                                        error: format!("group {group_id} not found on store {store_id}"),
+                                    })),
+                                }))
+                                .await;
+                            continue;
+                        };
+                        if !group.local_replica().is_leader() {
+                            let hint = group.leader_endpoint().unwrap_or_default();
+                            let _ = tx
+                                .send(Ok(WatchNotifyResponse {
+                                    frame: Some(watch_notify_response::Frame::Error(WatchNotifyError {
+                                        group_id,
+                                        not_leader_hint: hint,
+                                        error: String::new(),
+                                    })),
+                                }))
+                                .await;
+                            continue;
+                        }
+                        let registry = group.watch_registry.clone();
+                        let id = registry.subscribe(&sub.prefix, tx.clone());
+                        watcher_ids.push((id, sub.prefix.clone()));
+                        debug!(store_id, group_id, watcher_id = id, "watch subscribed");
+                    }
+                    watch_notify_request::Frame::Unsubscribe(unsub) => {
+                        let group_id = unsub.group_id;
+                        let Some(group) = store.get_group(group_id) else {
+                            continue;
+                        };
+                        let registry = group.watch_registry.clone();
+                        let prefix = unsub.prefix.clone();
+                        watcher_ids.retain(|(id, p)| {
+                            if p == &prefix {
+                                registry.unsubscribe(&prefix, *id);
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        debug!(store_id, group_id, "watch unsubscribed");
+                    }
+                }
+            }
+            // Stream end: clean up all watchers registered by this stream.
+            if let Some(group_id) = current_group_id {
+                if let Some(group) = store.get_group(group_id) {
+                    let registry = group.watch_registry.clone();
+                    let ids: Vec<u64> = watcher_ids.iter().map(|(id, _)| *id).collect();
+                    registry.remove_all(&ids);
+                }
+            }
+            debug!(store_id, "watch_notify stream closed");
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
     }
 }
 

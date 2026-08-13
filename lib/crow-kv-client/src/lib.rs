@@ -29,6 +29,7 @@ mod pool;
 mod service_registry;
 mod space_usage;
 mod topology;
+mod watch_notify;
 
 pub use client::{
     new_client_id, BatchOp, CrowkvClient, GetOutcome, JournalOp, JournalScanOutcome, ScanOutcome,
@@ -41,6 +42,7 @@ pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 pub use service_registry::ServiceRegistryClient;
 pub use space_usage::{ClusterUsage, NodeUsage, RackUsage, SpaceUsageClient};
+pub use watch_notify::{WatchNotify, WatchNotifyClient, WatchSubscription};
 
 /// Re-exported so callers don't need a direct `crow_kv` dependency just to
 /// pick a read mode.

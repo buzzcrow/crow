@@ -120,6 +120,15 @@ pub struct PxLearner {
     /// Optional registry handle for engine-apply latency. Set via
     /// [`Self::set_engine_apply_summary`] when a registry is wired.
     engine_apply: OnceLock<Arc<crate::metrics::LatencySummary>>,
+    /// Optional per-group watch registry + coalescer. Set when the
+    /// group is constructed; None in tests that don't use
+    /// watch/notify. The apply-path hook in `apply_entry` checks
+    /// `has_watchers()` before touching the registry.
+    watch_registry: OnceLock<(
+        u64,
+        Arc<crate::cluster::watch_registry::WatchRegistry>,
+        Arc<crate::cluster::watch_registry::WatchCoalescer>,
+    )>,
 }
 
 impl Default for PxLearner {
@@ -142,6 +151,7 @@ impl Default for PxLearner {
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
+            watch_registry: OnceLock::new(),
         }
     }
 }
@@ -169,6 +179,7 @@ impl PxLearner {
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
+            watch_registry: OnceLock::new(),
         }
     }
 
@@ -190,6 +201,19 @@ impl PxLearner {
     /// creation when a metrics registry is available.
     pub(crate) fn set_engine_apply_summary(&self, summary: Arc<crate::metrics::LatencySummary>) {
         let _ = self.engine_apply.set(summary);
+    }
+
+    /// Wire the per-group watch registry + coalescer. Called once
+    /// during `PxGroup` construction (after the learner is created).
+    /// The apply-path hook in `apply_entry` checks `has_watchers()`
+    /// before touching the registry — zero overhead when no watchers.
+    pub(crate) fn set_watch_registry(
+        &self,
+        group_id: u64,
+        registry: Arc<crate::cluster::watch_registry::WatchRegistry>,
+        coalescer: Arc<crate::cluster::watch_registry::WatchCoalescer>,
+    ) {
+        let _ = self.watch_registry.set((group_id, registry, coalescer));
     }
 
     /// Live value and its resolved slot for `key`, or `None` if unset or
@@ -546,6 +570,17 @@ impl PxLearner {
         }
         if let Some(h) = self.engine_apply.get() {
             h.observe(apply_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        // Watch/notify apply-path hook: if a watch registry is wired
+        // and has watchers, record the changed keys for coalesced
+        // notify emission. Fires on ALL apply paths (learn, spawned
+        // apply, catch-up) — the etcd model. Followers have empty
+        // registries (cleared on step-down) so `has_watchers()` is
+        // false → zero overhead.
+        if let Some((group_id, registry, coalescer)) = self.watch_registry.get() {
+            if registry.has_watchers() {
+                coalescer.record_chosen(*group_id, slot, &batch.ops, registry);
+            }
         }
     }
 }

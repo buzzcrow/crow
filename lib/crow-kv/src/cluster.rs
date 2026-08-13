@@ -32,6 +32,7 @@ mod px_kv_store_handler;
 pub mod remote_replica;
 pub mod replica;
 pub mod status;
+pub mod watch_registry;
 
 pub use group::ProposeResult;
 pub use group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};

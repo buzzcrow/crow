@@ -85,6 +85,11 @@ pub struct KeepAlive {
     /// Optional metrics handle for sync latency/success/failure
     /// observations (R74 §11).
     metrics: Option<DiskdbMetrics>,
+    /// Optional sync trigger notify handle. When set, the keepalive
+    /// uses `Trigger::TimerOrEvent` — waking on either the timer
+    /// (safety-net polling) or the notify (woken by the `NotifyHandler`
+    /// on a `WatchNotify` frame).
+    sync_trigger: Option<Arc<tokio::sync::Notify>>,
     /// Per-disk consecutive miss counts (R76 Missing→Bad confirmation).
     /// Incremented when a disk is absent from sync; reset on
     /// rediscovery. When count >= `miss_threshold`, the disk
@@ -115,6 +120,7 @@ impl KeepAlive {
             config_handle: None,
             grpc_endpoint: String::new(),
             metrics: None,
+            sync_trigger: None,
             disk_miss_counts: RwLock::new(HashMap::new()),
             recovery_scans: RwLock::new(HashMap::new()),
         }
@@ -163,6 +169,25 @@ impl KeepAlive {
     pub fn with_metrics(mut self, metrics: DiskdbMetrics) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    /// Attach a sync trigger notify handle. When set, the keepalive
+    /// uses `Trigger::TimerOrEvent` — waking on either the timer
+    /// (safety-net polling) or the notify (woken by the `NotifyHandler`
+    /// on a `WatchNotify` frame).
+    #[must_use]
+    pub fn with_sync_trigger(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
+        self.sync_trigger = Some(notify);
+        self
+    }
+
+    /// Wake the keepalive sync loop immediately (called by the
+    /// `NotifyHandler` on each `WatchNotify` frame). No-op if no sync
+    /// trigger is set.
+    pub fn trigger_now(&self) {
+        if let Some(ref notify) = self.sync_trigger {
+            notify.notify_one();
+        }
     }
 
     /// Cancel + await all running recovery scan tasks. Called on
@@ -695,9 +720,17 @@ impl BackgroundTask for KeepAlive {
         match &self.config_handle {
             Some(handle) => {
                 let handle = Arc::clone(handle);
-                Trigger::TimerFn(Box::new(move || {
+                let interval_fn = Box::new(move || {
                     std::time::Duration::from_secs(u64::from(handle.load().heartbeat.interval_secs))
-                }))
+                });
+                if let Some(ref notify) = self.sync_trigger {
+                    Trigger::TimerOrEvent {
+                        interval_fn,
+                        notify: Arc::clone(notify),
+                    }
+                } else {
+                    Trigger::TimerFn(interval_fn)
+                }
             }
             None => Trigger::Timer(self.config.interval),
         }

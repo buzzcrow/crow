@@ -259,6 +259,15 @@ pub struct PxGroup {
     pub(crate) snapshots: DashMap<u64, Arc<SnapshotHandle>>,
     /// Monotonic counter for snapshot handle ids within this group.
     pub(crate) next_snapshot_handle: AtomicU64,
+    /// Watch/notify registry. Per-group; wired into the learner via
+    /// `set_watch_registry` so `apply_entry` can emit notifies. Cleared
+    /// on leader step-down (drops all watcher tx senders, closing
+    /// client streams for clean reconnect).
+    pub watch_registry: Arc<crate::cluster::watch_registry::WatchRegistry>,
+    /// Watch/notify coalescer. Debounces burst writes to the same
+    /// prefix into one notify. Flushed on leader step-down before the
+    /// registry clears (no notify lost on leader change).
+    pub watch_coalescer: Arc<crate::cluster::watch_registry::WatchCoalescer>,
 }
 
 /// R59 snapshot versioning API: a pinned point-in-time-consistent L1 view.
@@ -359,7 +368,18 @@ impl PxGroup {
             coalesce_watchdog_handle: OnceLock::new(),
             snapshots: DashMap::new(),
             next_snapshot_handle: AtomicU64::new(1),
+            watch_registry: Arc::new(crate::cluster::watch_registry::WatchRegistry::new()),
+            watch_coalescer: Arc::new(crate::cluster::watch_registry::WatchCoalescer::new(
+                CrowKVConfig::default().watch_notify_debounce_ms,
+            )),
         };
+        // Wire the watch registry + coalescer into the learner so
+        // `apply_entry` can emit notifies on the apply path.
+        group.local_replica.learner.set_watch_registry(
+            group_id,
+            Arc::clone(&group.watch_registry),
+            Arc::clone(&group.watch_coalescer),
+        );
         group.recompute_quorum();
         group
     }

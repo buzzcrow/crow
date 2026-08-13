@@ -46,6 +46,14 @@ pub enum Trigger {
     TimerFn(Box<dyn Fn() -> Duration + Send + Sync>),
     /// Wait on a `Notify` (woken externally) between cycles.
     Event(Arc<tokio::sync::Notify>),
+    /// Wake on either a timer tick (dynamic interval from config) OR
+    /// an external notify signal. Used by keepalive when
+    /// `notify_enabled` is true: the timer is the safety-net polling
+    /// interval, the notify is woken by the `WatchNotify` handler.
+    TimerOrEvent {
+        interval_fn: Box<dyn Fn() -> Duration + Send + Sync>,
+        notify: Arc<tokio::sync::Notify>,
+    },
 }
 
 /// Error from a background task cycle.
@@ -98,6 +106,15 @@ impl StopHandle {
     pub fn notify_waiters(&self) {
         self.flag.store(true, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    /// Wait for the stop signal. Used by long-lived tasks that don't
+    /// follow the trigger→cycle model (e.g. the notify handler).
+    pub async fn notified(&self) {
+        if self.flag.load(Ordering::Acquire) {
+            return;
+        }
+        self.notify.notified().await;
     }
 }
 
@@ -198,6 +215,12 @@ async fn wait_trigger(task: &Arc<dyn BackgroundTask>) {
         }
         Trigger::Event(notify) => {
             notify.notified().await;
+        }
+        Trigger::TimerOrEvent { interval_fn, notify } => {
+            tokio::select! {
+                () = tokio::time::sleep(interval_fn()) => {}
+                () = notify.notified() => {}
+            }
         }
     }
 }

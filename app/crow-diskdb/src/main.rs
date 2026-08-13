@@ -14,13 +14,14 @@ use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::health;
 use crow_diskdb::liveness::keepalive::KeepAlive;
 use crow_diskdb::liveness::lifecycle::StartupPhase;
+use crow_diskdb::liveness::notify::NotifyHandler;
 use crow_diskdb::metrics::{DiskdbMetrics, RecalcEngine, ReportingTask};
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::compaction::{CompactionEngine, PreparatoryThread};
 use crow_diskdb::recovery::RecoveryEngine;
 use crow_diskdb::scanner::{ScanState, ScannerTask};
 use crow_diskdb::service::DiskdbService;
-use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
+use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient};
 use tracing::info;
 
 /// CROW diskdb server CLI.
@@ -124,12 +125,23 @@ async fn main() {
         cas_retry_limit: config.load().storage.cas_retry_limit,
         temp_failure_timeout_secs: config.load().heartbeat.temp_failure_timeout_secs,
     };
+    let notify_enabled = config.load().notify.notify_enabled;
+    let sync_trigger = if notify_enabled {
+        Some(Arc::new(tokio::sync::Notify::new()))
+    } else {
+        None
+    };
     let keepalive = KeepAlive::new(hw, svc, container.clone(), keepalive_cfg)
         .with_ddb_kv_client(dg_kv_sync)
         .with_cas_retry_metric(Arc::clone(&metrics.allocate_retry_cas_bit))
         .with_config_handle(Arc::clone(&config))
         .with_grpc_endpoint(config.load().server.listen_addr.clone())
         .with_metrics(metrics.clone());
+    let keepalive = if let Some(ref trigger) = sync_trigger {
+        keepalive.with_sync_trigger(Arc::clone(trigger))
+    } else {
+        keepalive
+    };
 
     info!("running blocking initial keep-alive tick");
     let init_outcome = keepalive.tick().await;
@@ -214,6 +226,25 @@ async fn main() {
     });
     let bg_handles = runner.spawn(&bg_ctx);
 
+    // Spawn the watch/notify handler when notify is enabled. It
+    // subscribes to group-0 prefixes and wakes the keepalive sync
+    // loop on notify (triggering an immediate re-sync of changed
+    // keys). The timer remains as a safety-net poller.
+    let notify_handle = if notify_enabled {
+        let watch_client = WatchNotifyClient::from_shared(Arc::clone(&kv_client));
+        let trigger = sync_trigger
+            .as_ref()
+            .map(Arc::clone)
+            .expect("sync_trigger set when notify_enabled");
+        let notify_stop = stop.clone();
+        Some(tokio::spawn(async move {
+            let handler = NotifyHandler::new(watch_client, trigger);
+            handler.run(notify_stop).await;
+        }))
+    } else {
+        None
+    };
+
     // Start the HTTP management/health server. Exposes `/ready`
     // (aliased `/health`) returning the current `StartupPhase` +
     // degraded flag so orchestrators can poll readiness during
@@ -261,6 +292,9 @@ async fn main() {
     }
     let _ = http_handle.await;
     let _ = recovery_handle.await;
+    if let Some(h) = notify_handle {
+        let _ = h.await;
+    }
     info!("crow-diskdb stopped");
 }
 
