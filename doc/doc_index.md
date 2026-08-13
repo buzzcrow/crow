@@ -31,6 +31,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | Doc | When to read |
 | --- | --- |
 | `doc/working/plan-test.md` | Unfinished test task backlog. Read when picking the next test to implement. |
+| `doc/working/plan-diskdb-zone-management.md` | diskdb zone-management implementation plan — persist-only free, `compact_ts` watermark compaction, atomic batch_write, preparatory thread. Read when implementing the zone-management design delta. |
 | `doc/design/kv/kv-read-flow-analysis.md` | KV point-read flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-scan-flow-analysis.md` | KV scan flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. |
@@ -66,7 +67,8 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/console/design-crow-console-ui.md` | Web UI v1: 3-pane shell, React Flow canvas, inspector, KV Operator center panel. |
 | `doc/design/protocol/design-crow-protocol-key.md` | Key encoding: flat structs, 3-byte header, `BinaryKey` + `TextKey`, frozen layouts, append-only evolution. |
 | `doc/design/protocol/design-crow-protocol-types.md` | Wire types, `u64` ID aliases, re-export pattern, `utoipa` schema derives. |
-| `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, zone records, three recovery strategies, allocation, state machines, metrics. |
+| `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, disk status management, space metrics, background scanner, crate layout, concurrency. |
+| `doc/design/diskdb/design-crow-diskdb-zone-management.md` | Zone management: record model, allocation algorithm, persist-only free, compaction-on-rotation, preparatory thread, crash recovery, zone-level concurrency, invariants. |
 | `doc/design/diskdb/design-crow-diskdb-space-metrics.md` | Space metrics component: usage accessors, `QueryCapacityStats` handler, per-disk counters, recalc verifier, reporting loop, keepalive piggyback, kv-client aggregation, `crow-diskdb-client` library. |
 
 ## How AI Should Use This Index
