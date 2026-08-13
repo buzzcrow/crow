@@ -125,11 +125,19 @@ zone's journal into a throwaway bitmap, compares it **bit-by-bit**
 against the live `usage_bits` (extending R74's count-only recalc with
 per-block ghost identification), verifies record CRC and
 deserialization, validates `owner_chunk` well-formedness, and reports
-findings via metrics + admin RPCs. Auto-correction (when enabled)
-follows the data-safety principle: clear ghost-busy bits only when
-records are intact and authoritative; set ghost-free bits back; never
-free a block with a corrupt or uncertain record. Leak detection is
-scaffolded as deferred.
+findings via metrics + admin RPCs. The scanner **skips active zones**
+(zones in the disk's `active_zone_context` — the allocator is actively
+handing blocks from them, so transient drift is expected) and **skips
+zones being compacted** (compaction is mid-merge of free records into
+a snapshot). For non-active zones, drift detection uses a **re-verify
+step** to filter transient states caused by in-flight allocate/free
+operations. Auto-correction (when enabled) follows the data-safety
+principle: clear ghost-busy bits only when records are intact and
+authoritative; set ghost-free bits back; never free a block with a
+corrupt or uncertain record. Compaction remains a separate
+`BackgroundTask` (different cadence, different purpose — write vs
+read); the scanner coordinates by skipping zones with an in-progress
+compaction flag. Leak detection is scaffolded as deferred.
 
 1. **Scanner task** — new module `app/crow-diskdb/src/scanner/mod.rs`.
    `ScannerTask` implements the `BackgroundTask` trait (from
@@ -147,6 +155,19 @@ scaffolded as deferred.
    iterates owned disk-groups → disks → zones (via
    `DdbDiskGroupContainer::disk_group_ids` + `get_disk_group`), and for
    each zone:
+   - **Skip active zones**: a zone currently in the disk's
+     `active_zone_context` (the RCU-published set the allocator
+     round-robins through) is skipped — the allocator is actively
+     handing blocks from it, so transient drift (bit set, no record
+     yet; or record persisted, bit not yet cleared) is expected. The
+     scanner checks these zones on a later cycle when they rotate out
+     of the active set (become full or the set rotates). Skipped zones
+     are counted in the scan summary as `skipped_active`.
+   - **Skip zones being compacted**: check the zone's compaction flag
+     (an `AtomicBool` on `DdbZone`, set by `CompactionEngine` at the
+     start of `compact_zone` and cleared on completion). If set, skip
+     the zone — compaction is mid-merge and the bitmap is changing.
+     Counted as `skipped_compacting`.
    - Replays the journal into a throwaway `DdbZone` by calling
      `recover_zone_inner` (R73, strategy 2) with strategy-1 fallback
      (`rebuild_zone_bitmap_full_scan`) on `JournalScanGcGap` or
@@ -160,7 +181,18 @@ scaffolded as deferred.
        (`BusyBlockKey` exists — records say busy). Dangerous
        direction: allocator may re-hand the block. Cannot happen from
        the fixed free path, but detected as defense-in-depth.
+   - **Re-verify step**: if drift is detected, the scanner does not
+     report immediately. It waits a short delay (default 1s,
+     configurable via `reverify_delay_ms`) and re-snapshots the live
+     `usage_bits`, then re-compares. If the drift disappears, it was
+     transient (an in-flight allocate/free completed during the
+     delay) — skip it. If the drift persists, it is real — report it.
+     This filters false positives from the allocate/free Phase 1→2
+     windows without holding any lock. The re-verify does not re-read
+     the journal (records don't change during the delay); only the
+     live bitmap is re-snapshotted.
    - Returns `GhostScanResult { ghost_busy: u64, ghost_free: u64,
+     skipped_active: u64, skipped_compacting: u64,
      details: Vec<GhostBlock> }` where each `GhostBlock` records
      `(disk_id, zone_index, unit_offset, unit_count, direction)`.
    - This extends R74's `RecalcEngine::recalc_zone` (which compares
@@ -171,7 +203,8 @@ scaffolded as deferred.
      it).
    - **Auto-correction (optional, default off)**: if
      `config.scanner.auto_correct_drift` is true, correct the live
-     bitmap per the data-safety principle:
+     bitmap per the data-safety principle (only after re-verify
+     confirms the drift is persistent):
      - Ghost-busy: clear the live bit (records confidently say free).
      - Ghost-free: set the live bit back (records say busy, data may
        be written).
@@ -186,7 +219,9 @@ scaffolded as deferred.
 
 3. **Record integrity verification** — new
    `app/crow-diskdb/src/scanner/integrity.rs`.
-   `scan_integrity(container, kv)` iterates owned zones and for each:
+   `scan_integrity(container, kv)` iterates owned zones (same skip
+   logic as ghost scan: skip active zones and zones being compacted)
+   and for each:
    - Calls `DdbKvClient::read_zone_records` (R72) to load
      `ZoneRecords { zone_value, busy, free }`.
    - If `zone_value` is present, verifies CRC via
@@ -253,18 +288,42 @@ scaffolded as deferred.
    - `auto_correct_drift: bool` (default false) — enable live-bitmap
      auto-correction in the ghost scan (follows data-safety
      principle: clears ghost-busy, sets ghost-free, never frees
-     corrupt-record blocks).
+     corrupt-record blocks; only after re-verify confirms persistent
+     drift).
    - `detect_owner_mismatch: bool` (default false) — enable per-block
      `owner_chunk` validation in the integrity scan (gated because it
      piggybacks on `read_zone_records`, which is already loaded when
      `verify_record_integrity` is true; the flag controls whether
      owner validation runs).
+   - `reverify_delay_ms: u32` (default 1000) — delay before
+     re-snapshot the live bitmap to filter transient drift. Set to 0
+     to disable re-verify (report immediately, may include false
+     positives from in-flight operations).
+
+8. **Compaction coordination** — add an `AtomicBool` field
+   `compacting: AtomicBool` to `DdbZone` in
+   `app/crow-diskdb/src/model/zone.rs`. `CompactionEngine::compact_zone`
+   sets it to `true` at the start and `false` on completion (success
+   or error — use a guard/RAII pattern to ensure it's cleared on early
+   return). The scanner checks this flag before scanning a zone and
+   skips if set. This is a lightweight coordination mechanism — no
+   lock, no waiting; the scanner simply tries again next cycle.
+   Compaction remains a separate `BackgroundTask` (different cadence:
+   300s vs 600s; different purpose: write vs read-check). The two
+   tasks do not block each other — they skip overlapping zones.
 
 ```
                     ┌──────────────┐
    TriggerScan ──►  │  ScannerTask │  ◄── TimerFn(scan_interval_secs)
    (Notify/flag)    └──────┬───────┘
                           │ run_cycle
+                          ▼
+         ┌─────────────────────────────────┐
+         │  for each owned zone:           │
+         │  skip if in active_zone_context │
+         │  skip if compacting flag is set │
+         └────────────────┬────────────────┘
+                          │
               ┌───────────┼───────────┐
               ▼           ▼           ▼
       ┌───────────┐ ┌───────────┐ ┌───────────┐
@@ -272,7 +331,7 @@ scaffolded as deferred.
       │           │ │    rs     │ │           │
       │ replay +  │ │ CRC +     │ │ "deferred"│
       │ bit-diff  │ │ decode +  │ │ (scaffold)│
-      │           │ │ owner chk │ │           │
+      │ → re-verify│ │ owner chk │ │           │
       └─────┬─────┘ └─────┬─────┘ └─────┬─────┘
             │             │             │
             └─────────────┼─────────────┘
@@ -301,9 +360,18 @@ scaffolded as deferred.
   be written), continue scan. No auto-correct.
 - Empty zone (no records, no snapshot) → no drift, no ghosts, no
   integrity issues; counted as scanned.
-- Scanner cycle overlaps with compaction → scans are read-only
-  (snapshot the live `usage_bits`); no conflict with compaction's
-  writes.
+- **Active zone (in `active_zone_context`)** → skipped; counted as
+  `skipped_active`. Checked on a later cycle when it rotates out.
+- **Zone being compacted** (`compacting` flag set) → skipped; counted
+  as `skipped_compacting`. Checked on a later cycle.
+- **Transient drift (in-flight allocate/free)** → re-verify step
+  filters it: wait `reverify_delay_ms`, re-snapshot live bitmap,
+  re-compare. If drift disappears, it was transient — skip. If
+  persistent, report.
+- **All zones active or compacting** → scan cycle completes with
+  zero zones scanned; logged as a warning (the scanner is starved).
+  The operator can increase `scan_interval_secs` or trigger an ad-hoc
+  scan during a low-traffic window.
 - Auto-correct off (default) → report only; operator uses
   `RebuildZoneBitmap` to correct.
 - `TriggerScan` while a scan is in progress → return "scan in
@@ -316,15 +384,17 @@ scaffolded as deferred.
   determined.
 
 **Dependencies**: R70 (types, `ScannerConfig` scaffold), R71
-(`DdbDiskGroupContainer` — disk-group/disk/zone iteration), R72
+(`DdbDiskGroupContainer` — disk-group/disk/zone iteration;
+`DdbDisk::active_zone_context` for active-zone skip), R72
 (`DdbKvClient::read_zone_records`, `journal_scan_busy`,
 `journal_scan_free`), R73 (`recover_zone_inner`,
-`rebuild_zone_bitmap_full_scan`, `RecoveryError` fallback), R74
-(`RecalcEngine` — optional count-level pre-check; `DiskdbMetrics`
-registry pattern). No dependency on R76–R77. R79 (free batching) does
-not change scanner scope — with persist-before-bitmap-clear, unflushed
-frees on crash leave bits set (ghost-busy, self-correcting); the
-scanner reclaims the wasted space.
+`rebuild_zone_bitmap_full_scan`, `RecoveryError` fallback;
+`CompactionEngine` — coordination via `compacting` flag on `DdbZone`),
+R74 (`RecalcEngine` — optional count-level pre-check;
+`DiskdbMetrics` registry pattern). No dependency on R76–R77. R79 (free
+batching) does not change scanner scope — with
+persist-before-bitmap-clear, unflushed frees on crash leave bits set
+(ghost-busy, self-correcting); the scanner reclaims the wasted space.
 
 **Acceptance**:
 
@@ -339,15 +409,17 @@ scanner reclaims the wasted space.
     interval (not the old). Unit test.
 
 - **Ghost + bitmap drift detection (work item 2)**:
-  - `scan_ghosts` detects ghost-busy: setup a zone, manually set a
-    live bitmap bit for a block with no `BusyBlockKey` on disk → run
-    `scan_ghosts` → assert the ghost-busy block is in `details` with
-    direction `GhostBusy`. Unit test.
-  - `scan_ghosts` detects ghost-free: setup a zone, persist a
-    `BusyBlockValue` on disk, manually **clear** the live bitmap bit
-    (simulating a bug/hardware error that cleared the bit while the
-    record exists) → run `scan_ghosts` → assert the ghost-free block
-    is in `details` with direction `GhostFree`. Unit test.
+  - `scan_ghosts` detects ghost-busy: setup a zone (not in active
+    set, not compacting), manually set a live bitmap bit for a block
+    with no `BusyBlockKey` on disk → run `scan_ghosts` → assert the
+    ghost-busy block is in `details` with direction `GhostBusy`.
+    Unit test.
+  - `scan_ghosts` detects ghost-free: setup a zone (not in active
+    set, not compacting), persist a `BusyBlockValue` on disk,
+    manually **clear** the live bitmap bit (simulating a
+    bug/hardware error that cleared the bit while the record exists)
+    → run `scan_ghosts` → assert the ghost-free block is in
+    `details` with direction `GhostFree`. Unit test.
   - `scan_ghosts` reports zero ghosts when live and replayed bitmaps
     match: setup a zone, allocate blocks, persist all records → run
     `scan_ghosts` → assert `ghost_busy == 0`, `ghost_free == 0`.
@@ -356,16 +428,36 @@ scanner reclaims the wasted space.
     corrupt the `ZoneValue` CRC → run `scan_ghosts` → assert it does
     not panic, falls back to `rebuild_zone_bitmap_full_scan`, and
     still reports ghosts. Unit test.
+  - **Skip active zones**: add a zone to the disk's
+    `active_zone_context` → run `scan_ghosts` → assert the zone is
+    counted as `skipped_active` and not in `details`. Unit test.
+  - **Skip compacting zones**: set the zone's `compacting` flag →
+    run `scan_ghosts` → assert the zone is counted as
+    `skipped_compacting` and not in `details`. Unit test.
+  - **Re-verify filters transient drift**: setup a zone with a
+    transient ghost-busy (bit set, no record — simulate by setting
+    the bit after the journal replay but before the re-verify) →
+    run `scan_ghosts` with `reverify_delay_ms = 100` → during the
+    delay, clear the bit (simulating the allocate rollback
+    completing) → assert the ghost is **not** reported (transient,
+    filtered by re-verify). Unit test.
+  - **Re-verify confirms persistent drift**: setup a zone with a
+    persistent ghost-busy (bit set, no record) → run `scan_ghosts`
+    with `reverify_delay_ms = 100` → do not change the bit during
+    the delay → assert the ghost **is** reported (persistent,
+    confirmed by re-verify). Unit test.
   - **Auto-correction — ghost-busy (data-safety principle)**: enable
     `auto_correct_drift`, run `scan_ghosts` on a zone with a
-    ghost-busy bit (bit set, no `BusyBlockKey`, records intact) →
-    assert the live bit is **cleared** and `used_count` is
-    decremented (records confidently say free). Unit test.
+    persistent ghost-busy bit (bit set, no `BusyBlockKey`, records
+    intact, re-verify confirms) → assert the live bit is **cleared**
+    and `used_count` is decremented (records confidently say free).
+    Unit test.
   - **Auto-correction — ghost-free (data-safety principle)**: enable
     `auto_correct_drift`, run `scan_ghosts` on a zone with a
-    ghost-free bit (bit clear, `BusyBlockKey` exists, records intact)
-    → assert the live bit is **set back** and `used_count` is
-    incremented (records say busy, data may be written). Unit test.
+    persistent ghost-free bit (bit clear, `BusyBlockKey` exists,
+    records intact, re-verify confirms) → assert the live bit is
+    **set back** and `used_count` is incremented (records say busy,
+    data may be written). Unit test.
   - **Auto-correction — no correct on fallback (data-safety
     principle)**: enable `auto_correct_drift`, corrupt the
     `ZoneValue` CRC so the scan falls back to strategy 1 → assert
@@ -374,6 +466,7 @@ scanner reclaims the wasted space.
   - Invariant guarded: replayed bitmap (from intact records) is the
     source of truth; live bits with no backing record are ghost-busy,
     live bits clear with a backing `BusyBlockKey` are ghost-free.
+    Re-verify confirms persistence before reporting or correcting.
     Unit test.
 
 - **Record integrity (work item 3)**:
@@ -424,9 +517,18 @@ scanner reclaims the wasted space.
   - `ScannerConfig::default` has `scan_interval_secs == 600`,
     `detect_ghost_allocations == true`, `verify_record_integrity ==
     true`, `auto_correct_drift == false`, `detect_owner_mismatch ==
-    false`. Unit test.
+    false`, `reverify_delay_ms == 1000`. Unit test.
   - Config deserialized from TOML with scanner section → assert fields
     parsed correctly. Unit test.
+
+- **Compaction coordination (work item 8)**:
+  - `DdbZone::compacting` flag defaults to `false`. Unit test.
+  - `CompactionEngine::compact_zone` sets `compacting = true` at
+    start, `false` on success. Unit test (verify flag is false after
+    `compact_zone` returns Ok).
+  - `CompactionEngine::compact_zone` sets `compacting = true` at
+    start, `false` on error (RAII guard clears it). Unit test (mock
+    kv error, verify flag is false after `compact_zone` returns Err).
 
 - **Edge cases**:
   - Empty zone (no records, no snapshot): `scan_ghosts` and
@@ -435,10 +537,13 @@ scanner reclaims the wasted space.
   - Degraded mode (data-group unreachable): scanner skips unreadable
     zones, logs a warning, does not panic. Unit test (mock kv returns
     `Unavailable`).
-  - Scanner + compaction concurrency: run `scan_ghosts` while
-    compaction writes a new `ZoneValue` → assert scanner does not
-    panic and reports a consistent result (read-only snapshot).
-    Integration test.
+  - **All zones active or compacting**: scan cycle completes with
+    zero zones scanned; logged as a warning. Unit test (set all zones
+    active, run scan, assert `skipped_active == zone_count`,
+    `details` is empty).
+  - **Scanner + compaction concurrency**: run `scan_ghosts` while
+    compaction is in progress on a zone (flag set) → assert scanner
+    skips the zone, does not panic. Integration test.
   - **Corrupt snapshot + corrupt records (data-safety)**: corrupt
     both the `ZoneValue` CRC and a `BusyBlockValue` → run scan →
     assert scanner reports both, keeps all blocks busy, performs no

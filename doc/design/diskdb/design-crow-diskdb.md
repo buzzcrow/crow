@@ -1076,6 +1076,18 @@ and defense-in-depth against unknown bugs or hardware errors.
   validation deferred from the free path, §14); for freed blocks, the
   `FreeBlockValue.previous_owner` is the audit trail.
 - **Leak detection** — deferred (needs caller registries).
+- **Zone skipping** — the scanner skips zones in the disk's
+  `active_zone_context` (the allocator is actively handing blocks
+  from them, so transient drift is expected) and zones with the
+  `compacting` flag set (compaction is mid-merge). Skipped zones are
+  checked on a later cycle. For non-skipped zones, a re-verify step
+  (short delay + re-snapshot the live bitmap) filters transient drift
+  from in-flight allocate/free operations before reporting.
+- **Compaction coordination** — compaction remains a separate
+  `BackgroundTask` (different cadence, write vs read-check). The two
+  tasks coordinate via a lightweight `compacting: AtomicBool` on
+  `DdbZone` — the scanner skips zones with the flag set; no lock, no
+  waiting.
 
 ## 13. Crate Layout
 
