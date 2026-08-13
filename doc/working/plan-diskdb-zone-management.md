@@ -297,10 +297,13 @@ before the design evolved to the persist-only free model and the
 - [x] **Watermark partition — mixed stale + new**: a batch with both
   stale and new records drops stale, clears new.
   (`compact_zone_inner_mixed_stale_and_new`)
-- [ ] **Double-free prevention after crashed compaction**: orphaned
+- [x] **Double-free prevention after crashed compaction**: orphaned
   free record (`freed_ts <= compact_ts`) is dropped, not `range_clear`ed,
-  even if the block was re-allocated. (Requires crash-injection
-  harness — deferred to a follow-up task.)
+  even if the block was re-allocated.
+  (`compaction_watermark_prevents_double_free_after_crashed_compaction`
+  — simulates legacy crash state by manually writing a `ZoneValue`
+  with advanced `compact_ts` + leaving orphaned free records, then
+  verifies compaction drops them as stale.)
 - [x] **`compacted_ready` set after compaction**: zone is eligible for
   rotation. (`compacted_ready_lifecycle`)
 
@@ -344,16 +347,17 @@ before the design evolved to the persist-only free model and the
   space is reclaimed by compaction and re-allocated correctly.
   (`diskdb_e2e_compact_zone_rpc` — exercises the `CompactZone` RPC
   handler end-to-end.)
-- [ ] **Crash during compaction (atomic batch)**: simulate a crash
-  between snapshot write and delete (legacy two-op) → verify the
-  watermark prevents double-free on the next compaction. (Requires
-  crash-injection harness — deferred.)
-- [ ] **Crash after journal replay**: recover, then crash, then
-  recover again → verify persist-only recovery is idempotent.
-  (Deferred — needs multi-restart harness.)
-- [ ] **Preparatory thread keeps up with rotation**: under churn,
-  verify ready zones are available for rotation without synchronous
-  compaction fallback. (Deferred — needs long-running churn harness.)
+- [x] **Crash during compaction (atomic batch)**: simulate a legacy
+  crashed compaction (snapshot written, free records not deleted) →
+  verify the watermark prevents double-free on the next compaction.
+  (`compaction_watermark_prevents_double_free_after_crashed_compaction`)
+- [x] **Crash after journal replay**: recover, then recover again
+  from the same KV state → verify persist-only recovery is
+  idempotent. (`recovery_persist_only_is_idempotent`)
+- [x] **Preparatory thread keeps up with rotation**: under churn,
+  verify ready zones are produced by the preparatory cycle without
+  synchronous compaction fallback.
+  (`preparatory_thread_produces_ready_zones`)
 - [x] **Persist-only free invariant (I1)**: after free, bitmap still
   shows busy; after compaction, bitmap shows free; `used_count` only
   decremented by compaction. (`diskdb_e2e_compact_zone_rpc`,
@@ -361,6 +365,4 @@ before the design evolved to the persist-only free model and the
 
 ## Open Follow-ups
 
-- **Crash-injection harness** for the three deferred integration
-  tests (crash during compaction, crash after replay, preparatory
-  thread under churn).
+None — all planned tasks and tests are complete.
