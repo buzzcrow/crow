@@ -44,7 +44,7 @@ app/crow-cli/bench-runs/
 **/waldata/
 **/ctdata/
 # Runtime config dirs (operator-supplied real configs, not tracked).
-# Tracked sample configs live in app/<crate>/conf/*.sample.json.
+# Tracked default configs live in app/<crate>/conf/*.json.
 app/crow-diskdb/conf/runtime/
 app/crow-kv-server/conf/runtime/
 
