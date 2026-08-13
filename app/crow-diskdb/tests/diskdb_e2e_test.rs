@@ -24,6 +24,7 @@ use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
 use crow_protocol::diskdb_type_util::ZoneValueExt;
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
+use crow_protocol::DiskIdExt;
 
 const RACK_ID: u64 = 1;
 const NODE_ID: u64 = 10;
@@ -537,7 +538,57 @@ async fn diskdb_e2e_allocate_all_free_all() {
         .expect("disk-group should be in container");
 
     let total_cap = 3 * 4 * 128u64; // 3 disks × 4 zones × 128 units
+    let total_cap_bytes = total_cap * u64::from(UNIT_SIZE_BYTES);
     let owner_chunk = make_chunk_id(0, 0, 42);
+
+    // Helper: verify the busy + free == capacity invariant on a
+    // DiskGroupUsage, and that per-disk usage sums match the aggregate.
+    let verify_invariant = |label: &str| {
+        let usage = dg.aggregate_usage();
+        assert_eq!(
+            usage.busy_bytes + usage.free_bytes,
+            usage.capacity_bytes,
+            "{label}: busy + free != capacity (busy={}, free={}, cap={})",
+            usage.busy_bytes,
+            usage.free_bytes,
+            usage.capacity_bytes
+        );
+        assert_eq!(
+            usage.capacity_bytes, total_cap_bytes,
+            "{label}: capacity mismatch"
+        );
+        // Per-disk usage should sum to the aggregate.
+        let disks = dg.disks.read().unwrap();
+        let mut disk_busy_sum = 0u64;
+        let mut disk_free_sum = 0u64;
+        for disk in disks.iter() {
+            let du = disk.usage();
+            assert_eq!(
+                du.busy_bytes + du.free_bytes,
+                du.capacity_bytes,
+                "{label}: disk {} busy + free != capacity",
+                disk.disk_id.to_display_string()
+            );
+            disk_busy_sum += du.busy_bytes;
+            disk_free_sum += du.free_bytes;
+        }
+        drop(disks);
+        assert_eq!(
+            disk_busy_sum, usage.busy_bytes,
+            "{label}: per-disk busy sum != aggregate busy"
+        );
+        assert_eq!(
+            disk_free_sum, usage.free_bytes,
+            "{label}: per-disk free sum != aggregate free"
+        );
+        eprintln!(
+            "{label}: busy={} free={} cap={} (invariant ok)",
+            usage.busy_bytes, usage.free_bytes, usage.capacity_bytes
+        );
+    };
+
+    // Check invariant at the initial empty state.
+    verify_invariant("initial empty");
 
     // ── Phase 1: Allocate ALL space ───────────────────────────────
     // Use allocate_block (singular) in a loop — allocate_blocks
@@ -557,13 +608,18 @@ async fn diskdb_e2e_allocate_all_free_all() {
     .await
     {
         all_segments.push(seg);
+        // Check invariant periodically during allocation.
+        if all_segments.len() % 500 == 0 {
+            verify_invariant(&format!("allocating {} units", all_segments.len()));
+        }
     }
     eprintln!("allocated {} units (expected {total_cap})", all_segments.len());
     assert_eq!(all_segments.len() as u64, total_cap, "should fill all capacity");
 
-    // Verify aggregate usage is full.
+    // Verify aggregate usage is full + invariant holds.
+    verify_invariant("full");
     let usage = dg.aggregate_usage();
-    assert_eq!(usage.busy_bytes, total_cap * u64::from(UNIT_SIZE_BYTES));
+    assert_eq!(usage.busy_bytes, total_cap_bytes);
     assert_eq!(usage.free_bytes, 0);
 
     // Sample-verify a few BusyBlockValue records in KV (first, middle, last).
@@ -588,19 +644,25 @@ async fn diskdb_e2e_allocate_all_free_all() {
     eprintln!("sample busy records verified in kv");
 
     // ── Phase 2: Free ALL space ───────────────────────────────────
-    // Batch-free 100 at a time.
+    // Batch-free 100 at a time, checking the invariant periodically.
     let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let mut freed_count = 0usize;
     for chunk in all_segments.chunks(100) {
         alloc::free_blocks(&dg, chunk, &free_kv, false)
             .await
             .expect("free batch should succeed");
+        freed_count += chunk.len();
+        if freed_count % 500 == 0 {
+            verify_invariant(&format!("freeing {freed_count} units"));
+        }
     }
     eprintln!("freed all {} units", all_segments.len());
 
-    // Verify aggregate usage is empty.
+    // Verify aggregate usage is empty + invariant holds.
+    verify_invariant("empty after free");
     let usage = dg.aggregate_usage();
     assert_eq!(usage.busy_bytes, 0);
-    assert_eq!(usage.free_bytes, total_cap * u64::from(UNIT_SIZE_BYTES));
+    assert_eq!(usage.free_bytes, total_cap_bytes);
 
     // Sample-verify: FreeBlockValue exists + BusyBlockKey is gone.
     let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
@@ -649,6 +711,9 @@ async fn diskdb_e2e_allocate_all_free_all() {
     }
     eprintln!("re-allocated {reclaimed} units (expected {total_cap})");
     assert_eq!(reclaimed, total_cap, "should reclaim all capacity after free");
+
+    // Final invariant check: full again after re-allocation.
+    verify_invariant("full after reclaim");
 
     eprintln!("diskdb_e2e_allocate_all_free_all: ALL CHECKS PASSED");
 }
