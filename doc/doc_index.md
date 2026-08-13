@@ -68,7 +68,6 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/protocol/design-crow-protocol-types.md` | Wire types, `u64` ID aliases, re-export pattern, `utoipa` schema derives. |
 | `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, zone records, three recovery strategies, allocation, state machines, metrics. |
 | `doc/working/design-diskdb-server.md` | diskdb server implementation (R71 + R72): status management, allocate/free, crash-safety invariants. |
-| `doc/working/design-diskdb-recovery.md` | diskdb crash recovery + snapshot compaction (R73): `JournalScan`, `RebuildZoneBitmap`, recovery engine, compaction engine. |
 
 ## How AI Should Use This Index
 

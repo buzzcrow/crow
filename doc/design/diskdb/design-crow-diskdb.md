@@ -39,6 +39,8 @@ References (other projects, not ports):
   - [Three recovery strategies](#three-recovery-strategies)
   - [How the strategies work together](#how-the-strategies-work-together)
   - [Crash-safety invariants](#crash-safety-invariants)
+  - [Recovery and compaction engines](#recovery-and-compaction-engines)
+  - [Recovery triggers](#recovery-triggers)
 - [8. Allocation Algorithm](#8-allocation-algorithm)
   - [Zone-level allocate (sync, in-memory)](#zone-level-allocate-sync-in-memory)
   - [Disk-level allocate (sync) — rotating active-zone-set](#disk-level-allocate-sync--rotating-active-zone-set)
@@ -657,6 +659,76 @@ merges them into a fresh snapshot.
 - **Degraded mode** (group-0 / data-group unreachable): allocate/free
   RPCs return `Unavailable` before touching the bitmap. No partial
   state.
+
+### Recovery and compaction engines
+
+The recovery and compaction logic is implemented by two engines owned
+by the diskdb server:
+
+- **`RecoveryEngine`** — owns a `DataGroupClient`. Runs during startup
+  and on ownership transfer. For each owned disk-group it builds an
+  empty `Node` and calls `RecoveryEngine::recover_node`, which
+  reconstructs each zone via `recover_zone`.
+- **`CompactionEngine`** — owns a `DataGroupClient`. Runs as a
+  background `compaction_loop` over the owned nodes in `NodeContainer`.
+
+`recover_node` creates one `ZoneDisk` per disk, recovers each zone in
+parallel (bounded by `recovery_concurrency`), adds the zones to the
+disk, rebuilds the active zone set, and returns the reconstructed
+`Node`.
+
+`recover_zone` (strategy 2) is the primary restart path:
+
+1. Load the latest `ZoneValue` for the zone with a single point get. If
+   the CRC32 fails or no snapshot exists, proceed from an empty bitmap
+   or fall back to strategy 1.
+2. Initialize the bitmap from the snapshot, or from empty.
+3. Issue two narrow `JournalScan`s from `snapshot_slot + 1` to the
+   applied frontier: one over `BusyBlockKey` and one over `FreeBlockKey`
+   prefixes. Merge the two op lists by slot. `JournalScan` supports
+   slot-range, key-prefix, and transparent pagination; a
+   `KV_ERROR_JOURNAL_SCAN_GC_GAP` response falls back to strategy 1.
+4. Apply each op in slot order: `Put BusyBlockKey` sets the bit range
+   using `BusyBlockValue.unit_count`; `Delete BusyBlockKey` clears the
+   bit range, reading `unit_count` from the matching `FreeBlockValue`
+   in the same batch when available; `Put`/`Delete FreeBlockKey` are
+   no-ops for the bitmap; a newer `ZoneValue` written during replay
+   restarts from that snapshot.
+5. Return the rebuilt `Zone`, resetting the rotating cursor.
+
+`rebuild_zone_bitmap_full_scan` (strategy 1) is the on-demand fallback:
+
+1. Read all `BusyBlockKey`s for the zone via `read_zone_records` (key
+   order equals `unit_offset` order). `FreeBlockKey`s are ignored for
+   state determination.
+2. Set the bit range for each busy record using `unit_count` and build
+   the `Zone`.
+3. Optionally write a fresh `ZoneValue` snapshot so the next restart can
+   use strategy 2.
+4. Return the rebuilt `Zone` plus derived stats.
+
+`compact_zone` (strategy 3) is the background maintenance task:
+
+1. Scan free records for the zone by key prefix.
+2. Clear the freed bits in the in-memory bitmap.
+3. Determine `snapshot_slot` from the data group's applied frontier.
+4. Build a new `ZoneValue` from the merged bitmap and a CRC32 checksum.
+5. Write the new `ZoneValue` snapshot before deleting the free records.
+   The snapshot always reflects the freed state, so any crash point is
+   safe.
+6. Delete the free records in one `batch_write` and update the zone's
+   `snapshot_slot` and `uncompacted_free_record_count`.
+
+### Recovery triggers
+
+- **Startup**: after the blocking `sync_once` fetches owned
+  disk-groups, `RecoveryEngine::recover_node` runs for each one. The
+  gRPC server does not accept RPCs until recovery completes.
+- **Ownership transfer**: when `SyncLoop` detects a disk-group newly
+  assigned to this instance, it checks whether `ZoneValue` snapshots
+  already exist. If they do, the new owner runs
+  `RecoveryEngine::recover_node` and discards any stale in-memory state;
+  otherwise it initializes the disk-group via `disk_add_init`.
 
 ## 8. Allocation Algorithm
 

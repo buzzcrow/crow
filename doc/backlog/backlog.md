@@ -15,14 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R73](R73-diskdb-crash-recovery-snapshot.md)** — diskdb crash
-  recovery + snapshot compaction — Area: diskdb — Implement the three
-  recovery strategies: full scan rebuild (strategy 1, on-demand via
-  `RebuildZoneBitmap` RPC), journal scan replay (strategy 2, primary
-  restart path, needs a `JournalScan` crow-kv extension for
-  slot-ordered replay), and snapshot compaction (strategy 3, merges
-  free records into `ZoneValue`, deletes only free records). Crash
-  safety; state = busy iff `BusyBlockKey` exists.
 - **[R74](R74-diskdb-space-metrics-query.md)** — diskdb space metrics +
   query API — Area: diskdb — Implement per-disk / per-disk-group /
   per-zone space metrics with accurate accounting and a recalculation
