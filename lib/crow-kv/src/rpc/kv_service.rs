@@ -22,8 +22,9 @@ use crate::rpc::kv_service_client::KvServiceClient;
 use crate::rpc::kv_service_server::KvService;
 use crate::rpc::{
     CreateSnapshotRequest, CreateSnapshotResponse, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest,
-    KvResponse, KvScanRequest, KvScanResponse, KvSetRequest, ListSnapshotsRequest, ListSnapshotsResponse,
-    ReleaseSnapshotRequest, ReleaseSnapshotResponse, SnapshotScanRequest, SnapshotScanResponse,
+    KvJournalScanRequest, KvJournalScanResponse, KvResponse, KvScanRequest, KvScanResponse, KvSetRequest,
+    ListSnapshotsRequest, ListSnapshotsResponse, ReleaseSnapshotRequest, ReleaseSnapshotResponse,
+    SnapshotScanRequest, SnapshotScanResponse,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -559,6 +560,118 @@ impl KvService for KvStoreService {
         Ok(Response::new(resp))
     }
 
+    #[allow(clippy::too_many_lines)]
+    async fn journal_scan(
+        &self,
+        request: Request<KvJournalScanRequest>,
+    ) -> Result<Response<KvJournalScanResponse>, Status> {
+        let already_forwarded = request.metadata().get(FORWARD_HEADER).is_some();
+        let req = request.into_inner();
+        let req_size = req.key_prefix.len();
+        let start = Instant::now();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            request_id = req.request_id,
+            min_slot = req.min_slot,
+            max_slot = req.max_slot,
+            prefix_len = req.key_prefix.len(),
+            limit = req.limit,
+            forwarded_in = already_forwarded,
+            "received kv journal_scan rpc"
+        );
+
+        // Transparent leader-forward, mirroring `scan`: only
+        // linearizable scans hop to the leader; min_slot scans serve
+        // from the local replica.
+        let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
+        if linearizable && !already_forwarded {
+            if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
+                match forward_kv_journal_scan(&endpoint, req.clone()).await {
+                    Ok(mut resp) => {
+                        debug!(
+                            store_id = self.store.store_id,
+                            group_id = req.group_id,
+                            request_id = req.request_id,
+                            leader = %endpoint,
+                            "kv journal_scan forwarded to leader"
+                        );
+                        if let Some(m) = self.metrics_for(req.group_id) {
+                            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+                            m.bytes_in_bw.observe(req_size as u64);
+                            m.scan_forwarded_c.inc();
+                        }
+                        resp.request_id = req.request_id;
+                        resp.request_create_ms = req.request_create_ms;
+                        return Ok(Response::new(resp));
+                    }
+                    Err(status) => {
+                        warn!(
+                            store_id = self.store.store_id,
+                            group_id = req.group_id,
+                            request_id = req.request_id,
+                            leader = %endpoint,
+                            error = %status,
+                            "kv journal_scan forward failed; next step: serving stale local scan with leader hint"
+                        );
+                        let mut resp = self
+                            .store
+                            .kv_journal_scan(
+                                req.group_id,
+                                req.min_slot,
+                                req.max_slot,
+                                &req.key_prefix,
+                                req.limit,
+                                req.read_mode,
+                                req.request_id,
+                                req.request_create_ms,
+                            )
+                            .await;
+                        if let Some(m) = self.metrics_for(req.group_id) {
+                            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+                            m.bytes_in_bw.observe(req_size as u64);
+                            m.scan_forward_failed_c.inc();
+                        }
+                        resp.not_leader_hint = endpoint;
+                        resp.request_id = req.request_id;
+                        resp.request_create_ms = req.request_create_ms;
+                        return Ok(Response::new(resp));
+                    }
+                }
+            }
+        }
+
+        let mut resp = self
+            .store
+            .kv_journal_scan(
+                req.group_id,
+                req.min_slot,
+                req.max_slot,
+                &req.key_prefix,
+                req.limit,
+                req.read_mode,
+                req.request_id,
+                req.request_create_ms,
+            )
+            .await;
+        if let Some(m) = self.metrics_for(req.group_id) {
+            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+            m.bytes_in_bw.observe(req_size as u64);
+        }
+        if !resp.ok {
+            warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
+                request_id = req.request_id,
+                error = resp.error,
+                "kv journal_scan failed; next step: confirm group exists on this server"
+            );
+        }
+        resp.request_id = req.request_id;
+        resp.request_create_ms = req.request_create_ms;
+        Ok(Response::new(resp))
+    }
+
     async fn batch_write(
         &self,
         request: Request<KvBatchWriteRequest>,
@@ -701,5 +814,19 @@ async fn forward_kv_scan(endpoint: &str, body: KvScanRequest) -> Result<KvScanRe
     let mut req = Request::new(body);
     forward_header_set(&mut req);
     let resp = client.scan(req).await?;
+    Ok(resp.into_inner())
+}
+
+/// Forward a `KvJournalScanRequest` to the group's current leader. Same
+/// contract as [`forward_kv_scan`].
+async fn forward_kv_journal_scan(
+    endpoint: &str,
+    body: KvJournalScanRequest,
+) -> Result<KvJournalScanResponse, Status> {
+    let channel = forward_channel(endpoint).await?;
+    let mut client = KvServiceClient::new(channel);
+    let mut req = Request::new(body);
+    forward_header_set(&mut req);
+    let resp = client.journal_scan(req).await?;
     Ok(resp.into_inner())
 }

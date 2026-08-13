@@ -111,6 +111,18 @@ impl UsageBitmap {
         true
     }
 
+    /// Check whether bit `offset` is set (`Acquire`).
+    ///
+    /// # Panics
+    /// Panics if `offset >= block_count`.
+    #[must_use]
+    pub fn is_set(&self, offset: u32) -> bool {
+        let word_index = offset as usize / 64;
+        let bit_pos = offset % 64;
+        let mask = 1u64 << bit_pos;
+        self.bits[word_index].load(Ordering::Acquire) & mask != 0
+    }
+
     /// Clear bits `[offset..offset+count)`. Returns `false` if any bit
     /// was already clear (double-free); rolls back on collision.
     #[must_use]

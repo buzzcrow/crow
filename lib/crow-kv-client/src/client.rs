@@ -16,7 +16,8 @@ use dashmap::DashMap;
 
 use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{
-    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvScanRequest, KvSetRequest, ReadMode,
+    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvJournalScanRequest, KvScanRequest,
+    KvSetRequest, ReadMode,
 };
 
 use crate::config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
@@ -47,6 +48,31 @@ pub struct ScanOutcome {
     pub items: Vec<(Bytes, Bytes)>,
     pub truncated: bool,
     pub timed_out: bool,
+    /// The applied frontier when the scan ran (page 1's `read_slot`).
+    /// Used by `get_applied_slot` to read the data group's frontier via
+    /// a linearizable scan.
+    pub read_slot: u64,
+}
+
+/// One op from a `journal_scan` — a Put or Delete at a specific commit
+/// slot. `value` is empty for Delete. Zero-copy `Bytes` from the prost
+/// response frame.
+#[derive(Debug, Clone)]
+pub struct JournalOp {
+    pub key: Bytes,
+    pub value: Bytes,
+    pub is_delete: bool,
+    pub slot: u64,
+}
+
+/// Outcome of a successful `journal_scan`. Ops are in slot order
+/// (within a slot, in batch order). `truncated` means the caller's
+/// `limit` was reached and more ops exist beyond it.
+#[derive(Debug, Clone)]
+pub struct JournalScanOutcome {
+    pub ops: Vec<JournalOp>,
+    pub truncated: bool,
+    pub read_slot: u64,
 }
 
 /// One item of a `batch_write` call.
@@ -860,6 +886,7 @@ impl CrowkvClient {
                                     items: all_items,
                                     truncated: true,
                                     timed_out: true,
+                                    read_slot: page1_read_slot.unwrap_or(0),
                                 });
                             }
                             page_start_after = all_items.last().expect("non-empty page").0.to_vec();
@@ -881,6 +908,7 @@ impl CrowkvClient {
                             items: all_items,
                             truncated: outcome_truncated,
                             timed_out: resp.timed_out,
+                            read_slot: page1_read_slot.unwrap_or(0),
                         });
                     }
                     self.metrics.record_scan_error();
@@ -985,6 +1013,139 @@ impl CrowkvClient {
                     if resp.ok {
                         self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
                         return Ok(resp.count);
+                    }
+                    self.metrics.record_scan_error();
+                    if !resp.not_leader_hint.is_empty() {
+                        if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
+                            self.metrics.record_read_endpoint_fallback();
+                        }
+                        self.topology
+                            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
+                        endpoint = resp.not_leader_hint;
+                        continue;
+                    }
+                    attempts = self.count_other(attempts, &resp.error)?;
+                }
+                Err(status) => {
+                    self.metrics.record_scan_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
+                    attempts = self.count_other(attempts, &status.to_string())?;
+                }
+            }
+        }
+    }
+
+    /// Slot-ordered scan over the chosen log. Returns individual KV ops
+    /// (Put / Delete) in commit (slot) order within `[min_slot,
+    /// max_slot]` (`max_slot = 0` means "up to the current applied
+    /// frontier"), filtered by `key_prefix` (empty = all keys). Used by
+    /// diskdb strategy 2 (journal scan replay) — [`Self::scan`]
+    /// returns key order, not slot order, so it cannot drive a correct
+    /// replay.
+    ///
+    /// Transparent pagination: sends the first request, if `truncated`
+    /// resends with `min_slot = last_op_slot + 1`, repeats until all
+    /// ops in the range are collected or the caller's `limit` is
+    /// reached. `limit = 0` means "no caller limit" (still pages via
+    /// the server's per-page `page_limit`). Returns the full op list
+    /// in slot order.
+    ///
+    /// # Errors
+    /// See [`Error`]. A server `KV_ERROR_JOURNAL_SCAN_GC_GAP` (asked
+    /// for slots already GC'd below the WAL trim point) is surfaced as
+    /// [`Error::Server`] — the caller (diskdb recovery) falls back to
+    /// a full-scan rebuild.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub async fn journal_scan(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        min_slot: u64,
+        max_slot: u64,
+        key_prefix: &[u8],
+        limit: u32,
+        page_limit: u32,
+        read_mode: ReadMode,
+        deadline: Option<u64>,
+    ) -> Result<JournalScanOutcome> {
+        let min_slot_floor = self.resolve_min_slot(store_id, group_id, read_mode, None);
+        let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let mut attempts = 0u32;
+        let mut backoff = self.retry.backoff_base;
+        let mut all_ops: Vec<JournalOp> = Vec::new();
+        let mut page_min_slot = min_slot.max(min_slot_floor);
+        let mut page1_read_slot: Option<u64> = None;
+        loop {
+            let remaining_page_limit = if page_limit == 0 { 0 } else { page_limit };
+            let req = KvJournalScanRequest {
+                version: 1,
+                group_id,
+                min_slot: page_min_slot,
+                max_slot,
+                key_prefix: Bytes::copy_from_slice(key_prefix),
+                limit: remaining_page_limit,
+                request_id: next_request_id(),
+                request_create_ms: now_ms(),
+                read_mode: read_mode as i32,
+            };
+            let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
+            let _in_flight = self.incr_in_flight(&endpoint);
+            match KvServiceClient::new(channel).journal_scan(req).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
+                    if resp.ok {
+                        self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                        if page1_read_slot.is_none() {
+                            page1_read_slot = Some(resp.read_slot);
+                        }
+                        let page_len = resp.ops.len();
+                        let resp_truncated = resp.truncated;
+                        for op in resp.ops {
+                            all_ops.push(JournalOp {
+                                key: op.key,
+                                value: op.value,
+                                is_delete: op.is_delete,
+                                slot: op.slot,
+                            });
+                        }
+                        // Caller's limit reached?
+                        if limit != 0 && all_ops.len() >= limit as usize {
+                            all_ops.truncate(limit as usize);
+                            self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                            return Ok(JournalScanOutcome {
+                                ops: all_ops,
+                                truncated: true,
+                                read_slot: page1_read_slot.unwrap_or(0),
+                            });
+                        }
+                        // Server page truncated → fetch the next page
+                        // from `last_op_slot + 1`. A zero-op truncated
+                        // page is a safety stop (avoid infinite loop).
+                        if resp_truncated && page_len > 0 {
+                            let server_timed_out = deadline.is_some_and(|dl| now_ms() >= dl);
+                            if server_timed_out {
+                                return Ok(JournalScanOutcome {
+                                    ops: all_ops,
+                                    truncated: true,
+                                    read_slot: page1_read_slot.unwrap_or(0),
+                                });
+                            }
+                            page_min_slot = resp.last_op_slot.saturating_add(1);
+                            continue;
+                        }
+                        return Ok(JournalScanOutcome {
+                            ops: all_ops,
+                            truncated: false,
+                            read_slot: page1_read_slot.unwrap_or(0),
+                        });
                     }
                     self.metrics.record_scan_error();
                     if !resp.not_leader_hint.is_empty() {

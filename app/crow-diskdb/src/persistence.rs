@@ -14,10 +14,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crow_kv_client::{BatchOp, CrowkvClient, GetOutcome, ReadMode, Result};
+use crow_kv_client::{BatchOp, CrowkvClient, GetOutcome, JournalOp, ReadMode, Result};
 use crow_protocol::common::{ChunkId, DiskId};
 use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, FreeBlockValue, Segment, ZoneValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, ZoneKey};
+use crow_protocol::ZoneValueExt;
 
 use crate::node::{AllocClaim, AllocError, Node};
 
@@ -363,7 +364,7 @@ impl DataGroupClient {
                 group_id,
                 &busy_prefix,
                 &[],
-                &busy_prefix,
+                &[],
                 0, // unlimited
                 ReadMode::Linearizable,
                 None,
@@ -388,7 +389,7 @@ impl DataGroupClient {
                 group_id,
                 &free_prefix,
                 &[],
-                &free_prefix,
+                &[],
                 0, // unlimited
                 ReadMode::Linearizable,
                 None,
@@ -417,6 +418,125 @@ impl DataGroupClient {
             .collect();
         let (store_id, group_id) = bind;
         self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ())
+    }
+
+    /// Point-lookup the `ZoneValue` snapshot at `ZoneKey` only (1
+    /// round-trip). Used by R73 recovery strategy 2 step a (load
+    /// snapshot) — avoids the 2 wasted scans of `read_zone_records`
+    /// when only the snapshot is needed. Returns `Ok(None)` if no
+    /// `ZoneValue` exists (fresh zone).
+    pub async fn get_zone_value(
+        &self,
+        bind: Bind,
+        disk_id: &DiskId,
+        zone_index: u32,
+    ) -> Result<Option<ZoneValue>> {
+        let key = ZoneKey {
+            disk_id: *disk_id,
+            zone_index,
+        };
+        let (store_id, group_id) = bind;
+        let outcome = self
+            .kv
+            .get(store_id, group_id, &key.to_bytes(), ReadMode::Linearizable, None)
+            .await?;
+        match outcome {
+            GetOutcome::Found { value, .. } => {
+                let zv = ZoneValue::from_bytes(&value).map_err(|e| crow_kv_client::Error::SysdataDecode {
+                    key: format!("{:02x?}", key.to_bytes()),
+                    reason: e,
+                })?;
+                Ok(Some(zv))
+            }
+            GetOutcome::NotFound => Ok(None),
+        }
+    }
+
+    /// Get the data group's current applied frontier (for compaction's
+    /// `snapshot_slot`). Uses a linearizable `scan` with an empty
+    /// prefix and reads `read_slot` from the response — the read
+    /// barrier resolves to `contiguous_applied`, which is the slot to
+    /// anchor a new snapshot at.
+    pub async fn get_applied_slot(&self, bind: Bind) -> Result<u64> {
+        let (store_id, group_id) = bind;
+        let outcome = self
+            .kv
+            .scan(
+                store_id,
+                group_id,
+                &[],
+                &[],
+                &[],
+                1,
+                ReadMode::Linearizable,
+                None,
+                true,
+                None,
+            )
+            .await?;
+        Ok(outcome.read_slot)
+    }
+
+    /// Slot-ordered journal scan over `BusyBlockKey` ops for one zone
+    /// (R73 recovery strategy 2 step c, scan 1). Wraps
+    /// `CrowkvClient::journal_scan` with `BusyBlockKey::prefix_for_zone`.
+    /// Returns ops in slot order; the caller replays them to rebuild
+    /// the bitmap.
+    pub async fn journal_scan_busy(
+        &self,
+        bind: Bind,
+        min_slot: u64,
+        max_slot: u64,
+        disk_id: &DiskId,
+        zone_index: u32,
+    ) -> Result<Vec<JournalOp>> {
+        let prefix = BusyBlockKey::prefix_for_zone(disk_id, zone_index);
+        let (store_id, group_id) = bind;
+        let outcome = self
+            .kv
+            .journal_scan(
+                store_id,
+                group_id,
+                min_slot,
+                max_slot,
+                &prefix,
+                0,
+                0,
+                ReadMode::Linearizable,
+                None,
+            )
+            .await?;
+        Ok(outcome.ops)
+    }
+
+    /// Slot-ordered journal scan over `FreeBlockKey` ops for one zone
+    /// (R73 recovery strategy 2 step c, scan 2). Wraps
+    /// `CrowkvClient::journal_scan` with `FreeBlockKey::prefix_for_zone`.
+    pub async fn journal_scan_free(
+        &self,
+        bind: Bind,
+        min_slot: u64,
+        max_slot: u64,
+        disk_id: &DiskId,
+        zone_index: u32,
+    ) -> Result<Vec<JournalOp>> {
+        let prefix = FreeBlockKey::prefix_for_zone(disk_id, zone_index);
+        let (store_id, group_id) = bind;
+        let outcome = self
+            .kv
+            .journal_scan(
+                store_id,
+                group_id,
+                min_slot,
+                max_slot,
+                &prefix,
+                0,
+                0,
+                ReadMode::Linearizable,
+                None,
+            )
+            .await?;
+        Ok(outcome.ops)
     }
 }
 

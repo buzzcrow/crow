@@ -22,4 +22,5 @@ service DiskdbService {
   rpc QueryCapacityStats(QueryCapacityStatsRequest) returns (QueryCapacityStatsResponse);
   rpc GetDiskGroupInfo(GetDiskGroupInfoRequest) returns (GetDiskGroupInfoResponse);
   rpc GetDiskInfo(GetDiskInfoRequest)           returns (GetDiskInfoResponse);
+  rpc RebuildZoneBitmap(RebuildZoneBitmapRequest) returns (RebuildZoneBitmapResponse);
 }

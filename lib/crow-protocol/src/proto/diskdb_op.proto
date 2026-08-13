@@ -68,3 +68,22 @@ message GetDiskInfoRequest {
 message GetDiskInfoResponse {
   DiskInfo disk = 1;
 }
+
+// ── Rebuild zone bitmap (strategy 1 full scan) ─────────────────
+
+// On-demand full-scan rebuild of one zone's usage bitmap from the
+// live BusyBlockKey records on the data group. `zone_index = u32::MAX`
+// means all zones on the disk. Triggers
+// `RecoveryEngine::rebuild_zone_bitmap_full_scan`. Used by operators
+// for consistency checks and by the §12 scanner as its rebuild
+// mechanism.
+message RebuildZoneBitmapRequest {
+  crow.common.DiskId disk_id    = 1;
+  uint32             zone_index = 2;  // u32::MAX = all zones on the disk
+}
+
+message RebuildZoneBitmapResponse {
+  uint32 rebuilt_zone_count = 1;
+  uint64 total_busy_units   = 2;
+  uint64 total_free_units   = 3;
+}

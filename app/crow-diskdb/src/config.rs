@@ -120,7 +120,7 @@ impl Default for SyncConfig {
     }
 }
 
-/// Free batch flush + snapshot compaction configuration.
+/// Free batch flush + snapshot compaction + recovery configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistenceConfig {
     /// Free batching toggle (default: false). When false, frees are
@@ -130,10 +130,15 @@ pub struct PersistenceConfig {
     pub free_batch_enabled: bool,
     /// Free batch max size before forced flush (default: 256).
     pub free_flush_max_batch: u32,
-    /// Snapshot compaction interval in seconds (default: 300).
-    pub snapshot_interval_secs: u32,
-    /// Compact when journal entries per zone exceed this (default: 4096).
-    pub snapshot_journal_threshold: u32,
+    /// Periodic compaction interval in seconds (default: 300). The
+    /// compaction loop sleeps this long between cycles.
+    pub compaction_cadence_secs: u32,
+    /// Compact a zone when its `uncompacted_free_record_count` exceeds
+    /// this (default: 4096). Cadence OR threshold — whichever fires
+    /// first for a given zone.
+    pub snapshot_compaction_threshold: u32,
+    /// Max concurrent zone recoveries in `recover_node` (default: 16).
+    pub recovery_concurrency: usize,
 }
 
 impl Default for PersistenceConfig {
@@ -141,8 +146,9 @@ impl Default for PersistenceConfig {
         Self {
             free_batch_enabled: false,
             free_flush_max_batch: 256,
-            snapshot_interval_secs: 300,
-            snapshot_journal_threshold: 4096,
+            compaction_cadence_secs: 300,
+            snapshot_compaction_threshold: 4096,
+            recovery_concurrency: 16,
         }
     }
 }
@@ -208,8 +214,11 @@ pub fn validate(config: &DiskdbConfig) -> Result<(), String> {
     if config.storage.cas_retry_limit == 0 {
         return Err("cas_retry_limit must be > 0".to_string());
     }
-    if config.persistence.snapshot_interval_secs == 0 {
-        return Err("snapshot_interval_secs must be > 0".to_string());
+    if config.persistence.compaction_cadence_secs == 0 {
+        return Err("compaction_cadence_secs must be > 0".to_string());
+    }
+    if config.persistence.recovery_concurrency == 0 {
+        return Err("recovery_concurrency must be > 0".to_string());
     }
     if config.server.listen_addr.parse::<SocketAddr>().is_err() {
         return Err(format!(

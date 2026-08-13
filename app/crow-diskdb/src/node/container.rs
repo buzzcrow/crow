@@ -39,7 +39,7 @@ impl NodeContainer {
         self.nodes.read().unwrap().get(&dg_id).cloned()
     }
 
-    pub(crate) fn node_ids(&self) -> Vec<DiskGroupId> {
+    pub fn node_ids(&self) -> Vec<DiskGroupId> {
         self.nodes.read().unwrap().keys().copied().collect()
     }
 

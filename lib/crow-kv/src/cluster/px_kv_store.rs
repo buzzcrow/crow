@@ -603,3 +603,36 @@ pub(crate) enum ReadDecision {
     /// The read cannot currently be served with the requested consistency.
     Unavailable { msg: String },
 }
+
+/// Build a failed [`crate::rpc::KvJournalScanResponse`] carrying `error`
+/// and an optional `not_leader_hint`. Non-redirect failures pass an empty
+/// hint. `gc_gap` selects the `KV_ERROR_JOURNAL_SCAN_GC_GAP` code used
+/// when the caller asked for slots already below the WAL trim point.
+pub(crate) fn journal_scan_err(
+    error: String,
+    not_leader_hint: String,
+    gc_gap: bool,
+    request_id: u64,
+    request_create_ms: u64,
+) -> crate::rpc::KvJournalScanResponse {
+    let error_code = if error == "not leader" {
+        crate::rpc::KvErrorCode::KvErrorNotLeader as i32
+    } else if gc_gap {
+        crate::rpc::KvErrorCode::KvErrorJournalScanGcGap as i32
+    } else {
+        crate::rpc::KvErrorCode::KvErrorInternal as i32
+    };
+    crate::rpc::KvJournalScanResponse {
+        version: 1,
+        ok: false,
+        error,
+        ops: Vec::new(),
+        truncated: false,
+        last_op_slot: 0,
+        read_slot: 0,
+        error_code,
+        not_leader_hint,
+        request_id,
+        request_create_ms,
+    }
+}

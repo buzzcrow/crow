@@ -56,6 +56,39 @@ impl PxAcceptor {
         None
     }
 
+    /// Slot-ordered iteration over accepted entries in
+    /// `[start_slot, end_slot_exclusive)`. Yields `(slot, PxLogEntry)`
+    /// clones for slots that have an accepted value; gaps (slots with no
+    /// accepted entry, or slots below the trim point) are skipped. Used
+    /// by `JournalScan` (diskdb R73 strategy 2 replay) — the acceptor
+    /// holds every chosen entry on every replica (leader via `accept`,
+    /// follower via `FetchGap` → `accept`), so this is a complete
+    /// slot-ordered op log bounded by `contiguous_applied`.
+    ///
+    /// Lock-free and safe under concurrent writers: each yielded entry
+    /// is a clone taken under a chunk read pin.
+    pub fn accepted_iter_range(
+        &self,
+        start_slot: SlotIndex,
+        end_slot_exclusive: SlotIndex,
+    ) -> Vec<(SlotIndex, PxLogEntry)> {
+        let mut out = Vec::new();
+        for (slot, guard) in self.slot_list.iter_range(start_slot, end_slot_exclusive) {
+            if let Some(entry) = guard.accepted_cloned() {
+                out.push((slot, entry));
+            }
+        }
+        out
+    }
+
+    /// Current trim slot — slots below this have been GC'd and are no
+    /// longer readable. `JournalScan` returns `KV_ERROR_JOURNAL_SCAN_GC_GAP`
+    /// when `min_slot < trim_slot`.
+    #[must_use]
+    pub fn trim_slot(&self) -> SlotIndex {
+        self.slot_list.trim_slot()
+    }
+
     fn bump_highest_seen(&self, slot: SlotIndex) {
         let mut prev = self.highest_seen_slot.load(Ordering::Relaxed);
         while slot > prev {

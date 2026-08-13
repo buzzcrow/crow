@@ -342,18 +342,33 @@ impl SyncLoop {
             disk.add_zone(Arc::new(zone));
         }
 
-        // Write baseline ZoneValue records (empty bitmap, snapshot_slot=0).
+        // Write baseline ZoneValue records (empty bitmap, snapshot_slot=0)
+        // — but only if no snapshot already exists (R73: previously-owned
+        // disk-groups have real snapshots that must not be overwritten;
+        // recovery runs after sync_once to replay the journal from
+        // snapshot_slot).
         if let Some(ref kv) = self.kv {
             let bind = *node.bind.read().unwrap();
-            for zi in 0..zone_count {
-                let mut zv = crow_protocol::diskdb::rpc::ZoneValue {
-                    usage_bitmap: vec![],
-                    snapshot_slot: 0,
-                    crc32: 0,
-                };
-                zv.compute_checksum();
-                if let Err(e) = kv.put_zone(bind, &disk_id, zi, &zv).await {
-                    warn!(error = %e, disk = %disk_id.to_display_string(), zone = zi, "disk-add init: put_zone failed");
+            // Check the first zone only — if it has a snapshot, the
+            // disk was previously initialized (disk_add_init writes
+            // baseline snapshots for all zones atomically per zone).
+            let snapshots_exist = crate::recovery::zone_snapshots_exist(kv, bind, &disk_id, zone_count).await;
+            if snapshots_exist {
+                info!(
+                    disk = %disk_id.to_display_string(),
+                    "disk-add init: snapshots already exist, skipping baseline write (recovery will replay)"
+                );
+            } else {
+                for zi in 0..zone_count {
+                    let mut zv = crow_protocol::diskdb::rpc::ZoneValue {
+                        usage_bitmap: vec![],
+                        snapshot_slot: 0,
+                        crc32: 0,
+                    };
+                    zv.compute_checksum();
+                    if let Err(e) = kv.put_zone(bind, &disk_id, zi, &zv).await {
+                        warn!(error = %e, disk = %disk_id.to_display_string(), zone = zi, "disk-add init: put_zone failed");
+                    }
                 }
             }
         }

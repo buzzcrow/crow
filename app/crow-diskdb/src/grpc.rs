@@ -15,7 +15,7 @@ use crow_protocol::diskdb::rpc::diskdb_service_server::{
 use crow_protocol::diskdb::rpc::{
     AllocateBlocksRequest, AllocateResponse, FreeBlocksRequest, FreeResponse, GetDiskGroupInfoRequest,
     GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse, QueryCapacityStatsRequest,
-    QueryCapacityStatsResponse,
+    QueryCapacityStatsResponse, RebuildZoneBitmapRequest, RebuildZoneBitmapResponse,
 };
 use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
@@ -23,22 +23,33 @@ use tonic::{Request, Response, Status};
 use crate::config::StorageDefaults;
 use crate::node::NodeContainer;
 use crate::persistence::{self, DataGroupClient};
+use crate::recovery::RecoveryEngine;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
 const MAX_ALLOCATE_COUNT: u32 = 1024;
+
+/// `u32::MAX` sentinel for "all zones on the disk".
+const ALL_ZONES: u32 = u32::MAX;
 
 pub struct DiskdbService {
     container: Arc<NodeContainer>,
     kv: Arc<DataGroupClient>,
     storage: StorageDefaults,
+    recovery: Arc<RecoveryEngine>,
 }
 
 impl DiskdbService {
-    pub fn new(container: Arc<NodeContainer>, kv: Arc<DataGroupClient>, storage: StorageDefaults) -> Self {
+    pub fn new(
+        container: Arc<NodeContainer>,
+        kv: Arc<DataGroupClient>,
+        storage: StorageDefaults,
+        recovery: Arc<RecoveryEngine>,
+    ) -> Self {
         Self {
             container,
             kv,
             storage,
+            recovery,
         }
     }
 
@@ -243,5 +254,96 @@ impl DiskdbServiceTrait for DiskdbService {
             status: dv.status,
         };
         Ok(Response::new(GetDiskInfoResponse { disk: Some(info) }))
+    }
+
+    async fn rebuild_zone_bitmap(
+        &self,
+        req: Request<RebuildZoneBitmapRequest>,
+    ) -> Result<Response<RebuildZoneBitmapResponse>, Status> {
+        let req = req.into_inner();
+        let disk_id = req
+            .disk_id
+            .ok_or_else(|| Status::invalid_argument("disk_id required"))?;
+
+        // Find the node that owns this disk + the disk's zone_count.
+        let (node, disk_value, disk_value_disk_id) = {
+            let node_ids = self.container.node_ids();
+            let mut found = None;
+            for dg_id in node_ids {
+                if let Some(n) = self.container.get_node(dg_id) {
+                    let dv_clone = {
+                        let disks = n.disks.read().unwrap();
+                        disks
+                            .iter()
+                            .find(|d| d.disk_id == disk_id)
+                            .map(|d| (*d.disk_value.read().unwrap(), d.disk_id))
+                    };
+                    if let Some((dv, did)) = dv_clone {
+                        found = Some((n, dv, did));
+                        break;
+                    }
+                }
+            }
+            found
+        }
+        .ok_or_else(|| {
+            Status::permission_denied(format!(
+                "disk {} not owned by this instance",
+                disk_id.to_display_string()
+            ))
+        })?;
+
+        let bind = *node.bind.read().unwrap();
+        let zone_count = disk_value.zone_count;
+        let zone_size_units = disk_value.zone_size_units;
+
+        // Determine which zones to rebuild: all or one.
+        let zones_to_rebuild: Vec<u32> = if req.zone_index == ALL_ZONES {
+            (0..zone_count).collect()
+        } else {
+            if req.zone_index >= zone_count {
+                return Err(Status::invalid_argument(format!(
+                    "zone_index {} out of range (zone_count={zone_count})",
+                    req.zone_index,
+                )));
+            }
+            vec![req.zone_index]
+        };
+
+        let mut rebuilt_zone_count = 0u32;
+        let mut total_busy_units = 0u64;
+        let mut total_free_units = 0u64;
+        for zi in zones_to_rebuild {
+            #[allow(clippy::cast_possible_truncation)]
+            let unit_capacity = if zi == zone_count - 1 {
+                let remaining = disk_value.capacity_units - (u64::from(zi) * zone_size_units);
+                let rounded = (remaining / 64) * 64;
+                rounded as u32
+            } else {
+                zone_size_units as u32
+            };
+            match self
+                .recovery
+                .rebuild_zone_bitmap_full_scan(bind, disk_value_disk_id, zi, unit_capacity)
+                .await
+            {
+                Ok((_zone, stats)) => {
+                    rebuilt_zone_count += 1;
+                    total_busy_units += stats.used_units;
+                    total_free_units += stats.free_units;
+                }
+                Err(e) => {
+                    return Err(Status::internal(format!(
+                        "rebuild_zone_bitmap failed for zone {zi}: {e}"
+                    )));
+                }
+            }
+        }
+
+        Ok(Response::new(RebuildZoneBitmapResponse {
+            rebuilt_zone_count,
+            total_busy_units,
+            total_free_units,
+        }))
     }
 }

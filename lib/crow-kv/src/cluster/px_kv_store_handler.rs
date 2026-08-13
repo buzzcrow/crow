@@ -4,8 +4,11 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::cluster::kv_store::KvStore;
-use crate::cluster::px_kv_store::{missing_group_response, scan_err, PxKvStore, ReadDecision};
+use crate::cluster::px_kv_store::{
+    journal_scan_err, missing_group_response, scan_err, PxKvStore, ReadDecision,
+};
 use crate::common::optional_u64;
+use crate::kv::{Batch, Op};
 use bytes::Bytes;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -464,6 +467,157 @@ impl KvStore for PxKvStore {
                 ok: false,
                 error: format!("snapshot handle {snapshot_handle} not found"),
             }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn kv_journal_scan(
+        &self,
+        group_id: u64,
+        min_slot: u64,
+        max_slot: u64,
+        key_prefix: &[u8],
+        limit: u32,
+        read_mode: i32,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> crate::rpc::KvJournalScanResponse {
+        let Some(group) = self.get_group(group_id) else {
+            return journal_scan_err(
+                format!("group {group_id} not found in store {}", self.store_id),
+                String::new(),
+                false,
+                request_id,
+                request_create_ms,
+            );
+        };
+
+        // Read-mode routing mirrors `kv_scan`: linearizable runs the
+        // leader barrier; min_slot serves locally once the applied
+        // frontier has caught up to `min_slot`.
+        let read_slot = match self.resolve_read_point(&group, read_mode, min_slot).await {
+            ReadDecision::Serve { read_slot, .. } => read_slot,
+            ReadDecision::NotLeader { hint } => {
+                return journal_scan_err(
+                    "not leader".to_string(),
+                    hint,
+                    false,
+                    request_id,
+                    request_create_ms,
+                );
+            }
+            ReadDecision::Unavailable { msg } => {
+                return journal_scan_err(msg, String::new(), false, request_id, request_create_ms);
+            }
+        };
+
+        let replica = group.local_replica();
+        let acceptor = &replica.acceptor;
+
+        // GC safety: slots below the acceptor's trim point have been
+        // reclaimed and can no longer be read. The caller falls back to
+        // a full-scan rebuild (diskdb strategy 1) on this code.
+        let trim_slot = acceptor.trim_slot();
+        if min_slot < trim_slot {
+            return journal_scan_err(
+                format!("journal_scan min_slot {min_slot} below trim_slot {trim_slot} (slots GC'd)"),
+                String::new(),
+                true,
+                request_id,
+                request_create_ms,
+            );
+        }
+
+        // Effective upper bound: caller's max_slot (0 = MAX) capped by
+        // the applied frontier — never read unapplied slots.
+        let effective_max = if max_slot == 0 {
+            read_slot
+        } else {
+            max_slot.min(read_slot)
+        };
+        if effective_max < min_slot {
+            // Empty range — return an empty success.
+            return crate::rpc::KvJournalScanResponse {
+                version: 1,
+                ok: true,
+                error: String::new(),
+                ops: Vec::new(),
+                truncated: false,
+                last_op_slot: 0,
+                read_slot,
+                error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
+                not_leader_hint: String::new(),
+                request_id,
+                request_create_ms,
+            };
+        }
+
+        // Slot-ordered iteration over accepted entries. The acceptor
+        // holds every chosen entry on every replica (leader via
+        // `accept`, follower via `FetchGap` → `accept`), so this is a
+        // complete slot-ordered op log bounded by `contiguous_applied`.
+        // `end_slot_exclusive` = effective_max + 1 (effective_max is
+        // inclusive per the proto contract).
+        let end_exclusive = effective_max.saturating_add(1);
+        let entries = acceptor.accepted_iter_range(min_slot, end_exclusive);
+
+        // Decode each slot's payload batch and emit matching ops in
+        // slot order (within a slot, ops are in batch order).
+        let mut ops: Vec<crate::rpc::KvJournalOp> = Vec::new();
+        let mut truncated = false;
+        let mut last_op_slot = 0u64;
+        let limit_usize = limit as usize;
+        for (slot, entry) in entries {
+            let batch = Batch::decode(&entry.payload);
+            for op in batch.ops {
+                if !key_prefix.is_empty() && !op.key.starts_with(key_prefix) {
+                    continue;
+                }
+                let (value, is_delete) = match op.op {
+                    Op::Put(v) => (v, false),
+                    Op::Delete => (Bytes::new(), true),
+                };
+                last_op_slot = slot;
+                ops.push(crate::rpc::KvJournalOp {
+                    key: op.key,
+                    value,
+                    is_delete,
+                    slot,
+                });
+                if limit_usize != 0 && ops.len() >= limit_usize {
+                    truncated = true;
+                    break;
+                }
+            }
+            if truncated {
+                break;
+            }
+        }
+
+        debug!(
+            store_id = self.store_id,
+            group_id,
+            min_slot,
+            max_slot,
+            prefix_len = key_prefix.len(),
+            limit,
+            returned = ops.len(),
+            truncated,
+            "kv_journal_scan local-replica read"
+        );
+
+        crate::rpc::KvJournalScanResponse {
+            version: 1,
+            ok: true,
+            error: String::new(),
+            ops,
+            truncated,
+            last_op_slot,
+            read_slot,
+            error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
+            not_leader_hint: String::new(),
+            request_id,
+            request_create_ms,
         }
     }
 }

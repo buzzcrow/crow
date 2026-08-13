@@ -66,3 +66,7 @@ path = "tests/disk_alloc_test.rs"
 [[test]]
 name = "diskdb_e2e_test"
 path = "tests/diskdb_e2e_test.rs"
+
+[[test]]
+name = "recovery_test"
+path = "tests/recovery_test.rs"

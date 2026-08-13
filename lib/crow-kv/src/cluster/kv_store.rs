@@ -10,8 +10,8 @@
 //! concrete store, easing mocking and future store implementations.
 
 use crate::rpc::{
-    CreateSnapshotResponse, KvBatchItem, KvResponse, KvScanResponse, ListSnapshotsResponse,
-    ReleaseSnapshotResponse, SnapshotScanResponse,
+    CreateSnapshotResponse, KvBatchItem, KvJournalScanResponse, KvResponse, KvScanResponse,
+    ListSnapshotsResponse, ReleaseSnapshotResponse, SnapshotScanResponse,
 };
 
 #[allow(async_fn_in_trait)]
@@ -120,4 +120,28 @@ pub trait KvStore {
     /// Drop a snapshot handle, releasing the pinned view. The next GC
     /// sweep can reclaim the pages.
     async fn kv_release_snapshot(&self, group_id: u64, snapshot_handle: u64) -> ReleaseSnapshotResponse;
+
+    /// Slot-ordered scan over the chosen log: returns individual KV ops
+    /// (Put / Delete) in commit (slot) order within `[min_slot,
+    /// max_slot]`, filtered by `key_prefix`. Used by diskdb strategy 2
+    /// (journal scan replay) — `kv_scan` returns key order, not slot
+    /// order, so it cannot drive a correct replay. `limit` caps the
+    /// ops per response page; the response carries `truncated` +
+    /// `last_op_slot` for stateless pagination (caller sends
+    /// `min_slot = last_op_slot + 1` for the next page). `max_slot =
+    /// 0` means "up to the current applied frontier". Read-mode
+    /// routing mirrors `kv_scan`: linearizable runs the leader barrier;
+    /// `min_slot` serves locally once the frontier has caught up.
+    #[allow(clippy::too_many_arguments)]
+    async fn kv_journal_scan(
+        &self,
+        group_id: u64,
+        min_slot: u64,
+        max_slot: u64,
+        key_prefix: &[u8],
+        limit: u32,
+        read_mode: i32,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> KvJournalScanResponse;
 }

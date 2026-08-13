@@ -12,8 +12,8 @@ use std::sync::RwLock;
 
 use crow_common::metrics::Counter;
 use crow_protocol::common::DiskId;
-use crow_protocol::diskdb::rpc::ZoneAllocationState;
-use crow_protocol::{DiskGroupId, UsageBitmap};
+use crow_protocol::diskdb::rpc::{ZoneAllocationState, ZoneValue};
+use crow_protocol::{DiskGroupId, UsageBitmap, ZoneValueExt};
 
 /// Zone health — zones inherit the disk's `HwStatus`; no separate
 /// zone-level CAS state machine (§9). Updated by the sync loop and
@@ -311,5 +311,55 @@ impl Zone {
         self.used_count.fetch_sub(unit_count, Ordering::AcqRel);
         self.uncompacted_free_record_count.fetch_add(1, Ordering::Relaxed);
         true
+    }
+
+    /// Snapshot current `usage_bits` + `snapshot_slot` + `crc32` into a
+    /// `ZoneValue` for compaction (R73 strategy 3). The bitmap is
+    /// serialized via `UsageBitmap::snapshot`; the CRC is computed via
+    /// `ZoneValueExt::compute_checksum`.
+    #[must_use]
+    pub fn to_zone_value(&self) -> ZoneValue {
+        let mut zv = ZoneValue {
+            usage_bitmap: self.usage_bits.snapshot(),
+            snapshot_slot: self.snapshot_slot.load(Ordering::Acquire),
+            crc32: 0,
+        };
+        zv.compute_checksum();
+        zv
+    }
+
+    /// Rebuild a `Zone` from a `ZoneValue` snapshot (R73 recovery when
+    /// no records exist after the snapshot). Deserializes `usage_bitmap`
+    /// into a `UsageBitmap`, computes `used_count` = popcount, sets
+    /// `snapshot_slot`. Verifies CRC via `ZoneValueExt::verify_checksum`
+    /// before use; returns `None` on CRC failure (caller falls back to
+    /// strategy 1).
+    #[must_use]
+    pub fn from_zone_value(
+        disk_id: DiskId,
+        zone_index: u32,
+        disk_group_id: DiskGroupId,
+        unit_capacity: u32,
+        value: &ZoneValue,
+    ) -> Option<Self> {
+        if !value.verify_checksum() {
+            return None;
+        }
+        let usage_bits = UsageBitmap::restore(&value.usage_bitmap);
+        let used_count = usage_bits.count_set();
+        Some(Self {
+            disk_id,
+            zone_index,
+            disk_group_id,
+            zone_state: RwLock::new(ZoneHealth::Healthy),
+            unit_capacity,
+            usage_bits,
+            last_pos_64: AtomicU64::new(0),
+            used_count: AtomicU32::new(u32::try_from(used_count).unwrap_or(u32::MAX)),
+            snapshot_slot: AtomicU64::new(value.snapshot_slot),
+            uncompacted_free_record_count: AtomicU32::new(0),
+            cas_retry_count: AtomicU64::new(0),
+            metrics_cas_retry: None,
+        })
     }
 }

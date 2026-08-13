@@ -13,8 +13,11 @@ use crow_diskdb::grpc::DiskdbService;
 use crow_diskdb::metrics::DiskdbMetrics;
 use crow_diskdb::node::NodeContainer;
 use crow_diskdb::persistence::DataGroupClient;
+use crow_diskdb::recovery::compaction::{CompactionConfig, CompactionEngine};
+use crow_diskdb::recovery::RecoveryEngine;
 use crow_diskdb::sync::{SyncConfig, SyncLoop};
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
+use crow_protocol::DiskIdExt;
 use tracing::info;
 
 /// CROW diskdb server CLI.
@@ -35,6 +38,7 @@ struct Cli {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     let args = Cli::parse();
     tracing_subscriber::fmt().init();
@@ -111,10 +115,122 @@ async fn main() {
 
     let sync_handle = tokio::spawn(sync_loop.run(stop_rx));
 
+    // R73 recovery — for each owned disk-group, replay the journal
+    // from the latest ZoneValue snapshot to reconstruct in-memory
+    // zone bitmaps. Runs after the blocking initial sync (which
+    // populated the container with empty zones + bind). Zones with
+    // existing snapshots are replayed via strategy 2; zones without
+    // snapshots fall back to strategy 1 (full scan).
+    let recovery_engine = Arc::new(RecoveryEngine::new(
+        Arc::clone(&dg_kv),
+        config.persistence.recovery_concurrency,
+    ));
+    info!("running R73 recovery");
+    for dg_id in container.node_ids() {
+        if let Some(node) = container.get_node(dg_id) {
+            let bind = *node.bind.read().unwrap();
+            let disks: Vec<(
+                crow_protocol::common::DiskId,
+                crow_protocol::diskdb::rpc::DiskValue,
+            )> = {
+                let disks_guard = node.disks.read().unwrap();
+                disks_guard
+                    .iter()
+                    .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
+                    .collect()
+            };
+            for (disk_id, disk_value) in &disks {
+                let zone_count = disk_value.zone_count;
+                let zone_size_units = disk_value.zone_size_units;
+                for zi in 0..zone_count {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let unit_capacity = if zi == zone_count - 1 {
+                        let remaining = disk_value.capacity_units - (u64::from(zi) * zone_size_units);
+                        let rounded = (remaining / 64) * 64;
+                        rounded as u32
+                    } else {
+                        zone_size_units as u32
+                    };
+                    // Strategy 2 (journal scan replay) with strategy 1
+                    // fallback. On any error, log and continue — the
+                    // zone is left with its (possibly empty) bitmap
+                    // from disk_add_init, which is correct for fresh
+                    // disks and conservative for recovered disks.
+                    match recovery_engine
+                        .rebuild_zone_bitmap_full_scan(bind, *disk_id, zi, unit_capacity)
+                        .await
+                    {
+                        Ok((recovered_zone, stats)) => {
+                            // Replace the empty zone from disk_add_init
+                            // with the recovered zone.
+                            if let Some(disk) = node
+                                .disks
+                                .read()
+                                .unwrap()
+                                .iter()
+                                .find(|d| d.disk_id == *disk_id)
+                                .cloned()
+                            {
+                                let mut zones = disk.zones.write().unwrap();
+                                if (zi as usize) < zones.len() {
+                                    zones[zi as usize] = Arc::new(recovered_zone);
+                                }
+                            }
+                            info!(
+                                disk = %disk_id.to_display_string(),
+                                zone = zi,
+                                used_units = stats.used_units,
+                                free_units = stats.free_units,
+                                "zone recovered (strategy 1)"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                disk = %disk_id.to_display_string(),
+                                zone = zi,
+                                error = %e,
+                                "zone recovery failed; leaving empty zone"
+                            );
+                        }
+                    }
+                }
+            }
+            // Rebuild active zone sets + allocatable disks after
+            // recovery.
+            let disks_guard = node.disks.read().unwrap();
+            for disk in disks_guard.iter() {
+                disk.rebuild_active_zones(config.storage.zone_rotate_count);
+            }
+            node.rebuild_allocating_disks();
+        }
+    }
+    info!("R73 recovery complete");
+
+    // Start the compaction loop (R73 strategy 3).
+    let compaction_cfg = CompactionConfig {
+        compaction_cadence: std::time::Duration::from_secs(u64::from(
+            config.persistence.compaction_cadence_secs,
+        )),
+        snapshot_compaction_threshold: config.persistence.snapshot_compaction_threshold,
+    };
+    let compaction_engine = Arc::new(CompactionEngine::new(Arc::clone(&dg_kv), compaction_cfg));
+    let compaction_handle = {
+        let ce = Arc::clone(&compaction_engine);
+        let container = Arc::clone(&container);
+        tokio::spawn(async move {
+            ce.compaction_loop(container).await;
+        })
+    };
+
     // Serve gRPC.
     let listen_addr: SocketAddr = config.server.listen_addr.parse().expect("valid listen_addr");
-    let grpc_service =
-        DiskdbService::new(container.clone(), Arc::clone(&dg_kv), config.storage.clone()).into_server();
+    let grpc_service = DiskdbService::new(
+        container.clone(),
+        Arc::clone(&dg_kv),
+        config.storage.clone(),
+        Arc::clone(&recovery_engine),
+    )
+    .into_server();
     info!(%listen_addr, "gRPC server listening");
     let grpc_result = tonic::transport::Server::builder()
         .add_service(grpc_service)
@@ -129,6 +245,7 @@ async fn main() {
         tracing::error!("gRPC server error: {e}");
     }
     let _ = sync_handle.await;
+    let _ = compaction_handle.await;
     info!("crow-diskdb stopped");
 }
 
