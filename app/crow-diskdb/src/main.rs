@@ -16,7 +16,7 @@ use crow_diskdb::liveness::keepalive::KeepAlive;
 use crow_diskdb::liveness::lifecycle::StartupPhase;
 use crow_diskdb::metrics::{DiskdbMetrics, RecalcEngine, ReportingTask};
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
-use crow_diskdb::recovery::compaction::CompactionEngine;
+use crow_diskdb::recovery::compaction::{CompactionEngine, PreparatoryThread};
 use crow_diskdb::recovery::RecoveryEngine;
 use crow_diskdb::service::DiskdbService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
@@ -185,7 +185,11 @@ async fn main() {
         snapshot_compaction_threshold: config.load().persistence.snapshot_compaction_threshold,
     };
     let compaction_engine = Arc::new(
-        CompactionEngine::new(Arc::clone(&dg_kv), compaction_cfg).with_config_handle(Arc::clone(&config)),
+        CompactionEngine::new(Arc::clone(&dg_kv), compaction_cfg.clone())
+            .with_config_handle(Arc::clone(&config)),
+    );
+    let preparatory_thread = Arc::new(
+        PreparatoryThread::new(Arc::clone(&dg_kv), compaction_cfg).with_config_handle(Arc::clone(&config)),
     );
     let keepalive_task: Arc<dyn crow_diskdb::bg_task::BackgroundTask> = Arc::new(keepalive);
     let reporting_task: Arc<dyn crow_diskdb::bg_task::BackgroundTask> =
@@ -193,6 +197,7 @@ async fn main() {
     let runner = BgRunner::new()
         .register(keepalive_task)
         .register(compaction_engine)
+        .register(preparatory_thread)
         .register(reporting_task);
     let stop = runner.stop_handle();
     let bg_ctx = Arc::new(BgCtx {
