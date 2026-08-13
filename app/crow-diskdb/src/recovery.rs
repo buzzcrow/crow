@@ -29,10 +29,11 @@ use crow_protocol::diskdb::rpc::{BusyBlockValue, DiskValue, FreeBlockValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
 use crow_protocol::{DiskGroupId, NodeId, RackId, ZoneValueExt};
 
+use crate::data_group_client::{Bind, DataGroupClient};
 use crate::domain::disk::DdbDisk;
 use crate::domain::disk_group::DdbDiskGroup;
+use crate::domain::records::ZoneRecords;
 use crate::domain::zone::{DdbZone, DdbZoneHealth};
-use crate::persistence::{Bind, DataGroupClient, ZoneRecords};
 
 /// Recovery errors.
 #[derive(Debug)]

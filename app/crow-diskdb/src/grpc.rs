@@ -21,8 +21,9 @@ use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
 
 use crate::config::StorageDefaults;
+use crate::data_group_client::DataGroupClient;
+use crate::domain::alloc;
 use crate::domain::disk_group_container::DdbDiskGroupContainer;
-use crate::persistence::{self, DataGroupClient};
 use crate::recovery::RecoveryEngine;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
@@ -109,7 +110,7 @@ impl DiskdbServiceTrait for DiskdbService {
         let exclude_disks = req.exclude_disk_ids.clone();
 
         // Two-phase allocate.
-        let segments = persistence::allocate_blocks(
+        let segments = alloc::allocate_blocks(
             &dg,
             req.unit_count,
             req.count,
@@ -175,7 +176,7 @@ impl DiskdbServiceTrait for DiskdbService {
         })?;
 
         // Immediate free (v1).
-        persistence::free_blocks(
+        alloc::free_blocks(
             &node,
             &req.segments,
             &self.kv,
@@ -183,11 +184,11 @@ impl DiskdbServiceTrait for DiskdbService {
         )
         .await
         .map_err(|e| match e {
-            crate::persistence::FreeError::NotBusy { .. } => Status::not_found(format!("free failed: {e}")),
-            crate::persistence::FreeError::OwnerMismatch { .. } => {
+            crate::domain::alloc::FreeError::NotBusy { .. } => Status::not_found(format!("free failed: {e}")),
+            crate::domain::alloc::FreeError::OwnerMismatch { .. } => {
                 Status::permission_denied(format!("free failed: {e}"))
             }
-            crate::persistence::FreeError::Kv(_) => Status::internal(format!("free persist failed: {e}")),
+            crate::domain::alloc::FreeError::Kv(_) => Status::internal(format!("free persist failed: {e}")),
         })?;
 
         #[allow(clippy::cast_possible_truncation)]

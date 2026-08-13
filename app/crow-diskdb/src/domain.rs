@@ -8,12 +8,16 @@
 //!
 //! See `doc/working/design-diskdb-restructure.md` §2.
 
+pub mod alloc;
 pub mod disk;
 pub mod disk_group;
 pub mod disk_group_container;
+pub mod records;
 pub mod zone;
 
+pub use alloc::FreeError;
 pub use disk::{ActiveZoneContext, DdbDisk};
 pub use disk_group::{AllocClaim, AllocError, AllocateDiskContext, DdbDiskGroup};
 pub use disk_group_container::DdbDiskGroupContainer;
+pub use records::{BusyRecord, FreeRecord, ZoneRecords};
 pub use zone::{AllocatedRange, DdbZone, DdbZoneHealth};

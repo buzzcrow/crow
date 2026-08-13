@@ -14,9 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::KvCluster;
+use crow_diskdb::data_group_client::DataGroupClient;
+use crow_diskdb::domain::alloc;
 use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::domain::zone::DdbZone;
-use crow_diskdb::persistence::{self, DataGroupClient};
 use crow_diskdb::recovery::RecoveryEngine;
 use crow_diskdb::sync::{SyncConfig, SyncLoop};
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
@@ -190,15 +191,14 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     //    free 1 of them. After this, 2 blocks remain busy.
     let owner_chunk = make_chunk_id(0, 0, 42);
     let alloc_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    let segments =
-        persistence::allocate_blocks(&dg, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
-            .await
-            .expect("allocate 3");
+    let segments = alloc::allocate_blocks(&dg, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        .await
+        .expect("allocate 3");
     assert_eq!(segments.len(), 3);
 
     // Free the first 1.
     let free_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_blocks(&dg, &segments[0..1], &free_kv, false)
+    alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
         .await
         .expect("free 1");
 

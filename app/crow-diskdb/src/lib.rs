@@ -11,10 +11,10 @@
 )]
 
 pub mod config;
+pub mod data_group_client;
 pub mod domain;
 pub mod grpc;
 pub mod metrics;
-pub mod persistence;
 pub mod recovery;
 pub mod status;
 pub mod sync;

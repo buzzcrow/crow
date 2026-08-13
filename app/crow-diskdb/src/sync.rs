@@ -19,11 +19,11 @@ use crow_protocol::{DiskGroupId, NodeId, RackId};
 use crow_protocol::{DiskIdExt, ZoneValueExt};
 use tracing::{info, warn};
 
+use crate::data_group_client::DataGroupClient;
 use crate::domain::disk::DdbDisk;
 use crate::domain::disk_group::DdbDiskGroup;
 use crate::domain::disk_group_container::DdbDiskGroupContainer;
 use crate::domain::zone::DdbZone;
-use crate::persistence::DataGroupClient;
 
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {

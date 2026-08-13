@@ -22,9 +22,9 @@ use std::time::Duration;
 use crow_protocol::common::DiskId;
 use crow_protocol::key::BinaryKey;
 
+use crate::data_group_client::{Bind, DataGroupClient};
 use crate::domain::disk_group_container::DdbDiskGroupContainer;
 use crate::domain::zone::DdbZone;
-use crate::persistence::{Bind, DataGroupClient};
 use crate::recovery::RecoveryError;
 
 /// Compaction configuration.
