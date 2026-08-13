@@ -13,8 +13,8 @@
 pub mod config;
 pub mod data_group_client;
 pub mod domain;
-pub mod grpc;
 pub mod metrics;
 pub mod recovery;
+pub mod service;
 pub mod status;
 pub mod sync;
