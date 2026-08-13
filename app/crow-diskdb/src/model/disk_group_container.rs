@@ -54,22 +54,22 @@ impl DdbDiskGroupContainer {
         self.disk_groups.read().unwrap().keys().copied().collect()
     }
 
-    pub(crate) fn enter_degraded_mode(&self) {
+    pub fn enter_degraded_mode(&self) {
         let prev = self.degraded.swap(true, Ordering::SeqCst);
         if !prev {
             warn!("entering degraded mode");
         }
     }
 
-    pub(crate) fn exit_degraded_mode(&self) {
+    pub fn exit_degraded_mode(&self) {
         let prev = self.degraded.swap(false, Ordering::SeqCst);
         if prev {
             warn!("exiting degraded mode");
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn is_degraded(&self) -> bool {
+    /// Whether the instance is in degraded mode (missed heartbeats).
+    pub fn is_degraded(&self) -> bool {
         self.degraded.load(Ordering::SeqCst)
     }
 

@@ -204,8 +204,7 @@ async fn diskdb_e2e_allocate_free() {
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut keepalive =
-        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
+    let keepalive = KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
 
     // 4. Run one sync tick to populate in-memory state.
     let outcome = keepalive.tick().await;
@@ -400,8 +399,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut keepalive =
-        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
+    let keepalive = KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);

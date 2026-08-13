@@ -186,8 +186,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut keepalive =
-        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
+    let keepalive = KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
@@ -229,7 +228,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut keepalive2 =
+    let keepalive2 =
         KeepAlive::new(hw3, svc2, Arc::clone(&container2), keepalive_cfg2).with_ddb_kv_client(dg_kv2);
     let outcome2 = keepalive2.tick().await;
     assert_eq!(outcome2.groups_added, 1);
@@ -398,8 +397,7 @@ async fn recovery_strategy2_journal_replay() {
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut keepalive =
-        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
+    let keepalive = KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
@@ -426,7 +424,7 @@ async fn recovery_strategy2_journal_replay() {
     let svc2 = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw3 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let mut keepalive2 = KeepAlive::new(
+    let keepalive2 = KeepAlive::new(
         hw3,
         svc2,
         Arc::clone(&container2),
@@ -537,7 +535,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let mut keepalive = KeepAlive::new(
+    let keepalive = KeepAlive::new(
         hw2,
         svc,
         Arc::clone(&container),

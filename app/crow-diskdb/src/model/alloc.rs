@@ -9,7 +9,6 @@
 //! Phase 2 (async): persist the durable record via `DdbKvClient`.
 //!
 //! On Phase 2 failure, rolls back the bitmap bits (Phase 1 undo).
-//! See `doc/working/design-diskdb-server.md` §4.5–§4.6.
 
 use std::sync::Arc;
 

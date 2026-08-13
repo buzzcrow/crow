@@ -9,8 +9,6 @@
 //! src/key/diskdb.rs` (`BusyBlockKey` / `FreeBlockKey` / `ZoneKey`),
 //! encoded via `BinaryKey::encode`. Values are bincode-serialized proto
 //! types.
-//!
-//! See `doc/working/design-diskdb-server.md` §4.4.
 
 use std::sync::Arc;
 

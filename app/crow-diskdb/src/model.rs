@@ -5,8 +5,6 @@
 //! disk-groups, disks, zones, allocation/free orchestration, domain
 //! errors, and record read-models. No I/O, no transport — pure domain
 //! logic + invariants.
-//!
-//! See `doc/working/design-diskdb-restructure.md` §2.
 
 pub mod alloc;
 pub mod disk;

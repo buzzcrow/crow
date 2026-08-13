@@ -3,9 +3,6 @@
 
 //! Zone bitmap-scan allocator — per-zone allocation state + Phase 1
 //! (sync) allocate/free via per-bit CAS on the usage bitmap.
-//!
-//! See `doc/design/diskdb/design-crow-diskdb.md` §8 (allocation
-//! algorithm) and `doc/working/design-diskdb-server.md` §4.1.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;

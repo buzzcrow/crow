@@ -3,8 +3,6 @@
 
 //! `DdbDisk` — disk struct with zone management and the disk-level
 //! round-robin allocator (`disk_allocate`, `rotate_active_zones`).
-//!
-//! See `doc/working/design-diskdb-server.md` §4.2.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};

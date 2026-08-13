@@ -67,3 +67,55 @@ When adding internal state to `crowkv` lib:
 - **Visibility** — narrowest that works: private < `pub(super)` < `pub(crate)` < `pub`. Test-only access via `#[cfg(feature = "test-util")]` + `_for_tests` setters, never `pub`.
 - **Special cases** — `crow-tree-ffi`: `unsafe_code = deny` relaxed, 1000-line cap still applies. Test code: strict 2018 style (same as `src/`). Generated code: exempt from size rules.
 - **Enforcement** — `[workspace.lints.clippy]`: `mod_module_files`, `too_many_lines` (default threshold 100), `items_after_statements` set to `"warn"`. No `clippy.toml`. No new `#[allow]` suppressions.
+
+### Module Design Rules
+
+Beyond the mechanical rules above, the following principles govern how
+modules and files should be organized to surface domain concepts and
+separate concerns:
+
+- **Name by subject, not by kind or transport** — a file/module name
+  says *what thing* it holds, not *what category* it is. Bad
+  (kind/transport): `grpc.rs`, `persistence.rs`, `sync.rs`, `status.rs`.
+  Good (subject): `service/diskdb_service.rs`, `data_group_client.rs`,
+  `keepalive.rs`, `state_machine.rs`. The file-naming rule above (subject
+  not kind) extends to transport/layer names (`grpc`, `rpc`,
+  `persistence`, `sync`) and generic verbs (`status`).
+- **Name by the domain concept, not a borrowed/legacy term** — use the
+  term the domain actually uses. If the unit is a *disk-group*, the
+  struct is `DdbDiskGroup`, not `Node`. Never reuse a name that a lower
+  layer (e.g. a protocol crate) already owns for a different thing —
+  prefix local manager types to avoid shadowing confusion.
+- **One concept = one module; gather a cohesive model into one place**
+  — concepts that belong together live together. A reader should find
+  the whole model in one place, separate from infrastructure (I/O,
+  recovery, gRPC, config).
+- **Separate domain from infrastructure by layer** — domain = the
+  in-memory model + its invariants + orchestration logic. Infrastructure
+  = transport/I/O wrappers, gRPC service wiring, config loading, metrics.
+  Don't mix both in one file. Dependency direction: domain may depend on
+  an infra interface, infra depends on domain types; never the reverse
+  unconstrained.
+- **File layout must surface the conceptual structure** — if the design
+  has three strategies, the file layout should show three strategy files,
+  not one flat file with the strategies hidden in functions. If there are
+  multiple services, there's a `service/` module with one file per
+  service. The file tree is the first thing a reader sees — it should
+  read like a table of contents of the concepts.
+- **One file per resource/service, not one file per verb** — handlers
+  group by *resource*, not by *action*. `service/diskdb_service.rs`,
+  not `allocate.rs` / `free.rs` / `query.rs` (verbs) under service.
+- **A module's responsibility must be nameable in one phrase** — if you
+  can't name what a file does in one short subject phrase, it's doing
+  too much. Split until each file's responsibility is one phrase.
+- **Prefix local types to avoid clashes with shared/protocol crates** —
+  when a lower/shared crate owns a type family, the local in-memory
+  manager types get a project prefix to avoid name shadowing and reader
+  confusion. Identity fields that refer to the real physical thing stay
+  unprefixed (they are protocol types, correct as-is).
+- **The file tree separates "what it is" (domain) from "how it runs"
+  (runtime)** — domain modules = what the system *is* (the model,
+  invariants, errors, record read-models). Runtime modules = how it
+  *runs* (keep-alive driver, recovery, bg-task framework, service, config,
+  lifecycle, metrics). A change to a domain invariant touches domain; a
+  change to a runtime flow touches the runtime module — they don't entangle.

@@ -13,6 +13,7 @@
 pub mod bg_task;
 pub mod ddb_config;
 pub mod ddb_kv_client;
+pub mod health;
 pub mod liveness;
 pub mod metrics;
 pub mod model;
