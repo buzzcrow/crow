@@ -60,27 +60,26 @@ async fn main() {
     // Build the in-memory node container.
     let container = Arc::new(NodeContainer::new(instance_id));
 
-    // Build kv-client service classes (seeded with group-0 endpoint).
-    // In a real deployment the group-0 endpoint comes from config or
-    // discovery; for now we use a placeholder.
-    let group0_endpoint = config
-        .server
-        .instance_id
-        .as_ref()
-        .map(|_| "http://127.0.0.1:28001".to_string())
-        .unwrap_or_default();
-    let kv_client = CrowkvClient::new(ClientConfig::new(vec![group0_endpoint.clone()]));
-    kv_client.seed_leader(0, 0, group0_endpoint.clone());
-    let kv_client2 = CrowkvClient::new(ClientConfig::new(vec![group0_endpoint.clone()]));
-    kv_client2.seed_leader(0, 0, group0_endpoint.clone());
-    let kv_client3 = CrowkvClient::new(ClientConfig::new(vec![group0_endpoint.clone()]));
-    kv_client3.seed_leader(0, 0, group0_endpoint.clone());
-    let kv_client4 = CrowkvClient::new(ClientConfig::new(vec![group0_endpoint.clone()]));
-    kv_client4.seed_leader(0, 0, group0_endpoint.clone());
-    let hw = HardwareClient::new(kv_client);
-    let svc = ServiceRegistryClient::new(kv_client2);
-    let dg_kv = Arc::new(DataGroupClient::new(kv_client3));
-    let dg_kv_sync = DataGroupClient::new(kv_client4);
+    // Build one shared kv-client. The system group (store 0, group 0)
+    // leader and data-group leaders are discovered lazily via the
+    // kv-server HTTP management API seeds from config — no pre-seeding.
+    // One client is shared across all service classes (hardware,
+    // service-registry, data-group) since `CrowkvClient` is fully
+    // interior-mutable; each service class takes it via `from_shared`.
+    let kv_client = Arc::new(CrowkvClient::new(ClientConfig::new(
+        config.server.kv_server_mgmt_seeds.clone(),
+    )));
+    let (sys_store, sys_group) = kv_client.system_group();
+    info!(
+        store_id = sys_store,
+        group_id = sys_group,
+        seeds = ?config.server.kv_server_mgmt_seeds,
+        "kv-client built; system group leader will be discovered lazily"
+    );
+    let hw = HardwareClient::from_shared(Arc::clone(&kv_client));
+    let svc = ServiceRegistryClient::from_shared(Arc::clone(&kv_client));
+    let dg_kv = Arc::new(DataGroupClient::from_shared(Arc::clone(&kv_client)));
+    let dg_kv_sync = DataGroupClient::from_shared(Arc::clone(&kv_client));
 
     // Register diskdb metrics (§11: `zone.allocate.retry.cms.bit`,
     // `disk.bad.impacted_blocks`). The CAS retry counter is attached

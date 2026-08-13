@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 
+use crow_protocol::{DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, KV_SERVER_MGMT_BASE};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for a diskdb instance.
@@ -27,14 +28,22 @@ pub struct ServerConfig {
     pub http_listen_addr: String,
     /// Unique instance ID (auto-generated UUID if absent).
     pub instance_id: Option<String>,
+    /// HTTP management-API seed endpoints (`http://host:port`) of the
+    /// crow-kv-server(s) used to discover the system group (store 0,
+    /// group 0) leader and, via `/topology`, the data-group leaders.
+    /// The client refreshes this lazily on first use, so the leader
+    /// does not need to be pre-seeded. At least one must be reachable
+    /// for the diskdb to sync group 0.
+    pub kv_server_mgmt_seeds: Vec<String>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:9941".to_string(),
-            http_listen_addr: "0.0.0.0:9942".to_string(),
+            listen_addr: format!("0.0.0.0:{DISKDB_GRPC_BASE}"),
+            http_listen_addr: format!("0.0.0.0:{DISKDB_HTTP_BASE}"),
             instance_id: None,
+            kv_server_mgmt_seeds: vec![format!("http://127.0.0.1:{KV_SERVER_MGMT_BASE}")],
         }
     }
 }

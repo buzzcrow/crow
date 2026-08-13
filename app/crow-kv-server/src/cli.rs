@@ -2,13 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 use clap::Parser;
+use crow_protocol::KV_SERVER_MGMT_BASE;
 
 /// `CrowKV` server — reference implementation wrapping the `crow_kv` library.
 #[derive(Parser, Debug)]
 #[command(name = "crow-kv-server", about = "CrowKV server daemon")]
 pub struct Cli {
     /// HTTP management API listen port. Default: 9910.
-    #[arg(long, default_value_t = 9910)]
+    #[arg(long, default_value_t = KV_SERVER_MGMT_BASE)]
     pub management_port: u16,
 
     /// HTTP management API bind address.

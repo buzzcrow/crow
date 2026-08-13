@@ -91,3 +91,8 @@ pub use mgmt::{
 
 pub mod bitmap;
 pub use bitmap::{create_usage_bitmap, UsageBitmap};
+
+pub mod ports;
+pub use ports::{
+    ServicePort, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
+};

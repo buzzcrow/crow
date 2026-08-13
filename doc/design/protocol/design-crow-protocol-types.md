@@ -164,6 +164,13 @@ types are re-exported from the crate root.
 - **`diskdb_type_util`** — extension traits and utility functions
   for diskdb proto types.
 - **`bitmap`** — usage bitmap utilities for disk space accounting.
+- **`ports`** — default port allocation for CROW services. Each
+  service type has a base (start) port; multiple instances of the
+  same service type on one node increment by a per-type stride. Port
+  ranges are non-overlapping across service types so different
+  services never collide. Consumers (kv-server, diskdb, web, cli)
+  reference the base constants for clap `default_value_t` and config
+  defaults instead of hardcoding port numbers.
 
 Field-level detail for every type lives in the source files
 (`lib/crow-protocol/src/{common_type,mgmt,sysdata}.rs`), not in this
