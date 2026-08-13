@@ -12,6 +12,7 @@ use crow_diskdb::data_group_client::DataGroupClient;
 use crow_diskdb::ddb_config::{validate, DdbConfig};
 use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
+use crow_diskdb::lifecycle::StartupPhase;
 use crow_diskdb::metrics::DiskdbMetrics;
 use crow_diskdb::recovery::compaction::{CompactionConfig, CompactionEngine};
 use crow_diskdb::recovery::RecoveryEngine;
@@ -57,7 +58,7 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(crow_kv_client::new_client_id);
 
-    // Build the in-memory disk-group container.
+    // Build the in-memory disk-group container. Phase = Init.
     let container = Arc::new(DdbDiskGroupContainer::new(instance_id));
 
     // Build one shared kv-client. The system group (store 0, group 0)
@@ -88,7 +89,9 @@ async fn main() {
     let mut metrics_registry = MetricsRegistry::new();
     let metrics = DiskdbMetrics::register(&mut metrics_registry);
 
-    // Start the sync loop.
+    // Phase = Syncing. Run initial keep-alive tick (blocking) to
+    // populate the in-memory disk-group/disk/zone state.
+    container.set_lifecycle_phase(StartupPhase::Syncing);
     let keepalive_cfg = KeepAliveConfig {
         interval: std::time::Duration::from_secs(u64::from(config.sync.sync_interval_secs)),
         miss_threshold: config.heartbeat.miss_threshold,
@@ -101,32 +104,85 @@ async fn main() {
         .with_data_group_client(dg_kv_sync)
         .with_cas_retry_metric(metrics.allocate_retry_cas_bit);
 
-    // Blocking initial keep-alive tick — run one tick before serving
-    // gRPC to populate the in-memory disk-group/disk/zone state.
-    // Without this, the first allocate/free request would find an
-    // empty container.
     info!("running blocking initial keep-alive tick");
     let init_outcome = keepalive.tick().await;
     info!(
         groups_added = init_outcome.groups_added,
         disks_added = init_outcome.disks_added,
         duration_ms = init_outcome.sync_duration_ms,
-        "initial sync complete"
+        "initial keep-alive tick complete"
     );
 
     let keepalive_handle = tokio::spawn(keepalive.run(stop_rx));
 
-    // R73 recovery — for each owned disk-group, replay the journal
-    // from the latest ZoneValue snapshot to reconstruct in-memory
-    // zone bitmaps. Runs after the blocking initial sync (which
-    // populated the container with empty zones + bind). Zones with
-    // existing snapshots are replayed via strategy 2; zones without
-    // snapshots fall back to strategy 1 (full scan).
+    // Build the gRPC service + start serving immediately (before
+    // recovery). Mutating RPCs are gated on lifecycle phase = Up, so
+    // allocate/free/rebuild return `unavailable` during recovery.
+    // Read-only RPCs (GetDiskGroupInfo, GetDiskInfo) are allowed.
     let recovery_engine = Arc::new(RecoveryEngine::new(
         Arc::clone(&dg_kv),
         config.persistence.recovery_concurrency,
     ));
-    info!("running R73 recovery");
+    let listen_addr: SocketAddr = config.server.listen_addr.parse().expect("valid listen_addr");
+    let grpc_service = DiskdbService::new(
+        container.clone(),
+        Arc::clone(&dg_kv),
+        config.storage.clone(),
+        Arc::clone(&recovery_engine),
+    )
+    .into_server();
+    info!(%listen_addr, "gRPC server listening (recovery pending)");
+
+    // Phase = Recovering. Spawn recovery as a background task — the
+    // main task does not block on it. Each disk-group's zones are
+    // recovered; when all are done, phase transitions to Up.
+    container.set_lifecycle_phase(StartupPhase::Recovering);
+    let recovery_container = Arc::clone(&container);
+    let recovery_kv = Arc::clone(&dg_kv);
+    let recovery_cfg = config.clone();
+    let recovery_handle = tokio::spawn(async move {
+        run_recovery(recovery_kv, recovery_container, &recovery_cfg).await;
+    });
+
+    // Start the compaction loop (R73 strategy 3).
+    let compaction_cfg = CompactionConfig {
+        compaction_cadence: std::time::Duration::from_secs(u64::from(
+            config.persistence.compaction_cadence_secs,
+        )),
+        snapshot_compaction_threshold: config.persistence.snapshot_compaction_threshold,
+    };
+    let compaction_engine = Arc::new(CompactionEngine::new(Arc::clone(&dg_kv), compaction_cfg));
+    let compaction_handle = {
+        let ce = Arc::clone(&compaction_engine);
+        let container = Arc::clone(&container);
+        tokio::spawn(async move {
+            ce.compaction_loop(container).await;
+        })
+    };
+
+    // Serve gRPC until shutdown signal.
+    let grpc_result = tonic::transport::Server::builder()
+        .add_service(grpc_service)
+        .serve_with_shutdown(listen_addr, async move {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("received shutdown signal");
+            let _ = stop_tx.send(());
+        })
+        .await;
+
+    if let Err(e) = grpc_result {
+        tracing::error!("gRPC server error: {e}");
+    }
+    let _ = keepalive_handle.await;
+    let _ = compaction_handle.await;
+    let _ = recovery_handle.await;
+    info!("crow-diskdb stopped");
+}
+
+/// Run R73 recovery for all owned disk-groups, then set phase to Up.
+async fn run_recovery(kv: Arc<DataGroupClient>, container: Arc<DdbDiskGroupContainer>, config: &DdbConfig) {
+    info!("running R73 recovery (background)");
+    let recovery_engine = RecoveryEngine::new(kv, config.persistence.recovery_concurrency);
     for dg_id in container.disk_group_ids() {
         if let Some(dg) = container.get_disk_group(dg_id) {
             let bind = *dg.bind.read().unwrap();
@@ -152,18 +208,14 @@ async fn main() {
                     } else {
                         zone_size_units as u32
                     };
-                    // Strategy 2 (journal scan replay) with strategy 1
-                    // fallback. On any error, log and continue — the
-                    // zone is left with its (possibly empty) bitmap
-                    // from disk_add_init, which is correct for fresh
-                    // disks and conservative for recovered disks.
+                    // Strategy 1 (full scan) — strategy 2 is used
+                    // internally by recover_disk_group; this per-zone
+                    // rebuild is the on-demand path.
                     match recovery_engine
                         .rebuild_zone_bitmap_full_scan(bind, *disk_id, zi, unit_capacity)
                         .await
                     {
                         Ok((recovered_zone, stats)) => {
-                            // Replace the empty zone from disk_add_init
-                            // with the recovered zone.
                             if let Some(disk) = dg
                                 .disks
                                 .read()
@@ -205,49 +257,8 @@ async fn main() {
             dg.rebuild_allocating_disks();
         }
     }
-    info!("R73 recovery complete");
-
-    // Start the compaction loop (R73 strategy 3).
-    let compaction_cfg = CompactionConfig {
-        compaction_cadence: std::time::Duration::from_secs(u64::from(
-            config.persistence.compaction_cadence_secs,
-        )),
-        snapshot_compaction_threshold: config.persistence.snapshot_compaction_threshold,
-    };
-    let compaction_engine = Arc::new(CompactionEngine::new(Arc::clone(&dg_kv), compaction_cfg));
-    let compaction_handle = {
-        let ce = Arc::clone(&compaction_engine);
-        let container = Arc::clone(&container);
-        tokio::spawn(async move {
-            ce.compaction_loop(container).await;
-        })
-    };
-
-    // Serve gRPC.
-    let listen_addr: SocketAddr = config.server.listen_addr.parse().expect("valid listen_addr");
-    let grpc_service = DiskdbService::new(
-        container.clone(),
-        Arc::clone(&dg_kv),
-        config.storage.clone(),
-        Arc::clone(&recovery_engine),
-    )
-    .into_server();
-    info!(%listen_addr, "gRPC server listening");
-    let grpc_result = tonic::transport::Server::builder()
-        .add_service(grpc_service)
-        .serve_with_shutdown(listen_addr, async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("received shutdown signal");
-            let _ = stop_tx.send(());
-        })
-        .await;
-
-    if let Err(e) = grpc_result {
-        tracing::error!("gRPC server error: {e}");
-    }
-    let _ = keepalive_handle.await;
-    let _ = compaction_handle.await;
-    info!("crow-diskdb stopped");
+    container.set_lifecycle_phase(StartupPhase::Up);
+    info!("R73 recovery complete; phase = Up");
 }
 
 fn load_config(args: &Cli) -> DdbConfig {

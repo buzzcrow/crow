@@ -4,6 +4,7 @@
 //! `DdbDiskGroupContainer` — per-instance singleton managing all owned disk-groups.
 
 use super::disk_group::DdbDiskGroup;
+use crate::lifecycle::LifecycleState;
 use crow_protocol::DiskGroupId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +16,7 @@ pub struct DdbDiskGroupContainer {
     disk_groups: RwLock<HashMap<DiskGroupId, Arc<DdbDiskGroup>>>,
     pub(crate) instance_id: u64,
     pub(crate) degraded: AtomicBool,
+    pub(crate) lifecycle: LifecycleState,
 }
 
 impl DdbDiskGroupContainer {
@@ -23,6 +25,7 @@ impl DdbDiskGroupContainer {
             disk_groups: RwLock::new(HashMap::new()),
             instance_id,
             degraded: AtomicBool::new(false),
+            lifecycle: LifecycleState::new(),
         }
     }
 
@@ -60,5 +63,15 @@ impl DdbDiskGroupContainer {
     #[allow(dead_code)]
     pub(crate) fn is_degraded(&self) -> bool {
         self.degraded.load(Ordering::SeqCst)
+    }
+
+    /// Current startup phase.
+    pub fn lifecycle_phase(&self) -> crate::lifecycle::StartupPhase {
+        self.lifecycle.get()
+    }
+
+    /// Set the startup phase.
+    pub fn set_lifecycle_phase(&self, phase: crate::lifecycle::StartupPhase) {
+        self.lifecycle.set(phase);
     }
 }

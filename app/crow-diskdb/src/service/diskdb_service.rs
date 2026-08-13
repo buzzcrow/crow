@@ -88,6 +88,15 @@ impl DiskdbServiceTrait for DiskdbService {
             )));
         }
 
+        // Check lifecycle phase — mutating RPCs require Up.
+        let phase = self.container.lifecycle_phase();
+        if !phase.allows_mutating_rpcs() {
+            return Err(Status::unavailable(format!(
+                "diskdb not ready: phase={}",
+                phase.as_str()
+            )));
+        }
+
         // Check not degraded.
         if self.container.is_degraded() {
             return Err(Status::unavailable("diskdb in degraded mode"));
@@ -136,6 +145,15 @@ impl DiskdbServiceTrait for DiskdbService {
 
         if req.segments.is_empty() {
             return Ok(Response::new(FreeResponse { freed_count: 0 }));
+        }
+
+        // Check lifecycle phase — mutating RPCs require Up.
+        let phase = self.container.lifecycle_phase();
+        if !phase.allows_mutating_rpcs() {
+            return Err(Status::unavailable(format!(
+                "diskdb not ready: phase={}",
+                phase.as_str()
+            )));
         }
 
         // Check not degraded.
@@ -264,6 +282,16 @@ impl DiskdbServiceTrait for DiskdbService {
         req: Request<RebuildZoneBitmapRequest>,
     ) -> Result<Response<RebuildZoneBitmapResponse>, Status> {
         let req = req.into_inner();
+
+        // Check lifecycle phase — mutating RPCs require Up.
+        let phase = self.container.lifecycle_phase();
+        if !phase.allows_mutating_rpcs() {
+            return Err(Status::unavailable(format!(
+                "diskdb not ready: phase={}",
+                phase.as_str()
+            )));
+        }
+
         let disk_id = req
             .disk_id
             .ok_or_else(|| Status::invalid_argument("disk_id required"))?;
