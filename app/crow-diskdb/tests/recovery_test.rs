@@ -20,7 +20,7 @@ use std::time::Duration;
 use common::cluster::KvCluster;
 use crow_diskdb::ddb_config::{CompactionConfig, KeepAliveConfig};
 use crow_diskdb::ddb_kv_client::DdbKvClient;
-use crow_diskdb::keepalive::KeepAlive;
+use crow_diskdb::liveness::keepalive::KeepAlive;
 use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::model::zone::DdbZone;

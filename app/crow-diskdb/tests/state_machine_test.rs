@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
+use crow_diskdb::liveness::state_machine::{HwStateMachine, IllegalTransition, Op};
 use crow_diskdb::model::disk::DdbDisk;
 use crow_diskdb::model::disk_group::DdbDiskGroup;
 use crow_diskdb::model::zone::{DdbZone, DdbZoneHealth};
-use crow_diskdb::status_machine::{HwStateMachine, IllegalTransition, Op};
 use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 

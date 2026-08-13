@@ -4,7 +4,7 @@
 //! `DdbDiskGroupContainer` — per-instance singleton managing all owned disk-groups.
 
 use super::disk_group::DdbDiskGroup;
-use crate::lifecycle::LifecycleState;
+use crate::liveness::lifecycle::LifecycleState;
 use crow_protocol::DiskGroupId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,12 +66,12 @@ impl DdbDiskGroupContainer {
     }
 
     /// Current startup phase.
-    pub fn lifecycle_phase(&self) -> crate::lifecycle::StartupPhase {
+    pub fn lifecycle_phase(&self) -> crate::liveness::lifecycle::StartupPhase {
         self.lifecycle.get()
     }
 
     /// Set the startup phase.
-    pub fn set_lifecycle_phase(&self, phase: crate::lifecycle::StartupPhase) {
+    pub fn set_lifecycle_phase(&self, phase: crate::liveness::lifecycle::StartupPhase) {
         self.lifecycle.set(phase);
     }
 }

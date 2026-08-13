@@ -13,10 +13,8 @@
 pub mod bg_task;
 pub mod ddb_config;
 pub mod ddb_kv_client;
-pub mod keepalive;
-pub mod lifecycle;
+pub mod liveness;
 pub mod metrics;
 pub mod model;
 pub mod recovery;
 pub mod service;
-pub mod status_machine;

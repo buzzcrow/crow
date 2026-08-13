@@ -3,7 +3,7 @@
 
 //! `LifecycleState` + `StartupPhase` tests.
 
-use crow_diskdb::lifecycle::{LifecycleState, StartupPhase};
+use crow_diskdb::liveness::lifecycle::{LifecycleState, StartupPhase};
 
 #[test]
 fn test_lifecycle_default_is_init() {

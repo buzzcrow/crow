@@ -20,11 +20,11 @@ use tracing::{info, warn};
 
 use crate::ddb_config::KeepAliveConfig;
 use crate::ddb_kv_client::DdbKvClient;
+use crate::liveness::state_machine::HwStateMachine;
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
-use crate::status_machine::HwStateMachine;
 
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
