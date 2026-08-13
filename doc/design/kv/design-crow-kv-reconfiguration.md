@@ -3,10 +3,10 @@
 
 # CROW - Design: Reconfiguration
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv-leader-election.md`](design-crow-kv-leader-election.md)
-Satisfies: design-crow-kv.md §9.1](design-crow-kv.md), prerequisites of design-crow-kv.md §9.2](design-crow-kv.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §9.1, §9.2, [`design-crow-kv-leader-election.md`](design-crow-kv-leader-election.md)
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §9.1, §9.2
 
-This document specifies how a CROW group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design-crow-kv.md` §3.3). The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
+This document specifies how a CROW group safely changes its membership while preserving consensus safety. The mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design-crow-kv.md` §3.3).
 
 ## Table of Contents
 
@@ -16,11 +16,10 @@ This document specifies how a CROW group safely changes its membership while pre
 - [4. Member Removal](#4-member-removal)
 - [5. Leader Transfer](#5-leader-transfer)
 - [6. The `membership_epoch` Fence](#6-the-membership_epoch-fence)
-- [7. Group-0 Special Cases (historical, superseded by persistent cluster config)](#7-group-0-special-cases-historical)
+- [7. Group-0 Special Cases](#7-group-0-special-cases)
 - [8. Safety Argument](#8-safety-argument)
 - [9. Failure During Reconfiguration](#9-failure-during-reconfiguration)
 - [10. Tunables and Defaults](#10-tunables-and-defaults)
-- [11. Design History](#11-design-history)
 
 ---
 
@@ -45,7 +44,7 @@ Out of scope (design-crow-kv.md §2](design-crow-kv.md)):
 
 ## 2. Direct Per-Node Mutation Model
 
-The shipped design does not use `ConfigChange` log entries or a joint configuration. Instead, the operator (or `crow-console`) mutates the remote-replica list on each node independently through the HTTP management API:
+The design does not use `ConfigChange` log entries or a joint configuration. Instead, the operator (or `crow-console`) mutates the remote-replica list on each node independently through the HTTP management API:
 
 - `POST /stores/:sid/groups/:gid/remotes` — add one or more remote replicas.
 - `DELETE /stores/:sid/groups/:gid/remotes/:rid` — remove a remote replica.
@@ -173,26 +172,21 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 
 ---
 
-## 7. Group-0 Special Cases (historical)
+## 7. Group-0 Special Cases
 
-> **Decision record (2026-07, updated 2026-07):** `Group-0` as
-> originally described in this section (joint-consensus-based system
-> group) was never implemented. However, the persistent cluster config
-> requirement later adopted a system
-> group (store 0, group 0) using the **shipped Model B reconfiguration**
-> (direct HTTP mutation + `membership_epoch` fence) — no
-> joint-consensus primitive was needed. Group 0 stores cluster topology
-> as KV entries under text-path keys (`/hw/rack/...`, `/hw/node/...`,
-> `/kv/store/...`, `/kv/group/...`, etc.) with JSON values, written by
-> `HardwareClient` and `KVClusterMetaClient` in `crow-kv-client`. It is
-> created via `POST /system/init`. See `design-crow-kv.md` §3.3,
-> `design-crow-kv-group0.md`, and
-> `../console/design-crow-console.md` §4.3 for the implemented design.
-> The original joint-consensus proposal below was never built; see §11
-> for the design history and the rationale for choosing the shipped
-> model. Kept for history/reference only.
+Group 0 (store 0, group 0) is the system group that stores cluster
+topology metadata. It uses the same direct HTTP mutation +
+`membership_epoch` fence reconfiguration model (§2) as all other
+groups — no joint-consensus primitive is needed. Group 0 stores
+cluster topology as KV entries under text-path keys (`/hw/rack/...`,
+`/hw/node/...`, `/kv/store/...`, `/kv/group/...`, etc.) with JSON
+values, written by `HardwareClient` and `KVClusterMetaClient` in
+`crow-kv-client`. It is created via `POST /system/init`. See
+`design-crow-kv.md` §3.3, `design-crow-kv-group0.md`, and
+`../console/design-crow-console.md` §4.3 for details.
 
-The original design described Raft-style joint consensus with `C_old ∪ C_new` intermediate configurations, two `ConfigChange` log entries per membership change, and `TimeoutNow` fast leader transfer. The shipped system uses direct per-node HTTP mutation and `membership_epoch` fencing instead. A system embedding `crow-kv`'s primitives may still choose to build a joint-consensus layer on top of the `membership_epoch` fence.
+A system embedding `crow-kv`'s primitives may choose to build a
+joint-consensus layer on top of the `membership_epoch` fence.
 
 ---
 
@@ -222,7 +216,7 @@ The single-degree-at-a-time recommendation is not a safety requirement under the
 
 ## 9. Failure During Reconfiguration
 
-Because membership is persisted per node and not via a consensus log, failure recovery is simpler than in the original joint-consensus design:
+Because membership is persisted per node and not via a consensus log, failure recovery is simpler:
 
 - **Leader crashes after the first node has been mutated but before the fan-out completes.** The remaining nodes may have different epochs. The new leader, once elected, adopts the highest epoch it observes from any peer and continues the fan-out from the console. Writes self-heal as epochs converge.
 - **A new member fails during catch-up.** The operator removes it before flipping `voting` to `true`. Because the member is non-voting, its failure cannot affect quorum safety.
@@ -247,72 +241,3 @@ Because membership is persisted per node and not via a consensus log, failure re
 - For 7 → 3: do four single-remove reconfigurations.
 - Always step-down a leader before removing it. If the leader is unreachable, proceed and rely on the lease-unrenewable fallback.
 - Monitor `epoch_mismatch` responses and `membership_epoch` values during reconfiguration — a sustained `epoch_mismatch` is a sign that the fan-out is still in progress.
-
----
-
-## 11. Design History
-
-This section records how the shipped reconfiguration model was chosen and
-hardened, preserving the decision rationale from the original gap analysis.
-
-### 11.1 What was designed vs what shipped
-
-The original `design-crow-kv-reconfiguration.md` (§7, now historical) specified
-Raft-style joint consensus: two `ConfigChange` log entries per membership
-change (`joint = C_old ∪ C_new`, then `C_new`), both-quorum evaluation gated
-on *apply* not *chosen*, non-voting catch-up, `TimeoutNow` leader transfer,
-and Group-0-specific serialization rules. `lib/crow-kv/src/reconfig/mod.rs` was a
-skeleton stub — no joint-consensus code, no `ConfigChange` log-entry kind, no
-`TimeoutNow` RPC were ever built.
-
-What shipped instead (Model B, same operator-driven-simplicity spirit as P4's
-topology decision): **direct, per-node HTTP mutation** of each replica's
-remote-replica list (`app/crow-kv-server/src/mgmt_api.rs`), persisted to the local
-`GroupConfigStore` config file, with a non-voting-then-voting dance for
-new-member catch-up and no consensus-log involvement at all.
-
-### 11.2 The safety decision
-
-A code-level gap analysis (2026-07) identified that the shipped
-direct-mutation model had no written safety argument for the transient
-quorum-size disagreement window during fan-out: each node computes quorum
-from its own local voting-member count, and between the first and last HTTP
-calls for the same logical change, different nodes transiently disagree.
-
-Three options were evaluated:
-
-- **(a) Accept as documented risk.** Rejected: the window is real and
-  reachable during every membership addition, not just an edge case.
-- **(b) Lightweight epoch fence.** Chosen. Add a `membership_epoch` field
-  to `PxGroupConfig`, require exact match on `Prepare`/`Accept`, reject with
-  `epoch_mismatch` carrying the responder's epoch, and converge bidirectionally
-  to `max(own, peer)`. This converts the silent risk into a loud, bounded,
-  self-healing write stall during fan-out. No new propagation mechanism needed
-  — the console's existing all-nodes HTTP fan-out already delivers the epoch
-  bump to every node.
-- **(c) Full joint consensus.** Out of scope — would need its own design and
-  implementation plan. A system embedding `crow-kv`'s primitives may still
-  choose to build a joint-consensus layer on top of the `membership_epoch`
-  fence.
-
-### 11.3 Bug found during the analysis
-
-While designing the epoch fence, an independent correctness bug was found in
-the already-shipped code: non-voting members' `Accepted`/`Promised` replies
-were counted toward quorum (both in `run_accept_phase`/`run_prepare_phase` and
-in `PxGroup::propose`/`run_bulk_phase1`, which computed their own
-voting-agnostic quorum instead of reusing `self.quorum()`). During the
-non-voting catch-up window that every membership addition goes through, a
-value could be marked `Chosen` with fewer true voting-majority acks than
-required. This was fixed before the epoch fence was built on top of it
-(§6.4).
-
-### 11.4 Rolling upgrade compatibility
-
-Rolling upgrade testing verified that a mixed-version 3-node cluster (two
-nodes on one build, one on another) serves KV workload without divergence.
-The `membership_epoch` protobuf field (added by the fence) is itself a
-version-compat surface — an old binary without it defaults to `0` (protobuf3
-scalar default), which is correct because the initial epoch is `0`.
-Operational procedures for rolling upgrades are documented in
-[`user-guide.md`](../user-manual/user-guide.md).

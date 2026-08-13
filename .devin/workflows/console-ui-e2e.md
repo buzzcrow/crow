@@ -2,7 +2,7 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: CROW E2E (Playwright) test rules
+description: console-ui-e2e
 ---
 
 # CROW - E2E / Playwright Tests

@@ -7,7 +7,7 @@ description: CROW coding flow — conventions, doc-first
 
 # CROW - Coding Flow
 
-Companion workflows: `/review` (pre-push), `/doc` (doc rules), `/e2e` (Playwright tests).
+Companion workflows: `/review` (pre-push), `/doc` (doc rules), `/console-ui-e2e` (console-ui-e2e).
 
 ## Conventions
 

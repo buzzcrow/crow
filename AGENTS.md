@@ -39,9 +39,9 @@ Rust workspace + C++ storage engine (via FFI).
 | Action | Read first |
 | --- | --- |
 | Write/modify code | `/coding` workflow (conventions, doc-first) |
-| Write/modify E2E tests | `/e2e` workflow (Playwright rules) |
+| Write/modify E2E tests | `/console-ui-e2e` workflow (console-ui-e2e) |
 | Design or architecture question | `doc/doc_index.md` → match row → open only that doc under `doc/design/{kv,tree,console}/`, grep for `##` section |
-| Write/modify docs | `/doc` workflow (hierarchy, naming, formatting rules) |
+| Write/modify docs | `/doc` workflow (hierarchy, naming, formatting rules) → Doc Guides section dispatches to per-type guides: `doc-design` (formal design docs), `doc-backlog` (R** requirement docs), `doc-working-design` (design drafts), `doc-working-plan` (task plans) |
 | Commit changes | Hard Constraints above — no extra doc needed |
 | Debug a test failure | `/debug-test` workflow (env check, log-first, data-first, add missing logs) |
 | Pre-push review | `/review` workflow (checklist, hot-path rules, clippy exceptions) |

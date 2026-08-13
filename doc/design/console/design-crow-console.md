@@ -1,11 +1,46 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW Console Design
+# CROW - Design: Console (Overview)
 
-Upstream: `doc/../kv/design-crow-kv.md` §15 (the `crow-console` component
-overview) and §15.4.6 (Web UI requirements).
-Sibling: `doc/design/design-crow-console-ui.md` (frontend SPA design).
+The `crow-console` component provides a Web UI and a CLI that share one
+Rust core for managing `crow-kv-server` clusters. This overview covers
+the backend, data model, CLI, and hosting concerns; the frontend SPA
+design is detailed in the sub-design `design-crow-console-ui.md`.
+
+## Table of Contents
+
+- [1. Goals and Non-Goals](#1-goals-and-non-goals)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+- [2. High-Level Architecture](#2-high-level-architecture)
+  - [2.1 Call Path](#21-call-path)
+  - [2.2 Reuse Boundary](#22-reuse-boundary)
+- [3. Data Model](#3-data-model)
+  - [3.1 Physical (deployment) view](#31-physical-deployment-view)
+  - [3.2 Logical (usage) view](#32-logical-usage-view)
+  - [3.3 Source of truth and freshness](#33-source-of-truth-and-freshness)
+  - [3.4 Design decisions](#34-design-decisions)
+- [4. Console Backend Persistence and Monitor Task](#4-console-backend-persistence-and-monitor-task)
+  - [4.1 Persisted state (config file)](#41-persisted-state-config-file)
+  - [4.2 Monitor task](#42-monitor-task)
+  - [4.3 Persistent Cluster Config](#43-persistent-cluster-config)
+- [5. Node Access Model](#5-node-access-model)
+  - [5.1 Two transports per node](#51-two-transports-per-node)
+  - [5.2 SSH defaults (russh)](#52-ssh-defaults-russh)
+  - [5.3 Process lifecycle (deploy / start / stop)](#53-process-lifecycle-deploy--start--stop)
+- [6. Web UI Backend (Axum)](#6-web-ui-backend-axum)
+  - [6.1 Design Rules](#61-design-rules)
+  - [6.2 Recursive reads (?recursive=<depth>)](#62-recursive-reads-recursivedepth)
+  - [6.3 Orchestration semantics](#63-orchestration-semantics)
+  - [6.4 Resolution rules](#64-resolution-rules)
+  - [6.5 Frontend contract](#65-frontend-contract)
+- [7. CLI Design](#7-cli-design)
+  - [7.1 Bench subcommand](#71-bench-subcommand)
+- [8. Swagger UI Hosting](#8-swagger-ui-hosting)
+- [9. Error Model and Operation Logging](#9-error-model-and-operation-logging)
+- [10. Observability](#10-observability)
+- [11. Open Questions](#11-open-questions)
 
 ## 1. Goals and Non-Goals
 
@@ -371,7 +406,7 @@ these rules:
 
 ### 6.5 Frontend contract
 
-The frontend SPA design lives in `design/design-crow-console-ui.md`. The
+The frontend SPA design lives in `design-crow-console-ui.md`. The
 backend-facing contract here:
 
 - Bundle output is `app/crow-web/ui/dist/`; `crow-web` serves

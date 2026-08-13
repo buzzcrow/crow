@@ -3,10 +3,42 @@
 
 # CROW - Design: System Group (Group 0)
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md) [§3.3](design-crow-kv.md),
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §3.3
 [`design-crow-kv-server.md`](design-crow-kv-server.md),
 [`design-crow-kv-reconfiguration.md`](design-crow-kv-reconfiguration.md)
 Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §3.3
+
+---
+
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Design Decisions](#2-design-decisions)
+  - [2.1 `crow-kv-client` is the single sysdata API surface](#21-crow-kv-client-is-the-single-sysdata-api-surface)
+  - [2.2 `crow-kv-server` mgmt API is internal](#22-crow-kv-server-mgmt-api-is-internal)
+  - [2.3 Unified key concept with two encodings](#23-unified-key-concept-with-two-encodings)
+  - [2.4 All cross-component protocol types live in `crow-protocol`](#24-all-cross-component-protocol-types-live-in-crow-protocol)
+  - [2.5 ID types defined in `crow-protocol`](#25-id-types-defined-in-crow-protocol)
+  - [2.6 Two monitoring models: push (services) and pull (infrastructure)](#26-two-monitoring-models-push-services-and-pull-infrastructure)
+  - [2.7 kv-server keep-alive to group 0 (revised)](#27-kv-server-keep-alive-to-group-0-revised)
+  - [2.8 Hardware admin via kv-client (no admin gRPC service)](#28-hardware-admin-via-kv-client-no-admin-grpc-service)
+- [3. Group-0 Sysdata Schema](#3-group-0-sysdata-schema)
+  - [3.1 Key layout (text-path encoding)](#31-key-layout-text-path-encoding)
+  - [3.2 Text magic namespaces](#32-text-magic-namespaces)
+  - [3.3 Value encoding](#33-value-encoding)
+  - [3.4 Scan patterns](#34-scan-patterns)
+  - [3.5 `DiskGroupId` widening: u32 → u64](#35-diskgroupid-widening-u32--u64)
+  - [3.6 `dc_id` removal](#36-dc_id-removal)
+- [4. Service Registry](#4-service-registry)
+  - [4.1 Registration and keep-alive](#41-registration-and-keep-alive)
+  - [4.2 Services registered](#42-services-registered)
+  - [4.3 Liveness and expiry](#43-liveness-and-expiry)
+- [5. Bootstrap and Cutover](#5-bootstrap-and-cutover)
+  - [5.1 Two-phase bootstrap](#51-two-phase-bootstrap)
+  - [5.2 No `/topology/ready` flag](#52-no-topologyready-flag)
+  - [5.3 Greenfield migration](#53-greenfield-migration)
+  - [5.4 Leader readiness before writing](#54-leader-readiness-before-writing)
+- [6. Relationship to Existing Design Docs](#6-relationship-to-existing-design-docs)
 
 ---
 
@@ -80,7 +112,7 @@ CROW keys use a single key concept (struct + fields) with two encoding
 traits — `BinaryKey` (binary, for data groups) and `TextKey`
 (text-path, for group 0). The encoding protocol — rules, frozen
 layouts, evolution policy — is defined in
-[`design-crow-key.md`](../protocol/design-crow-key.md) §5. Group 0
+[`design-crow-protocol-key.md`](../protocol/design-crow-protocol-key.md) §5. Group 0
 uses text keys + JSON values; the full group-0 key/value schema is in
 §3 below.
 
@@ -118,8 +150,7 @@ handle, not a numeric cluster ID).
 - **`NodeId`** — `u64`. Console config today uses `String` for
   `NodeEntry.id`; the values are numeric strings. Console config
   schema changes to `u64`.
-- **`DiskGroupId`** — `u64`. (R70 key structs used `u32`; this is a
-  widening — see §3.5.)
+- **`DiskGroupId`** — `u64`. (This is a widening — see §3.5.)
 - **`StoreId`** — `u64`. Already u64 in kv-server and console config.
 - **`GroupId`** — `u64`. Already u64 in kv-server and console config.
 - **`ReplicaId`** — `u64`. Already u64 in kv-server and console config.
@@ -160,7 +191,7 @@ extended to periodic polling.
 **Yes, kv-server instances do keep-alive to group 0**, same push
 model as application services. Each kv-server instance registers
 under `/srv/kv-server/<instance_id>` and heartbeats with its hosted
-stores/groups and health status. This is implemented in R71 (a
+stores/groups and health status. This is implemented (a
 background keep-alive loop in `crow-kv-server` writing via
 `ServiceRegistryClient`); it is not deferred to a follow-up.
 
@@ -220,7 +251,7 @@ surface**: the previous `diskdb_sys_service.proto` /
 replaced by `HardwareClient` prefix scans, `Keepalive` by
 `ServiceRegistryClient.heartbeat`, and the add/remove/status ops by
 `HardwareClient` methods. The diskdb server serves only
-`DiskdbService` (allocate/free; stubbed `Unimplemented` until R72) and
+`DiskdbService` (allocate/free; stubbed `Unimplemented`) and
 reads hardware state from group 0 via `HardwareClient` in its sync
 loop — it does not own or serve hardware admin.
 
@@ -261,7 +292,7 @@ loop — it does not own or serve hardware admin.
 
 The encoding rationale (text vs binary magic independence, per-
 namespace choice) is in
-[`design-crow-key.md`](../protocol/design-crow-key.md) §5.
+[`design-crow-protocol-key.md`](../protocol/design-crow-protocol-key.md) §5.
 
 ### 3.3 Value encoding
 
@@ -305,7 +336,7 @@ single home for cross-component data structures) and are used by
 
 ### 3.5 `DiskGroupId` widening: u32 → u64
 
-R70 key structs (`DiskGroupKey`, `DiskKey`, `OwnerMapKey`,
+Key structs (`DiskGroupKey`, `DiskKey`, `OwnerMapKey`,
 `BindMapKey`) use `u32` for `disk_group_id`. The proto type
 `NodeValue` also uses `u32` for `disk_group_ids` (`repeated uint32`)
 and `last_used_dg_id` (`uint32`). (`DiskGroupValue` has no
@@ -322,9 +353,9 @@ diskdb is greenfield.
 
 ### 3.6 `dc_id` removal
 
-R70 reserved `dc_id` in `RackKey { dc_id, rack_id }`, `RackInfo`,
+The schema drops `dc_id` from `RackKey { dc_id, rack_id }`, `RackInfo`,
 `NodeInfo`, and `NodeValue.dc_id` (v1 ships flat — no DC layer). The
-text-path schema has no `dc_id` (`/hw/rack/<rack_id>`). R71 drops
+text-path schema has no `dc_id` (`/hw/rack/<rack_id>`). The schema drops
 `dc_id` from `RackKey` (struct + binary layout), `RackInfo`,
 `NodeInfo`, and `NodeValue.dc_id`. The binary `RackKey` layout changes
 accordingly (greenfield).
@@ -360,11 +391,11 @@ kv-server wrappers delegate to the generic methods.
 
 - **diskdb** — `/srv/diskdb/<instance_id>`. Heartbeat includes
   `owned_dg_ids` (which disk-groups this instance owns). Used by the
-  diskdb sync loop and by R78 notify for instance discovery.
+  diskdb sync loop and by a future notify mechanism for instance discovery.
 - **kv-server** — `/srv/kv-server/<instance_id>`. Heartbeat includes
   `hosted_stores`, `hosted_groups`, and aggregate health. Used by
   the console and other components for kv-server discovery and
-  health visibility. **Implemented in R71** (a background keep-alive
+  health visibility. **Implemented** (a background keep-alive
   loop in `crow-kv-server` writing via `ServiceRegistryClient`).
 - **Future services** (chunkdb, etc.) — same pattern under
   `/srv/<service>/<instance_id>`.
@@ -399,8 +430,8 @@ add a derived condition (e.g. "group 0 has ≥1 `/hw/node/` key").
 
 ### 5.3 Greenfield migration
 
-diskdb is greenfield (R70 just merged, no production diskdb). The
-old `/topology/...` records are superseded by `/hw/...` and
+diskdb is greenfield (no production diskdb). The
+old `/topology/...` records are replaced by `/hw/...` and
 `/kv/...`. Treat as greenfield — require a fresh cluster init. Old
 `/topology/...` keys are orphaned harmlessly.
 
@@ -427,5 +458,5 @@ existing flow doesn't already wait.
 - **`design-crow-kv-reconfiguration.md`** — group 0 membership
   evolves using the shipped Model B reconfiguration. No new consensus
   primitive required.
-- **`design-crow-key.md` §5** — documents the unified key concept
+- **`design-crow-protocol-key.md` §5** — documents the unified key concept
   (one struct, two encoding traits: `BinaryKey` + `TextKey`).

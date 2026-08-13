@@ -3,7 +3,7 @@
 
 // diskdb type definitions: enums, value types for data-group storage,
 // and the allocation handle (Segment). Key types are Rust key concepts
-// (see doc/design/protocol/design-crow-key.md), not proto messages.
+// (see doc/design/protocol/design-crow-protocol-key.md), not proto messages.
 // DiskId is in common_type.proto.
 //
 // See doc/design/diskdb/design-crow-diskdb.md.
@@ -62,7 +62,7 @@ message ZoneValue {
 // All sizes are in units; unit_size_bytes defines the unit itself.
 // Disk key is a Rust key concept (DiskKey, TextKey encoding
 // `/hw/disk/<rack_id>/<node_id>/<dg_id>/<disk_id_hex>` in group 0);
-// see doc/design/protocol/design-crow-key.md.
+// see doc/design/protocol/design-crow-protocol-key.md.
 message DiskValue {
   DiskType disk_type       = 1;
   uint64   capacity_units  = 2;
@@ -77,7 +77,7 @@ message DiskValue {
 // DiskGroup value — logical container of disks on one node.
 // DiskGroup key is a Rust key concept (DiskGroupKey, TextKey encoding
 // `/hw/dg/<rack_id>/<node_id>/<dg_id>` in group 0); see
-// doc/design/protocol/design-crow-key.md.
+// doc/design/protocol/design-crow-protocol-key.md.
 message DiskGroupValue {
   crow.common.HwStatus status = 1;
   repeated crow.common.DiskId disk_ids    = 2;

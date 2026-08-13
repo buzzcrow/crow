@@ -3,8 +3,8 @@
 
 # CROW - Design: Slots — Parallel Pipelining & Concurrent Slot List
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
-Satisfies: design-crow-kv.md §6.5](design-crow-kv.md), design-crow-kv.md §7.3](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md) §5.1 (high-concurrency log)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §5.1, §6.5, §7.3
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §5.1, §6.5, §7.3
 
 This document covers two aspects of CROW's slot mechanism:
 
@@ -26,8 +26,8 @@ This document covers two aspects of CROW's slot mechanism:
 - [10. Timing Diagrams](#10-timing-diagrams)
 - [11. Interaction with Snapshot and WAL GC](#11-interaction-with-snapshot-and-wal-gc)
 - [12. Tunables and Defaults](#12-tunables-and-defaults)
-- [13. Correctness Analysis for Parallel Slot Writes](#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)
-- [14. Parallel-Slot Linearizability Analysis](#14-parallel-slot-linearizability-analysis-moved-from-requirementmd-65)
+- [13. Correctness Analysis for Parallel Slot Writes](#13-correctness-analysis-for-parallel-slot-writes)
+- [14. Parallel-Slot Linearizability Analysis](#14-parallel-slot-linearizability-analysis)
 - [15. Slot List: Problem Statement](#15-slot-list-problem-statement)
 - [16. Slot List: Design Overview](#16-slot-list-design-overview)
 - [17. Slot List: PxSlotNode](#17-slot-list-pxslotnode)
@@ -36,6 +36,7 @@ This document covers two aspects of CROW's slot mechanism:
 - [20. Slot List: Correctness Invariants](#20-slot-list-correctness-invariants)
 - [21. Slot List: Performance Model](#21-slot-list-performance-model)
 - [22. Slot List: Risks, Reclamation & Open Questions](#22-slot-list-risks-reclamation--open-questions)
+- [23. Server-side Proposal Coalescing](#23-server-side-proposal-coalescing)
 
 ---
 
@@ -59,7 +60,7 @@ The blind-ops premise from design-crow-kv.md §5.2](design-crow-kv.md) makes the
 - **I1 — Single slot counter.** On a leader, slot assignment is performed by exactly one logical worker. Two writes never receive the same slot, and no two slots are assigned out of arrival order.
 - **I2 — Slot determines linearization.** The slot number assigned to an op is the op's position in the global linearization order (design-crow-kv.md §6.1](design-crow-kv.md)).
 - **I3 — Quorum-fsync before ack.** A client write is acked only after a quorum of acceptors (including the leader) have fsynced their `Accepted(slot, ballot, value)` records. This is the durability hook that makes I2 robust to failures.
-- **I4 — Apply-order independence for blind ops.** For any key *k*, the engine's final value is `value(max{ slot | slot writes k })`. Apply order between non-overlapping keys is irrelevant; for the same key, the higher slot wins regardless of arrival order ([§13](#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)).
+- **I4 — Apply-order independence for blind ops.** For any key *k*, the engine's final value is `value(max{ slot | slot writes k })`. Apply order between non-overlapping keys is irrelevant; for the same key, the higher slot wins regardless of arrival order ([§13](#13-correctness-analysis-for-parallel-slot-writes)).
 - **I5 — Per-key resolved-slot is monotone.** A learner's per-key tracker only ever advances. This is the basis for read-your-writes from followers.
 - **I6 — Safe-slot is contiguous.** The cluster-wide safe-slot is the maximum N such that *every* slot ≤ N is chosen and applied on every learner. It is by definition gap-free.
 
@@ -115,7 +116,7 @@ As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ..
 Each learner maintains, per key it has applied, the highest slot that has touched that key. This enables:
 
 - **Read-your-writes** ([§6.2 of design-crow-kv.md](design-crow-kv.md#62-read-your-writes-follower-read)): a follower can serve `Get(k, slot=N)` as soon as `resolved_slot[k] ≥ N`.
-- **Linearizability** ([§14](#14-parallel-slot-linearizability-analysis-moved-from-requirementmd-65)): per-key tracking makes "highest slot wins" correct under out-of-order apply.
+- **Linearizability** ([§14](#14-parallel-slot-linearizability-analysis)): per-key tracking makes "highest slot wins" correct under out-of-order apply.
 
 **Update rule.** On `apply(slot, batch)`: for each `(k, op, v?)` in the batch, if `slot > resolved_slot[k]`, update `resolved_slot[k] = slot` and write/tombstone `v`. Otherwise drop. Then advance `max_applied` and the contiguous-applied frontier.
 
@@ -435,7 +436,7 @@ Chunk lookup (`find_or_create_chunk`) walks the doubly-linked list to find the p
 
 ### 18.2 Get (head-first, general path)
 
-`get(slot)` walks from `head`, checking `trim_slot` first. When the covering chunk is found, it pins the chunk, loads the slot pointer, and returns a `SlotReadGuard`. Used for any historical slot.
+`get(slot)` walks from `head`, checking `trim_slot` first. When the covering chunk is found, it pins the chunk, loads the slot pointer, and returns a `SlotReadGuard`. Used for any already-known slot.
 
 ### 18.3 Get Tail (tail-first, hot path)
 
@@ -516,7 +517,7 @@ Compared to `BTreeMap`: ~10× faster insert, ~5× faster latest-slot access, ~3�
 
 ### 22.2 PxSlotNode Reclamation Evolution
 
-**Current:** Replaced `promised`/`accepted` pointers are retired and reclaimed on `PxSlotNode::drop`. No historical replacement leak, no dangling-reference regression.
+**Current:** Replaced `promised`/`accepted` pointers are retired and reclaimed on `PxSlotNode::drop`. No replacement leak, no dangling-reference regression.
 
 **Future triggers:** Per-node retired-chain depth growing across GC cycles, RSS growth from field churn, or tail latency regression from large node-drop reclamation bursts.
 
@@ -528,14 +529,14 @@ Compared to `BTreeMap`: ~10× faster insert, ~5× faster latest-slot access, ~3�
 2. **Chunk size:** Start with 1K; make `SLOT_CHUNK_SIZE` a `const` generic for benchmarking.
 3. **Per-slot `AtomicPtr` vs inline storage:** Start with `AtomicPtr`; optimise if profiles show bottleneck.
 
-## 23. Server-side Proposal Coalescing (R36 → R45/R45b)
+## 23. Server-side Proposal Coalescing
 
 ### 23.1 Problem
 
 Each client `PUT`/`DELETE` is its own Paxos proposal: one slot, one
 quorum RPC round, one WAL record, one learner apply. WAL batch
 aggregation already amortizes `fsync` across concurrent proposals, and
-R16b removed the leader's local `fsync` from the critical path, so the
+the leader's local `fsync` is off the critical path, so the
 remaining per-proposal fixed cost is the **quorum RPC round**. The
 write-flow sweep shows throughput plateaus at ~29K (Intel) / ~48K
 (M5 Pro) once the consensus pipeline saturates, independent of the
@@ -547,34 +548,25 @@ The `Batch` payload format already supports multiple ops per slot and
 concurrent single-key proposes each took a distinct slot and paid the
 full quorum round.
 
-### 23.2 Evolution: R36 (timer) → R45 (event) → R45b (drain threshold)
+### 23.2 Drain Threshold
 
-**R36 (timer-based, superseded)**: The first op opens a batch and arms
-a fixed timer (e.g. 500us). The timer fires (or the batch fills to
-`max_keys`) → spawn a slot-task. The timer is a deferred slot-task
-spawn — it delays the round so ops accumulate first.
-At high load, batches fill to `max_keys` before the timer fires; at
-low load, the timer adds a fixed latency floor (the "timer tax"). R36
-slot-tasks are fire-and-forget (no drain after round completion).
+The first op starts a 1-op slot-task **immediately** (no timer). Ops
+arriving during the round join a pending batch. On round completion,
+`coalesce_drain_after_round` checks the in-flight slot-task count
+(`occupied` — permits held) before taking the pending batch. If
+`occupied >= coalesce_drain_threshold`, the drain is skipped — the
+`max_keys` overflow path handles high load with full batches. If
+`occupied < coalesce_drain_threshold`, the pending batch is taken and
+the next slot-task is started (if non-empty) or the coalescer goes
+idle (if empty).
 
-**R45 (event-driven, current)**: The first op starts a 1-op slot-task
-**immediately** (no timer). Ops arriving during the round join a
-pending batch. On round completion, `coalesce_drain_after_round` takes
-the pending batch and starts the next slot-task (if non-empty) or goes
-idle (if empty). No timer, no latency floor. The high-load gap: with
-N concurrent slot-tasks, the drain fragments the single shared batch —
-most finishers get an empty batch, the coalescer goes idle, and the
-next op starts a 1-op round.
+At high load, drains almost never fire (many slot-tasks in flight);
+the `max_keys` overflow path produces full batches. At low load,
+drains always fire (few slot-tasks, threshold not exceeded), so there
+is no latency floor — a lone op flushes immediately. Default
+`coalesce_drain_threshold = 1` (see §23.5).
 
-**R45b (drain threshold, current)**: Same as R45, but the drain checks
-the in-flight slot-task count (`occupied` — permits held) before
-taking the batch. If `occupied >= coalesce_drain_threshold`, skip the
-drain — the `max_keys` overflow path handles high load with full
-batches. At high load, drains almost never fire (many slot-tasks in
-flight); at low load, drains always fire (few slot-tasks, threshold
-not exceeded). Default = `1` (see §23.5).
-
-### 23.3 Coalescer Design (R45b)
+### 23.3 Coalescer Design
 
 Per-group state on `PxGroup`:
 
@@ -605,7 +597,7 @@ Per-group state on `PxGroup`:
    immediately, never enters a batch.
 3. If `coalesce_max_keys == 0` (disabled) or `self_weak` is unset:
    call `propose_inner(payload, &[tag])` directly — bit-identical to
-   the legacy path.
+   the fallback path.
 4. Else (coalescing on): `coalesce_enqueue(payload, tag)`:
    - Coalescer is `None` (idle) → create a batch with this op, start a
      1-op slot-task **immediately**. Open a fresh empty batch for ops
@@ -653,10 +645,10 @@ message DedupTag { uint64 client_id = 1; uint64 seq = 2; }
 repeated DedupTag dedup_tags = 13;
 ```
 
-The legacy `client_id`/`seq` fields (9/10) are kept populated with the
+The `client_id`/`seq` fields (9/10) are kept populated with the
 first tag (or 0) for backward-compat with older followers during a
 rolling upgrade. New followers prefer `dedup_tags`; older followers
-fall back to the legacy single tag.
+fall back to the single tag.
 
 The `Learner::learn` trait signature changed from `(entry,
 client_id: Option<u64>, seq: Option<u64>)` to `(entry, dedup_tags:
@@ -711,15 +703,15 @@ the group via `set_from_config` (the coalescer reads
 
 ### 23.7 Benchmark Results (10s mem mode, 3-node cluster, max_keys=32)
 
-| Threads | Baseline TPS | R36 TPS | R45 event TPS | R45b TPS | R36 WAL | R45b WAL |
+| Threads | Baseline TPS | Timer TPS | Event TPS | Drain TPS | Timer WAL | Drain WAL |
 |---|---|---|---|---|---|---|
 | 32 | 27,787 | 33,029 | 48,346 | 47,485 | 31,090 | 139,404 |
 | 64 | 28,062 | 64,145 | 68,201 | 68,741 | 60,498 | 106,926 |
 | 128 | 28,260 | 97,554 | 86,759 | 101,537 | 92,752 | 101,350 |
 | 256 | 27,804 | 113,671 | 97,865 | 118,377 | 110,034 | 111,944 |
 
-R45b beats R36 at high load (128: 102K vs 98K, 256: 118K vs 114K) with
-WAL counts close to R36. At 64 threads it matches event mode and beats
-R36. At 32 threads it matches event mode (no regression) — the default
+Drain beats Timer at high load (128: 102K vs 98K, 256: 118K vs 114K) with
+WAL counts close to Timer. At 64 threads it matches Event mode and beats
+Timer. At 32 threads it matches Event mode (no regression) — the default
 threshold of 1 still allows drains at low load, preserving the zero-
 latency-floor behavior.

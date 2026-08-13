@@ -14,7 +14,7 @@
 //!   path, JSON-encoded values. Used by group 0 (small, human-
 //!   inspected, scan-friendly).
 //!
-//! See `doc/design/protocol/design-crow-key.md` for the full design.
+//! See `doc/design/protocol/design-crow-protocol-key.md` for the full design.
 //!
 //! Binary key layouts are frozen once shipped. New key kinds are added
 //! with a new type tag; existing layouts are never changed.

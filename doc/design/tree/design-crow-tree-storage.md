@@ -3,8 +3,8 @@
 
 # CROW - Design: crow-tree Durable Storage
 
-Parent: [`design-crow-tree.md`](design-crow-tree.md)
-Depends on: [`design-crow-tree-engine.md`](design-crow-tree-engine.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §12.1, [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md), [`../kv/design-crow-kv-wal.md`](../kv/design-crow-kv-wal.md), [`../kv/design-crow-kv-reconfiguration.md`](../kv/design-crow-kv-reconfiguration.md)
+Depends on: [`design-crow-tree.md`](design-crow-tree.md), [`design-crow-tree-engine.md`](design-crow-tree-engine.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §12.1, [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md), [`../kv/design-crow-kv-wal.md`](../kv/design-crow-kv-wal.md), [`../kv/design-crow-kv-reconfiguration.md`](../kv/design-crow-kv-reconfiguration.md)
+Satisfies: [`design-crow-tree.md`](design-crow-tree.md) §2 (durable storage architecture)
 
 This document specifies how crow-tree pages reach durable media and how that
 durability composes with the rest of CROW: the `PageStore` backend
@@ -98,12 +98,9 @@ immediately-ready completion). The upper-layer API is identical regardless
 of platform.
 
 **`FilePageStore`, `FileAsyncPageStore`, `IoEngine`, and `DirectIoEngine`
-are removed.** The old sync `FilePageStore` was only used for testing;
-`TextPageStore` now serves that role. The old `FileAsyncPageStore`
-(single-file `io_uring`) is superseded by `BlockAsyncPageStore`
-(array-of-blocks `io_uring`). The old `IoEngine`/`DirectIoEngine`
-abstraction (blocking calls wrapped as async) is replaced by the
-platform-level fallback described above.
+are removed.** `TextPageStore` serves the testing role. `BlockAsyncPageStore`
+(array-of-blocks `io_uring`) is the production async backend. The
+platform-level fallback described above provides the async abstraction.
 
 ### 2.4 fsync Policy
 

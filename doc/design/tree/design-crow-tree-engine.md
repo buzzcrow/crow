@@ -3,8 +3,8 @@
 
 # CROW - Design: crow-tree In-Memory Engine
 
-Parent: [`design-crow-tree.md`](design-crow-tree.md)
-Depends on: [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md) (apply semantics, slot rules)
+Depends on: [`design-crow-tree.md`](design-crow-tree.md), [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md) (apply semantics, slot rules)
+Satisfies: [`design-crow-tree.md`](design-crow-tree.md) §2 (in-memory engine architecture)
 
 This document specifies crow-tree's in-memory engine: the bounded 2-level
 structure (concurrent MemTable over a COW B+tree), the slot-aware value cell,
@@ -352,7 +352,7 @@ get(key):
   (`iter_all` / `compare`, `PinnedSnapshot::materialize`, GC's live walk).
 - **Zero-copy value returns.** An **L1** hit returns a *borrowed* `buffer`
   pointing into the resident leaf frame (valid only for the guard's
-  lifetime, §2.2). An **L0** hit (R50) also returns a *borrowed* `buffer`
+  lifetime, §2.2). An **L0** hit also returns a *borrowed* `buffer`
   pointing directly into the MemTable's skip-list node cell version — the
   epoch guard keeps the node alive past any concurrent overwrite/drain,
   exactly as it keeps an L1 frame resident. An overflow value (assembled
@@ -438,7 +438,7 @@ are relaxed atomics maintained by the writer (read by
 
 **`snapshot()` retained.** `iter_all`, `compare`, and `snapshot_export`
 need every entry — O(N) is correct there. `snapshot()` is a cursor walk;
-the point of R50 is that it is no longer on the scan or get path.
+the point of L0 is that it is no longer on the scan or get path.
 
 ### 1.10 Scan Path Perf Baseline
 
@@ -510,7 +510,7 @@ copy does.
 Future gaps (not measured by the baseline): high-concurrency
 read-mode split (MinSlot vs Linearizable at > 1T:1C), and reverse scan
 (forward-only today). The L0 snapshot copy (O(N_l0) per scan) was closed
-by R50 — see §1.9.
+by the L0 path — see §1.9.
 
 ---
 

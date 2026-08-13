@@ -3,8 +3,22 @@
 
 # CROW - Design: KV Server
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md) [§15.2](design-crow-kv.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §15.2
 Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §15.2
+
+---
+
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Design Decisions](#2-design-decisions)
+  - [2.1 KV engine selection](#21-kv-engine-selection)
+  - [2.2 Startup ordering](#22-startup-ordering)
+  - [2.3 Concurrency model](#23-concurrency-model)
+  - [2.4 HTTP framework: axum](#24-http-framework-axum)
+  - [2.5 Group lifecycle](#25-group-lifecycle)
+  - [2.6 Shutdown](#26-shutdown)
+- [3. Port Pool](#3-port-pool)
 
 ---
 

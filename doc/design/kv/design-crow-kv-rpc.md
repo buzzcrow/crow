@@ -3,8 +3,8 @@
 
 # CROW - Design: RPC Wire Protocol
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md) §3, §9.2, §10, [`design-crow-kv.md`](design-crow-kv.md) §2, §3
-Satisfies: design-crow-kv.md §3](design-crow-kv.md), design-crow-kv.md §9.2](design-crow-kv.md), design-crow-kv.md §10.1](design-crow-kv.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §2, §3, §9.2, §10
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §3, §9.2, §10.1
 
 This document defines the wire-serialization contract for all node-to-node and client-to-node RPC communication. The implementation uses **gRPC with protobuf** (tonic + prost). Every message carries a `version: u32` field at fixed protobuf tag 1 for forward/backward compatibility; no `required` fields; field numbers are append-only.
 

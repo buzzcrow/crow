@@ -8,7 +8,7 @@
 //! group keys (`ZoneKey`, `BusyBlockKey`, `FreeBlockKey`) implement
 //! [`BinaryKey`] only.
 //!
-//! See `doc/design/protocol/design-crow-key.md` §5 for frozen layouts.
+//! See `doc/design/protocol/design-crow-protocol-key.md` §5 for frozen layouts.
 //! See `doc/design/diskdb/design-crow-diskdb.md` §5 and §7 for the
 //! component-specific hierarchy.
 

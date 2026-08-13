@@ -1,21 +1,36 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW protocol types — Design
+# CROW - Design: Protocol Types
 
-This is a root design document for the **protocol** component area,
-focused on **wire types and identifier types** for cross-component
-communication. It defines what lives in `crow-protocol`, the rules
-for adding types there, and the consumer patterns that keep a single
+Depends on: [`design-crow-protocol.md`](design-crow-protocol.md)
+Satisfies: [`design-crow-protocol.md`](design-crow-protocol.md) wire types and ID aliases scope
+
+This is the sub-design for **wire types and identifier types** within
+the protocol area. Architecture decisions and the area envelope live
+in the root
+[`design-crow-protocol.md`](design-crow-protocol.md); this doc covers
+the detailed design: what lives in `crow-protocol`, the rules for
+adding types there, and the consumer patterns that keep a single
 source of truth across crates.
 
-The companion doc [`design-crow-key.md`](design-crow-key.md) covers
-key encoding. This doc covers everything else in `crow-protocol`:
-ID aliases, HTTP management API wire types, and group-0 sysdata
-entry types.
+The companion sub-design
+[`design-crow-protocol-key.md`](design-crow-protocol-key.md) covers
+key encoding. This doc covers everything else in `crow-protocol`: ID
+aliases, HTTP management API wire types, and group-0 sysdata entry
+types.
 
 See `doc/design/kv/design-crow-kv-group0.md` §2.4 (single home
 decision) and §2.5 (ID alias decision) for the upstream mandates.
+
+## Table of Contents
+
+- [1. Problem](#1-problem)
+- [2. Goals](#2-goals)
+- [3. Rules](#3-rules)
+- [4. Module Architecture](#4-module-architecture)
+- [5. Consumer Pattern](#5-consumer-pattern)
+- [6. References](#6-references)
 
 ---
 
@@ -42,18 +57,9 @@ and the conversion is a place for bugs.
 - **Optional schema derives.** The kv-server's OpenAPI spec needs
   `utoipa::ToSchema`; non-server consumers must not pull in `utoipa`.
 
-## 3. Non-Goals
+## 3. Rules
 
-- **No key encoding** — covered in [`design-crow-key.md`](design-crow-key.md).
-- **No protobuf definitions** — `.proto` files and generated code
-  live in `crow-protocol` for shared access, but their design is
-  driven by each component's gRPC service doc, not here.
-- **No server-local types** — types used only inside `crow-kv-server`
-  stay in the server; they are not cross-component.
-
-## 4. Rules
-
-### 4.1 Single home
+### 3.1 Single home
 
 All cross-component protocol types — wire types, ID aliases, key
 types — live in `crow-protocol`. No other crate defines its own copy
@@ -61,7 +67,7 @@ of a type that crosses a boundary. `crow-protocol` is the natural
 home: it already hosts the shared protobuf types and has no heavy
 dependencies.
 
-### 4.2 ID aliases are `u64` type aliases, not newtypes
+### 3.2 ID aliases are `u64` type aliases, not newtypes
 
 Simple integer IDs (`RackId`, `NodeId`, `DiskGroupId`, `StoreId`,
 `GroupId`, `ReplicaId`, `InstanceId`) are `pub type X = u64;` in
@@ -79,7 +85,7 @@ ID that is fundamentally numeric. The only `String` exceptions are
 non-cluster-ID handles: the console's `ServerEntry.id` (a URL
 handle) and `UpstreamRpc.node_id` (holds a URL, not a numeric ID).
 
-### 4.3 Re-export and alias, never redefine
+### 3.3 Re-export and alias, never redefine
 
 Consumers that have their own traditional names for wire types use
 `pub use` aliases instead of defining new structs:
@@ -98,7 +104,7 @@ guaranteeing one struct definition per wire shape. If a consumer
 does not render some fields, serde populates them and the consumer
 ignores them — the fields are not dropped from the type.
 
-### 4.4 `schema` feature: optional `utoipa` derives
+### 3.4 `schema` feature: optional `utoipa` derives
 
 Every mgmt wire type derives `utoipa::ToSchema` behind a feature-gated
 `cfg_attr`:
@@ -112,7 +118,7 @@ Only `crow-kv-server` (which builds the OpenAPI spec) enables the
 `schema` feature. All other consumers depend on `crow-protocol`
 without it and never pull in `utoipa`.
 
-### 4.5 Orphan rule: local conversions stay local
+### 3.5 Orphan rule: local conversions stay local
 
 Conversions between a `crow-protocol` wire type and a foreign source
 type cannot live in `crow-protocol` (orphan rule). They stay in the
@@ -126,7 +132,7 @@ crate that owns the source type:
 The hosting module re-exports the wire types from `crow-protocol` and
 hosts the conversions. It defines zero structs.
 
-### 4.6 Server-local types stay server-local
+### 3.6 Server-local types stay server-local
 
 Types used only inside `crow-kv-server` (e.g. `JoinGroupRequest`,
 `FlushResult`, `ReadinessResponse`, `ApiDoc`) stay in the server.
@@ -134,7 +140,7 @@ They are not cross-component; promoting them to `crow-protocol`
 would be premature. The rule: a type moves to `crow-protocol` only
 when a second crate needs to consume it.
 
-## 5. Module Architecture
+## 4. Module Architecture
 
 `crow-protocol` is organized into modules by concern. All public
 types are re-exported from the crate root.
@@ -152,7 +158,7 @@ types are re-exported from the crate root.
   form of a text-path key + its JSON value, produced by
   `HardwareClient` / `KVClusterMetaClient` reads.
 - **`key`** — key encoding traits and structs (covered in
-  [`design-crow-key.md`](design-crow-key.md)).
+  [`design-crow-protocol-key.md`](design-crow-protocol-key.md)).
 - **`common` / `diskdb::rpc` / `chunkdb::rpc` / `diskio::rpc`** —
   generated protobuf code from `.proto` files.
 - **`diskdb_type_util`** — extension traits and utility functions
@@ -163,7 +169,7 @@ Field-level detail for every type lives in the source files
 (`lib/crow-protocol/src/{common_type,mgmt,sysdata}.rs`), not in this
 doc. The doc gives the rules; the source is the reference.
 
-## 6. Consumer Pattern
+## 5. Consumer Pattern
 
 Every consumer follows the same pattern:
 
@@ -172,11 +178,12 @@ Every consumer follows the same pattern:
 3. **Numeric IDs at boundaries** — axum path params are `Path<u64>`, HTTP DTOs use `RackId`/`NodeId`, not `String`.
 4. **Local conversions only** — if a crate owns a source type, its `From` impl or free function lives there, not in `crow-protocol`.
 
-## 7. References
+## 6. References
 
 - `design-crow-kv-group0.md` §2.4 — single home mandate.
 - `design-crow-kv-group0.md` §2.5 — ID alias mandate.
 - `design-crow-kv-server.md` §2.4 — HTTP management API endpoints.
-- `design-crow-key.md` — key encoding (companion doc).
-- `lib/crow-protocol/src/` — type definitions (the field-level
-  reference).
+- [`design-crow-protocol-key.md`](design-crow-protocol-key.md) — key
+  encoding (companion sub-design).
+- The `crow-protocol` crate modules — type definitions (the
+  field-level reference).

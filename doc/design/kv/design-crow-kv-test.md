@@ -1,9 +1,23 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW Test Strategy
+# CROW - Design: Test Strategy
 
-## Overview
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §17
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §17
+
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Architecture Stack](#2-architecture-stack)
+- [3. Test Binary Map](#3-test-binary-map)
+- [4. Cross-Cutting Coverage Rules](#4-cross-cutting-coverage-rules)
+- [5. Layer Scope](#5-layer-scope)
+- [6. crow-tree C++ Test Layers](#6-crow-tree-c-test-layers)
+- [7. Sequencing](#7-sequencing)
+- [8. Test Pairing Rule](#8-test-pairing-rule)
+
+## 1. Overview
 
 CROW is a distributed key-value store built on Paxos consensus. The test
 suite is organized in layers that mirror the system architecture, so a
@@ -17,7 +31,7 @@ rules apply. Per-layer coverage checklists and the live task backlog live in
 [`plan-test.md`](../working/plan-test.md); benchmark design and baseline
 results live in [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md).
 
-## Architecture Stack
+## 2. Architecture Stack
 
 ```
 store      (PxKvStore: many groups, one node identity, routing)   <- lib/crow-kv/tests/store.rs
@@ -31,7 +45,7 @@ console    (mgmt API server + CLI: Axum REST, CLI commands)        <- app/crow-{
 ui e2e     (Playwright browser: SPA + real backend)                <- app/crow-web/ui/e2e/*
 ```
 
-## Test Binary Map
+## 3. Test Binary Map
 
 | Binary | Layer | Drives |
 | --- | --- | --- |
@@ -50,7 +64,7 @@ ui e2e     (Playwright browser: SPA + real backend)                <- app/crow-w
 | `app/crow-cli/tests/bench_benchmark.rs` | benchmark | `bench benchmark` lifecycle (deploy → run → collect → report → cleanup) + `bench compare` |
 | `app/crow-web/ui/e2e/*` | UI E2E | Playwright browser tests: SPA interactions, context menus, dialogs, KV panel |
 
-## Cross-Cutting Coverage Rules
+## 4. Cross-Cutting Coverage Rules
 
 **Placement rule:** a test that only needs the `crow-kv` library (even if it
 binds the embedded gRPC server via `PxKvStore::start`) lives in `crow-kv`. A
@@ -131,7 +145,7 @@ Deployment, UI E2E) that creates a multi-replica cluster must cover:
    resume. This is the most operationally sensitive scenario — the test must
    not block indefinitely waiting for election.
 
-## Layer Scope
+## 5. Layer Scope
 
 Each layer tests only the logic that belongs to it; a failure points at the
 lowest broken layer. Detailed per-layer coverage checklists live in
@@ -178,7 +192,7 @@ lowest broken layer. Detailed per-layer coverage checklists live in
   path end-to-end. Design, storage modes, and baseline results are in
   [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md).
 
-## crow-tree C++ Test Layers
+## 6. crow-tree C++ Test Layers
 
 The C++ crow-tree library (`libcrow-tree`) has its own test layers, separate
 from the Rust test binaries above. They run as `test-tree-ct` in CI.
@@ -196,7 +210,7 @@ The authoritative correctness oracle is **`compare()` against `InMemKV`**: for
 any op sequence, the two engines' `EngineView::iter_all` must be byte-for-byte
 equal (same key set, same `(slot, cell)`).
 
-## Sequencing
+## 7. Sequencing
 
 Fill gaps bottom-up so a new failure is always attributable to the lowest
 layer:
@@ -206,7 +220,7 @@ layer:
 4. Multi-node store and deployment re-enables, after repair-correctness
    fixes tracked in [`plan-test.md`](../working/plan-test.md).
 
-## Test Pairing Rule
+## 8. Test Pairing Rule
 
 Every feature or component milestone includes:
 

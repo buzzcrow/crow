@@ -7,134 +7,73 @@ description: Lifecycle for implementing requirement items from doc/backlog/backl
 
 # CROW - Implement Requirement Flow
 
-Use this workflow when picking up an item from
-`doc/backlog/backlog.md`. The index lists each requirement
-(`R**`) with a brief intro and a link to its detail doc
-(`doc/backlog/R**-<component>-<topic>.md`). Open the matched detail doc for the
-full problem/approach/files/acceptance analysis. Each item follows the
-full lifecycle below.
+Use this workflow when picking up an item from `doc/backlog/backlog.md`.
+Open the matched `R**-<component>-<topic>.md` detail doc for the full
+problem/approach/files/acceptance analysis.
+
+Per-type doc guides (open the matched one before writing that artifact):
+
+- Backlog doc (`R**-<component>-<topic>.md`) — [`doc-backlog`](doc-backlog.md)
+- Design draft (`design-<topic>.md`) — [`doc-working-design`](doc-working-design.md)
+- Task plan (`plan-<topic>.md`) — [`doc-working-plan`](doc-working-plan.md)
+- Formal design doc (folding target) — [`doc-design`](doc-design.md)
 
 ## Lifecycle
 
 ```
-1. Understand       → Read relevant code + design docs, confirm the problem
-2. Design           → Write doc/working/design-<topic>.md
-                      - Problem statement + current behavior
-                      - Proposed approach + alternatives considered
-                      - Acceptance test plan (what tests prove it works)
-3. Plan             → Write doc/working/plan-<topic>.md
-                      - Task breakdown with checkboxes
-                      - File-level changes
-                      - Dependency ordering
-                      - Track progress here
-4. Implement        → Code changes per plan, run tests per acceptance criteria
-5. Commit           → Commit all code + tests + working docs (design draft, plan doc)
-                      This checkpoint preserves work in git history in case of
-                      later blocking or human intervention.
-6. Affected tests   → Run only the test commands touched by this requirement's
-                      changes (see Test Commands below). Pick the subset matching
-                      the changed crates/components (e.g. crow-kv changes →
-                      test-kv-core + test-kv-server). Every selected test must
-                      pass — no failure may be skipped. The full suite runs
-                      later in Step 9 as a safety net.
-7. Merge design     → Fold the design doc into the formal design doc it belongs
-                      to (e.g. design-crow-tree-engine.md, design-wal.md),
-                      following that doc's style and detail level. Delete the
-                      standalone working/design-<topic>.md.
-8. Cleanup          → Delete the requirement's detail doc
-                      doc/backlog/R**-<component>-<topic>.md and remove its entry
-                      from the Item Index in doc/backlog/backlog.md. Delete
-                      plan-<topic>.md and design-<topic>.md.
-                      → Commit cleanup (second and final commit)
-9. Local CI check   → Run the GitHub CI Test job steps locally to verify they
-                      pass before pushing:
-                      - pixi run cargo fmt --all -- --check
-                      - pixi run cargo clippy --all-targets -- -D warnings
-                      - All Test Commands below, each separately so pass/fail
-                        is visible per command. All must pass — if any fail,
-                        fix before pushing.
+1. Understand       → Read relevant code + design docs, confirm the problem.
+2. Design           → Write doc/working/design-<topic>.md (doc-working-design guide).
+3. Plan             → Write doc/working/plan-<topic>.md (doc-working-plan guide).
+4. Implement        → Code changes per plan, run tests per acceptance criteria.
+5. Commit           → Commit code + tests + working docs (design draft, plan).
+6. Affected tests   → Run only the test commands touched by the changes (see
+                      below). Every selected test must pass — no skips. Full
+                      suite runs in Step 9.
+7. Merge design     → Fold the design draft into the formal design doc it
+                      belongs to, following the doc-design guide's Folding
+                      section. Delete the standalone design-<topic>.md.
+8. Cleanup          → Delete R**-<component>-<topic>.md + its backlog.md entry.
+                      Delete plan-<topic>.md. Commit cleanup (final commit).
+9. Local CI check   → Before pushing: pixi run cargo fmt --all -- --check,
+                      pixi run cargo clippy --all-targets -- -D warnings,
+                      all Test Commands below (each separately). All must pass.
 ```
 
 ## Test Commands
 
-Each test command should be run with a preceding `clean-env` to reset
-test state:
+Prefix each with `pixi run clean-env &&` to reset test state:
 
-- `pixi run clean-env && pixi run test-tree-ct`
-- `pixi run clean-env && pixi run test-tree-ffi`
-- `pixi run clean-env && pixi run test-kv-core`
-- `pixi run clean-env && pixi run test-kv-server`
-- `pixi run clean-env && pixi run test-console-cli`
-- `pixi run clean-env && pixi run test-console-server`
-- `pixi run clean-env && pixi run test-console-ui`
+- `pixi run test-tree-ct`
+- `pixi run test-tree-ffi`
+- `pixi run test-kv-core`
+- `pixi run test-kv-server`
+- `pixi run test-console-cli`
+- `pixi run test-console-server`
+- `pixi run test-console-ui`
 
 Step 6 runs the subset affected by the changes; Step 9 runs all of them.
 
 ## Blocking Conditions
 
 The workflow runs autonomously end-to-end. Stop and ask the user only in
-the following two cases:
+these two cases — in both, append a `## Blocked` section to
+`doc/working/plan-<topic>.md`, commit, then wait:
 
-### 1. Design gap requiring human decision
-
-During Step 2 (Design) or Step 3 (Plan), if there is an architectural
-decision with multiple valid approaches and no clearly superior choice,
-append the gap to the end of `doc/working/plan-<topic>.md` under a
-`## Blocked` heading with:
-
-- The decision that needs to be made.
-- The alternatives considered and their trade-offs.
-- Why it cannot be resolved automatically.
-
-Commit the plan doc with the gap recorded, then stop and wait for human
-review.
-
-### 2. Test failure after 5 retries
-
-During Step 4 (Implement), Step 6 (Affected tests), or Step 9 (Local CI
-check), if a test fails (new or existing regression) and remains failing
-after 5 retry attempts, append to the end of
-`doc/working/plan-<topic>.md` under a `## Blocked` heading with:
-
-- The failing test name(s) and command to reproduce.
-- What was attempted in each retry.
-- Preliminary root-cause analysis.
-- The exact error output.
-
-Commit current work, then stop and wait for human intervention. Do not
-guess fixes or weaken tests.
-
-In all other cases, proceed autonomously through all nine steps.
-
-## Design doc style (from existing design docs)
-
-- **Problem-first**: state what's broken/missing before proposing solutions
-- **Alternatives**: list rejected approaches with rationale
-- **Code-grounded**: reference actual file paths, function names, line numbers
-- **Concise**: aim for the detail level of existing §-level content in
-  `design/design-crow-tree-engine.md` or `design/design-crow-tree-storage.md`
-- **Acceptance criteria**: concrete, testable conditions
-
-## Plan doc style
-
-- Task breakdown as `- [ ]` checkboxes
-- One task in progress at a time
-- File list with intended changes
-- Test checklist
-- Update `doc/doc_index.md` if a new formal doc is added (not for working docs)
+1. **Design gap** (Step 2 or 3) — architectural decision with multiple valid
+   approaches and no clearly superior choice. Record: the decision, the
+   alternatives + trade-offs, why it cannot be resolved automatically.
+2. **Test failure after 5 retries** (Step 4, 6, or 9) — record: failing test
+   name(s) + reproduce command, what was attempted per retry, root-cause
+   analysis, exact error output. Do not guess fixes or weaken tests.
 
 ## Commit Cadence
 
-The workflow produces at least **two commits** per requirement:
+At least **two commits** per requirement:
 
-1. **Implementation commits** (during Step 4) — commit after each task in the
-   plan completes. For small tasks a single commit covering multiple tasks is
-   fine; for large or independent tasks, one commit per task keeps the history
-   reviewable. Use judgment based on task type and change size. The final
-   implementation commit includes the design draft and plan doc, preserving
-   the full working state in git history.
-2. **Cleanup commit** (after Step 8) — merged design doc, deletion of
-   working docs, deletion of `R**-<component>-<topic>.md` and its index entry in
-   `backlog.md`.
+1. **Implementation commits** (Step 4) — one per plan task (or grouped for
+   small tasks). The final implementation commit includes the design draft
+   and plan doc.
+2. **Cleanup commit** (after Step 8) — merged design doc + deletion of
+   working docs, `R**-<component>-<topic>.md`, and its `backlog.md` entry.
 
 All commits must pass the pre-commit quality gate (fmt, clippy, tests).

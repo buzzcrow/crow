@@ -6,7 +6,7 @@
 //! [`HardwareClient`]: group-0 hardware hierarchy + per-disk-group maps.
 //!
 //! Wraps a [`CrowkvClient`] pinned to group 0 (store 0, group 0). All
-//! keys are text-path keys (see `design-crow-key.md` §5.2); all values
+//! keys are text-path keys (see `design-crow-protocol-key.md` §5.2); all values
 //! are JSON-encoded proto `*Value` types from `crow-protocol`.
 //!
 //! Writes are blind puts (no CAS); values are small (< 1 KB). Status

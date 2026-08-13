@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW diskdb — Design
+# CROW - Design: diskdb (Overview)
 
 This is the root design document for the diskdb component area. It
 defines **what diskdb is**, **why key choices were made**, and **how the
@@ -14,6 +14,50 @@ References (other projects, not ports):
   (bitmap-scan, per-bit CAS, zone rotation).
 
 ---
+
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Non-Goals (Design Envelope)](#2-non-goals-design-envelope)
+- [3. Key Design Decisions](#3-key-design-decisions)
+  - [3.1 Group 0 is the centralized sysdata store](#31-group-0-is-the-centralized-sysdata-store)
+  - [3.2 disk-group → paxos group binding via a table (not hash)](#32-disk-group--paxos-group-binding-via-a-table-not-hash)
+  - [3.3 No CAS needed; exclusive ownership](#33-no-cas-needed-exclusive-ownership)
+  - [3.4 Records are the source of truth; bitmap is derived](#34-records-are-the-source-of-truth-bitmap-is-derived)
+  - [3.5 Zone is a logical concept; sizes may vary](#35-zone-is-a-logical-concept-sizes-may-vary)
+  - [3.6 Common protocol crate; gRPC now, custom RPC later](#36-common-protocol-crate-grpc-now-custom-rpc-later)
+  - [3.7 Reuse crow-common metrics](#37-reuse-crow-common-metrics)
+  - [3.8 Proto types used directly; no Rust type duplication](#38-proto-types-used-directly-no-rust-type-duplication)
+  - [3.9 Unit-based sizes; disk-id key routing](#39-unit-based-sizes-disk-id-key-routing)
+- [4. Architecture Overview](#4-architecture-overview)
+- [5. Group-0 Sysdata Schema](#5-group-0-sysdata-schema)
+- [6. Hierarchy](#6-hierarchy)
+- [7. Zone Records and Crash Recovery](#7-zone-records-and-crash-recovery)
+  - [Record key layout](#record-key-layout)
+  - [Value schemas](#value-schemas)
+  - [Record model](#record-model)
+  - [Three recovery strategies](#three-recovery-strategies)
+  - [How the strategies work together](#how-the-strategies-work-together)
+  - [Crash-safety invariants](#crash-safety-invariants)
+- [8. Allocation Algorithm](#8-allocation-algorithm)
+  - [Zone-level allocate (sync, in-memory)](#zone-level-allocate-sync-in-memory)
+  - [Disk-level allocate (sync) — rotating active-zone-set](#disk-level-allocate-sync--rotating-active-zone-set)
+  - [Round-robin across disks within the named disk-group (sync)](#round-robin-across-disks-within-the-named-disk-group-sync)
+  - [Two-phase async allocation](#two-phase-async-allocation)
+  - [Free (immediate in v1)](#free-immediate-in-v1)
+  - [Zone rotation (internal)](#zone-rotation-internal)
+- [9. State Machines](#9-state-machines)
+  - [Node / disk-group / disk HwStatus](#node--disk-group--disk-hwstatus)
+  - [Zone allocation state (derived, not a CAS state machine)](#zone-allocation-state-derived-not-a-cas-state-machine)
+- [10. Disk Status Management](#10-disk-status-management)
+- [11. Space Metrics](#11-space-metrics)
+- [12. Background Scanner](#12-background-scanner)
+- [13. Crate Layout](#13-crate-layout)
+- [14. Concurrency Model](#14-concurrency-model)
+- [15. Non-Gaps (Good Fits with CROW)](#15-non-gaps-good-fits-with-crow)
+- [16. Configuration](#16-configuration)
+- [17. Implementation Scope](#17-implementation-scope)
+- [18. References](#18-references)
 
 ## 1. Overview
 
@@ -235,7 +279,7 @@ domain methods. Internal types (metas, bitmap, CRC logic) are Rust
 structs not exposed via gRPC.
 
 **Keys are not protobuf.** KV keys use the cross-component binary
-encoding defined in `doc/design/protocol/design-crow-key.md` (flat
+encoding defined in `doc/design/protocol/design-crow-protocol-key.md` (flat
 per-kind Rust structs, two-byte `magic | type_tag` header, big-endian
 fixed-width fields). Protobuf-serialized `*Key` messages are never
 used as KV key bytes — the tag bytes break prefix scans. RPC
@@ -306,9 +350,9 @@ components with protocol surfaces reserved):
   anti-affinity), `FreeBlocks`, `QueryCapacityStats`,
   `GetDiskGroupInfo`, `GetDiskInfo`, `RebuildZoneBitmap` (on-demand
   full-scan rebuild, strategy 1, §7), `MarkBlockSuspect`,
-  `MarkBlockCorrupt` (per-block state transitions, §7). R71 ships this
-  service with allocate/free returning `Unimplemented`; the rest are
-  later requirements.
+  `MarkBlockCorrupt` (per-block state transitions, §7). The service ships
+  with allocate/free returning `Unimplemented`; the rest are later
+  requirements.
 - **Hardware admin** (no gRPC surface): rack/node/disk-group/disk
   add/remove and `set_*_status` are writes to group-0 sysdata
   performed through `HardwareClient` in `crow-kv-client`, invoked by
@@ -367,7 +411,7 @@ each key for scan narrowing:
 `dc_id` is dropped from `RackKey` and the Info types. The key concept
 structs live in `lib/crow-protocol/src/key/` and implement both
 `BinaryKey` (kept for data-group records) and `TextKey` (group 0). See
-`doc/design/protocol/design-crow-key.md` §5 and
+`doc/design/protocol/design-crow-protocol-key.md` §5 and
 `doc/design/kv/design-crow-kv-group0.md` §3.
 
 diskdb's own data groups (zone records) keep the `BinaryKey` encoding:
@@ -420,7 +464,7 @@ Rack (rack_id, u64) → Node (node_id, u64) → Disk-Group (dg_id, u64)  [logica
 
 Three types of KV entries on the disk-group's bound data group. Keys
 use the cross-component binary encoding
-(`doc/design/protocol/design-crow-key.md`): each is a flat struct with
+(`doc/design/protocol/design-crow-protocol-key.md`): each is a flat struct with
 a `magic | type_tag` header and big-endian fixed-width fields. Keys
 are disk-id-based (globally unique → reverse-lookup to the data group).
 No `node_id`/`disk_group_id` in record keys.
@@ -443,7 +487,7 @@ lexicographic byte order == numeric order, so a prefix scan of one
 zone's busy (or free) keys returns blocks in `unit_offset` order
 without deserialization. Exact byte layouts and prefix constructors
 (e.g. `BusyBlockKey::prefix_for_zone(disk_id, zone_index)`) are in
-`doc/design/protocol/design-crow-key.md`; value field details are in
+`doc/design/protocol/design-crow-protocol-key.md`; value field details are in
 `diskdb_type.proto`.
 
 ### Value schemas
@@ -699,10 +743,10 @@ source of truth" model directly.
 
 Free batching (grouping many frees into one `batch_write` per flush,
 triggered by batch size — no timer) is an optimization for
-high-free-throughput workloads, tracked as R79. When R79 ships,
-graceful shutdown drains and flushes the `FreeBatch` before exit; on
-ungraceful shutdown, unflushed frees are left for the §12
-ghost-allocation scanner to reconcile.
+high-free-throughput workloads, tracked as a future optimization. When
+batching ships, graceful shutdown drains and flushes the `FreeBatch`
+before exit; on ungraceful shutdown, unflushed frees are left for the
+§12 ghost-allocation scanner to reconcile.
 
 ### Zone rotation (internal)
 
@@ -799,13 +843,12 @@ diskdb's first major component:
   records on top. Group 0 holds disk metadata only; zone records live
   on the bound data group.
 
-**Follow-up — group-0 notify/watch (R78):** a future follow-up adds a
+**Follow-up — group-0 notify/watch:** a future follow-up adds a
 watch/notify mechanism where group 0 pushes hw-status-change and
 ownership-change notifications to registered diskdb endpoints (each
 diskdb registers its endpoint on sync). This replaces polling for
 status changes; polling stays as a safety net with an increased
-interval. Tracked as R78 (`doc/backlog/R78-diskdb-group0-notify-watch.md`).
-v1 ships with fixed-interval polling.
+interval. v1 ships with fixed-interval polling.
 
 ## 11. Space Metrics
 
@@ -830,7 +873,7 @@ per-disk-group usage summary (`capacity_bytes`, `used_bytes`,
 message sent to group 0 on each sync tick. Group 0 maintains this at
 the disk-group level (`DiskGroupUsageKey { disk_group_id }`). The
 console reads this for cluster-wide overview; per-disk/per-zone
-drill-down is via the `QueryCapacityStats` API (R74). The summary is
+drill-down is via the `QueryCapacityStats` API. The summary is
 derived (recomputed from the in-memory bitmap on each tick), not a
 source of truth.
 
@@ -848,7 +891,7 @@ intervals.
 - per-disk-group: `allocate.count`, `free.count`
 - per-instance: `sync.count`, `sync.error.count`,
   `compaction.count`, `compaction.error.count`,
-  `free_batch.flush.count` (R79, when batching enabled)
+  `free_batch.flush.count` (when batching enabled)
 
 **2. Gauges (internal status, current state snapshot):**
 - per-disk: `capacity_bytes`, `used_bytes`, `free_bytes`, `used_pct`,
@@ -859,7 +902,7 @@ intervals.
 - per-disk-group: `disk_count`, `allocatable_disk_count`,
   `capacity_bytes`, `used_bytes`, `free_bytes`
 - per-instance: `owned_disk_group_count`, `degraded` (0/1),
-  `free_batch_len` (current pending frees, R79),
+  `free_batch_len` (current pending frees),
   `uncompacted_free_record_count` (per zone — compaction backlog),
   `last_sync_slot` (group-0 sync frontier),
   `last_sync_age_secs` (time since last successful sync)
@@ -886,7 +929,7 @@ persist round-trip.
   - `free.rpc.latency_us` — total RPC latency.
   - `free.bitmap_clear.latency_us` — time in the per-bit CAS clear.
   - `free.kv_persist.latency_us` — time awaiting the `batch_write` of
-    `FreeBlockValue` (immediate in v1; batch flush in R79).
+    `FreeBlockValue` (immediate in v1; batch flush when batching enabled).
 - **Sync path:**
   - `sync.latency_us` — total `sync_once` latency.
   - `sync.read_group0.latency_us` — time reading from group 0.
@@ -910,8 +953,8 @@ updated on the reporting interval, not hot-path writes. `degraded` and
 ## 12. Background Scanner
 
 - **Ghost-allocation detection** — allocated in KV records but freed
-  locally (crash before the free `batch_write` persists, or when R79
-  free batching is enabled and the batch was not flushed on ungraceful
+  locally (crash before the free `batch_write` persists, or when free
+  batching is enabled and the batch was not flushed on ungraceful
   shutdown). Detected by comparing in-memory state against the records.
 - **Bitmap drift detection** — in-memory `usage_bits` drifts from
   the record-derived bitmap; reload from records. The scanner uses
@@ -998,9 +1041,9 @@ All public and inter-module APIs are `async`. Runtime is `tokio`
     KV read of the `BusyBlockValue` first (one paxos round-trip,
     doubles free latency).
 - v1 free is immediate (no `FreeBatch`, no background flush loop). When
-  R79 ships, `FreeBatch` will be protected by a `Mutex` held only for
-  the append, not for the KV flush; the flush is triggered by batch
-  size (no timer).
+  free batching ships, `FreeBatch` will be protected by a `Mutex` held
+  only for the append, not for the KV flush; the flush is triggered by
+  batch size (no timer).
 - Node-level `add_disk` / `remove_disk` acquire a write lock on the
   disk list; allocation/free acquire a read lock (concurrent with each
   other, exclusive with add/remove).
@@ -1033,49 +1076,47 @@ hardcoded tunables in business logic). Defaults:
   degraded miss threshold (3), temp-failure timeout (900 s)
 - **Allocator** — `zone_rotate_count`, CAS retry limit (100)
 - **Free** — `free_batch_enabled` (default false — v1 immediate free;
-  R79 size-threshold batching when true), `free_flush_max_batch` (256,
-  used by R79 when batching is enabled)
+  size-threshold batching when true), `free_flush_max_batch` (256,
+  used when batching is enabled)
 - **Compaction** — snapshot compaction threshold (record count or
   time), compaction cadence (periodic interval for strategy 3)
 - **Disk** — block / unit size (default 1 MB), zone size
 - **Free validation** — `validate_owner_on_free` (default false — no
   KV read on free; enable for strict ownership validation)
 
-## 17. Implementation Split
+## 17. Implementation Scope
 
-The diskdb implementation is split into follow-up requirements by
-functional scope:
+The diskdb implementation is organized by functional scope. Each area
+below covers a coherent slice of the component; together they make up
+the full diskdb server.
 
-- **R70** — Protocol + core types + config validation (protobuf
-  services, core types, record key layout, config validation, bitmap
-  utilities, CRC integrity). **Done.**
-- **R71** — Group-0 sysdata schema + sync (disk status management,
-  group-0 read/write, ownership/binding maps, heartbeat, disk-add
-  initialization flow, keepalive usage summary). **Done.**
-- **R72** — Zone allocator + record persistence (bitmap-scan
-  allocator, rotating active-zone-set, busy/free records, two-phase
-  async allocation, **immediate free** — no `FreeBatch`, no timer;
-  `disk_group_id` routing, `exclude_disks`, CAS retry bound). **Done.**
-- **R73** — Crash recovery + snapshot compaction (three strategies:
-  full scan rebuild, journal scan replay via `JournalScan` RPC,
-  compaction that deletes only free records).
-- **R74** — Space metrics + query API (per-disk/group/zone metrics,
+- **Protocol + core types** — protobuf services, core types, record key
+  layout, config validation, bitmap utilities, CRC integrity.
+- **Group-0 sysdata schema + sync** — disk status management, group-0
+  read/write, ownership/binding maps, heartbeat, disk-add initialization
+  flow, keepalive usage summary.
+- **Zone allocator + record persistence** — bitmap-scan allocator,
+  rotating active-zone-set, busy/free records, two-phase async
+  allocation, immediate free (no `FreeBatch`, no timer),
+  `disk_group_id` routing, `exclude_disks`, CAS retry bound.
+- **Crash recovery + snapshot compaction** — three strategies: full
+  scan rebuild, journal scan replay via `JournalScan` RPC, compaction
+  that deletes only free records.
+- **Space metrics + query API** — per-disk/group/zone metrics,
   recalculation path, `query_disk_usage`, three-category metrics:
-  counters, gauges, latency hierarchy).
-- **R75** — Background scanner (ghost/drift/integrity detection,
-  per-block state validation, uses strategy 1 full scan rebuild).
-- **R76** — Disk discovery + health probing (config-driven disk list,
-  health probe, disk failure detection).
-- **R77** — Console + CLI integration (follow-up: disk/disk-group
-  management UI, zone busy/free visualization, CLI command design).
-- **R78** — Group-0 notify/watch (follow-up: replace polling with
-  watch/notify; requires crow-kv extension; polling stays as safety
-  net).
-- **R79** — Free batch (follow-up: size-threshold batching, no timer;
-  graceful-shutdown drain + flush).
+  counters, gauges, latency hierarchy.
+- **Background scanner** — ghost/drift/integrity detection, per-block
+  state validation, uses strategy 1 full scan rebuild.
+- **Disk discovery + health probing** — config-driven disk list, health
+  probe, disk failure detection.
+- **Console + CLI integration** — disk/disk-group management UI, zone
+  busy/free visualization, CLI command design.
+- **Group-0 notify/watch** — replace polling with watch/notify; requires
+  crow-kv extension; polling stays as safety net.
+- **Free batch** — size-threshold batching, no timer; graceful-shutdown
+  drain + flush.
 
-Each requirement follows the `/implement-requirement` workflow. The
-design doc (this file and future sub-designs under
+The design doc (this file and future sub-designs under
 `doc/design/diskdb/`) is kept permanently — it is the root design for
 the diskdb component area.
 

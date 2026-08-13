@@ -1,12 +1,33 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW - Design
+# CROW - Design: KV (Overview)
 
 This is the root design document. It defines **what CROW is**, **why
 key choices were made**, and **how the system is structured**.
 Implementation-level detail lives in sub-design docs (`design-*.md`);
 this doc covers decisions and architecture only.
+
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Non-Goals (Design Envelope)](#2-non-goals-design-envelope)
+- [3. Key Design Decisions](#3-key-design-decisions)
+- [4. Architecture Overview](#4-architecture-overview)
+- [5. Data Model](#5-data-model)
+- [6. Read Modes](#6-read-modes)
+- [7. Consensus](#7-consensus)
+- [8. Storage and Durability](#8-storage-and-durability)
+- [9. Cluster Lifecycle](#9-cluster-lifecycle)
+- [10. Client Interaction](#10-client-interaction)
+- [11. Module Decomposition](#11-module-decomposition)
+- [12. Crate Layout](#12-crate-layout)
+- [13. Concurrency Model](#13-concurrency-model)
+- [14. Components](#14-components)
+- [15. Performance Targets](#15-performance-targets)
+- [16. Observability](#16-observability)
+- [17. Testing](#17-testing)
+- [18. References](#18-references)
 
 ---
 
@@ -44,8 +65,6 @@ because no operation reads before writing.
   require planned reconfiguration.
 - **No core-library sharding.** Every KV RPC carries an explicit
   `group_id`. Sharding policy lives in the calling application.
-- **No self-hosted topology group (no "Group-0").** Topology is
-  operator-managed via HTTP management API. Avoids cluster-wide SPOF.
 - **No client-side transactions.** Each request is independent and
   idempotent.
 - **No authn/authz.** Trusted-network assumption. Consumers needing
@@ -91,12 +110,6 @@ group-0 sysdata architecture.
 Group 0 membership evolves using the shipped Model B reconfiguration
 (direct HTTP mutation + `membership_epoch` fence). No new consensus
 primitive required.
-
-**Design history:** Originally rejected in favor of pure
-operator-managed topology. Re-evaluated and adopted when the
-single-point-of-failure risk of console-only TOML became the blocking
-concern for HA deployments. The operator-managed HTTP management API
-remains as the Phase 1 bootstrap path; group 0 adds the HA cutover.
 
 Full design: [`design-crow-kv-group0.md`](design-crow-kv-group0.md) (sysdata schema, service registry, keep-alive, monitoring models), `../console/design-crow-console.md` §4.3, `design-crow-kv-server.md` §2.2/§2.4.
 

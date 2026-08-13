@@ -1,16 +1,21 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW key — Design
+# CROW - Design: Key Encoding
 
-This is the root design document for the **protocol** component area,
-focused on **key encoding** for crow-kv. It defines how every CROW key
-that is stored in crow-kv is serialized to and parsed from bytes, via
-two encoding traits: `BinaryKey` (binary, for data groups) and
-`TextKey` (text-path, for group 0). It is shared across all components
-(diskdb first; future components reuse the same scheme). Field-level
-detail lives in the Rust source (`lib/crow-protocol/src/key/`); this
-doc covers decisions and the frozen layouts only.
+Depends on: [`design-crow-protocol.md`](design-crow-protocol.md)
+Satisfies: [`design-crow-protocol.md`](design-crow-protocol.md) key encoding scope
+
+This is the sub-design for **key encoding** within the protocol area.
+Architecture decisions and the area envelope live in the root
+[`design-crow-protocol.md`](design-crow-protocol.md); this doc covers
+the detailed design: how every CROW key that is stored in crow-kv is
+serialized to and parsed from bytes, via two encoding traits:
+`BinaryKey` (binary, for data groups) and `TextKey` (text-path, for
+group 0). It is shared across all components (diskdb first; future
+components reuse the same scheme). Field-level detail lives in the
+Rust source (`lib/crow-protocol/src/key/`); this doc covers decisions
+and the frozen layouts only.
 
 **Scope boundary:** this doc defines the **encoding protocol** — the
 rules, frozen layouts, and evolution policy. **Which keys are
@@ -21,6 +26,19 @@ patterns** are persistence concerns, defined in:
   (text keys + JSON values).
 - `doc/design/diskdb/design-crow-diskdb.md` §5 and §7 — data-group
   zone records (binary keys + protobuf values).
+
+## Table of Contents
+
+- [1. Problem](#1-problem)
+- [2. Goals](#2-goals)
+- [3. Key Design Decisions](#3-key-design-decisions)
+- [4. Unified Key Concept — Two Encodings](#4-unified-key-concept--two-encodings)
+- [5. Evolution (Append-Only)](#5-evolution-append-only)
+- [6. Relationship to RPC (Protobuf) Types](#6-relationship-to-rpc-protobuf-types)
+- [7. Crate Home](#7-crate-home)
+- [8. Trait Shape](#8-trait-shape)
+- [9. Testing](#9-testing)
+- [10. References](#10-references)
 
 ---
 
@@ -68,21 +86,9 @@ bytes.** CROW controls its own binary key format.
 - **Cross-component** — diskdb, and any future component stored in
   crow-kv, share the same magic, trait, and field-encoding rules.
 
-## 3. Non-Goals
+## 3. Key Design Decisions
 
-- **No encoding for values.** Values are free to use protobuf, bincode,
-  or whatever a component chooses; only keys are governed here.
-- **No transport encoding.** RPC wire format is a separate concern
-  (§7); keys do not travel over gRPC as serialized key messages.
-- **No compression.** Keys are small and fixed-width; compression
-  would break lexicographic order.
-- **No variable-schema keys.** A key kind has a fixed field set. New
-  fields require a new key kind (new type tag), not a versioned layout
-  (§6).
-
-## 4. Key Design Decisions
-
-### 4.1 Flat per-kind struct, not path segments
+### 3.1 Flat per-kind struct, not path segments
 
 Each key kind is one flat Rust struct with a fixed, positional binary
 layout. All hierarchy fields are inline in fixed positions
@@ -96,7 +102,7 @@ done as one scan per kind. This is fine — every real query in diskdb
 targets one kind at a time (list disks of a node, list zones of a
 disk, list busy blocks of a zone).
 
-### 4.2 Three-byte header: magic + type tag
+### 3.2 Three-byte header: magic + type tag
 
 Every key starts with:
 
@@ -115,7 +121,7 @@ Every key starts with:
 The header is followed by the kind's fixed fields, in hierarchy order,
 most-significant parent first.
 
-### 4.3 Big-endian fixed-width integers
+### 3.3 Big-endian fixed-width integers
 
 All integer fields are encoded big-endian, fixed width (`u64` = 8
 bytes, `u32` = 4 bytes). Big-endian makes lexicographic byte order
@@ -124,7 +130,7 @@ Fixed width means a field always consumes its bytes — no varint, no
 default-omission. This is the rule the user stated: "we cannot ignore
 the fields in a key, it always uses some bytes."
 
-### 4.4 Fixed-width 128-bit / 192-bit identifiers
+### 3.4 Fixed-width 128-bit / 192-bit identifiers
 
 `DiskId` (128-bit = `high:u64` + `low:u64`) encodes as 16 bytes:
 `high` big-endian followed by `low` big-endian. `ChunkId` (192-bit)
@@ -133,7 +139,7 @@ does not today). Fixed 16-byte width makes `disk_id` a stable block
 inside any key that contains it, so prefix scans on the fields before
 it work regardless of the id's value.
 
-### 4.5 All keys are fixed-width
+### 3.5 All keys are fixed-width
 
 Every key field is a fixed-width integer (`u64`, `u32`) or a
 fixed-width identifier (`DiskId` = 16 bytes). There are no
@@ -143,7 +149,7 @@ lives in the value (`InstanceValue`), not the key. This makes the
 entire encoding uniform: the decoder reads a known number of bytes per
 field, no length prefixes, no terminators, no sort-order edge cases.
 
-### 4.6 String fields (reserved: null-termination)
+### 3.6 String fields (reserved: null-termination)
 
 If a future key kind cannot avoid a UTF-8 string field, it is encoded
 as `utf8_bytes | 0x00` — the UTF-8 bytes followed by a single `0x00`
@@ -183,7 +189,7 @@ character, which does not appear in identifiers. If arbitrary bytes
 `0x00 0x01`, terminator `0x00 0x00`) instead; not required for UTF-8
 strings.
 
-### 4.7 Decode rejects trailing bytes and bad headers
+### 3.7 Decode rejects trailing bytes and bad headers
 
 `decode` verifies:
 
@@ -195,7 +201,7 @@ Any mismatch returns `Err(KeyError)`. Decoders never guess and never
 silently truncate. This keeps a corrupted or misrouted key from being
 misinterpreted as a different kind.
 
-### 4.8 Prefix constructors make scan intent explicit
+### 3.8 Prefix constructors make scan intent explicit
 
 Rather than have callers hand-craft prefix byte vectors, each key
 struct exposes typed prefix constructors, e.g.:
@@ -210,7 +216,7 @@ is the only sanctioned way to build a scan prefix, so the scan's
 intent is visible at the call site and the prefix bytes can never
 drift from the key layout.
 
-## 5. Unified Key Concept — Two Encodings
+## 4. Unified Key Concept — Two Encodings
 
 A CROW key has three parts: a magic (namespace), a key type (kind
 discriminator), and ordered key fields (hierarchy path). The **key
@@ -247,7 +253,7 @@ persistence docs**: `doc/design/kv/design-crow-kv-group0.md` §3
 (group-0 sysdata schema) and `doc/design/diskdb/design-crow-diskdb.md`
 §5/§7 (data-group zone records).
 
-### 5.1 Frozen Binary Key Layouts
+### 4.1 Frozen Binary Key Layouts
 
 All binary layouts below are **frozen** once the first implementation
 ships. Changing a field width, field order, or field set is a breaking
@@ -306,7 +312,7 @@ kinds are added; never reused, never reordered.
 `CROW_KEY_MAGIC` is a named constant in `lib/crow-protocol/src/key/`.
 Its exact value is fixed at first ship and never changed afterward.
 
-### 5.2 Text Key Layouts (Group 0)
+### 4.2 Text Key Layouts (Group 0)
 
 Text keys are slash-delimited paths: `/magic/type/<fields...>`. Values
 are JSON-encoded (serde on the same proto types). The path segments
@@ -333,7 +339,7 @@ patterns are in `design-crow-kv-group0.md` §3):
 - **KvReplicaKey** — `/kv/replica/<store_id>/<group_id>/<replica_id>`.
   (Text-only.)
 
-## 6. Evolution (Append-Only)
+## 5. Evolution (Append-Only)
 
 - **Add a key kind** — pick the next free type tag, define a new struct
   with its own fixed layout, implement `BinaryKey`. Existing kinds and
@@ -350,7 +356,7 @@ patterns are in `design-crow-kv-group0.md` §3):
 In short: key types are append-only — new kinds are added, existing
 kinds are never changed.
 
-## 7. Relationship to RPC (Protobuf) Types
+## 6. Relationship to RPC (Protobuf) Types
 
 KV keys and RPC messages are separate concerns:
 
@@ -372,7 +378,7 @@ There is no second representation of a key: the Rust `BinaryKey` types
 are the keys; the `**Info` proto messages are the RPC shape that
 happens to repeat the key's fields as plain scalars.
 
-## 8. Crate Home
+## 7. Crate Home
 
 The `BinaryKey` trait, the key structs, the `CROW_KEY_MAGIC` constant,
 the type-tag constants, and the prefix constructors live in
@@ -388,7 +394,7 @@ is pure Rust byte writes (no `bytes` crate needed on the encode path;
 `Vec<u8>` suffices, and `bytes::Bytes` is already a dependency for the
 scan-result path).
 
-## 9. Trait Shape
+## 8. Trait Shape
 
 ```rust
 pub trait BinaryKey: Sized {
@@ -416,7 +422,7 @@ no external type can claim a type tag.
 `TrailingBytes`. (A `BadLength` variant is reserved for future
 string-field kinds; not needed while all keys are fixed-width.)
 
-## 10. Testing
+## 9. Testing
 
 - **Round-trip** — every key: `from_bytes(to_bytes(k)) == k`.
 - **Order** — for keys with integer sort fields, an ordered list of
@@ -434,14 +440,13 @@ string-field kinds; not needed while all keys are fixed-width.)
   fields still decode correctly (the `0x00` terminator is consumed
   by the string decoder, not mistaken for the next field).
 
-## 11. References
+## 10. References
 
-- crow-kv `KVEngine` trait (key bytes, prefix scan):
-  `lib/crow-kv/src/kv/kv_engine.rs`.
+- crow-kv `KVEngine` trait (key bytes, prefix scan).
 - diskdb key kinds and their hierarchy:
   `doc/design/diskdb/design-crow-diskdb.md` §5 (group-0 sysdata) and
   §7 (zone records).
-- Proto types being replaced: `lib/crow-protocol/src/proto/`
+- Proto types being replaced: the `crow-protocol` proto module.
   `common_type.proto` (`RackKey`, `NodeKey`), `diskdb_type.proto`
   (`ZoneKey`, `DiskKey`, `DiskGroupKey`, `BusyBlockKey`,
   `FreeBlockKey`).

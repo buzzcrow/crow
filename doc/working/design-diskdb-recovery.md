@@ -10,12 +10,14 @@ and the compaction engine (strategy 3). Folded into
 `doc/design/diskdb/design-crow-diskdb.md` and deleted after merge.
 
 Root design: `doc/design/diskdb/design-crow-diskdb.md` (§1, §3.4, §7,
-§11, §16). Server implementation design: `doc/working/
-design-diskdb-server.md` (R71 + R72 module structure, protocol
-enhancements, group-0 simulation). This doc covers R73 implementation
-details — the crow-kv extension, recovery/compaction engines, data
-structures, flows, tests. Architecture decisions and rationale are in
-the root design; this doc does not repeat them.
+§11, §16). R71 (sync loop, `HardwareClient`, `ServiceRegistryClient`,
+`NodeContainer`) and R72 (`DataGroupClient`, `Zone` allocator, record
+persistence, two-phase allocate/free) are already landed in
+`app/crow-diskdb/src/` — this doc references the actual code paths.
+This doc covers R73 implementation details — the crow-kv extension,
+recovery/compaction engines, data structures, flows, tests.
+Architecture decisions and rationale are in the root design; this doc
+does not repeat them.
 
 ---
 
@@ -63,6 +65,24 @@ key prefix.
 
 ### 1.3 Proto additions (`lib/crow-kv/src/rpc/proto/kv.proto`)
 
+Add a new error code to the existing `KvErrorCode` enum (currently
+`NONE`, `NOT_LEADER`, `UNAVAILABLE`, `INTERNAL`):
+
+```protobuf
+enum KvErrorCode {
+  KV_ERROR_NONE        = 0;
+  KV_ERROR_NOT_LEADER  = 1;
+  KV_ERROR_UNAVAILABLE = 2;
+  KV_ERROR_INTERNAL    = 3;
+  KV_ERROR_JOURNAL_SCAN_GC_GAP = 4;  // min_slot < gc_slot (already GC'd)
+}
+```
+
+New messages — field naming follows the existing `KvScanRequest` /
+`KvScanResponse` convention (`version`, `request_id`,
+`request_create_ms`, `group_id`, `read_mode`, `read_slot`,
+`error_code`, `not_leader_hint`):
+
 ```protobuf
 // Slot-ordered scan over the WAL. Returns individual KV ops (Put /
 // Delete) in commit order within [min_slot, max_slot], filtered by
@@ -102,12 +122,18 @@ message KvJournalScanResponse {
 }
 ```
 
-Add to `KvService`:
+Add to `KvService` (after the existing `Scan` rpc):
 ```protobuf
   rpc JournalScan(KvJournalScanRequest) returns (KvJournalScanResponse);
 ```
 
-### 1.4 Server-side handler (`lib/crow-kv/src/cluster/px_kv_store.rs`)
+### 1.4 Server-side handler
+
+The gRPC handler goes in `lib/crow-kv/src/rpc/kv_service.rs` (where
+the existing `scan` handler lives), with the core scan logic in
+`lib/crow-kv/src/cluster/px_kv_store.rs` (where `scan_err` and the
+store-level scan helpers live). The handler mirrors the existing
+`scan` handler's leader-forward + read-mode logic.
 
 - `journal_scan(group_id, min_slot, max_slot, key_prefix, limit) ->
   Result<KvJournalScanResponse>`:
@@ -137,26 +163,30 @@ Add to `KvService`:
   compaction frontier — diskdb's compaction (strategy 3) writes a new
   `ZoneValue` snapshot before the WAL GC can remove the corresponding
   slots. If `min_slot < gc_slot` (the caller asks for already-GC'd
-  slots), return an error `JournalScanGcGap` — the caller falls back to
-  strategy 1 (full scan). This should not happen in normal operation
-  because compaction writes the snapshot before the WAL GC advances.
+  slots), return `KV_ERROR_JOURNAL_SCAN_GC_GAP` — the caller falls
+  back to strategy 1 (full scan). This should not happen in normal
+  operation because compaction writes the snapshot before the WAL GC
+  advances.
 
-### 1.5 Client method (`lib/crow-kv-client/`)
+### 1.5 Client method (`lib/crow-kv-client/src/client.rs`)
 
 - `CrowkvClient::journal_scan(store_id, group_id, min_slot, max_slot,
-  key_prefix, limit) -> Result<Vec<KvJournalOp>>` — paginates
-  transparently: sends the first request, if `truncated`, sends
-  `min_slot = last_op_slot + 1`, repeats until all ops collected.
-  Returns the full op list in slot order.
+  key_prefix, limit, read_mode) -> Result<JournalScanOutcome>` —
+  paginates transparently (same inner-pagination pattern as the
+  existing `scan` method): sends the first request, if `truncated`,
+  sends `min_slot = last_op_slot + 1`, repeats until all ops collected
+  or `limit` reached. Returns the full op list in slot order. The
+  `read_mode` + `min_slot` resolution mirrors `scan`'s
+  `resolve_min_slot` / `resolve_read_endpoint` logic.
 
 ### 1.6 Mock group-0 / mock data-group support
 
-The mock crow-kv-compatible server (from the R71+R72 working design,
-§2) needs to support `JournalScan` for integration testing. The mock
-keeps an in-memory op log: `Vec<(slot, key, value_opt)>` appended on
-each `Put`/`Delete`/`BatchWrite`. `JournalScan` filters this log by
-`[min_slot, max_slot]` + key prefix, sorts by slot, returns ops. No WAL
-files needed — the mock's op log is the "journal".
+The mock crow-kv-compatible server used in integration tests needs to
+support `JournalScan`. The mock keeps an in-memory op log:
+`Vec<(slot, key, value_opt)>` appended on each `Put`/`Delete`/
+`BatchWrite`. `JournalScan` filters this log by `[min_slot, max_slot]`
++ key prefix, sorts by slot, returns ops. No WAL files needed — the
+mock's op log is the "journal".
 
 ---
 
@@ -164,8 +194,9 @@ files needed — the mock's op log is the "journal".
 
 ### 2.1 `diskdb_service.proto` — `RebuildZoneBitmap` RPC
 
-Already specified in the R71+R72 working design §1.2. R73 implements
-the handler:
+The current `DiskdbService` has `AllocateBlocks`, `FreeBlocks`,
+`QueryCapacityStats`, `GetDiskGroupInfo`, `GetDiskInfo`. R73 adds the
+`RebuildZoneBitmap` RPC + messages:
 
 ```protobuf
   rpc RebuildZoneBitmap(RebuildZoneBitmapRequest)
@@ -174,7 +205,7 @@ the handler:
 
 ### 2.2 `diskdb_op.proto` — new messages
 
-Already specified in the R71+R72 working design §1.4. R73 uses:
+Add to `diskdb_op.proto`:
 - `RebuildZoneBitmapRequest { disk_id, zone_index }` — `zone_index =
   u32::MAX` means all zones on the disk.
 - `RebuildZoneBitmapResponse { rebuilt_zone_count, total_busy_units,
@@ -184,11 +215,15 @@ Already specified in the R71+R72 working design §1.4. R73 uses:
 
 ## 3. Recovery Engine
 
-`app/crow-diskdb/src/recovery/mod.rs`:
+New module `app/crow-diskdb/src/recovery.rs` (to be created; the
+`recovery` sub-module is registered in `lib.rs`):
 
 ### 3.1 `RecoveryEngine`
 
-- Owns a `DataGroupClient` (from R72) and a `SysdataClient` (from R71).
+- Owns a `DataGroupClient` (from R72). Disk metadata (`DiskValue`s)
+  is passed in by the caller (the sync loop already fetches it from
+  group 0 via `HardwareClient`); the recovery engine does not need a
+  group-0 client itself.
 - Runs on startup (before the gRPC server accepts RPCs) and on
   ownership transfer (when `SyncLoop` detects a new disk-group
   assigned to this instance).
@@ -196,28 +231,33 @@ Already specified in the R71+R72 working design §1.4. R73 uses:
 ### 3.2 `recover_node` — full node recovery
 
 ```rust
-fn recover_node(
+async fn recover_node(
     &self,
-    node_id: u64,
     dg_id: DiskGroupId,
-    bind: (u64, u64),  // (store_id, group_id)
-    disks: &[DiskValue],
-) -> Result<Node>
+    node_id: NodeId,
+    rack_id: RackId,
+    bind: Bind,  // (store_id, group_id)
+    disks: &[(DiskId, DiskValue)],
+    zone_rotate_count: u32,
+) -> Result<Arc<Node>>
 ```
 
-a. Create an empty `Node` with `disk_group_id`, `node_id`, `bind`.
-b. For each disk in `disks`:
-   - Create a `ZoneDisk` (from R71) with `disk_value` metadata.
-   - Compute zone count = `capacity_units / zone_size_units` (last
-     zone may be smaller, §3.5 word-alignment rule).
+a. Create an empty `Node` via `Node::new(dg_id, node_id, rack_id)`;
+   set `bind` from the bind map.
+b. For each `(disk_id, disk_value)` in `disks`:
+   - Create a `ZoneDisk` via `ZoneDisk::new(disk_id, dg_id, node_id,
+     rack_id, *disk_value)`.
+   - Compute zone count = `disk_value.zone_count` (last zone may be
+     smaller, rounded down to a multiple of 64 — matching
+     `sync.rs::disk_add_init`).
    - For each zone index (0 to `zone_count - 1`):
-     - Call `recover_zone(dg_id, bind, disk_id, zone_idx)`.
-     - Add the recovered zone to the disk.
-   - Call `disk.rebuild_active_zones()` — build the initial
-     `ActiveZoneContext` with the first `zone_rotate_count` allocatable
-     zones.
-   - Add disk to node.
-c. Return the reconstructed `Node`.
+     - Call `recover_zone(bind, disk_id, zone_idx, unit_capacity)`.
+     - Add the recovered zone to the disk via `disk.add_zone`.
+   - Call `disk.rebuild_active_zones(zone_rotate_count)` — build the
+     initial `ActiveZoneContext` with the first `zone_rotate_count`
+     allocatable zones.
+   - Add disk to node via `node.add_disk`.
+c. Return the reconstructed `Node` (wrapped in `Arc`).
 
 **Concurrency**: recover zones within a node in parallel
 (`tokio::spawn` + `join_all`) — each zone's recovery is independent.
@@ -233,43 +273,40 @@ the uncomplicated record set small.
 ```rust
 async fn recover_zone(
     &self,
-    dg_id: DiskGroupId,
-    bind: (u64, u64),
+    bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
     unit_capacity: u32,  // from DiskValue metadata
 ) -> Result<Zone>
 ```
 
-a. **Load the latest `ZoneValue` snapshot**: `await
-   DataGroupClient::get(bind, ZoneKey { disk_id, zone_idx })`. If
-   present, deserialize and verify CRC32 (`ZoneValueExt::verify` from
-   R70 — `crc32 == compute_checksum(usage_bitmap)`). If CRC fails, log
-   error and **fall back to strategy 1** (`rebuild_zone_bitmap_full_scan`)
-   for this zone — conservative.
+a. **Load the latest `ZoneValue` snapshot**: via
+   `DataGroupClient::get_zone_value(bind, disk_id, zone_idx)` (a
+   dedicated point-get on `ZoneKey` — 1 round-trip; avoids the 2
+   wasted scans of `read_zone_records` when only the snapshot is
+   needed). If present, deserialize and verify CRC32
+   (`ZoneValueExt::verify_checksum` from R70 — `crc32 ==
+   crc32fast::hash(usage_bitmap)`). If CRC fails, log error and **fall
+   back to strategy 1** (`rebuild_zone_bitmap_full_scan`) for this
+   zone — conservative.
 b. **Initialize replay state**:
    - If snapshot exists: `usage_bits = snapshot.usage_bitmap` (restored
      into a `UsageBitmap`), `used_count = popcount(usage_bits)`,
      `snapshot_slot = snapshot.snapshot_slot`.
    - If no snapshot: empty bitmap, `used_count = 0`, `snapshot_slot =
      0`.
-c. **Journal scan**: `await CrowkvClient::journal_scan(
-   store_id = bind.0, group_id = bind.1, min_slot = snapshot_slot + 1,
-   max_slot = 0 (MAX), key_prefix = zone_prefix, limit = 0)`.
-   - `zone_prefix` must cover both `BusyBlockKey` and `FreeBlockKey`
-     for this zone. Two options:
-     - **(a) Two scans** — one with `BusyBlockKey::prefix_for_zone(
-       disk_id, zone_idx)`, one with `FreeBlockKey::prefix_for_zone(
-       disk_id, zone_idx)`. Merge by slot. Simple, two round-trips.
-     - **(b) One scan with a broader prefix** — scan with
-       `disk_id` prefix (covers all key tags for this disk). Filter
-       client-side to only `BusyBlockKey`/`FreeBlockKey` ops for this
-       zone. One round-trip but more data transferred.
-   - **Choose (a)** for v1 — two narrow scans are cheaper than one broad
-     scan (less data), and the merge-by-slot is trivial (both lists are
-     already slot-sorted; merge like merge-sort).
-   - If `JournalScan` returns `JournalScanGcGap` (asked for slots
-     already GC'd), fall back to strategy 1 for this zone.
+c. **Journal scan**: two narrow scans (chosen over one broad scan —
+   less data transferred, merge-by-slot is trivial since both lists
+   are slot-sorted):
+   - `DataGroupClient::journal_scan_busy(bind, min_slot =
+     snapshot_slot + 1, max_slot = 0 (MAX), disk_id, zone_idx)` —
+     wraps `CrowkvClient::journal_scan` with
+     `BusyBlockKey::prefix_for_zone`.
+   - `DataGroupClient::journal_scan_free(bind, ...)` — wraps with
+     `FreeBlockKey::prefix_for_zone`.
+   Merge the two op lists by slot (merge-sort). If `JournalScan`
+   returns `KV_ERROR_JOURNAL_SCAN_GC_GAP` (asked for slots already
+   GC'd), fall back to strategy 1 for this zone.
 d. **Apply ops in slot order** (merge the two scans by slot):
    - `Put BusyBlockKey { disk_id, zone_idx, unit_offset }` with
      `BusyBlockValue { unit_count, ... }` → `range_set(unit_offset,
@@ -333,20 +370,19 @@ too slow for regular restart with many zones.
 ```rust
 async fn rebuild_zone_bitmap_full_scan(
     &self,
-    dg_id: DiskGroupId,
-    bind: (u64, u64),
+    bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
     unit_capacity: u32,
 ) -> Result<(Zone, ZoneStats)>
 ```
 
-a. `scan` with prefix `BusyBlockKey::prefix_for_zone(disk_id, zone_idx)`
-   (key order = `unit_offset` order). No snapshot needed, no slot
+a. `DataGroupClient::read_zone_records(bind, disk_id, zone_idx)`
+   (returns `ZoneRecords { zone_value, busy, free }`); use the `busy`
+   field. Key order = `unit_offset` order. No snapshot needed, no slot
    ordering needed.
-b. Start with an empty bitmap. For each `BusyBlockKey` + `BusyBlockValue`
-   returned: `range_set(unit_offset, unit_count)`; `used_count +=
-   unit_count`.
+b. Start with an empty bitmap. For each `BusyRecord` in `busy`:
+   `range_set(unit_offset, unit_count)`; `used_count += unit_count`.
 c. (`FreeBlockKey`s are not scanned — they carry `previous_owner` audit
    info but are not state indicators, §3.4.)
 d. Build the `Zone` as in `recover_zone` step e.
@@ -359,27 +395,40 @@ g. Return `(Zone, ZoneStats)`.
 
 ### 3.5 Recovery on startup
 
-Integrated into `app/crow-diskdb/src/main.rs` (extends the R71+R72
-wiring):
+Integrated into `app/crow-diskdb/src/main.rs`. The current `main.rs`
+runs a blocking initial sync (`sync_once`) before starting the gRPC
+server, but does not yet run recovery — the sync loop's
+`disk_add_init` writes baseline `ZoneValue` records (empty bitmap,
+`snapshot_slot = 0`) but does not replay the journal. R73 adds
+recovery after the initial sync:
 
-1. After the initial sync (R71) fetches owned disk-groups and their
-   disks from group 0, run `RecoveryEngine::recover_node()` for each
-   owned disk-group (strategy 2, with strategy 1 fallback).
+1. After the initial sync fetches owned disk-groups and their disks
+   from group 0, run `RecoveryEngine::recover_node()` for each owned
+   disk-group (strategy 2, with strategy 1 fallback).
 2. The server must not serve RPCs until recovery is complete for all
-   owned disk-groups. Use a `Barrier` or `OnceCell` to gate the gRPC
-   server startup.
+   owned disk-groups. The current `main.rs` already blocks on
+   `sync_once` before starting gRPC; recovery runs in the same
+   blocking phase.
 3. Log recovery progress: per disk-group, per disk, per zone — with
    timing (`recovery.zone.latency`, `recovery.node.latency` gauges,
    §11).
 
 ### 3.6 Recovery on ownership transfer
 
-Integrated into the sync loop (R71):
+Integrated into `app/crow-diskdb/src/sync.rs`. The current sync loop's
+`sync_once()` detects new disk-groups and calls `disk_add_init` (which
+writes baseline `ZoneValue` records but does not replay the journal).
+R73 keeps `disk_add_init` for fresh disks and adds recovery for
+existing disks:
 
 - When `sync_once()` detects a new disk-group assigned to this instance
-  (not previously owned), run `RecoveryEngine::recover_node()` for it
-  before adding it to the `NodeContainer` (in-memory state is
-  discarded; the records persist in the data group for the next owner).
+  (not previously owned), first check whether a `ZoneValue` snapshot
+  already exists for its zones (via `get_zone_value`). If snapshots
+  exist (the disk-group was previously owned by another instance),
+  run `RecoveryEngine::recover_node()` to replay the journal from
+  `snapshot_slot`. If no snapshots exist (truly fresh disks), keep the
+  existing `disk_add_init` path (writes baseline `ZoneValue` records
+  with empty bitmap, `snapshot_slot = 0`).
 - The new owner recovers from the data group's records — the same
   `ZoneValue` snapshots + journal scan as startup. The previous owner's
   in-memory state is irrelevant.
@@ -388,9 +437,10 @@ Integrated into the sync loop (R71):
 
 ## 4. Compaction Engine
 
-`app/crow-diskdb/src/recovery/compaction.rs` — strategy 3 (ongoing
-maintenance). Keeps the uncompacted record set small so strategy 2's
-replay is fast.
+`app/crow-diskdb/src/recovery/compaction.rs` (sub-module of the
+`recovery` module, following the `node.rs` + `node/container.rs`
+pattern) — strategy 3 (ongoing maintenance). Keeps the uncompacted
+record set small so strategy 2's replay is fast.
 
 ### 4.1 `CompactionEngine`
 
@@ -417,7 +467,7 @@ b. For each owned node (disk-group) in `NodeContainer`:
          `uncompacted_free_record_count` gauge (§11) exceeds
          `config.snapshot_compaction_threshold` (record count, §16).
          If not, skip.
-       - `await compact_zone(dg_id, bind, zone)`.
+       - `await compact_zone(bind, disk_id, zone)`.
 c. Repeat.
 
 **Cadence vs. threshold**: compaction triggers on **either** the
@@ -430,21 +480,21 @@ accumulating too many free records between periodic cycles.
 ```rust
 async fn compact_zone(
     &self,
-    dg_id: DiskGroupId,
-    bind: (u64, u64),
+    bind: Bind,
     disk_id: DiskId,
     zone: &Zone,
 ) -> Result<()>
 ```
 
-a. **Scan free records** for the zone by key prefix
-   (`FreeBlockKey::prefix_for_zone(disk_id, zone_idx)`). The free
-   records of one zone are contiguous in the crow-tree page, so this is
-   efficient (§7). Use `DataGroupClient::scan_free_records(bind,
-   disk_id, zone_idx)`. Record `compaction.scan_free.latency` (§11).
+a. **Scan free records** for the zone via
+   `DataGroupClient::read_zone_records(bind, disk_id, zone_idx)` (use
+   the `free` field), or a dedicated `scan_free_records` helper that
+   calls only the free-prefix scan. The free records of one zone are
+   contiguous in the crow-tree page, so this is efficient (§7). Record
+   `compaction.scan_free.latency` (§11).
 b. **Merge free records into the in-memory `ZoneValue` bitmap**: for
-   each `FreeBlockKey` + `FreeBlockValue` returned: `range_clear(
-   unit_offset, unit_count)` on the zone's `usage_bits`. Record
+   each `FreeRecord` in `free`: `range_clear(unit_offset, unit_count)`
+   on the zone's `usage_bits`. Record
    `compaction.merge_bitmap.latency`.
    - Busy records for freed blocks are already gone (deleted on free);
      busy records for live blocks stay set. The merge only clears bits
@@ -452,15 +502,15 @@ b. **Merge free records into the in-memory `ZoneValue` bitmap**: for
 c. **Determine `snapshot_slot`**: `current_max_slot` = the applied
    frontier of the data group at the time of compaction. Fetched via
    `DataGroupClient::get_applied_slot(bind)` (a lightweight
-   `Scan` with `min_slot = 0` + `read_mode = Linearizable` to get the
-   `read_slot` from the response, or a dedicated method if crow-kv
-   exposes one).
+   `Scan` with `read_mode = Linearizable` to get the `read_slot` from
+   the response, or a dedicated method if crow-kv exposes one).
 d. **Build the new `ZoneValue`**: `usage_bitmap` (the merged bitmap,
    serialized from `usage_bits`), `snapshot_slot = current_max_slot`,
    `crc32 = compute_checksum(usage_bitmap)` (R70).
-e. **Write the new `ZoneValue`**: `await DataGroupClient::put(bind,
-   ZoneKey { disk_id, zone_idx }, &zone_value)`. This overwrites the
-   old snapshot.
+e. **Write the new `ZoneValue`**: `await DataGroupClient::put_zone(
+   bind, disk_id, zone_idx, &zone_value)`. This overwrites the old
+   snapshot. The key invariant: the `ZoneValue` snapshot is written
+   **before** the free records are deleted.
 f. **Delete the free records** in one `batch_write`:
    `await DataGroupClient::delete_free_records_batch(bind,
    &free_record_keys)`. One `batch_write` per data group; batch by
@@ -503,41 +553,49 @@ Besides the periodic loop, compaction can be triggered on demand:
 
 ## 5. Zone Struct Extensions
 
-Update `app/crow-diskdb/src/zone/mod.rs` (from R72):
-
+`app/crow-diskdb/src/zone.rs` already has (from R72):
 - `snapshot_slot: AtomicU64` — the slot of the last compacted
   `ZoneValue` snapshot. Initialized to 0 on fresh zone, set by recovery
   and compaction.
 - `uncompacted_free_record_count: AtomicU32` — gauge for the compaction
-  backlog (§11). Incremented on free, decremented when compaction
-  deletes the free record.
+  backlog (§11). Incremented on free (in `Zone::free`), decremented
+  when compaction deletes the free record.
+
+R73 adds:
 - `to_zone_value() -> ZoneValue` — snapshot current `usage_bits` +
-  `snapshot_slot` + `crc32` for compaction.
-- `from_zone_value(value: ZoneValue, unit_capacity: u32) -> Zone` —
+  `snapshot_slot` + `crc32` (via `ZoneValueExt::compute_checksum`) for
+  compaction.
+- `from_zone_value(value: &ZoneValue, unit_capacity: u32) -> Zone` —
   rebuild from a snapshot (used by recovery when no records exist after
-  the snapshot). Deserializes `usage_bitmap`, computes `used_count` =
-  popcount, sets `snapshot_slot`.
+  the snapshot). Deserializes `usage_bitmap` into a `UsageBitmap`,
+  computes `used_count` = popcount, sets `snapshot_slot`. Verifies CRC
+  via `ZoneValueExt::verify_checksum` before use.
 
 ---
 
 ## 6. DataGroupClient Extensions
 
-Update `app/crow-diskdb/src/persistence/mod.rs` (from R72):
-
-- `get_zone_value(bind, disk_id, zone_idx) -> Result<Option<ZoneValue>>`
-  — `get` from `ZoneKey`. Used by recovery (strategy 2 step a).
-- `put_zone_value(bind, disk_id, zone_idx, value: &ZoneValue) ->
-  Result<()>` — `put` to `ZoneKey`. Used by compaction (step e) and
-  full rebuild (strategy 1 step e).
-- `scan_busy_records(bind, disk_id, zone_idx) -> Result<Vec<(BusyBlockKey,
-  BusyBlockValue)>>` — prefix scan `BusyBlockKey::prefix_for_zone`.
-  Used by strategy 1 (full scan).
-- `scan_free_records(bind, disk_id, zone_idx) -> Result<Vec<(FreeBlockKey,
-  FreeBlockValue)>>` — prefix scan `FreeBlockKey::prefix_for_zone`.
-  Used by compaction (step a).
+`app/crow-diskdb/src/persistence.rs` already has (from R72):
+- `put_zone(bind, disk_id, zone_idx, value: &ZoneValue) -> Result<()>`
+  — `put` to `ZoneKey`. Used by compaction (step e) and full rebuild
+  (strategy 1 step e). Also used by the sync loop's `disk_add_init` to
+  write baseline `ZoneValue` records.
+- `read_zone_records(bind, disk_id, zone_idx) -> Result<ZoneRecords>`
+  — reads `ZoneValue` (point `get`) + all `BusyBlockKey` and
+  `FreeBlockKey` entries (two prefix scans) for one zone, decoded into
+  `ZoneRecords { zone_value, busy: Vec<BusyRecord>, free:
+  Vec<FreeRecord> }`. Used by strategy 1 (full scan — use the `busy`
+  field) and compaction (step a — use the `free` field). The
+  `zone_value` field serves strategy 2 step a (load snapshot).
 - `delete_free_records_batch(bind, keys: &[Vec<u8>]) -> Result<()>` —
   `batch_write` with `Delete` ops for free records only. Used by
-  compaction (step f). Already defined in R72; reused here.
+  compaction (step f).
+
+R73 adds:
+- `get_zone_value(bind, disk_id, zone_idx) -> Result<Option<ZoneValue>>`
+  — point `get` on `ZoneKey` only (1 round-trip). Used by recovery
+  (strategy 2 step a — load snapshot). Avoids the 2 wasted scans of
+  `read_zone_records` when only the snapshot is needed.
 - `get_applied_slot(bind) -> Result<u64>` — get the data group's
   current applied frontier (for compaction's `snapshot_slot`). Uses a
   lightweight `Scan` with `read_mode = Linearizable` and reads
@@ -552,76 +610,110 @@ Update `app/crow-diskdb/src/persistence/mod.rs` (from R72):
   `FreeBlockKey::prefix_for_zone`. Used by recovery (strategy 2 step
   c, scan 2).
 
+Note: `read_zone_records` does three round-trips (one `get` + two
+scans) per zone. Strategy 1 (full scan) uses the `busy` field;
+compaction (step a) uses the `free` field. Strategy 2 step a (load
+snapshot) uses the dedicated `get_zone_value` (1 round-trip) instead —
+the busy/free scans of `read_zone_records` are wasted there since
+strategy 2 replays from the journal, not current state.
+
 ---
 
 ## 7. Config Extensions
 
-`app/crow-diskdb/src/config.rs` — add a `CompactionConfig` section
-(or extend `PersistenceConfig`):
+`app/crow-diskdb/src/config.rs`. The current `PersistenceConfig`
+already has `snapshot_interval_secs` (default 300) and
+`snapshot_journal_threshold` (default 4096) — these were added in R72
+as placeholders. R73 renames/restructures them to match the §16 config
+naming:
 
-- `compaction_cadence: Duration` (default 60 s) — periodic compaction
-  interval.
-- `snapshot_compaction_threshold: u32` (default 4096) — free-record
-  count per zone that triggers compaction (in addition to the periodic
+- Rename `snapshot_interval_secs` → `compaction_cadence_secs` (default
+  300) — periodic compaction interval. Keep the same field semantics
+  (seconds in config; converted to `Duration` in `SyncConfig`-style
+  wiring).
+- Rename `snapshot_journal_threshold` →
+  `snapshot_compaction_threshold` (default 4096) — free-record count
+  per zone that triggers compaction (in addition to the periodic
   cadence).
-- `recovery_concurrency: usize` (default 16) — max concurrent zone
-  recoveries in `recover_node`.
-
-Fix `PersistenceConfig` (from R71+R72 working design):
-- Remove `snapshot_interval_secs` (replaced by `compaction_cadence` in
-  `CompactionConfig`).
-- Remove `snapshot_journal_threshold` (replaced by
-  `snapshot_compaction_threshold` in `CompactionConfig`).
+- Add `recovery_concurrency: usize` (default 16) — max concurrent zone
+  recoveries in `recover_node`. Add to `PersistenceConfig` (or a new
+  `RecoveryConfig` section).
+- Update `validate()` to check the renamed fields (replace the
+  existing `snapshot_interval_secs == 0` check).
 
 ---
 
 ## 8. Server Wiring
 
-Update `app/crow-diskdb/src/main.rs` (extends R71+R72 wiring):
+Update `app/crow-diskdb/src/main.rs`. The current `main.rs` builds
+the kv-client service classes, `NodeContainer`, `SyncLoop`, runs a
+blocking `sync_once`, spawns the sync loop, then starts the gRPC
+server. R73 inserts recovery + compaction into this flow:
 
-1. ... (R71+R72 steps 1–8: config, clients, NodeContainer, StatusManager,
-   SyncLoop, initial sync).
-2. Create `RecoveryEngine` with `DataGroupClient` + `SysdataClient`.
+1. ... (existing steps: config, clients, `NodeContainer`, `SyncLoop`,
+   blocking `sync_once`).
+2. Create `RecoveryEngine` with `DataGroupClient`.
 3. Run `RecoveryEngine::recover_node()` for each owned disk-group
    (blocking — server must not serve RPCs until recovery completes).
+   The current `main.rs` already blocks on `sync_once` before starting
+   gRPC; recovery runs in the same blocking phase, after `sync_once`.
 4. Create `CompactionEngine` with `DataGroupClient` + config.
 5. Spawn `compaction_loop` as a background task.
-6. Create gRPC service (R72) — now with `RebuildZoneBitmap` handler
-   implemented (delegates to `RecoveryEngine::
-   rebuild_zone_bitmap_full_scan`).
-7. Start gRPC server (tonic) on `listen_addr`.
-8. Start HTTP management server (axum) on `http_listen_addr`.
+6. Create gRPC service (`DiskdbService::new`) — now with the
+   `RebuildZoneBitmap` handler implemented (delegates to
+   `RecoveryEngine::rebuild_zone_bitmap_full_scan`). The current
+   `DiskdbService` does not have `RebuildZoneBitmap`; R73 adds it to
+   the `DiskdbService` struct + the `DiskdbService` trait impl in
+   `grpc.rs`.
+7. Start gRPC server (tonic) on `listen_addr` (existing).
+8. HTTP management server (axum) on `http_listen_addr` — not yet
+   implemented in the current `main.rs`; R73 does not add it (deferred
+   to R77 console).
 
-Update `app/crow-diskdb/src/sync/mod.rs` (R71):
-- When `sync_once()` detects a new disk-group, call
-  `RecoveryEngine::recover_node()` before adding it to
-  `NodeContainer`.
+Update `app/crow-diskdb/src/sync.rs`:
+- When `sync_once()` detects a new disk-group, check whether
+  `ZoneValue` snapshots already exist for its zones (via
+  `get_zone_value`). If they do, call `RecoveryEngine::recover_node()`
+  instead of `disk_add_init` (replay the journal from
+  `snapshot_slot`). If not (fresh disks), keep the existing
+  `disk_add_init` path. The `SyncLoop` needs a handle to the
+  `RecoveryEngine` (add a `with_recovery_engine` builder, mirroring
+  `with_data_group_client`).
 
 ---
 
 ## 9. Module Structure
 
+The current `app/crow-diskdb/src/` uses flat files with sub-module
+directories where needed (e.g. `node.rs` + `node/container.rs` +
+`node/disk.rs`). R73 follows the same pattern:
+
 ```
 app/crow-diskdb/src/
+├── recovery.rs             — RecoveryEngine, recover_node, recover_zone
+│                             (strategy 2), rebuild_zone_bitmap_full_scan
+│                             (strategy 1). New module.
 ├── recovery/
-│   ├── mod.rs              — RecoveryEngine, recover_node, recover_zone
-│   │                        (strategy 2), rebuild_zone_bitmap_full_scan
-│   │                        (strategy 1)
 │   └── compaction.rs       — CompactionEngine, compaction_loop,
-│                             compact_zone (strategy 3)
-├── persistence/
-│   └── mod.rs              — DataGroupClient (extended: get/put
-│                             ZoneValue, scan_busy/free_records,
-│                             journal_scan_busy/free, get_applied_slot)
-├── zone/
-│   └── mod.rs              — Zone (extended: snapshot_slot,
-│                             uncompacted_free_record_count,
-│                             to_zone_value, from_zone_value)
-├── grpc/
-│   └── service.rs          — RebuildZoneBitmap handler (was stub)
-├── config.rs               — CompactionConfig, recovery_concurrency
-├── sync/mod.rs             — trigger recovery on ownership transfer
-└── main.rs                 — wire RecoveryEngine + CompactionEngine
+│                             compact_zone (strategy 3). New sub-module.
+├── persistence.rs          — DataGroupClient (extended: get_zone_value,
+│                             get_applied_slot, journal_scan_busy/free).
+│                             Already has put_zone, read_zone_records,
+│                             delete_free_records_batch.
+├── zone.rs                 — Zone (extended: to_zone_value, from_zone_value).
+│                             Already has snapshot_slot,
+│                             uncompacted_free_record_count.
+├── grpc.rs                 — DiskdbService (extended: RebuildZoneBitmap
+│                             handler). Currently has Allocate/Free/Query/Info.
+├── config.rs               — PersistenceConfig (renamed fields:
+│                             compaction_cadence_secs,
+│                             snapshot_compaction_threshold),
+│                             recovery_concurrency.
+├── sync.rs                 — SyncLoop (extended: trigger recovery on
+│                             ownership transfer via with_recovery_engine;
+│                             keep disk_add_init for fresh disks).
+├── lib.rs                  — add `recovery` module.
+└── main.rs                 — wire RecoveryEngine + CompactionEngine.
 ```
 
 ---
@@ -668,8 +760,8 @@ app/crow-diskdb/src/
 
 ### 10.2 Integration tests (in-process mock group-0 + mock data-group)
 
-Using the `diskdb_test_harness` (from R71+R72 working design §2.3),
-extended with `JournalScan` support (§1.6):
+Using an in-process mock crow-kv-compatible server (mock group-0 +
+mock data-group), extended with `JournalScan` support (§1.6):
 
 - **`JournalScan` crow-kv RPC** — write ops via `Put`/`Delete`/
   `BatchWrite`, then `JournalScan` returns them in slot order within a
@@ -687,18 +779,184 @@ extended with `JournalScan` support (§1.6):
   `snapshot_compaction_threshold`, verify compaction runs.
 - **Compaction trigger on cadence** — wait for `compaction_cadence`,
   verify compaction runs.
-- **Ownership transfer recovery** — simulate ownership transfer (re-
-  assign disk-group in mock group-0), verify the new owner recovers
-  from the data group's records.
+- **Ownership transfer recovery (mock)** — simulate ownership transfer
+  (re-assign disk-group in mock group-0), verify the new owner
+  recovers from the data group's records. See §10.4 for the detailed
+  scenarios.
 - **Server startup gates gRPC on recovery** — server does not accept
   RPCs until recovery finishes. Integration test: connect before
   recovery completes → `Unavailable`; connect after → success.
 - **Recovery concurrency** — recover a node with many zones, verify
   parallel recovery (timing < sequential baseline).
 
-### 10.3 Verification commands
+### 10.3 Ownership-transfer unit tests
+
+The ownership-transfer scenario: instance A owns a disk-group,
+allocates/frees blocks (producing records on the data group), then
+ownership transfers to instance B. Instance B has never seen A's
+in-memory state — it must reconstruct the bitmap purely from the data
+group's records. These unit tests exercise the recovery engine in
+isolation (no real kv cluster; use a mock data-group or direct
+`DataGroupClient` calls against an in-process store).
+
+- **Transfer with only busy records (no snapshot, no compaction)**:
+  - Instance A: `disk_add_init` writes baseline `ZoneValue` (empty
+    bitmap, `snapshot_slot = 0`). Allocate 5 blocks → 5
+    `BusyBlockKey` records on the data group.
+  - Transfer: ownership map changes to instance B. Instance B runs
+    `recover_node` → `recover_zone` for each zone.
+  - Verify: instance B's recovered bitmap has exactly the 5 bits set
+    that A allocated. `used_count` = 5 * unit_count. No busy record
+    for freed blocks (A freed none in this case).
+  - Key assertion: B's bitmap matches A's bitmap even though B never
+    saw A's in-memory state.
+
+- **Transfer after allocate + free (busy + free records, no
+  compaction)**:
+  - Instance A: allocate 5 blocks, free 2 of them. Data group has 3
+    `BusyBlockKey` + 2 `FreeBlockKey` records.
+  - Transfer to instance B → `recover_zone`.
+  - Verify: B's bitmap has exactly the 3 live busy bits set (the 2
+    freed bits are clear). `used_count` = 3 * unit_count. The 2
+    `FreeBlockKey` records are present but do not affect the bitmap
+    (free records are no-ops for state in strategy 2 replay).
+
+- **Transfer after compaction (snapshot + few records)**:
+  - Instance A: allocate 10, free 4, run compaction → new `ZoneValue`
+    snapshot with 6 bits set, `snapshot_slot = S`. The 4 free records
+    are deleted. Data group now has: 1 `ZoneValue` (6 bits, slot S) +
+    6 `BusyBlockKey` records.
+  - Transfer to instance B → `recover_zone` loads the snapshot (6
+    bits), journal-scans from `S+1` (no ops → empty replay).
+  - Verify: B's bitmap = 6 bits set, `used_count` = 6 * unit_count,
+    `snapshot_slot = S`. Recovery is fast (no replay needed).
+
+- **Transfer after compaction + post-compaction allocates**:
+  - Instance A: compact (snapshot at slot S, 6 bits), then allocate 3
+    more blocks (slots S+1..S+3). Data group: `ZoneValue` (6 bits,
+    slot S) + 6 old `BusyBlockKey` + 3 new `BusyBlockKey`.
+  - Transfer to instance B → `recover_zone` loads snapshot (6 bits),
+    journal-scans from `S+1`, replays 3 Put `BusyBlockKey` ops.
+  - Verify: B's bitmap = 9 bits set (6 from snapshot + 3 replayed),
+    `used_count` = 9 * unit_count.
+
+- **Transfer after compaction + post-compaction free**:
+  - Instance A: compact (snapshot at slot S, 6 bits), then free 1
+    block (slot S+1: Delete `BusyBlockKey` + Put `FreeBlockKey`).
+  - Transfer to instance B → `recover_zone` loads snapshot (6 bits),
+    journal-scans from `S+1`, replays the free op (Delete
+    `BusyBlockKey` → `range_clear` using `FreeBlockValue.unit_count`
+    from the same slot).
+  - Verify: B's bitmap = 5 bits set (6 from snapshot − 1 freed),
+    `used_count` = 5 * unit_count.
+
+- **Transfer with no records at all (fresh disk-group)**:
+  - No `ZoneValue`, no `BusyBlockKey`, no `FreeBlockKey`. This is the
+    `disk_add_init` path (fresh disks) — recovery is not triggered
+    (no snapshot exists). Verify: `disk_add_init` writes baseline
+    `ZoneValue` (empty bitmap, `snapshot_slot = 0`), B's bitmap is
+    empty, `used_count = 0`.
+
+- **Transfer back to original owner (A → B → A)**:
+  - Instance A allocates 5, transfers to B (B recovers 5 bits), B
+    allocates 3 more (8 total), transfers back to A.
+  - Instance A's old in-memory state is stale (5 bits) — it must
+    discard it and recover from records (8 bits).
+  - Verify: A's recovered bitmap = 8 bits, `used_count` = 8 *
+    unit_count. The stale in-memory state is irrelevant; recovery
+    always reconstructs from records.
+
+- **Transfer with corrupted snapshot on the new owner**:
+  - Instance A: compact (snapshot at slot S), then corrupt the
+    `ZoneValue`'s `crc32` field directly on the data group.
+  - Transfer to instance B → `recover_zone` loads snapshot, CRC
+    fails → falls back to strategy 1 (full scan of `BusyBlockKey`s).
+  - Verify: B's bitmap = full-scan result (all live busy bits set),
+    regardless of the corrupted snapshot.
+
+### 10.4 Verification commands
 
 - `pixi run cargo fmt --all -- --check`
 - `pixi run cargo clippy --all-targets -- -D warnings`
 - Relevant tests pass (`pixi run cargo test -p crow-diskdb` and
   `pixi run cargo test -p crow-kv` for the `JournalScan` handler).
+
+### 10.5 E2E test — disk-group transfer between diskdb instances
+
+Uses the existing `KvCluster` harness (3-node `crow-kv-server` cluster,
+groups 0 + 1) from `app/crow-diskdb/tests/common/cluster.rs`. Two
+diskdb instances run in-process (same test binary, separate
+`NodeContainer`s + `SyncLoop`s), sharing the same kv cluster. The test
+mirrors `diskdb_e2e_allocate_free` for the setup, then adds the
+transfer flow.
+
+**Setup** (shared by both instances):
+- Start `KvCluster` (3 kv-server nodes, group 0 + group 1).
+- Seed hardware metadata into group 0: rack 1, node 10, disk-group
+  100, 3 disks (disk_id 0:1, 0:2, 0:3), 4 zones × 128 units each.
+- Set ownership → instance A (`instance_id = 999`).
+- Set bind → `(store_id = 0, group_id = 1)`.
+
+**Phase 1 — instance A populates state**:
+- Build instance A: `NodeContainer::new(999)`, `SyncLoop` with
+  `DataGroupClient` seeded to group-1 leader. `with_recovery_engine`
+  (R73).
+- `sync_once()` → `disk_add_init` writes baseline `ZoneValue` records
+  (fresh disks, no snapshots exist yet).
+- Allocate 5 blocks via `persistence::allocate_blocks` (owner_chunk =
+  `0:0:42`). Verify 5 `BusyBlockKey` records on group 1.
+- Free 2 of the 5 blocks via `persistence::free_blocks`. Verify 2
+  `FreeBlockKey` records, 2 `BusyBlockKey` gone. Instance A's
+  in-memory bitmap: 3 bits set.
+- (Optional) Run compaction on one zone → verify `ZoneValue` snapshot
+  written with the compacted bitmap.
+
+**Phase 2 — transfer ownership to instance B**:
+- `hw.set_owner(rack_id=1, node_id=10, dg_id=100, instance_id=888,
+  lease_ms=now+3600s)` — re-assign ownership to instance B in group 0.
+- Build instance B: `NodeContainer::new(888)`, `SyncLoop` with
+  `with_recovery_engine`. Instance B has a fresh, empty
+  `NodeContainer` — it has never seen instance A's in-memory state.
+- `sync_once()` on instance B → detects disk-group 100 as new →
+  checks `get_zone_value` → snapshots exist (from `disk_add_init` or
+  compaction) → runs `RecoveryEngine::recover_node()` instead of
+  `disk_add_init`.
+
+**Phase 3 — verify instance B's recovered state**:
+- Instance B's `NodeContainer` has disk-group 100 with 3 disks, 4
+  zones each.
+- For each zone that had allocates: verify `used_count` matches the
+  record-derived count (3 live busy blocks if no compaction, or the
+  snapshot's popcount if compacted).
+- Verify instance B's bitmap matches the records: for each
+  `BusyBlockKey` on the data group, the corresponding bit is set in
+  B's in-memory `usage_bits`. For each freed offset, the bit is clear.
+- Verify `snapshot_slot` is set correctly (0 if no compaction, or the
+  compaction slot).
+
+**Phase 4 — instance B serves allocates after recovery**:
+- Allocate 3 more blocks via instance B's `NodeContainer` +
+  `DataGroupClient`. Verify they succeed and land on the correct
+  disks/zones (round-robin spreads across the 3 disks).
+- Verify the 3 new `BusyBlockKey` records appear on group 1.
+- Free 1 of the 3 new blocks. Verify the `FreeBlockKey` appears and
+  the `BusyBlockKey` is gone.
+
+**Phase 5 — transfer back to instance A (A → B → A)**:
+- `hw.set_owner(..., instance_id=999)` — transfer back to A.
+- Instance A's old `NodeContainer` is stale (3 bits from phase 1).
+  Discard it; build a fresh `NodeContainer::new(999)`.
+- `sync_once()` → recovery → reconstruct from records (3 old + 3 new
+  from B − 1 freed by B = 5 live busy blocks).
+- Verify A's recovered `used_count` = 5 * unit_count. The stale
+  in-memory state (3 bits) is irrelevant — recovery always
+  reconstructs from records.
+
+**Assertions summary**:
+- After phase 2, instance B's bitmap matches the data-group records
+  (not instance A's stale in-memory state).
+- After phase 4, instance B can allocate/free normally (recovery did
+  not corrupt the allocator).
+- After phase 5, instance A's recovered bitmap reflects all
+  operations from both A and B (total 5 live busy blocks), proving
+  recovery is idempotent and stateless-on-disk.
