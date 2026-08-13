@@ -19,7 +19,7 @@ use crow_protocol::{DiskGroupId, NodeId, RackId};
 use crow_protocol::{DiskIdExt, ZoneValueExt};
 use tracing::{info, warn};
 
-use crate::data_group_client::DataGroupClient;
+use crate::diskdb_kv_client::DiskDBKVClient;
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
@@ -72,10 +72,10 @@ pub struct KeepAlive {
     config: KeepAliveConfig,
     status_machine: HwStateMachine,
     missed_count: u32,
-    /// Optional `DataGroupClient` for writing baseline `ZoneValue`
+    /// Optional `DiskDBKVClient` for writing baseline `ZoneValue`
     /// records during disk-add init. When `None`, disk-add init
     /// skips the baseline write (test mode).
-    kv: Option<DataGroupClient>,
+    kv: Option<DiskDBKVClient>,
     /// Optional CAS retry counter handle, attached to each `Zone`
     /// during disk-add init via `Zone::with_cas_retry_metric`.
     cas_retry_metric: Option<Arc<Counter>>,
@@ -101,9 +101,9 @@ impl KeepAlive {
         }
     }
 
-    /// Attach a `DataGroupClient` for disk-add init baseline writes.
+    /// Attach a `DiskDBKVClient` for disk-add init baseline writes.
     #[must_use]
-    pub fn with_data_group_client(mut self, kv: DataGroupClient) -> Self {
+    pub fn with_diskdb_kv_client(mut self, kv: DiskDBKVClient) -> Self {
         self.kv = Some(kv);
         self
     }

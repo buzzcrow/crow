@@ -14,7 +14,7 @@ use crow_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
 use crow_protocol::ZoneValueExt;
 
-use crate::data_group_client::{Bind, DataGroupClient};
+use crate::diskdb_kv_client::{Bind, DiskDBKVClient};
 use crate::model::zone::{DdbZone, DdbZoneHealth};
 use crate::recovery::RecoveryError;
 
@@ -22,7 +22,7 @@ use crate::recovery::RecoveryError;
 /// Returns a recovered `Zone` or an error indicating why strategy 2
 /// failed (caller falls back to strategy 1).
 pub async fn recover_zone_inner(
-    kv: &DataGroupClient,
+    kv: &DiskDBKVClient,
     bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
@@ -177,7 +177,7 @@ fn find_free_unit_count_at_slot(ops: &[JournalOp], slot: u64, unit_offset: u64) 
 /// given disk — used by the keep-alive loop to decide between recovery
 /// (snapshots exist) and `disk_add_init` (fresh disks).
 pub async fn zone_snapshots_exist(
-    kv: &DataGroupClient,
+    kv: &DiskDBKVClient,
     bind: Bind,
     disk_id: &DiskId,
     zone_count: u32,

@@ -11,8 +11,8 @@
 )]
 
 pub mod bg_task;
-pub mod data_group_client;
 pub mod ddb_config;
+pub mod diskdb_kv_client;
 pub mod keepalive;
 pub mod lifecycle;
 pub mod metrics;
