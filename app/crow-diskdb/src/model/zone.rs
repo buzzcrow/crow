@@ -317,10 +317,13 @@ impl DdbZone {
     /// Returns `false` if any bit was already clear (double-free
     /// detection). Decrements `used_count` on success.
     ///
-    /// The bitmap clear happens before the durable `FreeBlockValue`
-    /// persist (§4.6). If diskdb crashes after the clear but before
-    /// the persist, the bit is clear in memory but the `BusyBlockKey`
-    /// still exists on disk — R73's full scan re-sets the bit (§4.8).
+    /// The bitmap clear happens after the durable `FreeBlockValue`
+    /// persist (persist-before-bitmap-clear). If diskdb crashes after
+    /// the persist but before the clear, the bit is set in memory but
+    /// no `BusyBlockKey` exists on disk — R73's full scan clears the
+    /// bit (no busy record → block is free). This is a ghost-busy
+    /// (self-correcting on restart; §12 scanner reconciles during live
+    /// operation).
     pub fn free(&self, unit_offset: u64, unit_count: u32) -> bool {
         if unit_count == 0 {
             return false;

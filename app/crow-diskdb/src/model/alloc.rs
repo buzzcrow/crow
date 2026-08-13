@@ -215,18 +215,24 @@ pub async fn allocate_blocks(
 /// before touching the bitmap. Rejects on `NotBusy` or `OwnerMismatch`.
 /// When `false` (default), no KV read — `owner_chunk` comes from the
 /// `Segment` (§14).
-/// Phase 1: clear bitmap locally (per-bit CAS).
-/// Phase 2: persist `FreeBlockValue` (delete `BusyBlockKey` + put
-/// `FreeBlockKey` in one `batch_write`).
+/// Phase 1: persist `FreeBlockValue` (delete `BusyBlockKey` + put
+/// `FreeBlockKey` in one `batch_write`) — durable free first.
+/// Phase 2: clear bitmap locally (per-bit CAS).
 ///
-/// See §4.6.
+/// Persist-before-bitmap-clear prevents the double-allocate window: if
+/// the persist fails, the bit stays set and the allocator will not
+/// re-hand the block to another caller. The caller gets an error and
+/// can retry safely (the block is still busy on both disk and memory).
+/// If the persist succeeds but the bitmap clear fails (rare: race or
+/// zone lookup failure), the block is free on disk but still shows busy
+/// in memory — the stale bit prevents re-allocation until the §12
+/// scanner reconciles (ghost-busy, self-correcting).
 ///
 /// # Errors
 /// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
-/// validation failure (no bitmap clear happens). Returns
-/// `FreeError::Kv` if the persist fails — the bitmap clear already
-/// happened locally; the §12 ghost-allocation scanner reconciles on
-/// restart.
+/// validation failure (no persist, no bitmap clear). Returns
+/// `FreeError::Kv` if the persist fails — the bitmap was NOT cleared;
+/// the block is still busy, the caller can retry.
 pub async fn free_block(
     dg: &Arc<DdbDiskGroup>,
     segment: &Segment,
@@ -268,49 +274,60 @@ pub async fn free_block(
         }
     }
 
-    // Phase 1: clear bitmap locally.
-    if !dg.free_block(
-        &disk_id,
-        segment.zone_index,
-        segment.unit_offset,
-        segment.unit_count,
-    ) {
-        return Err(FreeError::Kv(crow_kv_client::Error::SysdataDecode {
-            key: "free_block".to_string(),
-            reason: format!(
-                "bitmap clear failed for disk {disk_id:?} zone {} offset {}",
-                segment.zone_index, segment.unit_offset
-            ),
-        }));
-    }
-
-    // Record per-disk event counter after Phase 1 clear succeeds.
-    let unit_size = dg.disk_unit_size(disk_id).unwrap_or(0);
-    if let Some(m) = dg.disk_metrics(disk_id) {
-        m.record_free(segment.unit_count, unit_size);
-    }
-
-    // Phase 2: persist FreeBlockValue.
+    // Phase 1: persist FreeBlockValue (durable free first).
     let value = FreeBlockValue {
         unit_count: segment.unit_count,
         previous_owner: segment.owner_chunk,
     };
     kv.persist_free(bind, &disk_id, segment.zone_index, segment.unit_offset, &value)
         .await
-        .map_err(FreeError::from)
+        .map_err(FreeError::from)?;
+    // Persist succeeded — the block is free on disk. If we crash now,
+    // R73 recovery sees no BusyBlockKey → bit is clear → block is free.
+
+    // Phase 2: clear bitmap locally.
+    if !dg.free_block(
+        &disk_id,
+        segment.zone_index,
+        segment.unit_offset,
+        segment.unit_count,
+    ) {
+        // Persist succeeded but bitmap clear failed (rare: double-free
+        // race or zone lookup failure). The block is free on disk; the
+        // stale in-memory bit prevents re-allocation until the §12
+        // scanner reconciles. The caller's intent was achieved.
+        tracing::warn!(
+            "free persist succeeded but bitmap clear failed for disk {disk_id:?} zone {} offset {} — ghost-busy, scanner will reconcile",
+            segment.zone_index,
+            segment.unit_offset
+        );
+    }
+
+    // Record per-disk event counter after durable free.
+    let unit_size = dg.disk_unit_size(disk_id).unwrap_or(0);
+    if let Some(m) = dg.disk_metrics(disk_id) {
+        m.record_free(segment.unit_count, unit_size);
+    }
+
+    Ok(())
 }
 
-/// Free multiple blocks (one `batch_write` per data group). See §4.6.
+/// Free multiple blocks (one `batch_write` per data group).
 ///
 /// When `validate_owner_on_free` is `true`, all segments are validated
-/// first (all-or-nothing) — if any segment fails validation, no bitmap
-/// is cleared and the error is returned.
+/// first (all-or-nothing) — if any segment fails validation, no persist
+/// and no bitmap clear happens.
+///
+/// Persist-before-bitmap-clear (same ordering as `free_block`): the
+/// `batch_write` persists all `FreeBlockValue`s first, then the bitmap
+/// bits are cleared. If the persist fails, no bits are cleared — the
+/// blocks stay busy and the caller can retry safely.
 ///
 /// # Errors
 /// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
-/// validation failure (no bitmap clear happens). Returns
-/// `FreeError::Kv` if the persist fails — bitmap clears already
-/// happened locally.
+/// validation failure (no persist, no bitmap clear). Returns
+/// `FreeError::Kv` if the persist fails — no bitmap clears happened;
+/// all blocks are still busy, the caller can retry.
 pub async fn free_blocks(
     dg: &Arc<DdbDiskGroup>,
     segments: &[Segment],
@@ -354,25 +371,7 @@ pub async fn free_blocks(
         }
     }
 
-    // Phase 1: clear all bitmaps locally.
-    for seg in segments {
-        if let Some(disk_id) = seg.disk_id {
-            if !dg.free_block(&disk_id, seg.zone_index, seg.unit_offset, seg.unit_count) {
-                tracing::warn!(
-                    "bitmap clear failed for disk {disk_id:?} zone {} offset {} — ghost scanner will reconcile",
-                    seg.zone_index,
-                    seg.unit_offset
-                );
-            }
-            // Record per-disk event counter after Phase 1 clear succeeds.
-            let unit_size = dg.disk_unit_size(disk_id).unwrap_or(0);
-            if let Some(m) = dg.disk_metrics(disk_id) {
-                m.record_free(seg.unit_count, unit_size);
-            }
-        }
-    }
-
-    // Phase 2: persist all in one batch_write.
+    // Phase 1: persist all in one batch_write (durable free first).
     let records: Vec<(DiskId, u32, u64, FreeBlockValue)> = segments
         .iter()
         .filter_map(|seg| {
@@ -396,5 +395,31 @@ pub async fn free_blocks(
 
     kv.persist_free_batch(bind, &records)
         .await
-        .map_err(FreeError::from)
+        .map_err(FreeError::from)?;
+    // Persist succeeded — all blocks are free on disk. If we crash now,
+    // R73 recovery sees no BusyBlockKey → bits are clear → blocks are free.
+
+    // Phase 2: clear all bitmaps locally.
+    for seg in segments {
+        if let Some(disk_id) = seg.disk_id {
+            if !dg.free_block(&disk_id, seg.zone_index, seg.unit_offset, seg.unit_count) {
+                // Persist succeeded but bitmap clear failed (rare:
+                // double-free race or zone lookup failure). The block is
+                // free on disk; the stale in-memory bit prevents
+                // re-allocation until the §12 scanner reconciles.
+                tracing::warn!(
+                    "free persist succeeded but bitmap clear failed for disk {disk_id:?} zone {} offset {} — ghost-busy, scanner will reconcile",
+                    seg.zone_index,
+                    seg.unit_offset
+                );
+            }
+            // Record per-disk event counter after durable free.
+            let unit_size = dg.disk_unit_size(disk_id).unwrap_or(0);
+            if let Some(m) = dg.disk_metrics(disk_id) {
+                m.record_free(seg.unit_count, unit_size);
+            }
+        }
+    }
+
+    Ok(())
 }

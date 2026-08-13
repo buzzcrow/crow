@@ -626,14 +626,18 @@ crash point. The invariants that make this true:
   correctly free. This is a **ghost allocation** (bit set in-memory,
   no record) that is self-correcting on restart; the §12 scanner also
   detects this drift during live operation.
-- **Free atomicity** — the free is one `batch_write` (Delete
-  `BusyBlockKey` + Put `FreeBlockValue` at `FreeBlockKey`), atomic
-  within the data group (crow-kv paxos). If diskdb crashes after the
-  bitmap clear but before the `batch_write` persists, the bit is clear
-  in memory but the `BusyBlockKey` still exists on disk. On restart,
-  full scan sees the `BusyBlockKey` and re-sets the bit — the block is
-  correctly busy. The §12 scanner reconciles this drift during live
-  operation (ghost free).
+- **Free ordering** — the free persists first (Phase 1: `batch_write`
+  Delete `BusyBlockKey` + Put `FreeBlockValue` at `FreeBlockKey`,
+  atomic within the data group via crow-kv paxos), then clears the
+  bitmap (Phase 2). If diskdb crashes after the persist but before the
+  bitmap clear, the bit is set in memory but no `BusyBlockKey` exists
+  on disk. On restart, full scan sees no `BusyBlockKey` and clears the
+  bit — the block is correctly free. This is a **ghost-busy** (bit set
+  in-memory, no record) that is self-correcting on restart; the §12
+  scanner also detects this drift during live operation.
+  Persist-before-bitmap-clear prevents the double-allocate window: if
+  the persist fails, the bit stays set and the allocator will not
+  re-hand the block to another caller.
 - **Re-allocate clears the free marker** — on re-allocate (after a
   free), the `FreeBlockKey` is deleted and a new `BusyBlockValue` is
   written at `BusyBlockKey` in the same `batch_write`, so the record
@@ -653,9 +657,8 @@ merges them into a fresh snapshot.
   the bitmap (clear the bits set in Phase 1) and return error. No
   record was written, so the record set is consistent (no ghost).
 - **Free persist failure** (`batch_write` fails): the bitmap was
-  already cleared locally. Return error; the §12 scanner reconciles on
-  restart (the `BusyBlockKey` still exists on disk → block is busy →
-  scanner detects the bitmap/record drift and re-sets the bit).
+  not cleared. Return error; the block is still busy on both disk and
+  memory. The caller can retry safely — no double-allocate risk.
 - **Degraded mode** (group-0 / data-group unreachable): allocate/free
   RPCs return `Unavailable` before touching the bitmap. No partial
   state.
@@ -817,8 +820,10 @@ Free batching (grouping many frees into one `batch_write` per flush,
 triggered by batch size — no timer) is an optimization for
 high-free-throughput workloads, tracked as a future optimization. When
 batching ships, graceful shutdown drains and flushes the `FreeBatch`
-before exit; on ungraceful shutdown, unflushed frees are left for the
-§12 ghost-allocation scanner to reconcile.
+before exit; on ungraceful shutdown, unflushed frees leave the bitmap
+bits set (persist-before-bitmap-clear: the batch_write never
+happened, so the bits were never cleared) — the blocks are still
+busy, consistent, no ghost to reconcile.
 
 ### Zone rotation (internal)
 
