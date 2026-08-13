@@ -120,7 +120,19 @@ and the disk failure detection + recovery flow.
         `ZoneState::Bad` in-memory. Zones in the active deque are
         removed (they are no longer allocatable).
      e. Log the failure with details (disk_uuid, path, error).
-     f. **Recovery action**: v1 does **not** automatically migrate
+     f. **Impacted-blocks scan** (§10, updated): scan the zone
+        records for the bad disk (`DataGroupClient::
+        read_zone_records` per zone, §7) and collect all live
+        `BusyBlockValue`s — these are the impacted blocks. Each
+        carries `owner_chunk` (the chunk that owns the allocation)
+        so the caller / data-IO layer can be notified. Emit the
+        `disk.bad.impacted_blocks` gauge (§11; the metric handle
+        already exists in `DiskdbMetrics` from R72) and log the
+        hand-off. The collected list is handed to a future
+        recovery/relocation path: the data-IO layer rebuilds from
+        EC/mirror, or the owner is notified to re-allocate
+        elsewhere.
+     g. **Recovery action**: v1 does **not** automatically migrate
         data off a failed disk (there is no data I/O service — diskdb
         only allocates). The disk's existing allocations remain in
         the journal; callers that hold `Segment`s for the failed disk

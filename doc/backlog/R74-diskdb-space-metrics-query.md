@@ -146,7 +146,10 @@ path.
    - `DiskdbMetrics` — registers diskdb-specific metrics with
      `crow-common`'s metrics registry (D8). Per-disk hot-path
      counters (from `DiskMetrics`) flush into the crow-common
-     registry at reporting intervals.
+     registry at reporting intervals. (Note: `DiskdbMetrics` already
+     exists from R72 with `allocate_retry_cas_bit` and
+     `disk_bad_impacted_blocks` handles; R74 extends it with the
+     full gauge/counter/histogram set below.)
    - **Gauge counters** (for console/UI display, R77):
      - `disk_capacity_bytes` (labeled by disk_uuid, dg_id).
      - `disk_busy_bytes`, `disk_free_bytes`.
@@ -159,6 +162,21 @@ path.
      - `allocate_errors_total` (labeled by dg_id, error_code).
      - `allocate_latency` (histogram, buckets: 1ms, 5ms, 10ms, 25ms,
        50ms, 100ms, 250ms, 500ms, 1s).
+   - **Latency hierarchy (§11)** — the full per-layer latency
+     breakdown specified in §11. R74 implements these using
+     `LatencyHistogram` for hot paths (allocate/free bitmap scan, KV
+     persist) and `LatencySummary` for cold paths (sync, compaction,
+     zone rotate):
+     - `allocate.rpc.latency_us`, `allocate.bitmap_scan.latency_us`,
+       `allocate.kv_persist.latency_us`,
+       `allocate.zone_rotate.latency_us`.
+     - `free.rpc.latency_us`, `free.bitmap_clear.latency_us`,
+       `free.kv_persist.latency_us`.
+     - `sync.latency_us`, `sync.read_group0.latency_us`,
+       `sync.apply_changes.latency_us`.
+     - `compaction.latency_us`, `compaction.scan_free.latency_us`,
+       `compaction.merge_bitmap.latency_us`,
+       `compaction.kv_persist.latency_us`.
    - **Sync/recovery metrics**:
      - `sync_success_total`, `sync_failure_total`.
      - `sync_duration_ms` (histogram).
@@ -168,6 +186,20 @@ path.
      task: every 10 s, call `swap_periods()` on all `DiskMetrics`,
      update gauge counters in crow-common registry. This bridges the
      hot-path atomic counters to the reporting layer.
+
+7. **Keepalive usage summary piggyback (§11)** — update
+   `app/crow-diskdb/src/sync.rs`:
+   - The sync loop's `heartbeat_diskdb` call currently passes empty
+     arrays (from R72). §11 specifies a per-disk-group usage summary
+     piggybacked on keepalive: `capacity_bytes`, `used_bytes`,
+     `free_bytes`, `disk_count`, `allocatable_disk_count`. Group 0
+     maintains this at the disk-group level
+     (`DiskGroupUsageKey { disk_group_id }`). The console reads this
+     for cluster-wide overview; per-disk/per-zone drill-down is via
+     the `QueryCapacityStats` API (also R74).
+   - Compute the summary from the in-memory bitmap on each sync tick
+     (derived, not a source of truth). Pass it to
+     `heartbeat_diskdb`.
 
 7. **Proto extension** — update `lib/crow-protocol/src/proto/diskdb.proto`
    (from R70):

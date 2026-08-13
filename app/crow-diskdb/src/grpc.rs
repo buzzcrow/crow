@@ -162,9 +162,20 @@ impl DiskdbServiceTrait for DiskdbService {
         })?;
 
         // Immediate free (v1).
-        persistence::free_blocks(&node, &req.segments, &self.kv)
-            .await
-            .map_err(|e| Status::internal(format!("free persist failed: {e}")))?;
+        persistence::free_blocks(
+            &node,
+            &req.segments,
+            &self.kv,
+            self.storage.validate_owner_on_free,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::persistence::FreeError::NotBusy { .. } => Status::not_found(format!("free failed: {e}")),
+            crate::persistence::FreeError::OwnerMismatch { .. } => {
+                Status::permission_denied(format!("free failed: {e}"))
+            }
+            crate::persistence::FreeError::Kv(_) => Status::internal(format!("free persist failed: {e}")),
+        })?;
 
         #[allow(clippy::cast_possible_truncation)]
         let freed_count = req.segments.len() as u32;

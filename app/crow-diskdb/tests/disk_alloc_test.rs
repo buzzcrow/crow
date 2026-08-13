@@ -193,3 +193,43 @@ fn node_free_block_unknown_disk_id_fails() {
     let node = make_node_with_disks(&[(1, 1, 128)]);
     assert!(!node.free_block(&disk_id(999), 0, 0, 1));
 }
+
+// ── Status-change refresh ───────────────────────────────────────
+
+#[test]
+fn node_rebuild_allocating_disks_on_status_change() {
+    use crow_protocol::common::HwStatus;
+    let node = make_node_with_disks(&[(1, 1, 128), (2, 1, 128), (3, 1, 128)]);
+    // All 3 disks are allocatable initially — round-robin should
+    // eventually pick all 3.
+    let mut picked = std::collections::HashSet::new();
+    for _ in 0..6 {
+        let (disk, _, _) = node.allocate_block(1, &[], CAS_RETRY, ZONE_ROTATE).unwrap();
+        picked.insert(disk.disk_id);
+    }
+    assert_eq!(picked.len(), 3, "expected all 3 disks before status change");
+
+    // Transition disk 1 to Missing — rebuild_allocating_disks should
+    // remove it from the RCU context.
+    {
+        let all_disks = node.disks.read().unwrap();
+        let target = all_disks.iter().find(|d| d.disk_id == disk_id(1)).unwrap();
+        target.set_effective_status(HwStatus::Missing);
+    }
+    node.rebuild_allocating_disks();
+
+    // Round-robin should now only pick disks 2 and 3 (never disk 1).
+    let mut picked_after = std::collections::HashSet::new();
+    for _ in 0..4 {
+        let (disk, _, _) = node.allocate_block(1, &[], CAS_RETRY, ZONE_ROTATE).unwrap();
+        picked_after.insert(disk.disk_id);
+    }
+    assert!(
+        !picked_after.contains(&disk_id(1)),
+        "disk 1 should never be picked after Missing"
+    );
+    assert!(
+        picked_after.len() >= 2,
+        "expected disks 2 and 3 to be picked, got {picked_after:?}"
+    );
+}

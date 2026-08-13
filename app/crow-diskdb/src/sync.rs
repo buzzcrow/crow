@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crow_common::metrics::Counter;
 use crow_kv_client::{HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
@@ -69,6 +70,9 @@ pub struct SyncLoop {
     /// records during disk-add init. When `None`, disk-add init
     /// skips the baseline write (test mode).
     kv: Option<DataGroupClient>,
+    /// Optional CAS retry counter handle, attached to each `Zone`
+    /// during disk-add init via `Zone::with_cas_retry_metric`.
+    cas_retry_metric: Option<Arc<Counter>>,
 }
 
 impl SyncLoop {
@@ -85,6 +89,7 @@ impl SyncLoop {
             config,
             missed_count: 0,
             kv: None,
+            cas_retry_metric: None,
         }
     }
 
@@ -92,6 +97,13 @@ impl SyncLoop {
     #[must_use]
     pub fn with_data_group_client(mut self, kv: DataGroupClient) -> Self {
         self.kv = Some(kv);
+        self
+    }
+
+    /// Attach a CAS retry counter handle for `Zone::with_cas_retry_metric`.
+    #[must_use]
+    pub fn with_cas_retry_metric(mut self, counter: Arc<Counter>) -> Self {
+        self.cas_retry_metric = Some(counter);
         self
     }
 
@@ -262,6 +274,7 @@ impl SyncLoop {
                     let new_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
                     if old_status != new_status {
                         disk.set_effective_status(new_status);
+                        node.rebuild_allocating_disks();
                         outcome.status_changes += 1;
                     }
                 }
@@ -285,6 +298,7 @@ impl SyncLoop {
                     let old_status = *disk.effective_status.read().unwrap();
                     if old_status != HwStatus::Missing {
                         disk.set_effective_status(HwStatus::Missing);
+                        node.rebuild_allocating_disks();
                         outcome.status_changes += 1;
                     }
                 }
@@ -319,8 +333,13 @@ impl SyncLoop {
             } else {
                 zone_size_units as u32
             };
-            let zone = Arc::new(Zone::new(disk_id, zi, node.disk_group_id, unit_capacity));
-            disk.add_zone(zone);
+            let zone = Zone::new(disk_id, zi, node.disk_group_id, unit_capacity);
+            let zone = if let Some(ref counter) = self.cas_retry_metric {
+                zone.with_cas_retry_metric(Arc::clone(counter))
+            } else {
+                zone
+            };
+            disk.add_zone(Arc::new(zone));
         }
 
         // Write baseline ZoneValue records (empty bitmap, snapshot_slot=0).

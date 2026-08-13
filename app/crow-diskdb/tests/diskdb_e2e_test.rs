@@ -288,7 +288,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 9. Free the block.
     let free_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_block(&node, &segment, &free_kv)
+    persistence::free_block(&node, &segment, &free_kv, false)
         .await
         .expect("free should succeed");
     eprintln!("freed segment");
@@ -334,7 +334,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 12. Free all 3 in one batch.
     let free_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_blocks(&node, &segments, &free_kv2)
+    persistence::free_blocks(&node, &segments, &free_kv2, false)
         .await
         .expect("free 3 blocks should succeed");
     eprintln!("freed 3 blocks in batch");
@@ -371,6 +371,121 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("all 3 batch free records verified");
 
     eprintln!("diskdb_e2e_allocate_free: ALL CHECKS PASSED");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn diskdb_e2e_validate_owner_on_free() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+
+    let cluster = KvCluster::start().await;
+    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    seed_hardware(&hw).await;
+
+    let container = Arc::new(NodeContainer::new(INSTANCE_ID));
+    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
+    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
+    let dg_kv = make_data_group_client(&cluster.group1_leader_endpoint);
+
+    let sync_cfg = SyncConfig {
+        interval: Duration::from_secs(10),
+        miss_threshold: 3,
+        zone_rotate_count: 4,
+        cas_retry_limit: 100,
+    };
+    let mut sync_loop =
+        SyncLoop::new(hw2, svc, Arc::clone(&container), sync_cfg).with_data_group_client(dg_kv);
+    let outcome = sync_loop.sync_once().await;
+    assert_eq!(outcome.groups_added, 1);
+    assert_eq!(outcome.disks_added, 3);
+
+    let node = container
+        .get_node(DG_ID)
+        .expect("disk-group should be in container");
+
+    // Allocate a block.
+    let owner_chunk = make_chunk_id(0, 0, 100);
+    let alloc_kv = make_data_group_client(&cluster.group1_leader_endpoint);
+    let segment = persistence::allocate_block(&node, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        .await
+        .expect("allocate should succeed");
+
+    // 1. Free with validate_owner_on_free=true and matching owner → success.
+    let free_kv = make_data_group_client(&cluster.group1_leader_endpoint);
+    persistence::free_block(&node, &segment, &free_kv, true)
+        .await
+        .expect("free with matching owner should succeed");
+
+    // Verify the FreeBlockValue was persisted.
+    let free_key = FreeBlockKey {
+        disk_id: make_disk_id(0, 1),
+        zone_index: segment.zone_index,
+        unit_offset: segment.unit_offset,
+    };
+    let verify_kv = make_data_group_client(&cluster.group1_leader_endpoint);
+    let free_val = kv_get(&verify_kv, &free_key.to_bytes()).await;
+    assert!(
+        free_val.is_some(),
+        "free record should exist after validated free"
+    );
+
+    // 2. Allocate again, then free with validate_owner_on_free=true but
+    //    a WRONG owner → OwnerMismatch, no bitmap clear.
+    let alloc_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
+    let segment2 = persistence::allocate_block(&node, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
+        .await
+        .expect("allocate should succeed");
+
+    let wrong_owner = make_chunk_id(0, 0, 999);
+    let mut wrong_segment = segment2;
+    wrong_segment.owner_chunk = Some(wrong_owner);
+
+    let free_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
+    let result = persistence::free_block(&node, &wrong_segment, &free_kv2, true).await;
+    assert!(
+        matches!(result, Err(persistence::FreeError::OwnerMismatch { .. })),
+        "expected OwnerMismatch, got {result:?}"
+    );
+
+    // The BusyBlockKey should still exist (free was rejected).
+    let seg2_disk_id = segment2.disk_id.expect("segment2 should have disk_id");
+    let busy_key = BusyBlockKey {
+        disk_id: seg2_disk_id,
+        zone_index: segment2.zone_index,
+        unit_offset: segment2.unit_offset,
+    };
+    let verify_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
+    let busy_val = kv_get(&verify_kv2, &busy_key.to_bytes()).await;
+    assert!(
+        busy_val.is_some(),
+        "busy record should still exist after rejected free"
+    );
+
+    // 3. Free the block with the correct owner (cleanup).
+    let free_kv3 = make_data_group_client(&cluster.group1_leader_endpoint);
+    persistence::free_block(&node, &segment2, &free_kv3, true)
+        .await
+        .expect("free with matching owner should succeed");
+
+    // 4. Free a non-busy block with validate_owner_on_free=true → NotBusy.
+    let fake_segment = crow_protocol::diskdb::rpc::Segment {
+        disk_id: Some(seg2_disk_id),
+        zone_index: segment2.zone_index,
+        unit_offset: 999_999, // non-existent offset
+        unit_count: 1,
+        owner_chunk: Some(owner_chunk),
+    };
+    let free_kv4 = make_data_group_client(&cluster.group1_leader_endpoint);
+    let result = persistence::free_block(&node, &fake_segment, &free_kv4, true).await;
+    assert!(
+        matches!(result, Err(persistence::FreeError::NotBusy { .. })),
+        "expected NotBusy, got {result:?}"
+    );
+
+    eprintln!("diskdb_e2e_validate_owner_on_free: ALL CHECKS PASSED");
 }
 
 /// Find the crow-kv-server binary (mirrors the cluster module's logic).

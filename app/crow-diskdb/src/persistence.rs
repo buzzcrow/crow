@@ -24,6 +24,63 @@ use crate::node::{AllocClaim, AllocError, Node};
 /// `(store_id, group_id)` identifying a bound paxos data group.
 pub type Bind = (u64, u64);
 
+/// Errors from the free path when `validate_owner_on_free` is enabled.
+#[derive(Debug)]
+pub enum FreeError {
+    /// KV client error during validation or persist.
+    Kv(crow_kv_client::Error),
+    /// Block is not busy (no `BusyBlockKey` exists) — double-free or
+    /// never allocated.
+    NotBusy {
+        disk_id: DiskId,
+        zone_index: u32,
+        unit_offset: u64,
+    },
+    /// `owner_chunk` in the `BusyBlockValue` does not match the
+    /// `Segment`'s `owner_chunk` — ownership mismatch.
+    OwnerMismatch {
+        disk_id: DiskId,
+        zone_index: u32,
+        unit_offset: u64,
+        expected: ChunkId,
+        actual: ChunkId,
+    },
+}
+
+impl std::fmt::Display for FreeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Kv(e) => write!(f, "kv error: {e}"),
+            Self::NotBusy {
+                disk_id,
+                zone_index,
+                unit_offset,
+            } => write!(
+                f,
+                "block not busy: disk {disk_id:?} zone {zone_index} offset {unit_offset}"
+            ),
+            Self::OwnerMismatch {
+                disk_id,
+                zone_index,
+                unit_offset,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "owner mismatch: disk {disk_id:?} zone {zone_index} offset {unit_offset}, expected {expected:?} actual {actual:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FreeError {}
+
+impl From<crow_kv_client::Error> for FreeError {
+    fn from(e: crow_kv_client::Error) -> Self {
+        Self::Kv(e)
+    }
+}
+
 /// A busy-block record read from the data group.
 #[derive(Debug, Clone)]
 pub struct BusyRecord {
@@ -72,6 +129,40 @@ impl DataGroupClient {
     #[must_use]
     pub fn kv(&self) -> &CrowkvClient {
         &self.kv
+    }
+
+    /// Point-lookup a `BusyBlockValue` at `BusyBlockKey`. Returns
+    /// `Ok(None)` if the key does not exist (block is not busy).
+    /// Used by the `validate_owner_on_free` path.
+    pub async fn get_busy(
+        &self,
+        bind: Bind,
+        disk_id: &DiskId,
+        zone_index: u32,
+        unit_offset: u64,
+    ) -> Result<Option<BusyBlockValue>> {
+        let key = BusyBlockKey {
+            disk_id: *disk_id,
+            zone_index,
+            unit_offset,
+        };
+        let (store_id, group_id) = bind;
+        let outcome = self
+            .kv
+            .get(store_id, group_id, &key.to_bytes(), ReadMode::Linearizable, None)
+            .await?;
+        match outcome {
+            GetOutcome::Found { value, .. } => {
+                let bv = bincode::deserialize::<BusyBlockValue>(&value).map_err(|e| {
+                    crow_kv_client::Error::SysdataDecode {
+                        key: format!("{:02x?}", key.to_bytes()),
+                        reason: e.to_string(),
+                    }
+                })?;
+                Ok(Some(bv))
+            }
+            GetOutcome::NotFound => Ok(None),
+        }
     }
 
     /// Persist a single busy-block record: `put` to `BusyBlockKey`.
@@ -454,24 +545,63 @@ pub async fn allocate_blocks(
 
 /// Free a single block. v1: synchronous (no batch, no timer).
 ///
+/// Phase 0 (optional): when `validate_owner_on_free` is `true`, read
+/// the `BusyBlockValue` from the data group and validate `owner_chunk`
+/// before touching the bitmap. Rejects on `NotBusy` or `OwnerMismatch`.
+/// When `false` (default), no KV read — `owner_chunk` comes from the
+/// `Segment` (§14).
 /// Phase 1: clear bitmap locally (per-bit CAS).
 /// Phase 2: persist `FreeBlockValue` (delete `BusyBlockKey` + put
 /// `FreeBlockKey` in one `batch_write`).
 ///
-/// See §4.6. No KV read on free in v1 — `owner_chunk` comes from the
-/// `Segment`.
+/// See §4.6.
 ///
 /// # Errors
-/// Returns a KV client error if the persist fails. The bitmap clear
-/// already happened locally; the §12 ghost-allocation scanner
-/// reconciles on restart.
-pub async fn free_block(node: &Arc<Node>, segment: &Segment, kv: &DataGroupClient) -> Result<()> {
-    let disk_id = segment
-        .disk_id
-        .ok_or_else(|| crow_kv_client::Error::SysdataDecode {
+/// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
+/// validation failure (no bitmap clear happens). Returns
+/// `FreeError::Kv` if the persist fails — the bitmap clear already
+/// happened locally; the §12 ghost-allocation scanner reconciles on
+/// restart.
+pub async fn free_block(
+    node: &Arc<Node>,
+    segment: &Segment,
+    kv: &DataGroupClient,
+    validate_owner_on_free: bool,
+) -> std::result::Result<(), FreeError> {
+    let disk_id = segment.disk_id.ok_or_else(|| {
+        FreeError::Kv(crow_kv_client::Error::SysdataDecode {
             key: "segment.disk_id".to_string(),
             reason: "missing disk_id in Segment".to_string(),
-        })?;
+        })
+    })?;
+    let bind = *node.bind.read().unwrap();
+
+    // Phase 0: validate ownership (optional, one paxos round-trip).
+    if validate_owner_on_free {
+        let busy = kv
+            .get_busy(bind, &disk_id, segment.zone_index, segment.unit_offset)
+            .await?;
+        match busy {
+            None => {
+                return Err(FreeError::NotBusy {
+                    disk_id,
+                    zone_index: segment.zone_index,
+                    unit_offset: segment.unit_offset,
+                });
+            }
+            Some(bv) => {
+                if bv.owner_chunk != segment.owner_chunk {
+                    return Err(FreeError::OwnerMismatch {
+                        disk_id,
+                        zone_index: segment.zone_index,
+                        unit_offset: segment.unit_offset,
+                        expected: segment.owner_chunk.unwrap_or_default(),
+                        actual: bv.owner_chunk.unwrap_or_default(),
+                    });
+                }
+            }
+        }
+    }
 
     // Phase 1: clear bitmap locally.
     if !node.free_block(
@@ -480,13 +610,13 @@ pub async fn free_block(node: &Arc<Node>, segment: &Segment, kv: &DataGroupClien
         segment.unit_offset,
         segment.unit_count,
     ) {
-        return Err(crow_kv_client::Error::SysdataDecode {
+        return Err(FreeError::Kv(crow_kv_client::Error::SysdataDecode {
             key: "free_block".to_string(),
             reason: format!(
                 "bitmap clear failed for disk {disk_id:?} zone {} offset {}",
                 segment.zone_index, segment.unit_offset
             ),
-        });
+        }));
     }
 
     // Phase 2: persist FreeBlockValue.
@@ -494,29 +624,75 @@ pub async fn free_block(node: &Arc<Node>, segment: &Segment, kv: &DataGroupClien
         unit_count: segment.unit_count,
         previous_owner: segment.owner_chunk,
     };
-    let bind = *node.bind.read().unwrap();
     kv.persist_free(bind, &disk_id, segment.zone_index, segment.unit_offset, &value)
         .await
+        .map_err(FreeError::from)
 }
 
 /// Free multiple blocks (one `batch_write` per data group). See §4.6.
 ///
+/// When `validate_owner_on_free` is `true`, all segments are validated
+/// first (all-or-nothing) — if any segment fails validation, no bitmap
+/// is cleared and the error is returned.
+///
 /// # Errors
-/// Returns a KV client error if any persist fails. Bitmap clears
-/// already happened locally.
-pub async fn free_blocks(node: &Arc<Node>, segments: &[Segment], kv: &DataGroupClient) -> Result<()> {
+/// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
+/// validation failure (no bitmap clear happens). Returns
+/// `FreeError::Kv` if the persist fails — bitmap clears already
+/// happened locally.
+pub async fn free_blocks(
+    node: &Arc<Node>,
+    segments: &[Segment],
+    kv: &DataGroupClient,
+    validate_owner_on_free: bool,
+) -> std::result::Result<(), FreeError> {
+    let bind = *node.bind.read().unwrap();
+
+    // Phase 0: validate ownership for all segments (all-or-nothing).
+    if validate_owner_on_free {
+        for seg in segments {
+            let disk_id = seg.disk_id.ok_or_else(|| {
+                FreeError::Kv(crow_kv_client::Error::SysdataDecode {
+                    key: "segment.disk_id".to_string(),
+                    reason: "missing disk_id in Segment".to_string(),
+                })
+            })?;
+            let busy = kv
+                .get_busy(bind, &disk_id, seg.zone_index, seg.unit_offset)
+                .await?;
+            match busy {
+                None => {
+                    return Err(FreeError::NotBusy {
+                        disk_id,
+                        zone_index: seg.zone_index,
+                        unit_offset: seg.unit_offset,
+                    });
+                }
+                Some(bv) => {
+                    if bv.owner_chunk != seg.owner_chunk {
+                        return Err(FreeError::OwnerMismatch {
+                            disk_id,
+                            zone_index: seg.zone_index,
+                            unit_offset: seg.unit_offset,
+                            expected: seg.owner_chunk.unwrap_or_default(),
+                            actual: bv.owner_chunk.unwrap_or_default(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Phase 1: clear all bitmaps locally.
     for seg in segments {
-        let disk_id = seg.disk_id.ok_or_else(|| crow_kv_client::Error::SysdataDecode {
-            key: "segment.disk_id".to_string(),
-            reason: "missing disk_id in Segment".to_string(),
-        })?;
-        if !node.free_block(&disk_id, seg.zone_index, seg.unit_offset, seg.unit_count) {
-            tracing::warn!(
-                "bitmap clear failed for disk {disk_id:?} zone {} offset {} — ghost scanner will reconcile",
-                seg.zone_index,
-                seg.unit_offset
-            );
+        if let Some(disk_id) = seg.disk_id {
+            if !node.free_block(&disk_id, seg.zone_index, seg.unit_offset, seg.unit_count) {
+                tracing::warn!(
+                    "bitmap clear failed for disk {disk_id:?} zone {} offset {} — ghost scanner will reconcile",
+                    seg.zone_index,
+                    seg.unit_offset
+                );
+            }
         }
     }
 
@@ -542,6 +718,7 @@ pub async fn free_blocks(node: &Arc<Node>, segments: &[Segment], kv: &DataGroupC
         return Ok(());
     }
 
-    let bind = *node.bind.read().unwrap();
-    kv.persist_free_batch(bind, &records).await
+    kv.persist_free_batch(bind, &records)
+        .await
+        .map_err(FreeError::from)
 }

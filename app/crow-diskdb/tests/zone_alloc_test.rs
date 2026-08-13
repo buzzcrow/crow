@@ -191,3 +191,42 @@ fn zone_cas_retry_counter_increments_under_contention() {
         "expected CAS retries under contention, got {retries}"
     );
 }
+
+#[test]
+fn zone_cas_retry_metric_matches_atomic() {
+    use crow_common::metrics::MetricsRegistry;
+    use crow_diskdb::metrics::DiskdbMetrics;
+    use std::sync::Barrier;
+    // Attach a crow-common counter to the zone via
+    // with_cas_retry_metric — verify the crow-common counter matches
+    // the internal `cas_retry_count` atomic after concurrent
+    // allocation. Contention is not guaranteed (scheduler-dependent),
+    // but the counter wiring is verified either way: if retries
+    // occur, both increment together; if not, both stay at 0.
+    let mut registry = MetricsRegistry::new();
+    let metrics = DiskdbMetrics::register(&mut registry);
+    let counter = Arc::clone(&metrics.allocate_retry_cas_bit);
+    let zone = Arc::new(make_zone(64).with_cas_retry_metric(counter));
+    let barrier = Arc::new(Barrier::new(16));
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let z = zone.clone();
+        let b = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            b.wait();
+            while z.allocate(1, CAS_RETRY).is_some() {}
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    // The crow-common counter must match the internal atomic — this
+    // proves the metric wiring is correct (both are incremented in
+    // the same code path).
+    let atomic_retries = zone.cas_retry_count.load(Ordering::Relaxed);
+    let counter_value = metrics.allocate_retry_cas_bit.snapshot().total;
+    assert_eq!(
+        counter_value, atomic_retries,
+        "crow-common counter ({counter_value}) must match atomic retries ({atomic_retries})"
+    );
+}

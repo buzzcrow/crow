@@ -7,8 +7,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
+use crow_common::metrics::MetricsRegistry;
 use crow_diskdb::config::{validate, DiskdbConfig};
 use crow_diskdb::grpc::DiskdbService;
+use crow_diskdb::metrics::DiskdbMetrics;
 use crow_diskdb::node::NodeContainer;
 use crow_diskdb::persistence::DataGroupClient;
 use crow_diskdb::sync::{SyncConfig, SyncLoop};
@@ -76,6 +78,13 @@ async fn main() {
     let dg_kv = Arc::new(DataGroupClient::new(kv_client3));
     let dg_kv_sync = DataGroupClient::new(kv_client4);
 
+    // Register diskdb metrics (§11: `zone.allocate.retry.cms.bit`,
+    // `disk.bad.impacted_blocks`). The CAS retry counter is attached
+    // to each `Zone` during disk-add init so the allocate path can
+    // increment it on each failed `cas_bit`.
+    let mut metrics_registry = MetricsRegistry::new();
+    let metrics = DiskdbMetrics::register(&mut metrics_registry);
+
     // Start the sync loop.
     let sync_cfg = SyncConfig {
         interval: std::time::Duration::from_secs(u64::from(config.sync.sync_interval_secs)),
@@ -84,8 +93,9 @@ async fn main() {
         cas_retry_limit: config.storage.cas_retry_limit,
     };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let mut sync_loop =
-        SyncLoop::new(hw, svc, container.clone(), sync_cfg).with_data_group_client(dg_kv_sync);
+    let mut sync_loop = SyncLoop::new(hw, svc, container.clone(), sync_cfg)
+        .with_data_group_client(dg_kv_sync)
+        .with_cas_retry_metric(metrics.allocate_retry_cas_bit);
 
     // Blocking initial sync — run one tick before serving gRPC to
     // populate the in-memory node/disk/zone state. Without this, the
