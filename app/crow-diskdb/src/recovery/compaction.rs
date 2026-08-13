@@ -22,6 +22,7 @@ use std::time::Duration;
 use crow_protocol::common::DiskId;
 use crow_protocol::key::BinaryKey;
 
+use crate::bg_task::{BackgroundTask, BgCtx, BgError, CycleFut, Trigger};
 use crate::data_group_client::{Bind, DataGroupClient};
 use crate::domain::disk_group_container::DdbDiskGroupContainer;
 use crate::domain::zone::DdbZone;
@@ -60,45 +61,48 @@ impl CompactionEngine {
         Self { kv, config }
     }
 
-    /// Run the compaction loop forever. Sleeps
-    /// `compaction_cadence`, then for each owned node/disk/zone checks
-    /// `uncompacted_free_record_count` against
-    /// `snapshot_compaction_threshold` and calls `compact_zone` when
-    /// exceeded. Cadence OR threshold — whichever fires first for a
-    /// given zone.
-    pub async fn compaction_loop(self: Arc<Self>, container: Arc<DdbDiskGroupContainer>) -> ! {
-        loop {
-            tokio::time::sleep(self.config.compaction_cadence).await;
-
-            for dg_id in container.disk_group_ids() {
-                let Some(dg) = container.get_disk_group(dg_id) else {
-                    continue;
-                };
-                let bind = *dg.bind.read().unwrap();
-                let disks = dg.disks.read().unwrap().clone();
-                for disk in disks {
-                    let zones = disk.zones.read().unwrap().clone();
-                    for zone in zones {
-                        let backlog = zone
-                            .uncompacted_free_record_count
-                            .load(std::sync::atomic::Ordering::Acquire);
-                        if backlog < self.config.snapshot_compaction_threshold {
-                            continue;
-                        }
-                        if let Err(e) = self
-                            .compact_zone(bind, disk.disk_id, &zone, zone.zone_index)
-                            .await
-                        {
-                            tracing::warn!(
-                                disk_id = ?disk.disk_id,
-                                zone_index = zone.zone_index,
-                                error = %e,
-                                "compaction failed; will retry next cycle"
-                            );
-                        }
+    /// Run one compaction cycle: for each owned disk-group/disk/zone,
+    /// check `uncompacted_free_record_count` against
+    /// `snapshot_compaction_threshold` and call `compact_zone` when
+    /// exceeded.
+    pub async fn compaction_cycle(&self, container: &DdbDiskGroupContainer) {
+        for dg_id in container.disk_group_ids() {
+            let Some(dg) = container.get_disk_group(dg_id) else {
+                continue;
+            };
+            let bind = *dg.bind.read().unwrap();
+            let disks = dg.disks.read().unwrap().clone();
+            for disk in disks {
+                let zones = disk.zones.read().unwrap().clone();
+                for zone in zones {
+                    let backlog = zone
+                        .uncompacted_free_record_count
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    if backlog < self.config.snapshot_compaction_threshold {
+                        continue;
+                    }
+                    if let Err(e) = self
+                        .compact_zone(bind, disk.disk_id, &zone, zone.zone_index)
+                        .await
+                    {
+                        tracing::warn!(
+                            disk_id = ?disk.disk_id,
+                            zone_index = zone.zone_index,
+                            error = %e,
+                            "compaction failed; will retry next cycle"
+                        );
                     }
                 }
             }
+        }
+    }
+
+    /// Run the compaction loop forever (legacy entry point for direct
+    /// `tokio::spawn` without the `BgRunner` framework).
+    pub async fn compaction_loop(self: Arc<Self>, container: Arc<DdbDiskGroupContainer>) -> ! {
+        loop {
+            tokio::time::sleep(self.config.compaction_cadence).await;
+            self.compaction_cycle(&container).await;
         }
     }
 
@@ -181,4 +185,26 @@ impl CompactionEngine {
     ) -> Result<(), RecoveryError> {
         self.compact_zone(bind, disk_id, zone, zone_idx).await
     }
+}
+
+impl BackgroundTask for CompactionEngine {
+    fn run_cycle<'a>(&'a self, ctx: &'a BgCtx) -> CycleFut<'a> {
+        Box::pin(async move {
+            self.compaction_cycle(&ctx.container).await;
+            Ok(())
+        })
+    }
+
+    fn trigger(&self) -> Trigger {
+        Trigger::Timer(self.config.compaction_cadence)
+    }
+
+    fn name(&self) -> &'static str {
+        "compaction"
+    }
+}
+
+#[allow(dead_code)]
+fn _bg_error_unused() -> BgError {
+    BgError("unused".to_string())
 }
