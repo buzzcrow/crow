@@ -138,8 +138,12 @@ impl DdbDisk {
     }
 
     /// Rotate the active zone set: scan all zones from `pos_v_zone`
-    /// (rotating start), pick the first `zone_rotate_count`
-    /// allocatable zones, RCU-publish the new context.
+    /// (rotating start), pick the first `zone_rotate_count` allocatable
+    /// zones that are `compacted_ready` (I5 — compaction-before-rotation).
+    /// If fewer ready zones exist than needed, falls back to any
+    /// allocatable zone (synchronous compaction will run on the next
+    /// cycle). RCU-publish the new context and clear `compacted_ready`
+    /// on the published zones.
     ///
     /// Returns `false` if no allocatable zones remain.
     fn rotate_active_zones(&self, old_ctx: &Arc<ActiveZoneContext>, zone_rotate_count: u32) -> bool {
@@ -163,14 +167,34 @@ impl DdbDisk {
         #[allow(clippy::cast_possible_truncation)]
         let start = self.pos_v_zone.load(Ordering::Relaxed) as usize % zone_num;
         let mut new_ctx: Vec<Arc<DdbZone>> = Vec::with_capacity(zone_rotate_count as usize);
+        // First pass: pick compacted_ready + allocatable zones (I5).
         for i in 0..zone_num {
             if new_ctx.len() >= zone_rotate_count as usize {
                 break;
             }
             let zone = &zones[(start + i) % zone_num];
-            if zone.allocatable() {
+            if zone.allocatable() && zone.compacted_ready.load(Ordering::Acquire) {
                 new_ctx.push(Arc::clone(zone));
             }
+        }
+        // Second pass (fallback): if not enough ready zones, pick any
+        // allocatable zone. The preparatory thread or periodic
+        // compaction will compact them later.
+        if new_ctx.len() < zone_rotate_count as usize {
+            for i in 0..zone_num {
+                if new_ctx.len() >= zone_rotate_count as usize {
+                    break;
+                }
+                let zone = &zones[(start + i) % zone_num];
+                if zone.allocatable() && !new_ctx.iter().any(|z| z.zone_index == zone.zone_index) {
+                    new_ctx.push(Arc::clone(zone));
+                }
+            }
+        }
+        // Clear compacted_ready on published zones — they will need
+        // re-compaction after being allocated from and freed.
+        for zone in &new_ctx {
+            zone.clear_compacted_ready();
         }
         // Advance pos_v_zone past the scanned range.
         self.pos_v_zone.fetch_add(zone_num as u64, Ordering::Relaxed);

@@ -65,7 +65,8 @@ impl CompactionEngine {
     /// Run one compaction cycle: for each owned disk-group/disk/zone,
     /// check `uncompacted_free_record_count` against
     /// `snapshot_compaction_threshold` and call `compact_zone` when
-    /// exceeded.
+    /// exceeded. Skips zones in the disk's `active_zone_context` (I4 —
+    /// no concurrent allocate).
     pub async fn compaction_cycle(&self, container: &DdbDiskGroupContainer, threshold: u32) {
         for dg_id in container.disk_group_ids() {
             let Some(dg) = container.get_disk_group(dg_id) else {
@@ -74,8 +75,17 @@ impl CompactionEngine {
             let bind = *dg.bind.read().unwrap();
             let disks = dg.disks.read().unwrap().clone();
             for disk in disks {
+                // Collect active zone indices to skip (I4).
+                let active_zone_indices: std::collections::HashSet<u32> = {
+                    let active = disk.active_zone_context.read().unwrap();
+                    active.iter().map(|z| z.zone_index).collect()
+                };
                 let zones = disk.zones.read().unwrap().clone();
                 for zone in zones {
+                    // Skip active zones — no concurrent allocate (I4).
+                    if active_zone_indices.contains(&zone.zone_index) {
+                        continue;
+                    }
                     let backlog = zone
                         .uncompacted_free_record_count
                         .load(std::sync::atomic::Ordering::Acquire);
@@ -98,11 +108,17 @@ impl CompactionEngine {
         }
     }
 
-    /// Compact one zone: merge free records into a new `ZoneValue`
-    /// snapshot, write it, then delete the free records.
+    /// Compact one zone: partition free records by the `compact_ts`
+    /// watermark, `range_clear` only the new records, write a new
+    /// `ZoneValue` + delete all free records in one atomic `batch_write`
+    /// (I6). Sets `compacted_ready = true` on success.
     ///
-    /// Crash-safety invariant: the `ZoneValue` snapshot is written
-    /// **before** the free records are deleted.
+    /// Crash-safety: the atomic `batch_write` ensures the snapshot and
+    /// the free-record deletes succeed or fail together — no window
+    /// where the snapshot is durable but the free records survive (I6).
+    /// If diskdb crashes during the batch, the KV group's paxos
+    /// consensus ensures the batch is atomic — either all ops are
+    /// applied or none are.
     pub async fn compact_zone(
         &self,
         bind: Bind,
@@ -110,7 +126,7 @@ impl CompactionEngine {
         zone: &Arc<DdbZone>,
         zone_idx: u32,
     ) -> Result<(), RecoveryError> {
-        // Step a: scan free records for the zone.
+        // Step 1: scan free records for the zone (no zone lock — KV read).
         let records = self.kv.read_zone_records(bind, &disk_id, zone_idx).await?;
         let free_keys: Vec<Vec<u8>> = records.free.iter().map(|r| r.key.to_bytes()).collect();
         #[allow(clippy::cast_possible_truncation)]
@@ -119,46 +135,44 @@ impl CompactionEngine {
             // Nothing to compact.
             zone.uncompacted_free_record_count
                 .store(0, std::sync::atomic::Ordering::Release);
+            zone.mark_compacted_ready();
             return Ok(());
         }
 
-        // Step b: merge free records into the in-memory bitmap
-        // (range_clear per free record).
-        for free in &records.free {
-            #[allow(clippy::cast_possible_truncation)]
-            let offset = free.key.unit_offset as u32;
-            let _ = zone.usage_bits.range_clear(offset, free.value.unit_count);
-        }
-        // Update used_count = popcount of the merged bitmap.
-        let popcount = zone.usage_bits.count_set();
-        zone.used_count.store(
-            u32::try_from(popcount).unwrap_or(u32::MAX),
-            std::sync::atomic::Ordering::Release,
-        );
+        // Step 2: in-memory compaction — partition by watermark,
+        // range_clear only new records, advance compact_ts (zone lock
+        // held only for the bitmap mutation, I9).
+        let result = zone.compact_zone_inner(&records.free);
 
-        // Step c: determine snapshot_slot = current applied frontier.
+        // Step 3: determine snapshot_slot = current applied frontier.
         let snapshot_slot = self.kv.get_applied_slot(bind).await.unwrap_or(0);
 
-        // Step d: build the new ZoneValue (with CRC).
+        // Step 4: build the new ZoneValue (with CRC + advanced compact_ts).
         zone.snapshot_slot
             .store(snapshot_slot, std::sync::atomic::Ordering::Release);
         let zv = zone.to_zone_value();
 
-        // Step e: write the new ZoneValue BEFORE deleting free records
-        // (crash-safety invariant).
-        self.kv.put_zone(bind, &disk_id, zone_idx, &zv).await?;
+        // Step 5: atomic batch_write — Put ZoneValue + Delete all free
+        // records (I6). They succeed or fail together.
+        self.kv
+            .compact_zone_batch(bind, &disk_id, zone_idx, &zv, &free_keys)
+            .await?;
 
-        // Step f: delete the free records in one batch_write.
-        self.kv.delete_free_records_batch(bind, &free_keys).await?;
-
-        // Step g: decrement uncompacted_free_record_count.
+        // Step 6: decrement uncompacted_free_record_count by the total
+        // free records processed (both stale and new were deleted).
         zone.uncompacted_free_record_count
             .fetch_sub(free_count, std::sync::atomic::Ordering::AcqRel);
+
+        // Step 7: mark the zone as compacted and ready for rotation.
+        zone.mark_compacted_ready();
 
         tracing::info!(
             disk_id = ?disk_id,
             zone_index = zone_idx,
             free_count,
+            new_free_count = result.new_free_count,
+            stale_free_count = result.stale_free_count,
+            compact_ts = result.new_compact_ts,
             snapshot_slot,
             "compaction completed"
         );

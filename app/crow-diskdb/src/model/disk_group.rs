@@ -37,6 +37,11 @@ pub struct DdbDiskGroup {
     allocating_disks: RwLock<Arc<AllocateDiskContext>>,
     /// Round-robin cursor over `allocating_disks`.
     pos_v_disk_ctx: AtomicU64,
+    /// Per-disk-group monotonic timestamp source for `FreeBlockValue.freed_ts`.
+    /// Advanced by `max(now(), last + 1)` on each free. Initialized to
+    /// `max(now(), max(freed_ts of all scanned free records) + 1)` after
+    /// recovery (§8 Monotonic timestamp source).
+    free_ts_source: AtomicU64,
 }
 
 impl DdbDiskGroup {
@@ -51,6 +56,7 @@ impl DdbDiskGroup {
             disk_index: RwLock::new(HashMap::new()),
             allocating_disks: RwLock::new(Arc::new(Vec::new())),
             pos_v_disk_ctx: AtomicU64::new(0),
+            free_ts_source: AtomicU64::new(now_nanos()),
         }
     }
 
@@ -69,6 +75,33 @@ impl DdbDiskGroup {
         let disks = self.disks.read().unwrap();
         let new_ctx: Vec<Arc<DdbDisk>> = disks.iter().filter(|d| d.allocatable()).cloned().collect();
         *self.allocating_disks.write().unwrap() = Arc::new(new_ctx);
+    }
+
+    /// Generate the next monotonic `freed_ts` for a `FreeBlockValue`.
+    /// Advances the source by `max(now(), last + 1)` to guarantee
+    /// monotonicity even if the wall clock jumps backwards.
+    pub fn next_freed_ts(&self) -> u64 {
+        let now = now_nanos();
+        loop {
+            let prev = self.free_ts_source.load(Ordering::Acquire);
+            let next = now.max(prev + 1);
+            if self
+                .free_ts_source
+                .compare_exchange(prev, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return next;
+            }
+        }
+    }
+
+    /// Initialize the timestamp source after recovery to
+    /// `max(now(), max_freed_ts + 1)`. Called once after all zones in
+    /// the disk-group are recovered.
+    pub fn init_free_ts_source_after_recovery(&self, max_freed_ts: u64) {
+        let now = now_nanos();
+        let target = now.max(max_freed_ts + 1);
+        self.free_ts_source.store(target, Ordering::Release);
     }
 
     /// Whether this disk-group can accept allocations.
@@ -283,4 +316,13 @@ pub struct DiskGroupUsage {
 pub enum AllocError {
     /// No disk/zone can satisfy the request.
     NoSpace,
+}
+
+/// Current wall-clock time in nanoseconds (monotonic source for
+/// `FreeBlockValue.freed_ts`).
+fn now_nanos() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(0))
 }

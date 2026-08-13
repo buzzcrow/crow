@@ -340,6 +340,37 @@ impl DdbKvClient {
         self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ())
     }
 
+    /// Atomic compaction write: Put the new `ZoneValue` + Delete all
+    /// free records in one `batch_write` (I6 — atomic snapshot + delete).
+    /// They succeed or fail together — no window where the snapshot is
+    /// durable but the free records survive.
+    pub async fn compact_zone_batch(
+        &self,
+        bind: Bind,
+        disk_id: &DiskId,
+        zone_index: u32,
+        zone_value: &ZoneValue,
+        free_keys: &[Vec<u8>],
+    ) -> Result<()> {
+        let zone_key = ZoneKey {
+            disk_id: *disk_id,
+            zone_index,
+        };
+        let zone_bytes = bincode::serialize(zone_value).expect("serialize ZoneValue");
+        let mut ops = Vec::with_capacity(1 + free_keys.len());
+        ops.push(BatchOp::Put {
+            key: Bytes::from(zone_key.to_bytes()),
+            value: Bytes::from(zone_bytes),
+        });
+        for k in free_keys {
+            ops.push(BatchOp::Delete {
+                key: Bytes::from(k.clone()),
+            });
+        }
+        let (store_id, group_id) = bind;
+        self.kv.batch_write(store_id, group_id, &ops).await.map(|_| ())
+    }
+
     /// Point-lookup the `ZoneValue` snapshot at `ZoneKey` only (1
     /// round-trip). Used by R73 recovery strategy 2 step a (load
     /// snapshot) — avoids the 2 wasted scans of `read_zone_records`
