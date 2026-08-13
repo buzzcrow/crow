@@ -122,12 +122,32 @@ async fn main() {
         config.paxos.coalesce_drain_threshold = threshold;
     }
 
-    let registry = Arc::new(KvStoreRegistry::with_config(config).with_metrics_registry(
-        metrics_runner.as_ref().map_or_else(
-            || Arc::new(std::sync::Mutex::new(crow_kv::metrics::MetricsRegistry::new())),
-            |r| r.registry().clone(),
+    let registry = Arc::new(
+        KvStoreRegistry::with_config(config.clone()).with_metrics_registry(
+            metrics_runner.as_ref().map_or_else(
+                || Arc::new(std::sync::Mutex::new(crow_kv::metrics::MetricsRegistry::new())),
+                |r| r.registry().clone(),
+            ),
         ),
-    ));
+    );
+
+    // Spawn a config file watcher for diff logging. kv-server has few
+    // dynamic fields; most changes require restart (the registry owns
+    // the config). The watcher logs what changed so the operator knows
+    // a restart is needed.
+    let watcher_old_config = Arc::new(std::sync::Mutex::new(config));
+    let _config_watcher =
+        match crow_common::config::watch::<CrowKVConfig, _>(std::path::Path::new(&args.config), move |new| {
+            let mut old = watcher_old_config.lock().unwrap();
+            crow_common::config::log_diff(&*old, new);
+            *old = new.clone();
+        }) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                tracing::warn!(error = %e, "config file watcher failed to start; live reload disabled");
+                None
+            }
+        };
 
     // Populate the port pool from `--ports` even when `--stores` is not
     // provided, so stores created later via the management API can use

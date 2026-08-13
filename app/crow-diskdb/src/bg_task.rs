@@ -15,8 +15,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tracing::{error, info};
 
+use crate::ddb_config::DdbConfig;
 use crate::ddb_kv_client::DdbKvClient;
 use crate::metrics::DiskdbMetrics;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
@@ -26,12 +28,21 @@ pub struct BgCtx {
     pub container: Arc<DdbDiskGroupContainer>,
     pub kv: Arc<DdbKvClient>,
     pub metrics: DiskdbMetrics,
+    /// Shared config handle — bg tasks read dynamic fields (timer
+    /// intervals, thresholds) from this on each tick so config
+    /// reloads take effect without restart.
+    pub config: Arc<ArcSwap<DdbConfig>>,
 }
 
 /// What causes a background task to wake and run a cycle.
 pub enum Trigger {
-    /// Sleep for `Duration` between cycles.
+    /// Sleep for a fixed `Duration` between cycles.
     Timer(Duration),
+    /// Sleep for a dynamically-computed `Duration` between cycles.
+    /// The closure is called each tick to read the current interval
+    /// from the shared config handle, so config reloads take effect
+    /// on the next tick with no stop/restart.
+    TimerFn(Box<dyn Fn() -> Duration + Send + Sync>),
     /// Wait on a `Notify` (woken externally) between cycles.
     Event(Arc<tokio::sync::Notify>),
 }
@@ -145,6 +156,9 @@ async fn wait_trigger(task: &Arc<dyn BackgroundTask>) {
     match task.trigger() {
         Trigger::Timer(dur) => {
             tokio::time::sleep(dur).await;
+        }
+        Trigger::TimerFn(f) => {
+            tokio::time::sleep(f()).await;
         }
         Trigger::Event(notify) => {
             notify.notified().await;

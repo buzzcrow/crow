@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crow_protocol::common::DiskId;
 use crow_protocol::key::BinaryKey;
 
-use crate::bg_task::{BackgroundTask, BgCtx, BgError, CycleFut, Trigger};
+use crate::bg_task::{BackgroundTask, BgCtx, CycleFut, Trigger};
 use crate::ddb_config::CompactionConfig;
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group_container::DdbDiskGroupContainer;
@@ -33,20 +33,40 @@ use crate::recovery::RecoveryError;
 pub struct CompactionEngine {
     kv: Arc<DdbKvClient>,
     config: CompactionConfig,
+    /// Optional shared config handle for live-apply of the timer
+    /// cadence. When set, `trigger()` returns `TimerFn` reading
+    /// `persistence.compaction_cadence_secs` from this handle each
+    /// tick; when `None`, falls back to the fixed snapshot.
+    config_handle: Option<Arc<arc_swap::ArcSwap<crate::ddb_config::DdbConfig>>>,
 }
 
 impl CompactionEngine {
     /// Create a new compaction engine.
     #[must_use]
     pub fn new(kv: Arc<DdbKvClient>, config: CompactionConfig) -> Self {
-        Self { kv, config }
+        Self {
+            kv,
+            config,
+            config_handle: None,
+        }
+    }
+
+    /// Attach a shared config handle for live-apply of the timer
+    /// cadence and compaction threshold.
+    #[must_use]
+    pub fn with_config_handle(
+        mut self,
+        handle: Arc<arc_swap::ArcSwap<crate::ddb_config::DdbConfig>>,
+    ) -> Self {
+        self.config_handle = Some(handle);
+        self
     }
 
     /// Run one compaction cycle: for each owned disk-group/disk/zone,
     /// check `uncompacted_free_record_count` against
     /// `snapshot_compaction_threshold` and call `compact_zone` when
     /// exceeded.
-    pub async fn compaction_cycle(&self, container: &DdbDiskGroupContainer) {
+    pub async fn compaction_cycle(&self, container: &DdbDiskGroupContainer, threshold: u32) {
         for dg_id in container.disk_group_ids() {
             let Some(dg) = container.get_disk_group(dg_id) else {
                 continue;
@@ -59,7 +79,7 @@ impl CompactionEngine {
                     let backlog = zone
                         .uncompacted_free_record_count
                         .load(std::sync::atomic::Ordering::Acquire);
-                    if backlog < self.config.snapshot_compaction_threshold {
+                    if backlog < threshold {
                         continue;
                     }
                     if let Err(e) = self
@@ -75,15 +95,6 @@ impl CompactionEngine {
                     }
                 }
             }
-        }
-    }
-
-    /// Run the compaction loop forever (legacy entry point for direct
-    /// `tokio::spawn` without the `BgRunner` framework).
-    pub async fn compaction_loop(self: Arc<Self>, container: Arc<DdbDiskGroupContainer>) -> ! {
-        loop {
-            tokio::time::sleep(self.config.compaction_cadence).await;
-            self.compaction_cycle(&container).await;
         }
     }
 
@@ -171,21 +182,27 @@ impl CompactionEngine {
 impl BackgroundTask for CompactionEngine {
     fn run_cycle<'a>(&'a self, ctx: &'a BgCtx) -> CycleFut<'a> {
         Box::pin(async move {
-            self.compaction_cycle(&ctx.container).await;
+            let threshold = ctx.config.load().persistence.snapshot_compaction_threshold;
+            self.compaction_cycle(&ctx.container, threshold).await;
             Ok(())
         })
     }
 
     fn trigger(&self) -> Trigger {
-        Trigger::Timer(self.config.compaction_cadence)
+        match &self.config_handle {
+            Some(handle) => {
+                let handle = Arc::clone(handle);
+                Trigger::TimerFn(Box::new(move || {
+                    std::time::Duration::from_secs(u64::from(
+                        handle.load().persistence.compaction_cadence_secs,
+                    ))
+                }))
+            }
+            None => Trigger::Timer(self.config.compaction_cadence),
+        }
     }
 
     fn name(&self) -> &'static str {
         "compaction"
     }
-}
-
-#[allow(dead_code)]
-fn _bg_error_unused() -> BgError {
-    BgError("unused".to_string())
 }

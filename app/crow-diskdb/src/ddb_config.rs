@@ -4,9 +4,9 @@
 //! Configuration for the diskdb server.
 
 use std::net::SocketAddr;
-use std::path::Path;
 use std::time::Duration;
 
+use crow_common::config::BaseConfig;
 use crow_protocol::{DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, KV_SERVER_MGMT_BASE};
 use serde::{Deserialize, Serialize};
 
@@ -21,32 +21,27 @@ pub struct DdbConfig {
     pub sync: SyncConfig,
 }
 
-impl DdbConfig {
-    /// Load config from a TOML file.
-    ///
-    /// # Errors
-    /// Returns `Err` if the file cannot be read or parsed as TOML.
-    pub fn load_from_file(path: &Path) -> std::result::Result<Self, std::io::Error> {
-        let data = std::fs::read_to_string(path)?;
-        toml::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+impl BaseConfig for DdbConfig {
+    fn validate(&self) -> Result<(), String> {
+        validate(self)
     }
 }
 
 /// gRPC + HTTP listen addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// gRPC listen address.
+    /// static: gRPC listen address.
     pub listen_addr: String,
-    /// HTTP management listen address.
+    /// static: HTTP management listen address.
     pub http_listen_addr: String,
-    /// Unique instance ID (auto-generated UUID if absent).
+    /// static: unique instance ID (auto-generated UUID if absent).
     pub instance_id: Option<String>,
-    /// HTTP management-API seed endpoints (`http://host:port`) of the
-    /// crow-kv-server(s) used to discover the system group (store 0,
-    /// group 0) leader and, via `/topology`, the data-group leaders.
-    /// The client refreshes this lazily on first use, so the leader
-    /// does not need to be pre-seeded. At least one must be reachable
-    /// for the diskdb to sync group 0.
+    /// static: HTTP management-API seed endpoints (`http://host:port`)
+    /// of the crow-kv-server(s) used to discover the system group
+    /// (store 0, group 0) leader and, via `/topology`, the data-group
+    /// leaders. The client refreshes this lazily on first use, so the
+    /// leader does not need to be pre-seeded. At least one must be
+    /// reachable for the diskdb to sync group 0.
     pub kv_server_mgmt_seeds: Vec<String>,
 }
 
@@ -64,25 +59,25 @@ impl Default for ServerConfig {
 /// Storage defaults for zones and blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageDefaults {
-    /// Default zone size in bytes (default: 16 GB).
+    /// static: default zone size in bytes (default: 16 GB).
     pub zone_size_bytes: u64,
-    /// Block size in bytes (default: 1 MB; configurable 512 KB–2 MB).
+    /// static: block size in bytes (default: 1 MB; configurable 512 KB–2 MB).
     pub block_size_bytes: u32,
-    /// Allocation granularity in bytes (default: 1 MB; must be power of 2).
-    /// v1 enforces `allocate_granularity == block_size_bytes`.
+    /// static: allocation granularity in bytes (default: 1 MB; must be
+    /// power of 2). v1 enforces `allocate_granularity == block_size_bytes`.
     pub allocate_granularity: u32,
-    /// Number of zones in the disk-level active zone set (default: 4).
-    /// The disk round-robins over this many zones at a time; when all
-    /// are exhausted, the set rotates to a new batch of zones.
+    /// static: number of zones in the disk-level active zone set
+    /// (default: 4). The disk round-robins over this many zones at a
+    /// time; when all are exhausted, the set rotates to a new batch.
     pub zone_rotate_count: u32,
-    /// Per-bit CAS retry cap in the zone bitmap-scan allocator
+    /// dynamic: per-bit CAS retry cap in the zone bitmap-scan allocator
     /// (default: 100). On exhaustion, the allocator falls through to
     /// the next bit / word / zone.
     pub cas_retry_limit: u32,
-    /// Strict ownership validation before free (default: false). When
-    /// true, the free path reads the `BusyBlockValue` from the data
-    /// group first and validates `owner_chunk` (one extra paxos
-    /// round-trip, doubles free latency).
+    /// dynamic: strict ownership validation before free (default:
+    /// false). When true, the free path reads the `BusyBlockValue`
+    /// from the data group first and validates `owner_chunk` (one
+    /// extra paxos round-trip, doubles free latency).
     pub validate_owner_on_free: bool,
 }
 
@@ -102,12 +97,12 @@ impl Default for StorageDefaults {
 /// Heartbeat / liveness configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatConfig {
-    /// Heartbeat interval in seconds (default: 10).
+    /// dynamic: heartbeat interval in seconds (default: 10).
     pub interval_secs: u32,
-    /// Missed heartbeats before entering degraded mode (default: 3).
+    /// dynamic: missed heartbeats before entering degraded mode (default: 3).
     pub miss_threshold: u32,
-    /// Duration in `TempFailure` before transitioning to `Offline`
-    /// (default: 900s).
+    /// dynamic: duration in `TempFailure` before transitioning to
+    /// `Offline` (default: 900s).
     pub temp_failure_timeout_secs: u32,
 }
 
@@ -124,11 +119,11 @@ impl Default for HeartbeatConfig {
 /// Group-0 sync configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
-    /// Group-0 store id (default: 0).
+    /// static: group-0 store id (default: 0).
     pub group0_store_id: u64,
-    /// Group-0 group id (default: 0).
+    /// static: group-0 group id (default: 0).
     pub group0_group_id: u64,
-    /// Sync interval in seconds (default: 10).
+    /// dynamic: sync interval in seconds (default: 10).
     pub sync_interval_secs: u32,
 }
 
@@ -145,21 +140,22 @@ impl Default for SyncConfig {
 /// Free batch flush + snapshot compaction + recovery configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistenceConfig {
-    /// Free batching toggle (default: false). When false, frees are
-    /// immediate (one `batch_write` per free). When true, frees are
-    /// grouped and flushed via one `batch_write` when the batch reaches
-    /// `free_flush_max_batch` (R79; no timer).
+    /// dynamic: free batching toggle (default: false). When false,
+    /// frees are immediate (one `batch_write` per free). When true,
+    /// frees are grouped and flushed via one `batch_write` when the
+    /// batch reaches `free_flush_max_batch` (R79; no timer).
     pub free_batch_enabled: bool,
-    /// Free batch max size before forced flush (default: 256).
+    /// dynamic: free batch max size before forced flush (default: 256).
     pub free_flush_max_batch: u32,
-    /// Periodic compaction interval in seconds (default: 300). The
-    /// compaction loop sleeps this long between cycles.
+    /// dynamic: periodic compaction interval in seconds (default: 300).
+    /// The compaction loop sleeps this long between cycles.
     pub compaction_cadence_secs: u32,
-    /// Compact a zone when its `uncompacted_free_record_count` exceeds
-    /// this (default: 4096). Cadence OR threshold — whichever fires
-    /// first for a given zone.
+    /// dynamic: compact a zone when its
+    /// `uncompacted_free_record_count` exceeds this (default: 4096).
+    /// Cadence OR threshold — whichever fires first for a given zone.
     pub snapshot_compaction_threshold: u32,
-    /// Max concurrent zone recoveries in `recover_node` (default: 16).
+    /// static: max concurrent zone recoveries in `recover_node`
+    /// (default: 16).
     pub recovery_concurrency: usize,
 }
 
@@ -178,11 +174,11 @@ impl Default for PersistenceConfig {
 /// Background scanner configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerConfig {
-    /// Scanner run interval in seconds (default: 600).
+    /// dynamic: scanner run interval in seconds (default: 600).
     pub scan_interval_secs: u32,
-    /// Enable ghost allocation detection (default: true).
+    /// dynamic: enable ghost allocation detection (default: true).
     pub detect_ghost_allocations: bool,
-    /// Enable record integrity checks (default: true).
+    /// dynamic: enable record integrity checks (default: true).
     pub verify_record_integrity: bool,
 }
 

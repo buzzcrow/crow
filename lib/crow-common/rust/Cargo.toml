@@ -18,6 +18,9 @@ tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 flate2 = { workspace = true }
 serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+notify = "8.2"
+notify-debouncer-mini = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

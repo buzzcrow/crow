@@ -11,6 +11,8 @@
 
 use std::path::PathBuf;
 
+use crow_common::config::BaseConfig;
+
 use crate::wal::pipeline_backend::WalBlockAlignment;
 use crate::wal::record::WalRecordFormat;
 
@@ -46,32 +48,38 @@ impl AdmissionPolicy {
     }
 }
 
-/// Paxos retry configuration (static, global).
+/// Paxos retry configuration (all fields static — bind at group
+/// creation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PaxosConfig {
+    /// static: max paxos retries.
     pub max_paxos_retries: usize,
+    /// static: max slot retries.
     pub max_slot_retries: usize,
+    /// static: retry base backoff in milliseconds.
     pub retry_base_backoff_ms: u64,
     /// Maximum number of in-flight (allocated-but-not-yet-chosen) proposals
-    /// the leader admits concurrently. A proposal that cannot acquire a window
-    /// permit fails fast with `PxPaxosError::Busy` (retryable) rather than
-    /// blocking, so the leader never stalls behind a saturated pipeline
-    /// (parallel-slot window / performance targets).
+    /// static: maximum number of in-flight (allocated-but-not-yet-chosen)
+    /// proposals the leader admits concurrently. A proposal that cannot
+    /// acquire a window permit fails fast with `PxPaxosError::Busy`
+    /// (retryable) rather than blocking, so the leader never stalls
+    /// behind a saturated pipeline (parallel-slot window / performance
+    /// targets).
     pub max_inflight_proposals: usize,
-    /// Admission policy when all permits are occupied: `Reject` (fail fast
-    /// with `Busy`) or `Queue` (block until a permit is freed). Default
-    /// `Reject`.
+    /// static: admission policy when all permits are occupied: `Reject`
+    /// (fail fast with `Busy`) or `Queue` (block until a permit is
+    /// freed). Default `Reject`.
     pub inflight_admission: AdmissionPolicy,
-    /// R45 max ops per coalesced batch. `0` disables coalescing (one
-    /// proposal per key). Default 0 (opt-in).
+    /// static: R45 max ops per coalesced batch. `0` disables coalescing
+    /// (one proposal per key). Default 0 (opt-in).
     pub coalesce_max_keys: usize,
-    /// R45b drain threshold: skip draining the pending batch in
-    /// `coalesce_drain_after_round` when the in-flight slot-task count
-    /// (`occupied`) is at or above this value. Lets the `max_keys`
-    /// overflow path handle high load (full batches) while the drain
-    /// maintains concurrency at low-moderate load. Default `1` (set
-    /// via CLI when coalescing is enabled). `0` = always drain
-    /// (disables the heuristic).
+    /// static: R45b drain threshold — skip draining the pending batch
+    /// in `coalesce_drain_after_round` when the in-flight slot-task
+    /// count (`occupied`) is at or above this value. Lets the
+    /// `max_keys` overflow path handle high load (full batches) while
+    /// the drain maintains concurrency at low-moderate load. Default
+    /// `1` (set via CLI when coalescing is enabled). `0` = always
+    /// drain (disables the heuristic).
     pub coalesce_drain_threshold: usize,
 }
 
@@ -93,22 +101,24 @@ impl Default for PaxosConfig {
     }
 }
 
-/// Server-level configuration (static, global).
+/// Server-level configuration (all fields static — bind at startup).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ServerConfig {
-    /// Per-layer graceful-shutdown timeout in milliseconds.
+    /// static: per-layer graceful-shutdown timeout in milliseconds.
     /// Shutdowns that take longer almost always indicate a stuck task and are
     /// better force-cleaned than waited on.
     pub shutdown_timeout_ms: u64,
-    /// Byte budget for scan responses: caps the total key+value bytes in one
-    /// unary `KvScanResponse` so every page is provably bounded regardless of
-    /// value sizes. The engine always returns at least one entry even if it
-    /// alone exceeds the budget (so the client makes progress). Default 3.5
-    /// MiB leaves ~0.5 MiB for proto framing under tonic's 4 MiB default
-    /// `max_decoding_message_size`; tune down for low-latency interactive
-    /// scans or up for bulk-export workloads (stay below the RPC frame
-    /// ceiling). Post-R32 (custom Rust RPC) the ceiling may change — only
-    /// this default's constraint value needs revisiting, not the knob itself.
+    /// static: byte budget for scan responses: caps the total key+value
+    /// bytes in one unary `KvScanResponse` so every page is provably
+    /// bounded regardless of value sizes. The engine always returns at
+    /// least one entry even if it alone exceeds the budget (so the
+    /// client makes progress). Default 3.5 MiB leaves ~0.5 MiB for
+    /// proto framing under tonic's 4 MiB default
+    /// `max_decoding_message_size`; tune down for low-latency
+    /// interactive scans or up for bulk-export workloads (stay below
+    /// the RPC frame ceiling). Post-R32 (custom Rust RPC) the ceiling
+    /// may change — only this default's constraint value needs
+    /// revisiting, not the knob itself.
     pub scan_byte_budget: usize,
 }
 
@@ -129,38 +139,41 @@ impl Default for ServerConfig {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct WalConfig {
-    /// Directories to distribute WAL segments across.
+    /// static: directories to distribute WAL segments across.
     pub wal_disks: Vec<PathBuf>,
-    /// Target segment size before rotation (bytes). Default 64 MiB.
+    /// static: target segment size before rotation (bytes). Default 64 MiB.
     pub wal_segment_size: u64,
-    /// Durable flush batch size trigger (bytes). Default 64 KiB.
+    /// static: durable flush batch size trigger (bytes). Default 64 KiB.
     pub wal_flush_batch_bytes: usize,
-    /// Safety-net timer that wakes the idle writer every `watchdog` ms to
-    /// drain any queued records in case of a missed wake ("just in case for
-    /// bugs"). Default 100 ms.
+    /// dynamic: safety-net timer that wakes the idle writer every
+    /// `watchdog` ms to drain any queued records in case of a missed
+    /// wake ("just in case for bugs"). Default 100 ms.
     pub wal_flush_watchdog_ms: u64,
-    /// Disk-pressure watermark for eager GC. Default 80%.
+    /// dynamic: disk-pressure watermark for eager GC. Default 80%.
     pub wal_disk_high_watermark_pct: u8,
-    /// Forensics retention grace period (seconds). Default 3600 (1 hour).
+    /// dynamic: forensics retention grace period (seconds). Default 3600
+    /// (1 hour).
     pub wal_min_retention_secs: u64,
-    /// GC scan cadence (seconds). Default 30.
+    /// dynamic: GC scan cadence (seconds). Default 30.
     pub gc_tick_secs: u64,
-    /// Whether the WAL backend uses block-aligned I/O (SSD/NVMe under
-    /// `O_DIRECT`). When `false` (default), the file backend is used with
-    /// byte-addressable media (RAM/SCM/PMEM). When `true`, a block pipeline
-    /// is selected and `wal_io_unit_bytes` controls the alignment unit.
+    /// static: whether the WAL backend uses block-aligned I/O (SSD/NVMe
+    /// under `O_DIRECT`). When `false` (default), the file backend is
+    /// used with byte-addressable media (RAM/SCM/PMEM). When `true`, a
+    /// block pipeline is selected and `wal_io_unit_bytes` controls the
+    /// alignment unit.
     pub wal_aligned: bool,
-    /// SSD/NVMe I/O unit size in bytes. Only used when `wal_aligned` is `true`.
-    /// Common values: 512 (logical sector), 4096 (default 4 KiB), 8192,
-    /// 16384, 65536. Must be a power of two.
+    /// static: SSD/NVMe I/O unit size in bytes. Only used when
+    /// `wal_aligned` is `true`. Common values: 512 (logical sector),
+    /// 4096 (default 4 KiB), 8192, 16384, 65536. Must be a power of
+    /// two.
     pub wal_io_unit_bytes: usize,
-    /// Record encoding format. `Auto` selects binary frames (zero-copy) on all
-    /// backends.
+    /// static: record encoding format. `Auto` selects binary frames
+    /// (zero-copy) on all backends.
     pub wal_record_format: WalRecordFormat,
-    /// Skip the durable `fdatasync` on every write batch. Records are still
-    /// written to the segment file, but the flush is not durable. Unsafe for
-    /// production — only for benchmark path-overhead isolation (R10). Default
-    /// `false`.
+    /// static: skip the durable `fdatasync` on every write batch.
+    /// Records are still written to the segment file, but the flush is
+    /// not durable. Unsafe for production — only for benchmark
+    /// path-overhead isolation (R10). Default `false`.
     pub wal_skip_fsync: bool,
 }
 
@@ -210,7 +223,8 @@ impl Default for WalConfig {
     }
 }
 
-/// Leader-election / heartbeat / lease tunables (per group).
+/// Leader-election / heartbeat / lease tunables (all fields static —
+/// bind at group creation; per group).
 ///
 /// All time values are milliseconds, stored as `u64`. The election driver
 /// converts to `Duration` at the consumption site.
@@ -394,13 +408,16 @@ impl Default for PxElectionConfig {
 /// Merges all sub-configs (`ServerConfig`, `PaxosConfig`,
 /// `PxElectionConfig`, `WalConfig`) and the former `PxGroup` internal
 /// flags (`force_classic`, `wal_early_ack`, `async_engine_apply`) into
-/// one struct with `serde` derives for JSON file loading. Runtime
+/// one struct with `serde` derives for TOML file loading. Runtime
 /// paths and backends are `#[serde(skip)]` — set from CLI args after
 /// loading.
 ///
-/// Usage: `CrowKVConfig::load_from_file(path)` or
-/// `CrowKVConfig::default()`, then CLI args override individual fields,
-/// then pass `&CrowKVConfig` to `create_group_with_wal`.
+/// Usage: `crow_common::config::load_from_file::<CrowKVConfig>(path)`
+/// or `CrowKVConfig::default()`, then CLI args override individual
+/// fields, then pass `&CrowKVConfig` to `create_group_with_wal`.
+///
+/// All top-level fields are static (bind at startup / group creation).
+/// Dynamic fields are inside `WalConfig` (GC tunables).
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct CrowKVConfig {
@@ -412,34 +429,84 @@ pub struct CrowKVConfig {
     pub election: PxElectionConfig,
     #[serde(default)]
     pub wal: WalConfig,
+    /// static: force classic paxos path (no pipelining).
     #[serde(default)]
     pub force_classic: bool,
+    /// static: early WAL ack timing.
     #[serde(default)]
     pub wal_early_ack: bool,
+    /// static: async engine apply (R35).
     #[serde(default)]
     pub async_engine_apply: bool,
-    /// WAL root directory. `#[serde(skip)]` — set from `--wal-root` CLI.
+    /// static: WAL root directory. `#[serde(skip)]` — set from
+    /// `--wal-root` CLI.
     #[serde(skip)]
     pub wal_root: PathBuf,
-    /// Group config root directory. `#[serde(skip)]` — set from CLI.
+    /// static: group config root directory. `#[serde(skip)]` — set
+    /// from CLI.
     #[serde(skip)]
     pub config_root: PathBuf,
-    /// Crowtree data root directory. `#[serde(skip)]` — set from CLI.
+    /// static: crowtree data root directory. `#[serde(skip)]` — set
+    /// from CLI.
     #[serde(skip)]
     pub data_root: PathBuf,
-    /// WAL I/O backend label. `#[serde(skip)]` — set from `--wal-backend`.
+    /// static: WAL I/O backend label. `#[serde(skip)]` — set from
+    /// `--wal-backend`.
     #[serde(skip)]
     pub wal_backend: String,
-    /// Crowtree storage backend label. `#[serde(skip)]` — set from
-    /// `--kv-backend`.
+    /// static: crowtree storage backend label. `#[serde(skip)]` — set
+    /// from `--kv-backend`.
     #[serde(skip)]
     pub crowtree_backend: String,
-    /// Skip durable fdatasync. `#[serde(skip)]` — set from `--no-fsync`.
+    /// static: skip durable fdatasync. `#[serde(skip)]` — set from
+    /// `--no-fsync`.
     #[serde(skip)]
     pub wal_skip_fsync: bool,
-    /// Log directory. `#[serde(skip)]` — set from CLI.
+    /// static: log directory. `#[serde(skip)]` — set from CLI.
     #[serde(skip)]
     pub log_dir: String,
+}
+
+impl BaseConfig for CrowKVConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.server.shutdown_timeout_ms == 0 {
+            return Err("server.shutdown_timeout_ms must be > 0".to_string());
+        }
+        if self.server.scan_byte_budget == 0 {
+            return Err("server.scan_byte_budget must be > 0".to_string());
+        }
+        if self.paxos.max_inflight_proposals == 0 {
+            return Err("paxos.max_inflight_proposals must be > 0".to_string());
+        }
+        if self.election.election_min_ms >= self.election.election_max_ms {
+            return Err(format!(
+                "election.election_min_ms ({}) must be < election_max_ms ({})",
+                self.election.election_min_ms, self.election.election_max_ms,
+            ));
+        }
+        Ok(())
+    }
+
+    fn fill_skip_defaults(&mut self) {
+        if self.wal_root.as_os_str().is_empty() {
+            self.wal_root = PathBuf::from("waldata");
+        }
+        if self.config_root.as_os_str().is_empty() {
+            self.config_root = PathBuf::from("conf");
+        }
+        if self.data_root.as_os_str().is_empty() {
+            self.data_root = PathBuf::from("ctdata");
+        }
+        if self.wal_backend.is_empty() {
+            self.wal_backend = "file".to_string();
+        }
+        if self.crowtree_backend.is_empty() {
+            self.crowtree_backend = "file".to_string();
+        }
+        if self.log_dir.is_empty() {
+            self.log_dir = "log".to_string();
+        }
+    }
 }
 
 impl Default for CrowKVConfig {
@@ -469,35 +536,16 @@ impl Default for CrowKVConfig {
 }
 
 impl CrowKVConfig {
-    /// Load from a TOML file. Missing fields use sub-struct defaults.
+    /// Load from a TOML file. Delegates to
+    /// `crow_common::config::load_from_file` (fills skip defaults +
+    /// validates). Kept for backward compatibility with existing
+    /// call sites.
     ///
     /// # Errors
-    /// Returns `Err` if the file cannot be read or parsed as TOML.
+    /// Returns `Err(message)` if the file cannot be read, parsed, or
+    /// fails validation.
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
-        let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let mut config: Self = toml::from_str(&data).map_err(|e| e.to_string())?;
-        // Fill runtime defaults if the file didn't set them (they're
-        // serde-skip so they're always default-initialized by
-        // deserialization).
-        if config.wal_root.as_os_str().is_empty() {
-            config.wal_root = PathBuf::from("waldata");
-        }
-        if config.config_root.as_os_str().is_empty() {
-            config.config_root = PathBuf::from("conf");
-        }
-        if config.data_root.as_os_str().is_empty() {
-            config.data_root = PathBuf::from("ctdata");
-        }
-        if config.wal_backend.is_empty() {
-            config.wal_backend = "file".to_string();
-        }
-        if config.crowtree_backend.is_empty() {
-            config.crowtree_backend = "file".to_string();
-        }
-        if config.log_dir.is_empty() {
-            config.log_dir = "log".to_string();
-        }
-        Ok(config)
+        crow_common::config::load_from_file::<Self>(path)
     }
 
     /// Test profile — fast election timings, `wal_early_ack` off.

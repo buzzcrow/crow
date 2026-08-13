@@ -14,7 +14,10 @@
 //!   appender initialization.
 //! - [`time`] — process-wide monotonic-time anchor helpers.
 //! - [`report`] — multi-step operation error aggregation.
+//! - [`config`] — shared TOML config plumbing: `BaseConfig` trait,
+//!   `load_from_file`, `watch` (file watcher), `log_diff`.
 
+pub mod config;
 pub mod logging;
 pub mod metrics;
 pub mod report;

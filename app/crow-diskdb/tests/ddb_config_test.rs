@@ -3,6 +3,7 @@
 
 //! Config validation + `load_from_file` tests.
 
+use crow_common::config::BaseConfig;
 use crow_diskdb::ddb_config::{validate, DdbConfig};
 
 #[test]
@@ -87,8 +88,8 @@ fn config_defaults_match_design() {
 fn tracked_config_file_loads_and_validates() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let config_path = manifest_dir.join("conf/crow_diskdb_config.toml");
-    let config = DdbConfig::load_from_file(&config_path).expect("load tracked config");
-    validate(&config).expect("tracked config validates");
+    let config = crow_common::config::load_from_file::<DdbConfig>(&config_path).expect("load tracked config");
+    config.validate().expect("tracked config validates");
 }
 
 #[test]
@@ -97,7 +98,7 @@ fn config_load_from_file_roundtrip() {
     let toml = toml::to_string_pretty(&config).expect("serialize");
     let tmp = std::env::temp_dir().join("ddb_config_test.toml");
     std::fs::write(&tmp, &toml).expect("write temp");
-    let loaded = DdbConfig::load_from_file(&tmp).expect("load");
+    let loaded = crow_common::config::load_from_file::<DdbConfig>(&tmp).expect("load");
     assert_eq!(loaded.storage.block_size_bytes, config.storage.block_size_bytes);
     assert_eq!(loaded.server.listen_addr, config.server.listen_addr);
     let _ = std::fs::remove_file(&tmp);

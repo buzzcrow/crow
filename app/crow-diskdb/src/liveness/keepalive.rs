@@ -8,6 +8,7 @@
 //! (disk-add init, status changes, removals).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crow_common::metrics::Counter;
@@ -18,6 +19,7 @@ use crow_protocol::DiskIdExt;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 use tracing::{info, warn};
 
+use crate::bg_task::{BackgroundTask, BgCtx, CycleFut, Trigger};
 use crate::ddb_config::KeepAliveConfig;
 use crate::ddb_kv_client::DdbKvClient;
 use crate::liveness::state_machine::HwStateMachine;
@@ -49,7 +51,7 @@ pub struct KeepAlive {
     container: Arc<DdbDiskGroupContainer>,
     config: KeepAliveConfig,
     status_machine: HwStateMachine,
-    missed_count: u32,
+    missed_count: AtomicU32,
     /// Optional `DdbKvClient` for writing baseline `ZoneValue`
     /// records during disk-add init. When `None`, disk-add init
     /// skips the baseline write (test mode).
@@ -57,6 +59,11 @@ pub struct KeepAlive {
     /// Optional CAS retry counter handle, attached to each `Zone`
     /// during disk-add init via `Zone::with_cas_retry_metric`.
     cas_retry_metric: Option<Arc<Counter>>,
+    /// Optional shared config handle for live-apply of the timer
+    /// interval. When set, `trigger()` returns `TimerFn` reading
+    /// `heartbeat.interval_secs` from this handle each tick; when
+    /// `None`, falls back to the fixed `config.interval` snapshot.
+    config_handle: Option<Arc<arc_swap::ArcSwap<crate::ddb_config::DdbConfig>>>,
 }
 
 impl KeepAlive {
@@ -73,9 +80,10 @@ impl KeepAlive {
             container,
             config,
             status_machine,
-            missed_count: 0,
+            missed_count: AtomicU32::new(0),
             kv: None,
             cas_retry_metric: None,
+            config_handle: None,
         }
     }
 
@@ -93,54 +101,110 @@ impl KeepAlive {
         self
     }
 
-    /// Run one sync tick.
-    #[allow(clippy::too_many_lines)]
-    pub async fn tick(&mut self) -> KeepAliveOutcome {
+    /// Attach a shared config handle for live-apply of the timer
+    /// interval. When set, the keep-alive tick interval is read from
+    /// the handle each tick, so config reloads take effect without
+    /// restart.
+    #[must_use]
+    pub fn with_config_handle(
+        mut self,
+        handle: Arc<arc_swap::ArcSwap<crate::ddb_config::DdbConfig>>,
+    ) -> Self {
+        self.config_handle = Some(handle);
+        self
+    }
+
+    /// Run one sync tick — a thin orchestrator calling the four
+    /// concerns in order: heartbeat, observe ownership, observe
+    /// disks. Returns the aggregate outcome.
+    pub async fn tick(&self) -> KeepAliveOutcome {
         let start = std::time::Instant::now();
-        let instance_id = self.container.instance_id;
 
         // a. Keep-alive heartbeat.
-        if let Err(e) = self.svc.heartbeat_diskdb(instance_id, "", &[], &[]).await {
-            warn!(error = %e, "sync: heartbeat failed");
-            self.missed_count += 1;
-            if self.missed_count >= self.config.miss_threshold {
-                self.container.enter_degraded_mode();
-            }
+        if !self.heartbeat().await {
             return KeepAliveOutcome {
                 sync_duration_ms: elapsed_ms(start),
                 ..Default::default()
             };
         }
 
-        // b. Read ownership map.
+        // b+c. Observe ownership (owner map + bind map).
+        let Some((owned, groups_added, groups_removed)) = self.observe_ownership().await else {
+            return KeepAliveOutcome {
+                sync_duration_ms: elapsed_ms(start),
+                ..Default::default()
+            };
+        };
+
+        // d+e+f. Reconcile disk-groups + observe disks.
+        let mut outcome = self.observe_disks(&owned).await;
+        outcome.groups_added = groups_added;
+        outcome.groups_removed = groups_removed;
+
+        // h. Reset missed count on success.
+        let prev = self.missed_count.swap(0, Ordering::SeqCst);
+        if prev > 0 {
+            self.container.exit_degraded_mode();
+        }
+
+        outcome.sync_duration_ms = elapsed_ms(start);
+        info!(
+            groups_added = outcome.groups_added,
+            groups_removed = outcome.groups_removed,
+            disks_added = outcome.disks_added,
+            duration_ms = outcome.sync_duration_ms,
+            "sync complete"
+        );
+        outcome
+    }
+
+    /// Heartbeat to the service registry. Returns `false` on failure
+    /// (caller skips the rest of the tick). Tracks missed count and
+    /// enters degraded mode on threshold breach.
+    async fn heartbeat(&self) -> bool {
+        let instance_id = self.container.instance_id;
+        if let Err(e) = self.svc.heartbeat_diskdb(instance_id, "", &[], &[]).await {
+            warn!(error = %e, "sync: heartbeat failed");
+            let count = self.missed_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if count >= self.config.miss_threshold {
+                self.container.enter_degraded_mode();
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Read the owner map + bind map from group 0, filter to owned
+    /// disk-groups, and reconcile the container (add new, update
+    /// binds, remove gone). Returns `None` on I/O failure (caller
+    /// skips the rest of the tick). Returns `(owned, groups_added,
+    /// groups_removed)` on success.
+    async fn observe_ownership(&self) -> Option<(Vec<crow_protocol::DiskdbOwnerEntry>, usize, usize)> {
+        let instance_id = self.container.instance_id;
+
+        // Read ownership map.
         let owners = match self.hw.list_owners().await {
             Ok(o) => o,
             Err(e) => {
                 warn!(error = %e, "sync: read owner map failed");
-                self.missed_count += 1;
-                if self.missed_count >= self.config.miss_threshold {
+                let count = self.missed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if count >= self.config.miss_threshold {
                     self.container.enter_degraded_mode();
                 }
-                return KeepAliveOutcome {
-                    sync_duration_ms: elapsed_ms(start),
-                    ..Default::default()
-                };
+                return None;
             }
         };
 
-        // c. Read bind map.
+        // Read bind map.
         let binds = match self.hw.list_binds().await {
             Ok(b) => b,
             Err(e) => {
                 warn!(error = %e, "sync: read bind map failed");
-                self.missed_count += 1;
-                if self.missed_count >= self.config.miss_threshold {
+                let count = self.missed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if count >= self.config.miss_threshold {
                     self.container.enter_degraded_mode();
                 }
-                return KeepAliveOutcome {
-                    sync_duration_ms: elapsed_ms(start),
-                    ..Default::default()
-                };
+                return None;
             }
         };
         let bind_map: HashMap<DiskGroupId, (u64, u64)> = binds
@@ -148,15 +212,16 @@ impl KeepAlive {
             .map(|b| (b.dg_id, (b.store_id, b.group_id)))
             .collect();
 
-        // d. Filter to owned disk-groups.
+        // Filter to owned disk-groups.
         let owned: Vec<_> = owners
             .into_iter()
             .filter(|o| o.instance_id == instance_id)
             .collect();
 
-        // e. Reconcile disk-groups.
-        let mut outcome = KeepAliveOutcome::default();
+        // Reconcile disk-groups: add new, update binds, remove gone.
         let current_ids: Vec<_> = self.container.disk_group_ids();
+        let mut groups_added = 0usize;
+        let mut groups_removed = 0usize;
 
         for entry in &owned {
             if !current_ids.contains(&entry.dg_id) {
@@ -167,7 +232,7 @@ impl KeepAlive {
                     *dg.bind.write().unwrap() = (store_id, group_id);
                 }
                 self.container.add_disk_group(dg);
-                outcome.groups_added += 1;
+                groups_added += 1;
             } else if let Some(dg) = self.container.get_disk_group(entry.dg_id) {
                 // Update bind if changed.
                 if let Some(&(store_id, group_id)) = bind_map.get(&entry.dg_id) {
@@ -179,16 +244,23 @@ impl KeepAlive {
             }
         }
 
-        // f. Detect removed disk-groups.
+        // Detect removed disk-groups.
         for &id in &current_ids {
             if !owned.iter().any(|o| o.dg_id == id) {
                 self.container.remove_disk_group(id);
-                outcome.groups_removed += 1;
+                groups_removed += 1;
             }
         }
 
-        // g. For each owned disk-group, read member disks and reconcile.
-        for entry in &owned {
+        Some((owned, groups_added, groups_removed))
+    }
+
+    /// For each owned disk-group, read member disks from group 0 and
+    /// reconcile (disk-add init, status changes, removals). Drives
+    /// the `HwStateMachine` on status changes.
+    async fn observe_disks(&self, owned: &[crow_protocol::DiskdbOwnerEntry]) -> KeepAliveOutcome {
+        let mut outcome = KeepAliveOutcome::default();
+        for entry in owned {
             let Some(dg) = self.container.get_disk_group(entry.dg_id) else {
                 continue;
             };
@@ -213,21 +285,6 @@ impl KeepAlive {
             )
             .await;
         }
-
-        // h. Reset missed count on success.
-        if self.missed_count > 0 {
-            self.missed_count = 0;
-            self.container.exit_degraded_mode();
-        }
-
-        outcome.sync_duration_ms = elapsed_ms(start);
-        info!(
-            groups_added = outcome.groups_added,
-            groups_removed = outcome.groups_removed,
-            disks_added = outcome.disks_added,
-            duration_ms = outcome.sync_duration_ms,
-            "sync complete"
-        );
         outcome
     }
 
@@ -392,21 +449,29 @@ impl KeepAlive {
         dg.add_disk(disk);
         dg.rebuild_allocating_disks();
     }
+}
 
-    /// Run the loop forever (until the stop signal fires).
-    pub async fn run(mut self, mut stop: tokio::sync::oneshot::Receiver<()>) {
-        let mut ticker = tokio::time::interval(self.config.interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    let _ = self.tick().await;
-                }
-                _ = &mut stop => {
-                    info!("sync loop shutting down");
-                    break;
-                }
+impl BackgroundTask for KeepAlive {
+    fn run_cycle<'a>(&'a self, _ctx: &'a BgCtx) -> CycleFut<'a> {
+        Box::pin(async move {
+            let _ = self.tick().await;
+            Ok(())
+        })
+    }
+
+    fn trigger(&self) -> Trigger {
+        match &self.config_handle {
+            Some(handle) => {
+                let handle = Arc::clone(handle);
+                Trigger::TimerFn(Box::new(move || {
+                    std::time::Duration::from_secs(u64::from(handle.load().heartbeat.interval_secs))
+                }))
             }
+            None => Trigger::Timer(self.config.interval),
         }
+    }
+
+    fn name(&self) -> &'static str {
+        "keepalive"
     }
 }

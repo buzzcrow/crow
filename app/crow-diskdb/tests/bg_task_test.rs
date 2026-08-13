@@ -69,10 +69,14 @@ fn make_ctx() -> Arc<BgCtx> {
     let mut registry = crow_common::metrics::MetricsRegistry::new();
     let metrics = DiskdbMetrics::register(&mut registry);
     let _ = KeepAliveConfig::default();
+    let config = Arc::new(arc_swap::ArcSwap::from_pointee(
+        crow_diskdb::ddb_config::DdbConfig::default(),
+    ));
     Arc::new(BgCtx {
         container,
         kv,
         metrics,
+        config,
     })
 }
 
