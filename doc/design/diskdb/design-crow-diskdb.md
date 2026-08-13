@@ -612,29 +612,71 @@ visibility.
   - **Normal uncompacted**: bit set, no `BusyBlockKey`, `FreeBlockKey`
     exists — the block was freed (persist-only) but compaction hasn't
     cleared the bit yet. This is **not drift** — it's the expected
-    state. The scanner does not report it. (If the zone is not active
-    and has a high `uncompacted_free_record_count`, the scanner may
-    log a hint that compaction is lagging, but it's not a drift
-    finding.)
+    state. The scanner counts it as `uncompacted_lag` (not drift) so
+    operators can see compaction lag, but does not auto-correct it.
   - **Ghost-free** (drift): bit clear, `BusyBlockKey` exists — should
     not happen in the persist-only model (free never clears bits, and
     only allocate/compaction touch the bitmap). If detected, it
     indicates a bug or hardware error. Records are authoritative →
     block is busy → set the bit back. Data may be written.
-- **Bitmap drift detection** — in-memory `usage_bits` drifts from the
-  record-derived bitmap; reload from records. The scanner uses
-  strategy 1 (full scan rebuild, zone-management §6) as its rebuild mechanism — the
-  same `RebuildZoneBitmap` RPC/API an operator would use for a
-  consistency check or full rebuild.
-- **Record integrity** — CRC check on zone snapshots and
-  `BusyBlockValue` / `FreeBlockValue` records. Corrupt records are
-  reported; the block is kept busy (key exists, data may be written);
-  no auto-correction frees a block with a corrupt record.
-- **Per-block state validation** — for busy blocks, cross-check
-  `Segment.owner_chunk` against the `BusyBlockValue` in KV (ownership
-  validation deferred from the free path, zone-management §8); for freed blocks, the
-  `FreeBlockValue.previous_owner` is the audit trail.
-- **Leak detection** — deferred (needs caller registries).
+- **Ghost scan implementation** (`scanner/ghost.rs`) — `scan_ghosts`
+  iterates owned disk-groups → disks → zones. For each non-active,
+  unlocked zone, it replays the journal into a throwaway `DdbZone`
+  via `recover_zone_inner` (strategy 2) with
+  `rebuild_zone_bitmap_full_scan` (strategy 1) fallback — same logic
+  as `RecalcEngine::recalc_zone`. It then does a bit-by-bit diff
+  (`diff_bitmaps`) between the live and replayed bitmaps, classifying
+  each differing bit by checking `ZoneRecords` busy/free offset sets
+  (built into `HashSet<u64>` for O(1) lookup). The zone lock is not
+  held across awaits (I9); it is re-acquired (try_write) only for the
+  synchronous classify + auto-correct step.
+- **Re-verify step** — if real drift is detected and
+  `reverify_delay_ms > 0`, the scanner sleeps, re-snapshots the live
+  bitmap, and re-checks each drifted bit. If the drift disappeared
+  during the delay (a zone rotated out with an in-flight allocate
+  whose Phase 2 completed), it was transient and is skipped. If
+  persistent, it is reported. Setting `reverify_delay_ms = 0`
+  disables re-verify (report immediately, may include false
+  positives from in-flight operations).
+- **Auto-correct** — when `ghost.auto_correct` is enabled and
+  re-verify confirms persistent drift, the live bitmap is corrected:
+  real ghost-busy → `cas_bit(off, false)` + `used_count` decrement;
+  ghost-free → `cas_bit(off, true)` + `used_count` increment. Normal
+  uncompacted bits are never auto-corrected (compaction's job).
+  Fallback (CRC fail / GC gap) suppresses auto-correct (corruption
+  signal — the scanner reports but does not correct when the
+  record-derived bitmap itself may be unreliable).
+- **Record integrity** (`scanner/integrity.rs`) — `scan_integrity`
+  re-checks CRC on the `ZoneValue` snapshot via
+  `ZoneValueExt::verify_checksum`, detects records that
+  `read_zone_records` silently skips (undecodable keys/values) by
+  doing its own prefix scans with `BusyBlockKey::from_bytes` +
+  `bincode::deserialize` on each item, and optionally validates
+  `owner_chunk` well-formedness (non-zero) on each `BusyBlockValue`.
+  Corrupt records are reported; the block is kept busy (key exists,
+  data may be written); no auto-correction frees a block with a
+  corrupt record.
+- **Leak detection** (`scanner/leak.rs`) — deferred (needs caller
+  registries). The scaffold returns `LeakScanResult { status:
+  "deferred" }` so the scanner loop calls it unconditionally.
+- **Scanner task** (`scanner/task.rs`) — `ScannerTask` implements
+  `BackgroundTask` and runs on `BgRunner` with a `TimerFn` trigger
+  reading `scanner.scan_interval_secs` from the shared config handle.
+  `ScanState` holds the last `ScanSummary` (shared between the task
+  and the gRPC service handlers) + an `AtomicBool` scan-requested
+  flag (set by `TriggerScan`, consumed at the start of the next
+  `run_cycle`) + an `AtomicBool` in-progress flag (prevents overlap).
+- **Admin RPCs** — `TriggerScan` sets the scan-requested flag and
+  returns the current summary + `scan_in_progress` flag;
+  `GetScanStatus` returns the last summary + `has_run` flag. The
+  `ScanSummary` proto message carries all scan counts (ghost_busy,
+  ghost_free, uncompacted_lag, corrupt_snapshots, corrupt_records,
+  owner_mismatches, leak_status) + timing.
+- **Scanner metrics** — `scanner_runs_total` (counter),
+  `scanner_duration_ms` (latency summary), `scanner_ghosts_found`
+  (gauge), `scanner_drift_found` (gauge = ghost_busy + ghost_free),
+  `scanner_corrupt_records` (gauge = corrupt_snapshots +
+  corrupt_records).
 - **Zone coordination** — the scanner skips active zones, acquires the
   zone-level lock for non-active zones, and coordinates with compaction
   via the shared lock. Details in
@@ -745,6 +787,12 @@ hardcoded tunables in business logic). Defaults:
 - **Disk** — block / unit size (default 1 MB), zone size
 - **Free validation** — `validate_owner_on_free` (default false — no
   KV read on free; enable for strict ownership validation)
+- **Scanner** — `scan_interval_secs` (600), `ghost.detect` (true),
+  `ghost.auto_correct` (false — manual review first; enable for
+  self-healing), `integrity.verify` (true),
+  `integrity.detect_owner_mismatch` (false — piggybacks on
+  `read_zone_records`), `reverify_delay_ms` (1000 — set 0 to disable
+  re-verify)
 
 ## 15. Implementation Scope
 

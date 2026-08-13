@@ -15,16 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R75](R75-diskdb-background-scanner.md)** — diskdb background
-  scanner — Area: diskdb — Periodic consistency check: real
-  ghost-busy detection (no BusyBlockKey + no FreeBlockKey — drift),
-  normal-uncompacted classification (FreeBlockKey exists — not drift,
-  persist-only model), ghost-free detection (defense-in-depth),
-  record integrity (CRC + deserialization + owner_chunk validation),
-  operator visibility (metrics + admin RPCs). Zone-level lock
-  coordinates with compaction + health checks. Data-safety principle:
-  never free a block that might have data. Leak detection deferred
-  (needs caller registries).
 - **[R76](R76-diskdb-disk-discovery-health.md)** — diskdb disk discovery
   + health probing — Area: diskdb — Implement config-driven disk
   discovery, health probing (existence, size, basic read/write test),
