@@ -562,4 +562,27 @@ mod tests {
             PaxosConfig::DEFAULT.max_inflight_proposals
         );
     }
+
+    /// The tracked `app/crow-kv-server/conf/crow_kv_server_config.json`
+    /// must parse without error — guards against stale/mismatched
+    /// template edits.
+    #[test]
+    fn tracked_kv_server_config_file_loads() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config_path = manifest_dir
+            .join("..")
+            .join("..")
+            .join("app")
+            .join("crow-kv-server")
+            .join("conf")
+            .join("crow_kv_server_config.json");
+        if !config_path.exists() {
+            // Running from a published crate (no workspace layout).
+            return;
+        }
+        let config = CrowKVConfig::load_from_file(&config_path).expect("load tracked config");
+        assert_eq!(config.server.shutdown_timeout_ms, 10_000);
+        assert!(config.wal_early_ack);
+        assert!(config.async_engine_apply);
+    }
 }

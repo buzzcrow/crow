@@ -81,6 +81,16 @@ fn config_defaults_match_design() {
     assert_eq!(config.persistence.free_flush_max_batch, 256);
 }
 
+/// The tracked `conf/crow_diskdb_config.json` must parse and validate
+/// without error — guards against stale/mismatched template edits.
+#[test]
+fn tracked_config_file_loads_and_validates() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config_path = manifest_dir.join("conf/crow_diskdb_config.json");
+    let config = DdbConfig::load_from_file(&config_path).expect("load tracked config");
+    validate(&config).expect("tracked config validates");
+}
+
 #[test]
 fn config_load_from_file_roundtrip() {
     let config = DdbConfig::default();

@@ -4,23 +4,41 @@
     "scan_byte_budget": 3670016
   },
   "paxos": {
-    "max_inflight_proposals": 16,
-    "inflight_admission": "Queue"
+    "max_paxos_retries": 3,
+    "max_slot_retries": 3,
+    "retry_base_backoff_ms": 5,
+    "max_inflight_proposals": 32,
+    "inflight_admission": "Queue",
+    "coalesce_max_keys": 0,
+    "coalesce_drain_threshold": 1
   },
   "election": {
-    "election_timeout_ms": 1500,
-    "heartbeat_interval_ms": 100,
+    "prevote_enabled": true,
+    "heartbeat_interval_ms": 150,
+    "election_min_ms": 1000,
+    "election_max_ms": 2000,
     "lease_duration_ms": 3000,
-    "pre_vote": true,
+    "max_clock_skew_ms": 500,
+    "bulk_prepare_window": 1024,
+    "catchup_snapshot_threshold": 1024,
     "election_driver_disabled": false,
-    "snapshot_slot_threshold": 10000,
-    "snapshot_time_threshold_ms": 300000,
-    "maintenance_tick_ms": 1000
+    "learner_stream_window_frames": 128,
+    "maintenance_tick_ms": 10000,
+    "snapshot_slot_threshold": 100000,
+    "snapshot_time_threshold_ms": 600000,
+    "learner_stream_rpc_timeout_ms": 2000
   },
   "wal": {
-    "wal_record_format": "Binary",
+    "wal_disks": ["waldata"],
     "wal_segment_size": 67108864,
     "wal_flush_batch_bytes": 65536,
+    "wal_flush_watchdog_ms": 100,
+    "wal_disk_high_watermark_pct": 80,
+    "wal_min_retention_secs": 3600,
+    "gc_tick_secs": 30,
+    "wal_aligned": false,
+    "wal_io_unit_bytes": 4096,
+    "wal_record_format": "Auto",
     "wal_skip_fsync": false
   },
   "force_classic": false,
