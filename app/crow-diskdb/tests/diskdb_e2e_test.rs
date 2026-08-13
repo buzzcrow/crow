@@ -201,6 +201,7 @@ async fn diskdb_e2e_allocate_free() {
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
+        temp_failure_timeout_secs: 900,
     };
     let mut sync_loop =
         SyncLoop::new(hw2, svc, Arc::clone(&container), sync_cfg).with_data_group_client(dg_kv);
@@ -396,6 +397,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
+        temp_failure_timeout_secs: 900,
     };
     let mut sync_loop =
         SyncLoop::new(hw2, svc, Arc::clone(&container), sync_cfg).with_data_group_client(dg_kv);

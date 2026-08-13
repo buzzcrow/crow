@@ -70,3 +70,11 @@ path = "tests/diskdb_e2e_test.rs"
 [[test]]
 name = "recovery_test"
 path = "tests/recovery_test.rs"
+
+[[test]]
+name = "config_test"
+path = "tests/config_test.rs"
+
+[[test]]
+name = "status_machine_test"
+path = "tests/status_machine_test.rs"

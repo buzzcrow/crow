@@ -94,6 +94,7 @@ async fn main() {
         miss_threshold: config.heartbeat.miss_threshold,
         zone_rotate_count: config.storage.zone_rotate_count,
         cas_retry_limit: config.storage.cas_retry_limit,
+        temp_failure_timeout_secs: config.heartbeat.temp_failure_timeout_secs,
     };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let mut sync_loop = SyncLoop::new(hw, svc, container.clone(), sync_cfg)

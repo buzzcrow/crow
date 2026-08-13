@@ -24,6 +24,7 @@ use crate::domain::disk::DdbDisk;
 use crate::domain::disk_group::DdbDiskGroup;
 use crate::domain::disk_group_container::DdbDiskGroupContainer;
 use crate::domain::zone::DdbZone;
+use crate::status_machine::HwStateMachine;
 
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
@@ -48,6 +49,7 @@ pub struct SyncConfig {
     pub miss_threshold: u32,
     pub zone_rotate_count: u32,
     pub cas_retry_limit: u32,
+    pub temp_failure_timeout_secs: u32,
 }
 
 impl Default for SyncConfig {
@@ -57,6 +59,7 @@ impl Default for SyncConfig {
             miss_threshold: 3,
             zone_rotate_count: 4,
             cas_retry_limit: 100,
+            temp_failure_timeout_secs: 900,
         }
     }
 }
@@ -67,6 +70,7 @@ pub struct SyncLoop {
     svc: ServiceRegistryClient,
     container: Arc<DdbDiskGroupContainer>,
     config: SyncConfig,
+    status_machine: HwStateMachine,
     missed_count: u32,
     /// Optional `DataGroupClient` for writing baseline `ZoneValue`
     /// records during disk-add init. When `None`, disk-add init
@@ -84,11 +88,13 @@ impl SyncLoop {
         container: Arc<DdbDiskGroupContainer>,
         config: SyncConfig,
     ) -> Self {
+        let status_machine = HwStateMachine::new(config.temp_failure_timeout_secs);
         Self {
             hw,
             svc,
             container,
             config,
+            status_machine,
             missed_count: 0,
             kv: None,
             cas_retry_metric: None,
@@ -275,9 +281,21 @@ impl SyncLoop {
                     let old_status = *disk.effective_status.read().unwrap();
                     let new_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
                     if old_status != new_status {
-                        disk.set_effective_status(new_status);
-                        dg.rebuild_allocating_disks();
-                        outcome.status_changes += 1;
+                        match self.status_machine.transition_disk(&disk, new_status) {
+                            Ok(_) => {
+                                dg.rebuild_allocating_disks();
+                                outcome.status_changes += 1;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    disk = ?disk.disk_id,
+                                    from = ?old_status,
+                                    to = ?new_status,
+                                    error = %e,
+                                    "illegal disk status transition; keeping current"
+                                );
+                            }
+                        }
                     }
                 }
             } else {
@@ -299,9 +317,21 @@ impl SyncLoop {
                 if let Some(disk) = disk {
                     let old_status = *disk.effective_status.read().unwrap();
                     if old_status != HwStatus::Missing {
-                        disk.set_effective_status(HwStatus::Missing);
-                        dg.rebuild_allocating_disks();
-                        outcome.status_changes += 1;
+                        match self.status_machine.transition_disk(&disk, HwStatus::Missing) {
+                            Ok(_) => {
+                                dg.rebuild_allocating_disks();
+                                outcome.status_changes += 1;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    disk = ?disk.disk_id,
+                                    from = ?old_status,
+                                    to = ?HwStatus::Missing,
+                                    error = %e,
+                                    "illegal disk status transition; keeping current"
+                                );
+                            }
+                        }
                     }
                 }
             }

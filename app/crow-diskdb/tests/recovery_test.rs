@@ -177,6 +177,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
+        temp_failure_timeout_secs: 900,
     };
     let mut sync_loop =
         SyncLoop::new(hw2, svc, Arc::clone(&container), sync_cfg).with_data_group_client(dg_kv);
@@ -219,6 +220,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
+        temp_failure_timeout_secs: 900,
     };
     let mut sync_loop2 =
         SyncLoop::new(hw3, svc2, Arc::clone(&container2), sync_cfg2).with_data_group_client(dg_kv2);

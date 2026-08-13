@@ -16,5 +16,5 @@ pub mod domain;
 pub mod metrics;
 pub mod recovery;
 pub mod service;
-pub mod status;
+pub mod status_machine;
 pub mod sync;
