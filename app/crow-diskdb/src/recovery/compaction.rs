@@ -23,7 +23,7 @@ use crow_protocol::common::DiskId;
 use crow_protocol::key::BinaryKey;
 
 use crate::bg_task::{BackgroundTask, BgCtx, BgError, CycleFut, Trigger};
-use crate::diskdb_kv_client::{Bind, DiskDBKVClient};
+use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
 use crate::recovery::RecoveryError;
@@ -47,17 +47,17 @@ impl Default for CompactionConfig {
     }
 }
 
-/// Snapshot compaction engine. Owns a `DiskDBKVClient` and runs as a
+/// Snapshot compaction engine. Owns a `DdbKvClient` and runs as a
 /// background task (`tokio::spawn`).
 pub struct CompactionEngine {
-    kv: Arc<DiskDBKVClient>,
+    kv: Arc<DdbKvClient>,
     config: CompactionConfig,
 }
 
 impl CompactionEngine {
     /// Create a new compaction engine.
     #[must_use]
-    pub fn new(kv: Arc<DiskDBKVClient>, config: CompactionConfig) -> Self {
+    pub fn new(kv: Arc<DdbKvClient>, config: CompactionConfig) -> Self {
         Self { kv, config }
     }
 

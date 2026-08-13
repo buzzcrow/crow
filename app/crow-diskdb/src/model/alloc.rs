@@ -3,10 +3,10 @@
 
 //! Two-phase allocate/free orchestration — coordinates the in-memory
 //! `DdbDiskGroup`/`DdbDisk`/`DdbZone` model with durable writes via
-//! `DiskDBKVClient`.
+//! `DdbKvClient`.
 //!
 //! Phase 1 (sync): bitmap CAS on the in-memory zone.
-//! Phase 2 (async): persist the durable record via `DiskDBKVClient`.
+//! Phase 2 (async): persist the durable record via `DdbKvClient`.
 //!
 //! On Phase 2 failure, rolls back the bitmap bits (Phase 1 undo).
 //! See `doc/working/design-diskdb-server.md` §4.5–§4.6.
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crow_protocol::common::{ChunkId, DiskId};
 use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, FreeBlockValue, Segment};
 
-use crate::diskdb_kv_client::{Bind, DiskDBKVClient};
+use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group::{AllocClaim, AllocError, DdbDiskGroup};
 
 /// Errors from the free path when `validate_owner_on_free` is enabled.
@@ -79,7 +79,7 @@ impl From<crow_kv_client::Error> for FreeError {
 /// Two-phase allocate a single block.
 ///
 /// Phase 1 (sync): bitmap CAS via `dg.allocate_block`.
-/// Phase 2 (async): persist `BusyBlockValue` via `DiskDBKVClient`.
+/// Phase 2 (async): persist `BusyBlockValue` via `DdbKvClient`.
 ///
 /// On Phase 2 failure, rolls back the bitmap bits (Phase 1 undo) and
 /// returns the error. See §4.5.
@@ -93,7 +93,7 @@ pub async fn allocate_block(
     unit_count: u32,
     owner_chunk: &ChunkId,
     unit_size: u32,
-    kv: &DiskDBKVClient,
+    kv: &DdbKvClient,
     cas_retry_limit: u32,
     zone_rotate_count: u32,
 ) -> std::result::Result<Segment, AllocError> {
@@ -141,7 +141,7 @@ pub async fn allocate_blocks(
     exclude_disks: &[DiskId],
     owner_chunk: &ChunkId,
     unit_size: u32,
-    kv: &DiskDBKVClient,
+    kv: &DdbKvClient,
     cas_retry_limit: u32,
     zone_rotate_count: u32,
 ) -> std::result::Result<Vec<Segment>, AllocError> {
@@ -219,7 +219,7 @@ pub async fn allocate_blocks(
 pub async fn free_block(
     dg: &Arc<DdbDiskGroup>,
     segment: &Segment,
-    kv: &DiskDBKVClient,
+    kv: &DdbKvClient,
     validate_owner_on_free: bool,
 ) -> std::result::Result<(), FreeError> {
     let disk_id = segment.disk_id.ok_or_else(|| {
@@ -297,7 +297,7 @@ pub async fn free_block(
 pub async fn free_blocks(
     dg: &Arc<DdbDiskGroup>,
     segments: &[Segment],
-    kv: &DiskDBKVClient,
+    kv: &DdbKvClient,
     validate_owner_on_free: bool,
 ) -> std::result::Result<(), FreeError> {
     let bind: Bind = *dg.bind.read().unwrap();

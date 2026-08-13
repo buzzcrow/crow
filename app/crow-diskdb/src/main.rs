@@ -9,7 +9,7 @@ use std::sync::Arc;
 use clap::Parser;
 use crow_common::metrics::MetricsRegistry;
 use crow_diskdb::ddb_config::{validate, DdbConfig};
-use crow_diskdb::diskdb_kv_client::DiskDBKVClient;
+use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
 use crow_diskdb::lifecycle::StartupPhase;
 use crow_diskdb::metrics::DiskdbMetrics;
@@ -79,8 +79,8 @@ async fn main() {
     );
     let hw = HardwareClient::from_shared(Arc::clone(&kv_client));
     let svc = ServiceRegistryClient::from_shared(Arc::clone(&kv_client));
-    let dg_kv = Arc::new(DiskDBKVClient::from_shared(Arc::clone(&kv_client)));
-    let dg_kv_sync = DiskDBKVClient::from_shared(Arc::clone(&kv_client));
+    let dg_kv = Arc::new(DdbKvClient::from_shared(Arc::clone(&kv_client)));
+    let dg_kv_sync = DdbKvClient::from_shared(Arc::clone(&kv_client));
 
     // Register diskdb metrics (§11: `zone.allocate.retry.cms.bit`,
     // `disk.bad.impacted_blocks`). The CAS retry counter is attached
@@ -101,7 +101,7 @@ async fn main() {
     };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let mut keepalive = KeepAlive::new(hw, svc, container.clone(), keepalive_cfg)
-        .with_diskdb_kv_client(dg_kv_sync)
+        .with_ddb_kv_client(dg_kv_sync)
         .with_cas_retry_metric(metrics.allocate_retry_cas_bit);
 
     info!("running blocking initial keep-alive tick");
@@ -180,7 +180,7 @@ async fn main() {
 }
 
 /// Run R73 recovery for all owned disk-groups, then set phase to Up.
-async fn run_recovery(kv: Arc<DiskDBKVClient>, container: Arc<DdbDiskGroupContainer>, config: &DdbConfig) {
+async fn run_recovery(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContainer>, config: &DdbConfig) {
     info!("running R73 recovery (background)");
     let recovery_engine = RecoveryEngine::new(kv, config.persistence.recovery_concurrency);
     for dg_id in container.disk_group_ids() {

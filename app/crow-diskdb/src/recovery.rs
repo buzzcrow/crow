@@ -30,7 +30,7 @@ use crow_protocol::common::DiskId;
 use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
-use crate::diskdb_kv_client::{Bind, DiskDBKVClient};
+use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::zone::DdbZone;
@@ -81,12 +81,12 @@ pub struct ZoneStats {
 
 /// Crash recovery + ownership-transfer reconstruction engine.
 ///
-/// Owns a `DiskDBKVClient` (from the server wiring). Disk metadata
+/// Owns a `DdbKvClient` (from the server wiring). Disk metadata
 /// (`DiskValue`s) is passed in by the caller (the keep-alive loop
 /// already fetches it from group 0 via `HardwareClient`); the recovery
 /// engine does not need a group-0 client itself.
 pub struct RecoveryEngine {
-    kv: Arc<DiskDBKVClient>,
+    kv: Arc<DdbKvClient>,
     /// Max concurrent zone recoveries in `recover_disk_group`.
     recovery_concurrency: usize,
 }
@@ -95,7 +95,7 @@ impl RecoveryEngine {
     /// Create a new recovery engine with the given data-group client
     /// and zone-recovery concurrency limit.
     #[must_use]
-    pub fn new(kv: Arc<DiskDBKVClient>, recovery_concurrency: usize) -> Self {
+    pub fn new(kv: Arc<DdbKvClient>, recovery_concurrency: usize) -> Self {
         Self {
             kv,
             recovery_concurrency: recovery_concurrency.max(1),

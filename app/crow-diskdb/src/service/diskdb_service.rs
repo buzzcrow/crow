@@ -21,7 +21,7 @@ use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
 
 use crate::ddb_config::StorageDefaults;
-use crate::diskdb_kv_client::DiskDBKVClient;
+use crate::ddb_kv_client::DdbKvClient;
 use crate::model::alloc;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::recovery::RecoveryEngine;
@@ -34,7 +34,7 @@ const ALL_ZONES: u32 = u32::MAX;
 
 pub struct DiskdbService {
     container: Arc<DdbDiskGroupContainer>,
-    kv: Arc<DiskDBKVClient>,
+    kv: Arc<DdbKvClient>,
     storage: StorageDefaults,
     recovery: Arc<RecoveryEngine>,
 }
@@ -42,7 +42,7 @@ pub struct DiskdbService {
 impl DiskdbService {
     pub fn new(
         container: Arc<DdbDiskGroupContainer>,
-        kv: Arc<DiskDBKVClient>,
+        kv: Arc<DdbKvClient>,
         storage: StorageDefaults,
         recovery: Arc<RecoveryEngine>,
     ) -> Self {

@@ -17,14 +17,14 @@ use std::time::Duration;
 
 use tracing::{error, info};
 
-use crate::diskdb_kv_client::DiskDBKVClient;
+use crate::ddb_kv_client::DdbKvClient;
 use crate::metrics::DiskdbMetrics;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 
 /// Shared context passed to every background task.
 pub struct BgCtx {
     pub container: Arc<DdbDiskGroupContainer>,
-    pub kv: Arc<DiskDBKVClient>,
+    pub kv: Arc<DdbKvClient>,
     pub metrics: DiskdbMetrics,
 }
 

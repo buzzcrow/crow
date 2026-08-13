@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::KvCluster;
-use crow_diskdb::diskdb_kv_client::DiskDBKVClient;
+use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
 use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
@@ -113,10 +113,10 @@ async fn seed_hardware(hw: &HardwareClient) {
         .expect("set bind");
 }
 
-fn make_diskdb_kv_client(endpoint: &str) -> DiskDBKVClient {
+fn make_ddb_kv_client(endpoint: &str) -> DdbKvClient {
     let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
     kv.seed_leader(STORE_ID, DATA_GROUP_ID, endpoint.to_string());
-    DiskDBKVClient::new(kv)
+    DdbKvClient::new(kv)
 }
 
 fn make_hardware_client(endpoint: &str) -> HardwareClient {
@@ -171,7 +171,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
@@ -180,7 +180,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         temp_failure_timeout_secs: 900,
     };
     let mut keepalive =
-        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_diskdb_kv_client(dg_kv);
+        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
@@ -191,14 +191,14 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     // 3. Allocate 3 blocks (anti-affinity spreads across 3 disks),
     //    free 1 of them. After this, 2 blocks remain busy.
     let owner_chunk = make_chunk_id(0, 0, 42);
-    let alloc_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let segments = alloc::allocate_blocks(&dg, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
         .await
         .expect("allocate 3");
     assert_eq!(segments.len(), 3);
 
     // Free the first 1.
-    let free_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
         .await
         .expect("free 1");
@@ -214,7 +214,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     let container2 = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc2 = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw3 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv2 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let dg_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let keepalive_cfg2 = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
@@ -223,7 +223,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         temp_failure_timeout_secs: 900,
     };
     let mut keepalive2 =
-        KeepAlive::new(hw3, svc2, Arc::clone(&container2), keepalive_cfg2).with_diskdb_kv_client(dg_kv2);
+        KeepAlive::new(hw3, svc2, Arc::clone(&container2), keepalive_cfg2).with_ddb_kv_client(dg_kv2);
     let outcome2 = keepalive2.tick().await;
     assert_eq!(outcome2.groups_added, 1);
     assert_eq!(outcome2.disks_added, 3);
@@ -235,7 +235,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     assert_eq!(bind, bind2);
 
     // 5. Run strategy 1 recovery on each zone of each disk.
-    let recovery_kv = Arc::new(make_diskdb_kv_client(&cluster.group1_leader_endpoint));
+    let recovery_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
     let recovery = RecoveryEngine::new(Arc::clone(&recovery_kv), 4);
 
     let disks = dg2.disks.read().unwrap().clone();

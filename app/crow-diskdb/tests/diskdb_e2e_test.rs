@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::KvCluster;
-use crow_diskdb::diskdb_kv_client::DiskDBKVClient;
+use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
 use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
@@ -48,7 +48,7 @@ fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
 
 /// Point-lookup a key in the data group, returning the value bytes
 /// if found.
-async fn kv_get(kv: &DiskDBKVClient, key: &[u8]) -> Option<bytes::Bytes> {
+async fn kv_get(kv: &DdbKvClient, key: &[u8]) -> Option<bytes::Bytes> {
     let outcome = kv
         .kv()
         .get(
@@ -147,12 +147,12 @@ async fn seed_hardware(hw: &HardwareClient) {
         .expect("set bind");
 }
 
-/// Build a `DiskDBKVClient` seeded with the leader endpoint for
+/// Build a `DdbKvClient` seeded with the leader endpoint for
 /// `(store_id, group_id)`.
-fn make_diskdb_kv_client(endpoint: &str) -> DiskDBKVClient {
+fn make_ddb_kv_client(endpoint: &str) -> DdbKvClient {
     let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
     kv.seed_leader(STORE_ID, DATA_GROUP_ID, endpoint.to_string());
-    DiskDBKVClient::new(kv)
+    DdbKvClient::new(kv)
 }
 
 /// Build a `HardwareClient` seeded with the group-0 leader endpoint.
@@ -194,7 +194,7 @@ async fn diskdb_e2e_allocate_free() {
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
 
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
@@ -204,7 +204,7 @@ async fn diskdb_e2e_allocate_free() {
         temp_failure_timeout_secs: 900,
     };
     let mut keepalive =
-        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_diskdb_kv_client(dg_kv);
+        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
 
     // 4. Run one sync tick to populate in-memory state.
     let outcome = keepalive.tick().await;
@@ -235,7 +235,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 6. Verify baseline ZoneValue records were written to group 1
     //    for all 3 disks.
-    let verify_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     for did in &[make_disk_id(0, 1), make_disk_id(0, 2), make_disk_id(0, 3)] {
         let zone_records = verify_kv
             .read_zone_records((STORE_ID, DATA_GROUP_ID), did, 0)
@@ -252,7 +252,7 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("baseline ZoneValue verified for all 3 disks");
 
     // 7. Allocate one block.
-    let alloc_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let owner_chunk = make_chunk_id(0, 0, 42);
     let segment = alloc::allocate_block(
         &dg,
@@ -279,7 +279,7 @@ async fn diskdb_e2e_allocate_free() {
         unit_offset: segment.unit_offset,
     };
     let busy_bytes = busy_key.to_bytes();
-    let kv_client = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let kv_client = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let busy_val = kv_get(&kv_client, &busy_bytes).await;
     assert!(busy_val.is_some(), "busy record should exist in kv");
     let busy_record: crow_protocol::diskdb::rpc::BusyBlockValue =
@@ -289,7 +289,7 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("BusyBlockValue record verified in kv");
 
     // 9. Free the block.
-    let free_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     alloc::free_block(&dg, &segment, &free_kv, false)
         .await
         .expect("free should succeed");
@@ -303,7 +303,7 @@ async fn diskdb_e2e_allocate_free() {
         unit_offset: segment.unit_offset,
     };
     let free_bytes = free_key.to_bytes();
-    let verify_kv2 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let free_val = kv_get(&verify_kv2, &free_bytes).await;
     assert!(free_val.is_some(), "free record should exist in kv");
     let free_record: crow_protocol::diskdb::rpc::FreeBlockValue =
@@ -317,7 +317,7 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("FreeBlockValue record verified, BusyBlockKey gone");
 
     // 11. Allocate multiple blocks and verify.
-    let alloc_kv2 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let segments = alloc::allocate_blocks(
         &dg,
         1,   // unit_count
@@ -335,14 +335,14 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("allocated 3 blocks");
 
     // 12. Free all 3 in one batch.
-    let free_kv2 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     alloc::free_blocks(&dg, &segments, &free_kv2, false)
         .await
         .expect("free 3 blocks should succeed");
     eprintln!("freed 3 blocks in batch");
 
     // 13. Verify all 3 busy keys are gone and 3 free keys exist.
-    let verify_kv3 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv3 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     for seg in &segments {
         let bk = BusyBlockKey {
             disk_id: make_disk_id(0, 1),
@@ -390,7 +390,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
 
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
@@ -400,7 +400,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         temp_failure_timeout_secs: 900,
     };
     let mut keepalive =
-        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_diskdb_kv_client(dg_kv);
+        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
@@ -411,13 +411,13 @@ async fn diskdb_e2e_validate_owner_on_free() {
 
     // Allocate a block.
     let owner_chunk = make_chunk_id(0, 0, 100);
-    let alloc_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
         .await
         .expect("allocate should succeed");
 
     // 1. Free with validate_owner_on_free=true and matching owner → success.
-    let free_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     alloc::free_block(&dg, &segment, &free_kv, true)
         .await
         .expect("free with matching owner should succeed");
@@ -428,7 +428,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         zone_index: segment.zone_index,
         unit_offset: segment.unit_offset,
     };
-    let verify_kv = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let free_val = kv_get(&verify_kv, &free_key.to_bytes()).await;
     assert!(
         free_val.is_some(),
@@ -437,7 +437,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
 
     // 2. Allocate again, then free with validate_owner_on_free=true but
     //    a WRONG owner → OwnerMismatch, no bitmap clear.
-    let alloc_kv2 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let segment2 = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
         .await
         .expect("allocate should succeed");
@@ -446,7 +446,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     let mut wrong_segment = segment2;
     wrong_segment.owner_chunk = Some(wrong_owner);
 
-    let free_kv2 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let result = alloc::free_block(&dg, &wrong_segment, &free_kv2, true).await;
     assert!(
         matches!(result, Err(alloc::FreeError::OwnerMismatch { .. })),
@@ -460,7 +460,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         zone_index: segment2.zone_index,
         unit_offset: segment2.unit_offset,
     };
-    let verify_kv2 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let busy_val = kv_get(&verify_kv2, &busy_key.to_bytes()).await;
     assert!(
         busy_val.is_some(),
@@ -468,7 +468,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     );
 
     // 3. Free the block with the correct owner (cleanup).
-    let free_kv3 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv3 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     alloc::free_block(&dg, &segment2, &free_kv3, true)
         .await
         .expect("free with matching owner should succeed");
@@ -481,7 +481,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         unit_count: 1,
         owner_chunk: Some(owner_chunk),
     };
-    let free_kv4 = make_diskdb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv4 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let result = alloc::free_block(&dg, &fake_segment, &free_kv4, true).await;
     assert!(
         matches!(result, Err(alloc::FreeError::NotBusy { .. })),

@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! [`DiskDBKVClient`] — wraps [`CrowkvClient`] for put/delete/scan on
+//! [`DdbKvClient`] — wraps [`CrowkvClient`] for put/delete/scan on
 //! the disk-group's bound paxos data group.
 //!
 //! Uses `(store_id, group_id)` from `DdbDiskGroup.bind` (set by the
@@ -31,11 +31,11 @@ pub type Bind = (u64, u64);
 /// All methods take `(store_id, group_id)` from `DdbDiskGroup.bind`. The
 /// wrapped `CrowkvClient` must have its topology seeded with the
 /// data-group leader endpoint.
-pub struct DiskDBKVClient {
+pub struct DdbKvClient {
     kv: Arc<CrowkvClient>,
 }
 
-impl DiskDBKVClient {
+impl DdbKvClient {
     /// Wrap a `CrowkvClient` for data-group access.
     #[must_use]
     pub fn new(kv: CrowkvClient) -> Self {

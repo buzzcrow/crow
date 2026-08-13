@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crow_protocol::common::DiskId;
 
-use crate::diskdb_kv_client::{Bind, DiskDBKVClient};
+use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::records::ZoneRecords;
 use crate::model::zone::DdbZone;
 use crate::recovery::{RecoveryError, ZoneStats};
@@ -23,7 +23,7 @@ use crate::recovery::{RecoveryError, ZoneStats};
 /// Optionally writes a fresh `ZoneValue` snapshot after the rebuild so
 /// the next restart can use strategy 2.
 pub async fn rebuild_zone_bitmap_full_scan(
-    kv: &DiskDBKVClient,
+    kv: &DdbKvClient,
     bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
