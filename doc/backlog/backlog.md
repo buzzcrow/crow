@@ -15,15 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R72](R72-diskdb-zone-allocator-journal.md)** — diskdb zone
-  allocator + record persistence — Area: diskdb — Implement the zone
-  bitmap-scan allocator (per-bit CAS, rotating cursor, CAS retry
-  bound), rotating active-zone-set, round-robin across disks within
-  the named disk-group,
-  two-phase async allocation (sync CAS claim + async KV persist of
-  `BusyBlockValue`), immediate free (delete `BusyBlockKey` + write
-  `FreeBlockValue` carrying `previous_owner`; one `batch_write`).
-  Block allocate/free component. Free batching is R79.
 - **[R73](R73-diskdb-crash-recovery-snapshot.md)** — diskdb crash
   recovery + snapshot compaction — Area: diskdb — Implement the three
   recovery strategies: full scan rebuild (strategy 1, on-demand via
