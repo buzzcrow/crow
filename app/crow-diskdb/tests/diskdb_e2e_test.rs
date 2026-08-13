@@ -21,6 +21,7 @@ use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
+use crow_protocol::diskdb::rpc::diskdb_service_server::DiskdbService as DiskdbServiceTrait;
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
 use crow_protocol::diskdb_type_util::ZoneValueExt;
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
@@ -717,6 +718,181 @@ async fn diskdb_e2e_allocate_all_free_all() {
     verify_invariant("still full after free (persist-only)");
 
     eprintln!("diskdb_e2e_allocate_all_free_all: ALL CHECKS PASSED");
+}
+
+/// `CompactZone` RPC: allocate → free (persist-only, bitmap stays set)
+/// → call `CompactZone` RPC → verify bitmap cleared, space reclaimed,
+/// free records deleted. Tests the full RPC handler path via
+/// `DiskdbService::compact_zone`.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn diskdb_e2e_compact_zone_rpc() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+
+    let cluster = KvCluster::start().await;
+    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    seed_hardware(&hw).await;
+
+    // 1. First tick — populates state + writes baseline ZoneValues.
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
+    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
+    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let keepalive = KeepAlive::new(
+        hw2,
+        svc,
+        Arc::clone(&container),
+        KeepAliveConfig {
+            interval: Duration::from_secs(10),
+            miss_threshold: 3,
+            zone_rotate_count: 4,
+            cas_retry_limit: 100,
+            temp_failure_timeout_secs: 900,
+        },
+    )
+    .with_ddb_kv_client(dg_kv);
+    let outcome = keepalive.tick().await;
+    assert_eq!(outcome.groups_added, 1);
+    assert_eq!(outcome.disks_added, 3);
+
+    let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
+
+    // 2. Allocate 4 blocks (one at a time — allocate_blocks enforces
+    // anti-affinity across disks, but we only have 3 disks).
+    let owner_chunk = make_chunk_id(0, 0, 42);
+    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let mut segments = Vec::new();
+    for _ in 0..4 {
+        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+            .await
+            .expect("allocate");
+        segments.push(seg);
+    }
+    assert_eq!(segments.len(), 4);
+
+    // 3. Free 2 blocks — persist-only: bitmap stays set.
+    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    alloc::free_blocks(&dg, &segments[0..2], &free_kv, false)
+        .await
+        .expect("free 2");
+
+    // 4. Verify bitmap still shows busy for freed segments (persist-only).
+    let disk_id = segments[0].disk_id.unwrap();
+    let zone_index = segments[0].zone_index;
+    {
+        let disk = dg
+            .disks
+            .read()
+            .unwrap()
+            .iter()
+            .find(|d| d.disk_id == disk_id)
+            .cloned()
+            .expect("disk exists");
+        let zones = disk.zones.read().unwrap();
+        let zone = &zones[zone_index as usize];
+        #[allow(clippy::cast_possible_truncation)]
+        let bit0 = segments[0].unit_offset as u32;
+        assert!(
+            zone.usage_bits.is_set(bit0),
+            "freed bit should still be set (persist-only)"
+        );
+    }
+
+    // 5. Call CompactZone RPC via DiskdbService handler — compact ALL
+    // zones on the disk (empty zone_indices = all zones). This handles
+    // the case where freed and busy blocks are in different zones.
+    // Set lifecycle to Up so the mutating-RPC gate passes.
+    container.set_lifecycle_phase(crow_diskdb::liveness::lifecycle::StartupPhase::Up);
+    let compact_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let storage = crow_diskdb::ddb_config::StorageDefaults::default();
+    let recovery = Arc::new(crow_diskdb::recovery::RecoveryEngine::new(
+        Arc::clone(&compact_kv),
+        4,
+    ));
+    let recalc = Arc::new(crow_diskdb::metrics::RecalcEngine::new(
+        Arc::clone(&compact_kv),
+        Arc::clone(&container),
+    ));
+    let service = crow_diskdb::service::DiskdbService::new(
+        Arc::clone(&container),
+        compact_kv,
+        storage,
+        recovery,
+        recalc,
+    );
+    let req = tonic::Request::new(crow_protocol::diskdb::rpc::CompactZoneRequest {
+        disk_id: Some(disk_id),
+        zone_indices: vec![], // empty = all zones
+    });
+    let resp = service
+        .compact_zone(req)
+        .await
+        .expect("compact_zone RPC should succeed");
+    let resp = resp.into_inner();
+    assert!(
+        resp.compacted_zone_count > 0,
+        "at least one zone should be compacted"
+    );
+    assert!(
+        resp.zones.iter().all(|z| z.success),
+        "all zone compaction results should be success"
+    );
+    eprintln!(
+        "compact_zone RPC: compacted {} zones, deleted {} free records",
+        resp.compacted_zone_count, resp.total_free_records_deleted
+    );
+
+    // 6. Verify bitmap is now cleared for freed segments.
+    {
+        let disk = dg
+            .disks
+            .read()
+            .unwrap()
+            .iter()
+            .find(|d| d.disk_id == disk_id)
+            .cloned()
+            .expect("disk exists");
+        let zones = disk.zones.read().unwrap();
+        let zone = &zones[zone_index as usize];
+        #[allow(clippy::cast_possible_truncation)]
+        let bit0 = segments[0].unit_offset as u32;
+        assert!(
+            !zone.usage_bits.is_set(bit0),
+            "freed bit should be clear after compaction"
+        );
+    }
+
+    // 7. Verify FreeBlockKey records are deleted from KV.
+    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    for seg in &segments[0..2] {
+        let free_key = FreeBlockKey {
+            disk_id,
+            zone_index: seg.zone_index,
+            unit_offset: seg.unit_offset,
+        };
+        let val = kv_get(&verify_kv, &free_key.to_bytes()).await;
+        assert!(
+            val.is_none(),
+            "free record should be deleted after compaction (offset={})",
+            seg.unit_offset
+        );
+    }
+
+    // 8. Verify space is now reclaimable — allocate 2 more blocks.
+    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let mut new_segments = Vec::new();
+    for _ in 0..2 {
+        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
+            .await
+            .expect("should reclaim after compaction");
+        new_segments.push(seg);
+    }
+    assert_eq!(new_segments.len(), 2);
+
+    eprintln!("diskdb_e2e_compact_zone_rpc: ALL CHECKS PASSED");
 }
 
 /// Find the crow-kv-server binary (mirrors the cluster module's logic).

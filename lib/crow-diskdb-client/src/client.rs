@@ -21,9 +21,9 @@ use crow_kv_client::ServiceRegistryClient;
 use crow_protocol::common::DiskId;
 use crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient;
 use crow_protocol::diskdb::rpc::{
-    AllocateBlocksRequest, AllocateResponse, FreeBlocksRequest, FreeResponse, GetDiskGroupInfoRequest,
-    GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse, QueryCapacityStatsRequest,
-    QueryCapacityStatsResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse,
+    AllocateBlocksRequest, AllocateResponse, CompactZoneRequest, CompactZoneResponse, FreeBlocksRequest,
+    FreeResponse, GetDiskGroupInfoRequest, GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse,
+    QueryCapacityStatsRequest, QueryCapacityStatsResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse,
 };
 use crow_protocol::DiskGroupId;
 
@@ -303,6 +303,24 @@ impl DiskdbClient {
             dg_id,
             |mut client| async move { client.recalc_disk_usage(req).await },
         )
+        .await
+    }
+
+    /// Compact one or more zones on a disk (admin RPC). Empty
+    /// `zone_indices` = all zones on the disk. Routes by looking up
+    /// which diskdb instance owns the disk's disk-group.
+    ///
+    /// # Errors
+    /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
+    pub async fn compact_zone(&self, req: CompactZoneRequest) -> Result<CompactZoneResponse> {
+        let disk_id = req
+            .disk_id
+            .ok_or_else(|| DiskdbClientError::Rpc("disk_id required".into()))?;
+        let dg_id = self.dg_for_disk(disk_id).await?;
+        self.with_retry(dg_id, |mut client| {
+            let req = req.clone();
+            async move { client.compact_zone(req).await }
+        })
         .await
     }
 

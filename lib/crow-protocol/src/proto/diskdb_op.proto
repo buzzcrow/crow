@@ -129,3 +129,29 @@ message ZoneRecalcResult {
   // succeeded).
   optional string    fallback_reason   = 9;
 }
+
+// ── Compact zone (on-demand compaction trigger) ─────────────────
+
+// Triggers compaction on one or more zones of a disk. Compaction
+// merges free records into the ZoneValue snapshot (clearing freed
+// bits) and deletes the free records in one atomic batch_write. Used
+// by operators for manual compaction and by tests to verify the
+// persist-only free → compaction → reclaim cycle. Empty zone_indices
+// = all zones on the disk.
+message CompactZoneRequest {
+  crow.common.DiskId disk_id    = 1;
+  repeated uint32    zone_indices = 2;  // empty = all zones on the disk
+}
+
+message CompactZoneResponse {
+  uint32 compacted_zone_count    = 1;
+  uint32 total_free_records_deleted = 2;
+  repeated ZoneCompactionResult zones = 3;
+}
+
+message ZoneCompactionResult {
+  uint32          zone_index           = 1;
+  bool            success              = 2;
+  uint32          free_records_deleted = 3;
+  optional string error                = 4;  // absent on success
+}

@@ -182,12 +182,15 @@ before the design evolved to the persist-only free model and the
 
 ## Recovery
 
-- [x] **Advance `compact_ts` after journal replay**: in
-  `recover_zone_inner`, after applying all replayed ops, set
-  `compact_ts = max(ZoneValue.compact_ts, max(freed_ts of all replayed
-  free records))`. This prevents the next compaction from
-  double-freeing blocks that were freed then re-allocated during the
-  replay window. Files:
+- [x] **Persist-only recovery (Option B)**: recovery (strategy 2)
+  only applies `Put BusyBlockKey` ops to the bitmap (sets bits for
+  allocations). `Delete BusyBlockKey` ops (frees) are ignored — the
+  bitmap is a conservative over-estimate, same as during normal
+  operation. `compact_ts` stays at `snapshot.compact_ts` (no
+  advancement). The free records on disk are the source of truth;
+  the common compaction flow clears the freed bits. This eliminates
+  the double-free risk that would arise if recovery cleared bits for
+  frees while the free records still exist on disk. Files:
   `app/crow-diskdb/src/recovery/journal_replay.rs`.
 - [x] **Set `compacted_ready = true` after recovery**: both strategy 2
   (`recover_zone_inner`) and strategy 1
@@ -244,84 +247,129 @@ before the design evolved to the persist-only free model and the
   `recover_disk_group`.
 - `app/crow-diskdb/src/service.rs` / `app/crow-diskdb/src/main.rs` —
   preparatory thread lifecycle.
+- `lib/crow-protocol/src/proto/diskdb_op.proto` — `CompactZoneRequest`
+  / `CompactZoneResponse` / `ZoneCompactionResult` messages.
+- `lib/crow-protocol/src/proto/diskdb_service.proto` — `CompactZone`
+  RPC.
+- `lib/crow-diskdb-client/src/client.rs` — `compact_zone` client
+  method.
+- `app/crow-diskdb/src/service/diskdb_service.rs` — `compact_zone`
+  RPC handler.
 
 ## Test Checklist
 
 ### Unit tests (zone.rs)
 
-- [ ] **`rollback_allocate` clears bits + decrements `used_count`**:
+- [x] **`rollback_allocate` clears bits + decrements `used_count`**:
   allocate, then rollback → bit clear, `used_count` back to 0.
-- [ ] **`rollback_allocate` does not increment
+  (`zone_rollback_multi_unit`, `zone_rollback_then_reallocate`)
+- [x] **`rollback_allocate` does not increment
   `uncompacted_free_record_count`**: verify the counter is unchanged.
-- [ ] **Persist-only free does not touch bitmap**: after a free, the
+  (`rollback_allocate_does_not_increment_backlog`)
+- [x] **Persist-only free does not touch bitmap**: after a free, the
   bit stays set, `used_count` unchanged, `uncompacted_free_record_count`
-  incremented.
-- [ ] **`compacted_ready` lifecycle**: `false` on `new`, `true` after
+  incremented. (`disk_free_is_persist_only`, `record_free_increments_backlog`)
+- [x] **`compacted_ready` lifecycle**: `false` on `new`, `true` after
   `from_zone_value` / compaction / recovery, `false` after rotation
-  into active set.
-- [ ] **`compact_ts` restored from `ZoneValue`**: `from_zone_value`
-  sets `compact_ts` from the snapshot.
-- [ ] **`to_zone_value` includes `compact_ts`**: serialized `ZoneValue`
-  has the correct `compact_ts` and CRC verifies.
-- [ ] **CRC covers `compact_ts`**: corrupting `compact_ts` fails
-  `verify_checksum`.
+  into active set. (`compacted_ready_lifecycle`)
+- [x] **`compact_ts` restored from `ZoneValue`**: `from_zone_value`
+  sets `compact_ts` from the snapshot. (`zone_to_from_zone_value_roundtrip`)
+- [x] **`to_zone_value` includes `compact_ts`**: serialized `ZoneValue`
+  has the correct `compact_ts` and CRC verifies. (`zone_to_from_zone_value_roundtrip`)
+- [x] **CRC covers `compact_ts`**: corrupting `compact_ts` fails
+  `verify_checksum`. (`zone_from_zone_value_rejects_bad_crc`)
 
 ### Unit tests (compaction)
 
-- [ ] **Watermark partition — stale records dropped**: free records
+- [x] **Watermark partition — stale records dropped**: free records
   with `freed_ts <= compact_ts` are not `range_clear`ed (bits already
-  clear).
-- [ ] **Watermark partition — new records cleared**: free records with
+  clear). (`compact_zone_inner_stale_records_dropped`)
+- [x] **Watermark partition — new records cleared**: free records with
   `freed_ts > compact_ts` are `range_clear`ed, `used_count` recomputed.
-- [ ] **`compact_ts` monotonic**: `new_compact_ts = max(old, max(new
+  (`compact_zone_inner_new_records_cleared`)
+- [x] **`compact_ts` monotonic**: `new_compact_ts = max(old, max(new
   freed_ts))` — no regression even with a stale step-1 read.
-- [ ] **Atomic batch_write (I6)**: snapshot + delete succeed or fail
+  (`compact_zone_inner_compact_ts_monotonic`)
+- [x] **Atomic batch_write (I6)**: snapshot + delete succeed or fail
   together — no window where snapshot is durable but free records
-  survive.
+  survive. (`compaction_compact_zone_writes_snapshot_and_deletes_free_records`)
+- [x] **Watermark partition — mixed stale + new**: a batch with both
+  stale and new records drops stale, clears new.
+  (`compact_zone_inner_mixed_stale_and_new`)
 - [ ] **Double-free prevention after crashed compaction**: orphaned
   free record (`freed_ts <= compact_ts`) is dropped, not `range_clear`ed,
-  even if the block was re-allocated.
-- [ ] **`compacted_ready` set after compaction**: zone is eligible for
-  rotation.
+  even if the block was re-allocated. (Requires crash-injection
+  harness — deferred to a follow-up task.)
+- [x] **`compacted_ready` set after compaction**: zone is eligible for
+  rotation. (`compacted_ready_lifecycle`)
 
 ### Unit tests (recovery)
 
-- [ ] **`compact_ts` advanced after journal replay**: replay a free
-  (Delete BusyBlockKey) then a re-allocate (Put BusyBlockKey) →
-  `compact_ts >= freed_ts` of the replayed free → next compaction
-  drops the free record as stale (no double-free).
-- [ ] **Double-free prevention after replay + re-allocate**: block
-  freed then re-allocated during replay → bit is SET → next compaction
-  does NOT `range_clear` (free record is stale by watermark).
-- [ ] **Timestamp source init**: `recover_disk_group` initializes
-  `free_ts_source` to `max(now(), max(freed_ts) + 1)`.
-- [ ] **`compacted_ready = true` after strategy 2**: recovered zone is
-  eligible for the active set.
-- [ ] **`compacted_ready = true` after strategy 1**: full-scan
-  recovered zone is eligible.
+- [x] **Persist-only recovery (Option B)**: recovery only applies `Put
+  BusyBlockKey` (sets bits). `Delete BusyBlockKey` (frees) are ignored
+  — bitmap is a conservative over-estimate. `compact_ts` stays at
+  `snapshot.compact_ts`. (`recovery_strategy2_journal_replay`)
+- [x] **Compaction clears freed bits after recovery**: after recovery,
+  running compaction on a zone with free records clears the freed bits
+  and deletes the free records. (`recovery_strategy2_journal_replay`
+  step 7)
+- [~] **Timestamp source init**: `recover_disk_group` initializes
+  `free_ts_source` to `max(now(), max(freed_ts) + 1)`. The
+  `monotonic_free_ts_source` + `next_freed_ts` accessors exist on
+  `DdbDiskGroup` and are used by the free path, but the recovery
+  engine does not yet seed the source from scanned free records — it
+  relies on `now()` only. Acceptable while no pre-existing free
+  records have `freed_ts > now()` (fresh start); needs wiring for
+  ownership transfer where the prior owner's `freed_ts` may be ahead.
+- [x] **`compacted_ready = true` after strategy 2**: recovered zone is
+  eligible for the active set. (`recovery_strategy2_journal_replay`)
+- [x] **`compacted_ready = true` after strategy 1**: full-scan
+  recovered zone is eligible. (`recovery_strategy1_full_scan_rebuilds_bitmap`)
 
 ### Unit tests (rotation)
 
-- [ ] **Rotation picks `compacted_ready` zones**: only ready zones
-  enter the active set.
+- [x] **Rotation picks `compacted_ready` zones**: only ready zones
+  enter the active set. (`zone_rotate_one_uses_all_zones`,
+  `disk_allocate_rotates_across_active_zones`)
 - [ ] **`compacted_ready` cleared on rotation**: published zones get
-  `compacted_ready = false`.
+  `compacted_ready = false`. (Implicit in `rotate_active_zones`; no
+  dedicated unit test yet — covered by integration.)
 - [ ] **Fallback to synchronous compaction**: when no ready zones
-  exist, rotation compacts inline then publishes.
+  exist, rotation compacts inline then publishes. (Not yet
+  implemented in `rotate_active_zones` — preparatory thread covers
+  the common case; synchronous fallback is a follow-up task.)
 
 ### Integration tests
 
-- [ ] **Allocate → free → compaction → re-allocate cycle**: verify
+- [x] **Allocate → free → compaction → re-allocate cycle**: verify
   space is reclaimed by compaction and re-allocated correctly.
+  (`diskdb_e2e_compact_zone_rpc` — exercises the `CompactZone` RPC
+  handler end-to-end.)
 - [ ] **Crash during compaction (atomic batch)**: simulate a crash
   between snapshot write and delete (legacy two-op) → verify the
-  watermark prevents double-free on the next compaction.
+  watermark prevents double-free on the next compaction. (Requires
+  crash-injection harness — deferred.)
 - [ ] **Crash after journal replay**: recover, then crash, then
-  recover again → verify `compact_ts` advancement prevents
-  double-free.
+  recover again → verify persist-only recovery is idempotent.
+  (Deferred — needs multi-restart harness.)
 - [ ] **Preparatory thread keeps up with rotation**: under churn,
   verify ready zones are available for rotation without synchronous
-  compaction fallback.
-- [ ] **Persist-only free invariant (I1)**: after free, bitmap still
+  compaction fallback. (Deferred — needs long-running churn harness.)
+- [x] **Persist-only free invariant (I1)**: after free, bitmap still
   shows busy; after compaction, bitmap shows free; `used_count` only
-  decremented by compaction.
+  decremented by compaction. (`diskdb_e2e_compact_zone_rpc`,
+  `disk_free_is_persist_only`, `free_is_persist_only`)
+
+## Open Follow-ups
+
+- **Synchronous compaction fallback in `rotate_active_zones`**: when
+  no `compacted_ready` zones exist, rotation should compact the next
+  batch inline then publish. Currently the preparatory thread covers
+  the common case; the fallback is not yet wired.
+- **Timestamp source seeding during `recover_disk_group`**: collect
+  `max(freed_ts)` across all scanned free records and seed
+  `free_ts_source = max(now(), max(freed_ts) + 1)`. Needed for
+  ownership transfer where the prior owner's clock may be ahead.
+- **Crash-injection harness** for the three deferred integration
+  tests (crash during compaction, crash after replay, preparatory
+  thread under churn).

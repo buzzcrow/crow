@@ -14,11 +14,11 @@ use crow_protocol::diskdb::rpc::diskdb_service_server::{
     DiskdbService as DiskdbServiceTrait, DiskdbServiceServer,
 };
 use crow_protocol::diskdb::rpc::{
-    AllocateBlocksRequest, AllocateResponse, DiskGroupInfo, DiskGroupRecalcResult, DiskInfo,
-    FreeBlocksRequest, FreeResponse, GetDiskGroupInfoRequest, GetDiskGroupInfoResponse, GetDiskInfoRequest,
-    GetDiskInfoResponse, QueryCapacityStatsRequest, QueryCapacityStatsResponse, RebuildZoneBitmapRequest,
-    RebuildZoneBitmapResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse, ZoneRecalcResult,
-    ZoneUsage as ProtoZoneUsage,
+    AllocateBlocksRequest, AllocateResponse, CompactZoneRequest, CompactZoneResponse, DiskGroupInfo,
+    DiskGroupRecalcResult, DiskInfo, FreeBlocksRequest, FreeResponse, GetDiskGroupInfoRequest,
+    GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse, QueryCapacityStatsRequest,
+    QueryCapacityStatsResponse, RebuildZoneBitmapRequest, RebuildZoneBitmapResponse, RecalcDiskUsageRequest,
+    RecalcDiskUsageResponse, ZoneCompactionResult, ZoneRecalcResult, ZoneUsage as ProtoZoneUsage,
 };
 use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
@@ -29,6 +29,7 @@ use crate::metrics::RecalcEngine;
 use crate::model::alloc;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::ZoneUsage;
+use crate::recovery::compaction::compact_zone;
 use crate::recovery::RecoveryEngine;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
@@ -618,6 +619,114 @@ impl DiskdbServiceTrait for DiskdbService {
 
         Ok(Response::new(RecalcDiskUsageResponse {
             results: proto_results,
+        }))
+    }
+
+    async fn compact_zone(
+        &self,
+        req: Request<CompactZoneRequest>,
+    ) -> Result<Response<CompactZoneResponse>, Status> {
+        let req = req.into_inner();
+
+        // Check lifecycle phase — mutating RPCs require Up.
+        let phase = self.container.lifecycle_phase();
+        if !phase.allows_mutating_rpcs() {
+            return Err(Status::unavailable(format!(
+                "diskdb not ready: phase={}",
+                phase.as_str()
+            )));
+        }
+
+        let disk_id = req
+            .disk_id
+            .ok_or_else(|| Status::invalid_argument("disk_id required"))?;
+
+        // Find the disk-group + disk that owns this disk.
+        let (dg, disk) = {
+            let dg_ids = self.container.disk_group_ids();
+            let mut found = None;
+            for dg_id in dg_ids {
+                if let Some(n) = self.container.get_disk_group(dg_id) {
+                    let disk_clone = {
+                        let disks = n.disks.read().unwrap();
+                        disks.iter().find(|d| d.disk_id == disk_id).cloned()
+                    };
+                    if let Some(d) = disk_clone {
+                        found = Some((n, d));
+                        break;
+                    }
+                }
+            }
+            found
+        }
+        .ok_or_else(|| {
+            Status::permission_denied(format!(
+                "disk {} not owned by this instance",
+                disk_id.to_display_string()
+            ))
+        })?;
+
+        let bind = *dg.bind.read().unwrap();
+        let zone_count = disk.disk_value.read().unwrap().zone_count;
+
+        // Determine which zones to compact: all or specified list.
+        let zones_to_compact: Vec<u32> = if req.zone_indices.is_empty() {
+            (0..zone_count).collect()
+        } else {
+            // Validate all indices are in range.
+            for &zi in &req.zone_indices {
+                if zi >= zone_count {
+                    return Err(Status::invalid_argument(format!(
+                        "zone_index {zi} out of range (zone_count={zone_count})",
+                    )));
+                }
+            }
+            req.zone_indices.clone()
+        };
+
+        // Compact each zone and collect results.
+        let mut results = Vec::with_capacity(zones_to_compact.len());
+        let mut compacted_count = 0u32;
+        let mut total_deleted = 0u32;
+        for zi in zones_to_compact {
+            let zone = {
+                let zones = disk.zones.read().unwrap();
+                Arc::clone(&zones[zi as usize])
+            };
+            // Record backlog before compaction to compute deleted count.
+            let backlog_before = zone
+                .uncompacted_free_record_count
+                .load(std::sync::atomic::Ordering::Acquire);
+            match compact_zone(&self.kv, bind, disk_id, &zone, zi).await {
+                Ok(()) => {
+                    let backlog_after = zone
+                        .uncompacted_free_record_count
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let deleted = backlog_before.saturating_sub(backlog_after);
+                    compacted_count += 1;
+                    total_deleted += deleted;
+                    results.push(ZoneCompactionResult {
+                        zone_index: zi,
+                        success: true,
+                        free_records_deleted: deleted,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(ZoneCompactionResult {
+                        zone_index: zi,
+                        success: false,
+                        free_records_deleted: 0,
+                        error: Some(format!("{e}")),
+                    });
+                }
+            }
+        }
+
+        Ok(Response::new(CompactZoneResponse {
+            compacted_zone_count: compacted_count,
+            total_free_records_deleted: total_deleted,
+            zones: results,
         }))
     }
 }
