@@ -17,35 +17,16 @@
 //! for state; strategy 1 ignores free records entirely).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crow_protocol::common::DiskId;
 use crow_protocol::key::BinaryKey;
 
 use crate::bg_task::{BackgroundTask, BgCtx, BgError, CycleFut, Trigger};
+use crate::ddb_config::CompactionConfig;
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
 use crate::recovery::RecoveryError;
-
-/// Compaction configuration.
-#[derive(Debug, Clone)]
-pub struct CompactionConfig {
-    /// Periodic compaction interval.
-    pub compaction_cadence: Duration,
-    /// Free-record count per zone that triggers compaction (in
-    /// addition to the periodic cadence). Whichever fires first.
-    pub snapshot_compaction_threshold: u32,
-}
-
-impl Default for CompactionConfig {
-    fn default() -> Self {
-        Self {
-            compaction_cadence: Duration::from_secs(300),
-            snapshot_compaction_threshold: 4096,
-        }
-    }
-}
 
 /// Snapshot compaction engine. Owns a `DdbKvClient` and runs as a
 /// background task (`tokio::spawn`).

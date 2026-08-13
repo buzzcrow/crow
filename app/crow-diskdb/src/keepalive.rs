@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crow_common::metrics::Counter;
 use crow_kv_client::{HardwareClient, ServiceRegistryClient};
@@ -19,6 +18,7 @@ use crow_protocol::{DiskGroupId, NodeId, RackId};
 use crow_protocol::{DiskIdExt, ZoneValueExt};
 use tracing::{info, warn};
 
+use crate::ddb_config::KeepAliveConfig;
 use crate::ddb_kv_client::DdbKvClient;
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
@@ -40,28 +40,6 @@ pub struct KeepAliveOutcome {
     pub disks_removed: usize,
     pub status_changes: usize,
     pub sync_duration_ms: u64,
-}
-
-/// Configuration for the sync loop.
-#[derive(Debug, Clone)]
-pub struct KeepAliveConfig {
-    pub interval: Duration,
-    pub miss_threshold: u32,
-    pub zone_rotate_count: u32,
-    pub cas_retry_limit: u32,
-    pub temp_failure_timeout_secs: u32,
-}
-
-impl Default for KeepAliveConfig {
-    fn default() -> Self {
-        Self {
-            interval: Duration::from_secs(10),
-            miss_threshold: 3,
-            zone_rotate_count: 4,
-            cas_retry_limit: 100,
-            temp_failure_timeout_secs: 900,
-        }
-    }
 }
 
 /// Background sync loop: keep-alive + hardware read + disk-add init.

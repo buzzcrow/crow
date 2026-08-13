@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use crow_protocol::{DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, KV_SERVER_MGMT_BASE};
 use serde::{Deserialize, Serialize};
@@ -191,6 +192,49 @@ impl Default for ScannerConfig {
             scan_interval_secs: 600,
             detect_ghost_allocations: true,
             verify_record_integrity: true,
+        }
+    }
+}
+
+// ── Validation ──────────────────────────────────────────────────
+
+/// Keep-alive loop configuration.
+#[derive(Debug, Clone)]
+pub struct KeepAliveConfig {
+    pub interval: Duration,
+    pub miss_threshold: u32,
+    pub zone_rotate_count: u32,
+    pub cas_retry_limit: u32,
+    pub temp_failure_timeout_secs: u32,
+}
+
+impl Default for KeepAliveConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(10),
+            miss_threshold: 3,
+            zone_rotate_count: 4,
+            cas_retry_limit: 100,
+            temp_failure_timeout_secs: 900,
+        }
+    }
+}
+
+/// Compaction configuration.
+#[derive(Debug, Clone)]
+pub struct CompactionConfig {
+    /// Periodic compaction interval.
+    pub compaction_cadence: Duration,
+    /// Free-record count per zone that triggers compaction (in
+    /// addition to the periodic cadence). Whichever fires first.
+    pub snapshot_compaction_threshold: u32,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            compaction_cadence: Duration::from_secs(300),
+            snapshot_compaction_threshold: 4096,
         }
     }
 }

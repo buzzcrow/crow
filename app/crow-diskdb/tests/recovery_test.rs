@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::KvCluster;
+use crow_diskdb::ddb_config::KeepAliveConfig;
 use crow_diskdb::ddb_kv_client::DdbKvClient;
-use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
+use crow_diskdb::keepalive::KeepAlive;
 use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::model::zone::DdbZone;
