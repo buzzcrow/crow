@@ -16,8 +16,9 @@ complexity, and dependency. Before implementation, follow the
 ### High Priority
 
 - **[R75](R75-diskdb-background-scanner.md)** — diskdb background
-  scanner — Area: diskdb — Implement ghost-allocation detection,
-  allocate_pos drift detection, record integrity (CRC). Leak detection
+  scanner — Area: diskdb — Implement ghost-allocation detection
+  (per-bit bitmap diff), bitmap drift detection, record integrity
+  (CRC + deserialization + owner_chunk validation). Leak detection
   deferred (needs caller registries).
 - **[R76](R76-diskdb-disk-discovery-health.md)** — diskdb disk discovery
   + health probing — Area: diskdb — Implement config-driven disk
