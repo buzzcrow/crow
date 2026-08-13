@@ -155,3 +155,48 @@ message ZoneCompactionResult {
   uint32          free_records_deleted = 3;
   optional string error                = 4;  // absent on success
 }
+
+// ── Scanner admin (R75) ─────────────────────────────────────────
+
+// Triggers an immediate scan of all owned zones. The scan runs on the
+// next scanner tick (the scanner task's trigger is TimerFn, so
+// TriggerScan sets a "scan requested" flag checked at the start of
+// the next run_cycle). Returns the last completed scan summary (or an
+// empty summary if no scan has run yet) + whether a scan is currently
+// in progress.
+message TriggerScanRequest {
+  // empty — runs all enabled scans
+}
+
+message TriggerScanResponse {
+  ScanSummary summary          = 1;
+  bool        scan_in_progress = 2;  // true if a scan was already running
+}
+
+// Returns the last completed scan summary. `has_run` is false if no
+// scan has completed yet (the summary is empty in that case).
+message GetScanStatusRequest {
+  // empty
+}
+
+message GetScanStatusResponse {
+  ScanSummary summary = 1;  // empty if no scan has run
+  bool        has_run = 2;
+}
+
+// Summary of one scanner cycle. Reported by TriggerScan and
+// GetScanStatus, and recorded as metrics after each cycle.
+message ScanSummary {
+  uint64 started_at_ms            = 1;
+  uint64 duration_ms              = 2;
+  uint64 zones_scanned            = 3;
+  uint64 zones_skipped_active     = 4;
+  uint64 zones_skipped_compacting = 5;
+  uint64 ghost_busy               = 6;  // real ghost-busy (drift)
+  uint64 ghost_free               = 7;  // ghost-free (drift, defense-in-depth)
+  uint64 uncompacted_lag          = 8;  // normal uncompacted (not drift)
+  uint64 corrupt_snapshots        = 9;
+  uint64 corrupt_records          = 10;
+  uint64 owner_mismatches         = 11;
+  string leak_status              = 12;  // "deferred" in v1
+}

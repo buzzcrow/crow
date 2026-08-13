@@ -18,4 +18,5 @@ pub mod liveness;
 pub mod metrics;
 pub mod model;
 pub mod recovery;
+pub mod scanner;
 pub mod service;

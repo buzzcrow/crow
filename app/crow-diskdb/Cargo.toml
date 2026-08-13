@@ -109,3 +109,7 @@ path = "tests/space_flow_test.rs"
 [[test]]
 name = "query_handler_test"
 path = "tests/query_handler_test.rs"
+
+[[test]]
+name = "scanner_test"
+path = "tests/scanner_test.rs"

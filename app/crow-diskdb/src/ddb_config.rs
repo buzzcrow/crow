@@ -185,23 +185,73 @@ impl Default for PersistenceConfig {
     }
 }
 
+/// Ghost-scan sub-config — controls the ghost allocation + drift
+/// detection phase of the scanner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhostScanConfig {
+    /// dynamic: enable ghost allocation detection (default: true).
+    pub detect: bool,
+    /// dynamic: enable live-bitmap auto-correction (default: false).
+    /// Follows the data-safety principle: clears ghost-busy, sets
+    /// ghost-free, never frees corrupt-record blocks; only after
+    /// re-verify confirms persistent drift.
+    pub auto_correct: bool,
+}
+
+impl Default for GhostScanConfig {
+    fn default() -> Self {
+        Self {
+            detect: true,
+            auto_correct: false,
+        }
+    }
+}
+
+/// Integrity-scan sub-config — controls the record CRC + decode +
+/// owner-chunk validation phase of the scanner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntegrityScanConfig {
+    /// dynamic: enable record integrity checks (default: true).
+    pub verify: bool,
+    /// dynamic: enable per-block `owner_chunk` validation (default:
+    /// false). Piggybacks on `read_zone_records`, which is already
+    /// loaded when `verify` is true; the flag controls whether owner
+    /// validation runs.
+    pub detect_owner_mismatch: bool,
+}
+
+impl Default for IntegrityScanConfig {
+    fn default() -> Self {
+        Self {
+            verify: true,
+            detect_owner_mismatch: false,
+        }
+    }
+}
+
 /// Background scanner configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerConfig {
     /// dynamic: scanner run interval in seconds (default: 600).
     pub scan_interval_secs: u32,
-    /// dynamic: enable ghost allocation detection (default: true).
-    pub detect_ghost_allocations: bool,
-    /// dynamic: enable record integrity checks (default: true).
-    pub verify_record_integrity: bool,
+    /// Ghost allocation + drift detection sub-config.
+    pub ghost: GhostScanConfig,
+    /// Record integrity verification sub-config.
+    pub integrity: IntegrityScanConfig,
+    /// dynamic: delay in ms before re-snapshotting the live bitmap to
+    /// filter transient drift (default: 1000). Set to 0 to disable
+    /// re-verify (report immediately, may include false positives
+    /// from in-flight operations).
+    pub reverify_delay_ms: u32,
 }
 
 impl Default for ScannerConfig {
     fn default() -> Self {
         Self {
             scan_interval_secs: 600,
-            detect_ghost_allocations: true,
-            verify_record_integrity: true,
+            ghost: GhostScanConfig::default(),
+            integrity: IntegrityScanConfig::default(),
+            reverify_delay_ms: 1000,
         }
     }
 }

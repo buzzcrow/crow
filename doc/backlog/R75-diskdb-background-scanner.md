@@ -4,16 +4,18 @@
 ### R75: diskdb — Background Scanner (Consistency Check + Integrity Detection)
 
 **Problem**: R72–R74 implement the allocation engine, crash recovery,
-and space metrics. The free path is **persist-only** (§7: delete
+and space metrics. The free path is **persist-only**
+([`design-crow-diskdb-zone-management.md`](../design/diskdb/design-crow-diskdb-zone-management.md) §4: delete
 `BusyBlockKey` + put `FreeBlockValue`, no bitmap mutation), and R73's
 recovery rebuilds the bitmap from records on restart. Compaction
-(§8) is the sole mechanism for clearing freed bits in the bitmap —
+(zone-management §5) is the sole mechanism for clearing freed bits in the bitmap —
 it runs before a zone enters the active set (preparatory thread) and
 periodically as a fallback. But during uptime, there is no mechanism
 to detect and reconcile live-state drift, catch record corruption
 early, or give operators visibility into cluster health.
 
-- **Current behavior + impact** — R74's `RecalcEngine` (§11) replays
+- **Current behavior + impact** — R74's `RecalcEngine`
+  (`app/crow-diskdb/src/metrics/recalc.rs`) replays
   each zone's journal into a throwaway bitmap and compares the
   **popcount** (busy-block count) against the live `DdbZone`. This
   detects count-level drift on demand (`RecalcDiskUsage` RPC), but:
@@ -32,21 +34,23 @@ early, or give operators visibility into cluster health.
     is never re-checked until the next restart — by then, recovery
     itself may fail.
   - It does not validate **per-block state** — `BusyBlockValue.owner_chunk`
-    (§14, ownership validation deferred from the free path) is never
+    (zone-management §8, ownership validation deferred from the free path) is never
     cross-checked after allocate.
   - There is no **operator visibility** into cluster health during
     uptime — no metrics, no admin RPC to trigger a check, no status
     query. An operator has no signal that drift or corruption is
     accumulating until a restart surfaces it.
 
-- **Design pointers** — §12 (Background Scanner) specifies drift
+- **Design pointers** — [`design-crow-diskdb.md`](../design/diskdb/design-crow-diskdb.md) §10 (Background Scanner) specifies drift
   detection, record integrity, and per-block state validation; leak
-  detection is a §2 non-goal (needs caller registries). §7
-  (crash-safety invariants) defines the drift directions in the
-  persist-only model. §14 (Concurrency Model) defines the zone-level
+  detection is a §2 non-goal (needs caller registries). Zone-management
+  §6 (crash-safety invariants) defines the drift directions in the
+  persist-only model. Zone-management §8 (Concurrency Model) defines the zone-level
   lock for non-allocate operations (compaction, scanner, health
-  checks) and the common methods on `DdbZone`. No direct aioss analog
-  — new work (the aioss reference path cited in §15 is not accessible
+  checks) and the common methods on `DdbZone`; zone-management §9
+  (Background Scanner Coordination) specifies the zone-skip + lock
+  coordination with compaction. No direct aioss analog
+  — new work (the aioss reference path cited in §16 is not accessible
   for verification).
 
 - **Data-safety principle** — a busy block may have data written to
@@ -136,7 +140,7 @@ per-block ghost identification), verifies record CRC and
 deserialization, validates `owner_chunk` well-formedness, and reports
 findings via metrics + admin RPCs. The scanner **skips active zones**
 (zones in the disk's `active_zone_context` — the allocator is actively
-handing blocks from them) and acquires the **zone-level lock** (§14)
+handing blocks from them) and acquires the **zone-level lock** (zone-management §8)
 for non-active zones to coordinate with compaction and health checks.
 Drift detection distinguishes **real ghost-busy** (no `BusyBlockKey`,
 no `FreeBlockKey` — drift) from **normal uncompacted** (no
@@ -147,35 +151,43 @@ an in-flight allocate. Auto-correction (when enabled) follows the
 data-safety principle: clear real ghost-busy bits only when records
 are intact and authoritative; set ghost-free bits back; never free a
 block with a corrupt or uncertain record. Compaction and the scanner
-share common methods on `DdbZone` (§14) and coordinate via the
+share common methods on `DdbZone` (zone-management §8) and coordinate via the
 zone-level lock. Leak detection is scaffolded as deferred.
 
 1. **Scanner task** — new module `app/crow-diskdb/src/scanner/mod.rs`.
    `ScannerTask` implements the `BackgroundTask` trait (from
-   `bg_task.rs`): `run_cycle` runs one scan cycle, `trigger` returns
-   `Trigger::TimerFn` that reads `scan_interval_secs` from the shared
-   `DdbConfig` handle (so config reloads take effect on the next tick),
-   `name` returns `"scanner"`. Registered with `BgRunner` in `main.rs`
-   alongside compaction, keep-alive, and reporting. Each cycle runs
-   ghost/drift scan → integrity scan (gated by config flags) → log
+   `app/crow-diskdb/src/bg_task.rs`): `run_cycle(&BgCtx)` runs one scan
+   cycle, `trigger` returns `Trigger::TimerFn` that reads
+   `scan_interval_secs` from the shared `ArcSwap<DdbConfig>` handle on
+   `BgCtx.config` (so config reloads take effect on the next tick),
+   `name` returns `"scanner"`. Registered with `BgRunner` in
+   `app/crow-diskdb/src/main.rs` alongside keep-alive, compaction
+   (`CompactionEngine`), preparatory thread (`PreparatoryThread`), and
+   reporting (`ReportingTask`). `BgCtx` provides `container`
+   (`Arc<DdbDiskGroupContainer>`), `kv` (`Arc<DdbKvClient>`),
+   `metrics` (`DiskdbMetrics`), and `config` (`Arc<ArcSwap<DdbConfig>>`)
+   — the scanner reads all four from `ctx` in `run_cycle`. Each cycle
+   runs ghost/drift scan → integrity scan (gated by config flags) → log
    summary → update metrics. Scans are read-only by default — they
    detect and report; auto-correction is opt-in (default off).
 
 2. **Ghost + bitmap drift detection** — new
    `app/crow-diskdb/src/scanner/ghost.rs`. `scan_ghosts(container, kv)`
    iterates owned disk-groups → disks → zones (via
-   `DdbDiskGroupContainer::disk_group_ids` + `get_disk_group`), and for
-   each zone:
+   `DdbDiskGroupContainer::disk_group_ids` + `get_disk_group`, then
+   `DdbDiskGroup.disks` read lock + `DdbDisk.active_zone_context` read
+   lock for active-set membership), and for each zone:
    - **Skip active zones**: a zone currently in the disk's
-     `active_zone_context` (the RCU-published set the allocator
-     round-robins through) is skipped — the allocator is actively
-     handing blocks from it, and the allocate Phase 1→2 window creates
-     transient ghost-busy bits. The scanner checks these zones on a
-     later cycle when they rotate out of the active set (and have been
-     compacted by the preparatory thread). Skipped zones are counted
-     in the scan summary as `skipped_active`.
+     `active_zone_context` (the RCU-published
+     `RwLock<Arc<Vec<Arc<DdbZone>>>>` the allocator round-robins
+     through) is skipped — the allocator is actively handing blocks
+     from it, and the allocate Phase 1→2 window creates transient
+     ghost-busy bits. The scanner checks these zones on a later cycle
+     when they rotate out of the active set (and have been compacted
+     by the preparatory thread). Skipped zones are counted in the scan
+     summary as `skipped_active`.
    - **Acquire zone-level lock**: for non-active zones, acquire the
-     zone-level lock (§14) via `zone.scan_zone_inner()` — the common
+     zone-level lock (zone-management §8) via `zone.scan_zone_inner()` — the common
      method on `DdbZone` that encapsulates locking. This coordinates
      with compaction (`compact_zone_inner`) and health checks
      (`health_check_zone_inner`) — only one non-allocate operation runs
@@ -183,9 +195,12 @@ zone-level lock. Leak detection is scaffolded as deferred.
      scanner skips the zone (counted as `skipped_compacting`) and
      tries again next cycle.
    - Replays the journal into a throwaway `DdbZone` by calling
-     `recover_zone_inner` (R73, strategy 2) with strategy-1 fallback
-     (`rebuild_zone_bitmap_full_scan`) on `JournalScanGcGap` or
-     `SnapshotCrcFail` — same fallback logic as `RecalcEngine`.
+     `recover_zone_inner` (R73, strategy 2,
+     `app/crow-diskdb/src/recovery/journal_replay.rs`) with
+     strategy-1 fallback (`rebuild_zone_bitmap_full_scan` in
+     `app/crow-diskdb/src/recovery/full_scan.rs`) on `JournalScanGcGap`
+     or `SnapshotCrcFail` — same fallback logic as `RecalcEngine`
+     (`app/crow-diskdb/src/metrics/recalc.rs`).
    - Compares `replayed.usage_bits` against `live.usage_bits`
      **bit-by-bit** (not just popcount). For each differing bit,
      classifies by checking the record set:
@@ -219,12 +234,13 @@ zone-level lock. Leak detection is scaffolded as deferred.
      `(disk_id, zone_index, unit_offset, unit_count, direction)`.
      `uncompacted_lag` is the count of normal-uncompacted blocks (not
      drift, but reported for visibility).
-   - This extends R74's `RecalcEngine::recalc_zone` (which compares
+   - This extends R74's `RecalcEngine::recalc_zone` (in
+     `app/crow-diskdb/src/metrics/recalc.rs`, which compares
      only `live_busy_blocks == replayed_busy_blocks`) with per-block
-     identification. The scanner may call `recalc_all` first as a
-     cheap count-level pre-check and skip the per-bit diff for zones
-     where counts match (optimization; correctness does not depend on
-     it).
+     identification. The scanner may call `RecalcEngine::recalc_all`
+     first as a cheap count-level pre-check and skip the per-bit diff
+     for zones where counts match (optimization; correctness does not
+     depend on it).
    - **Auto-correction (optional, default off)**: if
      `config.scanner.auto_correct_drift` is true, correct the live
      bitmap per the data-safety principle (only after re-verify
@@ -242,7 +258,7 @@ zone-level lock. Leak detection is scaffolded as deferred.
        corruption signal means something is wrong; report only and
        let the operator decide.
      - v1 defaults to off — report only; the operator triggers
-       correction via `RebuildZoneBitmap` (§7) or enables
+       correction via `RebuildZoneBitmap` (zone-management §6, strategy 1) or enables
        auto-correct in config.
 
 3. **Record integrity verification** — new
@@ -251,17 +267,25 @@ zone-level lock. Leak detection is scaffolded as deferred.
    lock logic as ghost scan: skip active zones, acquire zone-level
    lock for non-active zones, skip if locked by compaction) and for
    each:
-   - Calls `DdbKvClient::read_zone_records` (R72) to load
+   - Calls `DdbKvClient::read_zone_records` (R72,
+     `app/crow-diskdb/src/ddb_kv_client.rs`) to load
      `ZoneRecords { zone_value, busy, free }`.
    - If `zone_value` is present, verifies CRC via
      `ZoneValueExt::verify_checksum`. On failure, records a
      `CorruptSnapshot { disk_id, zone_index }`.
    - Validates each `BusyRecord` and `FreeRecord` deserialized
-     successfully (`read_zone_records` already decodes via bincode;
-     a decode failure surfaces as an error entry in `ZoneRecords` or
-     an `Err` — the scanner reports it as
-     `CorruptJournalRecord { disk_id, zone_index, key }`).
-   - **Per-block state validation** (§12): for each `BusyRecord`,
+     successfully. Note: `read_zone_records` **silently skips**
+     undecodable records (the `if let Ok(...)` pattern in its scan
+     loops) — it does not surface decode failures as errors. The
+     integrity scan must detect this by comparing the raw scan item
+     count (`kv.scan(...).items.len()`) against the decoded record
+     count (`records.busy.len() + records.free.len()`); a mismatch
+     indicates one or more corrupt records. The scanner reports each
+     corrupt record as
+     `CorruptJournalRecord { disk_id, zone_index, key }`. Alternatively,
+     the scanner does its own prefix scan with explicit decode-error
+     capture rather than relying on `read_zone_records`.
+   - **Per-block state validation** (§10): for each `BusyRecord`,
      validates `value.owner_chunk` is well-formed (non-zero `ChunkId`).
      A zeroed or malformed `owner_chunk` is reported as
      `OwnerMismatch { disk_id, zone_index, unit_offset }`. Full
@@ -291,8 +315,14 @@ zone-level lock. Leak detection is scaffolded as deferred.
 5. **Scanner admin RPCs** — add `TriggerScan` and `GetScanStatus` to
    `DiskdbService` in `app/crow-diskdb/src/service/diskdb_service.rs`
    (following the existing `RebuildZoneBitmap` / `RecalcDiskUsage`
-   pattern — no separate admin service). Add corresponding messages to
-   `lib/crow-protocol/src/proto/diskdb_service.proto`.
+   pattern — no separate admin service). `DiskdbService::new` currently
+   takes `(container, kv, storage, recovery, recalc)`; add a scanner
+   handle (e.g. `Arc<ScannerState>` holding the last scan summary + a
+   `Notify` for wakeups) as a sixth field. Add corresponding messages
+   and rpc entries to `lib/crow-protocol/src/proto/diskdb_service.proto`
+   (currently has 8 rpcs: `AllocateBlocks`, `FreeBlocks`,
+   `QueryCapacityStats`, `GetDiskGroupInfo`, `GetDiskInfo`,
+   `RebuildZoneBitmap`, `RecalcDiskUsage`, `CompactZone`).
    - `TriggerScan` — runs all enabled scans immediately (bypasses the
      timer) and returns the result summary. Uses an `Arc<Notify>` to
      wake the scanner task (the scanner task's `trigger` is
@@ -329,22 +359,30 @@ zone-level lock. Leak detection is scaffolded as deferred.
      to disable re-verify (report immediately, may include false
      positives from in-flight operations).
 
-8. **Zone-level lock + common methods** — add a zone-level lock
-   (`RwLock<()>` or `Mutex`) to `DdbZone` in
-   `app/crow-diskdb/src/model/zone.rs`, plus three common methods that
-   encapsulate the lock + operation (§14):
-   - `compact_zone_inner()` — read free records, clear bits, recompute
-     `used_count`, write snapshot, delete free records. Used by
-     `CompactionEngine` (preparatory thread + periodic fallback).
-   - `scan_zone_inner()` — replay journal, compare bitmap, verify
-     records. Used by the scanner.
-   - `health_check_zone_inner()` — verify zone records, CRC, snapshot
-     integrity. Used by the health probe (R76).
-   - Each method acquires the zone lock, performs the in-memory bitmap
-     mutation (if any), and releases the lock. The lock is **not** held
-     across `.await` on the KV client — the KV read is done before
-     acquiring the lock, and the KV write is done after releasing the
-     lock (the lock protects only the in-memory bitmap mutation).
+8. **Zone-level lock + common methods** — the zone-level lock
+   (`zone_lock: RwLock<()>`) already exists on `DdbZone` in
+   `app/crow-diskdb/src/model/zone.rs` (added in R73), plus common
+   methods that encapsulate the lock + operation (zone-management §8):
+   - `compact_zone_inner(&[FreeRecord]) -> CompactResult` — **fully
+     implemented** (R73): partitions free records by the `compact_ts`
+     watermark, `range_clear`s only new records, recomputes
+     `used_count`, advances `compact_ts`. Used by
+     `CompactionEngine` (preparatory thread + periodic fallback) via
+     `compact_zone` in `app/crow-diskdb/src/recovery/compaction.rs`.
+   - `scan_zone_inner(&self)` — **stub** (acquires read lock, body is
+     `// R75: compare in-memory bitmap with record-derived bitmap`).
+     R75 implements the full body: replay journal (KV read, no lock),
+     acquire zone read lock, compare bitmap (in-memory), release lock.
+     Used by the scanner.
+   - `health_check_zone_inner(&self)` — **stub** (acquires read lock,
+     body is `// R76: verify CRC + snapshot integrity`). Full
+     implementation is R76.
+   - Each method acquires the zone lock only for the in-memory bitmap
+     mutation/verification, and releases it before any KV write. The
+     lock is **not** held across `.await` on the KV client — the KV
+     read is done before acquiring the lock, and the KV write is done
+     after releasing the lock (I9 — the lock protects only the
+     in-memory bitmap mutation).
    - Allocate does **not** acquire this lock — it uses per-bit CAS
      (lock-free). The lock only coordinates non-allocate operations
      on non-active zones (no concurrent allocate).
@@ -431,16 +469,27 @@ zone-level lock. Leak detection is scaffolded as deferred.
   Never free a block when the durable state cannot be confidently
   determined.
 
-**Dependencies**: R70 (types, `ScannerConfig` scaffold), R71
-(`DdbDiskGroupContainer` — disk-group/disk/zone iteration;
-`DdbDisk::active_zone_context` for active-zone skip), R72
-(`DdbKvClient::read_zone_records`, `journal_scan_busy`,
-`journal_scan_free`), R73 (`recover_zone_inner`,
-`rebuild_zone_bitmap_full_scan`, `RecoveryError` fallback;
-`CompactionEngine` — shares zone-level lock + common methods on
-`DdbZone`), R74 (`RecalcEngine` — optional count-level pre-check;
-`DiskdbMetrics` registry pattern). No dependency on R76–R77. R79 (free
-batching) does not change scanner scope — the free path is
+**Dependencies**: R70 (types, `ScannerConfig` scaffold in
+`app/crow-diskdb/src/ddb_config.rs` — currently has `scan_interval_secs`,
+`detect_ghost_allocations`, `verify_record_integrity`; R75 adds
+`auto_correct_drift`, `detect_owner_mismatch`, `reverify_delay_ms`),
+R71 (`DdbDiskGroupContainer` — `disk_group_ids` + `get_disk_group` for
+disk-group iteration; `DdbDiskGroup.disks` + `DdbDisk.active_zone_context`
+(`RwLock<Arc<Vec<Arc<DdbZone>>>>`) for active-zone skip; `DdbDiskGroup.bind`
+for the paxos data-group binding), R72 (`DdbKvClient::read_zone_records`,
+`journal_scan_busy`, `journal_scan_free` in
+`app/crow-diskdb/src/ddb_kv_client.rs`), R73 (`recover_zone_inner` in
+`app/crow-diskdb/src/recovery/journal_replay.rs`,
+`rebuild_zone_bitmap_full_scan` in `app/crow-diskdb/src/recovery/full_scan.rs`,
+`RecoveryError` fallback; `CompactionEngine` in
+`app/crow-diskdb/src/recovery/compaction.rs` — shares zone-level lock +
+`compact_zone_inner` on `DdbZone`), R74 (`RecalcEngine` in
+`app/crow-diskdb/src/metrics/recalc.rs` — optional count-level pre-check;
+`DiskdbMetrics` registry pattern in `app/crow-diskdb/src/metrics.rs`).
+The zone-level lock (`DdbZone::zone_lock`) and method stubs
+(`scan_zone_inner`, `health_check_zone_inner`) already exist in
+`app/crow-diskdb/src/model/zone.rs` from R73. No dependency on R76–R77.
+R79 (free batching) does not change scanner scope — the free path is
 persist-only (no bitmap mutation), so batching only affects how many
 records are in one `batch_write`; the bitmap is always reconciled by
 compaction.
@@ -449,13 +498,14 @@ compaction.
 
 - **Scanner task (work item 1)**:
   - `ScannerTask` registered with `BgRunner`, runs a scan cycle every
-    `scan_interval_secs` (default 600). Setup: construct `ScannerTask`
-    with `DdbKvClient` + `DdbDiskGroupContainer` + `RecalcEngine`,
-    register with `BgRunner`, spawn → assert `run_cycle` called after
-    interval, `scanner_runs_total` incremented. Unit test.
+    `scan_interval_secs` (default 600). Setup: construct `ScannerTask`,
+    register with `BgRunner` alongside keep-alive + compaction +
+    preparatory + reporting, spawn → assert `run_cycle` called after
+    interval, `scanner_runs_total` incremented. `run_cycle` reads
+    `container`, `kv`, `metrics`, `config` from `BgCtx`. Unit test.
   - Config reload: change `scan_interval_secs` in the shared
-    `ArcSwap<DdbConfig>` handle → assert next tick uses the new
-    interval (not the old). Unit test.
+    `ArcSwap<DdbConfig>` handle on `BgCtx.config` → assert next tick
+    uses the new interval (not the old). Unit test.
 
 - **Ghost + bitmap drift detection (work item 2)**:
   - `scan_ghosts` detects real ghost-busy: setup a zone (not in
@@ -573,17 +623,22 @@ compaction.
     assert gauges reflect the count. Integration test.
 
 - **Config (work item 7)**:
-  - `ScannerConfig::default` has `scan_interval_secs == 600`,
+  - `ScannerConfig::default` (in `app/crow-diskdb/src/ddb_config.rs`)
+    currently has `scan_interval_secs == 600`,
     `detect_ghost_allocations == true`, `verify_record_integrity ==
-    true`, `auto_correct_drift == false`, `detect_owner_mismatch ==
-    false`, `reverify_delay_ms == 1000`. Unit test.
+    true` (from R70). R75 adds `auto_correct_drift == false`,
+    `detect_owner_mismatch == false`, `reverify_delay_ms == 1000`.
+    Unit test.
   - Config deserialized from TOML with scanner section → assert fields
     parsed correctly. Unit test.
 
 - **Zone-level lock + common methods (work item 8)**:
-  - `DdbZone` has a zone-level lock field. `compact_zone_inner`,
-    `scan_zone_inner`, `health_check_zone_inner` methods exist and
-    acquire the lock. Unit test (verify lock is acquired and released).
+  - `DdbZone` has a `zone_lock: RwLock<()>` field (already exists from
+    R73). `compact_zone_inner` is fully implemented (R73);
+    `scan_zone_inner` and `health_check_zone_inner` exist as stubs
+    that acquire the read lock. R75 implements the `scan_zone_inner`
+    body (replay + compare). Unit test (verify lock is acquired and
+    released, stub body replaced with full implementation).
   - `compact_zone_inner` and `scan_zone_inner` cannot run
     concurrently on the same zone — one blocks or the other skips.
     Unit test (acquire lock in one task, attempt the other, verify

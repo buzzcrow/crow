@@ -25,4 +25,6 @@ service DiskdbService {
   rpc RebuildZoneBitmap(RebuildZoneBitmapRequest) returns (RebuildZoneBitmapResponse);
   rpc RecalcDiskUsage(RecalcDiskUsageRequest) returns (RecalcDiskUsageResponse);
   rpc CompactZone(CompactZoneRequest)           returns (CompactZoneResponse);
+  rpc TriggerScan(TriggerScanRequest)           returns (TriggerScanResponse);
+  rpc GetScanStatus(GetScanStatusRequest)       returns (GetScanStatusResponse);
 }

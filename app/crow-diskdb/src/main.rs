@@ -18,6 +18,7 @@ use crow_diskdb::metrics::{DiskdbMetrics, RecalcEngine, ReportingTask};
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::compaction::{CompactionEngine, PreparatoryThread};
 use crow_diskdb::recovery::RecoveryEngine;
+use crow_diskdb::scanner::{ScanState, ScannerTask};
 use crow_diskdb::service::DiskdbService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use tracing::info;
@@ -148,6 +149,7 @@ async fn main() {
         config.load().persistence.recovery_concurrency,
     ));
     let recalc_engine = Arc::new(RecalcEngine::new(Arc::clone(&dg_kv), Arc::clone(&container)));
+    let scan_state = ScanState::new();
     let listen_addr: SocketAddr = config
         .load()
         .server
@@ -160,6 +162,7 @@ async fn main() {
         config.load().storage.clone(),
         Arc::clone(&recovery_engine),
         Arc::clone(&recalc_engine),
+        scan_state.clone(),
     )
     .into_server();
     info!(%listen_addr, "gRPC server listening (recovery pending)");
@@ -194,11 +197,14 @@ async fn main() {
     let keepalive_task: Arc<dyn crow_diskdb::bg_task::BackgroundTask> = Arc::new(keepalive);
     let reporting_task: Arc<dyn crow_diskdb::bg_task::BackgroundTask> =
         Arc::new(ReportingTask::new(metrics.clone(), Arc::clone(&config)));
+    let scanner_task: Arc<dyn crow_diskdb::bg_task::BackgroundTask> =
+        Arc::new(ScannerTask::new(scan_state, Arc::clone(&config)));
     let runner = BgRunner::new()
         .register(keepalive_task)
         .register(compaction_engine)
         .register(preparatory_thread)
-        .register(reporting_task);
+        .register(reporting_task)
+        .register(scanner_task);
     let stop = runner.stop_handle();
     let bg_ctx = Arc::new(BgCtx {
         container: Arc::clone(&container),

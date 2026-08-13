@@ -70,6 +70,13 @@ pub struct DiskdbMetrics {
     pub compaction_kv_persist_latency: Arc<LatencySummary>,
     pub sync_duration_ms: Arc<LatencySummary>,
     pub recovery_duration_ms: Arc<LatencySummary>,
+
+    // ── Scanner metrics (background scanner) ──────────────────────
+    pub scanner_runs_total: Arc<Counter>,
+    pub scanner_duration_ms: Arc<LatencySummary>,
+    pub scanner_ghosts_found: Arc<Gauge>,
+    pub scanner_drift_found: Arc<Gauge>,
+    pub scanner_corrupt_records: Arc<Gauge>,
 }
 
 impl DiskdbMetrics {
@@ -117,6 +124,12 @@ impl DiskdbMetrics {
             compaction_kv_persist_latency: registry.register_summary("compaction.kv_persist.latency_us"),
             sync_duration_ms: registry.register_summary("sync_duration_ms"),
             recovery_duration_ms: registry.register_summary("recovery_duration_ms"),
+            // Scanner metrics.
+            scanner_runs_total: registry.register_counter("scanner.runs.total"),
+            scanner_duration_ms: registry.register_summary("scanner.duration_ms"),
+            scanner_ghosts_found: registry.register_gauge("scanner.ghosts_found"),
+            scanner_drift_found: registry.register_gauge("scanner.drift_found"),
+            scanner_corrupt_records: registry.register_gauge("scanner.corrupt_records"),
         }
     }
 

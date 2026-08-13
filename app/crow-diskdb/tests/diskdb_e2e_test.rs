@@ -822,6 +822,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
         storage,
         recovery,
         recalc,
+        crow_diskdb::scanner::ScanState::new(),
     );
     let req = tonic::Request::new(crow_protocol::diskdb::rpc::CompactZoneRequest {
         disk_id: Some(disk_id),

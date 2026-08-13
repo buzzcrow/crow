@@ -16,9 +16,11 @@ use crow_protocol::diskdb::rpc::diskdb_service_server::{
 use crow_protocol::diskdb::rpc::{
     AllocateBlocksRequest, AllocateResponse, CompactZoneRequest, CompactZoneResponse, DiskGroupInfo,
     DiskGroupRecalcResult, DiskInfo, FreeBlocksRequest, FreeResponse, GetDiskGroupInfoRequest,
-    GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse, QueryCapacityStatsRequest,
-    QueryCapacityStatsResponse, RebuildZoneBitmapRequest, RebuildZoneBitmapResponse, RecalcDiskUsageRequest,
-    RecalcDiskUsageResponse, ZoneCompactionResult, ZoneRecalcResult, ZoneUsage as ProtoZoneUsage,
+    GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse, GetScanStatusRequest,
+    GetScanStatusResponse, QueryCapacityStatsRequest, QueryCapacityStatsResponse, RebuildZoneBitmapRequest,
+    RebuildZoneBitmapResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse, ScanSummary,
+    TriggerScanRequest, TriggerScanResponse, ZoneCompactionResult, ZoneRecalcResult,
+    ZoneUsage as ProtoZoneUsage,
 };
 use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
@@ -31,6 +33,7 @@ use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::ZoneUsage;
 use crate::recovery::compaction::compact_zone;
 use crate::recovery::RecoveryEngine;
+use crate::scanner::ScanState;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
 const MAX_ALLOCATE_COUNT: u32 = 1024;
@@ -44,6 +47,7 @@ pub struct DiskdbService {
     storage: StorageDefaults,
     recovery: Arc<RecoveryEngine>,
     recalc: Arc<RecalcEngine>,
+    scan_state: ScanState,
 }
 
 impl DiskdbService {
@@ -53,6 +57,7 @@ impl DiskdbService {
         storage: StorageDefaults,
         recovery: Arc<RecoveryEngine>,
         recalc: Arc<RecalcEngine>,
+        scan_state: ScanState,
     ) -> Self {
         Self {
             container,
@@ -60,6 +65,7 @@ impl DiskdbService {
             storage,
             recovery,
             recalc,
+            scan_state,
         }
     }
 
@@ -728,5 +734,51 @@ impl DiskdbServiceTrait for DiskdbService {
             total_free_records_deleted: total_deleted,
             zones: results,
         }))
+    }
+
+    async fn trigger_scan(
+        &self,
+        _req: Request<TriggerScanRequest>,
+    ) -> Result<Response<TriggerScanResponse>, Status> {
+        let in_progress = self.scan_state.request_scan();
+        let summary = self.scan_state.last_summary().unwrap_or_default();
+        Ok(Response::new(TriggerScanResponse {
+            summary: Some(summary_to_proto(&summary)),
+            scan_in_progress: in_progress,
+        }))
+    }
+
+    async fn get_scan_status(
+        &self,
+        _req: Request<GetScanStatusRequest>,
+    ) -> Result<Response<GetScanStatusResponse>, Status> {
+        match self.scan_state.last_summary() {
+            Some(summary) => Ok(Response::new(GetScanStatusResponse {
+                summary: Some(summary_to_proto(&summary)),
+                has_run: true,
+            })),
+            None => Ok(Response::new(GetScanStatusResponse {
+                summary: Some(ScanSummary::default()),
+                has_run: false,
+            })),
+        }
+    }
+}
+
+/// Convert a domain `ScanSummary` to the proto `ScanSummary`.
+fn summary_to_proto(s: &crate::scanner::ScanSummary) -> ScanSummary {
+    ScanSummary {
+        started_at_ms: s.started_at_ms,
+        duration_ms: s.duration_ms,
+        zones_scanned: s.zones_scanned,
+        zones_skipped_active: s.zones_skipped_active,
+        zones_skipped_compacting: s.zones_skipped_compacting,
+        ghost_busy: s.ghost_busy,
+        ghost_free: s.ghost_free,
+        uncompacted_lag: s.uncompacted_lag,
+        corrupt_snapshots: s.corrupt_snapshots,
+        corrupt_records: s.corrupt_records,
+        owner_mismatches: s.owner_mismatches,
+        leak_status: s.leak_status.clone(),
     }
 }
