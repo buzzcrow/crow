@@ -11,11 +11,11 @@ use crow_common::metrics::MetricsRegistry;
 use crow_diskdb::data_group_client::DataGroupClient;
 use crow_diskdb::ddb_config::{validate, DdbConfig};
 use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
+use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
 use crow_diskdb::metrics::DiskdbMetrics;
 use crow_diskdb::recovery::compaction::{CompactionConfig, CompactionEngine};
 use crow_diskdb::recovery::RecoveryEngine;
 use crow_diskdb::service::DiskdbService;
-use crow_diskdb::sync::{SyncConfig, SyncLoop};
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use crow_protocol::DiskIdExt;
 use tracing::info;
@@ -89,7 +89,7 @@ async fn main() {
     let metrics = DiskdbMetrics::register(&mut metrics_registry);
 
     // Start the sync loop.
-    let sync_cfg = SyncConfig {
+    let keepalive_cfg = KeepAliveConfig {
         interval: std::time::Duration::from_secs(u64::from(config.sync.sync_interval_secs)),
         miss_threshold: config.heartbeat.miss_threshold,
         zone_rotate_count: config.storage.zone_rotate_count,
@@ -97,15 +97,16 @@ async fn main() {
         temp_failure_timeout_secs: config.heartbeat.temp_failure_timeout_secs,
     };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let mut sync_loop = SyncLoop::new(hw, svc, container.clone(), sync_cfg)
+    let mut keepalive = KeepAlive::new(hw, svc, container.clone(), keepalive_cfg)
         .with_data_group_client(dg_kv_sync)
         .with_cas_retry_metric(metrics.allocate_retry_cas_bit);
 
-    // Blocking initial sync — run one tick before serving gRPC to
-    // populate the in-memory node/disk/zone state. Without this, the
-    // first allocate/free request would find an empty container.
-    info!("running blocking initial sync");
-    let init_outcome = sync_loop.sync_once().await;
+    // Blocking initial keep-alive tick — run one tick before serving
+    // gRPC to populate the in-memory disk-group/disk/zone state.
+    // Without this, the first allocate/free request would find an
+    // empty container.
+    info!("running blocking initial keep-alive tick");
+    let init_outcome = keepalive.tick().await;
     info!(
         groups_added = init_outcome.groups_added,
         disks_added = init_outcome.disks_added,
@@ -113,7 +114,7 @@ async fn main() {
         "initial sync complete"
     );
 
-    let sync_handle = tokio::spawn(sync_loop.run(stop_rx));
+    let keepalive_handle = tokio::spawn(keepalive.run(stop_rx));
 
     // R73 recovery — for each owned disk-group, replay the journal
     // from the latest ZoneValue snapshot to reconstruct in-memory
@@ -244,7 +245,7 @@ async fn main() {
     if let Err(e) = grpc_result {
         tracing::error!("gRPC server error: {e}");
     }
-    let _ = sync_handle.await;
+    let _ = keepalive_handle.await;
     let _ = compaction_handle.await;
     info!("crow-diskdb stopped");
 }

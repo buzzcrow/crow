@@ -18,8 +18,8 @@ use crow_diskdb::data_group_client::DataGroupClient;
 use crow_diskdb::domain::alloc;
 use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::domain::zone::DdbZone;
+use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
 use crow_diskdb::recovery::RecoveryEngine;
-use crow_diskdb::sync::{SyncConfig, SyncLoop};
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -166,22 +166,22 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     let hw = make_hardware_client(&cluster.group0_leader_endpoint);
     seed_hardware(&hw).await;
 
-    // 2. First sync_once — populates in-memory state + writes baseline
+    // 2. First tick — populates in-memory state + writes baseline
     //    ZoneValues.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    let sync_cfg = SyncConfig {
+    let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut sync_loop =
-        SyncLoop::new(hw2, svc, Arc::clone(&container), sync_cfg).with_data_group_client(dg_kv);
-    let outcome = sync_loop.sync_once().await;
+    let mut keepalive =
+        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_data_group_client(dg_kv);
+    let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
 
@@ -207,7 +207,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     let remaining_segments: Vec<_> = segments[1..].to_vec();
 
     // 4. Simulate a restart: drop the in-memory container. A fresh
-    //    sync_once will skip baseline ZoneValue writes (snapshots
+    //    tick will skip baseline ZoneValue writes (snapshots
     //    exist) and create empty zones.
     drop(dg);
     drop(container);
@@ -215,16 +215,16 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     let svc2 = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw3 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
-    let sync_cfg2 = SyncConfig {
+    let keepalive_cfg2 = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut sync_loop2 =
-        SyncLoop::new(hw3, svc2, Arc::clone(&container2), sync_cfg2).with_data_group_client(dg_kv2);
-    let outcome2 = sync_loop2.sync_once().await;
+    let mut keepalive2 =
+        KeepAlive::new(hw3, svc2, Arc::clone(&container2), keepalive_cfg2).with_data_group_client(dg_kv2);
+    let outcome2 = keepalive2.tick().await;
     assert_eq!(outcome2.groups_added, 1);
     assert_eq!(outcome2.disks_added, 3);
 

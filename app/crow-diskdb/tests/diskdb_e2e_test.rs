@@ -17,7 +17,7 @@ use common::cluster::KvCluster;
 use crow_diskdb::data_group_client::DataGroupClient;
 use crow_diskdb::domain::alloc;
 use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
-use crow_diskdb::sync::{SyncConfig, SyncLoop};
+use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
 use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -196,20 +196,20 @@ async fn diskdb_e2e_allocate_free() {
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv = make_data_group_client(&cluster.group1_leader_endpoint);
 
-    let sync_cfg = SyncConfig {
+    let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut sync_loop =
-        SyncLoop::new(hw2, svc, Arc::clone(&container), sync_cfg).with_data_group_client(dg_kv);
+    let mut keepalive =
+        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_data_group_client(dg_kv);
 
     // 4. Run one sync tick to populate in-memory state.
-    let outcome = sync_loop.sync_once().await;
+    let outcome = keepalive.tick().await;
     eprintln!(
-        "sync_once: groups_added={}, disks_added={}, duration_ms={}",
+        "tick: groups_added={}, disks_added={}, duration_ms={}",
         outcome.groups_added, outcome.disks_added, outcome.sync_duration_ms
     );
     assert_eq!(outcome.groups_added, 1, "expected 1 disk-group added");
@@ -392,16 +392,16 @@ async fn diskdb_e2e_validate_owner_on_free() {
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv = make_data_group_client(&cluster.group1_leader_endpoint);
 
-    let sync_cfg = SyncConfig {
+    let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
         zone_rotate_count: 4,
         cas_retry_limit: 100,
         temp_failure_timeout_secs: 900,
     };
-    let mut sync_loop =
-        SyncLoop::new(hw2, svc, Arc::clone(&container), sync_cfg).with_data_group_client(dg_kv);
-    let outcome = sync_loop.sync_once().await;
+    let mut keepalive =
+        KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_data_group_client(dg_kv);
+    let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
 

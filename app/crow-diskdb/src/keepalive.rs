@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `SyncLoop` — keep-alive + periodic hardware sync from group 0.
+//! `KeepAlive` — keep-alive + periodic hardware sync from group 0.
 //!
 //! Each tick: heartbeat, read ownership map, read bind map, read
 //! member disks per owned disk-group, reconcile in-memory state
@@ -33,7 +33,7 @@ fn elapsed_ms(start: std::time::Instant) -> u64 {
 
 /// Outcome of one sync tick.
 #[derive(Debug, Default, Clone)]
-pub struct SyncOutcome {
+pub struct KeepAliveOutcome {
     pub groups_added: usize,
     pub groups_removed: usize,
     pub disks_added: usize,
@@ -44,7 +44,7 @@ pub struct SyncOutcome {
 
 /// Configuration for the sync loop.
 #[derive(Debug, Clone)]
-pub struct SyncConfig {
+pub struct KeepAliveConfig {
     pub interval: Duration,
     pub miss_threshold: u32,
     pub zone_rotate_count: u32,
@@ -52,7 +52,7 @@ pub struct SyncConfig {
     pub temp_failure_timeout_secs: u32,
 }
 
-impl Default for SyncConfig {
+impl Default for KeepAliveConfig {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(10),
@@ -65,11 +65,11 @@ impl Default for SyncConfig {
 }
 
 /// Background sync loop: keep-alive + hardware read + disk-add init.
-pub struct SyncLoop {
+pub struct KeepAlive {
     hw: HardwareClient,
     svc: ServiceRegistryClient,
     container: Arc<DdbDiskGroupContainer>,
-    config: SyncConfig,
+    config: KeepAliveConfig,
     status_machine: HwStateMachine,
     missed_count: u32,
     /// Optional `DataGroupClient` for writing baseline `ZoneValue`
@@ -81,12 +81,12 @@ pub struct SyncLoop {
     cas_retry_metric: Option<Arc<Counter>>,
 }
 
-impl SyncLoop {
+impl KeepAlive {
     pub fn new(
         hw: HardwareClient,
         svc: ServiceRegistryClient,
         container: Arc<DdbDiskGroupContainer>,
-        config: SyncConfig,
+        config: KeepAliveConfig,
     ) -> Self {
         let status_machine = HwStateMachine::new(config.temp_failure_timeout_secs);
         Self {
@@ -117,7 +117,7 @@ impl SyncLoop {
 
     /// Run one sync tick.
     #[allow(clippy::too_many_lines)]
-    pub async fn sync_once(&mut self) -> SyncOutcome {
+    pub async fn tick(&mut self) -> KeepAliveOutcome {
         let start = std::time::Instant::now();
         let instance_id = self.container.instance_id;
 
@@ -128,7 +128,7 @@ impl SyncLoop {
             if self.missed_count >= self.config.miss_threshold {
                 self.container.enter_degraded_mode();
             }
-            return SyncOutcome {
+            return KeepAliveOutcome {
                 sync_duration_ms: elapsed_ms(start),
                 ..Default::default()
             };
@@ -143,7 +143,7 @@ impl SyncLoop {
                 if self.missed_count >= self.config.miss_threshold {
                     self.container.enter_degraded_mode();
                 }
-                return SyncOutcome {
+                return KeepAliveOutcome {
                     sync_duration_ms: elapsed_ms(start),
                     ..Default::default()
                 };
@@ -159,7 +159,7 @@ impl SyncLoop {
                 if self.missed_count >= self.config.miss_threshold {
                     self.container.enter_degraded_mode();
                 }
-                return SyncOutcome {
+                return KeepAliveOutcome {
                     sync_duration_ms: elapsed_ms(start),
                     ..Default::default()
                 };
@@ -177,7 +177,7 @@ impl SyncLoop {
             .collect();
 
         // e. Reconcile disk-groups.
-        let mut outcome = SyncOutcome::default();
+        let mut outcome = KeepAliveOutcome::default();
         let current_ids: Vec<_> = self.container.disk_group_ids();
 
         for entry in &owned {
@@ -262,7 +262,7 @@ impl SyncLoop {
         node_id: NodeId,
         dg_id: DiskGroupId,
         disks: &[(DiskId, DiskValue)],
-        outcome: &mut SyncOutcome,
+        outcome: &mut KeepAliveOutcome,
     ) {
         let _ = (rack_id, node_id, dg_id);
         let current_disk_ids: Vec<DiskId> = {
@@ -377,7 +377,7 @@ impl SyncLoop {
         // Write baseline ZoneValue records (empty bitmap, snapshot_slot=0)
         // — but only if no snapshot already exists (R73: previously-owned
         // disk-groups have real snapshots that must not be overwritten;
-        // recovery runs after sync_once to replay the journal from
+        // recovery runs after tick to replay the journal from
         // snapshot_slot).
         if let Some(ref kv) = self.kv {
             let bind = *dg.bind.read().unwrap();
@@ -417,7 +417,7 @@ impl SyncLoop {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let _ = self.sync_once().await;
+                    let _ = self.tick().await;
                 }
                 _ = &mut stop => {
                     info!("sync loop shutting down");

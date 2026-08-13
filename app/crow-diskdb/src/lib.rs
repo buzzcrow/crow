@@ -13,8 +13,8 @@
 pub mod data_group_client;
 pub mod ddb_config;
 pub mod domain;
+pub mod keepalive;
 pub mod metrics;
 pub mod recovery;
 pub mod service;
 pub mod status_machine;
-pub mod sync;
