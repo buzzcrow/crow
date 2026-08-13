@@ -8,8 +8,8 @@
 //! (disk-add init, status changes, removals).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 
 use crow_common::metrics::Counter;
 use crow_kv_client::{HardwareClient, ServiceRegistryClient};
@@ -28,6 +28,7 @@ use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
+use crate::recovery::disk_recovery::{recover_disk_to_up, RecoveryScanTask};
 
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
@@ -48,6 +49,14 @@ pub struct KeepAliveOutcome {
     pub disks_removed: usize,
     pub status_changes: usize,
     pub sync_duration_ms: u64,
+}
+
+/// Handle to a running per-disk recovery scan task. The cancel flag
+/// is set on `HwStatus::Up` recovery; the join handle is awaited on
+/// shutdown.
+struct RecoveryScanHandle {
+    cancel: Arc<AtomicBool>,
+    join: tokio::task::JoinHandle<()>,
 }
 
 /// Background sync loop: keep-alive + hardware read + disk-add init.
@@ -76,6 +85,14 @@ pub struct KeepAlive {
     /// Optional metrics handle for sync latency/success/failure
     /// observations (R74 §11).
     metrics: Option<DiskdbMetrics>,
+    /// Per-disk consecutive miss counts (R76 Missing→Bad confirmation).
+    /// Incremented when a disk is absent from sync; reset on
+    /// rediscovery. When count >= `miss_threshold`, the disk
+    /// transitions `Missing → Bad` and a recovery scan starts.
+    disk_miss_counts: RwLock<HashMap<DiskId, u32>>,
+    /// Running per-disk recovery scan tasks (R76). Keyed by `DiskId`;
+    /// removed when the task completes or is cancelled on recovery.
+    recovery_scans: RwLock<HashMap<DiskId, RecoveryScanHandle>>,
 }
 
 impl KeepAlive {
@@ -98,6 +115,8 @@ impl KeepAlive {
             config_handle: None,
             grpc_endpoint: String::new(),
             metrics: None,
+            disk_miss_counts: RwLock::new(HashMap::new()),
+            recovery_scans: RwLock::new(HashMap::new()),
         }
     }
 
@@ -144,6 +163,19 @@ impl KeepAlive {
     pub fn with_metrics(mut self, metrics: DiskdbMetrics) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    /// Cancel + await all running recovery scan tasks. Called on
+    /// shutdown to ensure clean task termination.
+    pub async fn shutdown_recovery_scans(&self) {
+        let handles: Vec<RecoveryScanHandle> = {
+            let mut scans = self.recovery_scans.write().unwrap();
+            scans.drain().map(|(_, h)| h).collect()
+        };
+        for handle in handles {
+            handle.cancel.store(true, Ordering::Release);
+            let _ = handle.join.await;
+        }
     }
 
     /// Run one sync tick — a thin orchestrator calling the four
@@ -359,7 +391,9 @@ impl KeepAlive {
     }
 
     /// Reconcile the disk list for one disk-group: add new disks,
-    /// update status on existing disks, detect removed disks.
+    /// update status on existing disks, detect removed disks. Drives
+    /// the `HwStateMachine` on status changes + the R76 Missing→Bad
+    /// confirmation + recovery scan spawn + recovery-to-Up path.
     async fn reconcile_disks(
         &self,
         dg: &Arc<DdbDiskGroup>,
@@ -377,32 +411,10 @@ impl KeepAlive {
 
         for (disk_id, disk_value) in disks {
             if current_disk_ids.contains(disk_id) {
-                // Existing disk — update status if changed.
-                let disk = {
-                    let disks_guard = dg.disks.read().unwrap();
-                    disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
-                };
-                if let Some(disk) = disk {
-                    let old_status = *disk.effective_status.read().unwrap();
-                    let new_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
-                    if old_status != new_status {
-                        match self.status_machine.transition_disk(&disk, new_status) {
-                            Ok(_) => {
-                                dg.rebuild_allocating_disks();
-                                outcome.status_changes += 1;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    disk = ?disk.disk_id,
-                                    from = ?old_status,
-                                    to = ?new_status,
-                                    error = %e,
-                                    "illegal disk status transition; keeping current"
-                                );
-                            }
-                        }
-                    }
-                }
+                // Existing disk — reset miss count (present in sync).
+                self.disk_miss_counts.write().unwrap().remove(disk_id);
+                self.reconcile_existing_disk(dg, disk_id, disk_value, outcome)
+                    .await;
             } else {
                 // New disk — disk-add init flow.
                 self.disk_add_init(dg, *disk_id, disk_value).await;
@@ -413,34 +425,187 @@ impl KeepAlive {
         // Detect removed disks (present in memory but absent from sync).
         for disk_id in &current_disk_ids {
             if !disks.iter().any(|(id, _)| id == disk_id) {
-                // Mark as Missing (not removed — §10 says transition
-                // to Missing, then Bad after confirmation).
-                let disk = {
-                    let disks_guard = dg.disks.read().unwrap();
-                    disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
-                };
-                if let Some(disk) = disk {
-                    let old_status = *disk.effective_status.read().unwrap();
-                    if old_status != HwStatus::Missing {
-                        match self.status_machine.transition_disk(&disk, HwStatus::Missing) {
-                            Ok(_) => {
-                                dg.rebuild_allocating_disks();
-                                outcome.status_changes += 1;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    disk = ?disk.disk_id,
-                                    from = ?old_status,
-                                    to = ?HwStatus::Missing,
-                                    error = %e,
-                                    "illegal disk status transition; keeping current"
-                                );
-                            }
-                        }
+                self.reconcile_absent_disk(dg, disk_id, outcome);
+            }
+        }
+    }
+
+    /// Reconcile an existing disk present in the sync response: update
+    /// status if changed, resume recovery scan if still Bad.
+    async fn reconcile_existing_disk(
+        &self,
+        dg: &Arc<DdbDiskGroup>,
+        disk_id: &DiskId,
+        disk_value: &DiskValue,
+        outcome: &mut KeepAliveOutcome,
+    ) {
+        let disk = {
+            let disks_guard = dg.disks.read().unwrap();
+            disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
+        };
+        let Some(disk) = disk else { return };
+        let old_status = *disk.effective_status.read().unwrap();
+        let new_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
+        if old_status != new_status {
+            // R76: unified recovery path for → Up transitions.
+            if new_status == HwStatus::Up
+                && matches!(old_status, HwStatus::Missing | HwStatus::Bad | HwStatus::Offline)
+            {
+                self.recover_disk_to_up(dg, &disk).await;
+                outcome.status_changes += 1;
+            } else {
+                match self.status_machine.transition_disk(&disk, new_status) {
+                    Ok(_) => {
+                        dg.rebuild_allocating_disks();
+                        outcome.status_changes += 1;
+                    }
+                    Err(e) => {
+                        warn!(
+                            disk = ?disk.disk_id,
+                            from = ?old_status,
+                            to = ?new_status,
+                            error = %e,
+                            "illegal disk status transition; keeping current"
+                        );
                     }
                 }
             }
+        } else if old_status == HwStatus::Bad {
+            // R76: on restart, a disk that is still Bad needs its
+            // recovery scan resumed (if not already running).
+            let scan_running = self.recovery_scans.read().unwrap().contains_key(&disk.disk_id);
+            if !scan_running {
+                info!(disk = ?disk.disk_id, "disk still Bad on sync — resuming recovery scan");
+                self.spawn_recovery_scan(dg, &disk);
+            }
         }
+    }
+
+    /// Reconcile a disk absent from the sync response: track miss
+    /// counts, transition Up→Missing→Bad, spawn recovery scan on Bad.
+    fn reconcile_absent_disk(
+        &self,
+        dg: &Arc<DdbDiskGroup>,
+        disk_id: &DiskId,
+        outcome: &mut KeepAliveOutcome,
+    ) {
+        let disk = {
+            let disks_guard = dg.disks.read().unwrap();
+            disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
+        };
+        let Some(disk) = disk else { return };
+        let old_status = *disk.effective_status.read().unwrap();
+
+        // Only track miss counts for disks that are not already Bad.
+        if old_status == HwStatus::Bad {
+            return;
+        }
+
+        // Increment consecutive miss count.
+        let miss_count = {
+            let mut counts = self.disk_miss_counts.write().unwrap();
+            let c = counts.entry(*disk_id).or_insert(0);
+            *c += 1;
+            *c
+        };
+
+        if old_status != HwStatus::Missing {
+            // First absence → transition Up → Missing.
+            match self.status_machine.transition_disk(&disk, HwStatus::Missing) {
+                Ok(_) => {
+                    dg.rebuild_allocating_disks();
+                    outcome.status_changes += 1;
+                    info!(disk = ?disk_id, "disk absent from sync → Missing");
+                }
+                Err(e) => {
+                    warn!(
+                        disk = ?disk_id,
+                        from = ?old_status,
+                        to = ?HwStatus::Missing,
+                        error = %e,
+                        "illegal disk status transition; keeping current"
+                    );
+                }
+            }
+        } else if miss_count >= self.config.miss_threshold {
+            // Nth consecutive absence → Missing → Bad + spawn recovery scan.
+            match self.status_machine.transition_disk(&disk, HwStatus::Bad) {
+                Ok(_) => {
+                    dg.rebuild_allocating_disks();
+                    outcome.status_changes += 1;
+                    info!(
+                        disk = ?disk_id,
+                        miss_count = miss_count,
+                        "disk absent for N ticks → Bad; starting recovery scan"
+                    );
+                    self.spawn_recovery_scan(dg, &disk);
+                    self.disk_miss_counts.write().unwrap().remove(disk_id);
+                }
+                Err(e) => {
+                    warn!(
+                        disk = ?disk_id,
+                        from = ?old_status,
+                        to = ?HwStatus::Bad,
+                        error = %e,
+                        "illegal disk status transition; keeping current"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Spawn a per-disk recovery scan task (R76). The task runs
+    /// independently (`tokio::spawn`) and is tracked in
+    /// `recovery_scans` for cancellation on recovery.
+    fn spawn_recovery_scan(&self, dg: &Arc<DdbDiskGroup>, disk: &Arc<DdbDisk>) {
+        let Some(ref kv) = self.kv else {
+            warn!(disk = ?disk.disk_id, "recovery scan: no kv client, skipping");
+            return;
+        };
+        let bind = *dg.bind.read().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let Some(m) = &self.metrics else {
+            warn!(disk = ?disk.disk_id, "recovery scan: no metrics handle, skipping");
+            return;
+        };
+        let gauge = Arc::clone(&m.disk_bad_impacted_blocks);
+        let task = RecoveryScanTask::new(Arc::clone(disk), bind, kv.clone(), Arc::clone(&cancel), gauge);
+        let disk_id = disk.disk_id;
+        let join = tokio::spawn(async move {
+            task.run().await;
+        });
+        self.recovery_scans
+            .write()
+            .unwrap()
+            .insert(disk_id, RecoveryScanHandle { cancel, join });
+    }
+
+    /// Unified recovery path for `Missing → Up`, `Bad → Up`, `Offline
+    /// → Up` (R76). Cancels the recovery scan (if running), runs
+    /// compaction on the disk's zones, rebuilds active zones, and
+    /// re-includes the disk in the allocating set.
+    async fn recover_disk_to_up(&self, dg: &Arc<DdbDiskGroup>, disk: &Arc<DdbDisk>) {
+        // Cancel any running recovery scan.
+        let scan_handle = self.recovery_scans.write().unwrap().remove(&disk.disk_id);
+        if let Some(handle) = scan_handle {
+            handle.cancel.store(true, Ordering::Release);
+            // The task will see the cancel flag on its next zone
+            // boundary and exit. We don't await it here — the scan
+            // persists its own progress on cancel.
+            info!(disk = ?disk.disk_id, "recovery scan cancelled (disk → Up)");
+        }
+
+        // Run the recovery-to-Up path: compaction + rebuild.
+        if let Some(ref kv) = self.kv {
+            let bind = *dg.bind.read().unwrap();
+            recover_disk_to_up(disk, bind, kv, self.config.zone_rotate_count).await;
+        } else {
+            // No kv client (test mode) — just set status + rebuild.
+            disk.set_effective_status(HwStatus::Up);
+            disk.rebuild_active_zones(self.config.zone_rotate_count);
+        }
+        dg.rebuild_allocating_disks();
+        info!(disk = ?disk.disk_id, "disk recovered → Up");
     }
 
     /// Disk-add init flow (§3.5): create `DdbDisk` + `DdbZone`s, write

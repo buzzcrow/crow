@@ -165,6 +165,24 @@ message DiskInfo {
   repeated ZoneUsage zone_usages       = 17;
 }
 
+// Recovery scan progress — stored at RecoveryScanProgressKey on the
+// bound data group. Written by the per-disk recovery scan task after
+// each zone; read by the sync loop on restart to resume the scan.
+message RecoveryScanProgressValue {
+  RecoveryScanStatus status             = 1;
+  uint32              last_completed_zone = 2;
+  uint64              impacted_blocks_count = 3;
+  uint64              started_at_ms      = 4;
+  uint64              updated_at_ms      = 5;
+}
+
+// Recovery scan lifecycle states.
+enum RecoveryScanStatus {
+  RECOVERY_SCAN_IN_PROGRESS = 0;
+  RECOVERY_SCAN_STOPPED     = 1;
+  RECOVERY_SCAN_COMPLETE    = 2;
+}
+
 // Disk-group info for query responses — key + value fields flattened
 // plus member disks. R74 adds aggregated capacity/busy/free bytes +
 // allocatable_disk_count.

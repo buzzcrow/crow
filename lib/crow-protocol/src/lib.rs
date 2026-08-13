@@ -65,7 +65,8 @@ pub mod diskio {
 
 pub mod diskdb_type_util;
 pub use diskdb_type_util::{
-    disk_id, effective_status, DiskIdExt, HwStatusExt, ZoneAllocationStateExt, ZoneValueExt,
+    disk_id, effective_status, DiskIdExt, HwStatusExt, RecoveryScanProgressValueExt, ZoneAllocationStateExt,
+    ZoneValueExt,
 };
 
 pub mod common_type;
@@ -74,7 +75,8 @@ pub use common_type::{DiskGroupId, GroupId, InstanceId, NodeId, RackId, ReplicaI
 pub mod key;
 pub use key::{
     BinaryKey, BindMapKey, BusyBlockKey, DiskGroupKey, DiskKey, FreeBlockKey, InstanceKey, KeyError,
-    KvGroupKey, KvReplicaKey, KvStoreKey, NodeKey, OwnerMapKey, RackKey, TextKey, ZoneKey, CROW_KEY_MAGIC,
+    KvGroupKey, KvReplicaKey, KvStoreKey, NodeKey, OwnerMapKey, RackKey, RecoveryScanProgressKey, TextKey,
+    ZoneKey, CROW_KEY_MAGIC,
 };
 
 pub mod sysdata;

@@ -30,7 +30,7 @@ mod key_tests;
 pub use common::{NodeKey, RackKey};
 pub use diskdb::{
     BindMapKey, BusyBlockKey, DiskGroupKey, DiskGroupUsageKey, DiskKey, FreeBlockKey, InstanceKey,
-    OwnerMapKey, ZoneKey,
+    OwnerMapKey, RecoveryScanProgressKey, ZoneKey,
 };
 pub use encoding::{BinaryKey, KeyError, TextKey, CROW_KEY_MAGIC};
 pub use kv_cluster::{KvGroupKey, KvReplicaKey, KvStoreKey};

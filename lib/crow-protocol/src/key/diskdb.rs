@@ -722,3 +722,30 @@ impl DiskGroupUsageKey {
         v
     }
 }
+
+// ── RecoveryScanProgressKey ─────────────────────────────────────
+
+/// Key for a per-disk recovery scan progress record.
+/// Binary layout: `magic | 0x000C | disk_id:16 bytes`. Total 19 bytes.
+/// Binary-only (data-group key, stored alongside zone records on the
+/// bound data group).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecoveryScanProgressKey {
+    pub disk_id: DiskId,
+}
+
+impl BinaryKey for RecoveryScanProgressKey {
+    const TYPE_TAG: u16 = 0x000C;
+
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        encode_header(out, Self::TYPE_TAG);
+        encode_disk_id(out, &self.disk_id);
+    }
+
+    fn decode(buf: &[u8]) -> Result<Self, KeyError> {
+        let fields = decode_header(buf, Self::TYPE_TAG)?;
+        let (disk_id, o) = decode_disk_id(fields, 0)?;
+        check_exact(fields, o)?;
+        Ok(Self { disk_id })
+    }
+}

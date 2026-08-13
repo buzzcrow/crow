@@ -18,7 +18,6 @@ use crow_protocol::common::HwStatus;
 
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
-use crate::model::zone::DdbZoneHealth;
 
 /// Operations a status may permit or deny.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +66,8 @@ impl HwStateMachine {
             (HwStatus::Missing, HwStatus::Bad | HwStatus::Up) => true,
             (HwStatus::Offline, HwStatus::Maintenance | HwStatus::Up)
             | (HwStatus::Maintenance, HwStatus::Offline) => true,
+            // Operator override: mark a Bad disk Up after physical repair.
+            (HwStatus::Bad, HwStatus::Up) => true,
             (HwStatus::Bad, _) | (_, HwStatus::Bad) => false,
             _ => false,
         }
@@ -118,18 +119,13 @@ impl HwStateMachine {
         }
     }
 
-    /// Entry side-effects for a disk. `Bad` marks all zones `Bad`;
-    /// other states have no disk-level side-effects (the caller
+    /// Entry side-effects for a disk. v1 has no disk-level
+    /// side-effects — zones follow the disk-level `HwStatus`
+    /// (top-layer status overrides; the disk's `effective_status`
+    /// is the sole gatekeeper for the allocate path). The caller
     /// handles disk-group-level follow-up like
-    /// `rebuild_allocating_disks`).
-    pub fn on_enter_disk(status: HwStatus, disk: &DdbDisk) {
-        if status == HwStatus::Bad {
-            let zones = disk.zones.read().unwrap();
-            for z in zones.iter() {
-                z.set_health(DdbZoneHealth::Bad);
-            }
-        }
-    }
+    /// `rebuild_allocating_disks`.
+    pub fn on_enter_disk(_status: HwStatus, _disk: &DdbDisk) {}
 
     /// Entry side-effects for a disk-group. v1 has no disk-group-level
     /// side-effects; reserved for future use.

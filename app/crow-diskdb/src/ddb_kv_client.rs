@@ -15,9 +15,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crow_kv_client::{BatchOp, CrowkvClient, GetOutcome, JournalOp, ReadMode, Result};
 use crow_protocol::common::DiskId;
-use crow_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue, ZoneValue};
-use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, ZoneKey};
-use crow_protocol::ZoneValueExt;
+use crow_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue, RecoveryScanProgressValue, ZoneValue};
+use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, RecoveryScanProgressKey, ZoneKey};
+use crow_protocol::{RecoveryScanProgressValueExt, ZoneValueExt};
 
 use crate::model::records::{BusyRecord, FreeRecord, ZoneRecords};
 
@@ -29,6 +29,7 @@ pub type Bind = (u64, u64);
 /// All methods take `(store_id, group_id)` from `DdbDiskGroup.bind`. The
 /// wrapped `CrowkvClient` must have its topology seeded with the
 /// data-group leader endpoint.
+#[derive(Clone)]
 pub struct DdbKvClient {
     kv: Arc<CrowkvClient>,
 }
@@ -488,5 +489,64 @@ impl DdbKvClient {
             )
             .await?;
         Ok(outcome.ops)
+    }
+
+    /// Persist a `RecoveryScanProgressValue` at
+    /// `RecoveryScanProgressKey { disk_id }` on the bound data group.
+    /// Written by the per-disk recovery scan task after each zone.
+    pub async fn put_recovery_scan_progress(
+        &self,
+        bind: Bind,
+        disk_id: &DiskId,
+        value: &RecoveryScanProgressValue,
+    ) -> Result<()> {
+        let key = RecoveryScanProgressKey { disk_id: *disk_id };
+        let bytes = value.to_bytes();
+        let (store_id, group_id) = bind;
+        self.kv
+            .put(store_id, group_id, &key.to_bytes(), &bytes, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Read the `RecoveryScanProgressValue` for a disk. Returns
+    /// `Ok(None)` if no progress record exists (fresh scan). Used by
+    /// the sync loop on restart to resume the scan from
+    /// `last_completed_zone + 1`.
+    pub async fn get_recovery_scan_progress(
+        &self,
+        bind: Bind,
+        disk_id: &DiskId,
+    ) -> Result<Option<RecoveryScanProgressValue>> {
+        let key = RecoveryScanProgressKey { disk_id: *disk_id };
+        let (store_id, group_id) = bind;
+        let outcome = self
+            .kv
+            .get(store_id, group_id, &key.to_bytes(), ReadMode::Linearizable, None)
+            .await?;
+        match outcome {
+            GetOutcome::Found { value, .. } => {
+                let v = RecoveryScanProgressValue::from_bytes(&value).map_err(|e| {
+                    crow_kv_client::Error::SysdataDecode {
+                        key: format!("{:02x?}", key.to_bytes()),
+                        reason: e,
+                    }
+                })?;
+                Ok(Some(v))
+            }
+            GetOutcome::NotFound => Ok(None),
+        }
+    }
+
+    /// Delete the `RecoveryScanProgressValue` for a disk. Called on
+    /// `HwStatus::Up` recovery (the scan is stopped + progress
+    /// cleared).
+    pub async fn delete_recovery_scan_progress(&self, bind: Bind, disk_id: &DiskId) -> Result<()> {
+        let key = RecoveryScanProgressKey { disk_id: *disk_id };
+        let (store_id, group_id) = bind;
+        self.kv
+            .delete(store_id, group_id, &key.to_bytes(), None)
+            .await
+            .map(|_| ())
     }
 }

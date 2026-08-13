@@ -12,7 +12,7 @@ use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
 use crate::metrics::DiskMetrics;
-use crate::model::zone::{AllocatedRange, DdbZone, DdbZoneHealth, ZoneUsage};
+use crate::model::zone::{AllocatedRange, DdbZone, ZoneUsage};
 
 /// RCU-published active zone set — `zone_rotate_count` allocatable
 /// zones, replaced via `Arc` swap on rotation.
@@ -75,18 +75,12 @@ impl DdbDisk {
     }
 
     /// Directly set the effective status, bypassing transition
-    /// legality. When `Bad`, marks all zones `Bad`. Production code
-    /// uses `HwStateMachine::transition_disk` (which validates + applies
-    /// + runs entry side-effects); this is a test/direct-set helper.
+    /// legality. Production code uses `HwStateMachine::transition_disk`
+    /// (which validates + applies + runs entry side-effects); this is
+    /// a test/direct-set helper. Zones follow the disk-level
+    /// `HwStatus` — no per-zone marking.
     pub fn set_effective_status(&self, status: HwStatus) {
         *self.effective_status.write().unwrap() = status;
-        if status == HwStatus::Bad {
-            // Mark all zones Bad.
-            let zones = self.zones.read().unwrap();
-            for z in zones.iter() {
-                z.set_health(DdbZoneHealth::Bad);
-            }
-        }
     }
 
     /// Disk-level allocate — round-robin over the active zone set,

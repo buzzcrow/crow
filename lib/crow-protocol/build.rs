@@ -83,6 +83,15 @@ fn main() {
         )
         .type_attribute("BlockState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ErrorCode", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // Recovery scan progress (bincode storage on data groups).
+        .type_attribute(
+            "RecoveryScanProgressValue",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "RecoveryScanStatus",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         // chunkdb enums.
         .type_attribute("ECState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ChunkState", "#[derive(serde::Serialize, serde::Deserialize)]")

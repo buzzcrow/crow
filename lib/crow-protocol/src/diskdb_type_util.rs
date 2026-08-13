@@ -9,7 +9,7 @@
 //! not wire format.
 
 use crate::common::{DiskId, HwStatus};
-use crate::diskdb::rpc::{ZoneAllocationState, ZoneValue};
+use crate::diskdb::rpc::{RecoveryScanProgressValue, ZoneAllocationState, ZoneValue};
 
 // ── DiskId helpers ──────────────────────────────────────────────
 
@@ -134,6 +134,36 @@ impl ZoneValueExt for ZoneValue {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<ZoneValue, String> {
+        bincode::deserialize(bytes).map_err(|e| e.to_string())
+    }
+}
+
+// ── RecoveryScanProgressValue serialization ─────────────────────
+
+/// Extension trait for `RecoveryScanProgressValue` bincode
+/// serialization (same wire format as other diskdb data-group
+/// values).
+pub trait RecoveryScanProgressValueExt {
+    /// Serialize to bytes (bincode).
+    ///
+    /// # Panics
+    /// Panics if bincode serialization fails (cannot fail for this type).
+    #[must_use]
+    fn to_bytes(&self) -> Vec<u8>;
+
+    /// Deserialize from bytes (bincode).
+    ///
+    /// # Errors
+    /// Returns `Err` if the bytes cannot be deserialized.
+    fn from_bytes(bytes: &[u8]) -> Result<RecoveryScanProgressValue, String>;
+}
+
+impl RecoveryScanProgressValueExt for RecoveryScanProgressValue {
+    fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("serialize RecoveryScanProgressValue")
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<RecoveryScanProgressValue, String> {
         bincode::deserialize(bytes).map_err(|e| e.to_string())
     }
 }

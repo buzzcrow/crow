@@ -27,8 +27,10 @@ pub struct DiskdbMetrics {
     // ── R72 counters ──────────────────────────────────────────────
     /// `zone.allocate.retry.cms.bit` — CAS retry counter.
     pub allocate_retry_cas_bit: Arc<Counter>,
-    /// `disk.bad.impacted_blocks` — bad-disk impacted block counter.
-    pub disk_bad_impacted_blocks: Arc<Counter>,
+    /// `disk.bad.impacted_blocks` — bad-disk impacted block gauge
+    /// (absolute count of busy blocks on bad disks, updated by the
+    /// recovery scan task).
+    pub disk_bad_impacted_blocks: Arc<Gauge>,
 
     // ── R74 §11 gauges (derived from the bitmap on the reporting tick) ──
     pub disk_capacity_bytes: Arc<Gauge>,
@@ -86,7 +88,7 @@ impl DiskdbMetrics {
         Self {
             // R72 counters.
             allocate_retry_cas_bit: registry.register_counter("zone.allocate.retry.cms.bit"),
-            disk_bad_impacted_blocks: registry.register_counter("disk.bad.impacted_blocks"),
+            disk_bad_impacted_blocks: registry.register_gauge("disk.bad.impacted_blocks"),
             // R74 gauges.
             disk_capacity_bytes: registry.register_gauge("disk.capacity_bytes"),
             disk_busy_bytes: registry.register_gauge("disk.busy_bytes"),
