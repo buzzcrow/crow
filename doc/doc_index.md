@@ -28,7 +28,6 @@ Long-lived task backlogs and per-path flow analyses. Plan files live under
 | Doc | When to read |
 | --- | --- |
 | `doc/working/plan-test.md` | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `doc/working/plan-diskdb-server.md` | diskdb R72 (allocate/free) + R71 sync-completion task plan: phased checkboxes with file-level changes and dependency graph (proto fixes → sync completion → zone allocator → persistence → disk/node orchestration → gRPC/wiring → mock group-0 + integration tests → verify + commit). Read when implementing R72. |
 | `doc/design/kv/kv-read-flow-analysis.md` | KV point-read (get) flow trace, benchmark results, and open issues. Read when working on read-path performance. |
 | `doc/design/kv/kv-scan-flow-analysis.md` | KV scan (range read) flow trace, benchmark results, and open issues. Read when working on scan-path performance. |
 | `doc/design/kv/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. Read when working on write-path performance. |

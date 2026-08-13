@@ -563,6 +563,57 @@ Compaction steps:
   from all live records. Triggered by an operator or the §12 scanner
   for a consistency check or full rebuild — not in the common code flow.
 
+### Crash-safety invariants
+
+The in-memory bitmap is a performance cache; the durable state is the
+set of `BusyBlockKey` / `FreeBlockKey` / `ZoneValue` records on the
+bound data group. Allocate and free are each a single durable
+operation (one `put` or one `batch_write`), so the **current-state
+rule** (a block is busy iff its `BusyBlockKey` exists) holds at every
+crash point. The invariants that make this true:
+
+- **Allocate ordering** — Phase 1 (bitmap CAS) happens before Phase 2
+  (`BusyBlockValue` persist). If diskdb crashes between Phase 1 and
+  Phase 2, the bit is set in memory but no `BusyBlockKey` exists on
+  disk. On restart, strategy 1 full scan rebuilds the bitmap from
+  records — the bit is clear (no busy record), so the block is
+  correctly free. This is a **ghost allocation** (bit set in-memory,
+  no record) that is self-correcting on restart; the §12 scanner also
+  detects this drift during live operation.
+- **Free atomicity** — the free is one `batch_write` (Delete
+  `BusyBlockKey` + Put `FreeBlockValue` at `FreeBlockKey`), atomic
+  within the data group (crow-kv paxos). If diskdb crashes after the
+  bitmap clear but before the `batch_write` persists, the bit is clear
+  in memory but the `BusyBlockKey` still exists on disk. On restart,
+  full scan sees the `BusyBlockKey` and re-sets the bit — the block is
+  correctly busy. The §12 scanner reconciles this drift during live
+  operation (ghost free).
+- **Re-allocate clears the free marker** — on re-allocate (after a
+  free), the `FreeBlockKey` is deleted and a new `BusyBlockValue` is
+  written at `BusyBlockKey` in the same `batch_write`, so the record
+  set stays consistent (no stale free marker for a now-busy offset).
+
+The bitmap is never persisted on the allocate/free hot path — only the
+`ZoneValue` snapshot (written by compaction) carries a serialized
+bitmap, with `snapshot_slot` (replay start point) + `crc32` (integrity
+check). The baseline `ZoneValue` (empty bitmap, `snapshot_slot = 0`)
+is written during disk-add init (§10); all subsequent state changes
+are `BusyBlockValue` / `FreeBlockValue` records until compaction
+merges them into a fresh snapshot.
+
+**Hot-path error handling:**
+
+- **Allocate persist failure** (Phase 2 `batch_write` fails): rollback
+  the bitmap (clear the bits set in Phase 1) and return error. No
+  record was written, so the record set is consistent (no ghost).
+- **Free persist failure** (`batch_write` fails): the bitmap was
+  already cleared locally. Return error; the §12 scanner reconciles on
+  restart (the `BusyBlockKey` still exists on disk → block is busy →
+  scanner detects the bitmap/record drift and re-sets the bit).
+- **Degraded mode** (group-0 / data-group unreachable): allocate/free
+  RPCs return `Unavailable` before touching the bitmap. No partial
+  state.
+
 ## 8. Allocation Algorithm
 
 The algorithm follows the buzz-cpp reference
@@ -712,10 +763,28 @@ diskdb's first major component:
   driven for v1; `/dev` scan later); probe health (existence, size,
   basic read/write test). Source of truth for disk identity/capacity is
   group 0; live health is probed locally.
-- **Disk failure detection + recovery flow** (new — does not exist
-  yet): on disk failure, transition to Suspect, update group 0,
-  trigger recovery. The recovery flow is designed in a follow-up
-  requirement.
+- **Disk failure detection + bad-disk handling**: on disk failure,
+  transition to `Suspect`, update group 0. When a disk transitions to
+  `Bad` (via `Missing → Bad` after confirmation, §9), its busy blocks
+  are no longer readable. diskdb does **not** rebuild or relocate them
+  inline on the sync path — relocation/rebuild is a follow-up
+  requirement. The bad-disk handling on the sync path:
+  - Mark the `ZoneDisk` and all its `Zone`s as `Bad`
+    (`zone_state = Bad`; `allocatable()` returns `false`). No new
+    allocates touch the disk. Free is also blocked —
+    `allows_free(Bad)` is `false` (free allows `Up`/`Maintenance`/
+    `Suspect` only, §9).
+  - Scan the zone records for the bad disk (`read_zone_records` per
+    zone, §7) and collect all live `BusyBlockValue`s — these are the
+    impacted blocks. Each carries `owner_chunk` (the chunk that owns
+    the allocation) so the caller / data-IO layer can be notified.
+  - Emit the `disk.bad.impacted_blocks` gauge (§11) and log the
+    hand-off. The collected list is handed to a future
+    recovery/relocation path: the data-IO layer rebuilds from
+    EC/mirror, or the owner is notified to re-allocate elsewhere.
+  - The disk stays `Bad` — its records are read-only until an operator
+    removes the disk or marks it `Up` after repair (which triggers
+    strategy-1/2 recovery, §7).
 - **Disk-add initialization flow**: the operator adds a disk in group 0
   (via `HardwareClient.add_disk` through the console), which writes
   `DiskValue` to group 0. On the next sync tick, diskdb fetches the
@@ -982,11 +1051,11 @@ functional scope:
   utilities, CRC integrity). **Done.**
 - **R71** — Group-0 sysdata schema + sync (disk status management,
   group-0 read/write, ownership/binding maps, heartbeat, disk-add
-  initialization flow, keepalive usage summary).
+  initialization flow, keepalive usage summary). **Done.**
 - **R72** — Zone allocator + record persistence (bitmap-scan
   allocator, rotating active-zone-set, busy/free records, two-phase
   async allocation, **immediate free** — no `FreeBatch`, no timer;
-  `disk_group_id` routing, `exclude_disks`, CAS retry bound).
+  `disk_group_id` routing, `exclude_disks`, CAS retry bound). **Done.**
 - **R73** — Crash recovery + snapshot compaction (three strategies:
   full scan rebuild, journal scan replay via `JournalScan` RPC,
   compaction that deletes only free records).
