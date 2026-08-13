@@ -1,0 +1,40 @@
+{
+  "server": {
+    "listen_addr": "0.0.0.0:5600",
+    "http_listen_addr": "0.0.0.0:5601",
+    "instance_id": null,
+    "kv_server_mgmt_seeds": [
+      "http://127.0.0.1:5500"
+    ]
+  },
+  "storage": {
+    "zone_size_bytes": 17179869184,
+    "block_size_bytes": 1048576,
+    "allocate_granularity": 1048576,
+    "zone_rotate_count": 4,
+    "cas_retry_limit": 100,
+    "validate_owner_on_free": false
+  },
+  "heartbeat": {
+    "interval_secs": 10,
+    "miss_threshold": 3,
+    "temp_failure_timeout_secs": 900
+  },
+  "persistence": {
+    "free_batch_enabled": false,
+    "free_flush_max_batch": 256,
+    "compaction_cadence_secs": 300,
+    "snapshot_compaction_threshold": 4096,
+    "recovery_concurrency": 16
+  },
+  "scanner": {
+    "scan_interval_secs": 600,
+    "detect_ghost_allocations": true,
+    "verify_record_integrity": true
+  },
+  "sync": {
+    "group0_store_id": 0,
+    "group0_group_id": 0,
+    "sync_interval_secs": 10
+  }
+}

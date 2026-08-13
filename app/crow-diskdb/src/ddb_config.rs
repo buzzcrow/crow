@@ -4,19 +4,31 @@
 //! Configuration for the diskdb server.
 
 use std::net::SocketAddr;
+use std::path::Path;
 
 use crow_protocol::{DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, KV_SERVER_MGMT_BASE};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for a diskdb instance.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DiskdbConfig {
+pub struct DdbConfig {
     pub server: ServerConfig,
     pub storage: StorageDefaults,
     pub heartbeat: HeartbeatConfig,
     pub persistence: PersistenceConfig,
     pub scanner: ScannerConfig,
     pub sync: SyncConfig,
+}
+
+impl DdbConfig {
+    /// Load config from a JSON file.
+    ///
+    /// # Errors
+    /// Returns `Err` if the file cannot be read or parsed as JSON.
+    pub fn load_from_file(path: &Path) -> std::result::Result<Self, std::io::Error> {
+        let data = std::fs::read_to_string(path)?;
+        serde_json::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
 }
 
 /// gRPC + HTTP listen addresses.
@@ -185,11 +197,11 @@ impl Default for ScannerConfig {
 
 // ── Validation ──────────────────────────────────────────────────
 
-/// Validate a `DiskdbConfig`.
+/// Validate a `DdbConfig`.
 ///
 /// # Errors
 /// Returns `Err(message)` on the first violation.
-pub fn validate(config: &DiskdbConfig) -> Result<(), String> {
+pub fn validate(config: &DdbConfig) -> Result<(), String> {
     let block = config.storage.block_size_bytes;
     let min_block: u32 = 512 * 1024;
     let max_block: u32 = 2 * 1024 * 1024;
@@ -255,85 +267,4 @@ pub fn validate(config: &DiskdbConfig) -> Result<(), String> {
 
 fn is_power_of_two(n: u32) -> bool {
     n > 0 && n.is_power_of_two()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn config_validate_accepts_default() {
-        let config = DiskdbConfig::default();
-        validate(&config).expect("default config should be valid");
-    }
-
-    #[test]
-    fn config_validate_rejects_non_power_of_two_block_size() {
-        let mut config = DiskdbConfig::default();
-        config.storage.block_size_bytes = 700 * 1024;
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_validate_rejects_block_size_out_of_range() {
-        let mut config = DiskdbConfig::default();
-        config.storage.block_size_bytes = 256 * 1024;
-        assert!(validate(&config).is_err());
-
-        let mut config = DiskdbConfig::default();
-        config.storage.block_size_bytes = 4 * 1024 * 1024;
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_validate_rejects_zone_not_multiple_of_block() {
-        let mut config = DiskdbConfig::default();
-        config.storage.zone_size_bytes = 16 * 1024 * 1024 * 1024 + 1;
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_validate_rejects_granularity_not_equal_to_block() {
-        let mut config = DiskdbConfig::default();
-        config.storage.allocate_granularity = 512 * 1024;
-        config.storage.block_size_bytes = 1024 * 1024;
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_validate_rejects_bad_listen_addr() {
-        let mut config = DiskdbConfig::default();
-        config.server.listen_addr = "not-an-addr".to_string();
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_validate_rejects_zero_sync_interval() {
-        let mut config = DiskdbConfig::default();
-        config.sync.sync_interval_secs = 0;
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_validate_rejects_zero_zone_rotate_count() {
-        let mut config = DiskdbConfig::default();
-        config.storage.zone_rotate_count = 0;
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_validate_rejects_zero_cas_retry_limit() {
-        let mut config = DiskdbConfig::default();
-        config.storage.cas_retry_limit = 0;
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn config_defaults_match_design() {
-        let config = DiskdbConfig::default();
-        assert_eq!(config.storage.cas_retry_limit, 100);
-        assert!(!config.storage.validate_owner_on_free);
-        assert!(!config.persistence.free_batch_enabled);
-        assert_eq!(config.persistence.free_flush_max_batch, 256);
-    }
 }

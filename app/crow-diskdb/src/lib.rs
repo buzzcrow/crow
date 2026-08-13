@@ -10,8 +10,8 @@
     clippy::match_same_arms
 )]
 
-pub mod config;
 pub mod data_group_client;
+pub mod ddb_config;
 pub mod domain;
 pub mod metrics;
 pub mod recovery;

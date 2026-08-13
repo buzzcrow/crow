@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use crow_common::metrics::MetricsRegistry;
-use crow_diskdb::config::{validate, DiskdbConfig};
 use crow_diskdb::data_group_client::DataGroupClient;
+use crow_diskdb::ddb_config::{validate, DdbConfig};
 use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::metrics::DiskdbMetrics;
 use crow_diskdb::recovery::compaction::{CompactionConfig, CompactionEngine};
@@ -248,16 +248,14 @@ async fn main() {
     info!("crow-diskdb stopped");
 }
 
-fn load_config(args: &Cli) -> DiskdbConfig {
+fn load_config(args: &Cli) -> DdbConfig {
     let mut config = if let Some(path) = &args.config {
-        let data = std::fs::read_to_string(path).unwrap_or_else(|e| {
-            panic!("failed to read config file {path}: {e}");
-        });
-        serde_json::from_str(&data).unwrap_or_else(|e| {
-            panic!("failed to parse config file {path}: {e}");
+        let p = std::path::Path::new(path);
+        DdbConfig::load_from_file(p).unwrap_or_else(|e| {
+            panic!("failed to load config file {path}: {e}");
         })
     } else {
-        DiskdbConfig::default()
+        DdbConfig::default()
     };
 
     if let Some(addr) = &args.listen_addr {

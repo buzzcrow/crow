@@ -20,8 +20,8 @@ use crow_protocol::diskdb::rpc::{
 use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
 
-use crate::config::StorageDefaults;
 use crate::data_group_client::DataGroupClient;
+use crate::ddb_config::StorageDefaults;
 use crate::domain::alloc;
 use crate::domain::disk_group_container::DdbDiskGroupContainer;
 use crate::recovery::RecoveryEngine;
