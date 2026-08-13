@@ -3,12 +3,14 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, DEFAULT_SERVER_BINARY, seedRackAndNode, stopNodeServer, freePort } from '../fixtures/consoleSetup';
 
 test.describe('E2E-04 deploy server', () => {
   test('deploys and stops a real crow-kv-server through the UI', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 4, 4);
 
+    const mgmtPort = freePort();
+    const grpcPort = freePort();
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
@@ -20,8 +22,8 @@ test.describe('E2E-04 deploy server', () => {
       await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
 
       await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 4/i })).toBeVisible();
-      await page.getByLabel('Management Port').fill('9911');
-      await page.getByLabel('gRPC Port').fill('9921');
+      await page.getByLabel('Management Port').fill(String(mgmtPort));
+      await page.getByLabel('gRPC Port').fill(String(grpcPort));
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
@@ -32,8 +34,8 @@ test.describe('E2E-04 deploy server', () => {
       }, { timeout: 5_000 }).toEqual(
         expect.objectContaining({
           node_id: 4,
-          url: 'http://127.0.0.1:9911',
-          grpc_url: 'http://127.0.0.1:9921',
+          url: `http://127.0.0.1:${mgmtPort}`,
+          grpc_url: `http://127.0.0.1:${grpcPort}`,
           pid: expect.any(Number),
         }),
       );

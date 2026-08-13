@@ -35,3 +35,4 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
 crow-kv = { path = "../../lib/crow-kv" }
+futures = "0.3"

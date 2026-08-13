@@ -3,12 +3,12 @@
 // Baseline: 1.1s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, clusterInit, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-05 store group replica chain', () => {
   test('creates store and group through the UI against a real deployed server', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 5, 5);
-    await deployNodeServer(baseURL!, 5, 9912, 9922);
+    await deployNodeServer(baseURL!, 5, freePort(), freePort());
 
     const api = await apiContext(baseURL!);
     try {

@@ -3,12 +3,12 @@
 // Baseline: 0.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-07 delete replica', () => {
   test('deletes a replica through the UI and verifies the real backend', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 7, 7);
-    await deployNodeServer(baseURL!, 7, 9937, 9947);
+    await deployNodeServer(baseURL!, 7, freePort(), freePort());
     await createStore(baseURL!, 77, [7]);
     await addGroup(baseURL!, 77, 770, 7700, [7]);
 

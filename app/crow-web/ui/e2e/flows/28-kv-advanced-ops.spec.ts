@@ -3,7 +3,7 @@
 // Baseline: 1.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.goto('/');
@@ -35,7 +35,7 @@ test.describe('E2E-28 KV advanced operations', () => {
 
   test('delete prefix, delete selected, inline delete, copy', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 28, 28);
-    await deployNodeServer(baseURL!, 28, 9928, 9938);
+    await deployNodeServer(baseURL!, 28, freePort(), freePort());
     await createStore(baseURL!, 280, [28]);
     await addGroup(baseURL!, 280, 2800, 28000, [28]);
     await waitForLeader(baseURL!, 280, 2800);

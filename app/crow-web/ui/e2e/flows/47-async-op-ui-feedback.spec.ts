@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 
 import { test, expect } from '../fixtures/realBackend';
-import { createRack, createNode, deployNodeServer, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
+import { createRack, createNode, deployNodeServer, freePort, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-47 async operation UI feedback', () => {
   test.beforeEach(async ({ baseURL }) => {
@@ -11,7 +11,7 @@ test.describe('E2E-47 async operation UI feedback', () => {
   test('ping and stop show success toast, activity log records both', async ({ page, baseURL }) => {
     await createRack(baseURL!, { id: 47, name: 'r47' });
     await createNode(baseURL!, { id: 47, rack_id: 47 });
-    await deployNodeServer(baseURL!, 47, 9947, 9957);
+    await deployNodeServer(baseURL!, 47, freePort(), freePort());
 
     try {
       await page.goto('/');

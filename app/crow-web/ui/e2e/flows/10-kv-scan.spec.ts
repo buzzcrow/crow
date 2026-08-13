@@ -3,7 +3,7 @@
 // Baseline: 0.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any) {
   await page.goto('/');
@@ -24,7 +24,7 @@ async function putKey(page: any, key: string, value: string) {
 test.describe('E2E-10 KV scan', () => {
   test('scans keys through the real KV UI', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 10, 10);
-    await deployNodeServer(baseURL!, 10, 9930, 9940);
+    await deployNodeServer(baseURL!, 10, freePort(), freePort());
     await createStore(baseURL!, 110, [10]);
     await addGroup(baseURL!, 110, 1100, 11000, [10]);
     await waitForLeader(baseURL!, 110, 1100);

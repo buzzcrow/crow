@@ -3,7 +3,7 @@
 // Baseline: 0.8s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -48,11 +48,13 @@ test.describe('E2E-46 multi-store reconfig', () => {
 
       await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 461, 10020, 10021);
-    await deployNodeServer(baseURL!, 462, 10022, 10023);
-    await deployNodeServer(baseURL!, 463, 10024, 10025);
-    await deployNodeServer(baseURL!, 464, 10026, 10027);
-    await deployNodeServer(baseURL!, 465, 10028, 10029);
+    await Promise.all([
+      deployNodeServer(baseURL!, 461, freePort(), freePort()),
+      deployNodeServer(baseURL!, 462, freePort(), freePort()),
+      deployNodeServer(baseURL!, 463, freePort(), freePort()),
+      deployNodeServer(baseURL!, 464, freePort(), freePort()),
+      deployNodeServer(baseURL!, 465, freePort(), freePort()),
+    ]);
 
     // Store A: 460, group 4600 on n46a,b,c
     await createStore(baseURL!, 460, [461, 462, 463]);

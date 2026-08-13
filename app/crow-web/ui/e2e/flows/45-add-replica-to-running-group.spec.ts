@@ -3,7 +3,7 @@
 // Baseline: 0.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -41,10 +41,12 @@ test.describe('E2E-45 add replica to running group', () => {
 
       await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 451, 10010, 10011);
-    await deployNodeServer(baseURL!, 452, 10012, 10013);
-    await deployNodeServer(baseURL!, 453, 10014, 10015);
-    await deployNodeServer(baseURL!, 454, 10016, 10017);
+    await Promise.all([
+      deployNodeServer(baseURL!, 451, freePort(), freePort()),
+      deployNodeServer(baseURL!, 452, freePort(), freePort()),
+      deployNodeServer(baseURL!, 453, freePort(), freePort()),
+      deployNodeServer(baseURL!, 454, freePort(), freePort()),
+    ]);
 
     // Store on all 4 nodes, but group initially on 3
     await createStore(baseURL!, 450, [451, 452, 453, 454]);

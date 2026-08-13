@@ -3,7 +3,7 @@
 // Baseline: 1.1s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -41,12 +41,14 @@ test.describe('E2E-38 multi-store isolation', () => {
     await seedRackAndNode(baseURL!, 384, 384);
     await seedRackAndNode(baseURL!, 385, 385);
     await seedRackAndNode(baseURL!, 386, 386);
-    await deployNodeServer(baseURL!, 381, 9938, 9939);
-    await deployNodeServer(baseURL!, 382, 9940, 9941);
-    await deployNodeServer(baseURL!, 383, 9942, 9943);
-    await deployNodeServer(baseURL!, 384, 9944, 9945);
-    await deployNodeServer(baseURL!, 385, 9946, 9947);
-    await deployNodeServer(baseURL!, 386, 9948, 9949);
+    await Promise.all([
+      deployNodeServer(baseURL!, 381, freePort(), freePort()),
+      deployNodeServer(baseURL!, 382, freePort(), freePort()),
+      deployNodeServer(baseURL!, 383, freePort(), freePort()),
+      deployNodeServer(baseURL!, 384, freePort(), freePort()),
+      deployNodeServer(baseURL!, 385, freePort(), freePort()),
+      deployNodeServer(baseURL!, 386, freePort(), freePort()),
+    ]);
 
     // Store A: 380, group 3800 on n38a,b,c. Store B: 381, group 3810 on n38d,e,f.
     await createStore(baseURL!, 380, [381, 382, 383]);

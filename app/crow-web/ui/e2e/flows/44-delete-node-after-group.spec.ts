@@ -3,7 +3,7 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -48,11 +48,13 @@ test.describe('E2E-44 delete node after group', () => {
 
       await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 441, 9990, 9991);
-    await deployNodeServer(baseURL!, 442, 9992, 9993);
-    await deployNodeServer(baseURL!, 443, 9994, 9995);
-    await deployNodeServer(baseURL!, 444, 9996, 9997);
-    await deployNodeServer(baseURL!, 445, 9998, 9999);
+    await Promise.all([
+      deployNodeServer(baseURL!, 441, freePort(), freePort()),
+      deployNodeServer(baseURL!, 442, freePort(), freePort()),
+      deployNodeServer(baseURL!, 443, freePort(), freePort()),
+      deployNodeServer(baseURL!, 444, freePort(), freePort()),
+      deployNodeServer(baseURL!, 445, freePort(), freePort()),
+    ]);
 
     await createStore(baseURL!, 440, [441, 442, 443, 444, 445]);
     await addGroup(baseURL!, 440, 4400, 44000, [441, 442, 443, 444, 445]);

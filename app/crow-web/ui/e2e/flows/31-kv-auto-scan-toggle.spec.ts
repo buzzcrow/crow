@@ -3,7 +3,7 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.goto('/');
@@ -28,7 +28,7 @@ test.describe('E2E-31 KV auto-scan toggle', () => {
 
   test('auto-scan off does not refresh, on does', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 31, 31);
-    await deployNodeServer(baseURL!, 31, 9931, 9941);
+    await deployNodeServer(baseURL!, 31, freePort(), freePort());
     await createStore(baseURL!, 310, [31]);
     await addGroup(baseURL!, 310, 3100, 31000, [31]);
     await waitForLeader(baseURL!, 310, 3100);

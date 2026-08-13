@@ -11,6 +11,7 @@ import {
   createRack,
   createStore,
   deployNodeServer,
+  freePort,
   stopNodeServer,
 } from '../fixtures/consoleSetup';
 
@@ -29,8 +30,10 @@ test.describe('E2E-21 physical node inspect', () => {
     await createRack(baseURL!, { id: 26, name: 'Rack TwentySix' });
     await createNode(baseURL!, { id: 261, rack_id: 26 });
     await createNode(baseURL!, { id: 262, rack_id: 26 });
-    await deployNodeServer(baseURL!, 261, 9980, 9990);
-    await deployNodeServer(baseURL!, 262, 9981, 9991);
+    await Promise.all([
+      deployNodeServer(baseURL!, 261, freePort(), freePort()),
+      deployNodeServer(baseURL!, 262, freePort(), freePort()),
+    ]);
     // store 266, then group 2660 / replica 26600 on n26a, then a peer on n26b.
     await createStore(baseURL!, 266, [261]);
     await addGroup(baseURL!, 266, 2660, 26600, [261]);

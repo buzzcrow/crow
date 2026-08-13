@@ -3,7 +3,7 @@
 // Baseline: 0.3s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-36 health pill states', () => {
   test.beforeEach(async ({ baseURL }) => {
@@ -12,7 +12,7 @@ test.describe('E2E-36 health pill states', () => {
 
   test('health pill shows Unknown initially and Healthy after group creation', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 36, 36);
-    await deployNodeServer(baseURL!, 36, 9936, 9946);
+    await deployNodeServer(baseURL!, 36, freePort(), freePort());
 
     try {
       await page.goto('/');

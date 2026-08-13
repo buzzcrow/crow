@@ -3,22 +3,24 @@
 // Baseline: 0.8s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, addGroup, addReplica, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, addGroup, addReplica, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, freePort } from '../fixtures/consoleSetup';
 
 test.describe('E2E-19 large cluster leader monitor', () => {
   test('creates multi-rack cluster with one store and multiple groups, monitors leader election', async ({ page, baseURL }) => {
-    test.setTimeout(60_000);
+    test.setTimeout(30_000);
     // Setup: 3 racks, 3 nodes, 3 deployed servers.
     const racks = [
-      { rack: 191, node: 191, mgmtPort: 9935, grpcPort: 9945 },
-      { rack: 192, node: 192, mgmtPort: 9936, grpcPort: 9946 },
-      { rack: 193, node: 193, mgmtPort: 9937, grpcPort: 9947 },
+      { rack: 191, node: 191, mgmtPort: freePort(), grpcPort: freePort() },
+      { rack: 192, node: 192, mgmtPort: freePort(), grpcPort: freePort() },
+      { rack: 193, node: 193, mgmtPort: freePort(), grpcPort: freePort() },
     ];
 
     for (const r of racks) {
       await seedRackAndNode(baseURL!, r.rack, r.node);
-      await deployNodeServer(baseURL!, r.node, r.mgmtPort, r.grpcPort);
     }
+    await Promise.all(
+      racks.map((r) => deployNodeServer(baseURL!, r.node, r.mgmtPort, r.grpcPort)),
+    );
 
     // Bootstrap store 199 with group 1990 (replica 19900) on n19a only.
     // http_add_store reuses the same replica_id across nodes and does not
@@ -68,7 +70,7 @@ test.describe('E2E-19 large cluster leader monitor', () => {
           }
         }
         return leaders.size;
-      }, { timeout: 30_000, intervals: [200] }).toBe(groups.length);
+      }, { timeout: 10_000, intervals: [200] }).toBe(groups.length);
 
       // Assert every group has elected exactly one leader.
       for (const gid of groups) {

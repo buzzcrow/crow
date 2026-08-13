@@ -3,7 +3,7 @@
 // Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.goto('/');
@@ -28,7 +28,7 @@ test.describe('E2E-32 inspector activity tab', () => {
 
   test('mutation appears in activity log and clear works', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 32, 32);
-    await deployNodeServer(baseURL!, 32, 9932, 9942);
+    await deployNodeServer(baseURL!, 32, freePort(), freePort());
     await createStore(baseURL!, 320, [32]);
     await addGroup(baseURL!, 320, 3200, 32000, [32]);
     await waitForLeader(baseURL!, 320, 3200);

@@ -3,12 +3,12 @@
 // Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 test.describe('E2E-09 KV put/get', () => {
   test('puts and gets a key through the real KV UI', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 9, 9);
-    await deployNodeServer(baseURL!, 9, 9919, 9929);
+    await deployNodeServer(baseURL!, 9, freePort(), freePort());
     await createStore(baseURL!, 99, [9]);
     await addGroup(baseURL!, 99, 990, 9900, [9]);
     await waitForLeader(baseURL!, 99, 990);

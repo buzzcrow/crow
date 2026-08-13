@@ -3,7 +3,7 @@
 // Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -48,9 +48,11 @@ test.describe('E2E-42 stop server keeps group', () => {
 
       await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 421, 9970, 9971);
-    await deployNodeServer(baseURL!, 422, 9972, 9973);
-    await deployNodeServer(baseURL!, 423, 9974, 9975);
+    await Promise.all([
+      deployNodeServer(baseURL!, 421, freePort(), freePort()),
+      deployNodeServer(baseURL!, 422, freePort(), freePort()),
+      deployNodeServer(baseURL!, 423, freePort(), freePort()),
+    ]);
 
     await createStore(baseURL!, 420, [421, 422, 423]);
     await addGroup(baseURL!, 420, 4200, 42000, [421, 422, 423]);

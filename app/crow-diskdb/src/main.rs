@@ -206,7 +206,8 @@ async fn main() {
         .http_listen_addr
         .parse()
         .expect("valid http_listen_addr");
-    let http_stop = Arc::clone(&stop);
+    let http_stop = Arc::new(tokio::sync::Notify::new());
+    let http_stop_signal = Arc::clone(&http_stop);
     let http_container = Arc::clone(&container);
     let http_handle = tokio::spawn(async move {
         let app = health::router(http_container);
@@ -216,7 +217,7 @@ async fn main() {
             .expect("bind http_listen_addr");
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                http_stop.notified().await;
+                http_stop_signal.notified().await;
                 info!("HTTP health server shutting down");
             })
             .await
@@ -230,6 +231,7 @@ async fn main() {
             let _ = tokio::signal::ctrl_c().await;
             info!("received shutdown signal");
             stop.notify_waiters();
+            http_stop.notify_waiters();
         })
         .await;
 

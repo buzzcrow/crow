@@ -20,14 +20,14 @@ Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 387 | 7.6 s | 21.0 s |
-| `test-tree-ffi` | 30 | 7.8 s | 78.9 s |
-| `test-kv-core` | 554 | 76.1 s | 60.8 s |
-| `test-kv-server` | 69 | 143.9 s | 66.8 s |
-| `test-diskdb` | 48 | 70.5 s | — |
-| `test-console-cli` | 13 | 95.0 s | 67.5 s |
-| `test-console-server` | 53 | 199.6 s | 53.7 s |
-| `test-console-ui` | 80 | 179.7 s | 108.5 s |
+| `test-tree-ct` | 387 | 14.7 s | 21.0 s |
+| `test-tree-ffi` | 30 | 15.6 s | 78.9 s |
+| `test-kv-core` | 555 | 17.6 s | 60.8 s |
+| `test-kv-server` | 69 | 44.6 s | 66.8 s |
+| `test-diskdb` | 75 | 22.3 s | — |
+| `test-console-cli` | 13 | 49.5 s | 67.5 s |
+| `test-console-server` | 53 | 46.7 s | 53.7 s |
+| `test-console-ui` | 80 | 160.6 s | 108.5 s |
 
 ---
 

@@ -136,9 +136,33 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     if let Some(threshold) = req.coalesce_drain_threshold {
         cmd.arg("--coalesce-drain-threshold").arg(threshold.to_string());
     }
+}
+
+/// Resolve the `--config` path for a deploy. When `req.config` is set,
+/// it is used verbatim. When unset, a minimal (comment-only) TOML config
+/// is written so the server's required `--config` arg is satisfied; all
+/// config fields are `#[serde(default)]`, so an empty file loads defaults.
+/// In a workspace deploy the file lives at `<dir>/conf/crow_kv_server_config.toml`
+/// (matching the server's default `config_root`); otherwise a unique file
+/// under the system temp dir keyed by `mgmt_port`.
+fn resolve_config_path(req: &DeployRequest, workspace_dir: Option<&std::path::Path>) -> Result<PathBuf> {
     if let Some(config) = &req.config {
-        cmd.arg("--config").arg(config.as_os_str());
+        return Ok(config.clone());
     }
+    let path = match workspace_dir {
+        Some(dir) => {
+            let conf = dir.join("conf");
+            std::fs::create_dir_all(&conf).map_err(Error::Io)?;
+            conf.join("crow_kv_server_config.toml")
+        }
+        None => std::env::temp_dir().join(format!("crow-kv-server-deploy-{}.toml", req.mgmt_port)),
+    };
+    std::fs::write(
+        &path,
+        "# auto-generated minimal config; all fields use defaults\n",
+    )
+    .map_err(Error::Io)?;
+    Ok(path)
 }
 
 async fn deploy_local_in_workspace(
@@ -173,11 +197,15 @@ async fn deploy_local_in_workspace(
         binary.clone()
     };
 
+    let config_path = resolve_config_path(req, workspace_dir)?;
+
     let mgmt_url = format!("http://{}:{}", node.host, req.mgmt_port);
     let grpc_url = format!("http://{}:{}", node.host, req.grpc_port);
 
     let mut cmd = Command::new(&launch_binary);
-    cmd.arg("--management-addr")
+    cmd.arg("--config")
+        .arg(&config_path)
+        .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
         .arg(req.mgmt_port.to_string())
@@ -246,7 +274,7 @@ async fn deploy_local_in_workspace(
     // this function returns. The pid is the user's tracking handle.
     std::mem::forget(child);
 
-    wait_for_ready(&mgmt_url, Duration::from_secs(10)).await?;
+    wait_for_ready(&mgmt_url, Duration::from_secs(3)).await?;
 
     Ok(DeployedServer {
         server_id: req.server_id.clone(),

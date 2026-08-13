@@ -3,7 +3,7 @@
 // Baseline: 3.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createNode, createRack, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, createNode, createRack, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * E2E-25 · Destructive confirms for store / node / rack (Req §3.2, §6).
@@ -16,7 +16,7 @@ import { apiContext, createNode, createRack, createStore, deployNodeServer, seed
 test.describe('E2E-25 root deletes', () => {
   test('confirm-gates store, node, and rack deletion', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 25, 25);
-    await deployNodeServer(baseURL!, 25, 9957, 9967);
+    await deployNodeServer(baseURL!, 25, freePort(), freePort());
     await createStore(baseURL!, 255, [25]);
     // A serverless node (clean to delete) and an empty rack (clean to delete).
     await createNode(baseURL!, { id: 274, rack_id: 25 });

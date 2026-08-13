@@ -3,7 +3,7 @@
 // Baseline: 1.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createRack, createStore, createNode, deployNodeServer, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, createRack, createStore, createNode, deployNodeServer, freePort, stopNodeServer } from '../fixtures/consoleSetup';
 
 function nextNumericId(values: Array<string | number>): string {
   const max = values.reduce<number>((acc, value) => {
@@ -29,9 +29,11 @@ test.describe('E2E-20 UI behaviors', () => {
       createNode(baseURL!, { id: 203, rack_id: 203 }),
       createNode(baseURL!, { id: 204, rack_id: 204 }),
     ]);
-    await deployNodeServer(baseURL!, 201, 9960, 9970);
-    await deployNodeServer(baseURL!, 202, 9961, 9971);
-    await deployNodeServer(baseURL!, 203, 9962, 9972);
+    await Promise.all([
+      deployNodeServer(baseURL!, 201, freePort(), freePort()),
+      deployNodeServer(baseURL!, 202, freePort(), freePort()),
+      deployNodeServer(baseURL!, 203, freePort(), freePort()),
+    ]);
     await createStore(baseURL!, 207, [201, 202]);
 
     const api = await apiContext(baseURL!);

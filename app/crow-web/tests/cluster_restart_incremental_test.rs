@@ -216,7 +216,7 @@ async fn create_group(
 }
 
 async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str, value: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let (status, body) = json_post(
             client,
@@ -232,13 +232,13 @@ async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u
             assert_eq!(body["ok"], true);
         }
         // Leader likely changed mid-operation; wait for a stable leader and retry.
-        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
+        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(3)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
 async fn kv_delete(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let (status, body) = json_post(
             client,
@@ -257,7 +257,7 @@ async fn kv_delete(client: &reqwest::Client, base: &str, store_id: u64, group_id
             );
             assert_eq!(body["ok"], true);
         }
-        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
+        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(3)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -548,9 +548,17 @@ async fn setup_cluster(tag: &str, rack_nodes: &[(u64, u64)], bin: &Path, electio
     let mut node_ids = Vec::new();
     for (node_id, rack_id) in rack_nodes {
         create_node(&client, &base, *node_id, *rack_id).await;
-        let pid = deploy_server(&client, &base, *node_id, bin, election_profile).await;
-        guard.pids.insert(node_id.to_string(), pid);
         node_ids.push(*node_id);
+    }
+    // Deploy all nodes concurrently — each deploy polls /health until
+    // ready, so parallel deploy overlaps the readiness waits.
+    let deploy_futs: Vec<_> = node_ids
+        .iter()
+        .map(|&nid| deploy_server(&client, &base, nid, bin, election_profile))
+        .collect();
+    let pids = futures::future::join_all(deploy_futs).await;
+    for (nid, pid) in node_ids.iter().zip(pids) {
+        guard.pids.insert(nid.to_string(), pid);
     }
 
     Cluster {
@@ -568,15 +576,23 @@ impl Cluster {
     }
 
     async fn stop_all(&self) {
-        for node_id in &self.node_ids {
-            stop_server(&self.client, &self.base, *node_id).await;
-        }
+        let futs: Vec<_> = self
+            .node_ids
+            .iter()
+            .map(|&nid| stop_server(&self.client, &self.base, nid))
+            .collect();
+        futures::future::join_all(futs).await;
     }
 
     async fn restart_all(&mut self) {
-        for node_id in &self.node_ids.clone() {
-            let pid = restart_server(&self.client, &self.base, *node_id).await;
-            self.guard.pids.insert(node_id.to_string(), pid);
+        let ids = self.node_ids.clone();
+        let futs: Vec<_> = ids
+            .iter()
+            .map(|&nid| restart_server(&self.client, &self.base, nid))
+            .collect();
+        let pids = futures::future::join_all(futs).await;
+        for (nid, pid) in ids.iter().zip(pids) {
+            self.guard.pids.insert(nid.to_string(), pid);
         }
     }
 
@@ -702,7 +718,7 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             g.nodes.len(),
-            Duration::from_secs(30),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -771,7 +787,7 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             &expected,
-            Duration::from_secs(15),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -812,7 +828,7 @@ async fn restart_recovery(
                 &cluster.base,
                 g.store_id,
                 store_group_count[&g.store_id],
-                Duration::from_secs(45),
+                Duration::from_secs(3),
             )
             .await;
         }
@@ -822,7 +838,7 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             g.nodes.len(),
-            Duration::from_secs(45),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -835,7 +851,7 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             g.nodes.len(),
-            Duration::from_secs(30),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -866,7 +882,7 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             &expected,
-            Duration::from_secs(30),
+            Duration::from_secs(3),
         )
         .await;
     }

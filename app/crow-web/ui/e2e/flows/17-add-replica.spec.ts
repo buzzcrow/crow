@@ -3,15 +3,17 @@
 // Baseline: 0.8s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-17 add replica', () => {
   test('adds a replica to an existing group through the UI', async ({ page, baseURL }) => {
     // Setup: two racks/nodes with deployed servers.
     await seedRackAndNode(baseURL!, 171, 171);
     await seedRackAndNode(baseURL!, 172, 172);
-    await deployNodeServer(baseURL!, 171, 9948, 9958);
-    await deployNodeServer(baseURL!, 172, 9949, 9959);
+    await Promise.all([
+      deployNodeServer(baseURL!, 171, freePort(), freePort()),
+      deployNodeServer(baseURL!, 172, freePort(), freePort()),
+    ]);
 
     // Seed a store with an initial group on n17a.
     await createStore(baseURL!, 177, [171]);

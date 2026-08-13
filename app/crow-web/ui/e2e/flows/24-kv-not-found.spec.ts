@@ -3,7 +3,7 @@
 // Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 /**
  * E2E-24 · KV get not-found + error surfacing (Req §3.4, §7).
@@ -18,7 +18,7 @@ import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServe
 test.describe('E2E-24 KV not-found', () => {
   test('renders a graceful not-found for a missing key', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 24, 24);
-    await deployNodeServer(baseURL!, 24, 9956, 9966);
+    await deployNodeServer(baseURL!, 24, freePort(), freePort());
     await createStore(baseURL!, 244, [24]);
     await addGroup(baseURL!, 244, 2440, 24400, [24]);
     await waitForLeader(baseURL!, 244, 2440);

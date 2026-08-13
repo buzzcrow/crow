@@ -3,7 +3,7 @@
 // Baseline: 1.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -48,9 +48,11 @@ test.describe('E2E-43 stop leader reelection', () => {
 
       await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 431, 9980, 9981);
-    await deployNodeServer(baseURL!, 432, 9982, 9983);
-    await deployNodeServer(baseURL!, 433, 9984, 9985);
+    await Promise.all([
+      deployNodeServer(baseURL!, 431, freePort(), freePort()),
+      deployNodeServer(baseURL!, 432, freePort(), freePort()),
+      deployNodeServer(baseURL!, 433, freePort(), freePort()),
+    ]);
 
     await createStore(baseURL!, 430, [431, 432, 433]);
     await addGroup(baseURL!, 430, 4300, 43000, [431, 432, 433]);

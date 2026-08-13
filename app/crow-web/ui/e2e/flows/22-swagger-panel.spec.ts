@@ -3,7 +3,7 @@
 // Baseline: 0.9s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { createNode, createRack, deployNodeServer, stopNodeServer } from '../fixtures/consoleSetup';
+import { createNode, createRack, deployNodeServer, freePort, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * E2E-22 · Embedded Swagger panel (Req §3.5).
@@ -18,8 +18,10 @@ test.describe('E2E-22 swagger panel', () => {
     await createRack(baseURL!, { id: 22, name: 'Rack TwentyTwo' });
     await createNode(baseURL!, { id: 221, rack_id: 22 });
     await createNode(baseURL!, { id: 222, rack_id: 22 });
-    await deployNodeServer(baseURL!, 221, 9953, 9963);
-    await deployNodeServer(baseURL!, 222, 9954, 9964);
+    await Promise.all([
+      deployNodeServer(baseURL!, 221, freePort(), freePort()),
+      deployNodeServer(baseURL!, 222, freePort(), freePort()),
+    ]);
 
     try {
       await page.goto('/');

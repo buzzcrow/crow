@@ -821,6 +821,7 @@ dependencies = [
  "crow-kv",
  "crow-kv-client",
  "crow-protocol",
+ "futures",
  "hex",
  "reqwest",
  "serde",

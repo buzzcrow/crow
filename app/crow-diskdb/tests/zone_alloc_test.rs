@@ -166,29 +166,39 @@ fn zone_concurrent_allocate_no_double_alloc() {
 #[test]
 fn zone_cas_retry_counter_increments_under_contention() {
     use std::sync::Barrier;
+    const THREADS: usize = 16;
+    const ROUNDS: u32 = 50;
     // Small zone, many threads with a barrier — forces CAS contention
-    // on the same word.
+    // on the same word. The experiment is repeated in rounds (allocate
+    // all, free all) because OS scheduling may serialize threads on a
+    // lightly loaded machine; across enough rounds the probability of
+    // zero contention vanishes.
     let zone = Arc::new(make_zone(64));
-    let barrier = Arc::new(Barrier::new(16));
-    let mut handles = Vec::new();
-    for _ in 0..16 {
-        let z = zone.clone();
-        let b = barrier.clone();
-        handles.push(std::thread::spawn(move || {
-            b.wait();
-            while z.allocate(1, CAS_RETRY).is_some() {}
-        }));
+    for _ in 0..ROUNDS {
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let z = zone.clone();
+            let b = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                while z.allocate(1, CAS_RETRY).is_some() {}
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+        if zone.cas_retry_count.load(Ordering::Relaxed) > 0 {
+            return; // contention observed
+        }
+        // Free all units for the next round.
+        for i in 0u64..64 {
+            zone.free(i, 1);
+        }
     }
-    for h in handles {
-        let _ = h.join();
-    }
-    // Under contention with a barrier, CAS retries should have
-    // occurred. (Not strictly guaranteed on all schedulers, but the
-    // barrier makes it very likely.)
-    let retries = zone.cas_retry_count.load(Ordering::Relaxed);
-    assert!(
-        retries > 0,
-        "expected CAS retries under contention, got {retries}"
+    panic!(
+        "expected CAS retries under contention after {ROUNDS} rounds, got {}",
+        zone.cas_retry_count.load(Ordering::Relaxed)
     );
 }
 

@@ -3,12 +3,12 @@
 // Baseline: 0.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-06 cross jump', () => {
   test('jumps from logical replica details to the hosting physical node', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 6, 6);
-    await deployNodeServer(baseURL!, 6, 9916, 9926);
+    await deployNodeServer(baseURL!, 6, freePort(), freePort());
     await createStore(baseURL!, 66, [6]);
     await addGroup(baseURL!, 66, 660, 6600, [6]);
 
@@ -34,7 +34,7 @@ test.describe('E2E-06 cross jump', () => {
 
   test('jumps from physical node details to the hosting logical store', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 62, 62);
-    await deployNodeServer(baseURL!, 62, 9917, 9927);
+    await deployNodeServer(baseURL!, 62, freePort(), freePort());
     await createStore(baseURL!, 67, [62]);
     await addGroup(baseURL!, 67, 670, 6700, [62]);
 

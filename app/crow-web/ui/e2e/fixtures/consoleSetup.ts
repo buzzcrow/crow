@@ -10,6 +10,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_SERVER_BINARY =
   process.env.CROW_KV_SERVER_BINARY ?? resolve(__dirname, '../../../../../target/debug/crow-kv-server');
 
+// Monotonic port counter for E2E tests. Tests run sequentially (workers: 1),
+// so a counter is safe — each test cleans up its own servers before the
+// next test starts. Starts high to avoid clashing with OS-assigned ports.
+let nextPort = 30000 + (process.pid % 10000);
+export function freePort(): number {
+  return nextPort++;
+}
+
 export interface TestRack {
   id: number;
   name?: string;
@@ -125,7 +133,7 @@ export async function addReplica(baseURL: string, storeId: number, groupId: numb
  * creates the store; a group must be added separately (`addGroup`) and then
  * needs a moment to elect before KV ops can resolve a leader.
  */
-export async function waitForLeader(baseURL: string, storeId: number, groupId: number, timeoutMs = 10_000) {
+export async function waitForLeader(baseURL: string, storeId: number, groupId: number, timeoutMs = 3_000) {
   const api = await apiContext(baseURL);
   try {
     const start = Date.now();
@@ -246,15 +254,21 @@ export async function setupCluster(baseURL: string, topo: TopologyDescriptor): P
   const racks: number[] = [];
   const nodes: number[] = [];
 
+  // Create racks + nodes (sequential — cheap API calls).
   for (let i = 0; i < topo.nodeCount; i++) {
     const rackId = topo.rackBase + i;
     const nodeId = topo.nodeBase + i;
     await createRack(baseURL, { id: rackId, name: `rack-${rackId}` });
     await createNode(baseURL, { id: nodeId, rack_id: rackId });
-    await deployNodeServer(baseURL, nodeId, topo.portBase + i * 2, topo.portBase + i * 2 + 1);
     racks.push(rackId);
     nodes.push(nodeId);
   }
+
+  // Deploy all nodes concurrently — each deploy polls /health until
+  // ready, so parallel deploy overlaps the readiness waits.
+  await Promise.all(
+    nodes.map((nodeId) => deployNodeServer(baseURL, nodeId, freePort(), freePort())),
+  );
 
   const stores: number[] = [];
   const groups: { storeId: number; groupId: number }[] = [];

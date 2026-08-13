@@ -3,7 +3,7 @@
 // Baseline: 0.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-33 inspector cross-jump node to store', () => {
   test.beforeEach(async ({ baseURL }) => {
@@ -12,7 +12,7 @@ test.describe('E2E-33 inspector cross-jump node to store', () => {
 
   test('physical node with store shows cross-jump to logical store', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 33, 33);
-    await deployNodeServer(baseURL!, 33, 9933, 9943);
+    await deployNodeServer(baseURL!, 33, freePort(), freePort());
     await createStore(baseURL!, 330, [33]);
     await addGroup(baseURL!, 330, 3300, 33000, [33]);
     await waitForLeader(baseURL!, 330, 3300);

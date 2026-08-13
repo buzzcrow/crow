@@ -12,6 +12,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,6 +78,27 @@ pub trait BackgroundTask: Send + Sync + 'static {
 pub struct BgRunner {
     tasks: Vec<Arc<dyn BackgroundTask>>,
     stop: Arc<tokio::sync::Notify>,
+    stopped: Arc<AtomicBool>,
+}
+
+/// Handle used to signal shutdown to all `BgRunner` tasks. Replaces the
+/// bare `Arc<Notify>` so the stop signal is race-free: `notify_waiters()`
+/// sets an `AtomicBool` (the source of truth) before waking sleepers, so a
+/// notification that arrives while a task is mid-cycle (not polling the
+/// `Notify`) is not lost — the task sees the flag on the next loop.
+#[derive(Clone)]
+pub struct StopHandle {
+    notify: Arc<tokio::sync::Notify>,
+    flag: Arc<AtomicBool>,
+}
+
+impl StopHandle {
+    /// Signal all tasks to stop. Sets the stop flag (source of truth)
+    /// then wakes any task currently parked on the `Notify`.
+    pub fn notify_waiters(&self) {
+        self.flag.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
 }
 
 impl BgRunner {
@@ -85,6 +107,7 @@ impl BgRunner {
         Self {
             tasks: Vec::new(),
             stop: Arc::new(tokio::sync::Notify::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -95,21 +118,26 @@ impl BgRunner {
         self
     }
 
-    /// Stop signal handle — pass to `Notify` to shut down all tasks.
+    /// Stop signal handle — call `notify_waiters()` to shut down all tasks.
     #[must_use]
-    pub fn stop_handle(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.stop)
+    pub fn stop_handle(&self) -> StopHandle {
+        StopHandle {
+            notify: Arc::clone(&self.stop),
+            flag: Arc::clone(&self.stopped),
+        }
     }
 
     /// Spawn all registered tasks. Returns join handles.
     pub fn spawn(self, ctx: &Arc<BgCtx>) -> Vec<tokio::task::JoinHandle<()>> {
         let stop = Arc::clone(&self.stop);
+        let stopped = Arc::clone(&self.stopped);
         self.tasks
             .into_iter()
             .map(|task| {
                 let ctx = Arc::clone(ctx);
                 let stop = Arc::clone(&stop);
-                spawn_task(task, ctx, stop)
+                let stopped = Arc::clone(&stopped);
+                spawn_task(task, ctx, stop, stopped)
             })
             .collect()
     }
@@ -125,18 +153,26 @@ fn spawn_task(
     task: Arc<dyn BackgroundTask>,
     ctx: Arc<BgCtx>,
     stop: Arc<tokio::sync::Notify>,
+    stopped: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     let name = task.name();
     tokio::spawn(async move {
         info!(task = name, "background task started");
         loop {
+            // Check the stop flag first — covers the race where
+            // notify_waiters() fired during the previous run_cycle
+            // (when this task was not polling stop.notified()).
+            if stopped.load(Ordering::Acquire) {
+                info!(task = name, "background task stopped");
+                return;
+            }
             // Wait for trigger or stop.
-            let stopped = tokio::select! {
+            let stopped_now = tokio::select! {
                 biased;
                 () = stop.notified() => true,
                 () = wait_trigger(&task) => false,
             };
-            if stopped {
+            if stopped_now || stopped.load(Ordering::Acquire) {
                 info!(task = name, "background task stopped");
                 return;
             }

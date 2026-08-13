@@ -3,7 +3,7 @@
 // Baseline: 0.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * E2E-23 · Embedding isolation (Req §4, design §8).
@@ -18,7 +18,7 @@ import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServe
 test.describe('E2E-23 embedding isolation', () => {
   test('honors apiPrefix, readonly, and module opt-out', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 23, 23);
-    await deployNodeServer(baseURL!, 23, 9955, 9965);
+    await deployNodeServer(baseURL!, 23, freePort(), freePort());
     await createStore(baseURL!, 233, [23]);
     await addGroup(baseURL!, 233, 2330, 23300, [23]);
 

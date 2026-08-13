@@ -3,7 +3,7 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -39,11 +39,13 @@ test.describe('E2E-39 subset group operations', () => {
 
       await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 391, 9950, 9951);
-    await deployNodeServer(baseURL!, 392, 9952, 9953);
-    await deployNodeServer(baseURL!, 393, 9954, 9955);
-    await deployNodeServer(baseURL!, 394, 9956, 9957);
-    await deployNodeServer(baseURL!, 395, 9958, 9959);
+    await Promise.all([
+      deployNodeServer(baseURL!, 391, freePort(), freePort()),
+      deployNodeServer(baseURL!, 392, freePort(), freePort()),
+      deployNodeServer(baseURL!, 393, freePort(), freePort()),
+      deployNodeServer(baseURL!, 394, freePort(), freePort()),
+      deployNodeServer(baseURL!, 395, freePort(), freePort()),
+    ]);
 
     // Single store, two groups on different node subsets.
     await createStore(baseURL!, 390, [391, 392, 393, 394, 395]);
