@@ -467,7 +467,9 @@ async fn recovery_strategy2_journal_replay() {
         .recover_disk_group(DG_ID, NODE_ID, RACK_ID, bind2, &disks, 4)
         .await;
 
-    // 5. Verify busy segments' bits are set, freed segments' bits are clear.
+    // 5. Verify busy segments' bits are set. With Option B (persist-
+    // only recovery), freed segments' bits are ALSO set (conservative
+    // over-estimate — compaction is the sole bit-clearer).
     for seg in &remaining_segments {
         let disk = recovered_dg
             .disks
@@ -500,12 +502,13 @@ async fn recovery_strategy2_journal_replay() {
         #[allow(clippy::cast_possible_truncation)]
         let bit = seg.unit_offset as u32;
         assert!(
-            !zone.usage_bits.is_set(bit),
-            "bit {bit} should be clear after strategy 2 recovery (freed segment)"
+            zone.usage_bits.is_set(bit),
+            "bit {bit} should be set after strategy 2 recovery (Option B: freed bits stay set until compaction)"
         );
     }
 
-    // 6. Total used = 2 (2 remaining busy blocks of 1 unit each).
+    // 6. Total used = 3 (conservative over-estimate: 2 busy + 1 freed-
+    // but-not-compacted). Compaction will correct this.
     let total_used: u64 = recovered_dg
         .disks
         .read()
@@ -520,7 +523,60 @@ async fn recovery_strategy2_journal_replay() {
                 .sum::<u64>()
         })
         .sum();
-    assert_eq!(total_used, 2, "total used after strategy 2 recovery should be 2");
+    assert_eq!(
+        total_used, 3,
+        "total used after strategy 2 recovery should be 3 (conservative over-estimate)"
+    );
+
+    // 7. Run compaction on the zone that has the freed segment — this
+    // is the common compaction flow that clears the freed bit.
+    let freed_seg = &segments[0];
+    let freed_disk_id = freed_seg.disk_id.unwrap();
+    let freed_zone_idx = freed_seg.zone_index;
+    let freed_disk = recovered_dg
+        .disks
+        .read()
+        .unwrap()
+        .iter()
+        .find(|d| d.disk_id == freed_disk_id)
+        .cloned()
+        .expect("freed disk exists");
+    let freed_zone = {
+        let zones = freed_disk.zones.read().unwrap();
+        Arc::clone(&zones[freed_zone_idx as usize])
+    };
+    let compaction_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let engine = CompactionEngine::new(Arc::new(compaction_kv), CompactionConfig::default());
+    engine
+        .compact_zone_now(bind2, freed_disk_id, &freed_zone, freed_zone_idx)
+        .await
+        .expect("compaction should succeed");
+
+    // 8. After compaction, the freed bit is clear and used_count = 2.
+    #[allow(clippy::cast_possible_truncation)]
+    let freed_bit = freed_seg.unit_offset as u32;
+    assert!(
+        !freed_zone.usage_bits.is_set(freed_bit),
+        "freed bit should be clear after compaction"
+    );
+    let total_used_after_compaction: u64 = recovered_dg
+        .disks
+        .read()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            d.zones
+                .read()
+                .unwrap()
+                .iter()
+                .map(|z| u64::from(z.used_count.load(std::sync::atomic::Ordering::Acquire)))
+                .sum::<u64>()
+        })
+        .sum();
+    assert_eq!(
+        total_used_after_compaction, 2,
+        "total used after compaction should be 2 (freed bit cleared)"
+    );
 
     eprintln!("recovery_strategy2_journal_replay: ALL CHECKS PASSED");
 }
@@ -617,7 +673,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     let compaction_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
     let compaction = CompactionEngine::new(compaction_kv, CompactionConfig::default());
     compaction
-        .compact_zone(bind, disk_id, &zone, zone_idx)
+        .compact_zone_now(bind, disk_id, &zone, zone_idx)
         .await
         .expect("compaction should succeed");
 

@@ -96,7 +96,7 @@ before the design evolved to the persist-only free model and the
   (recovery sets it; fresh zones from `disk_add_init` need compaction
   first or are empty → ready). Files:
   `app/crow-diskdb/src/model/disk.rs`.
-- [~] **Add preparatory thread**: a background task that pre-compacts
+- [x] **Add preparatory thread**: a background task that pre-compacts
   the next `zone_rotate_count` zones in the rotation order (starting
   from `pos_v_zone + zone_rotate_count`, wrapping). For each zone that
   is not ready and not active: acquire zone lock, compact, mark ready.
@@ -175,7 +175,7 @@ before the design evolved to the persist-only free model and the
   compaction loop must skip zones in the disk's `active_zone_context`
   (I4 — no concurrent allocate). Files:
   `app/crow-diskdb/src/recovery/compaction.rs`.
-- [~] **Wire preparatory thread**: spawn the preparatory thread as part
+- [x] **Wire preparatory thread**: spawn the preparatory thread as part
   of the compaction engine's background task. It pre-compacts the next
   batch of zones and marks them `compacted_ready`. Files:
   `app/crow-diskdb/src/recovery/compaction.rs`.
@@ -195,7 +195,7 @@ before the design evolved to the persist-only free model and the
   on the recovered zone (the bitmap is accurate from records). Files:
   `app/crow-diskdb/src/recovery/journal_replay.rs`,
   `app/crow-diskdb/src/recovery/full_scan.rs`.
-- [~] **Initialize timestamp source during `recover_disk_group`**: after
+- [~] **Initialize timestamp source during `recover_disk_group` (stub exists, not yet called from recovery engine)**: after
   all zones in a disk-group are recovered, initialize the
   `DdbDiskGroup.free_ts_source` to `max(now(), max(freed_ts of all
   scanned free records) + 1)`. This requires collecting the max
@@ -209,7 +209,7 @@ before the design evolved to the persist-only free model and the
 
 ## Server Wiring
 
-- [~] **Wire preparatory thread startup/shutdown**: the server startup
+- [x] **Wire preparatory thread startup/shutdown**: the server startup
   path must spawn the preparatory thread (owned by `CompactionEngine`)
   after recovery completes. Shutdown must cancel it. Files:
   `app/crow-diskdb/src/service.rs` or `app/crow-diskdb/src/main.rs`.

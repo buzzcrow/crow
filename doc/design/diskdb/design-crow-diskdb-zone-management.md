@@ -685,30 +685,30 @@ and returns the reconstructed `Node`.
    prefixes. Merge the two op lists by slot. `JournalScan` supports
    slot-range, key-prefix, and transparent pagination; a
    `KV_ERROR_JOURNAL_SCAN_GC_GAP` response falls back to strategy 1.
-4. Apply each op in slot order: `Put BusyBlockKey` sets the bit range
-   using `BusyBlockValue.unit_count`; `Delete BusyBlockKey` clears the
-   bit range, reading `unit_count` from the matching `FreeBlockValue`
-   in the same batch when available; `Put`/`Delete FreeBlockKey` are
-   no-ops for the bitmap; a newer `ZoneValue` written during replay
-   restarts from that snapshot.
+4. Apply only `Put BusyBlockKey` ops in slot order: each sets the bit
+   range using `BusyBlockValue.unit_count`. `Delete BusyBlockKey` ops
+   (frees) are **ignored** — the bitmap stays as a conservative over-
+   estimate (persist-only recovery, consistent with the free path
+   during normal operation). `Put`/`Delete FreeBlockKey` are no-ops for
+   the bitmap. The free records on disk are the source of truth for
+   what's freed; the common compaction flow (§5) will `range_clear`
+   their bits naturally. This eliminates the double-free risk that
+   would arise if recovery cleared bits for frees while the free
+   records still exist on disk.
 5. Return the rebuilt `Zone`, resetting the rotating cursor. Mark the
-   zone as `compacted_ready = true` (it was just recovered from records,
-   so its bitmap is accurate). **Advance `compact_ts`** to
-   `max(ZoneValue.compact_ts, max(freed_ts of all replayed free
-   records))` (or 0 if no snapshot and no replayed free records). This
-   is critical: replay clears bits for `Delete BusyBlockKey` ops (frees
-   after the snapshot), so the bitmap is accurate — but the free
-   records still exist on disk. Without advancing `compact_ts`, the
-   next compaction would classify those free records as "new"
-   (`freed_ts > snapshot.compact_ts`) and `range_clear` their bits. If a
-   block was freed then re-allocated during replay, the bit is SET
-   (re-allocated) and `range_clear` would corrupt the live allocation
-   (double-free). Advancing `compact_ts` makes the next compaction drop
-   those records as stale (`freed_ts <= compact_ts`) — safe. The
-   per-disk-group monotonic timestamp source is initialized to
-   `max(now(), max(freed_ts of all scanned free records) + 1)` after
-   all zones in the disk-group are recovered (§8 Monotonic timestamp
-   source).
+   zone as `compacted_ready = true` (it was just recovered from
+   records). `compact_ts` stays at `snapshot.compact_ts` — no
+   advancement needed. The free records on disk have `freed_ts >
+   snapshot.compact_ts` (they were written after the snapshot), so the
+   next compaction will classify them as "new" and `range_clear` their
+   bits — correct, since those blocks ARE free (no `BusyBlockKey` on
+   disk). Count the net free records (Put FreeBlockKey = +1, Delete
+   FreeBlockKey = -1 from re-allocate) to initialize
+   `uncompacted_free_record_count` so the compaction engine knows the
+   backlog. The per-disk-group monotonic timestamp source is
+   initialized to `max(now(), max(freed_ts of all scanned free
+   records) + 1)` after all zones in the disk-group are recovered
+   (§8 Monotonic timestamp source).
 
 `rebuild_zone_bitmap_full_scan` (strategy 1) is the on-demand fallback:
 
@@ -942,6 +942,15 @@ with compaction via the zone-level lock (§8):
 - **I9 — Zone lock not held across `.await`**: the zone-level lock
   protects only in-memory bitmap mutation. KV reads happen before
   acquiring the lock; KV writes happen after releasing it.
+- **I10 — Persist-only recovery**: recovery (strategy 2) only applies
+  `Put BusyBlockKey` ops to the bitmap (sets bits for allocations).
+  `Delete BusyBlockKey` ops (frees) are ignored — the bitmap is a
+  conservative over-estimate after recovery, same as during normal
+  operation. The free records on disk are the source of truth; the
+  common compaction flow clears the freed bits. This eliminates the
+  double-free risk that would arise if recovery cleared bits for frees
+  while the free records still exist on disk (no `compact_ts`
+  advancement needed).
 
 ## 11. Tunables and Defaults
 
