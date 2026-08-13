@@ -52,7 +52,7 @@ References (other projects, not ports):
   - [Node / disk-group / disk HwStatus](#node--disk-group--disk-hwstatus)
   - [Zone allocation state (derived, not a CAS state machine)](#zone-allocation-state-derived-not-a-cas-state-machine)
 - [10. Disk Status Management](#10-disk-status-management)
-- [11. Space Metrics](#11-space-metrics)
+- [11. Space Metrics](#11-space-metrics) — detailed design in [`design-crow-diskdb-space-metrics.md`](design-crow-diskdb-space-metrics.md)
 - [12. Background Scanner](#12-background-scanner)
 - [13. Crate Layout](#13-crate-layout)
 - [14. Concurrency Model](#14-concurrency-model)
@@ -924,7 +924,14 @@ interval. v1 ships with fixed-interval polling.
 
 ## 11. Space Metrics
 
-diskdb's third major component. Metrics must show **internal status**
+diskdb's third major component. Detailed design — usage accessors,
+`QueryCapacityStats` handler, per-disk counters, keepalive piggyback,
+recalc verifier, reporting loop, proto, kv-client aggregation, and the
+full `crow-diskdb-client` library — lives in
+[`design-crow-diskdb-space-metrics.md`](design-crow-diskdb-space-metrics.md).
+This section carries the architecture and the metric categories.
+
+Metrics must show **internal status**
 (gauges reflecting current state) and a **latency hierarchy** (where
 time is spent, broken down by layer) so operators can diagnose both
 capacity problems and performance bottlenecks.

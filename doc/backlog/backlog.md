@@ -15,11 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R74](R74-diskdb-space-metrics-query.md)** — diskdb space metrics +
-  query API — Area: diskdb — Implement per-disk / per-disk-group /
-  per-zone space metrics with accurate accounting and a recalculation
-  path (replay journal to verify). `query_disk_usage` gRPC API. Space
-  metrics component.
 - **[R75](R75-diskdb-background-scanner.md)** — diskdb background
   scanner — Area: diskdb — Implement ghost-allocation detection,
   allocate_pos drift detection, record integrity (CRC). Leak detection
