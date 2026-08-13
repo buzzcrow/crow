@@ -3,9 +3,10 @@
 
 # crow-kv Watch/Notify Extension (R78)
 
-This draft covers the crow-kv watch/notify extension and the diskdb
-server-side notify handler that together replace fixed-interval polling
-(R71) as the primary change-detection mechanism. The backlog doc is
+This draft covers the crow-kv watch/notify extension, the diskdb
+server-side notify handler, and the client endpoint cache proactive
+refresh that together replace fixed-interval polling (R71) as the
+primary change-detection mechanism. The backlog doc is
 [`doc/backlog/R78-diskdb-group0-notify-watch.md`](../backlog/R78-diskdb-group0-notify-watch.md);
 the root design context is
 [`doc/design/diskdb/design-crow-diskdb.md`](../design/diskdb/design-crow-diskdb.md)
@@ -13,21 +14,20 @@ the root design context is
 [`doc/design/kv/design-crow-kv-rpc.md`](../design/kv/design-crow-kv-rpc.md)
 §3 (LearnerStream pattern). Already landed: R71's `KeepAlive` sync loop
 (`app/crow-diskdb/src/liveness/keepalive.rs`) with fixed-interval
-polling and `heartbeat_diskdb` (endpoint slot wired but passing `""`);
-R71's `BackgroundTask` / `BgRunner` / `Trigger` framework
-(`app/crow-diskdb/src/bg_task.rs`); the `LearnerStream` bidi-stream
-pattern (`lib/crow-kv/src/rpc/px_service.rs:395`). Architecture
-decisions and rationale are in the root design; this doc does not
-repeat them.
+polling and `heartbeat_diskdb` (endpoint populated from
+`config.server.listen_addr` via `.with_grpc_endpoint(...)` in
+`main.rs:131`); R71's `BackgroundTask` / `BgRunner` / `Trigger`
+framework (`app/crow-diskdb/src/bg_task.rs`); the `LearnerStream`
+bidi-stream pattern (`lib/crow-kv/src/rpc/px_service.rs:395`); R74's
+`DiskdbClient` + endpoint cache + `refresh_endpoints` +
+`read_all_diskdb_instances` (`lib/crow-diskdb-client/src/client.rs`).
+Architecture decisions and rationale are in the root design; this doc
+does not repeat them.
 
-**Scope note — item 6 deferred.** R78 item 6 (client endpoint cache
-proactive refresh in `crow-diskdb-client`) depends on R74's
-`DiskdbClient` + endpoint cache, which is not yet implemented
-(`QueryCapacityStats` still returns `Unimplemented`,
-`crow-diskdb-client` is a skeleton). Items 1-5 (the crow-kv watch/notify
-extension + diskdb server-side notify handler + polling safety net) are
-independent of R74 and are implemented here. Item 6 is a follow-up that
-builds on the watch/notify client API once R74 lands.
+**Scope note — all 7 items in scope.** R74 has landed
+(`DiskdbClient` + endpoint cache + `refresh_endpoints`), so item 7
+(client endpoint cache proactive refresh in `crow-diskdb-client`) is
+no longer blocked and is designed here alongside items 1–6.
 
 ## 1. WatchNotify gRPC Bidi Stream
 
@@ -68,7 +68,7 @@ message WatchUnsubscribe {
 
 // Pushed from leader to watcher when a watched key changes. Carries
 // the changed keys (not values) so the watcher can re-read via the
-// normal path. slot = the commit slot of the triggering write.
+// normal path. slot = the apply slot of the triggering write.
 message WatchNotify {
   uint64 group_id      = 1;
   bytes  prefix        = 2;  // which watched prefix matched
@@ -105,9 +105,16 @@ Add to the `KvService` service:
 
 - **Field numbers are append-only** — matches the RPC design's
   compatibility rule (`design-crow-kv-rpc.md` §5).
-- **`bytes` fields** — `prefix` and `keys` are small (group-0 keys are
-  text paths < 128 bytes); no `Bytes` mapping needed (unlike hot-path
-  KV fields). `Vec<u8>` is fine.
+- **`bytes` fields** — `prefix` and `keys` are raw key bytes as stored
+  in the engine. For group-0 sysdata these are UTF-8 text paths (e.g.
+  `/hw/disk/1/100/5/abcd`) because `HardwareClient` puts keys via
+  `key.to_path().as_bytes()` and scans via `prefix.as_bytes()` (see
+  `hardware.rs:57`, `hardware.rs:95`). For data groups the keys are
+  binary-encoded (`BinaryKey::to_bytes()`). The proto is
+  encoding-agnostic; the subscriber and the engine agree on the
+  encoding because they both use the same key types. No `Bytes`
+  mapping needed — group-0 keys are text paths < 128 bytes; `Vec<u8>`
+  is fine.
 
 ### 1.3 Server-side handler
 
@@ -130,40 +137,64 @@ a. On stream open, allocate an `mpsc::channel::<Result<WatchNotifyResponse, Stat
 b. Spawn a task that reads inbound frames in a loop:
    - `WatchSubscribe { group_id, prefix }` — look up the `PxGroup` for
      `group_id` via `self.store`. If this node is not the leader of
-     that group, send `WatchNotifyError { not_leader_hint }` and
-     `continue` (do not close the stream — the client may subscribe to
-     other groups). If leader, register a `Watcher { prefix, tx }` in
-     the group's `WatchRegistry` and record the `watcher_id` for
-     cleanup on stream end.
+     that group (`local_replica.is_leader()`), send
+     `WatchNotifyError { not_leader_hint }` and `continue` (do not
+     close the stream — the client may subscribe to other groups). If
+     leader, register a `Watcher { prefix, tx }` in the group's
+     `WatchRegistry` and record the `watcher_id` for cleanup on stream
+     end.
    - `WatchUnsubscribe { group_id, prefix }` — remove the matching
      watcher from the group's registry.
 c. On inbound stream end (client disconnect or error), remove all
-   watchers registered by this stream from their group registries.
+   watchers registered by this stream from their group registries
+   (`registry.remove_all(&watcher_ids)`).
 d. The outbound stream is `ReceiverStream::new(rx)` boxed, returned to
    tonic.
 
-- **Leader check** — uses the same `role == Leader &&
-  current_term == proposing_term` gate as the propose path. A
-  non-leader node returns `not_leader_hint` per-subscribe rather than
-  closing the stream, so a client subscribed to multiple groups gets
-  hints only for the groups this node doesn't lead.
-- **Leader change mid-stream** — on step-down, the old leader drops
-  all watchers from its registry (the registry is cleared on
-  `become_follower`). The outbound `mpsc::Sender` is dropped when the
-  registry clears, which causes the client's stream to close. The
-  client reconnects to the new leader and re-subscribes. The
-  safety-net polling covers the gap.
+- **Leader check** — uses `local_replica.is_leader()`
+  (`local_replica.rs:643`), the same atomic role check the propose
+  path uses for its leadership gate. A non-leader node returns
+  `not_leader_hint` per-subscribe rather than closing the stream, so a
+  client subscribed to multiple groups gets hints only for the groups
+  this node doesn't lead.
+- **Leader change mid-stream** — on step-down, the old leader clears
+  its `WatchRegistry` (see §2.3). Dropping all `Watcher` tx senders
+  closes the clients' outbound streams. The client reconnects to the
+  new leader and re-subscribes. The safety-net polling covers the gap.
+- **`not_leader_hint` source** — `PxGroup::leader_endpoint()` returns
+  the believed leader's endpoint (or empty if unknown). The handler
+  sends this as the hint, matching the `KvResponse.not_leader_hint`
+  pattern in the unary RPC path.
 
-## 2. Watch Registry + Notify Emission
+## 2. Watch Registry + Apply-Path Trigger
 
 ### 2.1 Why
 
-The notify trigger must fire on the leader's write path, after a value
-is Paxos-chosen, with access to the written keys. The write path's
-chosen hook is `group_propose.rs:246` (after `fan_out_chosen_notice`),
-which has `&self` (`PxGroup`), the `entry.payload` (`Bytes`), and
-`group_id`. The registry therefore lives on `PxGroup` so the trigger
-incurs no cross-struct lookup.
+The notify trigger must fire on the leader's **apply path** — after a
+value is Paxos-chosen AND applied to the engine — not on the proposal
+path. This is the etcd model: watchers are fed from the apply stream,
+not the proposal path (R78 backlog, solution item 1). The proposal
+path (`group_propose.rs:246`) only fires for slots the leader proposes
+itself; slots the leader learns via heartbeat catch-up
+(`apply_loop_task`, `local_replica_apply.rs:301`) or repair
+(`group.rs:684`) never trigger a notify on the proposal path. The
+apply path fires for **every** chosen slot on **every** replica,
+covering all three entry points:
+- `Learner::learn` (`learner.rs:554`) — sync path (R17 off): leader
+  proposals + follower learn.
+- `spawn_learn_chosen`'s spawned task (`local_replica_apply.rs:57`) —
+  async path (R17 on): deferred engine apply.
+- `apply_loop_task` (`local_replica_apply.rs:342`) — background
+  catch-up: slots learned via heartbeat `known_commit_slot` advance
+  (R65) or gap-fill.
+
+The apply path's central function is `PxLearner::apply_entry`
+(`learner.rs:522`), which decodes `entry.payload` via `Batch::decode`
+(`op.rs:56`) into `Batch { ops: Vec<BatchOp> }` — the changed keys are
+already extracted there, so the notify trigger incurs no extra decode.
+The registry therefore lives on `PxLearner` (set via a setter at group
+construction) so the trigger fires from one hook point with no
+cross-struct lookup.
 
 ### 2.2 WatchRegistry
 
@@ -172,56 +203,124 @@ New module `lib/crow-kv/src/cluster/watch_registry.rs`:
 ```rust
 /// One watcher: a prefix + an outbound channel to push notify frames.
 pub(crate) struct Watcher {
-    pub prefix: Bytes,
+    pub prefix: Vec<u8>,
     pub tx: mpsc::Sender<Result<WatchNotifyResponse, Status>>,
 }
 
-/// Per-group watch registry. Held by `PxGroup` as `Arc<WatchRegistry>`.
+/// Per-group watch registry. Wired into `PxLearner` via
+/// `set_watch_registry`; the learner's `apply_entry` calls `emit`
+/// after each successful engine apply, gated by `has_watchers`.
 pub(crate) struct WatchRegistry {
     /// prefix -> list of watchers. DashMap for concurrent subscribe/
     /// unsubscribe/emit. Each watcher has a unique `watcher_id` (a
     /// counter) so a stream can remove its own watchers on disconnect.
-    watchers: DashMap<Bytes, Vec<(u64, Watcher)>>,
+    watchers: DashMap<Vec<u8>, Vec<(u64, Watcher)>>,
     next_id: AtomicU64,
+    /// Atomic fast-path flag: true iff at least one watcher is
+    /// registered. The apply path checks this (one Acquire load)
+    /// before touching the DashMap — zero overhead when no watchers.
+    has_watchers: AtomicBool,
 }
 
 impl WatchRegistry {
     pub fn new() -> Self;
     /// Register a watcher for `prefix`. Returns the `watcher_id` for
-    /// later removal.
-    pub fn subscribe(&self, prefix: Bytes, tx: mpsc::Sender<...>) -> u64;
-    /// Remove a specific watcher by `(prefix, watcher_id)`.
-    pub fn unsubscribe(&self, prefix: &Bytes, watcher_id: u64);
-    /// Remove all watchers whose `tx` is the given sender (stream-end
-    /// cleanup). Identified by watcher_id set.
+    /// later removal. Sets `has_watchers = true`.
+    pub fn subscribe(&self, prefix: Vec<u8>, tx: mpsc::Sender<...>) -> u64;
+    /// Remove a specific watcher by `(prefix, watcher_id)`. Updates
+    /// `has_watchers` if the registry becomes empty.
+    pub fn unsubscribe(&self, prefix: &[u8], watcher_id: u64);
+    /// Remove all watchers whose `watcher_id` is in the list (stream-
+    /// end cleanup). Updates `has_watchers`.
     pub fn remove_all(&self, watcher_ids: &[u64]);
-    /// Clear all watchers (leader step-down).
+    /// Clear all watchers (leader step-down). Drops all tx senders,
+    /// closing client streams. Sets `has_watchers = false`.
     pub fn clear(&self);
-    /// For a set of changed keys, find matching prefixes and enqueue
-    /// notify frames. Called by the coalescer or directly (debounce=0).
-    pub fn emit(&self, group_id: u64, slot: u64, changed: &[(Bytes, Bytes)]);
-    /// True if no watchers are registered (skip decode + match on the
-    /// write path — the common case when nobody is watching).
-    pub fn is_empty(&self) -> bool;
+    /// For a set of changed keys (from `Batch::decode`), find matching
+    /// prefixes and enqueue notify frames. Called by the coalescer or
+    /// directly (debounce=0). Non-blocking: uses `try_send`.
+    pub fn emit(&self, group_id: u64, slot: u64, changed: &[BatchOp]);
+    /// True if at least one watcher is registered. Atomic load — the
+    /// apply-path fast path.
+    pub fn has_watchers(&self) -> bool;
 }
 ```
 
-- **`is_empty` fast path** — the write-path hook checks
-  `registry.is_empty()` before decoding the payload. When no watchers
-  are registered (the common case in tests and non-diskdb clusters),
-  the cost is one atomic load. This keeps the feature zero-overhead
-  when unused.
-- **`emit` matching** — for each changed key, iterate
-  `watchers.iter()` and check `key.starts_with(&entry.prefix)`. Group
-  matches by prefix, build one `WatchNotify { prefix, keys, slot }`
+- **`has_watchers` atomic fast path** — the apply-path hook checks
+  `registry.has_watchers()` (one `Acquire` load of an `AtomicBool`)
+  before decoding or matching. When no watchers are registered (the
+  common case in tests and non-diskdb clusters), the cost is one
+  predicted-not-taken branch. This is cheaper than `DashMap::is_empty()`
+  (which acquires read locks on all shards) and is the true
+  zero-overhead gate. `has_watchers` is set to `true` on the first
+  `subscribe` and recomputed (via `watchers.is_empty()` scan) on
+  `unsubscribe` / `remove_all` / `clear`.
+- **`emit` matching** — for each `BatchOp` in the decoded batch,
+  iterate `watchers.iter()` and check `op.key.starts_with(&entry.prefix)`.
+  Group matches by prefix, build one `WatchNotify { prefix, keys, slot }`
   per prefix per watcher, send via `tx.try_send` (non-blocking — if the
   watcher's channel is full, drop the notify; the safety-net polling
   covers missed notifies).
-- **`try_send` not `send().await`** — the write path must not block on
+- **`try_send` not `send().await`** — the apply path must not block on
   a slow watcher. A full channel means the watcher is lagging; dropping
   the notify is correct (the safety-net polling will catch up).
+- **Delete ops** — `BatchOp { op: Op::Delete, key }` still carries a
+  key; a delete on a watched prefix notifies the watcher (the key
+  changed — it's gone). The watcher re-reads and sees the deletion.
 
-### 2.3 PxGroup integration
+### 2.3 PxLearner integration
+
+Add to `PxLearner` (`lib/crow-kv/src/paxos/learner.rs`):
+
+```rust
+/// Optional per-group watch registry. Set when the group is
+/// constructed; None in tests that don't use watch/notify. The
+/// apply-path hook in `apply_entry` checks `has_watchers()` before
+/// touching the registry.
+watch_registry: OnceLock<(u64, Arc<WatchRegistry>)>,  // (group_id, registry)
+```
+
+- **`(group_id, registry)` tuple** — `PxLogEntry` has no `group_id`
+  field (`roles.rs:81`: `slot`, `ballot`, `term`, `payload`), and
+  `apply_entry` takes only `(slot, &payload)`. The `group_id` is stored
+  alongside the registry so `emit` can populate `WatchNotify.group_id`
+  without threading `group_id` through every call site.
+- **Set via `set_watch_registry(group_id, Arc<WatchRegistry>)`** —
+  called once during `PxGroup` construction (after the learner is
+  created). `OnceLock` ensures it's set exactly once; tests that don't
+  use watch/notify leave it unset (`has_watchers()` returns false via
+  the `None` fast path).
+- **`apply_entry` hook** — after `self.engine.apply(slot, &batch).await`
+  succeeds (`learner.rs:538`), before the method returns:
+
+```rust
+if let Some((group_id, registry)) = self.watch_registry.get() {
+    if registry.has_watchers() {
+        self.watch_coalescer
+            .record_chosen(*group_id, slot, &batch.ops, registry);
+    }
+}
+```
+
+  The `batch` is already decoded at `learner.rs:533`
+  (`let batch = Batch::decode(payload)`), so the keys are available
+  with no extra decode. The coalescer is also wired via `OnceLock`
+  (see §3). When `has_watchers()` is false, the cost is one `OnceLock::get`
+  + one `AtomicBool` load — zero overhead when unused.
+- **Fires on ALL apply paths** — `apply_entry` is called from `learn`
+  (sync, `learner.rs:559`), `spawn_learn_chosen` (async,
+  `local_replica_apply.rs:58`), and `apply_loop_task` (catch-up,
+  `local_replica_apply.rs:342`). All three paths trigger the hook,
+  covering leader proposals, follower learn, heartbeat catch-up, and
+  gap-fill repair. This is the etcd model.
+- **Followers don't emit** — followers also call `apply_entry`, but
+  their `WatchRegistry` is empty (cleared on step-down, or never
+  populated if they were never leader). `has_watchers()` returns false
+  → no emit. Only the leader (which holds the client streams) emits.
+  No explicit leader check needed in the hook — the registry's
+  emptiness is the gate.
+
+### 2.4 PxGroup integration
 
 Add to `PxGroup` (`lib/crow-kv/src/cluster/group.rs`):
 
@@ -230,50 +329,64 @@ pub(crate) watch_registry: Arc<WatchRegistry>,
 ```
 
 - Constructed in `PxGroup::new` as `Arc::new(WatchRegistry::new())`.
-- **Cleared on `become_follower`** — when the replica steps down from
-  leader, call `watch_registry.clear()`. This drops all `Watcher` tx
-  senders, closing the clients' outbound streams (clean reconnect).
+  Wired into the learner via
+  `local_replica.learner.set_watch_registry(group_id, Arc::clone(&watch_registry))`
+  right after construction.
+- **Cleared on step-down** — the leader step-down path is
+  `PxGroup::step_down` (`group_election.rs:385`), called for
+  `HigherTerm` / `LeaseUnrenewable` / `Admin` reasons. Add
+  `self.watch_registry.clear()` + `self.watch_coalescer.flush_and_clear()`
+  at the end of `step_down` (after `become_follower`). This drops all
+  `Watcher` tx senders, closing the clients' outbound streams (clean
+  reconnect). The coalescer flush emits any pending notifies before
+  the registry clears (no notify lost on leader change).
+- **Also cleared on propose-path direct step-down** — the propose path
+  has two direct `become_follower` calls that bypass `step_down`:
+  `group_propose.rs:208` (higher term during prepare) and
+  `group_propose.rs:293` (higher term during accept). Both have
+  `&self` (`PxGroup`), so add `self.watch_registry.clear()` +
+  `self.watch_coalescer.flush_and_clear()` before each
+  `replica.become_follower(...)` call. This covers the case where the
+  leader discovers a higher term mid-proposal and steps down without
+  going through `step_down`.
 - **Not cleared on `shutdown`** — `shutdown` drops the whole `PxGroup`,
   which drops the `Arc<WatchRegistry>`, which drops all watchers.
 
-### 2.4 Write-path trigger
+### 2.5 Why not the proposal path
 
-In `group_propose.rs`, after `self.fan_out_chosen_notice(&entry, group_id)`
-(line 246), before the `trace!`:
+The original draft hooked the trigger at `group_propose.rs:246` (after
+`fan_out_chosen_notice`). That path has a critical gap: it only fires
+for slots the leader **proposes itself**. Three classes of chosen
+slots never trigger a notify on the proposal path:
 
-```rust
-if !self.watch_registry.is_empty() {
-    self.watch_coalescer
-        .record_chosen(group_id, entry.slot, &entry.payload, &self.watch_registry);
-}
-```
+- **Heartbeat catch-up slots** — when the leader advances
+  `known_commit_slot` via heartbeat (R65, `group_election.rs:299`) and
+  the background `apply_loop_task` applies slots the leader accepted as
+  a follower before winning the election. These slots are real writes
+  to real keys; watchers must be notified.
+- **Repair slots** — `group.rs:684` and `group_election.rs:274` call
+  `fan_out_chosen_notice` for gap-fill repair, but these are on the
+  repair path, not the propose path. A repaired slot is a real write;
+  watchers must be notified.
+- **Foreign-value retry** — the draft correctly noted that the
+  proposal path fires for foreign values, but the retried client value
+  fires its own notify. On the apply path, both the foreign value and
+  the retried value fire `apply_entry` → both notify. This is correct
+  and automatic — no special handling needed.
 
-- **`is_empty` gate** — skips the payload decode + key extraction when
-  nobody is watching. The `watch_coalescer` is a field on `PxGroup`
-  (see §3).
-- **`record_chosen`** — decodes `entry.payload` via `Batch::decode`
-  (`lib/crow-kv/src/kv/op.rs:56`), extracts the keys from `ops`, and
-  either emits immediately (debounce = 0) or buffers into the coalescer
-  (debounce > 0).
-- **Foreign-value retry** — the trigger fires for every chosen entry,
-  including foreign values (the `adopted_foreign_value` path at line
-  255 continues to `'slot_retry`). A foreign value chosen at this slot
-  is still a real write to real keys; watchers should be notified. The
-  client's own value is retried on a new slot, which fires its own
-  notify. This is correct — the watcher sees both the foreign write and
-  the retried write.
-- **NoOp entries** — `Batch::decode` on an empty payload returns an
-  empty `Batch` (no ops); `record_chosen` no-ops. No notify fires for
-  repair/noop slots.
+The apply-path hook covers all three with one code point. The cost is
+that `apply_entry` runs on followers too (where the registry is empty),
+but the `has_watchers()` atomic check makes this a single predicted-
+not-taken branch — zero overhead.
 
 ## 3. Coalescing
 
 ### 3.1 Why
 
-Burst writes to the same prefix (e.g. a batch of disk-status updates)
-would generate one notify per write, flooding watchers. A debounce
-window coalesces writes to the same prefix into one notify. R78
-specifies a default of 100 ms.
+Burst writes to the same prefix (e.g. a batch of disk-status updates
+via `batch_write`) would generate one notify per write, flooding
+watchers. A debounce window coalesces writes to the same prefix into
+one notify. R78 specifies a default of 100 ms.
 
 ### 3.2 WatchCoalescer
 
@@ -283,56 +396,82 @@ New struct in `lib/crow-kv/src/cluster/watch_registry.rs`:
 pub(crate) struct WatchCoalescer {
     debounce_ms: u64,
     /// prefix -> (pending keys set, timer handle). Protected by a
-    /// parking_lot::Mutex — the write path is low-contention (one
+    /// parking_lot::Mutex — the apply path is low-contention (one
     /// leader, one coalescer).
-    pending: Mutex<HashMap<Bytes, (HashSet<Bytes>, Option<JoinHandle<()>)>>,
+    pending: Mutex<HashMap<Vec<u8>, (HashSet<Vec<u8>>, Option<JoinHandle<()>>)>>,
 }
+```
 
+Wired into `PxLearner` via a second `OnceLock`:
+
+```rust
+watch_coalescer: OnceLock<Arc<WatchCoalescer>>,
+```
+
+Set via `set_watch_coalescer(Arc<WatchCoalescer>)` during `PxGroup`
+construction. The `apply_entry` hook (§2.3) calls
+`watch_coalescer.record_chosen(group_id, slot, &batch.ops, registry)`.
+
+```rust
 impl WatchCoalescer {
     pub fn new(debounce_ms: u64) -> Self;
-    /// Called from the write-path trigger. Decodes the payload, extracts
-    /// keys, and either emits immediately (debounce=0) or buffers.
+    /// Called from the apply-path hook. For each BatchOp, find matching
+    /// prefixes in the registry, and either emit immediately (debounce=0)
+    /// or buffer into pending[prefix].
     pub fn record_chosen(
         &self,
         group_id: u64,
         slot: u64,
-        payload: &Bytes,
+        ops: &[BatchOp],
         registry: &WatchRegistry,
     );
+    /// Drain all pending sets (emitting final notifies) and cancel all
+    /// timers. Called on leader step-down before registry.clear().
+    pub fn flush_and_clear(&self);
 }
 ```
 
-a. If `debounce_ms == 0`: decode `Batch`, collect keys, call
+a. If `debounce_ms == 0`: for each `BatchOp`, find matching prefixes in
+   the registry, collect keys per prefix, call
    `registry.emit(group_id, slot, &keys)` immediately. No buffering.
-b. If `debounce_ms > 0`: decode `Batch`, for each key find matching
-   prefixes in the registry, insert keys into `pending[prefix]`. If no
-   timer is running for that prefix, spawn a `tokio::time::sleep` task
-   that after `debounce_ms` locks the map, drains the pending set for
-   that prefix, and calls `registry.emit`. The timer handle is stored
-   so a subsequent write to the same prefix within the window just adds
-   to the set (the existing timer will flush).
+b. If `debounce_ms > 0`: for each `BatchOp`, find matching prefixes in
+   the registry, insert keys into `pending[prefix]`. If no timer is
+   running for that prefix, spawn a `tokio::time::sleep` task that
+   after `debounce_ms` locks the map, drains the pending set for that
+   prefix, and calls `registry.emit`. The timer handle is stored so a
+   subsequent write to the same prefix within the window just adds to
+   the set (the existing timer will flush).
 c. The timer task captures `Arc<WatchRegistry>` + `Arc<WatchCoalescer>`
    (weak) so it survives even if the group is dropped mid-debounce
    (the weak upgrade fails → no-op).
+d. `record_chosen` skips ops whose key matches no registered prefix
+   (the common case when the write is to an unwatched key range) —
+   no pending entry is created.
 
 - **Debounce = 0 is the test default** — tests want immediate notifies
   with no timer flakiness. Production sets 100 ms.
-- **Coalescer cleared on step-down** — `become_follower` calls
-  `watch_coalescer.flush_and_clear()` which drains all pending sets
-  (emitting final notifies) and cancels all timers. This ensures no
-  notify is lost on leader change (the last burst is flushed before the
-  registry clears).
+- **Coalescer flushed on step-down** — `step_down` and the propose-path
+  direct step-downs (§2.4) call `watch_coalescer.flush_and_clear()`
+  **before** `watch_registry.clear()`. This drains all pending sets
+  (emitting final notifies) and cancels all timers. No notify is lost
+  on leader change — the last burst is flushed before the registry
+  clears and client streams close.
 - **`slot` in coalesced notifies** — the coalesced notify carries the
   highest slot among the coalesced writes (the most recent). Watchers
   use it only for logging; the actual freshness is guaranteed by the
   re-read via the sync path.
+- **`debounce_ms` is read from `CrowKVConfig`** — the coalescer is
+  constructed in `PxGroup::new` with
+  `CrowKVConfig::watch_notify_debounce_ms` (default 100). On
+  `set_from_config`, the coalescer's debounce is updated live (the
+  field is an `AtomicU64` on the coalescer, read by `record_chosen`).
 
 ## 4. WatchNotify Client
 
 ### 4.1 Why
 
 diskdb (and future clients) need a reusable client that opens the
-`WatchNotify` stream to the group-0 leader, subscribes to prefixes,
+`WatchNotify` stream to the group leader, subscribes to prefixes,
 and delivers notify frames via a channel. This is the client-side
 mirror of §1's server handler.
 
@@ -363,8 +502,8 @@ pub struct WatchNotifyClient {
 impl WatchNotifyClient {
     pub fn from_shared(kv: Arc<CrowkvClient>) -> Self;
 
-    /// Subscribe to `(group_id, prefix)`. Opens a bidi stream to the
-    /// group leader (discovered via the topology cache), sends a
+    /// Subscribe to `(store_id, group_id, prefix)`. Opens a bidi stream
+    /// to the group leader (discovered via the topology cache), sends a
     /// `WatchSubscribe` frame, and returns a `WatchSubscription` whose
     /// `notify_rx` yields `WatchNotify` frames.
     ///
@@ -375,31 +514,49 @@ impl WatchNotifyClient {
     /// polling.
     pub async fn subscribe(
         &self,
+        store_id: u64,
         group_id: u64,
         prefix: &[u8],
     ) -> Result<WatchSubscription>;
 }
 ```
 
-a. `subscribe` resolves the group-0 leader endpoint via
-   `CrowkvClient`'s topology cache (same mechanism as `Put`/`Get`).
-b. Opens a gRPC `WatchNotify` bidi stream to that endpoint.
-c. Sends `WatchSubscribe { group_id, prefix }`.
-d. Spawns a reader task that loops on the inbound stream: on
+a. `subscribe` resolves the group leader endpoint via
+   `CrowkvClient`'s topology cache (`kv.topology.leader(store_id, group_id)`,
+   falling back to `kv.topology.refresh()` on cache miss — same
+   mechanism as `Put`/`Get` via `resolve_leader`).
+b. Gets a gRPC channel from the shared `ConnectionPool`
+   (`kv.pool.get(&endpoint)`) — reuses the existing connection pool,
+   no separate channel management.
+c. Opens a `KvServiceClient::new(channel).watch_notify(...)` bidi
+   stream to that endpoint.
+d. Sends `WatchSubscribe { version: 1, group_id, prefix }`.
+e. Spawns a reader task that loops on the inbound stream: on
    `WatchNotify` frame, forwards to the subscriber's `notify_rx`; on
-   `WatchNotifyError { not_leader_hint }`, refreshes topology,
-   reconnects to the new leader, re-subscribes, and continues. On
-   stream error/disconnect, same reconnect logic.
-e. `WatchSubscription::drop` sends `WatchUnsubscribe` (if the stream
+   `WatchNotifyError { not_leader_hint }`, refreshes topology
+   (`kv.topology.set_leader(store_id, group_id, hint)`), reconnects
+   to the new leader, re-subscribes, and continues. On stream
+   error/disconnect, same reconnect logic.
+f. `WatchSubscription::drop` sends `WatchUnsubscribe` (if the stream
    is still open) and aborts the reader task.
 
+- **`store_id` required** — the topology cache is keyed by
+  `(store_id, group_id)`. Group 0 is `(0, 0)` (`CrowkvClient::SYSTEM_STORE`
+  / `SYSTEM_GROUP`, `client.rs:277-279`). The `subscribe` signature
+  takes `store_id` so the client can resolve the leader endpoint.
 - **One stream per subscription** — simpler than multiplexing multiple
   prefixes over one stream (each subscription is independent; a
-  diskdb instance typically watches 3-4 prefixes). If this becomes a
+  diskdb instance typically watches 3 prefixes). If this becomes a
   connection-count concern, a future optimization multiplexes
-  subscriptions over a shared stream.
+  subscriptions over a shared stream (the proto already supports
+  multiple `WatchSubscribe` frames on one stream — no proto change
+  needed).
 - **Reconnect backoff** — capped exponential (50 ms → 2 s), matching
-  `LearnerStream`'s reconnect policy (`design-crow-kv-rpc.md` §6).
+  `LearnerStream`'s reconnect policy (`design-crow-kv-rpc.md` §6:
+  "capped exponential backoff (50 ms → 2 s)").
+- **`ConnectionPool` reuse** — `pool` is `pub(crate)` on `CrowkvClient`
+  (`client.rs:166`); `WatchNotifyClient` is in the same crate, so it
+  accesses the pool directly. No new connection management code.
 
 ## 5. diskdb Notify Handler + Polling Safety Net
 
@@ -432,7 +589,7 @@ pub enum Trigger {
 }
 ```
 
-Update `wait_trigger`:
+Update `wait_trigger` (`bg_task.rs:191`):
 
 ```rust
 Trigger::TimerOrEvent { interval_fn, notify } => {
@@ -445,6 +602,8 @@ Trigger::TimerOrEvent { interval_fn, notify } => {
 
 - **Backward-compatible** — existing tasks keep `Timer`/`TimerFn`/
   `Event`; only keepalive uses `TimerOrEvent` when `notify_enabled`.
+- **`select!` is race-safe** — both branches can fire; `select!` polls
+  both and picks one. No panic if both are ready.
 
 ### 5.3 KeepAlive changes
 
@@ -454,15 +613,17 @@ a. Add field `sync_trigger: Option<Arc<tokio::sync::Notify>>` —
    `Some` when `notify_enabled`, `None` otherwise (keeps the struct
    usable in tests without notify).
 b. Add builder method `.with_sync_trigger(notify: Arc<Notify>) -> Self`.
-c. In `trigger()`: if `sync_trigger` is `Some`, return
-   `Trigger::TimerOrEvent { interval_fn, notify: sync_trigger }`; else
-   fall back to the existing `TimerFn` path.
+c. In `trigger()` (the `BackgroundTask` impl): if `sync_trigger` is
+   `Some`, return `Trigger::TimerOrEvent { interval_fn, notify:
+   sync_trigger }`; else fall back to the existing `TimerFn` path.
 d. Add method `pub fn trigger_now(&self)` — calls
    `self.sync_trigger.notify_one()` if set. Called by the notify
    handler on each `WatchNotify` frame.
-e. **`heartbeat_diskdb` endpoint** — populate the `grpc_endpoint` arg
-   (currently `""` at line 166) from the config's `server.listen_addr`.
-   This fulfills R78 item 1 (endpoint registration).
+e. **`grpc_endpoint` already populated** — `main.rs:131` already
+   calls `.with_grpc_endpoint(config.load().server.listen_addr.clone())`,
+   and `keepalive.rs:234` passes `self.grpc_endpoint` to
+   `heartbeat_diskdb` on every tick. R78 item 1 (endpoint
+   registration) is already done; no change needed here.
 
 ### 5.4 Notify handler task
 
@@ -474,14 +635,14 @@ New module `app/crow-diskdb/src/liveness/notify.rs`:
 pub struct NotifyHandler {
     watch: WatchNotifyClient,
     keepalive_trigger: Arc<tokio::sync::Notify>,
-    prefixes: Vec<(u64, Vec<u8>)>,  // (group_id, prefix)
+    /// (store_id, group_id, prefix) triples to subscribe to.
+    subscriptions: Vec<(u64, u64, Vec<u8>)>,
 }
 
 impl NotifyHandler {
     pub fn new(
         watch: WatchNotifyClient,
         keepalive_trigger: Arc<tokio::sync::Notify>,
-        group0_group_id: u64,
     ) -> Self;
 
     /// Open subscriptions and loop on notify frames. Each frame wakes
@@ -491,20 +652,38 @@ impl NotifyHandler {
 }
 ```
 
-a. On `run`, subscribe to the group-0 prefixes diskdb cares about:
-   - `/hw/dg_owner/` (ownership map)
-   - `/hw/dg_bind/` (binding map)
-   - `/hw/disk/` (disk metadata + status)
+a. On `run`, subscribe to the group-0 prefixes diskdb cares about.
+   The prefixes are **text-encoded** (matching the engine's group-0
+   key encoding — `HardwareClient` puts/scans text paths):
+   - `/hw/dg_owner/` (ownership map — global; `list_owners` scans
+     globally and filters to this instance)
+   - `/hw/dg_bind/` (binding map — global; `list_binds` scans globally)
+   - `/hw/disk/` (disk metadata + status — global; `observe_disks`
+     scans per owned disk-group, but the notify is a coarse trigger)
+   All three use `(G0_STORE, G0_GROUP)` = `(0, 0)`.
 b. For each subscription, spawn a reader loop: on `WatchNotify` frame,
    call `keepalive_trigger.notify_one()` (wakes keepalive →
    `KeepAlive::tick()` → re-reads the changed keys from group 0).
 c. The notify is a **trigger only** — diskdb re-reads the actual values
    via the normal sync path (`observe_ownership`, `observe_disks`).
-   This keeps the notify payload small and avoids duplicating the read
+   This keeps the notify payload small and avoids a duplicated read
    path.
 d. On subscription drop/reconnect, the `WatchNotifyClient` handles
    reconnect internally (§4.2); the handler just keeps reading.
+e. On `stop.notified()`, drop all subscriptions (which closes the
+   streams) and exit.
 
+- **Global prefixes, not per-node** — `list_owners()` / `list_binds()`
+  scan the global `/hw/dg_owner/` / `/hw/dg_bind/` prefixes and filter
+  to `instance_id == self.instance_id` (`keepalive.rs:288`). Watching
+  the global prefix means the keepalive wakes on any ownership/bind
+  change anywhere, then re-scans and filters to this instance. An
+  irrelevant change (another instance's ownership) causes a cheap
+  no-op re-scan. Per-node prefixes (`OwnerMapKey::prefix_for_node`)
+  would be more selective but require knowing `rack_id`/`node_id`
+  before the first sync — the diskdb discovers its node identity from
+  the ownership map, not from config. Global prefixes avoid this
+  bootstrapping dependency.
 - **Not a `BackgroundTask`** — `NotifyHandler` is a long-lived task
   with its own `run` method, not a `BgRunner` cycle task. It's spawned
   directly in `main.rs` alongside the bg runner, with the same stop
@@ -524,9 +703,55 @@ When `notify_enabled` is true:
   fixed-interval polling at `sync_interval_secs` (default 10 s), no
   notify handler, no `WatchNotifyClient`.
 
-## 6. Configuration
+## 6. Client Endpoint Cache Proactive Refresh (Item 7)
 
-### 6.1 diskdb config
+### 6.1 Why
+
+R74's `DiskdbClient` endpoint cache (`lib/crow-diskdb-client/src/client.rs`)
+refreshes **on demand** today: at startup, on cache miss, and on
+error-retry (`refresh_endpoints` reads `read_all_diskdb_instances`).
+When a diskdb instance moves (endpoint change in its service-registry
+record at `/srv/diskdb/<instance_id>`), a client holding the old
+endpoint cache entry fails one `allocate_blocks`/`free_blocks` attempt,
+triggers `refresh_endpoints` (on-demand safety net), and retries. R78
+item 7 extends this to **proactive** refresh: the client subscribes to
+the `/srv/diskdb/` prefix via `WatchNotifyClient`; on a notify
+(instance register/deregister/move), it refreshes the affected cache
+entries so the next call routes to the new endpoint without a failed
+attempt + retry. The v1 on-demand refresh remains as the safety net;
+proactive refresh is an optimization, not a correctness requirement.
+
+### 6.2 Design
+
+Add a `WatchNotifyClient` subscription to `DiskdbClient`:
+
+a. In `DiskdbClient::new` (or a new `with_watch_notify` builder), if
+   a `WatchNotifyClient` is provided, subscribe to
+   `(G0_STORE, G0_GROUP, "/srv/diskdb/")`.
+b. Spawn a reader task: on `WatchNotify` frame, call
+   `self.refresh_endpoints()` (the existing R74 method). The notify
+   is a coarse trigger — the refresh re-reads ALL diskdb instances
+   from group 0 and updates the cache. This is the same "trigger, not
+   transport" model as the diskdb notify handler (§5.4).
+c. The reader task runs for the client's lifetime. On stream close
+   (leader change), `WatchNotifyClient` reconnects automatically
+   (§4.2); the reader task just keeps reading.
+d. If no `WatchNotifyClient` is provided (v1 default), the client
+   uses on-demand refresh only (R74 behavior, unchanged).
+
+- **`/srv/diskdb/` prefix** — the service-registry instance key path
+  is `/srv/diskdb/<instance_id>` (`InstanceKey::to_path()`,
+  `key/diskdb.rs:642`). The global prefix `/srv/diskdb/` covers all
+  diskdb instances. `ServiceRegistryClient::read_all_diskdb_instances`
+  scans this prefix (`service_registry.rs:166-167`).
+- **On-demand refresh stays as safety net** — if a notify is missed
+  (stream disconnected, channel full), the next `allocate_blocks` to
+  a moved instance fails once, triggers `refresh_endpoints`, and
+  retries. The cache is eventually consistent either way.
+
+## 7. Configuration
+
+### 7.1 diskdb config
 
 Add to `app/crow-diskdb/src/ddb_config.rs`:
 
@@ -557,7 +782,7 @@ impl Default for NotifyConfig {
 - `validate()`: if `notify_enabled` and `sync.sync_interval_secs == 0`,
   error (same existing check; no new constraint).
 
-### 6.2 crow-kv config
+### 7.2 crow-kv config
 
 The `WatchCoalescer`'s `debounce_ms` is a per-group setting. It's read
 from the `CrowKVConfig` held by `PxGroup`:
@@ -574,6 +799,21 @@ pub watch_notify_debounce_ms: u64,  // default: 100
   authoritative source; diskdb's field is for documentation/operator
   convenience (they should match). See Open Questions.
 
+### 7.3 crow-diskdb-client config
+
+Add an optional `watch_notify` toggle to `DiskdbClient`'s config (or
+builder):
+
+```rust
+/// When true, the client subscribes to `/srv/diskdb/` and proactively
+/// refreshes the endpoint cache on notify. Default: false (on-demand
+/// refresh only, R74 behavior).
+pub watch_notify_enabled: bool,
+```
+
+- **Default false** — proactive refresh is an optimization; v1 ships
+  with on-demand refresh (R74). Operators opt in per client.
+
 ## Scope
 
 **lib/crow-kv** (watch/notify extension):
@@ -585,10 +825,17 @@ pub watch_notify_debounce_ms: u64,  // default: 100
   handler (subscribe/unsubscribe/leader-check/cleanup).
 - `src/cluster/watch_registry.rs` — **new**: `WatchRegistry`,
   `Watcher`, `WatchCoalescer`.
-- `src/cluster/group.rs` — add `watch_registry: Arc<WatchRegistry>` +
-  `watch_coalescer` fields to `PxGroup`; clear on `become_follower`.
-- `src/cluster/group_propose.rs` — add notify trigger after
-  `fan_out_chosen_notice` (line 246), gated by `is_empty`.
+- `src/paxos/learner.rs` — add `watch_registry` + `watch_coalescer`
+  `OnceLock` fields + `set_watch_registry` / `set_watch_coalescer`
+  setters; add apply-path emit hook in `apply_entry`.
+- `src/cluster/group.rs` — add `watch_registry: Arc<WatchRegistry>`
+  field to `PxGroup`; wire into learner in `PxGroup::new`; clear on
+  `step_down`.
+- `src/cluster/group_election.rs` — call `watch_registry.clear()` +
+  `watch_coalescer.flush_and_clear()` in `PxGroup::step_down`.
+- `src/cluster/group_propose.rs` — call `watch_registry.clear()` +
+  `watch_coalescer.flush_and_clear()` before the two direct
+  `become_follower` calls (lines 208, 293).
 - `src/cluster/group_config.rs` — add `watch_notify_debounce_ms` to
   `CrowKVConfig`.
 - `src/cluster/mod.rs` — export `watch_registry`.
@@ -604,7 +851,7 @@ pub watch_notify_debounce_ms: u64,  // default: 100
   group-0 prefixes, wake keepalive on notify).
 - `src/liveness/keepalive.rs` — add `sync_trigger` field +
   `with_sync_trigger` builder + `trigger_now` method + `TimerOrEvent`
-  trigger; populate `grpc_endpoint` in `heartbeat_diskdb`.
+  trigger.
 - `src/liveness/mod.rs` — export `notify`.
 - `src/bg_task.rs` — add `Trigger::TimerOrEvent` variant +
   `wait_trigger` branch.
@@ -613,28 +860,33 @@ pub watch_notify_debounce_ms: u64,  // default: 100
 - `src/main.rs` — wire `NotifyHandler` when `notify_enabled`; pass
   `sync_trigger` to keepalive.
 
-**Deferred (item 6, post-R74)**:
-- `lib/crow-diskdb-client/src/lib.rs` — `WatchNotifyClient`
-  subscription on `/srv/diskdb/` for proactive endpoint cache refresh.
-  Depends on R74's `DiskdbClient` + endpoint cache.
+**lib/crow-diskdb-client** (item 7 — proactive endpoint cache refresh):
+- `src/client.rs` — add optional `WatchNotifyClient` to `DiskdbClient`;
+  subscribe to `/srv/diskdb/` when enabled; call `refresh_endpoints`
+  on notify.
+- `src/lib.rs` — re-export `WatchNotifyClient` from `crow-kv-client`
+  for convenience.
 
 ## Complexity
 
 **High.** The crow-kv watch/notify extension is a new subsystem: a
 bidi gRPC stream, a per-group watch registry with concurrent
-subscribe/unsubscribe/emit, a write-path trigger that decodes every
-chosen payload (gated by an `is_empty` fast path), and a debounce
-coalescer with timer tasks. The hardest parts are (1) the leader-step-
-down lifecycle — clearing the registry and flushing the coalescer
-without losing notifies, while closing client streams cleanly; (2) the
-`WatchNotifyClient` reconnect logic — detecting stream close, refreshing
-topology, re-subscribing, and keeping the subscriber's channel open
-across reconnects; (3) keeping the write-path overhead near-zero when
-no watchers are registered (the `is_empty` gate + `try_send` non-
-blocking emit). The diskdb side is medium complexity (trigger
-extension + notify handler task). The `LearnerStream` pattern is
-reused for the bidi stream shape; the `Batch::decode` is reused for
-payload decoding.
+subscribe/unsubscribe/emit, an apply-path trigger that fires on every
+chosen slot (gated by an `AtomicBool` fast path), and a debounce
+coalescer with timer tasks. The hardest parts are (1) the apply-path
+hook — wiring the registry into `PxLearner` via `OnceLock` so all
+three apply entry points (`learn`, `spawn_learn_chosen`,
+`apply_loop_task`) trigger the hook, while keeping zero overhead when
+no watchers are registered; (2) the leader-step-down lifecycle —
+clearing the registry and flushing the coalescer without losing
+notifies, while closing client streams cleanly, across three step-down
+sites (`step_down` + two propose-path direct `become_follower` calls);
+(3) the `WatchNotifyClient` reconnect logic — detecting stream close,
+refreshing topology, re-subscribing, and keeping the subscriber's
+channel open across reconnects. The diskdb side is medium complexity
+(trigger extension + notify handler task). The `LearnerStream` pattern
+is reused for the bidi stream shape; the `Batch::decode` is reused for
+payload decoding (already done in `apply_entry`, no extra decode).
 
 ## Test Design
 
@@ -652,12 +904,15 @@ payload decoding.
 - `remove_all` — subscribe 3 prefixes via one stream, `remove_all` by
   the recorded ids, emit to all 3; assert no notifies.
 - `emit_full_channel_drops` — subscribe with a capacity-1 channel,
-  fill it, emit 3 keys; assert no panic (try_send drops silently); the
+  fill it, emit 3 keys; assert no panic (`try_send` drops silently); the
   watcher misses notifies (safety-net covers this).
-- `is_empty` — true before subscribe, false after, true after
-  unsubscribe + clear.
-- `clear` — subscribe 3 watchers, `clear()`, assert `is_empty` and all
-  channels are closed (sender dropped).
+- `has_watchers` — false before subscribe, true after, false after
+  `unsubscribe` + `clear`.
+- `clear` — subscribe 3 watchers, `clear()`, assert `has_watchers`
+  false and all channels are closed (sender dropped).
+- `delete_op_notifies` — emit a `BatchOp { op: Op::Delete, key }`
+  matching the prefix; assert the watcher receives a notify with the
+  key.
 
 **WatchCoalescer** (`lib/crow-kv/src/cluster/watch_registry.rs`):
 - `debounce_zero_emits_immediately` — `debounce_ms=0`, record a
@@ -669,6 +924,8 @@ payload decoding.
   prefixes; assert two separate notifies (one per prefix timer).
 - `flush_and_clear_on_stepdown` — buffer 2 keys, `flush_and_clear`;
   assert one final notify with the buffered keys + no timers remain.
+- `unwatched_key_skipped` — record a payload whose key matches no
+  registered prefix; assert no pending entry is created and no notify.
 
 **WatchNotify server handler** (`lib/crow-kv/src/rpc/kv_service.rs`):
 - `subscribe_not_leader` — open a stream to a non-leader node, send
@@ -682,6 +939,10 @@ payload decoding.
   stream; `Put` a matching key; assert no notify (registry cleaned up).
 - `leader_stepdown_closes_streams` — subscribe on the leader, force
   step-down; assert the client stream closes (sender dropped).
+- `heartbeat_catchup_notifies` — force the leader to learn a slot via
+  heartbeat catch-up (not via its own propose); assert the watcher
+  receives a notify (proves the apply-path hook fires for catch-up
+  slots, not just proposed slots).
 
 **Trigger::TimerOrEvent** (`app/crow-diskdb/src/bg_task.rs`):
 - `timer_fires` — `TimerOrEvent` with a 10 ms interval; assert the
@@ -698,7 +959,7 @@ payload decoding.
   `notify_enabled=true`. Wait for the initial sync. Add a disk via
   `HardwareClient::add_disk` (writes to `/hw/disk/...` in group 0).
   Assert the diskdb container sees the new disk within 1 s (notify
-  woke the keepalive), not 60 s (the safety-net interval). Then
+  woke keepalive), not 60 s (the safety-net interval). Then
   remove the disk; assert it transitions to `Missing` within 1 s.
 - **Ownership transfer** — reassign a disk-group's owner in group 0
   (`HardwareClient` write to `/hw/dg_owner/...`); assert the diskdb
@@ -717,6 +978,20 @@ payload decoding.
 - **Coalescing** — `notify_debounce_ms=100`; burst-write 10 disks in
   one `batch_write`; assert one notify (coalesced) wakes the keepalive
   once, not 10 times.
+- **Heartbeat catch-up notify** — force a leader change where the new
+  leader has slots to catch up via heartbeat (slots it accepted as a
+  follower); assert the watcher receives notifies for those slots
+  (proves the apply-path hook fires for catch-up slots in E2E).
+
+**Client endpoint cache proactive refresh (item 7)**:
+- `DiskdbClient` with `watch_notify_enabled=true`, subscribed to
+  `/srv/diskdb/`; change a diskdb instance's `grpc_endpoint` in group
+  0 → client's `endpoint_cache` entry for the affected `disk_group_id`
+  refreshes without a failed `allocate_blocks` attempt; next call
+  routes to the new endpoint.
+- Client misses a notify (stream disconnected) → next
+  `allocate_blocks` to a moved instance fails once, triggers
+  `refresh_endpoints` (on-demand safety net), retries successfully.
 
 ## Module Structure
 
@@ -727,10 +1002,13 @@ lib/crow-kv/src/
     kv_service.rs               # +watch_notify handler
   cluster/
     watch_registry.rs           # NEW: WatchRegistry, Watcher, WatchCoalescer
-    group.rs                    # +watch_registry, +watch_coalescer fields
-    group_propose.rs            # +notify trigger after fan_out_chosen_notice
+    group.rs                    # +watch_registry field, wire into learner, clear on step_down
+    group_election.rs           # +clear registry + flush coalescer in step_down
+    group_propose.rs            # +clear registry before direct become_follower calls
     group_config.rs             # +watch_notify_debounce_ms
     mod.rs                      # export watch_registry
+  paxos/
+    learner.rs                  # +watch_registry/coalescer OnceLock + set_* + apply-path hook
 
 lib/crow-kv-client/src/
   watch_notify.rs               # NEW: WatchNotifyClient, WatchSubscription
@@ -739,11 +1017,15 @@ lib/crow-kv-client/src/
 app/crow-diskdb/src/
   liveness/
     notify.rs                   # NEW: NotifyHandler
-    keepalive.rs                # +sync_trigger, +trigger_now, +endpoint
+    keepalive.rs                # +sync_trigger, +trigger_now, +TimerOrEvent trigger
     mod.rs                      # export notify
   bg_task.rs                    # +Trigger::TimerOrEvent
   ddb_config.rs                 # +NotifyConfig
   main.rs                       # wire NotifyHandler when notify_enabled
+
+lib/crow-diskdb-client/src/
+  client.rs                     # +optional WatchNotifyClient, proactive refresh on notify
+  lib.rs                        # re-export WatchNotifyClient
 ```
 
 ## Config Extensions
@@ -752,7 +1034,10 @@ app/crow-diskdb/src/
   - `notify_enabled: bool` — default `false`. Static (requires restart).
   - `notify_debounce_ms: u64` — default `100`. Dynamic.
 - **`CrowKVConfig.watch_notify_debounce_ms`** — default `100`.
-  Dynamic (live-reload via `set_from_config`).
+  Dynamic (live-reload via `set_from_config`; the coalescer reads it
+  from an `AtomicU64`).
+- **`DiskdbClient` `watch_notify_enabled: bool`** — default `false`.
+  Static (set at client construction).
 - **`validate()`** — no new constraints; existing
   `sync.sync_interval_secs > 0` check covers the safety-net interval.
 
@@ -760,13 +1045,13 @@ app/crow-diskdb/src/
 
 `app/crow-diskdb/src/main.rs` startup sequence (additions):
 
-1. After building `keepalive` (line 126): if
+1. After building `keepalive` (line 127): if
    `config.load().notify.notify_enabled`, create an
    `Arc<tokio::sync::Notify>` (`sync_trigger`), call
    `keepalive.with_sync_trigger(Arc::clone(&sync_trigger))`.
 2. After building the bg runner (line 197): if `notify_enabled`,
    construct `WatchNotifyClient::from_shared(Arc::clone(&kv_client))`
-   and `NotifyHandler::new(watch, sync_trigger, sys_group)`. Spawn
+   and `NotifyHandler::new(watch, sync_trigger)`. Spawn
    `notify_handler.run(stop_notify)` as a background task with the
    same stop signal as the bg runner.
 3. On shutdown: the stop signal aborts the notify handler (its `run`
@@ -789,10 +1074,10 @@ app/crow-diskdb/src/
   leader; diskdb's field documents the operator's intent. Revisit if
   per-subscription debounce is needed.
 - **Q2: One stream per subscription vs multiplexed.** §4.2 chooses one
-  gRPC stream per `(group_id, prefix)` subscription. A diskdb instance
-  watching 4 prefixes opens 4 streams. If connection count is a
-  concern, multiplex all subscriptions over one stream (send multiple
-  `WatchSubscribe` frames on one bidi stream). The proto already
-  supports this (the inbound stream is a sequence of frames). **No
-  change needed for v1** — the `WatchNotifyClient` can be extended
-  later to multiplex without proto changes.
+  gRPC stream per `(store_id, group_id, prefix)` subscription. A
+  diskdb instance watching 3 prefixes opens 3 streams. If connection
+  count is a concern, multiplex all subscriptions over one stream
+  (send multiple `WatchSubscribe` frames on one bidi stream). The
+  proto already supports this (the inbound stream is a sequence of
+  frames). **No change needed for v1** — the `WatchNotifyClient` can
+  be extended later to multiplex without proto changes.

@@ -3,174 +3,324 @@
 
 ### R78: diskdb — Group-0 Notify/Watch (Replace Polling Sync)
 
-**Problem**: R71 implements the group-0 sync loop with fixed-interval
-polling (default 10 s). Every diskdb instance polls group 0 on each
-tick to detect ownership changes, new disks, and status updates. This
-works for v1 but has two drawbacks:
+**Problem**:
 
-- **Latency** — a status change (disk bad, disk-group reassigned) takes
-  up to one sync interval (10 s) to be observed. For failure detection
-  and ownership transfer, faster propagation is desirable.
-- **Wasted reads** — every poll is a prefix scan of group 0 even when
-  nothing changed. With many diskdb instances, this is redundant load
-  on group 0.
+- **Current behavior + impact** — R71 implements the diskdb group-0
+  sync loop with fixed-interval polling (default 10 s, read from
+  `DdbConfig.sync.sync_interval_secs`). Every diskdb instance prefix-
+  scans group 0 on each tick to detect ownership changes, new disks,
+  and status updates. This works for v1 but has two drawbacks:
+  - **Latency** — a status change (disk bad, disk-group reassigned)
+    takes up to one sync interval (10 s) to be observed. For failure
+    detection and ownership transfer, faster propagation is
+    desirable.
+  - **Wasted reads** — every poll is a prefix scan of group 0 even
+    when nothing changed. With many diskdb instances, this is
+    redundant load on group 0.
+  - **Root cause** — deferred placeholder, not a bug: R71 shipped
+    polling as the v1 change-detection mechanism; push-based notify
+    was always a follow-up.
+- **Design pointers** —
+  [`doc/design/diskdb/design-crow-diskdb.md`](../design/diskdb/design-crow-diskdb.md)
+  §10 (Follow-up — group-0 notify/watch) states v1 ships with
+  fixed-interval polling and lists watch/notify as a follow-up where
+  group 0 pushes notifications to diskdb and polling stays as a
+  safety net with an increased interval. The implementation design is
+  in
+  [`doc/working/design-crow-kv-watch-notify.md`](../working/design-crow-kv-watch-notify.md)
+  (design draft). No direct aioss analog — new work; the reference
+  model is etcd watch (watcher fed from the mvcc backend apply
+  stream, not the Raft proposal path).
+- **Use scenarios** —
+  - **Disk failure propagation** — an operator marks a disk bad (or
+    a health probe flips it) in group 0; the owning diskdb observes
+    the new status and stops allocating on it within ~1 s, not 10 s.
+  - **Ownership transfer** — a disk-group's owner is reassigned in
+    group 0; the old owner drops the disk-group and the new owner
+    picks it up within ~1 s, not 10 s.
+  - **New disk discovery** — a disk is added to a node in group 0;
+    the owning diskdb initializes the disk (zone baselines) within
+    ~1 s, not 10 s.
+  - **Client endpoint cache proactive refresh (R74 use case)** — a
+    diskdb instance moves (endpoint change in its service-registry
+    record); a client holding the old endpoint cache entry refreshes
+    it before its next `allocate_blocks`/`free_blocks` call, instead
+    of failing one attempt and retrying.
+  - **Missed-notify fallback** — a notify is dropped (watcher channel
+    full) or the WatchNotify stream is disconnected; the diskdb still
+    converges to the group-0 state on the next safety-net poll (60 s).
 
-The design doc (§10) lists this as a follow-up:
+**Solution**:
 
-> **Follow-up — group-0 notify/watch:** a future follow-up adds a
-> watch/notify mechanism where group 0 pushes hw-status-change and
-> ownership-change notifications to registered diskdb endpoints (each
-> diskdb registers its endpoint on sync). This replaces polling for
-> status changes; polling stays as a safety net with an increased
-> interval. v1 ships with fixed-interval polling.
+Add a watch/notify mechanism so a crow-kv leader pushes
+hw-status-change and ownership-change notifications to subscribers
+over a long-lived gRPC bidi stream, replacing fixed-interval polling
+as the primary change-detection mechanism. diskdb subscribes to the
+group-0 prefixes it cares about and triggers an immediate sync on
+notify; polling stays as a safety net at a raised interval.
 
-Note: §10 says "each diskdb registers its endpoint on sync", but R71
-only wired the `grpc_endpoint` slot in `heartbeat_diskdb` — it passes
-`""` (`keepalive.rs:166`). Populating the endpoint is part of R78.
+*One-line summary*: client-pulled `WatchNotify` bidi stream + leader-
+side apply-path trigger, with polling as a safety net.
 
-**Solution**: Add a watch/notify mechanism so group 0 pushes
-hw-status-change and ownership-change notifications to registered
-diskdb endpoints, replacing fixed-interval polling as the primary
-change-detection mechanism.
+The detailed design (proto, registry, coalescer, trigger path
+selection, lifecycle) is in the design draft
+[`doc/working/design-crow-kv-watch-notify.md`](../working/design-crow-kv-watch-notify.md);
+this section states *what* is built and *where*, not *how*.
 
-1. **diskdb endpoint registration** — each diskdb instance registers
-   its notify endpoint (host:port) in group 0 on startup and on every
-   sync tick via the `grpc_endpoint` arg of `heartbeat_diskdb` (R71
-   wired the slot but passes `""`; R78 populates it). The registration
-   carries the endpoint URL and the `instance_id`.
+1. **crow-kv watch/notify extension** (`lib/crow-kv`) — add a
+   `WatchNotify` gRPC bidi stream to `KvService` and a per-group
+   `WatchRegistry` so a client can subscribe to a `(group_id, prefix)`
+   and receive `WatchNotify` frames (changed keys, not values) when a
+   watched prefix is written. The notify fires on the leader's apply
+   path after a slot is chosen (the etcd model — watcher fed from the
+   apply stream, not the proposal path), gated by an empty-registry
+   fast path so a group with no watchers pays one predicted-not-taken
+   branch per apply. The trigger-path selection rationale (apply-path
+   hook vs two-code-copies vs WAL tailer) is in the design draft §2.4;
+   the chosen option is the apply-path hook. This is the main crow-kv
+   design work and the subject of a future sub-design doc
+   (`design-crow-kv-watch-notify.md`, folded from the working draft on
+   merge).
+2. **WatchNotify client** (`lib/crow-kv-client`) — a reusable
+   `WatchNotifyClient` that opens the bidi stream to the group-0
+   leader (discovered via the topology cache), sends subscribe frames,
+   and delivers notify frames over a channel. Handles leader-change by
+   reconnecting to the new leader and re-subscribing, keeping the
+   subscriber's channel open across the reconnect (mirrors the
+   `LearnerStream` reconnect pattern).
+3. **diskdb notify handler** (`app/crow-diskdb/src/liveness/notify.rs`,
+   new) — a `NotifyHandler` task that subscribes to the group-0
+   prefixes diskdb cares about (`/hw/dg_owner/`, `/hw/dg_bind/`,
+   `/hw/disk/`) and wakes the keepalive sync loop on each notify. The
+   notify is a **trigger, not a transport** — diskdb re-reads the
+   actual values from group 0 via the normal sync path
+   (`observe_ownership`, `observe_disks`), keeping the notify payload
+   small and avoiding a duplicated read path.
+4. **KeepAlive hybrid wake** (`app/crow-diskdb/src/liveness/keepalive.rs`
+   + `app/crow-diskdb/src/bg_task.rs`) — extend the `Trigger` enum
+   with a `TimerOrEvent` variant (timer + external `Notify` signal) so
+   the keepalive loop wakes on either the safety-net timer tick or an
+   external notify. KeepAlive gains a `sync_trigger` field + a
+   `trigger_now()` method called by the notify handler.
+5. **Polling as a safety net** — keep the fixed-interval sync loop
+   (R71) as a safety net, but raise the effective interval (e.g. 60 s
+   instead of 10 s) when notify is on, since notifies handle the
+   common case. The polling loop catches any missed notifies
+   (reliability fallback). When notify is off (v1 default), behavior
+   is unchanged — fixed-interval polling at `sync_interval_secs`.
+6. **Configuration** (`app/crow-diskdb/src/ddb_config.rs`) — add a
+   `NotifyConfig { notify_enabled, notify_debounce_ms }` section.
+   `notify_enabled` (default false) toggles polling-only vs
+   notify+polling. `notify_debounce_ms` (default 100) is the crow-kv-
+   side coalescing window (0 = no coalescing). The crow-kv leader's
+   debounce is authoritative (`CrowKVConfig.watch_notify_debounce_ms`);
+   diskdb's field documents operator intent (see Open Questions).
+7. **Client endpoint cache proactive refresh (R74 use case)**
+   (`lib/crow-diskdb-client/src/client.rs`) — `DiskdbClient`'s
+   `endpoint_cache` (R74, now implemented: `refresh_endpoints` reads
+   `read_all_diskdb_instances`) refreshes **on demand** today
+   (startup, cache miss, error-retry). R78 extends this to proactive
+   refresh: the client subscribes to the `/srv/diskdb/` prefix via
+   `WatchNotifyClient`; on a notify (instance register/deregister/
+   move), it refreshes the affected cache entries so the next
+   `allocate_blocks`/`free_blocks`/`query_*` routes to the new
+   endpoint without a failed attempt + retry. The v1 on-demand
+   refresh remains as the safety net; proactive refresh is an
+   optimization, not a correctness requirement.
 
-2. **crow-kv watch/notify extension** — add a watch/notify capability
-   to crow-kv so that group 0 can push notifications to registered
-   endpoints when watched keys change. This is a crow-kv extension
-   (new sub-design doc). Design questions to resolve:
+**Note on endpoint registration** — the original design-doc §10
+framing ("group 0 pushes notifications to registered diskdb
+endpoints; each diskdb registers its endpoint on sync") evolved in
+the design draft to a **client-pulled bidi stream**: diskdb opens the
+`WatchNotify` stream to the group-0 leader and subscribes; the leader
+pushes notifies over that stream. No separate notify-endpoint
+registration is needed for notify delivery. The `grpc_endpoint` arg
+of `heartbeat_diskdb` (R71/R74) is the diskdb gRPC service address
+for service-registry discovery (so clients can route
+`allocate_blocks`), and is **already populated** from
+`config.server.listen_addr` (`app/crow-diskdb/src/main.rs`,
+`.with_grpc_endpoint(...)`), passed on every sync tick
+(`keepalive.rs` `heartbeat_diskdb` call). Design-doc §10 will be
+updated to the bidi-stream model when the design draft is folded in.
 
-   - **Watch scope** — per-key watch, per-prefix watch, or per-group
-     watch? diskdb needs per-prefix (e.g. watch
-     `/diskdb/node/{node_id}/`, `/diskdb/map/owner/`,
-     `/diskdb/map/bind/`).
-   - **Notify transport** — push over gRPC (a new `WatchNotify` stream
-     from group 0 to diskdb), or HTTP POST to the registered endpoint?
-     gRPC bidi stream is the natural fit (matches crow-kv's existing
-     `LearnerStream` pattern); HTTP POST is simpler but less
-     idiomatic.
-   - **Reliability** — what happens if a diskdb endpoint is down when
-     group 0 pushes a notification? Options: retry with backoff, fall
-     back to polling on notify failure, or both (notify + polling as a
-     safety net).
-   - **Notify trigger path** — three options were evaluated for where
-     the notify fires:
-     - (A) **Apply-path hook** — after the leader applies a chosen
-       slot whose batch touches a watched range, enqueue a notify to
-       matching subscribers. The batch is already decoded in
-       `apply(slot, batch)`; no re-decode, no new API, no GC
-       interaction. Guarded by an empty-registry fast path so a group
-       with no registered watchers pays one predicted-not-taken branch
-       per apply, off the Quorum critical path under
-       `async_engine_apply`. This is the etcd model (watcher fed from
-       the mvcc backend apply stream, not the Raft proposal path).
-     - (B) **Two code copies** — group0's apply path has the hook;
-       other groups' apply path is untouched. Zero perf on
-       watcher-less groups, but duplicated apply path with divergence
-       risk, and not general (each new group needs the hooked copy).
-     - (C) **WAL background tailer** — a background task reads the
-       committed WAL prefix, decodes `Chosen` records, matches
-       watched ranges. Zero perf on watcher-less groups (tailer
-       doesn't exist), but needs a new `WalEngine` tail API, a Paxos
-       record decoder, and WAL GC interaction handling (tailer
-       falling behind `wal_min_retention` → full-scan resync).
-     **Chosen: (A).** B and C both eliminate one branch vs A, but a
-     predicted-not-taken branch is noise-level (~0 cycles). That
-     gain does not justify B's duplication or C's new API + decoder
-     + GC machinery. A is the lowest-complexity option with
-     negligible perf impact. A per-group `watch_notify_enabled` flag
-     may exist as admin policy (refuse registrations on a group) but
-     is not a perf gate; the empty registry is the gate. This is the
-     main crow-kv design work.
-   - **Coalescing** — burst writes to the same prefix should coalesce
-     into one notify (debounce window, e.g. 100 ms) to avoid notify
-     storms.
+```
+                     group-0 leader (crow-kv)
+                     ┌──────────────────────────────┐
+                     │ PxGroup                       │
+                     │  WatchRegistry (per-prefix)   │
+                     │  WatchCoalescer (debounce)    │
+                     │  apply-path trigger ──────────┼──┐
+                     └─────────────┬────────────────┘  │ (chosen slot
+                                   │ WatchNotify       │  touches watched
+                       ┌───────────┴────────────┐      │  prefix)
+                       │   bidi gRPC stream     │      │
+            subscribe  │  (client-pulled)       │      │
+        ┌──────────────┴────────┐  ┌────────────┴───────┴──────┐
+        │ diskdb NotifyHandler  │  │ crow-kv KvService         │
+        │  /hw/dg_owner/        │  │  watch_notify handler     │
+        │  /hw/dg_bind/         │  │  (subscribe/leader-check) │
+        │  /hw/disk/            │  └───────────────────────────┘
+        └──────────┬────────────┘
+                   │ notify_one()
+        ┌──────────┴────────────┐
+        │ KeepAlive             │   safety-net timer (60 s)
+        │  Trigger::TimerOrEvent│ ────────────────────────────┐
+        │  tick() → re-read     │                             │ fallback
+        └───────────────────────┘                             │
+                                                              │
+        ┌──────────────────────┐  subscribe /srv/diskdb/      │
+        │ DiskdbClient (R74)   │ ◄────────────────────────────┘
+        │  endpoint_cache      │   proactive refresh on notify
+        │  + WatchNotifyClient │   (on-demand refresh = safety net)
+        └──────────────────────┘
+```
 
-3. **diskdb notify handler** — add a notify handler to the diskdb
-   server:
+**Edge cases at a glance**:
 
-   - On receiving a notify for a watched prefix, trigger an immediate
-     `KeepAlive::tick()` (R71's sync entry point in
-     `liveness/keepalive.rs`). The sync reads the changed keys from
-     group 0 and applies them to the in-memory state.
-   - The notify is a **trigger**, not a transport for the data itself
-     — diskdb still reads the actual values from group 0 via the
-     normal sync path. This keeps the notify payload small and avoids
-     duplicating the read path.
+- **Watcher channel full** → `try_send` drops the notify silently
+  (write path never blocks on a slow watcher); safety-net polling
+  catches the missed change.
+- **Leader step-down mid-stream** → old leader clears its
+  `WatchRegistry` + flushes the coalescer (final notifies emitted);
+  dropping the watcher senders closes client streams; clients
+  reconnect to the new leader and re-subscribe; safety-net covers
+  the gap.
+- **Client subscribed to a group this node doesn't lead** → server
+  returns `WatchNotifyError { not_leader_hint }` per-subscribe
+  without closing the stream (client may subscribe to other groups
+  on the same stream); client reconnects to the leader for that
+  group.
+- **Foreign-value retry on the write path** → trigger fires for the
+  foreign value (a real write to real keys) and again for the
+  retried client value; both notifies are correct.
+- **NoOp / repair slots** → `Batch::decode` on empty payload yields
+  no ops; no notify fires.
+- **Notify disabled (v1 default)** → no notify handler, no
+  `WatchNotifyClient`, keepalive uses the existing `TimerFn` trigger
+  at `sync_interval_secs` (10 s); zero overhead when disabled.
+- **diskdb down when a notify fires** → no stream is open, so no
+  notify is delivered; on restart diskdb opens the stream and the
+  next change is notified; any change missed while down is caught by
+  the safety-net poll on restart.
+- **Client misses a notify (partition / was down)** → v1 on-demand
+  refresh (cache-miss + error-retry) remains as the safety net; the
+  cache is eventually consistent either way.
 
-4. **Polling as a safety net** — keep the fixed-interval sync loop
-   (R71) as a safety net, but increase the interval (e.g. 60 s instead
-   of 10 s) since notifies handle the common case. The polling loop
-   catches any missed notifies (reliability fallback).
+**Dependencies**:
 
-5. **Configuration** — add to the diskdb config (`ddb_config.rs`):
+- **R71** (landed) — `KeepAlive` sync loop
+  (`app/crow-diskdb/src/liveness/keepalive.rs`), fixed-interval
+  polling, `heartbeat_diskdb` (endpoint slot wired and **populated**
+  from `config.server.listen_addr`), `BackgroundTask` / `BgRunner` /
+  `Trigger` framework (`app/crow-diskdb/src/bg_task.rs`).
+- **R74** (landed) — `DiskdbClient` + `endpoint_cache` +
+  `refresh_endpoints` + `read_all_diskdb_instances`
+  (`lib/crow-diskdb-client/src/client.rs`); the service-registry
+  `/srv/diskdb/` prefix that item 7 watches. Item 7 is no longer
+  blocked by R74.
+- **Depends on this** — none yet. Future groups opt into watch/notify
+  via the same `WatchNotify` stream with no design change (the
+  registry is per-group; the empty-registry fast path is the only
+  gate).
 
-   - `notify_enabled` (default false in v1, true when this feature
-     ships) — toggle between polling-only and notify+polling.
-   - The existing `sync.sync_interval_secs` (default 10) is the
-     safety-net polling interval; when `notify_enabled` is true its
-     effective default rises (e.g. 60) since notifies handle the
-     common case. No separate parallel interval field.
-   - `notify_debounce_ms` (default 100) — crow-kv-side coalescing
-     window.
+**Acceptance**:
 
-6. **Client endpoint cache proactive refresh (R74 use case)** —
-   `crow-diskdb-client`'s `DiskdbClient` (from R74) maintains a
-   `disk_group_id -> grpc_endpoint` cache populated from
-   `ServiceRegistryClient::read_all_diskdb_instances()`. In v1 (R74)
-   this cache refreshes **on demand** (startup, cache miss,
-   error-retry) — a moved instance is detected reactively on the next
-   failed operation, not proactively. R78's notify/watch extends this
-   to proactive refresh:
+**WatchRegistry + coalescer (crow-kv)**:
+- `WatchRegistry::subscribe` for prefix `/hw/disk/`, `emit` a changed
+  key `/hw/disk/1/2/3/abcd` → watcher channel receives a `WatchNotify`
+  with the key; a key outside the prefix (`/hw/rack/1`) does not
+  notify. Unit test.
+- Two watchers on the same prefix, `emit` one key → both receive the
+  notify. Unit test.
+- `subscribe` then `unsubscribe` by `watcher_id`, `emit` → no notify
+  received (channel stays empty). Unit test.
+- `subscribe` 3 prefixes via one stream, `remove_all` by the recorded
+  ids, `emit` to all 3 → no notifies. Unit test.
+- `subscribe` with a capacity-1 channel, fill it, `emit` 3 keys → no
+  panic (`try_send` drops silently); watcher misses notifies. Unit
+  test.
+- `is_empty` true before subscribe, false after, true after
+  `unsubscribe` + `clear`. Unit test.
+- `subscribe` 3 watchers, `clear()` → `is_empty` true and all
+  channels closed (sender dropped). Unit test.
+- `WatchCoalescer` with `debounce_ms=0`, `record_chosen` a payload
+  with 2 keys → immediate emit (no timer). Unit test.
+- `WatchCoalescer` with `debounce_ms=50`, `record_chosen` 3 payloads
+  to the same prefix within 10 ms → one `WatchNotify` with all keys
+  after ~50 ms (use `tokio::time::pause`). Unit test.
+- `WatchCoalescer` with writes to two prefixes → two separate
+  notifies (one per prefix timer). Unit test.
+- `WatchCoalescer::flush_and_clear` with 2 buffered keys → one final
+  notify with the buffered keys + no timers remain. Unit test.
 
-   - The client subscribes to changes on the `/srv/diskdb/` prefix
-     (the service registry). When a diskdb instance registers,
-     deregisters, or moves (endpoint change in `InstanceValue`), group
-     0 pushes a notify to subscribed clients.
-   - On notify, the client refreshes the affected cache entries from
-     `read_all_diskdb_instances()` (or a targeted
-     `read_instance("diskdb", instance_id)` for the changed instance).
-     The cache updates immediately — the next `allocate_blocks` /
-     `free_blocks` / `query_*` call routes to the new endpoint without
-     a failed attempt + retry.
-   - **Watch scope** — per-prefix watch on `/srv/diskdb/` (the client
-     cares about all diskdb instance registrations, not just one key).
-     This is the same prefix-watch scope as item 2's diskdb-server
-     side; the client is an additional subscriber.
-   - **Reliability** — if the client misses a notify (network
-     partition, client was down), the v1 on-demand refresh
-     (cache-miss + error-retry) remains as the safety net. The
-     proactive refresh is an optimization, not a correctness
-     requirement — the cache is eventually consistent either way.
-   - **Client-side watch transport** — the client opens a gRPC
-     `WatchNotify` stream to group 0 (same transport as item 2's
-     diskdb-server notify). The stream is long-lived; on disconnect,
-     the client falls back to on-demand refresh + reconnects the
-     stream.
+**WatchNotifyClient (crow-kv-client)**:
+- `WatchNotifyClient::subscribe` to `(group_0, /hw/disk/)` against a
+  3-node cluster; `Put` a matching key on the leader → the
+  subscription's `notify_rx` yields a `WatchNotify` with the key.
+  Integration test.
+- Force a leader change while subscribed → the client reconnects to
+  the new leader, re-subscribes, and the subscriber's `notify_rx`
+  stays open; a subsequent `Put` is notified within 1 s. Integration
+  test.
+- Drop the `WatchSubscription` → server removes the watcher; a
+  subsequent `Put` to the prefix produces no notify on the dropped
+  subscription. Integration test.
 
-**Scope** (expected changed files):
+**WatchNotify server handler (crow-kv)**:
+- Open a stream to a non-leader node, `WatchSubscribe` for a group it
+  doesn't lead → `WatchNotifyError { not_leader_hint }` received;
+  stream stays open (can subscribe to another group). Unit test.
+- Open a stream to the leader, subscribe to a prefix, `Put` a matching
+  key → `WatchNotify` frame received with the key. Integration test.
+- Open a stream, subscribe, drop the stream, `Put` a matching key →
+  no notify (registry cleaned up on stream end). Integration test.
+- Subscribe on the leader, force step-down → client stream closes
+  (sender dropped). Integration test.
 
-- `doc/design/kv/design-crow-kv-watch-notify.md` — new sub-design for
-  the crow-kv watch/notify extension (watch scope, transport,
-  reliability, coalescing, group-0 write-path trigger).
-- `lib/crow-kv/src/...` — crow-kv watch/notify implementation (watch
-  registry, notify emission on write, gRPC `WatchNotify` stream or
-  HTTP POST).
-- `app/crow-diskdb/src/liveness/keepalive.rs` (and a new
-  `liveness/notify.rs` handler) — notify handler that triggers
-  `KeepAlive::tick()` on notify; polling-as-safety-net mode.
-- `app/crow-diskdb/src/ddb_config.rs` — notify config items.
-- `lib/crow-diskdb-client/src/lib.rs` — `WatchNotify` stream
-  subscription on `/srv/diskdb/` for proactive endpoint cache refresh
-  (R74 use case, item 6).
+**Trigger::TimerOrEvent (diskdb)**:
+- `TimerOrEvent` with a 10 ms interval, no notify → task wakes within
+  50 ms. Unit test.
+- `TimerOrEvent` with a 60 s interval, `notify_one()` → task wakes
+  immediately (< 50 ms). Unit test.
+- Both timer and notify fire simultaneously → `select!` does not
+  panic. Unit test.
 
-**Dependencies**: R71 (sync loop, `heartbeat_diskdb` endpoint slot,
-instance heartbeat), R74 (`DiskdbClient` endpoint cache,
-service-registry discovery).
+**diskdb notify-driven sync (E2E)**:
+- Start a 3-node kv-cluster (group 0) + one diskdb with
+  `notify_enabled=true`; wait for initial sync; add a disk via
+  `HardwareClient::add_disk` → diskdb container sees the new disk
+  within 1 s (notify woke keepalive), not 60 s. E2E test.
+- Reassign a disk-group's owner in group 0 → owning diskdb drops the
+  disk-group within 1 s (notify-driven), not 60 s. E2E test.
+- Subscribe with a capacity-1 channel, fill it (drop the reader),
+  write to group 0 → diskdb still syncs within 60 s (safety-net
+  timer). E2E test.
+- Subscribe on the group-0 leader, force a leader change → diskdb
+  `WatchNotifyClient` reconnects to the new leader and subsequent
+  writes are notified within 1 s; safety-net covers the reconnect
+  gap. E2E test.
+- `notify_enabled=false` (v1 default), add a disk → diskdb sees it
+  only on the next timer tick (10 s default), proving zero overhead
+  when disabled. E2E test.
+- `notify_debounce_ms=100`, burst-write 10 disks in one
+  `batch_write` → one coalesced notify wakes keepalive once, not 10
+  times. E2E test.
+
+**Client endpoint cache proactive refresh (R74 use case, item 7)**:
+- `DiskdbClient` subscribed to `/srv/diskdb/`, change a diskdb
+  instance's `grpc_endpoint` in group 0 → client's `endpoint_cache`
+  entry for the affected `disk_group_id` refreshes without a failed
+  `allocate_blocks` attempt; next call routes to the new endpoint.
+  Integration test.
+- Client misses a notify (stream disconnected) → next
+  `allocate_blocks` to a moved instance fails once, triggers
+  `refresh_endpoints` (on-demand safety net), retries successfully.
+  Integration test.
+
+**Test commands**: `pixi run test-kv-core`,
+`pixi run test-kv-client`, `pixi run test-diskdb`,
+`pixi run test-diskdb-client`, `pixi run cargo fmt --all -- --check`,
+`pixi run cargo clippy --all-targets -- -D warnings`.
 
 **Non-goals**:
 
@@ -180,10 +330,26 @@ service-registry discovery).
   metadata, ownership map, binding map, service registry
   `/srv/diskdb/` for client endpoint cache); other groups opt in via
   future requirements with no design change. The gating mechanism is
-  an empty-registry fast path on the apply path (one predicted-not-taken
-  branch when no watchers), not a per-group perf flag (see item 2).
+  an empty-registry fast path on the apply path (one predicted-not-
+  taken branch when no watchers), not a per-group perf flag.
 - Not a replacement for the sync read path — diskdb still reads the
   actual values from group 0; the notify is only a trigger.
 - Not in v1 — v1 ships with fixed-interval polling (R71) and
   on-demand client cache refresh (R74). This requirement is a
   follow-up.
+
+**Open Questions**:
+
+- **Q1 — `notify_debounce_ms` ownership.** The coalescer runs on the
+  crow-kv leader (group 0), configured via
+  `CrowKVConfig.watch_notify_debounce_ms`. diskdb's
+  `NotifyConfig.notify_debounce_ms` is the operator's intent but is
+  not directly consumed by the coalescer (diskdb is a client, not the
+  leader). Options: (a) diskdb's field is documentation-only — the
+  operator sets the real value in crow-kv config; (b) diskdb sends
+  its desired debounce as a `WatchSubscribe` parameter and the leader
+  uses the per-subscription value (more ergonomic, adds per-watcher
+  debounce state). Recommendation: (a) for v1 — one global debounce
+  on the leader; revisit if per-subscription debounce is needed.
+  Cannot be resolved autonomously — it is an API-ergonomics trade-off
+  that needs a human decision.

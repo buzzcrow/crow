@@ -11,14 +11,21 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R80** — Bump this line in the same commit when adding a new item.
+**Next R number: R81** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-- **[R76](R76-diskdb-disk-discovery-health.md)** — diskdb disk discovery
-  + health probing — Area: diskdb — Implement config-driven disk
-  discovery, health probing (existence, size, basic read/write test),
-  disk failure detection + recovery flow.
+- **[R76](R76-diskdb-disk-discovery-health.md)** — diskdb disk failure
+  detection + recovery scan flow — Area: diskdb — Wire the
+  `Missing → Bad → Up` lifecycle into the sync loop: Missing → Bad
+  confirmation, per-disk background recovery scan (iterates busy
+  blocks zone by zone, placeholder recovery, KV-persisted progress,
+  stops on Up), disk recovery (Missing/Bad/Offline → Up — unified
+  path: stop scan + compaction, no full RecoveryEngine rebuild).
+  Disk `effective_status` is the sole allocate gatekeeper — remove
+  redundant zone-level `DdbZoneHealth::Bad` marking (top-layer
+  status overrides). Real data repair is explicitly skipped (no
+  disk-block repair component / `diskio` service).
 - **[R77](R77-diskdb-console-cli.md)** — diskdb console + CLI
   integration — Area: diskdb / console — Disk/disk-group management UI,
   zone busy/free visualization (block array chart), CLI command design
@@ -26,10 +33,11 @@ complexity, and dependency. Before implementation, follow the
   core diskdb is functional.
 - **[R78](R78-diskdb-group0-notify-watch.md)** — group-0 notify/watch
   — Area: diskdb / kv — Replace fixed-interval polling (R71) with a
-  watch/notify mechanism: group 0 pushes hw-status-change and
-  ownership-change notifications to registered diskdb endpoints.
-  Requires a crow-kv watch/notify extension (new sub-design). Polling
-  stays as a safety net. Follow-up after R71; not in v1.
+  watch/notify mechanism: diskdb subscribes to group-0 prefixes via a
+  client-pulled `WatchNotify` bidi stream and the leader pushes
+  hw-status-change and ownership-change notifications over that
+  stream. Requires a crow-kv watch/notify extension (new sub-design).
+  Polling stays as a safety net. Follow-up after R71; not in v1.
 - **[R79](R79-diskdb-free-batch.md)** — diskdb free batch
   (size-threshold, no timer) — Area: diskdb — Group frees into a
   batch and flush via one `batch_write` when the batch reaches a
@@ -37,6 +45,19 @@ complexity, and dependency. Before implementation, follow the
   synchronous on the free path, not a background loop. v1 ships with
   immediate free (R72); this is a follow-up for high-free-throughput
   workloads.
+- **[R80](R80-diskdb-rebalance.md)** — diskdb space rebalance across
+  disks + disk-groups — Area: diskdb — New/recovered disks enter
+  `allocating_disks` empty while peers stay near-full; the round-robin
+  allocator is load-unaware so imbalance persists. Add imbalance
+  gauges (per-disk-group `used_pct` spread), load-aware allocation
+  skewing (weight new allocates by free space — passive convergence,
+  no data move), and a per-disk-group rebalance planner that emits
+  `RebalancePlanValue` (source busy blocks + `owner_chunk` + target
+  disk) with placeholder relocation (`LogOnly`, no `diskio` — same
+  envelope as R76). Disk-group-level rebalance is a caller concern
+  (§3.2 — caller picks `disk_group_id`); diskdb contributes a
+  `GetRebalanceHint` RPC + keepalive summary, not cross-instance
+  moves. Real data relocation deferred to a future `diskio` service.
 
 - **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
   `spawn_blocking` on the durability path. The WAL's production I/O
