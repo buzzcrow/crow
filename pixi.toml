@@ -92,28 +92,36 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
 test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
 test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
+test-common = { cmd = "cargo test -p crow-common --all-targets", depends-on = ["build"] }
+test-protocol = { cmd = "cargo test -p crow-protocol --all-targets", depends-on = ["build"] }
 test-kv-core = { cmd = "cargo test -p crow-kv --all-targets", depends-on = ["build"] }
+test-kv-client = { cmd = "cargo test -p crow-kv-client --all-targets", depends-on = ["build"] }
 test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets", depends-on = ["build"] }
 test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets", depends-on = ["build"] }
+test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets", depends-on = ["build"] }
+test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets", depends-on = ["build"] }
 test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
 test-console-server = { cmd = "cargo test -p crow-web --all-targets", depends-on = ["build"] }
 test-console-ui = { cmd = "cargo build -p crow-kv-server && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
+# Full workspace test suite, grouped by domain. clean-env only runs at start
+# and before the console block (server-spawning tests with the heaviest
+# process/log footprint); non-spawning and self-cleaning tests run back-to-back.
 test-suite = { cmd = '''
 bash -c '
 set -e
 pixi run clean-env
 pixi run test-tree-ct
-pixi run clean-env
 pixi run test-tree-ffi
-pixi run clean-env
+pixi run test-common
+pixi run test-protocol
 pixi run test-kv-core
-pixi run clean-env
+pixi run test-kv-client
+pixi run test-diskdb-client
 pixi run test-kv-server
-pixi run clean-env
 pixi run test-diskdb
 pixi run clean-env
+pixi run test-console-shared
 pixi run test-console-cli
-pixi run clean-env
 pixi run test-console-server
 pixi run clean-env
 pixi run test-console-ui

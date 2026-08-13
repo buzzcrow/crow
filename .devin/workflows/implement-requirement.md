@@ -41,13 +41,24 @@ Per-type doc guides (open the matched one before writing that artifact):
 
 ## Test Commands
 
-Prefix each with `pixi run clean-env &&` to reset test state:
+Prefix server-spawning tests with `pixi run clean-env &&` to reset test
+state. Non-server tests can run back-to-back without clean-env.
+
+Non-server (no clean-env needed):
 
 - `pixi run test-tree-ct`
 - `pixi run test-tree-ffi`
+- `pixi run test-common`
+- `pixi run test-protocol`
 - `pixi run test-kv-core`
+- `pixi run test-kv-client`
+- `pixi run test-diskdb-client`
+
+Server-spawning (prefix with `pixi run clean-env &&`):
+
 - `pixi run test-kv-server`
 - `pixi run test-diskdb`
+- `pixi run test-console-shared`
 - `pixi run test-console-cli`
 - `pixi run test-console-server`
 - `pixi run test-console-ui`
