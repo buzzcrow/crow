@@ -10,6 +10,7 @@
 //! `NotLeader` retry (A8), Swagger UI (A9), React SPA shell.
 
 pub mod corr_id;
+pub mod diskdb;
 pub mod error;
 pub mod expand;
 pub mod health;
@@ -84,6 +85,19 @@ pub fn router(state: AppState) -> axum::Router {
         )
         // Disk move (R81).
         .route("/api/disks/:disk_id/move", post(lifecycle::http_move_disk))
+        // Disk status set (R77).
+        .route(
+            "/api/disks/:disk_id/status",
+            axum::routing::put(diskdb::http_set_disk_status),
+        )
+        // ── Diskdb runtime proxy (R77): /api/diskdb/* ───────────────
+        .route("/api/diskdb/instances", get(diskdb::http_list_diskdb_instances))
+        .route("/api/diskdb/usage", get(diskdb::http_diskdb_usage))
+        .route("/api/diskdb/scan-status", get(diskdb::http_diskdb_scan_status))
+        .route("/api/diskdb/scan", post(diskdb::http_diskdb_scan))
+        .route("/api/diskdb/recalc", post(diskdb::http_diskdb_recalc))
+        .route("/api/diskdb/compact", post(diskdb::http_diskdb_compact))
+        .route("/api/diskdb/rebuild", post(diskdb::http_diskdb_rebuild))
         .route(
             "/api/nodes/:id/server",
             get(lifecycle::http_get_node_server).delete(lifecycle::http_delete_node_server),

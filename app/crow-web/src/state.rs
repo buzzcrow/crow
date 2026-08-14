@@ -19,6 +19,9 @@ use crow_console_shared::{
 /// to `config_path` when present.
 ///
 /// `openapi_cache` is a per-node TTL cache for the `OpenAPI` JSON proxy.
+///
+/// `diskdb_client` is lazily initialized on the first `/api/diskdb/*`
+/// request (the service registry may not be ready at console startup).
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<ConsoleConfig>>,
@@ -27,6 +30,7 @@ pub struct AppState {
     pub openapi_cache: Arc<std::sync::Mutex<HashMap<u64, (serde_json::Value, std::time::Instant)>>>,
     pub monitor_cache: Arc<MonitorCache>,
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    pub diskdb_client: Arc<tokio::sync::RwLock<Option<crow_diskdb_client::DiskdbClient>>>,
 }
 
 impl Default for AppState {
@@ -74,6 +78,7 @@ impl AppState {
             openapi_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             monitor_cache: Arc::new(MonitorCache::new()),
             runtime_pids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            diskdb_client: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 

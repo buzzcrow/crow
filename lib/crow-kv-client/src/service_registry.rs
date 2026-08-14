@@ -38,6 +38,7 @@ fn now_ms() -> u64 {
 ///
 /// All methods target store 0, group 0. The wrapped `CrowkvClient`
 /// must have its topology seeded with a group-0 leader endpoint.
+#[derive(Clone)]
 pub struct ServiceRegistryClient {
     kv: Arc<CrowkvClient>,
 }
