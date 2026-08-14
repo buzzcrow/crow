@@ -15,20 +15,19 @@ use crow_common::metrics::Counter;
 use crow_kv_client::{HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{DiskGroupUsageSummary, DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
-use crow_protocol::DiskIdExt;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 use tracing::{info, warn};
 
 use crate::bg_task::{BackgroundTask, BgCtx, CycleFut, Trigger};
 use crate::ddb_config::KeepAliveConfig;
-use crate::ddb_kv_client::DdbKvClient;
+use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::liveness::state_machine::HwStateMachine;
 use crate::metrics::{DiskMetrics, DiskdbMetrics};
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
-use crate::model::zone::DdbZone;
 use crate::recovery::disk_recovery::{recover_disk_to_up, ImpactedBlocksGauge, RecoveryScanTask};
+use crate::recovery::{full_scan, journal_replay, unit_capacity_for_zone};
 
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
@@ -452,8 +451,8 @@ impl KeepAlive {
                 self.reconcile_existing_disk(dg, disk_id, disk_value, outcome)
                     .await;
             } else {
-                // New disk — disk-add init flow.
-                self.disk_add_init(dg, *disk_id, disk_value).await;
+                // New disk — disk-add init flow (R81: Init-state).
+                self.disk_add_init(dg, *disk_id, disk_value);
                 outcome.disks_added += 1;
             }
         }
@@ -532,8 +531,22 @@ impl KeepAlive {
         let Some(disk) = disk else { return };
         let old_status = *disk.effective_status.read().unwrap();
 
-        // Only track miss counts for disks that are not already Bad.
+        // R81: Bad disks are kept in memory (recovery scan running).
         if old_status == HwStatus::Bad {
+            return;
+        }
+
+        // R81: Offline, Maintenance, Init disks are removed from
+        // memory directly. Their DiskKey was deleted from group 0
+        // (moved or removed); absence means the disk is gone.
+        if matches!(
+            old_status,
+            HwStatus::Offline | HwStatus::Maintenance | HwStatus::Init
+        ) {
+            dg.remove_disk_from_memory(disk_id);
+            self.disk_miss_counts.write().unwrap().remove(disk_id);
+            outcome.disks_removed += 1;
+            info!(disk = ?disk_id, status = ?old_status, "disk absent from sync → removed from memory");
             return;
         }
 
@@ -670,78 +683,156 @@ impl KeepAlive {
         info!(disk = ?disk.disk_id, "disk recovered → Up");
     }
 
-    /// Disk-add init flow (§3.5): create `DdbDisk` + `DdbZone`s, write
-    /// baseline `ZoneValue` records, rebuild active zones, add to
-    /// `DdbDiskGroup.disks`.
-    #[allow(clippy::cast_possible_truncation)]
-    async fn disk_add_init(&self, dg: &Arc<DdbDiskGroup>, disk_id: DiskId, disk_value: &DiskValue) {
-        let zone_count = disk_value.zone_count;
-        let zone_size_units = disk_value.zone_size_units;
-        let unit_size_bytes = disk_value.unit_size_bytes;
-        let _ = unit_size_bytes;
-
+    /// Disk-add init flow (R81): create `DdbDisk` with
+    /// `effective_status = Init` and no zones, add to the disk-group,
+    /// then spawn a background zone load task. The task loads zones
+    /// via `load_zone_inner` (strategy 2 + strategy 1 fallback) and
+    /// transitions `Init → disk_value.status` on success.
+    fn disk_add_init(&self, dg: &Arc<DdbDiskGroup>, disk_id: DiskId, disk_value: &DiskValue) {
         let mut disk = DdbDisk::new(disk_id, dg.disk_group_id, dg.node_id, dg.rack_id, *disk_value);
-        // Attach per-disk hot-path counters (R74 §3).
         disk.metrics = Some(Arc::new(DiskMetrics::new()));
         let disk = Arc::new(disk);
 
-        for zi in 0..zone_count {
-            // Last zone may be smaller; round down to multiple of 64.
-            let unit_capacity = if zi == zone_count - 1 {
-                let remaining = disk_value.capacity_units - (u64::from(zi) * zone_size_units);
-                let rounded = (remaining / 64) * 64;
-                rounded as u32
-            } else {
-                zone_size_units as u32
-            };
-            let zone = DdbZone::new(disk_id, zi, dg.disk_group_id, unit_capacity);
-            let zone = if let Some(ref counter) = self.cas_retry_metric {
-                zone.with_cas_retry_metric(Arc::clone(counter))
-            } else {
-                zone
-            };
-            disk.add_zone(Arc::new(zone));
-        }
+        // Add the Init disk to the group (not allocatable until
+        // transitioned to Up).
+        dg.add_disk(disk.clone());
+        dg.rebuild_allocating_disks();
 
-        // Write baseline ZoneValue records (empty bitmap, snapshot_slot=0)
-        // — but only if no snapshot already exists (R73: previously-owned
-        // disk-groups have real snapshots that must not be overwritten;
-        // recovery runs after tick to replay the journal from
-        // snapshot_slot).
+        // Spawn background zone load if we have a kv client.
         if let Some(ref kv) = self.kv {
             let bind = *dg.bind.read().unwrap();
-            // Check the first zone only — if it has a snapshot, the
-            // disk was previously initialized (disk_add_init writes
-            // baseline snapshots for all zones atomically per zone).
-            let snapshots_exist = crate::recovery::zone_snapshots_exist(kv, bind, &disk_id, zone_count).await;
-            if snapshots_exist {
-                info!(
-                    disk = %disk_id.to_display_string(),
-                    "disk-add init: snapshots already exist, skipping baseline write (recovery will replay)"
-                );
+            let zone_rotate_count = self.config.zone_rotate_count;
+            let status_machine = self.status_machine.clone();
+            let dg = Arc::clone(dg);
+            let disk = Arc::clone(&disk);
+            let kv = Arc::new(kv.clone());
+            let cas_retry_metric = self.cas_retry_metric.clone();
+            let disk_value_owned = *disk_value;
+            tokio::spawn(async move {
+                Self::background_zone_load(
+                    bind,
+                    disk_id,
+                    disk_value_owned,
+                    kv,
+                    cas_retry_metric,
+                    zone_rotate_count,
+                    status_machine,
+                    dg,
+                    disk,
+                )
+                .await;
+            });
+        } else {
+            // No kv client (test mode) — transition Init → Up with
+            // empty zones so the disk becomes allocatable.
+            let target = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
+            let final_status = if HwStateMachine::is_legal_transition(HwStatus::Init, target) {
+                target
             } else {
-                let zone_values: Vec<(u32, crow_protocol::diskdb::rpc::ZoneValue)> = {
-                    let zones = disk.zones.read().unwrap();
-                    zones
-                        .iter()
-                        .enumerate()
-                        .map(|(zi, zone)| {
-                            #[allow(clippy::cast_possible_truncation)]
-                            (zi as u32, zone.to_zone_value())
-                        })
-                        .collect()
-                };
-                for (zi, zv) in &zone_values {
-                    if let Err(e) = kv.put_zone(bind, &disk_id, *zi, zv).await {
-                        warn!(error = %e, disk = %disk_id.to_display_string(), zone = zi, "disk-add init: put_zone failed");
-                    }
-                }
+                warn!(
+                    disk = ?disk_id,
+                    target = ?target,
+                    "disk-add init: illegal Init → target; falling back to Offline"
+                );
+                HwStatus::Offline
+            };
+            if let Err(e) = self.status_machine.transition_disk(&disk, final_status) {
+                warn!(disk = ?disk_id, error = %e, "disk-add init: Init → final_status failed");
             }
+            disk.rebuild_active_zones(self.config.zone_rotate_count);
+            dg.rebuild_allocating_disks();
+        }
+    }
+
+    /// Background zone load task for a new Init-state disk. Loads all
+    /// zones via strategy 2 (journal replay) with strategy 1 (full
+    /// scan) fallback, then transitions `Init → disk_value.status`.
+    #[allow(clippy::too_many_arguments)]
+    async fn background_zone_load(
+        bind: Bind,
+        disk_id: DiskId,
+        disk_value: DiskValue,
+        kv: Arc<DdbKvClient>,
+        cas_retry_metric: Option<Arc<Counter>>,
+        zone_rotate_count: u32,
+        status_machine: HwStateMachine,
+        dg: Arc<DdbDiskGroup>,
+        disk: Arc<DdbDisk>,
+    ) {
+        let zone_count = disk_value.zone_count;
+        let zone_size_units = disk_value.zone_size_units;
+        let mut all_ok = true;
+
+        for zi in 0..zone_count {
+            let unit_capacity = unit_capacity_for_zone(&disk_value, zi, zone_count, zone_size_units);
+            let (zone, _max_freed_ts) =
+                match journal_replay::load_zone_inner(&kv, bind, disk_id, zi, unit_capacity).await {
+                    Ok((zone, max_freed_ts)) => (zone, max_freed_ts),
+                    Err(e) => {
+                        warn!(
+                            disk = ?disk_id,
+                            zone = zi,
+                            error = %e,
+                            "init-state load: strategy 2 failed; falling back to full scan"
+                        );
+                        match full_scan::rebuild_zone_bitmap_full_scan(&kv, bind, disk_id, zi, unit_capacity)
+                            .await
+                        {
+                            Ok((zone, _)) => (zone, 0),
+                            Err(e2) => {
+                                tracing::error!(
+                                    disk = ?disk_id,
+                                    zone = zi,
+                                    error = %e2,
+                                    "init-state load: strategy 1 also failed; using empty zone"
+                                );
+                                all_ok = false;
+                                let mut z = crate::model::zone::DdbZone::new(
+                                    disk_id,
+                                    zi,
+                                    dg.disk_group_id,
+                                    unit_capacity,
+                                );
+                                if let Some(ref counter) = cas_retry_metric {
+                                    z = z.with_cas_retry_metric(Arc::clone(counter));
+                                }
+                                (z, 0)
+                            }
+                        }
+                    }
+                };
+
+            // Attach CAS retry metric if configured.
+            let zone = if let Some(ref counter) = cas_retry_metric {
+                Arc::new(zone.with_cas_retry_metric(Arc::clone(counter)))
+            } else {
+                Arc::new(zone)
+            };
+            disk.add_zone(zone);
         }
 
-        disk.rebuild_active_zones(self.config.zone_rotate_count);
-        dg.add_disk(disk);
+        // Transition Init → final status.
+        let target = if all_ok {
+            HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up)
+        } else {
+            HwStatus::Offline
+        };
+        let final_status = if HwStateMachine::is_legal_transition(HwStatus::Init, target) {
+            target
+        } else {
+            warn!(
+                disk = ?disk_id,
+                target = ?target,
+                "init-state load: illegal Init → target; falling back to Offline"
+            );
+            HwStatus::Offline
+        };
+        if let Err(e) = status_machine.transition_disk(&disk, final_status) {
+            warn!(disk = ?disk_id, error = %e, "init-state load: Init → final_status failed");
+        }
+        disk.rebuild_active_zones(zone_rotate_count);
         dg.rebuild_allocating_disks();
+        info!(disk = ?disk_id, status = ?final_status, "init-state zone load complete");
     }
 }
 

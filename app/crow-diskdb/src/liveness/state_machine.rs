@@ -44,6 +44,7 @@ impl std::fmt::Display for IllegalTransition {
 impl std::error::Error for IllegalTransition {}
 
 /// Stateless hardware status transition machine.
+#[derive(Clone)]
 pub struct HwStateMachine {
     temp_failure_timeout: Duration,
 }

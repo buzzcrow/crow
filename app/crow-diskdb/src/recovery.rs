@@ -26,18 +26,18 @@ pub mod journal_replay;
 
 use std::sync::Arc;
 
-use crow_protocol::common::DiskId;
+use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
+use crate::liveness::state_machine::HwStateMachine;
 use crate::metrics::DiskMetrics;
 use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::zone::DdbZone;
 
 pub use full_scan::rebuild_zone_bitmap_full_scan;
-pub use journal_replay::zone_snapshots_exist;
 
 /// Zone load errors.
 #[derive(Debug)]
@@ -207,6 +207,17 @@ impl ZoneLoader {
             }
 
             disk.rebuild_active_zones(zone_rotate_count);
+            // Transition Init → Up after zones are loaded. `DdbDisk::new`
+            // defaults to `Init` (R81); the startup path loads zones
+            // then transitions to `Up` so the disk becomes allocatable.
+            let sm = HwStateMachine::new(0);
+            if let Err(e) = sm.transition_disk(&disk, HwStatus::Up) {
+                tracing::warn!(
+                    disk_id = ?*disk_id,
+                    error = %e,
+                    "load_disk_group: Init → Up transition failed; disk stays Init"
+                );
+            }
             dg.add_disk(disk);
             dg.rebuild_allocating_disks();
         }
@@ -241,7 +252,12 @@ impl ZoneLoader {
 /// zone may be smaller (rounded down to a multiple of 64), matching
 /// `keepalive.rs::disk_add_init`.
 #[allow(clippy::cast_possible_truncation)]
-fn unit_capacity_for_zone(disk_value: &DiskValue, zi: u32, zone_count: u32, zone_size_units: u64) -> u32 {
+pub(crate) fn unit_capacity_for_zone(
+    disk_value: &DiskValue,
+    zi: u32,
+    zone_count: u32,
+    zone_size_units: u64,
+) -> u32 {
     if zi == zone_count - 1 {
         let remaining = disk_value.capacity_units - (u64::from(zi) * zone_size_units);
         let rounded = (remaining / 64) * 64;

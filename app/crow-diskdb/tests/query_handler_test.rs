@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crow_diskdb::model::disk::DdbDisk;
 use crow_diskdb::model::disk_group::DdbDiskGroup;
 use crow_diskdb::model::zone::DdbZone;
-use crow_protocol::common::DiskId;
+use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 
 const DG: u64 = 200;
@@ -37,6 +37,7 @@ fn make_disk_value() -> DiskValue {
 
 fn make_disk(low: u64) -> Arc<DdbDisk> {
     let disk = Arc::new(DdbDisk::new(disk_id(low), DG, 10, 1, make_disk_value()));
+    disk.set_effective_status(HwStatus::Up);
     for zi in 0..ZONE_COUNT {
         let zone = Arc::new(DdbZone::new(disk_id(low), zi, DG, ZONE_CAP));
         disk.add_zone(zone);

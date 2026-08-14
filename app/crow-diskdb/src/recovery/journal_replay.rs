@@ -141,17 +141,3 @@ pub async fn load_zone_inner(
 
     Ok((zone, max_freed_ts))
 }
-
-/// Check whether a `ZoneValue` snapshot exists for any zone on the
-/// given disk — used by the keep-alive loop to decide between zone
-/// load (snapshots exist) and `disk_add_init` (fresh disks).
-pub async fn zone_snapshots_exist(kv: &DdbKvClient, bind: Bind, disk_id: &DiskId, zone_count: u32) -> bool {
-    // Check the first zone only — if it has a snapshot, the disk was
-    // previously initialized (disk_add_init writes baseline snapshots
-    // for all zones). This avoids `zone_count` round-trips in the
-    // common case.
-    if zone_count == 0 {
-        return false;
-    }
-    matches!(kv.get_zone_value(bind, disk_id, 0).await, Ok(Some(_)))
-}

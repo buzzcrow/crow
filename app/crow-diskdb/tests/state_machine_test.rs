@@ -29,6 +29,7 @@ fn make_disk_with_zones(zone_count: u32, zone_capacity: u32) -> Arc<DdbDisk> {
             ..Default::default()
         },
     ));
+    disk.set_effective_status(HwStatus::Up);
     for zi in 0..zone_count {
         disk.add_zone(Arc::new(DdbZone::new(
             DiskId { high: 0, low: 1 },

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crow_diskdb::model::disk::DdbDisk;
 use crow_diskdb::model::disk_group::{AllocError, DdbDiskGroup};
 use crow_diskdb::model::zone::DdbZone;
-use crow_protocol::common::DiskId;
+use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 
 fn disk_id(n: u64) -> DiskId {
@@ -32,6 +32,7 @@ const ZONE_ROTATE: u32 = 4;
 
 fn make_disk(disk_low: u64, zone_count: u32, zone_capacity: u32) -> Arc<DdbDisk> {
     let disk = Arc::new(DdbDisk::new(disk_id(disk_low), DG, 1, 1, make_disk_value()));
+    disk.set_effective_status(HwStatus::Up);
     for zi in 0..zone_count {
         let zone = Arc::new(DdbZone::new(disk_id(disk_low), zi, DG, zone_capacity));
         disk.add_zone(zone);

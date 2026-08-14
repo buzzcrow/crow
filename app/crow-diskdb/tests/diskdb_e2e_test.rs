@@ -23,7 +23,6 @@ use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, Ser
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::diskdb_service_server::DiskdbService as DiskdbServiceTrait;
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
-use crow_protocol::diskdb_type_util::ZoneValueExt;
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
 use crow_protocol::DiskIdExt;
 
@@ -47,6 +46,50 @@ fn make_disk_id(high: u64, low: u64) -> DiskId {
 
 fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
     ChunkId { high, mid, low }
+}
+
+/// Wait for all disks in a disk-group to transition from Init to Up
+/// and have their zones loaded. Polls every 10ms up to 5s.
+async fn wait_for_disks_ready(
+    container: &DdbDiskGroupContainer,
+    dg_id: u64,
+    expected_disks: usize,
+    expected_zones: u32,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(dg) = container.get_disk_group(dg_id) {
+            let disks = dg.disks.read().unwrap();
+            let all_ready = disks.len() == expected_disks
+                && disks.iter().all(|d| {
+                    *d.effective_status.read().unwrap() == HwStatus::Up
+                        && u32::try_from(d.zones.read().unwrap().len()).unwrap_or(0) == expected_zones
+                });
+            if all_ready {
+                return;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            let dg = container.get_disk_group(dg_id);
+            let status = match dg {
+                Some(dg) => {
+                    let disks = dg.disks.read().unwrap();
+                    disks
+                        .iter()
+                        .map(|d| {
+                            let s = *d.effective_status.read().unwrap();
+                            let zc = d.zones.read().unwrap().len();
+                            format!("{s:?}({zc}z)")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+                None => "no dg".to_string(),
+            };
+            panic!("disks not ready after 5s: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Point-lookup a key in the data group, returning the value bytes
@@ -217,7 +260,11 @@ async fn diskdb_e2e_allocate_free() {
     assert_eq!(outcome.groups_added, 1, "expected 1 disk-group added");
     assert_eq!(outcome.disks_added, 3, "expected 3 disks added");
 
-    // 5. Verify the dg has 3 disks with zones.
+    // 5. Wait for background zone load to complete (R81: disks start
+    //    in Init state, zones load in background).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
+    // 6. Verify the dg has 3 disks with zones.
     let dg = container
         .get_disk_group(DG_ID)
         .expect("disk-group should be in container");
@@ -234,24 +281,6 @@ async fn diskdb_e2e_allocate_free() {
     assert_eq!(bind, (STORE_ID, DATA_GROUP_ID), "bind should be set");
     assert_eq!(disk_count, 3, "expected 3 disks");
     assert_eq!(zone_count, ZONE_COUNT, "expected {ZONE_COUNT} zones per disk");
-
-    // 6. Verify baseline ZoneValue records were written to group 1
-    //    for all 3 disks.
-    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    for did in &[make_disk_id(0, 1), make_disk_id(0, 2), make_disk_id(0, 3)] {
-        let zone_records = verify_kv
-            .read_zone_records((STORE_ID, DATA_GROUP_ID), did, 0)
-            .await
-            .expect("read zone records");
-        assert!(
-            zone_records.zone_value.is_some(),
-            "zone 0 should have a ZoneValue for disk {did:?}"
-        );
-        let zv = zone_records.zone_value.unwrap();
-        assert!(zv.verify_checksum(), "zone 0 checksum should be valid");
-        assert_eq!(zv.snapshot_slot, 0, "snapshot_slot should be 0");
-    }
-    eprintln!("baseline ZoneValue verified for all 3 disks");
 
     // 7. Allocate one block.
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
@@ -406,6 +435,9 @@ async fn diskdb_e2e_validate_owner_on_free() {
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
 
+    // Wait for background zone load (R81).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
     let dg = container
         .get_disk_group(DG_ID)
         .expect("disk-group should be in container");
@@ -533,6 +565,9 @@ async fn diskdb_e2e_allocate_all_free_all() {
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
+
+    // Wait for background zone load (R81).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container
         .get_disk_group(DG_ID)
@@ -757,6 +792,9 @@ async fn diskdb_e2e_compact_zone_rpc() {
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
+
+    // Wait for background zone load (R81).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
 

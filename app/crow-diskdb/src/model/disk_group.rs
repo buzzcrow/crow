@@ -70,6 +70,20 @@ impl DdbDiskGroup {
         self.rebuild_allocating_disks();
     }
 
+    /// Remove a disk from in-memory state (`disks` vec + `disk_index`).
+    /// Used when a disk is absent from sync and its status is
+    /// `Offline`, `Maintenance`, or `Init` — the disk's `DiskKey` was
+    /// deleted from group 0 (moved or removed), so absence means it's
+    /// gone. Rebuilds the allocatable disk set.
+    pub fn remove_disk_from_memory(&self, disk_id: &DiskId) {
+        {
+            let mut disks = self.disks.write().unwrap();
+            disks.retain(|d| d.disk_id != *disk_id);
+        }
+        self.disk_index.write().unwrap().remove(disk_id);
+        self.rebuild_allocating_disks();
+    }
+
     /// Rebuild the RCU-published allocatable disk set.
     pub fn rebuild_allocating_disks(&self) {
         let disks = self.disks.read().unwrap();

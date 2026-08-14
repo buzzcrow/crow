@@ -59,7 +59,7 @@ impl DdbDisk {
             pos_v_zone: AtomicU64::new(0),
             active_zone_context: RwLock::new(Arc::new(Vec::new())),
             pos_v_zone_ctx: AtomicU64::new(0),
-            effective_status: RwLock::new(HwStatus::Up),
+            effective_status: RwLock::new(HwStatus::Init),
             metrics: None,
         }
     }

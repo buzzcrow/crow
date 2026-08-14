@@ -29,6 +29,7 @@ fn make_disk_value(zone_count: u32) -> DiskValue {
 fn make_disk(disk_id: DiskId, dg_id: u64, zone_count: u32) -> Arc<DdbDisk> {
     let dv = make_disk_value(zone_count);
     let disk = Arc::new(DdbDisk::new(disk_id, dg_id, 10, 1, dv));
+    disk.set_effective_status(HwStatus::Up);
     for zi in 0..zone_count {
         let zone = DdbZone::new(disk_id, zi, dg_id, ZONE_CAP);
         disk.add_zone(Arc::new(zone));
