@@ -16,8 +16,8 @@ use crate::kv::{BatchOp, Op};
 use crate::rpc::{WatchNotify, WatchNotifyResponse};
 
 /// One watcher: an outbound channel to push notify frames.
-pub struct Watcher {
-    pub tx: mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>,
+struct Watcher {
+    tx: mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>,
 }
 
 /// Byte-level prefix trie node. Each node holds the watchers
@@ -38,8 +38,13 @@ impl TrieNode {
     }
 }
 
-/// Prefix → (keys, values) accumulator for `emit`.
-type PrefixMap = HashMap<Vec<u8>, (Vec<Vec<u8>>, Vec<Vec<u8>>)>;
+/// Prefix → (keys, values) accumulator for `emit`. Keys and values
+/// borrow from the caller's `&[BatchOp]` for the duration of `emit`
+/// (the trie read lock is held throughout); they are cloned into
+/// owned `Vec<u8>` once per prefix when building the `WatchNotify`
+/// frame, avoiding the per-(prefix,key) clone the owned accumulator
+/// did on every matching node.
+type PrefixMap<'a> = HashMap<Vec<u8>, (Vec<&'a [u8]>, Vec<&'a [u8]>)>;
 
 /// Prefix trie: maps registered byte-prefixes to watcher lists.
 /// `emit` walks each changed key through the trie (`O(key_len)` per
@@ -59,13 +64,15 @@ impl PrefixTrie {
     /// Walk `key` through the trie. At each node that has watchers
     /// (including the root for the empty prefix), record `(prefix,
     /// key, value)` into `out`. The prefix is the bytes consumed so
-    /// far on the path to that node.
-    fn collect_matches(&self, key: &[u8], value: &[u8], out: &mut PrefixMap) {
+    /// far on the path to that node. `key` and `value` are borrowed
+    /// (no clone here); they are cloned once per prefix when the
+    /// `WatchNotify` frame is built in `emit`.
+    fn collect_matches<'a>(&self, key: &'a [u8], value: &'a [u8], out: &mut PrefixMap<'a>) {
         let mut node = &self.root;
         if !node.watchers.is_empty() {
             let entry = out.entry(Vec::new()).or_default();
-            entry.0.push(key.to_vec());
-            entry.1.push(value.to_vec());
+            entry.0.push(key);
+            entry.1.push(value);
         }
         for (i, &byte) in key.iter().enumerate() {
             match node.children.get(&byte) {
@@ -74,8 +81,8 @@ impl PrefixTrie {
                     if !node.watchers.is_empty() {
                         let prefix = key[..=i].to_vec();
                         let entry = out.entry(prefix).or_default();
-                        entry.0.push(key.to_vec());
-                        entry.1.push(value.to_vec());
+                        entry.0.push(key);
+                        entry.1.push(value);
                     }
                 }
                 None => break,
@@ -110,10 +117,18 @@ pub struct WatchRegistry {
     /// before touching the trie — zero overhead when no watchers.
     has_watchers: AtomicBool,
     /// Cumulative count of notify frames dropped because a watcher's
-    /// channel was full (`try_send` failed). The client catches up
-    /// via the safety-net poller, but a non-zero value indicates the
-    /// watcher is consuming slower than the produce rate.
+    /// channel was full (`try_send` returned `Full`). The client
+    /// catches up via the safety-net poller, but a non-zero value
+    /// indicates the watcher is consuming slower than the produce
+    /// rate.
     dropped_notifies: AtomicU64,
+    /// Cumulative count of `try_send` calls that returned `Closed`
+    /// (the watcher's receiver was dropped). A non-zero value
+    /// indicates a leaked watcher entry — stream-end cleanup should
+    /// have removed it; a persistent `Closed` means cleanup missed
+    /// it (e.g. a multi-group stream that only cleaned up the last
+    /// group).
+    closed_watchers: AtomicU64,
 }
 
 impl Default for WatchRegistry {
@@ -130,6 +145,7 @@ impl WatchRegistry {
             next_id: AtomicU64::new(1),
             has_watchers: AtomicBool::new(false),
             dropped_notifies: AtomicU64::new(0),
+            closed_watchers: AtomicU64::new(0),
         }
     }
 
@@ -172,13 +188,24 @@ impl WatchRegistry {
     }
 
     /// Remove all watchers whose `watcher_id` is in the list (stream-
-    /// end cleanup). Updates `has_watchers`.
+    /// end cleanup). Updates `has_watchers` only if at least one
+    /// watcher was actually removed.
     pub fn remove_all(&self, watcher_ids: &[u64]) {
+        if watcher_ids.is_empty() {
+            return;
+        }
         let id_set: std::collections::HashSet<u64> = watcher_ids.iter().copied().collect();
-        let mut trie = self.trie.write();
-        remove_all_from_node(&mut trie.root, &id_set);
-        drop(trie);
-        self.recompute_has_watchers();
+        let removed = {
+            let mut trie = self.trie.write();
+            let before = count_watchers(&trie.root);
+            remove_all_from_node(&mut trie.root, &id_set);
+            let after = count_watchers(&trie.root);
+            drop(trie);
+            before != after
+        };
+        if removed {
+            self.recompute_has_watchers();
+        }
     }
 
     /// Clear all watchers (leader step-down). Drops all tx senders,
@@ -199,8 +226,10 @@ impl WatchRegistry {
     pub fn emit(&self, group_id: u64, slot: u64, changed: &[BatchOp]) {
         let trie = self.trie.read();
         // For each changed key, walk the trie and collect matching
-        // (prefix, key, value) triples.
-        let mut prefix_map: PrefixMap = HashMap::new();
+        // (prefix, key, value) triples. Keys and values are borrowed
+        // from `changed` (no clone here); the trie read lock is held
+        // for the whole emit.
+        let mut prefix_map: PrefixMap<'_> = HashMap::new();
         for op in changed {
             let value: &[u8] = match &op.op {
                 Op::Put(v) => v.as_ref(),
@@ -208,27 +237,42 @@ impl WatchRegistry {
             };
             trie.collect_matches(&op.key, value, &mut prefix_map);
         }
-        // Send one notify per matching prefix.
+        // Send one notify per matching prefix. The `WatchNotify` frame
+        // is built once per prefix (cloning the borrowed keys/values
+        // into owned `Vec<u8>`), then cloned once per watcher on that
+        // prefix — the channel owns the response value, so the
+        // per-watcher clone is unavoidable, but the per-(prefix,key)
+        // collection clones are eliminated.
         for (prefix, (keys, values)) in prefix_map {
             if let Some(watchers) = trie.watchers_for(&prefix) {
                 let notify = WatchNotify {
                     group_id,
                     prefix,
-                    keys,
+                    keys: keys.into_iter().map(<[u8]>::to_vec).collect(),
                     slot,
-                    values,
+                    values: values.into_iter().map(<[u8]>::to_vec).collect(),
                 };
                 for (_, watcher) in watchers {
-                    if let Err(mpsc::error::TrySendError::Full(_)) =
-                        watcher.tx.try_send(Ok(WatchNotifyResponse {
-                            frame: Some(crate::rpc::watch_notify_response::Frame::Notify(notify.clone())),
-                        }))
-                    {
-                        self.dropped_notifies.fetch_add(1, Ordering::Relaxed);
-                        tracing::error!(
-                            "critical: watch notify dropped -- watcher channel full, \
-                             client will catch up via safety-net poller"
-                        );
+                    let resp = WatchNotifyResponse {
+                        frame: Some(crate::rpc::watch_notify_response::Frame::Notify(notify.clone())),
+                    };
+                    match watcher.tx.try_send(Ok(resp)) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            self.dropped_notifies.fetch_add(1, Ordering::Relaxed);
+                            tracing::error!(
+                                "critical: watch notify dropped -- watcher channel full, \
+                                 client will catch up via safety-net poller"
+                            );
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            self.closed_watchers.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(
+                                "watch notify: watcher channel closed -- \
+                                 leaked watcher (stream-end cleanup missed it); \
+                                 client will catch up via safety-net poller"
+                            );
+                        }
                     }
                 }
             }
@@ -246,6 +290,14 @@ impl WatchRegistry {
     #[must_use]
     pub fn dropped_notifies(&self) -> u64 {
         self.dropped_notifies.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative count of `try_send` calls that returned `Closed`
+    /// since registry creation. Non-zero indicates a leaked watcher
+    /// entry (stream-end cleanup missed it).
+    #[must_use]
+    pub fn closed_watchers(&self) -> u64 {
+        self.closed_watchers.load(Ordering::Relaxed)
     }
 
     /// Recompute `has_watchers` by checking if the trie is empty.
@@ -278,4 +330,13 @@ fn remove_all_from_node(node: &mut TrieNode, id_set: &std::collections::HashSet<
     for byte in empty_children {
         node.children.remove(&byte);
     }
+}
+
+/// Total watcher count across `node` and its children.
+fn count_watchers(node: &TrieNode) -> usize {
+    let mut n = node.watchers.len();
+    for child in node.children.values() {
+        n += count_watchers(child);
+    }
+    n
 }

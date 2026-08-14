@@ -140,7 +140,11 @@ impl DdbZone {
         }
     }
 
-    /// Set the zone health (called by sync loop / health probe).
+    /// Set the zone health. Test-only: production code no longer marks
+    /// individual zones — the disk-level `HwStatus` is the sole
+    /// gatekeeper for the allocate path (R76). Retained for tests that
+    /// exercise the `allocatable()` health check directly.
+    #[cfg(feature = "test-util")]
     pub fn set_health(&self, health: DdbZoneHealth) {
         *self.zone_state.write().unwrap() = health;
     }

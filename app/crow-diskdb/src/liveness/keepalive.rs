@@ -28,7 +28,7 @@ use crate::model::disk::DdbDisk;
 use crate::model::disk_group::DdbDiskGroup;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
-use crate::recovery::disk_recovery::{recover_disk_to_up, RecoveryScanTask};
+use crate::recovery::disk_recovery::{recover_disk_to_up, ImpactedBlocksGauge, RecoveryScanTask};
 
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
@@ -98,6 +98,10 @@ pub struct KeepAlive {
     /// Running per-disk recovery scan tasks (R76). Keyed by `DiskId`;
     /// removed when the task completes or is cancelled on recovery.
     recovery_scans: RwLock<HashMap<DiskId, RecoveryScanHandle>>,
+    /// Cluster-aggregated `disk.bad.impacted_blocks` gauge. Each
+    /// recovery scan reports its per-disk count; the gauge sums across
+    /// all concurrently bad disks. Set in `with_metrics`.
+    impacted_blocks: Option<Arc<ImpactedBlocksGauge>>,
 }
 
 impl KeepAlive {
@@ -123,6 +127,7 @@ impl KeepAlive {
             sync_trigger: None,
             disk_miss_counts: RwLock::new(HashMap::new()),
             recovery_scans: RwLock::new(HashMap::new()),
+            impacted_blocks: None,
         }
     }
 
@@ -164,9 +169,15 @@ impl KeepAlive {
     }
 
     /// Attach a metrics handle for sync latency/success/failure
-    /// observations (R74 §11).
+    /// observations (R74 §11). Also wraps the
+    /// `disk.bad.impacted_blocks` gauge in an `ImpactedBlocksGauge`
+    /// aggregator so concurrent per-disk recovery scans sum into the
+    /// gauge instead of overwriting each other.
     #[must_use]
     pub fn with_metrics(mut self, metrics: DiskdbMetrics) -> Self {
+        self.impacted_blocks = Some(Arc::new(ImpactedBlocksGauge::new(Arc::clone(
+            &metrics.disk_bad_impacted_blocks,
+        ))));
         self.metrics = Some(metrics);
         self
     }
@@ -587,14 +598,19 @@ impl KeepAlive {
             warn!(disk = ?disk.disk_id, "recovery scan: no kv client, skipping");
             return;
         };
-        let bind = *dg.bind.read().unwrap();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let Some(m) = &self.metrics else {
-            warn!(disk = ?disk.disk_id, "recovery scan: no metrics handle, skipping");
+        let Some(ref impacted) = self.impacted_blocks else {
+            warn!(disk = ?disk.disk_id, "recovery scan: no impacted-blocks gauge, skipping");
             return;
         };
-        let gauge = Arc::clone(&m.disk_bad_impacted_blocks);
-        let task = RecoveryScanTask::new(Arc::clone(disk), bind, kv.clone(), Arc::clone(&cancel), gauge);
+        let bind = *dg.bind.read().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task = RecoveryScanTask::new(
+            Arc::clone(disk),
+            bind,
+            kv.clone(),
+            Arc::clone(&cancel),
+            Arc::clone(impacted),
+        );
         let disk_id = disk.disk_id;
         let join = tokio::spawn(async move {
             task.run().await;
@@ -606,9 +622,10 @@ impl KeepAlive {
     }
 
     /// Unified recovery path for `Missing → Up`, `Bad → Up`, `Offline
-    /// → Up` (R76). Cancels the recovery scan (if running), runs
-    /// compaction on the disk's zones, rebuilds active zones, and
-    /// re-includes the disk in the allocating set.
+    /// → Up` (R76). Cancels the recovery scan (if running), drops the
+    /// disk's impacted-blocks contribution, routes the status
+    /// transition through the state machine (single source of truth),
+    /// then runs compaction + rebuild + re-include.
     async fn recover_disk_to_up(&self, dg: &Arc<DdbDiskGroup>, disk: &Arc<DdbDisk>) {
         // Cancel any running recovery scan.
         let scan_handle = self.recovery_scans.write().unwrap().remove(&disk.disk_id);
@@ -620,13 +637,33 @@ impl KeepAlive {
             info!(disk = ?disk.disk_id, "recovery scan cancelled (disk → Up)");
         }
 
-        // Run the recovery-to-Up path: compaction + rebuild.
+        // Drop this disk's contribution to the cluster impacted-blocks
+        // gauge.
+        if let Some(ref ib) = self.impacted_blocks {
+            ib.remove_disk(&disk.disk_id);
+        }
+
+        // Route the status transition through the state machine so it
+        // is the single source of truth (validates legality, including
+        // the operator-override `Bad → Up`, and sets `effective_status`).
+        if let Err(e) = self.status_machine.transition_disk(disk, HwStatus::Up) {
+            warn!(
+                disk = ?disk.disk_id,
+                error = %e,
+                "recovery-to-Up: illegal transition, keeping current status"
+            );
+            return;
+        }
+
+        // Run the recovery-to-Up path: compaction + rebuild. The
+        // status is already set by `transition_disk` above; the
+        // `recover_disk_to_up` helper no longer sets it itself.
         if let Some(ref kv) = self.kv {
             let bind = *dg.bind.read().unwrap();
             recover_disk_to_up(disk, bind, kv, self.config.zone_rotate_count).await;
         } else {
-            // No kv client (test mode) — just set status + rebuild.
-            disk.set_effective_status(HwStatus::Up);
+            // No kv client (test mode) — status already set; just
+            // rebuild active zones.
             disk.rebuild_active_zones(self.config.zone_rotate_count);
         }
         dg.rebuild_allocating_disks();

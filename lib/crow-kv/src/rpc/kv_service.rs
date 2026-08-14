@@ -808,8 +808,12 @@ impl KvService for KvStoreService {
         let store_id = store.store_id;
 
         tokio::spawn(async move {
-            let mut watcher_ids: Vec<(u64, Vec<u8>)> = Vec::new();
-            let mut current_group_id: Option<u64> = None;
+            // (group_id, watcher_id, prefix) for every active
+            // subscription on this stream. Tracked per-group so a
+            // multi-group stream cleans up each group's registry on
+            // close (a single `current_group_id` would leak watchers
+            // on every group but the last).
+            let mut watchers: Vec<(u64, u64, Vec<u8>)> = Vec::new();
             while let Some(item) = inbound.next().await {
                 let frame = match item {
                     Ok(req) => req.frame,
@@ -822,7 +826,6 @@ impl KvService for KvStoreService {
                 match frame {
                     watch_notify_request::Frame::Subscribe(sub) => {
                         let group_id = sub.group_id;
-                        current_group_id = Some(group_id);
                         let Some(group) = store.get_group(group_id) else {
                             let _ = tx
                                 .send(Ok(WatchNotifyResponse {
@@ -850,7 +853,7 @@ impl KvService for KvStoreService {
                         }
                         let registry = group.watch_registry.clone();
                         let id = registry.subscribe(&sub.prefix, tx.clone());
-                        watcher_ids.push((id, sub.prefix.clone()));
+                        watchers.push((group_id, id, sub.prefix.clone()));
                         debug!(store_id, group_id, watcher_id = id, "watch subscribed");
                     }
                     watch_notify_request::Frame::Unsubscribe(unsub) => {
@@ -860,8 +863,10 @@ impl KvService for KvStoreService {
                         };
                         let registry = group.watch_registry.clone();
                         let prefix = unsub.prefix.clone();
-                        watcher_ids.retain(|(id, p)| {
-                            if p == &prefix {
+                        // Match on (group_id, prefix) — a stream may
+                        // watch the same prefix on multiple groups.
+                        watchers.retain(|(gid, id, p)| {
+                            if *gid == group_id && p == &prefix {
                                 registry.unsubscribe(&prefix, *id);
                                 false
                             } else {
@@ -872,11 +877,16 @@ impl KvService for KvStoreService {
                     }
                 }
             }
-            // Stream end: clean up all watchers registered by this stream.
-            if let Some(group_id) = current_group_id {
+            // Stream end: clean up every watcher this stream
+            // registered, grouped by `group_id` so each group's
+            // registry gets its own `remove_all`.
+            let mut by_group: std::collections::HashMap<u64, Vec<u64>> = std::collections::HashMap::new();
+            for (group_id, id, _) in &watchers {
+                by_group.entry(*group_id).or_default().push(*id);
+            }
+            for (group_id, ids) in by_group {
                 if let Some(group) = store.get_group(group_id) {
                     let registry = group.watch_registry.clone();
-                    let ids: Vec<u64> = watcher_ids.iter().map(|(id, _)| *id).collect();
                     registry.remove_all(&ids);
                 }
             }

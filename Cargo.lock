@@ -713,6 +713,7 @@ dependencies = [
 name = "crow-kv"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "criterion",
  "crossbeam-skiplist",

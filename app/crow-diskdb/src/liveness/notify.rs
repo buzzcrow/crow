@@ -65,12 +65,15 @@ impl NotifyHandler {
         // Merge all subscription receivers into one stream. We move
         // the receivers out by replacing them with dummy receivers
         // (the subscriptions themselves stay alive — only their
-        // `notify_rx` is moved into the merge tasks).
+        // `notify_rx` is moved into the merge tasks). The merge-task
+        // join handles are tracked so they can be aborted on stop
+        // (otherwise they linger until the gRPC streams close).
         let (merge_tx, mut merge_rx) = mpsc::channel::<()>(64);
+        let mut merge_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         for mut sub in subscriptions {
             let rx = std::mem::replace(&mut sub.notify_rx, mpsc::channel(1).1);
             let tx = merge_tx.clone();
-            tokio::spawn(async move {
+            merge_handles.push(tokio::spawn(async move {
                 let mut rx = rx;
                 while let Some(_notify) = rx.recv().await {
                     if tx.send(()).await.is_err() {
@@ -81,7 +84,7 @@ impl NotifyHandler {
                 // (subscriber dropped or stream closed), `sub` drops
                 // and aborts the reader.
                 drop(sub);
-            });
+            }));
         }
         drop(merge_tx);
 
@@ -89,6 +92,13 @@ impl NotifyHandler {
             tokio::select! {
                 () = stop.notified() => {
                     info!("notify handler stopping");
+                    // Abort the per-subscription merge tasks so they
+                    // don't linger after the handler stops; dropping
+                    // each `WatchSubscription` (held inside the task)
+                    // aborts its reader task in turn.
+                    for handle in merge_handles {
+                        handle.abort();
+                    }
                     return;
                 }
                 recv = merge_rx.recv() => {

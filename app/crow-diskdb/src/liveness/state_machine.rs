@@ -119,12 +119,15 @@ impl HwStateMachine {
         }
     }
 
-    /// Entry side-effects for a disk. v1 has no disk-level
-    /// side-effects — zones follow the disk-level `HwStatus`
-    /// (top-layer status overrides; the disk's `effective_status`
-    /// is the sole gatekeeper for the allocate path). The caller
-    /// handles disk-group-level follow-up like
-    /// `rebuild_allocating_disks`.
+    /// Entry side-effects for a disk. Reserved hook for future
+    /// per-status disk-level side-effects (e.g. zone marking on Bad
+    /// once per-zone recovery exists). v1 has no disk-level
+    /// side-effects — the disk's `effective_status` is the sole
+    /// gatekeeper for the allocate path, and the caller handles
+    /// disk-group-level follow-up like `rebuild_allocating_disks`.
+    /// Kept as a called no-op (from `transition_disk`) so the hook
+    /// point is wired and a future side-effect lands in one place
+    /// rather than being scattered across callers.
     pub fn on_enter_disk(_status: HwStatus, _disk: &DdbDisk) {}
 
     /// Entry side-effects for a disk-group. v1 has no disk-group-level
