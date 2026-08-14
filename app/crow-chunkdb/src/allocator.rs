@@ -62,6 +62,11 @@ impl ChunkAllocator {
         Self { pool }
     }
 
+    /// Get a reference to the diskdb client pool.
+    pub fn pool(&self) -> &DiskdbClientPool {
+        &self.pool
+    }
+
     /// Allocate a single strip.
     ///
     /// # Errors
