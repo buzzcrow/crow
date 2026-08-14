@@ -7,8 +7,10 @@
     clippy::must_use_candidate,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::match_same_arms
+    clippy::match_same_arms,
+    clippy::doc_markdown
 )]
 
 pub mod chunkdb_config;
 pub mod service;
+pub mod topology;

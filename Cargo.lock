@@ -633,6 +633,7 @@ dependencies = [
  "crow-kv-client",
  "crow-protocol",
  "dashmap",
+ "parking_lot 0.12.5",
  "prost",
  "serde",
  "serde_json",

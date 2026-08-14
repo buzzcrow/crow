@@ -7,7 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "CROW chunkdb server: distributed chunk manager (stateless; persists to CROW KV, allocates via diskdb)."
 autobenches = false
-autotests = false
 
 [[bin]]
 name = "crow-chunkdb"
@@ -43,6 +42,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dashmap = "6"
+parking_lot = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
