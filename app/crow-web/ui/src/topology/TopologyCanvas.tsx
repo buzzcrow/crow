@@ -108,6 +108,10 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   const lastRefreshTokenRef = useRef<number | undefined>(refreshToken);
   const lastFocusNonceRef = useRef<number | undefined>(undefined);
   const nodeIdsKeyRef = useRef<Partial<Record<ViewMode, string>>>({});
+  // Tracks the last (viewMode, nodeIds, refreshToken) triple that triggered
+  // a fit/restore. Polls return new array references for the same data, which
+  // would otherwise re-run the effect every cycle and fight user panning.
+  const lastActionKeyRef = useRef<string | undefined>(undefined);
 
   const { nodes: rawNodes, edges } = useMemo(
     () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById),
@@ -132,6 +136,13 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     // Re-fit when the set of node IDs changes (nodes added/removed),
     // whether from a mutation or a poll update — not just on manual refresh.
     const nodeIdsKey = positioned.nodes.map((n) => n.id).sort().join(',');
+    // Only act on meaningful changes: view-mode switch, node-set change, or
+    // manual refresh. Polls return new array references for the same data;
+    // without this guard the effect re-runs every cycle and the
+    // setViewport(savedViewport) call below fights an in-progress pan drag.
+    const actionKey = `${viewMode}:${nodeIdsKey}:${refreshToken ?? ''}`;
+    if (actionKey === lastActionKeyRef.current) return;
+    lastActionKeyRef.current = actionKey;
     if (nodeIdsKey !== nodeIdsKeyRef.current[viewMode]) {
       nodeIdsKeyRef.current[viewMode] = nodeIdsKey;
       viewportsRef.current[viewMode] = undefined;

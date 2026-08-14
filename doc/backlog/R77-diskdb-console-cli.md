@@ -1,7 +1,12 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R77: diskdb — Console + CLI Integration (Diskdb Runtime Console: REST Proxy, Web UI Panel + Disk Lifecycle UI, CLI Commands)
+### R77: diskdb — Console + CLI Integration (Capacity View, REST Proxy, Web UI Panel + Disk Lifecycle UI, CLI Commands)
+
+**Implementation design**: [`doc/working/design-capacity-view.md`](../working/design-capacity-view.md)
+— full E2E flow (GUI → REST → DiskdbClient → gRPC → diskdb), Capacity
+view structure, canvas rendering, server menu refactor, batch disk
+add, diskdb deploy handlers.
 
 **Problem**: R70–R76 implement the core diskdb server (allocation,
 recovery, metrics, scanning, health probing) with a full gRPC surface
@@ -26,6 +31,14 @@ recovery, metrics, scanning, health probing) with a full gRPC surface
 - **`DiskdbClient` gaps.** `lib/crow-diskdb-client` (R74 §11) wraps
   allocate/free/query/recalc/compact, but not the scanner RPCs
   (`TriggerScan`, `GetScanStatus`) or `RebuildZoneBitmap`.
+- **No diskdb deploy path from the console.** Only `crow-kv-server`
+  has deploy/restart/stop handlers (`http_deploy_node_server` etc.);
+  `crow-diskdb` must be launched out-of-band. AddNodeDialog
+  auto-deploys KV but not DiskDB.
+- **Server context menu is on the wrong entity.** Restart/Stop live
+  on the Node context menu (App.tsx lines 261–274) but operate on the
+  KV Server process; the Server tree node (type `'Server'`) has no
+  context menu at all. Server-process ops belong on the Server node.
 
 The root design marks console integration as a follow-up: §2 non-goal
 "full console integration (web + CLI) as a follow-up"; §9 "per-zone —
@@ -43,34 +56,57 @@ keepalive piggyback "the console reads this for cluster-wide overview".
   work.
 
 **Use scenarios**:
-- An operator opens the console, switches to the Diskdb panel, and
-  sees one card per diskdb instance (endpoint, owned disk-group count,
-  heartbeat age, aggregate capacity/busy/free bar) — the "is diskdb
-  healthy" view, served from group-0 keepalive data, no gRPC fan-out.
-- The operator drills into a disk-group: capacity/busy/free bars,
-  `allocatable_disk_count` vs `disk_count` (degraded if they differ),
-  then per-disk rows. One disk looks hot; the operator clicks its zone
-  strip and opens the zone block chart — a canvas grid of 16K units
-  with busy blocks filled — to see the allocation pattern.
+- An operator opens the console, switches to the **Capacity view**,
+  and sees the rack → node → disk-group → disk hierarchy. Selecting a
+  rack or node shows a hierarchical capacity summary (disk counts as
+  array icons, not per-disk boxes — too many). Selecting a disk-group
+  shows per-disk boxes with a green→amber→red busy gradient.
+- The operator selects a disk → a zone grid renders (canvas, ~80×80
+  for 6400 zones on a 200 TB / 32 GB-zone disk), each zone box
+  gradient-colored by busy%. A "jump to zone #" input handles direct
+  navigation. Selecting a zone → the zone's `usage_bitmap` renders as
+  a canvas grid (~181×181 for 32K units), busy blocks red, free blocks
+  green. The view refreshes every 3 s without flicker (offscreen
+  double-buffer).
+- In the **Physical view**, the operator sees both KV Server and
+  DiskDB Server under each Node, with their owned resources expanded
+  (KV: store → group; DiskDB: disk-group → disk, read-only).
+  Right-clicking a Server node offers Restart / Stop (server-process
+  ops, not on the Node menu). AddNodeDialog auto-deploys both KV and
+  DiskDB.
 - A scan finishes; the scanner panel shows drift (ghost busy/free),
   uncompacted lag, and corruption counts. The operator clicks "Run
   Scan" to re-run, and watches the in-progress state.
 - A recalc reports drift on zone 7 of disk X; the operator clicks
   "Rebuild" for that zone (v1 recalc is report-only; rebuild is the
   manual correction).
-- The operator adds a disk: right-clicks the node in the physical
-  tree, "Add Disk", fills the dialog (id, type, capacity, zone/unit
-  sizes). The disk appears in the tree and, once the diskdb sync +
-  zone load completes, shows up allocatable in the Diskdb panel.
+- The operator adds disks: switches to Capacity view, right-clicks
+  the node → "Add Disk Group", then right-clicks the disk-group →
+  "Add Disk" (batch dialog — multiple UUIDs at once, defaults 4 TiB
+  capacity / 32 GiB zone / 1 MiB unit locked). The disks appear in the
+  tree and, once the diskdb sync + zone load completes, show up
+  allocatable in the Capacity panel.
 - From the shell, the operator runs `crow diskdb usage --dg 3` and
   `crow diskdb scan-status` to script monitoring.
 
 **Solution**:
 
-**One-line summary**: expose diskdb runtime data through `crow-web`
-REST + `crow diskdb` CLI subcommands, and add disk lifecycle UI
-(tree nodes + dialogs) plus a Diskdb center panel (instance overview,
-usage dashboard, zone block chart, scanner, recalc) to the web UI.
+**One-line summary**: introduce a **Capacity view** (third view-mode)
+for disk lifecycle + canvas capacity visualization, expose diskdb
+runtime data through `crow-web` REST + `crow diskdb` CLI subcommands,
+add diskdb deploy/restart/stop handlers, refactor server-process ops
+to the Server context menu, and add batch disk-add. Full E2E flow:
+GUI → REST → `DiskdbClient`/`HardwareClient` → gRPC → `crow-diskdb`.
+
+**View-mode restructure** (see working design §1):
+- **Physical** — rack → node → server(s) → resources. Infrastructure
+  + service management only. Server context menu: Restart, Stop,
+  Deploy. Node menu: Ping, Delete Node (no disk ops).
+- **Capacity** (new) — rack → node → disk-group → disk. The only place
+  to add/remove/move/set-status disk groups and disks. Center panel:
+  canvas capacity visualization (§5 of working design).
+- **KV** (renamed from "Logical") — store → group → replica. KV
+  data-plane operations. Unchanged.
 
 1. **DiskdbClient scanner/rebuild wrappers** — extend
    `lib/crow-diskdb-client/src/client.rs`:
@@ -123,16 +159,31 @@ usage dashboard, zone block chart, scanner, recalc) to the web UI.
      `DiskUsage`, `ZoneUsage`, `ScanSummary`, `RecalcResult`,
      `CompactionResult`.
 
-4. **Web UI — disk lifecycle (hybrid tree)** — extend
-   `app/crow-web/ui/src/`:
-   - Physical tree renders `DiskGroup` and `Disk` nodes under `Node`
-     (extend the physical-tree data hooks to fetch the existing
-     `GET /api/nodes/:id/disk-groups` + `.../disks` endpoints).
-   - Context menu on `DiskGroup`/`Disk` nodes + dialogs following the
-     `AddNodeDialog`/`ConfirmDeleteDialog` pattern: `AddDiskDialog`
-     (id, type, capacity, zone/unit sizes), `RemoveDiskDialog`,
-     `MoveDiskDialog` (target rack/node/disk-group), 
-     `SetDiskStatusDialog` (HwStatus enum).
+4. **Web UI — Capacity view (disk lifecycle + visualization)** —
+   extend `app/crow-web/ui/src/` (see working design §1, §5, §6):
+   - **New Capacity view-mode** (third mode alongside Physical / KV).
+     Sidebar renders rack → node → disk-group → disk (fetched from the
+     existing `GET /api/nodes/:id/disk-groups` + `.../disks`
+     endpoints). This is the **only** view where disk lifecycle
+     actions are available.
+   - **Physical view refactor**: server-process ops (Restart, Stop,
+     Deploy) move from the Node context menu to the **Server** context
+     menu (App.tsx `buildMenuItems` — add a `Server` case, currently
+     absent). Physical tree gains a DiskDB Server sub-tree under each
+     Node (`DDB-${nodeId}` → DiskGroup → Disk, read-only), mirroring
+     the existing KV Server sub-tree (KV → Store → Group). Node menu
+     keeps only Ping + Delete Node.
+   - **DiskDB Server deploy**: new
+     `POST /api/nodes/:id/diskdb/deploy|restart|stop` handlers
+     mirroring the KV handlers (SSH or local fork — no Docker).
+     AddNodeDialog auto-deploys both KV and DiskDB.
+   - Context menu on `DiskGroup`/`Disk` nodes (Capacity view only) +
+     dialogs following the `AddNodeDialog`/`ConfirmDeleteDialog`
+     pattern: `AddDiskGroupDialog`, `AddDiskDialog` (**batch** —
+     multiple UUIDs at once; new `POST .../disks/batch` endpoint,
+     atomic all-or-nothing; defaults 4 TiB capacity / 32 GiB zone /
+     1 MiB unit locked), `RemoveDiskDialog`, `MoveDiskDialog` (target
+     rack/node/disk-group), `SetDiskStatusDialog` (HwStatus enum).
    - **Two-column status display** on disk rows: "Group-0" (the
      `DiskValue.status` from `HardwareClient.get_disk`, fetched via the
      existing `GET /api/nodes/:id/disk-groups/:dg_id/disks/:disk_id`
@@ -144,30 +195,33 @@ usage dashboard, zone block chart, scanner, recalc) to the web UI.
      between a sync tick applying a change and the next keepalive
      write-back, and permanently if a write-back fails.
 
-5. **Web UI — Diskdb center panel (runtime)** — new
-   `app/crow-web/ui/src/panels/DiskdbPanel.tsx` with a header toggle
-   (`CenterPanelMode`), following the KV Operator panel pattern:
-   - `DiskdbInstanceCards` — per-instance overview from
-     `/api/diskdb/instances`: endpoint, owned dg count, heartbeat age,
-     aggregate capacity/busy/free bar, degraded indicator
-     (`allocatable_disk_count < disk_count` on any dg). Poll 5–10 s.
-   - `DiskGroupUsageCard` / `DiskUsageTable` — usage dashboard from
-     `/api/diskdb/usage`: per-dg stacked bars + status; per-disk rows
-     (id, type badge, busy/free + mini-bar, active_zone_count /
-     zone_count, status). Render per-disk/per-zone fields only — the
-     wrapping `DiskGroupInfo` aggregates are zeroed at drill-down
-     levels (space-metrics §4) and must not be displayed.
-   - `ZoneSummaryStrip` — per-zone rows for a selected disk (index,
-     capacity, busy% bar, busy/free block counts, `alloc_state`
-     badge) from the disk-level brief entries; no bitmap fetched.
-   - `ZoneBlockChart` — canvas grid of the zone's `usage_bitmap`,
-     fetched only on zone drill-down (2 KB for 16K units; one
-     `query_zone` call). Decode to a bitset, render as a square grid
-     (side = ceil(sqrt(units)), 128×128 for 16K), busy = filled cell,
-     free = empty track, hover tooltip with offset + state, legend.
-     No `allocate_pos` marker — `ZoneUsage` has no such field (dropped
-     by decision). Canvas, not SVG/DOM, for zones
-     > 4K units; redraw only on data change.
+5. **Web UI — Capacity center panel (canvas)** — new
+   `app/crow-web/ui/src/panels/CapacityPanel.tsx`, rendered when
+   `viewMode === Capacity`. Content depends on the selected entity
+   (see working design §5):
+   - **Rack / Node selected** — hierarchical capacity summary; disk
+     counts as array icons + count (not per-disk boxes). Data from
+     `GET /api/diskdb/usage` (cluster merge).
+   - **DiskGroup selected** — per-disk boxes with green→amber→red
+     busy gradient + % label. Data from `GET /api/diskdb/usage?dg=<id>`.
+   - **Disk selected** — zone grid (canvas, ~80×80 for 6400 zones on
+     a 200 TB / 32 GB-zone disk), each zone box gradient-colored by
+     busy%. "Jump to zone #" input for direct navigation. Data from
+     `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>` (brief per-zone
+     entries, no bitmap).
+   - **Zone selected** — zone bitmap (canvas, ~181×181 for 32K units
+     at 32 GB / 1 MB). Busy block = red filled cell, free block =
+     green filled cell. Fetched on-demand only (one `query_zone`
+     call). Decode `usage_bitmap` to a bitset, render as a square
+     grid (side = ceil(sqrt(units))), hover tooltip with offset +
+     state. No `allocate_pos` marker — `ZoneUsage` has no such field.
+   - **Rendering**: canvas (not SVG/DOM) for all levels; offscreen
+     double-buffering (draw to offscreen, `drawImage` blit to visible
+     — never clear-then-slowly-draw, that flickers). 3 s poll
+     refreshes the focused view; previous frame retained until new
+     frame is fully drawn, then swapped. Color encoding:
+     green(free) → amber → red(busy), with % text labels as
+     redundant non-color encoding.
    - `ScannerPanel` — last `ScanSummary` grouped: Drift (ghost_busy,
      ghost_free), Lag (uncompacted_lag), Corruption (corrupt_snapshots,
      corrupt_records), Owner (owner_mismatches), plus duration and
@@ -241,12 +295,14 @@ Flow diagram (web path shown; CLI routes through the same REST layer):
 
 ```
 Operator
-   │  (Diskdb panel / crow-cli)
+   │  (Capacity panel / crow-cli)
    ▼
-crow-web (Axum REST /api/diskdb/*)
+crow-web (Axum REST /api/diskdb/* + /api/nodes/:id/diskdb/*)
    │   reads service registry directly for /instances
    ├─────────────────────────────────────────► ServiceRegistryClient (group 0)
    │                                              └─ keepalive group_usages
+   ├─────────────────────────────────────────► HardwareClient (group 0)
+   │                                              └─ disk lifecycle + set_status
    ▼  (lib/crow-diskdb-client DiskdbClient)
 crow-diskdb (gRPC DiskdbService)
    ├─ QueryCapacityStats ─► dg/disk/zone usage (+ usage_bitmap at zone level)
@@ -259,7 +315,7 @@ Edge cases at a glance:
 - Cluster overview without `dg` → web layer iterates all instances and
   merges; a dead instance yields a degraded card, not a failed page.
 - Zone drill-down → bitmap is omitted at disk level (proto contract);
-  the UI issues the zone-level query and renders summary rows first.
+  the UI issues the zone-level query and renders the zone grid first.
 - Zeroed group aggregates at disk/zone drill-down → UI renders
   per-disk/per-zone fields only.
 - Scan already running → `TriggerScan` returns `scan_in_progress`;
@@ -274,8 +330,13 @@ Edge cases at a glance:
   expected between a state-machine transition and the next write-back;
   persistent divergence indicates a write-back failure (logged as a
   warning).
-- Large zones (16K units) → canvas grid, no per-block DOM; bitmap
-  fetched on demand only.
+- Large zones (32K units at 32 GB / 1 MB) → canvas grid (~181×181),
+  no per-block DOM; bitmap fetched on demand only. Zone grid for a
+  200 TB disk (~6400 zones) → ~80×80 canvas.
+- Batch disk-add with N disks → atomic all-or-nothing; a malformed
+  `disk_id` or group-0 write failure rejects the whole batch.
+- DiskDB deploy failure on AddNode → KV stays deployed; operator
+  retries via Server context menu Deploy.
 
 **Dependencies**:
 - R70–R76 (proto, admin RPCs, allocate/free, `QueryCapacityStats` +
@@ -286,7 +347,15 @@ Edge cases at a glance:
   the missing scanner/rebuild wrappers.
 - R81 (disk-group/disk lifecycle REST + `crow disk`/`disk-group` CLI +
   `DiskEntry`/`AddDiskBody`/`MoveDiskBody` in `crow-console-shared`)
-  — landed; R77 builds the UI/dialogs on these handlers.
+  — landed; R77 builds the UI/dialogs on these handlers and adds the
+  batch disk-add endpoint.
+- KV server deploy/stop/restart handlers
+  (`http_deploy_node_server` etc. in `app/crow-web/src/lifecycle.rs`)
+  — landed; R77 mirrors them for `crow-diskdb` (SSH / local fork, no
+  Docker).
+- Port allocation (`lib/crow-protocol/src/ports.rs` —
+  `DISKDB_GRPC_BASE=9941`, `DISKDB_HTTP_BASE=9942`) — landed; R77 uses
+  these for diskdb deploy defaults.
 - Nothing depends on R77.
 
 **Acceptance**:
@@ -330,28 +399,44 @@ Edge cases at a glance:
   layer. Integration test.
 - `pixi run test-console-cli` passes.
 
-**Web UI lifecycle**:
-- Physical tree renders `DiskGroup` and `Disk` nodes under `Node`;
-  right-clicking a node offers "Add Disk"; the dialog adds a disk via
-  REST → group 0 → diskdb sync, and the disk appears in the tree with
-  `Up` status and its zone count. E2E test.
+**Web UI lifecycle (Capacity view + Physical refactor)**:
+- Capacity view sidebar renders rack → node → disk-group → disk;
+  right-clicking a node offers "Add Disk Group"; right-clicking a
+  disk-group offers "Add Disk" (batch dialog — multiple UUIDs, defaults
+  4 TiB / 32 GiB / 1 MiB locked); the batch endpoint adds all disks
+  atomically via REST → group 0 → diskdb sync, and the disks appear in
+  the tree with `Up` status and zone counts. E2E test.
+- Batch with a malformed `disk_id` → whole batch rejected, 0 disks
+  created. E2E test.
 - `RemoveDiskDialog`, `MoveDiskDialog`, `SetDiskStatusDialog` mutate
   via REST and refresh the tree. E2E test.
 - Disk rows show two status columns — "Group-0" (from
   `HardwareClient.get_disk` via the disk detail endpoint) and
   "Runtime" (from `GetDiskInfo`/`QueryCapacityStats`); both render
   `HwStatus` via the existing status-pill mapping. E2E test.
+- Physical view: DiskDB Server sub-tree renders under each Node
+  (disk-group → disk, read-only); right-clicking a Server node offers
+  Restart / Stop (server-process ops); Node menu has only Ping +
+  Delete Node (no Restart/Stop). E2E test.
+- AddNodeDialog auto-deploys both KV and DiskDB; both appear in the
+  Physical tree. E2E test.
+- Right-click DiskDB Server → Stop → process stops, entry persists →
+  Restart → process restarts on same ports. E2E test.
 
-**Web UI runtime panel**:
-- Diskdb panel instance cards show registry data + aggregate
-  capacity/busy/free bar; a dg with `allocatable_disk_count <
-  disk_count` renders a degraded indicator. E2E test.
-- Dg/disk usage dashboard renders bars from `/api/diskdb/usage`; zone
-  strip shows counts + `alloc_state` badges without fetching bitmaps.
+**Web UI capacity panel (canvas)**:
+- Rack/Node selected → hierarchical capacity summary with disk counts
+  as array icons. E2E test.
+- DiskGroup selected → per-disk boxes with green→amber→red busy
+  gradient + % label. E2E test.
+- Disk selected → zone grid (canvas) renders ~80×80 for 6400 zones,
+  each zone box gradient-colored by busy%; "jump to zone #" input
+  navigates. E2E test.
+- Zone selected → `usage_bitmap` renders as canvas grid (~181×181 for
+  32K units): allocate blocks, open the zone, verify busy cells are
+  red and free cells are green; hover shows offset + state. E2E test.
+- 3 s poll refreshes the current view without flicker (offscreen
+  double-buffer — previous frame retained until new frame is drawn).
   E2E test.
-- `ZoneBlockChart` renders a zone's `usage_bitmap` as a canvas grid:
-  allocate blocks, open the zone, verify busy cells are filled and
-  free cells are empty; hover shows offset + state. E2E test.
 - `ScannerPanel` shows the last `ScanSummary` grouped by
   drift/lag/corruption/owner; "Run Scan" triggers a scan and the panel
   reflects the running state. E2E test.
