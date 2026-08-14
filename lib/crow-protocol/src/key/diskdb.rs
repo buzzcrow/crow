@@ -325,6 +325,16 @@ impl BinaryKey for BusyBlockKey {
 }
 
 impl BusyBlockKey {
+    /// Prefix for scanning all busy blocks of a disk:
+    /// `magic | 0x0006 | disk_id`.
+    #[must_use]
+    pub fn prefix_for_disk(disk_id: &DiskId) -> Vec<u8> {
+        let mut v = Vec::new();
+        encode_header(&mut v, Self::TYPE_TAG);
+        encode_disk_id(&mut v, disk_id);
+        v
+    }
+
     /// Prefix for scanning all busy blocks in a zone:
     /// `magic | 0x0006 | disk_id | zone_index`.
     #[must_use]
@@ -374,6 +384,16 @@ impl BinaryKey for FreeBlockKey {
 }
 
 impl FreeBlockKey {
+    /// Prefix for scanning all free blocks of a disk:
+    /// `magic | 0x0007 | disk_id`.
+    #[must_use]
+    pub fn prefix_for_disk(disk_id: &DiskId) -> Vec<u8> {
+        let mut v = Vec::new();
+        encode_header(&mut v, Self::TYPE_TAG);
+        encode_disk_id(&mut v, disk_id);
+        v
+    }
+
     /// Prefix for scanning all free blocks in a zone:
     /// `magic | 0x0007 | disk_id | zone_index`.
     #[must_use]

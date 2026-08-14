@@ -1523,3 +1523,289 @@ pub async fn http_remove_disk(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+// ── Disk move ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct MoveDiskBody {
+    new_rack_id: RackId,
+    new_node_id: NodeId,
+    new_disk_group_id: DiskGroupId,
+}
+
+/// `POST /api/disks/:disk_id/move`.
+///
+/// Moves a disk from its current placement to a new disk-group. The
+/// disk's records (zone/busy/free) are copied from the old bind to
+/// the new bind, then the group-0 placement is updated.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if the disk is not found, the new disk-group is
+/// not found, or the record copy / group-0 update fails.
+#[allow(clippy::too_many_lines)]
+pub async fn http_move_disk(
+    State(state): State<AppState>,
+    Path(disk_id): Path<String>,
+    Json(body): Json<MoveDiskBody>,
+) -> Result<Json<DiskEntry>, (StatusCode, Json<ErrorBody>)> {
+    // 1. Resolve the disk's current placement from config.
+    let (old_rack_id, old_node_id, old_dg_id, disk_entry) = {
+        let cfg = state.config.read().unwrap();
+        let entry = cfg.disk(&disk_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk {disk_id} not found"),
+                }),
+            )
+        })?;
+        (entry.rack_id, entry.node_id, entry.disk_group_id, entry.clone())
+    };
+
+    // 2. Verify the new disk-group exists in config.
+    {
+        let cfg = state.config.read().unwrap();
+        if !cfg
+            .disk_groups
+            .iter()
+            .any(|dg| dg.id == body.new_disk_group_id && dg.node_id == body.new_node_id)
+        {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!(
+                        "disk-group {} on node {} not found",
+                        body.new_disk_group_id, body.new_node_id
+                    ),
+                }),
+            ));
+        }
+    }
+
+    // 3. Parse the disk_id into a proto DiskId.
+    let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&disk_id)
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody { error: format!("invalid disk_id format: {e}") }),
+            ));
+        }
+    };
+
+    // 4. Set disk to Maintenance in group 0 (old placement).
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        if let Err(e) = hw
+            .set_disk_status(
+                old_rack_id,
+                old_node_id,
+                old_dg_id,
+                &disk_id_proto,
+                crow_protocol::common::HwStatus::Maintenance,
+            )
+            .await
+        {
+            tracing::warn!(disk_id = %disk_id, error = %e, "move: set Maintenance failed");
+        }
+    }
+
+    // 5. Copy records from old bind to new bind.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let old_bind = match hw.get_bind(old_rack_id, old_node_id, old_dg_id).await {
+            Ok(Some(bind)) => (bind.store_id, bind.group_id),
+            Ok(None) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorBody {
+                        error: format!(
+                            "no bind for old placement ({old_rack_id}, {old_node_id}, {old_dg_id})"
+                        ),
+                    }),
+                ));
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody {
+                        error: format!("get old bind: {e}"),
+                    }),
+                ));
+            }
+        };
+        let new_bind = match hw
+            .get_bind(body.new_rack_id, body.new_node_id, body.new_disk_group_id)
+            .await
+        {
+            Ok(Some(bind)) => (bind.store_id, bind.group_id),
+            Ok(None) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorBody {
+                        error: format!(
+                            "no bind for new placement ({}, {}, {}); create bind before move",
+                            body.new_rack_id, body.new_node_id, body.new_disk_group_id
+                        ),
+                    }),
+                ));
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody {
+                        error: format!("get new bind: {e}"),
+                    }),
+                ));
+            }
+        };
+
+        // Build a CrowkvClient seeded with both old and new bind leaders.
+        let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+        if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, old_node_id, old_bind.0).await {
+            kv.seed_leader(old_bind.0, old_bind.1, ep);
+        }
+        if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, body.new_node_id, new_bind.0).await {
+            kv.seed_leader(new_bind.0, new_bind.1, ep);
+        }
+        let copy_count = copy_disk_records(&kv, old_bind, new_bind, &disk_id_proto).await;
+        tracing::info!(disk_id = %disk_id, records_copied = copy_count, "move: records copied");
+    }
+
+    // 6. Update group 0 placement: remove from old, add to new.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        // Get the current DiskValue from group 0.
+        if let Ok(Some(disk_value)) = hw
+            .get_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
+            .await
+        {
+            // Remove from old placement.
+            if let Err(e) = hw
+                .remove_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
+                .await
+            {
+                tracing::warn!(disk_id = %disk_id, error = %e, "move: remove from old placement failed");
+            }
+            // Add to new placement with Maintenance status.
+            let mut new_value = disk_value;
+            new_value.status = crow_protocol::common::HwStatus::Maintenance as i32;
+            if let Err(e) = hw
+                .add_disk(
+                    body.new_rack_id,
+                    body.new_node_id,
+                    body.new_disk_group_id,
+                    &disk_id_proto,
+                    &new_value,
+                )
+                .await
+            {
+                tracing::warn!(disk_id = %disk_id, error = %e, "move: add to new placement failed");
+            }
+        }
+    }
+
+    // 7. Update ConsoleConfig: move the DiskEntry to the new disk-group.
+    let updated_entry = {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_disk(&disk_id).map_err(map_config_err)?;
+        let new_entry = DiskEntry {
+            disk_id: disk_entry.disk_id,
+            disk_group_id: body.new_disk_group_id,
+            rack_id: body.new_rack_id,
+            node_id: body.new_node_id,
+            disk_type: disk_entry.disk_type,
+            capacity_bytes: disk_entry.capacity_bytes,
+            zone_size_bytes: disk_entry.zone_size_bytes,
+            unit_size_bytes: disk_entry.unit_size_bytes,
+        };
+        cfg.add_disk(new_entry.clone()).map_err(map_config_err)?;
+        new_entry
+    };
+    state.persist().map_err(map_persist_err)?;
+
+    Ok(Json(updated_entry))
+}
+
+/// Copy all records for a disk from one bind to another. Scans zone,
+/// busy, and free block records by `DiskId` prefix, batch-writes them
+/// to the new bind.
+async fn copy_disk_records(
+    kv: &crow_kv_client::CrowkvClient,
+    old_bind: (u64, u64),
+    new_bind: (u64, u64),
+    disk_id: &crow_protocol::common::DiskId,
+) -> u64 {
+    use crow_protocol::key::{BusyBlockKey, FreeBlockKey, ZoneKey};
+
+    let prefixes = [
+        ZoneKey::prefix_for_disk(disk_id),
+        BusyBlockKey::prefix_for_disk(disk_id),
+        FreeBlockKey::prefix_for_disk(disk_id),
+    ];
+
+    let mut total_copied: u64 = 0;
+    let batch_size = 100u32;
+
+    for prefix in &prefixes {
+        let mut start_after: Vec<u8> = Vec::new();
+        loop {
+            let outcome = match kv
+                .scan(
+                    old_bind.0,
+                    old_bind.1,
+                    prefix,
+                    &start_after,
+                    &[], // empty end_key = no upper bound
+                    batch_size,
+                    crow_kv_client::ReadMode::Linearizable,
+                    None,
+                    false,
+                    None,
+                )
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(error = %e, "copy_disk_records: scan failed");
+                    break;
+                }
+            };
+
+            if outcome.items.is_empty() {
+                break;
+            }
+
+            // Batch-write to new bind.
+            let ops: Vec<crow_kv_client::BatchOp> = outcome
+                .items
+                .iter()
+                .map(|(k, v)| crow_kv_client::BatchOp::Put {
+                    key: k.clone(),
+                    value: v.clone(),
+                })
+                .collect();
+
+            if let Err(e) = kv.batch_write(new_bind.0, new_bind.1, &ops).await {
+                tracing::warn!(error = %e, "copy_disk_records: batch_write failed");
+                break;
+            }
+
+            total_copied += u64::try_from(outcome.items.len()).unwrap_or(0);
+
+            if !outcome.truncated {
+                break;
+            }
+            // Set start_after to the last key for pagination.
+            if let Some((last_key, _)) = outcome.items.last() {
+                start_after = last_key.to_vec();
+            } else {
+                break;
+            }
+        }
+    }
+
+    total_copied
+}
