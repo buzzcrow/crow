@@ -206,8 +206,7 @@ impl NodeConfigStore {
     ///
     /// # Errors
     /// Returns IO error if read or write fails.
-    #[allow(dead_code)]
-    pub(crate) async fn remove_store(&self, store_id: u64) -> io::Result<()> {
+    pub async fn remove_store(&self, store_id: u64) -> io::Result<()> {
         let mut node_config = self.load().await.unwrap_or_default();
         node_config.remove_store(store_id);
         self.write_atomic(&node_config).await

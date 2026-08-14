@@ -441,10 +441,33 @@ pub(super) async fn remove_group(
         ));
     }
 
+    // Delete the engine dir for this group.
+    let engine_dir = crate::startup::store_crow_tree_path(&state.config.data_root, sid, gid);
+    if let Err(e) = tokio::fs::remove_dir_all(&engine_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(store_id = sid, group_id = gid, error = %e, "failed to delete engine dir; continuing");
+        }
+    }
+
+    // Delete the WAL group dir.
+    let wal_group_dir =
+        crate::startup::store_wal_root(&state.config.wal_root, sid).join(format!("group{gid}"));
+    if let Err(e) = tokio::fs::remove_dir_all(&wal_group_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(store_id = sid, group_id = gid, error = %e, "failed to delete WAL group dir; continuing");
+        }
+    }
+
+    // Update node-config.json so the group does not resurrect on restart.
+    let node_config_store = crow_kv::cluster::node_config::NodeConfigStore::new(&state.config.config_root);
+    if let Err(e) = node_config_store.remove_group(sid, gid).await {
+        tracing::warn!(store_id = sid, group_id = gid, error = %e, "failed to update node_config; continuing");
+    }
+
     info!(
         store_id = sid,
         group_id = gid,
-        "PxGroup removed via management API"
+        "PxGroup removed via management API (dirs deleted + node_config updated)"
     );
     Ok(StatusCode::OK)
 }

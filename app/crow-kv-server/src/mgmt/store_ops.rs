@@ -180,10 +180,33 @@ pub(super) async fn remove_store(
             tracing::error!(store_id = sid, "{err}");
         }
     }
+
+    // Delete the engine store dir (cascades all group subdirs).
+    let engine_store_dir = state.config.data_root.join(format!("store{sid}"));
+    if let Err(e) = tokio::fs::remove_dir_all(&engine_store_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(store_id = sid, error = %e, "failed to delete engine store dir; continuing");
+        }
+    }
+
+    // Delete the WAL store dir (cascades all group subdirs).
+    let wal_store_dir = crate::startup::store_wal_root(&state.config.wal_root, sid);
+    if let Err(e) = tokio::fs::remove_dir_all(&wal_store_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(store_id = sid, error = %e, "failed to delete WAL store dir; continuing");
+        }
+    }
+
+    // Update node-config.json so the store does not resurrect on restart.
+    let node_config_store = crow_kv::cluster::node_config::NodeConfigStore::new(&state.config.config_root);
+    if let Err(e) = node_config_store.remove_store(sid).await {
+        tracing::warn!(store_id = sid, error = %e, "failed to update node_config; continuing");
+    }
+
     info!(
         store_id = sid,
         error_count = report.errors.len(),
-        "PxKvStore removed via management API"
+        "PxKvStore removed via management API (dirs deleted + node_config updated)"
     );
     Ok(StatusCode::OK)
 }
