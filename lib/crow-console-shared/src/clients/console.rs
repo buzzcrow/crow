@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crow_protocol::{NodeId, RackId};
 
-use crate::cluster::{GroupSummary, GroupView, ReplicaView, StoreView};
+use crate::cluster::{DiskGroupId, GroupSummary, GroupView, ReplicaView, StoreView};
 use crate::config::{NodeEntry, RackEntry, ServerEntry};
 use crate::error::{Error, Result};
 
@@ -52,6 +52,29 @@ pub struct AddRackBody {
     pub id: RackId,
     #[serde(default)]
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddDiskGroupBody {
+    pub id: DiskGroupId,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddDiskBody {
+    pub disk_id: String,
+    pub disk_type: String,
+    pub capacity_bytes: u64,
+    pub zone_size_bytes: u64,
+    pub unit_size_bytes: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MoveDiskBody {
+    pub new_rack_id: RackId,
+    pub new_node_id: NodeId,
+    pub new_disk_group_id: DiskGroupId,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -280,6 +303,86 @@ impl ConsoleClient {
     pub async fn ping_node(&self, node_id: NodeId) -> Result<PingResult> {
         self.post_json(&format!("/api/nodes/{node_id}/ping"), &serde_json::json!({}))
             .await
+    }
+
+    // ── Physical: disk-group lifecycle ────────────────────────────
+
+    /// `GET /api/nodes/:node_id/disk-groups`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn list_disk_groups(&self, node_id: NodeId) -> Result<Vec<crate::config::DiskGroupEntry>> {
+        self.get_json(&format!("/api/nodes/{node_id}/disk-groups")).await
+    }
+
+    /// `POST /api/nodes/:node_id/disk-groups`.
+    ///
+    /// # Errors
+    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
+    pub async fn add_disk_group(
+        &self,
+        node_id: NodeId,
+        body: &AddDiskGroupBody,
+    ) -> Result<crate::config::DiskGroupEntry> {
+        self.post_json(&format!("/api/nodes/{node_id}/disk-groups"), body)
+            .await
+    }
+
+    /// `DELETE /api/nodes/:node_id/disk-groups/:dg_id`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn remove_disk_group(&self, node_id: NodeId, dg_id: DiskGroupId) -> Result<()> {
+        self.delete_path(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}"))
+            .await
+    }
+
+    // ── Physical: disk lifecycle ──────────────────────────────────
+
+    /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn list_disks(
+        &self,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+    ) -> Result<Vec<crate::config::DiskEntry>> {
+        self.get_json(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}/disks"))
+            .await
+    }
+
+    /// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+    ///
+    /// # Errors
+    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
+    pub async fn add_disk(
+        &self,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        body: &AddDiskBody,
+    ) -> Result<crate::config::DiskEntry> {
+        self.post_json(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}/disks"), body)
+            .await
+    }
+
+    /// `DELETE /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn remove_disk(&self, node_id: NodeId, dg_id: DiskGroupId, disk_id: &str) -> Result<()> {
+        self.delete_path(&format!(
+            "/api/nodes/{node_id}/disk-groups/{dg_id}/disks/{disk_id}"
+        ))
+        .await
+    }
+
+    /// `POST /api/disks/:disk_id/move`.
+    ///
+    /// # Errors
+    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
+    pub async fn move_disk(&self, disk_id: &str, body: &MoveDiskBody) -> Result<crate::config::DiskEntry> {
+        self.post_json(&format!("/api/disks/{disk_id}/move"), body).await
     }
 
     // ── Physical: server lifecycle (one server per node) ──────────

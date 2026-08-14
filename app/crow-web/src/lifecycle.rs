@@ -8,8 +8,8 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use crow_console_shared::cluster::{NodeHealth, NodeId, ProcState, RackId, ServerProcess};
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::cluster::{DiskGroupId, NodeHealth, NodeId, ProcState, RackId, ServerProcess};
+use crow_console_shared::config::{DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry};
 use crow_console_shared::expand::RecursiveDepth;
 use crow_console_shared::monitor::NodeRecord;
 use serde::{Deserialize, Serialize};
@@ -1184,4 +1184,342 @@ pub async fn http_internal_reset(
 #[derive(Serialize)]
 pub struct ResetResult {
     pub stopped: Vec<String>,
+}
+
+// ── Disk-group lifecycle ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddDiskGroupBody {
+    id: DiskGroupId,
+    #[serde(default)]
+    name: String,
+}
+
+/// `GET /api/nodes/:node_id/disk-groups`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the node does not exist.
+pub async fn http_list_node_disk_groups(
+    State(state): State<AppState>,
+    Path(node_id): Path<NodeId>,
+) -> Result<Json<Vec<DiskGroupEntry>>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    if !cfg.nodes.iter().any(|n| n.id == node_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("node {node_id} not found"),
+            }),
+        ));
+    }
+    Ok(Json(
+        cfg.disk_groups
+            .iter()
+            .filter(|dg| dg.node_id == node_id)
+            .cloned()
+            .collect(),
+    ))
+}
+
+/// `GET /api/nodes/:node_id/disk-groups/:dg_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk-group does not exist.
+pub async fn http_get_node_disk_group(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+) -> Result<Json<DiskGroupEntry>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    let dg = cfg
+        .disk_groups
+        .iter()
+        .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk-group {dg_id} not found on node {node_id}"),
+                }),
+            )
+        })?;
+    Ok(Json(dg.clone()))
+}
+
+/// `POST /api/nodes/:node_id/disk-groups`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk-group addition or config persistence fails.
+pub async fn http_add_node_disk_group(
+    State(state): State<AppState>,
+    Path(node_id): Path<NodeId>,
+    Json(body): Json<AddDiskGroupBody>,
+) -> Result<(StatusCode, Json<DiskGroupEntry>), (StatusCode, Json<ErrorBody>)> {
+    // Resolve rack_id from the node.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.node(node_id).map(|n| n.rack_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("node {node_id} not found"),
+                }),
+            )
+        })?
+    };
+    let entry = DiskGroupEntry {
+        id: body.id,
+        rack_id,
+        node_id,
+        name: body.name,
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_disk_group(entry.clone()).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::diskdb::rpc::DiskGroupValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            disk_ids: Vec::new(),
+        };
+        if let Err(e) = hw.add_disk_group(rack_id, node_id, entry.id, &value).await {
+            tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: add_disk_group failed");
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(entry)))
+}
+
+/// `DELETE /api/nodes/:node_id/disk-groups/:dg_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk-group removal or config persistence fails.
+pub async fn http_remove_node_disk_group(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Capture rack_id before removing.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disk_groups
+            .iter()
+            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+            .map(|dg| dg.rack_id)
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_disk_group(dg_id).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata.
+    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
+        if let Err(e) = hw.remove_disk_group_cascade(rack_id, node_id, dg_id).await {
+            tracing::warn!(disk_group_id = dg_id, error = %e, "sysdata sync: remove_disk_group_cascade failed");
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Disk lifecycle ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddDiskBody {
+    disk_id: String,
+    disk_type: String,
+    capacity_bytes: u64,
+    zone_size_bytes: u64,
+    unit_size_bytes: u32,
+}
+
+/// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk-group does not exist.
+pub async fn http_list_disks_in_group(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+) -> Result<Json<Vec<DiskEntry>>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    if !cfg
+        .disk_groups
+        .iter()
+        .any(|dg| dg.node_id == node_id && dg.id == dg_id)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("disk-group {dg_id} not found on node {node_id}"),
+            }),
+        ));
+    }
+    Ok(Json(
+        cfg.disks
+            .iter()
+            .filter(|d| d.disk_group_id == dg_id && d.node_id == node_id)
+            .cloned()
+            .collect(),
+    ))
+}
+
+/// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk does not exist.
+pub async fn http_get_disk(
+    State(state): State<AppState>,
+    Path((node_id, dg_id, disk_id)): Path<(NodeId, DiskGroupId, String)>,
+) -> Result<Json<DiskEntry>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    let disk = cfg
+        .disks
+        .iter()
+        .find(|d| d.node_id == node_id && d.disk_group_id == dg_id && d.disk_id == disk_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk {disk_id} not found"),
+                }),
+            )
+        })?;
+    Ok(Json(disk.clone()))
+}
+
+/// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk addition or config persistence fails.
+pub async fn http_add_disk(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+    Json(body): Json<AddDiskBody>,
+) -> Result<(StatusCode, Json<DiskEntry>), (StatusCode, Json<ErrorBody>)> {
+    // Resolve rack_id from the disk-group.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disk_groups
+            .iter()
+            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+            .map(|dg| dg.rack_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("disk-group {dg_id} not found on node {node_id}"),
+                    }),
+                )
+            })?
+    };
+    let entry = DiskEntry {
+        disk_id: body.disk_id,
+        disk_group_id: dg_id,
+        rack_id,
+        node_id,
+        disk_type: body.disk_type,
+        capacity_bytes: body.capacity_bytes,
+        zone_size_bytes: body.zone_size_bytes,
+        unit_size_bytes: body.unit_size_bytes,
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_disk(entry.clone()).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let disk_id = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&entry.disk_id) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: invalid disk_id format");
+                return Ok((StatusCode::CREATED, Json(entry)));
+            }
+        };
+        let unit_size = u64::from(entry.unit_size_bytes);
+        let value = crow_protocol::diskdb::rpc::DiskValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            disk_type: match entry.disk_type.as_str() {
+                "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
+                "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
+                "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
+                _ => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
+            },
+            capacity_units: entry.capacity_bytes.checked_div(unit_size).unwrap_or(0),
+            zone_size_units: entry.zone_size_bytes.checked_div(unit_size).unwrap_or(0),
+            unit_size_bytes: entry.unit_size_bytes,
+            zone_count: 0,
+        };
+        if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id, &value).await {
+            tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(entry)))
+}
+
+/// `DELETE /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk removal or config persistence fails.
+pub async fn http_remove_disk(
+    State(state): State<AppState>,
+    Path((node_id, dg_id, disk_id)): Path<(NodeId, DiskGroupId, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Capture rack_id before removing.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disks
+            .iter()
+            .find(|d| d.node_id == node_id && d.disk_group_id == dg_id && d.disk_id == disk_id)
+            .map(|d| d.rack_id)
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_disk(&disk_id).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata.
+    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
+        match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&disk_id) {
+            Ok(disk_id_proto) => {
+                if let Err(e) = hw.remove_disk_cascade(rack_id, node_id, dg_id, &disk_id_proto).await {
+                    tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: remove_disk_cascade failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: invalid disk_id format, skipping cascade");
+            }
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }

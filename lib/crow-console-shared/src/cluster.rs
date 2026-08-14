@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use crow_protocol::{GroupId, NodeId, RackId, ReplicaId, StoreId};
+pub use crow_protocol::{common_type::DiskGroupId, GroupId, NodeId, RackId, ReplicaId, StoreId};
 
 use crate::snapshot::CrowTreeStatsSnapshot;
 

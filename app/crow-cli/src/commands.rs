@@ -3,6 +3,8 @@
 
 pub(crate) mod bench;
 pub(crate) mod cluster;
+pub(crate) mod disk;
+pub(crate) mod disk_group;
 pub(crate) mod kv;
 pub(crate) mod node;
 pub(crate) mod paxos;
@@ -15,6 +17,8 @@ pub(crate) use bench::{run_bench_verb, BenchArgs};
 pub(crate) use cluster::{
     run_cluster_init, run_cluster_inspect, run_cluster_status, run_cluster_topology, ClusterVerb,
 };
+pub(crate) use disk::{run_disk_verb, DiskVerb};
+pub(crate) use disk_group::{run_disk_group_verb, DiskGroupVerb};
 pub(crate) use kv::{run_kv_verb, KvVerb};
 pub(crate) use node::{run_node_verb, NodeVerb};
 pub(crate) use paxos::{run_group_verb, GroupVerb};

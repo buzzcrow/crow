@@ -23,11 +23,33 @@ pub fn disk_id(high: u64, low: u64) -> DiskId {
 pub trait DiskIdExt {
     /// Display format: `{high:016x}-{low:016x}`.
     fn to_display_string(&self) -> String;
+
+    /// Parse a display-format string (`{high:016x}-{low:016x}`) into a
+    /// `DiskId`. Also accepts a bare 32-char hex string (no dash).
+    ///
+    /// # Errors
+    /// Returns an error string if the input is malformed.
+    fn from_display_string(s: &str) -> Result<DiskId, String>;
 }
 
 impl DiskIdExt for DiskId {
     fn to_display_string(&self) -> String {
         format!("{:016x}-{:016x}", self.high, self.low)
+    }
+
+    fn from_display_string(s: &str) -> Result<DiskId, String> {
+        let (high_hex, low_hex) = if let Some((h, l)) = s.split_once('-') {
+            (h, l)
+        } else if s.len() == 32 {
+            (&s[..16], &s[16..])
+        } else {
+            return Err(format!(
+                "invalid DiskId string: expected 32 hex chars or high-low pair, got {s}"
+            ));
+        };
+        let high = u64::from_str_radix(high_hex, 16).map_err(|e| format!("invalid high: {e}"))?;
+        let low = u64::from_str_radix(low_hex, 16).map_err(|e| format!("invalid low: {e}"))?;
+        Ok(DiskId { high, low })
     }
 }
 

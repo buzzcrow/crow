@@ -27,7 +27,10 @@ pub mod ssh;
 pub mod test_ports;
 pub mod topology;
 
-pub use config::{ConsoleConfig, ConsoleConfigEngine, NodeEntry, RackEntry, ServerEntry, TomlFileEngine};
+pub use config::{
+    ConsoleConfig, ConsoleConfigEngine, DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry,
+    TomlFileEngine,
+};
 pub use snapshot::{
     ClusterSnapshot, CrowTreeStatsSnapshot, ElectionStateSnapshot, GroupView, HealthInfo, KvStoreView,
     LocalReplicaView, MetricFieldView, MetricPointView, MetricsResponse, ReadStateSnapshot, RemoteMetrics,

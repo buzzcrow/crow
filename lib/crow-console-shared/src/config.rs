@@ -13,6 +13,7 @@ use crow_protocol::{NodeId, RackId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::cluster::DiskGroupId;
 use crate::error::{Error, Result};
 
 use std::fmt;
@@ -162,6 +163,10 @@ pub struct ConsoleConfig {
     pub stores: Vec<StoreEntry>,
     #[serde(default)]
     pub groups: Vec<GroupEntry>,
+    #[serde(default, rename = "disk_group")]
+    pub disk_groups: Vec<DiskGroupEntry>,
+    #[serde(default, rename = "disk")]
+    pub disks: Vec<DiskEntry>,
     /// Optional `[bench]` section. Reserved for future use.
     #[serde(default, skip_serializing_if = "BenchConfig::is_empty")]
     pub(crate) bench: BenchConfig,
@@ -221,6 +226,34 @@ impl NodeEntry {
     pub fn ssh_enabled(&self) -> bool {
         !self.ssh_user.is_empty()
     }
+}
+
+/// Console-side disk-group entry. Mirrors the group-0 `DiskGroupKey`
+/// placement (`rack_id`, `node_id`, `disk_group_id`) plus a human-readable
+/// name. The console config is the operator's intent; group-0 sysdata is
+/// the derived view synced by the console handlers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskGroupEntry {
+    pub id: DiskGroupId,
+    pub rack_id: RackId,
+    pub node_id: NodeId,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Console-side disk entry. `disk_id` is a UUID hex string (stable across
+/// moves). `disk_type` is `"Hdd"` or `"Ssd"`. Capacity / zone / unit sizes
+/// are the physical disk's parameters, captured at add time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskEntry {
+    pub disk_id: String,
+    pub disk_group_id: DiskGroupId,
+    pub rack_id: RackId,
+    pub node_id: NodeId,
+    pub disk_type: String,
+    pub capacity_bytes: u64,
+    pub zone_size_bytes: u64,
+    pub unit_size_bytes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,8 +319,33 @@ struct PersistedConsoleConfig {
     store: BTreeMap<String, PersistedStoreEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     group: BTreeMap<String, PersistedGroupEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disk_group: BTreeMap<String, PersistedDiskGroupEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disk: BTreeMap<String, PersistedDiskEntry>,
     #[serde(default, skip_serializing_if = "BenchConfig::is_empty")]
     bench: BenchConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedDiskGroupEntry {
+    id: DiskGroupId,
+    rack_id: RackId,
+    node_id: NodeId,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedDiskEntry {
+    disk_id: String,
+    disk_group_id: DiskGroupId,
+    rack_id: RackId,
+    node_id: NodeId,
+    disk_type: String,
+    capacity_bytes: u64,
+    zone_size_bytes: u64,
+    unit_size_bytes: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,6 +742,121 @@ impl ConsoleConfig {
         self.servers.iter_mut().find(|s| s.id == id)
     }
 
+    // ── disk-group ────────────────────────────────────────────────
+
+    /// Add a disk-group. Rejects duplicate id and unknown node.
+    ///
+    /// # Errors
+    /// `Error::Conflict` on duplicate id; `Error::Validation` on unknown
+    /// node.
+    pub fn add_disk_group(&mut self, entry: DiskGroupEntry) -> Result<()> {
+        if self.disk_groups.iter().any(|dg| dg.id == entry.id) {
+            return Err(Error::Conflict {
+                kind: "disk_group".into(),
+                id: entry.id.to_string(),
+            });
+        }
+        if !self.nodes.iter().any(|n| n.id == entry.node_id) {
+            return Err(Error::Validation {
+                field: "node_id".into(),
+                message: format!("unknown node {}", entry.node_id),
+            });
+        }
+        self.disk_groups.push(entry);
+        Ok(())
+    }
+
+    /// Remove a disk-group by id.
+    ///
+    /// # Errors
+    /// `Error::NotFound` if no disk-group; `Error::Conflict` if any
+    /// disk still references the disk-group.
+    pub fn remove_disk_group(&mut self, id: DiskGroupId) -> Result<DiskGroupEntry> {
+        if self.disks.iter().any(|d| d.disk_group_id == id) {
+            return Err(Error::Conflict {
+                kind: "disk_group".into(),
+                id: format!("{id}: disk_group still has disks"),
+            });
+        }
+        let pos = self
+            .disk_groups
+            .iter()
+            .position(|dg| dg.id == id)
+            .ok_or_else(|| Error::NotFound {
+                kind: "disk_group".into(),
+                id: id.to_string(),
+            })?;
+        Ok(self.disk_groups.remove(pos))
+    }
+
+    /// Look up a disk-group by id.
+    #[must_use]
+    pub fn disk_group(&self, id: DiskGroupId) -> Option<&DiskGroupEntry> {
+        self.disk_groups.iter().find(|dg| dg.id == id)
+    }
+
+    /// List disk-groups on a node.
+    #[must_use]
+    pub fn disk_groups_on_node(&self, node_id: NodeId) -> Vec<&DiskGroupEntry> {
+        self.disk_groups
+            .iter()
+            .filter(|dg| dg.node_id == node_id)
+            .collect()
+    }
+
+    // ── disk ──────────────────────────────────────────────────────
+
+    /// Add a disk. Rejects duplicate `disk_id` and unknown `disk_group`.
+    ///
+    /// # Errors
+    /// `Error::Conflict` on duplicate `disk_id`; `Error::Validation` on
+    /// unknown `disk_group`.
+    pub fn add_disk(&mut self, entry: DiskEntry) -> Result<()> {
+        if self.disks.iter().any(|d| d.disk_id == entry.disk_id) {
+            return Err(Error::Conflict {
+                kind: "disk".into(),
+                id: entry.disk_id.clone(),
+            });
+        }
+        if !self.disk_groups.iter().any(|dg| dg.id == entry.disk_group_id) {
+            return Err(Error::Validation {
+                field: "disk_group_id".into(),
+                message: format!("unknown disk_group {}", entry.disk_group_id),
+            });
+        }
+        self.disks.push(entry);
+        Ok(())
+    }
+
+    /// Remove a disk by `disk_id`.
+    ///
+    /// # Errors
+    /// `Error::NotFound` if no disk with that `disk_id`.
+    pub fn remove_disk(&mut self, disk_id: &str) -> Result<DiskEntry> {
+        let pos = self
+            .disks
+            .iter()
+            .position(|d| d.disk_id == disk_id)
+            .ok_or_else(|| Error::NotFound {
+                kind: "disk".into(),
+                id: disk_id.to_string(),
+            })?;
+        Ok(self.disks.remove(pos))
+    }
+
+    /// Look up a disk by `disk_id`.
+    #[must_use]
+    pub fn disk(&self, disk_id: &str) -> Option<&DiskEntry> {
+        self.disks.iter().find(|d| d.disk_id == disk_id)
+    }
+
+    /// List disks in a disk-group.
+    #[must_use]
+    pub fn disks_in_group(&self, dg_id: DiskGroupId) -> Vec<&DiskEntry> {
+        self.disks.iter().filter(|d| d.disk_group_id == dg_id).collect()
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn to_persisted(&self) -> PersistedConsoleConfig {
         let rack = self
             .racks
@@ -760,6 +933,40 @@ impl ConsoleConfig {
                 )
             })
             .collect();
+        let disk_group = self
+            .disk_groups
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.to_string(),
+                    PersistedDiskGroupEntry {
+                        id: entry.id,
+                        rack_id: entry.rack_id,
+                        node_id: entry.node_id,
+                        name: entry.name.clone(),
+                    },
+                )
+            })
+            .collect();
+        let disk = self
+            .disks
+            .iter()
+            .map(|entry| {
+                (
+                    entry.disk_id.clone(),
+                    PersistedDiskEntry {
+                        disk_id: entry.disk_id.clone(),
+                        disk_group_id: entry.disk_group_id,
+                        rack_id: entry.rack_id,
+                        node_id: entry.node_id,
+                        disk_type: entry.disk_type.clone(),
+                        capacity_bytes: entry.capacity_bytes,
+                        zone_size_bytes: entry.zone_size_bytes,
+                        unit_size_bytes: entry.unit_size_bytes,
+                    },
+                )
+            })
+            .collect();
         PersistedConsoleConfig {
             version: 2,
             rack,
@@ -767,6 +974,8 @@ impl ConsoleConfig {
             crow_kv_server,
             store,
             group,
+            disk_group,
+            disk,
             bench: self.bench.clone(),
         }
     }
@@ -828,12 +1037,40 @@ impl ConsoleConfig {
             })
             .collect();
         groups.sort_by_key(|g| (g.store_id, g.group_id));
+        let mut disk_groups: Vec<DiskGroupEntry> = persisted
+            .disk_group
+            .into_values()
+            .map(|entry| DiskGroupEntry {
+                id: entry.id,
+                rack_id: entry.rack_id,
+                node_id: entry.node_id,
+                name: entry.name,
+            })
+            .collect();
+        disk_groups.sort_by_key(|dg| dg.id);
+        let mut disks: Vec<DiskEntry> = persisted
+            .disk
+            .into_values()
+            .map(|entry| DiskEntry {
+                disk_id: entry.disk_id,
+                disk_group_id: entry.disk_group_id,
+                rack_id: entry.rack_id,
+                node_id: entry.node_id,
+                disk_type: entry.disk_type,
+                capacity_bytes: entry.capacity_bytes,
+                zone_size_bytes: entry.zone_size_bytes,
+                unit_size_bytes: entry.unit_size_bytes,
+            })
+            .collect();
+        disks.sort_by(|a, b| a.disk_id.cmp(&b.disk_id));
         Self {
             racks,
             nodes,
             servers,
             stores,
             groups,
+            disk_groups,
+            disks,
             bench: persisted.bench,
         }
     }
