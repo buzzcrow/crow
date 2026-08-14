@@ -153,6 +153,12 @@ impl HardwareClient {
         &self.kv
     }
 
+    /// Access the underlying `CrowkvClient` as a shared `Arc`.
+    #[must_use]
+    pub fn shared_kv(&self) -> Arc<CrowkvClient> {
+        Arc::clone(&self.kv)
+    }
+
     /// Add or replace a rack record.
     pub async fn add_rack(&self, rack_id: RackId, value: &RackValue) -> Result<()> {
         let key = RackKey { rack_id };

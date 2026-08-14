@@ -1057,12 +1057,19 @@ pub async fn http_node_openapi_proxy(
 ///
 /// # Errors
 /// Returns an error if workspace cleanup or config persistence fails.
+#[allow(clippy::too_many_lines)]
 pub async fn http_internal_reset(
     State(state): State<AppState>,
 ) -> Result<Json<ResetResult>, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle;
 
-    // 1. List all stores from the monitor cache.
+    // 0. Capture rack IDs and store IDs, then clean group-0 sysdata
+    //    before stopping servers (R81: cluster reset must remove
+    //    hardware hierarchy and KV-cluster topology from group 0).
+    let rack_ids: Vec<RackId> = {
+        let cfg = state.config.read().unwrap();
+        cfg.racks.iter().map(|r| r.id).collect()
+    };
     let stores: Vec<u64> = {
         let snap = state.monitor_cache.snapshot().await;
         let mut ids: Vec<u64> = snap.values().flat_map(|rec| rec.stores.keys().copied()).collect();
@@ -1070,10 +1077,32 @@ pub async fn http_internal_reset(
         ids.dedup();
         ids
     };
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        for rid in &rack_ids {
+            if let Err(e) = hw.remove_rack_cascade(*rid).await {
+                tracing::warn!(rack_id = rid, error = %e, "reset: remove_rack_cascade failed");
+            }
+        }
+        // Also clean KV-cluster topology records (stores, groups)
+        // from group 0 — the existing reset removes them from config
+        // but not from sysdata.
+        let meta = crow_kv_client::KVClusterMetaClient::from_shared(hw.shared_kv());
+        for sid in &stores {
+            if let Err(e) = meta.remove_store(*sid).await {
+                tracing::warn!(store_id = sid, error = %e, "reset: remove_store from sysdata failed");
+            }
+        }
+        tracing::info!(
+            "reset: group-0 sysdata cleanup complete for {} racks",
+            rack_ids.len()
+        );
+    } else {
+        tracing::warn!("reset: no group-0 endpoint, skipping sysdata cleanup");
+    }
 
     let mut stopped: Vec<String> = Vec::new();
 
-    // 2. For each store: list & remove all groups, then remove the store.
+    // 1. For each store: list & remove all groups, then remove the store.
     for sid in &stores {
         // List groups for this store.
         if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
@@ -1119,7 +1148,7 @@ pub async fn http_internal_reset(
         }
     }
 
-    // 3. List all nodes, stop their servers, then remove them.
+    // 2. List all nodes, stop their servers, then remove them.
     let node_ids: Vec<NodeId> = {
         let cfg = state.config.read().unwrap();
         cfg.nodes.iter().map(|n| n.id).collect()
@@ -1159,7 +1188,7 @@ pub async fn http_internal_reset(
         state.monitor_cache.drop_node(nid).await;
     }
 
-    // 4. Remove all racks.
+    // 3. Remove all racks.
     let rack_ids: Vec<String> = {
         let cfg = state.config.read().unwrap();
         cfg.racks.iter().map(|r| r.id.to_string()).collect()
@@ -1171,7 +1200,7 @@ pub async fn http_internal_reset(
         }
     }
 
-    // 5. Clear caches and workspace directories.
+    // 4. Clear caches and workspace directories.
     state.openapi_cache.lock().unwrap().clear();
     state
         .clear_workspaces()
