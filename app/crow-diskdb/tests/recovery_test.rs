@@ -52,6 +52,50 @@ fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
     ChunkId { high, mid, low }
 }
 
+/// Wait for all disks in a disk-group to transition from Init to Up
+/// and have their zones loaded. Polls every 10ms up to 5s.
+async fn wait_for_disks_ready(
+    container: &DdbDiskGroupContainer,
+    dg_id: u64,
+    expected_disks: usize,
+    expected_zones: u32,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(dg) = container.get_disk_group(dg_id) {
+            let disks = dg.disks.read().unwrap();
+            let all_ready = disks.len() == expected_disks
+                && disks.iter().all(|d| {
+                    *d.effective_status.read().unwrap() == HwStatus::Up
+                        && u32::try_from(d.zones.read().unwrap().len()).unwrap_or(0) == expected_zones
+                });
+            if all_ready {
+                return;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            let dg = container.get_disk_group(dg_id);
+            let status = match dg {
+                Some(dg) => {
+                    let disks = dg.disks.read().unwrap();
+                    disks
+                        .iter()
+                        .map(|d| {
+                            let s = *d.effective_status.read().unwrap();
+                            let zc = d.zones.read().unwrap().len();
+                            format!("{s:?}({zc}z)")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+                None => "no dg".to_string(),
+            };
+            panic!("disks not ready after 5s: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn seed_hardware(hw: &HardwareClient) {
     hw.add_rack(
         RACK_ID,
@@ -190,6 +234,9 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
+
+    // Wait for background zone load (Init → Up).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
     let bind = *dg.bind.read().unwrap();
@@ -411,6 +458,9 @@ async fn recovery_strategy2_journal_replay() {
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
 
+    // Wait for background zone load (Init → Up).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
     let bind = *dg.bind.read().unwrap();
 
@@ -616,6 +666,9 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
 
+    // Wait for background zone load (Init → Up).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
     let bind = *dg.bind.read().unwrap();
 
@@ -756,6 +809,9 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     .with_ddb_kv_client(dg_kv);
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
+
+    // Wait for background zone load (Init → Up).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
     let bind = *dg.bind.read().unwrap();
@@ -959,6 +1015,9 @@ async fn recovery_persist_only_is_idempotent() {
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
 
+    // Wait for background zone load (Init → Up).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
     let bind = *dg.bind.read().unwrap();
 
@@ -1107,6 +1166,9 @@ async fn preparatory_thread_produces_ready_zones() {
     .with_ddb_kv_client(dg_kv);
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
+
+    // Wait for background zone load (Init → Up).
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
 
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
 
