@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{self, crow_kv_server_bin, stop_pid_with_timeout, DeployRequest};
 use crow_console_shared::ConsoleConfig;
 use crow_web::{router, AppState};
@@ -109,6 +109,7 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

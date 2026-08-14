@@ -91,6 +91,7 @@ async fn deploy_local_and_observe_topology() {
         binary: None,
         election_profile: Some("e2e".into()),
         pid: None,
+        service_type: crow_console_shared::config::ServiceType::Kv,
     })
     .unwrap();
 

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crow_console_shared::clients::http::ServerClient;
 use crow_console_shared::cluster::NodeHealth;
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{self, crow_kv_server_bin, DeployRequest};
 use crow_console_shared::monitor::{legacy_topology_to_node_stores, NodeRecord};
 use crow_console_shared::ConsoleConfig;
@@ -93,6 +93,7 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -242,6 +243,7 @@ async fn kv_get_returns_502_when_leader_unreachable() {
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

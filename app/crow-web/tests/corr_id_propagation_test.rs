@@ -17,7 +17,7 @@
 use std::net::SocketAddr;
 
 use axum::routing::get;
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::corr_id;
 use crow_console_shared::ConsoleConfig;
 use crow_web::{router, AppState};
@@ -133,6 +133,7 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

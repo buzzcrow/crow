@@ -80,6 +80,10 @@ pub fn router(state: AppState) -> axum::Router {
             get(lifecycle::http_list_disks_in_group).post(lifecycle::http_add_disk),
         )
         .route(
+            "/api/nodes/:id/disk-groups/:dg_id/disks:batch",
+            post(lifecycle::http_add_disks_batch),
+        )
+        .route(
             "/api/nodes/:id/disk-groups/:dg_id/disks/:disk_id",
             get(lifecycle::http_get_disk).delete(lifecycle::http_remove_disk),
         )
@@ -98,6 +102,10 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/diskdb/recalc", post(diskdb::http_diskdb_recalc))
         .route("/api/diskdb/compact", post(diskdb::http_diskdb_compact))
         .route("/api/diskdb/rebuild", post(diskdb::http_diskdb_rebuild))
+        // ── DiskDB deploy lifecycle (R77) ────────────────────────────
+        .route("/api/nodes/:id/diskdb/deploy", post(diskdb::http_deploy_diskdb))
+        .route("/api/nodes/:id/diskdb/restart", post(diskdb::http_restart_diskdb))
+        .route("/api/nodes/:id/diskdb/stop", post(diskdb::http_stop_diskdb))
         .route(
             "/api/nodes/:id/server",
             get(lifecycle::http_get_node_server).delete(lifecycle::http_delete_node_server),

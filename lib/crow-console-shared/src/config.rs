@@ -256,6 +256,15 @@ pub struct DiskEntry {
     pub unit_size_bytes: u32,
 }
 
+/// Discriminator for console-deployed server entries. `Kv` is the
+/// default for backward compatibility with existing persisted configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ServiceType {
+    #[default]
+    Kv,
+    Diskdb,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerEntry {
     /// Console-side identifier; must be unique within the file.
@@ -282,6 +291,15 @@ pub struct ServerEntry {
     pub election_profile: Option<String>,
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Service type discriminator (R77). Defaults to `Kv` for
+    /// backward compatibility with pre-R77 persisted configs.
+    #[serde(default, skip_serializing_if = "is_default_service_type")]
+    pub service_type: ServiceType,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_service_type(st: &ServiceType) -> bool {
+    *st == ServiceType::Kv
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,6 +402,8 @@ struct PersistedServerEntry {
     binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     election_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_service_type")]
+    service_type: ServiceType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +436,7 @@ impl ServerEntry {
             binary: None,
             election_profile: None,
             pid: None,
+            service_type: ServiceType::Kv,
         }
     }
 }
@@ -902,6 +923,7 @@ impl ConsoleConfig {
                         auto_start: entry.auto_start,
                         binary: entry.binary.clone(),
                         election_profile: entry.election_profile.clone(),
+                        service_type: entry.service_type,
                     },
                 )
             })
@@ -1015,6 +1037,7 @@ impl ConsoleConfig {
                 binary: entry.binary,
                 election_profile: entry.election_profile,
                 pid: None,
+                service_type: entry.service_type,
             })
             .collect();
         servers.sort_by(|a, b| a.id.cmp(&b.id));

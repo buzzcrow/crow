@@ -22,7 +22,7 @@ use crow_protocol::diskdb::rpc::{
     TriggerScanResponse, ZoneUsage,
 };
 
-use crate::error::{err_400, err_404, err_502, ErrorBody};
+use crate::error::{err_400, err_404, err_500, err_502, ErrorBody};
 use crate::mgmt::{build_hardware_client, grpc_endpoint_for_node};
 use crate::state::AppState;
 
@@ -690,4 +690,292 @@ fn parse_hw_status(s: &str) -> Option<HwStatus> {
         "OFFLINE" | "HW_STATUS_OFFLINE" => Some(HwStatus::Offline),
         _ => None,
     }
+}
+
+// ── DiskDB deploy / restart / stop (R77) ──────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct DeployDiskdbBody {
+    pub mgmt_port: u16,
+    pub grpc_port: u16,
+    #[serde(default)]
+    pub binary: Option<String>,
+    #[serde(default)]
+    pub listen_addr: Option<String>,
+    #[serde(default)]
+    pub http_addr: Option<String>,
+    #[serde(default)]
+    pub config: Option<String>,
+}
+
+/// `POST /api/nodes/:id/diskdb/deploy` — spawn `crow-diskdb` on the
+/// node's workspace. Registers a `ServerEntry` with
+/// `service_type: Diskdb` and tracks the PID.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `409` if a diskdb instance is already deployed on the
+/// node, `404` if the node doesn't exist, `502` on spawn failure.
+pub async fn http_deploy_diskdb(
+    State(state): State<AppState>,
+    Path(node_id): Path<u64>,
+    Json(body): Json<DeployDiskdbBody>,
+) -> Result<(StatusCode, Json<DiskdbDeployResult>), (StatusCode, Json<ErrorBody>)> {
+    use crow_console_shared::config::ServiceType;
+    use crow_console_shared::lifecycle::{self, DiskdbDeployRequest};
+
+    let node = {
+        let cfg = state.config.read().unwrap();
+        // Check for existing diskdb instance on this node.
+        if cfg
+            .servers
+            .iter()
+            .any(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Diskdb)
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: format!("node {node_id} already hosts a deployed diskdb instance"),
+                }),
+            ));
+        }
+        cfg.node(node_id).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("node {node_id} not found"),
+                }),
+            )
+        })?
+    };
+
+    let req = DiskdbDeployRequest {
+        server_id: format!("diskdb-{node_id}"),
+        mgmt_port: body.mgmt_port,
+        grpc_port: body.grpc_port,
+        binary: body.binary.clone().map(std::path::PathBuf::from),
+        listen_addr: body.listen_addr.clone(),
+        http_addr: body.http_addr.clone(),
+        config: body.config.clone().map(std::path::PathBuf::from),
+    };
+
+    let workspace_dir = state
+        .prepare_node_workspace(node_id)
+        .map_err(|e| err_500(e.to_string()))?;
+    let deployed = lifecycle::deploy_diskdb_local(&req, &node, &workspace_dir)
+        .await
+        .map_err(|e| err_502(format!("diskdb deploy: {e}")))?;
+
+    let entry = crow_console_shared::config::ServerEntry {
+        id: format!("diskdb-{node_id}"),
+        url: deployed.mgmt_url.clone(),
+        node_id: Some(node_id),
+        grpc_url: Some(deployed.grpc_url.clone()),
+        mgmt_port: Some(body.mgmt_port),
+        grpc_port: Some(body.grpc_port),
+        auto_start: true,
+        binary: body.binary.clone(),
+        election_profile: None,
+        pid: None,
+        service_type: ServiceType::Diskdb,
+    };
+    state.set_diskdb_runtime_pid(node_id, deployed.pid);
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_server(entry).map_err(|e| err_500(format!("{e}")))?;
+    }
+    state.persist().map_err(|e| err_500(format!("{e}")))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(DiskdbDeployResult {
+            node_id,
+            mgmt_url: deployed.mgmt_url,
+            grpc_url: deployed.grpc_url,
+            pid: deployed.pid,
+        }),
+    ))
+}
+
+/// `POST /api/nodes/:id/diskdb/restart` — stop and redeploy the
+/// diskdb instance on a node, preserving ports from the persisted
+/// `ServerEntry`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if no diskdb instance is registered on the node,
+/// `502` on spawn/stop failure.
+pub async fn http_restart_diskdb(
+    State(state): State<AppState>,
+    Path(node_id): Path<u64>,
+) -> Result<Json<DiskdbDeployResult>, (StatusCode, Json<ErrorBody>)> {
+    use crow_console_shared::config::ServiceType;
+    use crow_console_shared::lifecycle::{self, DiskdbDeployRequest};
+
+    let (entry, node) = {
+        let cfg = state.config.read().unwrap();
+        let entry = cfg
+            .servers
+            .iter()
+            .find(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Diskdb)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("no diskdb instance registered on node {node_id}"),
+                    }),
+                )
+            })?;
+        let node = cfg.node(node_id).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("node {node_id} not found"),
+                }),
+            )
+        })?;
+        (entry, node)
+    };
+
+    let mgmt_port = port_of(&entry.url)
+        .ok_or_else(|| err_500(format!("diskdb entry has malformed mgmt_url: {}", entry.url)))?;
+    let grpc_port = entry.grpc_url.as_deref().and_then(port_of).ok_or_else(|| {
+        err_500(format!(
+            "diskdb entry has malformed grpc_url: {:?}",
+            entry.grpc_url
+        ))
+    })?;
+
+    // Stop existing process.
+    if let Some(pid) = state.diskdb_runtime_pid(node_id) {
+        let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
+            .await
+            .map_err(|e| err_500(format!("spawn_blocking (diskdb restart): {e}")))?
+            .map_err(|e| err_500(format!("stop_pid (diskdb restart): {e}")))?;
+    }
+
+    let req = DiskdbDeployRequest {
+        server_id: format!("diskdb-{node_id}"),
+        mgmt_port,
+        grpc_port,
+        binary: None,
+        ..Default::default()
+    };
+    let workspace_dir = state
+        .prepare_node_workspace(node_id)
+        .map_err(|e| err_500(e.to_string()))?;
+    let deployed = lifecycle::deploy_diskdb_local(&req, &node, &workspace_dir)
+        .await
+        .map_err(|e| err_502(format!("diskdb redeploy (restart): {e}")))?;
+
+    let new_entry = crow_console_shared::config::ServerEntry {
+        id: entry.id.clone(),
+        url: deployed.mgmt_url.clone(),
+        node_id: Some(node_id),
+        grpc_url: Some(deployed.grpc_url.clone()),
+        mgmt_port: entry.mgmt_port,
+        grpc_port: entry.grpc_port,
+        auto_start: entry.auto_start,
+        binary: entry.binary.clone(),
+        election_profile: None,
+        pid: None,
+        service_type: ServiceType::Diskdb,
+    };
+    state.set_diskdb_runtime_pid(node_id, deployed.pid);
+    {
+        let mut cfg = state.config.write().unwrap();
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.add_server(new_entry).map_err(|e| err_500(format!("{e}")))?;
+    }
+    state.persist().map_err(|e| err_500(format!("{e}")))?;
+
+    Ok(Json(DiskdbDeployResult {
+        node_id,
+        mgmt_url: deployed.mgmt_url,
+        grpc_url: deployed.grpc_url,
+        pid: deployed.pid,
+    }))
+}
+
+/// `POST /api/nodes/:id/diskdb/stop` — stop the diskdb instance on a
+/// node and remove its `ServerEntry`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if no diskdb instance is registered, `400` if no
+/// tracked PID, `502` on stop failure.
+pub async fn http_stop_diskdb(
+    State(state): State<AppState>,
+    Path(node_id): Path<u64>,
+) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
+    use crow_console_shared::config::ServiceType;
+    use crow_console_shared::lifecycle;
+
+    {
+        let cfg = state.config.read().unwrap();
+        let exists = cfg
+            .servers
+            .iter()
+            .any(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Diskdb);
+        if !exists {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("no diskdb instance deployed on node {node_id}"),
+                }),
+            ));
+        }
+    }
+    let Some(pid) = state.diskdb_runtime_pid(node_id) else {
+        return Err(err_400(format!("diskdb on node {node_id} has no tracked pid")));
+    };
+    let sent = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
+        .await
+        .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
+        .map_err(|e| err_500(format!("stop_pid: {e}")))?;
+    state.clear_diskdb_runtime_pid(node_id);
+    {
+        let mut cfg = state.config.write().unwrap();
+        // Remove the diskdb ServerEntry (not the kv-server entry).
+        let pos = cfg
+            .servers
+            .iter()
+            .position(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Diskdb);
+        if let Some(p) = pos {
+            cfg.servers.remove(p);
+        }
+    }
+    state.persist().map_err(|e| err_500(format!("{e}")))?;
+    Ok(Json(StopResult { sent }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiskdbDeployResult {
+    pub node_id: u64,
+    pub mgmt_url: String,
+    pub grpc_url: String,
+    pub pid: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StopResult {
+    pub sent: bool,
+}
+
+/// Parse `port` out of a URL like `http://host:9910` or `host:9910`.
+fn port_of(url: &str) -> Option<u16> {
+    let stripped = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let host_port = stripped.split('/').next().unwrap_or(stripped);
+    let port_str = host_port.rsplit(':').next()?;
+    port_str.parse::<u16>().ok()
 }

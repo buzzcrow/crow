@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::routing::get;
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{self, crow_kv_server_bin, DeployRequest};
 use crow_console_shared::ConsoleConfig;
 use crow_web::{router, AppState};
@@ -84,6 +84,7 @@ async fn spawn_web_with_node(upstream: &Upstream) -> SocketAddr {
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -271,6 +272,7 @@ async fn openapi_proxy_cache_is_per_node() {
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     cfg.add_server(ServerEntry {
@@ -284,6 +286,7 @@ async fn openapi_proxy_cache_is_per_node() {
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

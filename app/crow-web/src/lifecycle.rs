@@ -9,7 +9,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::cluster::{DiskGroupId, NodeHealth, NodeId, ProcState, RackId, ServerProcess};
-use crow_console_shared::config::{DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{
+    DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry, ServiceType,
+};
 use crow_console_shared::expand::RecursiveDepth;
 use crow_console_shared::monitor::NodeRecord;
 use serde::{Deserialize, Serialize};
@@ -709,6 +711,7 @@ pub async fn http_deploy_node_server(
             .clone()
             .or_else(|| std::env::var("CROW_KV_SERVER_ELECTION_PROFILE").ok()),
         pid: None,
+        service_type: ServiceType::Kv,
     };
     state.set_runtime_pid(node_id, deployed.pid);
     {
@@ -832,6 +835,7 @@ pub async fn http_restart_node_server(
         binary: entry.binary.clone(),
         election_profile: entry.election_profile.clone(),
         pid: None,
+        service_type: entry.service_type,
     };
     state.set_runtime_pid(node_id, deployed.pid);
     {
@@ -1555,6 +1559,168 @@ pub async fn http_add_disk(
     }
 
     Ok((StatusCode::CREATED, Json(entry)))
+}
+
+/// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks:batch` —
+/// add multiple disks in one request (R77). Validates all inputs
+/// before mutating config; best-effort sysdata sync per disk.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk-group doesn't exist, `400` on the
+/// first invalid disk input, `409` on the first duplicate `disk_id`.
+#[allow(clippy::too_many_lines)]
+pub async fn http_add_disks_batch(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+    Json(body): Json<AddDisksBatchBody>,
+) -> Result<(StatusCode, Json<AddDisksBatchResult>), (StatusCode, Json<ErrorBody>)> {
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disk_groups
+            .iter()
+            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+            .map(|dg| dg.rack_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("disk-group {dg_id} not found on node {node_id}"),
+                    }),
+                )
+            })?
+    };
+
+    // Validate all inputs before any mutation.
+    let mut validated: Vec<(
+        DiskEntry,
+        crow_protocol::common::DiskId,
+        crow_protocol::diskdb::rpc::DiskValue,
+    )> = Vec::new();
+    for d in &body.disks {
+        let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&d.disk_id) {
+            Ok(id) => id,
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: format!("invalid disk_id format for {}: {e}", d.disk_id),
+                    }),
+                ));
+            }
+        };
+        if d.unit_size_bytes == 0 || d.zone_size_bytes == 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!(
+                        "disk {}: unit_size_bytes and zone_size_bytes must be non-zero",
+                        d.disk_id
+                    ),
+                }),
+            ));
+        }
+        if d.zone_size_bytes % u64::from(d.unit_size_bytes) != 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!(
+                        "disk {}: zone_size_bytes must be a multiple of unit_size_bytes",
+                        d.disk_id
+                    ),
+                }),
+            ));
+        }
+        if d.capacity_bytes < d.zone_size_bytes {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("disk {}: capacity_bytes must be >= zone_size_bytes", d.disk_id),
+                }),
+            ));
+        }
+        let unit_size = u64::from(d.unit_size_bytes);
+        let capacity_units = d.capacity_bytes / unit_size;
+        let zone_size_units = d.zone_size_bytes / unit_size;
+        let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
+        let disk_type_proto = match d.disk_type.as_str() {
+            "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
+            "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
+            "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
+            "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
+            other => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: format!("disk {}: unknown disk_type: {other}", d.disk_id),
+                    }),
+                ));
+            }
+        };
+        let entry = DiskEntry {
+            disk_id: d.disk_id.clone(),
+            disk_group_id: dg_id,
+            rack_id,
+            node_id,
+            disk_type: d.disk_type.clone(),
+            capacity_bytes: d.capacity_bytes,
+            zone_size_bytes: d.zone_size_bytes,
+            unit_size_bytes: d.unit_size_bytes,
+        };
+        let value = crow_protocol::diskdb::rpc::DiskValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            disk_type: disk_type_proto,
+            capacity_units,
+            zone_size_units,
+            unit_size_bytes: d.unit_size_bytes,
+            zone_count,
+        };
+        validated.push((entry, disk_id_proto, value));
+    }
+
+    // Mutate config: add all disks.
+    let mut added: Vec<DiskEntry> = Vec::new();
+    {
+        let mut cfg = state.config.write().unwrap();
+        for (entry, _, _) in &validated {
+            cfg.add_disk(entry.clone()).map_err(map_config_err)?;
+            added.push(entry.clone());
+        }
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Best-effort sysdata sync per disk.
+    let mut sysdata_errors: Vec<String> = Vec::new();
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        for (entry, disk_id_proto, value) in &validated {
+            if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, disk_id_proto, value).await {
+                let msg = format!("disk {}: sysdata sync failed: {e}", entry.disk_id);
+                tracing::warn!(disk_id = %entry.disk_id, error = %e, "batch sysdata sync: add_disk failed");
+                sysdata_errors.push(msg);
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AddDisksBatchResult {
+            added,
+            sysdata_errors,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddDisksBatchBody {
+    pub disks: Vec<AddDiskBody>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddDisksBatchResult {
+    pub added: Vec<DiskEntry>,
+    pub sysdata_errors: Vec<String>,
 }
 
 /// `DELETE /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.

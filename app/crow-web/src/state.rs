@@ -127,6 +127,42 @@ impl AppState {
         self.runtime_pids.lock().unwrap().remove(&node_id.to_string());
     }
 
+    /// Get the runtime PID for a diskdb instance on a node (R77).
+    /// Keyed separately from kv-server PIDs.
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    #[must_use]
+    pub fn diskdb_runtime_pid(&self, node_id: impl std::fmt::Display) -> Option<u32> {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .get(&format!("diskdb-{node_id}"))
+            .copied()
+    }
+
+    /// Set the runtime PID for a diskdb instance on a node (R77).
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    pub fn set_diskdb_runtime_pid(&self, node_id: impl std::fmt::Display, pid: u32) {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .insert(format!("diskdb-{node_id}"), pid);
+    }
+
+    /// Clear the runtime PID for a diskdb instance on a node (R77).
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    pub fn clear_diskdb_runtime_pid(&self, node_id: impl std::fmt::Display) {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .remove(&format!("diskdb-{node_id}"));
+    }
+
     #[must_use]
     pub fn node_workspace_dir(&self, node_id: impl std::fmt::Display) -> PathBuf {
         self.runtime_root.join(format!("N-{node_id}"))

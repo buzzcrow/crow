@@ -516,3 +516,156 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
     }
     None
 }
+
+// ── DiskDB deploy (R77) ───────────────────────────────────────────
+
+/// Inputs for a diskdb deploy (R77). Simpler than `DeployRequest`
+/// — diskdb only needs `--config`, `--listen-addr`, `--http-addr`.
+#[derive(Debug, Clone, Default)]
+pub struct DiskdbDeployRequest {
+    pub server_id: String,
+    pub mgmt_port: u16,
+    pub grpc_port: u16,
+    pub binary: Option<PathBuf>,
+    /// Optional `--listen-addr` override (gRPC). Defaults to
+    /// `node.host:grpc_port`.
+    pub listen_addr: Option<String>,
+    /// Optional `--http-addr` override. Defaults to
+    /// `node.host:mgmt_port`.
+    pub http_addr: Option<String>,
+    /// Optional `--config` path. Defaults to an auto-generated
+    /// minimal config in the workspace.
+    pub config: Option<PathBuf>,
+}
+
+/// Resolve the path to the `crow-diskdb` binary.
+///
+/// Search order:
+/// 1. `$CROW_DISKDB_BIN`.
+/// 2. A sibling named `crow-diskdb` next to the current executable.
+/// 3. `crow-diskdb` on `$PATH`.
+#[must_use]
+pub fn crow_diskdb_bin() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CROW_DISKDB_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let mut p = dir.to_path_buf();
+            for _ in 0..3 {
+                let candidate = p.join("crow-diskdb");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                if !p.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(path) = find_in_path(std::ffi::OsStr::new("crow-diskdb")) {
+        return Some(path);
+    }
+    warn!("crow-diskdb binary not found via env, sibling, or $PATH");
+    None
+}
+
+/// Resolve the `--config` path for a diskdb deploy. When `req.config`
+/// is set, it is used verbatim. Otherwise a minimal config is written
+/// to `<workspace>/conf/crow_diskdb_config.toml`.
+fn resolve_diskdb_config_path(req: &DiskdbDeployRequest, workspace_dir: &std::path::Path) -> Result<PathBuf> {
+    if let Some(config) = &req.config {
+        return Ok(config.clone());
+    }
+    let conf = workspace_dir.join("conf");
+    std::fs::create_dir_all(&conf).map_err(Error::Io)?;
+    let path = conf.join("crow_diskdb_config.toml");
+    std::fs::write(
+        &path,
+        "# auto-generated minimal config; all fields use defaults\n",
+    )
+    .map_err(Error::Io)?;
+    Ok(path)
+}
+
+/// Spawn `crow-diskdb` locally. The binary takes `--config`,
+/// `--listen-addr`, `--http-addr`. A minimal config is written to
+/// the workspace `conf/` dir if none is supplied.
+///
+/// # Errors
+/// Returns `Error::Validation` for bad inputs and `Error::Io` for
+/// spawn or readiness failures.
+pub async fn deploy_diskdb_local(
+    req: &DiskdbDeployRequest,
+    node: &NodeEntry,
+    workspace_dir: &std::path::Path,
+) -> Result<DeployedServer> {
+    if req.mgmt_port == 0 || req.grpc_port == 0 {
+        return Err(Error::Validation {
+            field: "port".into(),
+            message: "mgmt_port and grpc_port must be non-zero".into(),
+        });
+    }
+    if req.mgmt_port == req.grpc_port {
+        return Err(Error::Validation {
+            field: "port".into(),
+            message: "mgmt_port and grpc_port must differ".into(),
+        });
+    }
+
+    let binary = match &req.binary {
+        Some(p) => p.clone(),
+        None => crow_diskdb_bin().ok_or_else(|| Error::Validation {
+            field: "binary".into(),
+            message: "could not locate crow-diskdb binary; set $CROW_DISKDB_BIN".into(),
+        })?,
+    };
+    let launch_binary = stage_server_binary(&binary, workspace_dir)?;
+
+    let config_path = resolve_diskdb_config_path(req, workspace_dir)?;
+    let mgmt_url = format!("http://{}:{}", node.host, req.mgmt_port);
+    let grpc_url = format!("http://{}:{}", node.host, req.grpc_port);
+
+    let mut cmd = Command::new(&launch_binary);
+    cmd.arg("--config").arg(&config_path);
+    if let Some(listen_addr) = &req.listen_addr {
+        cmd.arg("--listen-addr").arg(listen_addr);
+    } else {
+        cmd.arg("--listen-addr")
+            .arg(format!("{}:{}", node.host, req.grpc_port));
+    }
+    if let Some(http_addr) = &req.http_addr {
+        cmd.arg("--http-addr").arg(http_addr);
+    } else {
+        cmd.arg("--http-addr")
+            .arg(format!("{}:{}", node.host, req.mgmt_port));
+    }
+    cmd.kill_on_drop(false);
+    let log_dir = workspace_dir.join("log");
+    let tmp_path = log_dir.join("crow-diskdb.stdout.log");
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&tmp_path)
+        .map_err(Error::Io)?;
+    cmd.current_dir(workspace_dir);
+    cmd.stdout(Stdio::from(out.try_clone().map_err(Error::Io)?));
+    cmd.stderr(Stdio::from(out));
+    let child = cmd.spawn().map_err(Error::Io)?;
+    let pid = child.id().ok_or_else(|| Error::Validation {
+        field: "pid".into(),
+        message: "spawned child has no pid".into(),
+    })?;
+    let from = log_dir.join("crow-diskdb.stdout.log");
+    let to = log_dir.join(format!("crow-diskdb-{pid}.out.log"));
+    let _ = std::fs::rename(&from, &to);
+    // Detach: drop the Child handle so the process is not killed.
+    std::mem::forget(child);
+    wait_for_ready(&mgmt_url, Duration::from_secs(5)).await?;
+    Ok(DeployedServer {
+        server_id: req.server_id.clone(),
+        mgmt_url,
+        grpc_url,
+        pid,
+    })
+}
