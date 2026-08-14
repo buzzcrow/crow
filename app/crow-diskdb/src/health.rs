@@ -28,7 +28,7 @@ pub struct HealthState {
 /// `GET /ready` response body.
 #[derive(Debug, Serialize)]
 pub struct ReadyResponse {
-    /// Current startup phase: `init` / `syncing` / `recovering` / `up`.
+    /// Current startup phase: `init` / `syncing` / `loading` / `up`.
     pub phase: &'static str,
     /// `true` when the instance is in degraded mode (missed heartbeats).
     pub degraded: bool,

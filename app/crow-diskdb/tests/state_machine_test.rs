@@ -76,12 +76,13 @@ fn test_legal_transitions() {
         HwStatus::Offline,
         HwStatus::Up
     ));
+    // Operator override: mark a Bad disk Up after physical repair.
+    assert!(HwStateMachine::is_legal_transition(HwStatus::Bad, HwStatus::Up));
 }
 
 #[test]
 fn test_illegal_transitions() {
     assert!(!HwStateMachine::is_legal_transition(HwStatus::Up, HwStatus::Init));
-    assert!(!HwStateMachine::is_legal_transition(HwStatus::Bad, HwStatus::Up));
     assert!(!HwStateMachine::is_legal_transition(HwStatus::Up, HwStatus::Bad));
     assert!(!HwStateMachine::is_legal_transition(
         HwStatus::Init,
@@ -118,7 +119,7 @@ fn test_permits() {
 }
 
 #[test]
-fn test_transition_disk_applies_side_effects_on_bad() {
+fn test_transition_disk_applies_status_without_zone_marking() {
     let machine = HwStateMachine::new(900);
     let disk = make_disk_with_zones(3, 128);
     // Disk starts Up; transition to Bad is illegal from Up directly,
@@ -133,9 +134,12 @@ fn test_transition_disk_applies_side_effects_on_bad() {
         .transition_disk(&disk, HwStatus::Bad)
         .expect("Missing -> Bad");
 
+    // The disk-level status is the sole gatekeeper; zones are not
+    // marked individually (R76 — no per-zone marking).
+    assert_eq!(*disk.effective_status.read().unwrap(), HwStatus::Bad);
     let zones = disk.zones.read().unwrap();
     for z in zones.iter() {
-        assert_eq!(*z.zone_state.read().unwrap(), DdbZoneHealth::Bad);
+        assert_eq!(*z.zone_state.read().unwrap(), DdbZoneHealth::Healthy);
     }
 }
 

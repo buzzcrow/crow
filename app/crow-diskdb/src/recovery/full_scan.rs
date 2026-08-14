@@ -8,8 +8,6 @@
 //! the `RebuildZoneBitmap` RPC and the §12 scanner (R75). Also used as
 //! the fallback when strategy 2 cannot run.
 
-use std::sync::Arc;
-
 use crow_protocol::common::DiskId;
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
@@ -88,10 +86,4 @@ pub async fn rebuild_zone_bitmap_full_scan(
     };
 
     Ok((zone, stats))
-}
-
-/// Silence unused-import warning for `Arc` (kept for future use).
-#[allow(dead_code)]
-fn _arc_use() -> Option<Arc<()>> {
-    None
 }

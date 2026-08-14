@@ -1464,6 +1464,45 @@ pub async fn http_add_disk(
                 )
             })?
     };
+    // Validate the disk_id format before mutating config or syncing
+    // group 0 — a malformed id can never be routed by diskdb.
+    let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("invalid disk_id format: {e}"),
+                }),
+            ));
+        }
+    };
+    // The unit/zone sizes determine the disk's zone layout in diskdb —
+    // reject degenerate values instead of writing a zero-zone disk.
+    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "unit_size_bytes and zone_size_bytes must be non-zero".to_string(),
+            }),
+        ));
+    }
+    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "zone_size_bytes must be a multiple of unit_size_bytes".to_string(),
+            }),
+        ));
+    }
+    if body.capacity_bytes < body.zone_size_bytes {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "capacity_bytes must be >= zone_size_bytes".to_string(),
+            }),
+        ));
+    }
     let entry = DiskEntry {
         disk_id: body.disk_id,
         disk_group_id: dg_id,
@@ -1482,14 +1521,13 @@ pub async fn http_add_disk(
 
     // Sync group-0 sysdata. Best-effort.
     if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let disk_id = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&entry.disk_id) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: invalid disk_id format");
-                return Ok((StatusCode::CREATED, Json(entry)));
-            }
-        };
         let unit_size = u64::from(entry.unit_size_bytes);
+        let capacity_units = entry.capacity_bytes / unit_size;
+        let zone_size_units = entry.zone_size_bytes / unit_size;
+        // The diskdb server derives its zone list from this field —
+        // zone count = capacity / zone size (last zone may be smaller,
+        // per design §8).
+        let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
         let value = crow_protocol::diskdb::rpc::DiskValue {
             status: crow_protocol::common::HwStatus::Up as i32,
             disk_type: match entry.disk_type.as_str() {
@@ -1498,12 +1536,12 @@ pub async fn http_add_disk(
                 "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
                 _ => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
             },
-            capacity_units: entry.capacity_bytes.checked_div(unit_size).unwrap_or(0),
-            zone_size_units: entry.zone_size_bytes.checked_div(unit_size).unwrap_or(0),
+            capacity_units,
+            zone_size_units,
             unit_size_bytes: entry.unit_size_bytes,
-            zone_count: 0,
+            zone_count,
         };
-        if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id, &value).await {
+        if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id_proto, &value).await {
             tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
         }
     }

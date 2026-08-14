@@ -17,7 +17,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::cluster::KvCluster;
+use common::cluster::{wait_for_disks_ready, KvCluster};
 use crow_diskdb::ddb_config::KeepAliveConfig;
 use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::liveness::keepalive::KeepAlive;
@@ -41,8 +41,11 @@ const INSTANCE_ID: u64 = 999;
 
 const ZONE_SIZE_UNITS: u64 = 128;
 const UNIT_SIZE_BYTES: u32 = 1024 * 1024;
-const CAPACITY_UNITS: u64 = ZONE_SIZE_UNITS * 4;
-const ZONE_COUNT: u32 = 4;
+// 6 zones but `zone_rotate_count = 4` — the active set covers zones
+// 0-3, leaving zones 4-5 non-active. The scanner tests inject drift
+// into a non-active zone because both scans skip the active set.
+const CAPACITY_UNITS: u64 = ZONE_SIZE_UNITS * 6;
+const ZONE_COUNT: u32 = 6;
 
 fn make_disk_id(high: u64, low: u64) -> DiskId {
     DiskId { high, low }
@@ -340,6 +343,9 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
 
+    // R81: wait for the background Init→Up zone load before allocating.
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
     let bind = *dg.bind.read().unwrap();
 
@@ -351,9 +357,9 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
         .expect("allocate 1");
     assert_eq!(segments.len(), 1);
 
-    // 3. Inject a ghost-busy bit: pick a bit in the same zone that
-    //    has no BusyBlockKey. We use a high bit index that allocation
-    //    would never touch (allocation fills from low bits).
+    // 3. Inject a ghost-busy bit: pick a zone outside the active set
+    //    (the scanner skips active zones) and a high bit index that
+    //    allocation would never touch (allocation fills from low bits).
     let disk = dg
         .disks
         .read()
@@ -362,7 +368,7 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
         .find(|d| d.disk_id == segments[0].disk_id.unwrap_or_default())
         .cloned()
         .expect("disk exists");
-    let zone_idx = segments[0].zone_index;
+    let zone_idx: u32 = ZONE_COUNT - 1; // non-active zone (active set = 0..zone_rotate_count)
     let ghost_bit: u32 = 120; // high bit, no record there
     {
         let zones = disk.zones.read().unwrap();
@@ -452,13 +458,17 @@ async fn scan_integrity_detects_corrupt_snapshot() {
     let outcome = keepalive.tick().await;
     assert_eq!(outcome.groups_added, 1);
 
+    // R81: wait for the background Init→Up zone load before scanning.
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
     let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
     let bind = *dg.bind.read().unwrap();
 
-    // Pick the first disk + first zone.
+    // Pick the first disk + a non-active zone (the scanner skips the
+    // active set).
     let disk = dg.disks.read().unwrap()[0].clone();
     let disk_id = disk.disk_id;
-    let zone_idx: u32 = 0;
+    let zone_idx: u32 = ZONE_COUNT - 1;
 
     // Write a corrupt ZoneValue (wrong CRC) directly to KV.
     let corrupt_zv = crow_protocol::diskdb::rpc::ZoneValue {

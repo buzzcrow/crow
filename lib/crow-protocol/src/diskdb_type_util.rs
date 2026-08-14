@@ -40,8 +40,10 @@ impl DiskIdExt for DiskId {
     fn from_display_string(s: &str) -> Result<DiskId, String> {
         let (high_hex, low_hex) = if let Some((h, l)) = s.split_once('-') {
             (h, l)
-        } else if s.len() == 32 {
-            (&s[..16], &s[16..])
+        } else if s.len() == 32 && s.is_ascii() {
+            // ASCII-only guarantees byte 16 is a char boundary.
+            let (h, l) = (&s[..16], &s[16..]);
+            (h, l)
         } else {
             return Err(format!(
                 "invalid DiskId string: expected 32 hex chars or high-low pair, got {s}"

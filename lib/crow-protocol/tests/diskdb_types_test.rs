@@ -4,9 +4,9 @@
 //! Tests for `crow-protocol` diskdb domain logic: `HwStatus` rules,
 //! `ZoneAllocationState` interop, `ZoneValue` CRC integrity, and bitmap.
 
-use crow_protocol::common::HwStatus;
+use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::{ZoneAllocationState, ZoneValue};
-use crow_protocol::{HwStatusExt, UsageBitmap, ZoneAllocationStateExt, ZoneValueExt};
+use crow_protocol::{DiskIdExt, HwStatusExt, UsageBitmap, ZoneAllocationStateExt, ZoneValueExt};
 
 // ── HwStatus ────────────────────────────────────────────────────
 
@@ -23,6 +23,44 @@ fn hw_status_allows_allocate_and_free() {
     assert!(HwStatus::Maintenance.allows_free());
     assert!(HwStatus::Suspect.allows_free());
     assert!(!HwStatus::Offline.allows_free());
+}
+
+// ── DiskId display ──────────────────────────────────────────────
+
+#[test]
+fn disk_id_display_roundtrip() {
+    let id = DiskId {
+        high: 0x0123_4567_89ab_cdef,
+        low: 0xfedc_ba98_7654_3210,
+    };
+    let s = id.to_display_string();
+    assert_eq!(s, "0123456789abcdef-fedcba9876543210");
+    assert_eq!(DiskId::from_display_string(&s).unwrap(), id);
+}
+
+#[test]
+fn disk_id_from_display_string_bare_hex() {
+    let id = DiskId {
+        high: 0x0123_4567_89ab_cdef,
+        low: 0xfedc_ba98_7654_3210,
+    };
+    let s = format!("{:016x}{:016x}", id.high, id.low);
+    assert_eq!(DiskId::from_display_string(&s).unwrap(), id);
+}
+
+#[test]
+fn disk_id_from_display_string_rejects_non_ascii() {
+    // Byte 16 is inside a multi-byte char — must return Err, not panic.
+    let s = "abcdefghijklmno😀abcdefghijklm";
+    assert!(DiskId::from_display_string(s).is_err());
+}
+
+#[test]
+fn disk_id_from_display_string_rejects_malformed() {
+    assert!(DiskId::from_display_string("").is_err());
+    assert!(DiskId::from_display_string("short").is_err());
+    assert!(DiskId::from_display_string("zzzzzzzzzzzzzzzz-aaaaaaaaaaaaaaaa").is_err());
+    assert!(DiskId::from_display_string("0123456789abcdef-").is_err());
 }
 
 // ── ZoneAllocationState ─────────────────────────────────────────

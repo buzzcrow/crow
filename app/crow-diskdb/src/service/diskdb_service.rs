@@ -32,7 +32,7 @@ use crate::model::alloc;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::ZoneUsage;
 use crate::recovery::compaction::compact_zone;
-use crate::recovery::ZoneLoader;
+use crate::recovery::{unit_capacity_for_zone, ZoneLoader};
 use crate::scanner::ScanState;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
@@ -136,11 +136,6 @@ impl DiskdbServiceTrait for DiskdbService {
             return Err(Status::invalid_argument("unit_count must be non-zero"));
         }
         let unit_size = self.storage.block_size_bytes;
-        if req.unit_count * unit_size % unit_size != 0 {
-            return Err(Status::invalid_argument(
-                "unit_count must be aligned to block size",
-            ));
-        }
 
         // Validate count.
         if req.count == 0 {
@@ -322,9 +317,16 @@ impl DiskdbServiceTrait for DiskdbService {
             let mut proto_zu = Self::zone_usage_to_proto(&zu);
             proto_zu.usage_bitmap = bitmap_bytes;
             // Return a single-disk-group response with one disk + one zone.
+            let disk = dg.get_disk(disk_id).ok_or_else(|| {
+                Status::not_found(format!(
+                    "disk {} not found in group {}",
+                    disk_id.to_display_string(),
+                    req.disk_group_id
+                ))
+            })?;
             let disk_info = DiskInfo {
                 zone_usages: vec![proto_zu],
-                ..Self::build_disk_info(&dg.get_disk(disk_id).expect("disk exists"), false)
+                ..Self::build_disk_info(&disk, false)
             };
             let group_info = DiskGroupInfo {
                 rack_id: dg.rack_id,
@@ -522,7 +524,6 @@ impl DiskdbServiceTrait for DiskdbService {
 
         let bind = *node.bind.read().unwrap();
         let zone_count = disk_value.zone_count;
-        let zone_size_units = disk_value.zone_size_units;
 
         // Determine which zones to rebuild: all or one.
         let zones_to_rebuild: Vec<u32> = if req.zone_index == ALL_ZONES {
@@ -541,14 +542,8 @@ impl DiskdbServiceTrait for DiskdbService {
         let mut total_busy_units = 0u64;
         let mut total_free_units = 0u64;
         for zi in zones_to_rebuild {
-            #[allow(clippy::cast_possible_truncation)]
-            let unit_capacity = if zi == zone_count - 1 {
-                let remaining = disk_value.capacity_units - (u64::from(zi) * zone_size_units);
-                let rounded = (remaining / 64) * 64;
-                rounded as u32
-            } else {
-                zone_size_units as u32
-            };
+            let unit_capacity =
+                unit_capacity_for_zone(&disk_value, zi, zone_count, disk_value.zone_size_units);
             match self
                 .zone_loader
                 .rebuild_zone_bitmap_full_scan(bind, disk_value_disk_id, zi, unit_capacity)
@@ -695,8 +690,17 @@ impl DiskdbServiceTrait for DiskdbService {
         let mut compacted_count = 0u32;
         let mut total_deleted = 0u32;
         for zi in zones_to_compact {
+            // `zone_count` comes from group 0 (`disk_value`); the
+            // in-memory zone vec may lag it while a disk is still
+            // loading, so bounds-check before indexing.
             let zone = {
                 let zones = disk.zones.read().unwrap();
+                let loaded = zones.len();
+                if zi as usize >= loaded {
+                    return Err(Status::invalid_argument(format!(
+                        "zone_index {zi} out of range (loaded zones {loaded})"
+                    )));
+                }
                 Arc::clone(&zones[zi as usize])
             };
             // Record backlog before compaction to compute deleted count.

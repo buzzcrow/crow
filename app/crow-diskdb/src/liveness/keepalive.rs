@@ -480,6 +480,14 @@ impl KeepAlive {
         };
         let Some(disk) = disk else { return };
         let old_status = *disk.effective_status.read().unwrap();
+        // R81: an Init disk's status is owned by the background zone
+        // load task — it transitions Init → disk_value.status only
+        // after all zones are loaded. Skipping reconciliation here
+        // prevents a sync tick from flipping Init → Up with zero or
+        // partially-loaded zones (making the disk allocatable early).
+        if old_status == HwStatus::Init {
+            return;
+        }
         let new_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
         if old_status != new_status {
             // R76: unified recovery path for → Up transitions.
@@ -787,16 +795,17 @@ impl KeepAlive {
                                     "init-state load: strategy 1 also failed; using empty zone"
                                 );
                                 all_ok = false;
-                                let mut z = crate::model::zone::DdbZone::new(
-                                    disk_id,
-                                    zi,
-                                    dg.disk_group_id,
-                                    unit_capacity,
-                                );
-                                if let Some(ref counter) = cas_retry_metric {
-                                    z = z.with_cas_retry_metric(Arc::clone(counter));
-                                }
-                                (z, 0)
+                                // CAS metric is attached below on the
+                                // common path.
+                                (
+                                    crate::model::zone::DdbZone::new(
+                                        disk_id,
+                                        zi,
+                                        dg.disk_group_id,
+                                        unit_capacity,
+                                    ),
+                                    0,
+                                )
                             }
                         }
                     }

@@ -412,13 +412,15 @@ impl DdbZone {
     /// records in one atomic `batch_write` (I6). Returns the partition
     /// counts so the caller knows how many records it will delete.
     pub fn compact_zone_inner(&self, free_records: &[crate::model::records::FreeRecord]) -> CompactResult {
-        let current_compact_ts = self.compact_ts.load(Ordering::Acquire);
+        // Partition by watermark. Read without the lock — the caller
+        // scanned the free records unlocked (I9); the value is
+        // re-read under the lock below.
+        let partition_ts = self.compact_ts.load(Ordering::Acquire);
 
-        // Partition by watermark (no lock needed — read-only).
         let mut new_records: Vec<&crate::model::records::FreeRecord> = Vec::new();
         let mut stale_count: u32 = 0;
         for free in free_records {
-            if free.value.freed_ts <= current_compact_ts {
+            if free.value.freed_ts <= partition_ts {
                 stale_count += 1;
             } else {
                 new_records.push(free);
@@ -443,8 +445,10 @@ impl DdbZone {
             .store(u32::try_from(popcount).unwrap_or(u32::MAX), Ordering::Release);
 
         // Advance compact_ts monotonically: max(current, max(new
-        // freed_ts)). The max with current prevents regression when the
-        // step-1 read was stale (another compaction ran in between).
+        // freed_ts)). The partition read was unlocked and may be stale
+        // if another compaction ran in between — re-read under the
+        // lock so compact_ts never regresses (watermark invariant, I7).
+        let current_compact_ts = self.compact_ts.load(Ordering::Acquire);
         let max_new_freed_ts = new_records.iter().map(|f| f.value.freed_ts).max().unwrap_or(0);
         let new_compact_ts = current_compact_ts.max(max_new_freed_ts);
         self.compact_ts.store(new_compact_ts, Ordering::Release);

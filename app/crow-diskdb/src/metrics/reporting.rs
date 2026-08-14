@@ -14,7 +14,7 @@ use arc_swap::ArcSwap;
 
 use crate::bg_task::{BackgroundTask, BgCtx, CycleFut, Trigger};
 use crate::ddb_config::DdbConfig;
-use crate::metrics::{DiskMetrics, DiskdbMetrics};
+use crate::metrics::DiskdbMetrics;
 
 /// Reporting loop — flushes per-disk period counters into the
 /// crow-common `allocate_total`/`free_total` counters and recomputes
@@ -113,10 +113,3 @@ impl BackgroundTask for ReportingTask {
         "reporting"
     }
 }
-
-// `DiskMetrics` is referenced via the disk-group's per-disk lookup so
-// the reporting task does not need to thread `DiskMetrics` handles
-// directly. The trait impl above uses a `disk_metrics` accessor added
-// to `DdbDiskGroup` by the alloc-instrumentation step.
-#[allow(dead_code)]
-fn _assert_disk_metrics_used(_: &DiskMetrics) {}

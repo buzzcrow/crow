@@ -1186,6 +1186,11 @@ impl CrowkvClient {
                         });
                     }
                     self.metrics.record_scan_error();
+                    // GC gap is deterministic — do not retry; the caller
+                    // (diskdb recovery) falls back to a full-scan rebuild.
+                    if resp.error_code == crow_kv::rpc::KvErrorCode::KvErrorJournalScanGcGap as i32 {
+                        return Err(Error::JournalScanGcGap);
+                    }
                     if !resp.not_leader_hint.is_empty() {
                         if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
                             self.metrics.record_read_endpoint_fallback();

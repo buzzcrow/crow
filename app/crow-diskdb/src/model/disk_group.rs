@@ -98,7 +98,9 @@ impl DdbDiskGroup {
         let now = now_nanos();
         loop {
             let prev = self.free_ts_source.load(Ordering::Acquire);
-            let next = now.max(prev + 1);
+            // Saturating add keeps monotonicity at u64::MAX instead of
+            // wrapping to 0 (which would break the compact_ts watermark).
+            let next = now.max(prev.saturating_add(1));
             if self
                 .free_ts_source
                 .compare_exchange(prev, next, Ordering::AcqRel, Ordering::Acquire)

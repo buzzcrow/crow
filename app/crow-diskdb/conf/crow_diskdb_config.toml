@@ -64,10 +64,21 @@ load_concurrency = 16
 [scanner]
 # Scanner run interval in seconds.
 scan_interval_secs = 600
-# Enable ghost allocation detection.
-detect_ghost_allocations = true
-# Enable record integrity checks.
-verify_record_integrity = true
+# Delay in ms before re-snapshotting the live bitmap to filter
+# transient drift. 0 disables re-verify.
+reverify_delay_ms = 1000
+
+[scanner.ghost]
+# Enable ghost allocation + drift detection.
+detect = true
+# Auto-correct persistent drift (default false — manual review first).
+auto_correct = false
+
+[scanner.integrity]
+# Enable record integrity checks (CRC + decode).
+verify = true
+# Enable per-block owner_chunk validation (default false).
+detect_owner_mismatch = false
 
 # ── Group-0 sync ───────────────────────────────────────────────
 [sync]
@@ -82,3 +93,10 @@ sync_interval_secs = 10
 [reporting]
 # Reporting loop interval in seconds (gauges + period-counter flush).
 interval_secs = 10
+
+# ── Watch/notify ───────────────────────────────────────────────
+[notify]
+# Enable group-0 watch/notify (default false). When true, diskdb
+# subscribes to group-0 prefixes and the keepalive timer serves as a
+# safety-net poller.
+notify_enabled = false

@@ -17,7 +17,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::cluster::KvCluster;
+use common::cluster::{wait_for_disks_ready, KvCluster};
 use crow_diskdb::ddb_config::{CompactionConfig, KeepAliveConfig};
 use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::liveness::keepalive::KeepAlive;
@@ -50,50 +50,6 @@ fn make_disk_id(high: u64, low: u64) -> DiskId {
 
 fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
     ChunkId { high, mid, low }
-}
-
-/// Wait for all disks in a disk-group to transition from Init to Up
-/// and have their zones loaded. Polls every 10ms up to 5s.
-async fn wait_for_disks_ready(
-    container: &DdbDiskGroupContainer,
-    dg_id: u64,
-    expected_disks: usize,
-    expected_zones: u32,
-) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(dg) = container.get_disk_group(dg_id) {
-            let disks = dg.disks.read().unwrap();
-            let all_ready = disks.len() == expected_disks
-                && disks.iter().all(|d| {
-                    *d.effective_status.read().unwrap() == HwStatus::Up
-                        && u32::try_from(d.zones.read().unwrap().len()).unwrap_or(0) == expected_zones
-                });
-            if all_ready {
-                return;
-            }
-        }
-        if std::time::Instant::now() > deadline {
-            let dg = container.get_disk_group(dg_id);
-            let status = match dg {
-                Some(dg) => {
-                    let disks = dg.disks.read().unwrap();
-                    disks
-                        .iter()
-                        .map(|d| {
-                            let s = *d.effective_status.read().unwrap();
-                            let zc = d.zones.read().unwrap().len();
-                            format!("{s:?}({zc}z)")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-                None => "no dg".to_string(),
-            };
-            panic!("disks not ready after 5s: {status}");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 async fn seed_hardware(hw: &HardwareClient) {

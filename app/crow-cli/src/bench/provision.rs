@@ -7,11 +7,9 @@
 //! Mirrors the UI test fixture's `setupCluster`/`teardownCluster`
 //! (`crow-console/web/ui/e2e/fixtures/consoleSetup.ts`), but through
 //! the typed `ConsoleClient` against an **embedded** `crow-web`
-//! instance started in-process (the same pattern used by the CLI's own
-//! integration test harness,
-//! `crow-console/cli/tests/testkit/console.rs::spawn_console_empty`),
-//! so the benchmark is fully self-contained: 1 rack + 3 nodes on
-//! localhost, forming a complete Paxos replication group.
+//! instance started in-process, so the benchmark is fully
+//! self-contained: 1 rack + 3 nodes on localhost, forming a complete
+//! Paxos replication group.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

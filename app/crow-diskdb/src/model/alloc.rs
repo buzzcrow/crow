@@ -303,29 +303,33 @@ pub async fn allocate_blocks(
 
 /// Free a single block. v1: synchronous (no batch, no timer).
 ///
+/// The free path is **persist-only**: one `batch_write` (Delete
+/// `BusyBlockKey` + Put `FreeBlockValue`) makes the block free on
+/// disk. The in-memory bitmap is **not** touched — the bit stays set,
+/// `used_count` is not decremented (I1). Compaction is the sole
+/// bit-clearer for freed blocks (I3); `rollback_allocate` is the
+/// allocate-only bitmap clear and is never used here.
+///
 /// Phase 0 (optional): when `validate_owner_on_free` is `true`, read
 /// the `BusyBlockValue` from the data group and validate `owner_chunk`
-/// before touching the bitmap. Rejects on `NotBusy` or `OwnerMismatch`.
-/// When `false` (default), no KV read — `owner_chunk` comes from the
-/// `Segment` (§14).
+/// before persisting. Rejects on `NotBusy` or `OwnerMismatch`. When
+/// `false` (default), no KV read — `owner_chunk` comes from the
+/// `Segment`.
 /// Phase 1: persist `FreeBlockValue` (delete `BusyBlockKey` + put
 /// `FreeBlockKey` in one `batch_write`) — durable free first.
-/// Phase 2: clear bitmap locally (per-bit CAS).
+/// Post-persist: increment `uncompacted_free_record_count` on the zone
+/// so compaction knows there is work to do.
 ///
-/// Persist-before-bitmap-clear prevents the double-allocate window: if
-/// the persist fails, the bit stays set and the allocator will not
-/// re-hand the block to another caller. The caller gets an error and
-/// can retry safely (the block is still busy on both disk and memory).
-/// If the persist succeeds but the bitmap clear fails (rare: race or
-/// zone lookup failure), the block is free on disk but still shows busy
-/// in memory — the stale bit prevents re-allocation until the §12
-/// scanner reconciles (ghost-busy, self-correcting).
+/// If the persist fails, the block is still busy on both disk and
+/// memory — the caller can retry safely. If the persist succeeds but
+/// the in-memory zone lookup fails (rare: disk removed concurrently),
+/// the free record is durable but the backlog counter is not bumped;
+/// the periodic compaction cadence still reclaims the block.
 ///
 /// # Errors
 /// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
-/// validation failure (no persist, no bitmap clear). Returns
-/// `FreeError::Kv` if the persist fails — the bitmap was NOT cleared;
-/// the block is still busy, the caller can retry.
+/// validation failure (no persist). Returns `FreeError::Kv` if the
+/// persist fails — the block is still busy, the caller can retry.
 pub async fn free_block(
     dg: &Arc<DdbDiskGroup>,
     segment: &Segment,
@@ -376,22 +380,23 @@ pub async fn free_block(
     kv.persist_free(bind, &disk_id, segment.zone_index, segment.unit_offset, &value)
         .await
         .map_err(FreeError::from)?;
-    // Persist succeeded — the block is free on disk. If we crash now,
-    // R73 recovery sees no BusyBlockKey → bit is clear → block is free.
+    // Persist succeeded — the block is free on disk. The in-memory
+    // bitmap is untouched (persist-only, I1); compaction reconciles.
 
-    // Phase 2: clear bitmap locally.
+    // Post-persist: bump the zone's uncompacted-free backlog. The
+    // bitmap is NOT mutated — free is persist-only.
     if !dg.free_block(
         &disk_id,
         segment.zone_index,
         segment.unit_offset,
         segment.unit_count,
     ) {
-        // Persist succeeded but bitmap clear failed (rare: double-free
-        // race or zone lookup failure). The block is free on disk; the
-        // stale in-memory bit prevents re-allocation until the §12
-        // scanner reconciles. The caller's intent was achieved.
+        // Persist succeeded but the in-memory zone was not found
+        // (rare: disk removed concurrently). The free record is
+        // durable; the periodic compaction cadence still reclaims the
+        // block. The caller's intent was achieved.
         tracing::warn!(
-            "free persist succeeded but bitmap clear failed for disk {disk_id:?} zone {} offset {} — ghost-busy, scanner will reconcile",
+            "free persist succeeded but in-memory zone not found for disk {disk_id:?} zone {} offset {} — backlog counter not bumped",
             segment.zone_index,
             segment.unit_offset
         );
@@ -408,20 +413,22 @@ pub async fn free_block(
 
 /// Free multiple blocks (one `batch_write` per data group).
 ///
-/// When `validate_owner_on_free` is `true`, all segments are validated
-/// first (all-or-nothing) — if any segment fails validation, no persist
-/// and no bitmap clear happens.
+/// Persist-only free (same contract as `free_block`): one `batch_write`
+/// deletes all `BusyBlockKey`s and puts all `FreeBlockValue`s. The
+/// in-memory bitmaps are **not** touched — bits stay set, `used_count`
+/// is not decremented (I1); compaction is the sole bit-clearer (I3).
 ///
-/// Persist-before-bitmap-clear (same ordering as `free_block`): the
-/// `batch_write` persists all `FreeBlockValue`s first, then the bitmap
-/// bits are cleared. If the persist fails, no bits are cleared — the
-/// blocks stay busy and the caller can retry safely.
+/// When `validate_owner_on_free` is `true`, all segments are validated
+/// first (all-or-nothing) — if any segment fails validation, no
+/// persist happens.
+///
+/// If the persist fails, no in-memory state changed — all blocks are
+/// still busy and the caller can retry safely.
 ///
 /// # Errors
 /// Returns `FreeError::NotBusy` / `FreeError::OwnerMismatch` on
-/// validation failure (no persist, no bitmap clear). Returns
-/// `FreeError::Kv` if the persist fails — no bitmap clears happened;
-/// all blocks are still busy, the caller can retry.
+/// validation failure (no persist). Returns `FreeError::Kv` if the
+/// persist fails — all blocks are still busy, the caller can retry.
 pub async fn free_blocks(
     dg: &Arc<DdbDiskGroup>,
     segments: &[Segment],
@@ -491,19 +498,20 @@ pub async fn free_blocks(
     kv.persist_free_batch(bind, &records)
         .await
         .map_err(FreeError::from)?;
-    // Persist succeeded — all blocks are free on disk. If we crash now,
-    // R73 recovery sees no BusyBlockKey → bits are clear → blocks are free.
+    // Persist succeeded — all blocks are free on disk. The in-memory
+    // bitmaps are untouched (persist-only, I1); compaction reconciles.
 
-    // Phase 2: clear all bitmaps locally.
+    // Post-persist: bump each zone's uncompacted-free backlog. The
+    // bitmaps are NOT mutated — free is persist-only.
     for seg in segments {
         if let Some(disk_id) = seg.disk_id {
             if !dg.free_block(&disk_id, seg.zone_index, seg.unit_offset, seg.unit_count) {
-                // Persist succeeded but bitmap clear failed (rare:
-                // double-free race or zone lookup failure). The block is
-                // free on disk; the stale in-memory bit prevents
-                // re-allocation until the §12 scanner reconciles.
+                // Persist succeeded but the in-memory zone was not
+                // found (rare: disk removed concurrently). The free
+                // record is durable; the periodic compaction cadence
+                // still reclaims the block.
                 tracing::warn!(
-                    "free persist succeeded but bitmap clear failed for disk {disk_id:?} zone {} offset {} — ghost-busy, scanner will reconcile",
+                    "free persist succeeded but in-memory zone not found for disk {disk_id:?} zone {} offset {} — backlog counter not bumped",
                     seg.zone_index,
                     seg.unit_offset
                 );
