@@ -11,6 +11,8 @@
     clippy::doc_markdown
 )]
 
+pub mod allocator;
 pub mod chunkdb_config;
+pub mod selector;
 pub mod service;
 pub mod topology;

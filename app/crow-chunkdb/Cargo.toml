@@ -27,6 +27,7 @@ workspace = true
 [dependencies]
 crow-protocol = { path = "../../lib/crow-protocol" }
 crow-kv-client = { path = "../../lib/crow-kv-client" }
+crow-diskdb-client = { path = "../../lib/crow-diskdb-client" }
 crow-common = { path = "../../lib/crow-common/rust" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "net", "sync"] }
 tonic = { workspace = true }
@@ -43,6 +44,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dashmap = "6"
 parking_lot = "0.12"
+rand = "0.8"
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
