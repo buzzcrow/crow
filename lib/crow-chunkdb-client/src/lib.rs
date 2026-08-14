@@ -7,11 +7,18 @@
 //! caching, mirroring `crow-diskdb-client`'s pattern. The client
 //! discovers chunkdb instances via the service registry (group 0),
 //! caches `instance_id -> grpc_endpoint`, and lazily refreshes on
-//! cache miss. Retry logic lands in R90.
+//! cache miss. Retry on transient errors with exponential backoff.
+
+#![allow(
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::doc_markdown
+)]
 
 pub mod client;
 
-pub use client::ChunkdbClient;
+pub use client::{ChunkdbClient, RetryConfig};
 
 use thiserror::Error;
 
@@ -20,8 +27,50 @@ use thiserror::Error;
 pub enum ChunkdbClientError {
     #[error("chunkdb server unreachable: {0}")]
     Unreachable(String),
-    #[error("chunkdb RPC error: {0}")]
+    #[error("chunkdb server unavailable (transient): {0}")]
+    Unavailable(String),
+    #[error("chunk not found: {0}")]
+    NotFound(String),
+    #[error("chunk already exists: {0}")]
+    AlreadyExists(String),
+    #[error("invalid state transition: {0}")]
+    FailedPrecondition(String),
+    #[error("state conflict (concurrent modification): {0}")]
+    Aborted(String),
+    #[error("deadline exceeded: {0}")]
+    DeadlineExceeded(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+    #[error("RPC error: {0}")]
     Rpc(String),
+}
+
+impl ChunkdbClientError {
+    /// Check if this error is transient (worth retrying).
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable(_) | Self::DeadlineExceeded(_) | Self::Unreachable(_)
+        )
+    }
+}
+
+/// Map a gRPC status to a `ChunkdbClientError`.
+pub fn from_status(status: &tonic::Status) -> ChunkdbClientError {
+    let msg = status.message().to_string();
+    match status.code() {
+        tonic::Code::Unavailable => ChunkdbClientError::Unavailable(msg),
+        tonic::Code::DeadlineExceeded => ChunkdbClientError::DeadlineExceeded(msg),
+        tonic::Code::NotFound => ChunkdbClientError::NotFound(msg),
+        tonic::Code::AlreadyExists => ChunkdbClientError::AlreadyExists(msg),
+        tonic::Code::FailedPrecondition => ChunkdbClientError::FailedPrecondition(msg),
+        tonic::Code::Aborted => ChunkdbClientError::Aborted(msg),
+        tonic::Code::InvalidArgument => ChunkdbClientError::InvalidArgument(msg),
+        tonic::Code::Internal => ChunkdbClientError::Internal(msg),
+        _ => ChunkdbClientError::Rpc(msg),
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ChunkdbClientError>;

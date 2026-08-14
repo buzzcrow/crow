@@ -7,8 +7,8 @@
 //! instances from the service registry, populates a `DashMap` cache
 //! (`instance_id -> grpc_endpoint`). On cache miss, lazily refreshes.
 //! Channel pool: `DashMap<String, Channel>` per endpoint.
-//!
-//! R85 skeleton: method stubs wrap the 8 RPCs. Retry logic lands in R90.
+//! Retry: exponential backoff on transient errors (`Unavailable`,
+//! `DeadlineExceeded`), up to `max_retries`.
 
 use std::time::Duration;
 
@@ -27,6 +27,22 @@ use crow_protocol::InstanceId;
 
 use crate::{ChunkdbClientError, Result};
 
+/// Retry configuration for transient errors.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_backoff: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_backoff: Duration::from_millis(50),
+        }
+    }
+}
+
 /// Client for CROW chunkdb gRPC operations.
 pub struct ChunkdbClient {
     svc: ServiceRegistryClient,
@@ -34,6 +50,7 @@ pub struct ChunkdbClient {
     endpoint_cache: DashMap<InstanceId, String>,
     /// `grpc_endpoint -> Channel` pool.
     channels: DashMap<String, Channel>,
+    retry: RetryConfig,
 }
 
 impl ChunkdbClient {
@@ -43,13 +60,22 @@ impl ChunkdbClient {
             svc,
             endpoint_cache: DashMap::new(),
             channels: DashMap::new(),
+            retry: RetryConfig::default(),
+        }
+    }
+
+    /// Override the default retry config.
+    #[must_use]
+    pub fn with_retry_config(svc: ServiceRegistryClient, retry: RetryConfig) -> Self {
+        Self {
+            svc,
+            endpoint_cache: DashMap::new(),
+            channels: DashMap::new(),
+            retry,
         }
     }
 
     /// Eager warm: read all chunkdb instances, populate the endpoint cache.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Unreachable` if the service registry read fails.
     pub async fn refresh_endpoints(&self) -> Result<()> {
         let instances = self
             .svc
@@ -96,107 +122,104 @@ impl ChunkdbClient {
         Ok(ChunkdbServiceClient::new(channel))
     }
 
+    /// Execute an RPC with retry on transient errors.
+    /// `build_req` produces a fresh request clone for each attempt.
+    async fn with_retry<Req, F, Fut, T>(&self, build_req: impl Fn() -> Req, op: F) -> Result<T>
+    where
+        Req: Send,
+        F: Fn(ChunkdbServiceClient<Channel>, Req) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>> + Send,
+    {
+        let mut attempts = 0u32;
+        let mut backoff = self.retry.initial_backoff;
+        loop {
+            let client = self.client().await?;
+            let req = build_req();
+            match op(client, req).await {
+                Ok(value) => return Ok(value),
+                Err(status) => {
+                    let err = crate::from_status(&status);
+                    if !err.is_transient() || attempts >= self.retry.max_retries {
+                        return Err(err);
+                    }
+                    attempts += 1;
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                    let _ = self.refresh_endpoints().await;
+                }
+            }
+        }
+    }
+
     /// Allocate a new chunk.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn allocate_chunk(&self, req: AllocateChunkRequest) -> Result<AllocateChunkResponse> {
-        let mut client = self.client().await?;
-        client
-            .allocate_chunk(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req,
+            |mut c, r| async move { c.allocate_chunk(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 
     /// Append strips to an existing chunk.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn append_chunk(&self, req: AppendChunkRequest) -> Result<AppendChunkResponse> {
-        let mut client = self.client().await?;
-        client
-            .append_chunk(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req,
+            |mut c, r| async move { c.append_chunk(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 
     /// Query a chunk by ID.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn query_chunk(&self, req: QueryChunkRequest) -> Result<QueryChunkResponse> {
-        let mut client = self.client().await?;
-        client
-            .query_chunk(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req,
+            |mut c, r| async move { c.query_chunk(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 
     /// Seal a chunk.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn seal_chunk(&self, req: SealChunkRequest) -> Result<SealChunkResponse> {
-        let mut client = self.client().await?;
-        client
-            .seal_chunk(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req,
+            |mut c, r| async move { c.seal_chunk(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 
     /// Delete a chunk.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn delete_chunk(&self, req: DeleteChunkRequest) -> Result<DeleteChunkResponse> {
-        let mut client = self.client().await?;
-        client
-            .delete_chunk(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req,
+            |mut c, r| async move { c.delete_chunk(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 
     /// Delete a range within a chunk.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn delete_chunk_range(&self, req: DeleteChunkRangeRequest) -> Result<DeleteChunkRangeResponse> {
-        let mut client = self.client().await?;
-        client
-            .delete_chunk_range(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req,
+            |mut c, r| async move { c.delete_chunk_range(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 
     /// Update a single strip within a chunk.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn update_chunk_strip(&self, req: UpdateChunkStripRequest) -> Result<UpdateChunkStripResponse> {
-        let mut client = self.client().await?;
-        client
-            .update_chunk_strip(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req.clone(),
+            |mut c, r| async move { c.update_chunk_strip(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 
     /// List chunks with pagination.
-    ///
-    /// # Errors
-    /// Returns `ChunkdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn list_chunks(&self, req: ListChunksRequest) -> Result<ListChunksResponse> {
-        let mut client = self.client().await?;
-        client
-            .list_chunks(req)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|e| ChunkdbClientError::Rpc(e.to_string()))
+        self.with_retry(
+            || req,
+            |mut c, r| async move { c.list_chunks(r).await.map(tonic::Response::into_inner) },
+        )
+        .await
     }
 }
