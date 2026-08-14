@@ -1,9 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Crash recovery + snapshot compaction (R73).
+//! Startup zone loading + snapshot compaction (R73).
 //!
-//! `RecoveryEngine` reconstructs in-memory `DdbDiskGroup`/`DdbDisk`/
+//! `ZoneLoader` reconstructs in-memory `DdbDiskGroup`/`DdbDisk`/
 //! `DdbZone` state from the durable records on the bound data group
 //! after a restart or ownership transfer. Two strategies:
 //!
@@ -11,7 +11,7 @@
 //!   — scan all live `BusyBlockKey` records for a zone and set bits.
 //!   Always available, O(all live busy records per zone). Used as the
 //!   fallback when strategy 2 cannot run.
-//! - **Strategy 2** (`recovery::journal_replay::recover_zone_inner`) —
+//! - **Strategy 2** (`recovery::journal_replay::load_zone_inner`) —
 //!   load the latest `ZoneValue` snapshot, then replay the journal
 //!   (slot-ordered `JournalScan` of busy + free ops) from
 //!   `snapshot_slot + 1` to the applied frontier. Fast when compaction
@@ -39,9 +39,9 @@ use crate::model::zone::DdbZone;
 pub use full_scan::rebuild_zone_bitmap_full_scan;
 pub use journal_replay::zone_snapshots_exist;
 
-/// Recovery errors.
+/// Zone load errors.
 #[derive(Debug)]
-pub enum RecoveryError {
+pub enum ZoneLoadError {
     /// KV client error.
     Kv(crow_kv_client::Error),
     /// A `JournalScan` returned `KV_ERROR_JOURNAL_SCAN_GC_GAP` — slots
@@ -53,7 +53,7 @@ pub enum RecoveryError {
     SnapshotCrcFail,
 }
 
-impl std::fmt::Display for RecoveryError {
+impl std::fmt::Display for ZoneLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Kv(e) => write!(f, "kv error: {e}"),
@@ -63,15 +63,15 @@ impl std::fmt::Display for RecoveryError {
     }
 }
 
-impl std::error::Error for RecoveryError {}
+impl std::error::Error for ZoneLoadError {}
 
-impl From<crow_kv_client::Error> for RecoveryError {
+impl From<crow_kv_client::Error> for ZoneLoadError {
     fn from(e: crow_kv_client::Error) -> Self {
         Self::Kv(e)
     }
 }
 
-/// Per-zone recovery stats (returned by strategy 1 for the
+/// Per-zone load stats (returned by strategy 1 for the
 /// `RebuildZoneBitmap` RPC response).
 #[derive(Debug, Clone, Default)]
 pub struct ZoneStats {
@@ -80,38 +80,40 @@ pub struct ZoneStats {
     pub free_units: u64,
 }
 
-/// Crash recovery + ownership-transfer reconstruction engine.
+/// Startup zone loader — reconstructs in-memory `DdbDiskGroup`/
+/// `DdbDisk`/`DdbZone` state from durable records on the bound data
+/// group after a restart or ownership transfer.
 ///
 /// Owns a `DdbKvClient` (from the server wiring). Disk metadata
 /// (`DiskValue`s) is passed in by the caller (the keep-alive loop
-/// already fetches it from group 0 via `HardwareClient`); the recovery
-/// engine does not need a group-0 client itself.
-pub struct RecoveryEngine {
+/// already fetches it from group 0 via `HardwareClient`); the loader
+/// does not need a group-0 client itself.
+pub struct ZoneLoader {
     kv: Arc<DdbKvClient>,
-    /// Max concurrent zone recoveries in `recover_disk_group`.
-    recovery_concurrency: usize,
+    /// Max concurrent zone loads in `load_disk_group`.
+    load_concurrency: usize,
 }
 
-impl RecoveryEngine {
-    /// Create a new recovery engine with the given data-group client
-    /// and zone-recovery concurrency limit.
+impl ZoneLoader {
+    /// Create a new zone loader with the given data-group client
+    /// and zone-load concurrency limit.
     #[must_use]
-    pub fn new(kv: Arc<DdbKvClient>, recovery_concurrency: usize) -> Self {
+    pub fn new(kv: Arc<DdbKvClient>, load_concurrency: usize) -> Self {
         Self {
             kv,
-            recovery_concurrency: recovery_concurrency.max(1),
+            load_concurrency: load_concurrency.max(1),
         }
     }
 
-    /// Recover a full disk-group from the data group's records.
-    /// Creates an empty `DdbDiskGroup`, recovers each disk's zones
+    /// Load a full disk-group from the data group's records.
+    /// Creates an empty `DdbDiskGroup`, loads each disk's zones
     /// (strategy 2 with strategy 1 fallback), and returns the
     /// reconstructed `DdbDiskGroup`.
     ///
-    /// Zones within a disk-group are recovered in parallel, bounded by
-    /// `recovery_concurrency` — each zone's recovery is independent.
+    /// Zones within a disk-group are loaded in parallel, bounded by
+    /// `load_concurrency` — each zone's load is independent.
     #[allow(clippy::too_many_arguments)]
-    pub async fn recover_disk_group(
+    pub async fn load_disk_group(
         &self,
         dg_id: DiskGroupId,
         node_id: NodeId,
@@ -136,8 +138,8 @@ impl RecoveryEngine {
             let zone_count = disk_value.zone_count;
             let zone_size_units = disk_value.zone_size_units;
 
-            // Recover zones in parallel, bounded by the semaphore.
-            let sem = Arc::new(tokio::sync::Semaphore::new(self.recovery_concurrency));
+            // Load zones in parallel, bounded by the semaphore.
+            let sem = Arc::new(tokio::sync::Semaphore::new(self.load_concurrency));
             let mut zone_handles = Vec::with_capacity(zone_count as usize);
             for zi in 0..zone_count {
                 let unit_capacity = unit_capacity_for_zone(disk_value, zi, zone_count, zone_size_units);
@@ -146,7 +148,7 @@ impl RecoveryEngine {
                 let sem = Arc::clone(&sem);
                 let handle = tokio::spawn(async move {
                     let _permit = sem.acquire().await;
-                    journal_replay::recover_zone_inner(&kv, bind, disk_id, zi, unit_capacity).await
+                    journal_replay::load_zone_inner(&kv, bind, disk_id, zi, unit_capacity).await
                 });
                 zone_handles.push((zi, handle));
             }
@@ -160,7 +162,7 @@ impl RecoveryEngine {
                             disk_id = ?*disk_id,
                             zone_index = zi,
                             error = %e,
-                            "zone recovery failed; falling back to strategy 1 (full scan)"
+                            "zone load failed; falling back to strategy 1 (full scan)"
                         );
                         // Fallback: strategy 1 full scan. No freed_ts
                         // available (strategy 1 doesn't scan free
@@ -191,7 +193,7 @@ impl RecoveryEngine {
                             disk_id = ?*disk_id,
                             zone_index = zi,
                             error = %e,
-                            "zone recovery task panicked; using empty zone"
+                            "zone load task panicked; using empty zone"
                         );
                         (DdbZone::new(*disk_id, zi, dg_id, unit_capacity), 0)
                     }
@@ -215,7 +217,7 @@ impl RecoveryEngine {
         // greater than any pre-existing free record — critical for
         // ownership transfer where the prior owner's clock may be
         // ahead of ours.
-        dg.init_free_ts_source_after_recovery(max_freed_ts_in_dg);
+        dg.init_free_ts_source_after_load(max_freed_ts_in_dg);
 
         dg
     }
@@ -229,7 +231,7 @@ impl RecoveryEngine {
         disk_id: DiskId,
         zone_idx: u32,
         unit_capacity: u32,
-    ) -> Result<(DdbZone, ZoneStats), RecoveryError> {
+    ) -> Result<(DdbZone, ZoneStats), ZoneLoadError> {
         full_scan::rebuild_zone_bitmap_full_scan(&self.kv, bind, disk_id, zone_idx, unit_capacity).await
     }
 }

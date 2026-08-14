@@ -18,7 +18,7 @@ use crow_diskdb::liveness::notify::NotifyHandler;
 use crow_diskdb::metrics::{DiskdbMetrics, RecalcEngine, ReportingTask};
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::compaction::{CompactionEngine, PreparatoryThread};
-use crow_diskdb::recovery::RecoveryEngine;
+use crow_diskdb::recovery::ZoneLoader;
 use crow_diskdb::scanner::{ScanState, ScannerTask};
 use crow_diskdb::service::DiskdbService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient};
@@ -153,12 +153,12 @@ async fn main() {
     );
 
     // Build the gRPC service + start serving immediately (before
-    // recovery). Mutating RPCs are gated on lifecycle phase = Up, so
-    // allocate/free/rebuild return `unavailable` during recovery.
+    // zone loading). Mutating RPCs are gated on lifecycle phase = Up,
+    // so allocate/free/rebuild return `unavailable` during loading.
     // Read-only RPCs (GetDiskGroupInfo, GetDiskInfo) are allowed.
-    let recovery_engine = Arc::new(RecoveryEngine::new(
+    let zone_loader = Arc::new(ZoneLoader::new(
         Arc::clone(&dg_kv),
-        config.load().persistence.recovery_concurrency,
+        config.load().persistence.load_concurrency,
     ));
     let recalc_engine = Arc::new(RecalcEngine::new(Arc::clone(&dg_kv), Arc::clone(&container)));
     let scan_state = ScanState::new();
@@ -172,22 +172,22 @@ async fn main() {
         container.clone(),
         Arc::clone(&dg_kv),
         config.load().storage.clone(),
-        Arc::clone(&recovery_engine),
+        Arc::clone(&zone_loader),
         Arc::clone(&recalc_engine),
         scan_state.clone(),
     )
     .into_server();
-    info!(%listen_addr, "gRPC server listening (recovery pending)");
+    info!(%listen_addr, "gRPC server listening (zone load pending)");
 
-    // Phase = Recovering. Spawn recovery as a background task — the
+    // Phase = Loading. Spawn zone loading as a background task — the
     // main task does not block on it. Each disk-group's zones are
-    // recovered; when all are done, phase transitions to Up.
-    container.set_lifecycle_phase(StartupPhase::Recovering);
-    let recovery_container = Arc::clone(&container);
-    let recovery_kv = Arc::clone(&dg_kv);
-    let recovery_cfg = (**config.load()).clone();
-    let recovery_handle = tokio::spawn(async move {
-        run_recovery(recovery_kv, recovery_container, &recovery_cfg).await;
+    // loaded; when all are done, phase transitions to Up.
+    container.set_lifecycle_phase(StartupPhase::Loading);
+    let load_container = Arc::clone(&container);
+    let load_kv = Arc::clone(&dg_kv);
+    let load_cfg = (**config.load()).clone();
+    let load_handle = tokio::spawn(async move {
+        run_zone_load(load_kv, load_container, &load_cfg).await;
     });
 
     // Build the background-task runner with keepalive + compaction.
@@ -248,7 +248,7 @@ async fn main() {
     // Start the HTTP management/health server. Exposes `/ready`
     // (aliased `/health`) returning the current `StartupPhase` +
     // degraded flag so orchestrators can poll readiness during
-    // recovery.
+    // zone loading.
     let http_listen_addr: SocketAddr = config
         .load()
         .server
@@ -291,20 +291,20 @@ async fn main() {
         let _ = h.await;
     }
     let _ = http_handle.await;
-    let _ = recovery_handle.await;
+    let _ = load_handle.await;
     if let Some(h) = notify_handle {
         let _ = h.await;
     }
     info!("crow-diskdb stopped");
 }
 
-/// Run R73 recovery for all owned disk-groups, then set phase to Up.
-/// Uses `RecoveryEngine::recover_disk_group` (strategy 2 journal
-/// replay with strategy 1 full-scan fallback) and replaces each
-/// disk-group in the container with its recovered counterpart.
-async fn run_recovery(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContainer>, config: &DdbConfig) {
-    info!("running R73 recovery (background)");
-    let recovery_engine = RecoveryEngine::new(kv, config.persistence.recovery_concurrency);
+/// Run R73 zone loading for all owned disk-groups, then set phase to
+/// Up. Uses `ZoneLoader::load_disk_group` (strategy 2 journal replay
+/// with strategy 1 full-scan fallback) and replaces each disk-group in
+/// the container with its loaded counterpart.
+async fn run_zone_load(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContainer>, config: &DdbConfig) {
+    info!("running R73 zone load (background)");
+    let zone_loader = ZoneLoader::new(kv, config.persistence.load_concurrency);
     for dg_id in container.disk_group_ids() {
         let Some(dg) = container.get_disk_group(dg_id) else {
             continue;
@@ -320,8 +320,8 @@ async fn run_recovery(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContainer
                 .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
                 .collect()
         };
-        let recovered = recovery_engine
-            .recover_disk_group(
+        let loaded = zone_loader
+            .load_disk_group(
                 dg_id,
                 dg.node_id,
                 dg.rack_id,
@@ -330,11 +330,11 @@ async fn run_recovery(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContainer
                 config.storage.zone_rotate_count,
             )
             .await;
-        container.replace_disk_group(recovered);
-        info!(dg_id, "disk-group recovered (strategy 2 + strategy 1 fallback)");
+        container.replace_disk_group(loaded);
+        info!(dg_id, "disk-group loaded (strategy 2 + strategy 1 fallback)");
     }
     container.set_lifecycle_phase(StartupPhase::Up);
-    info!("R73 recovery complete; phase = Up");
+    info!("R73 zone load complete; phase = Up");
 }
 
 fn load_config(args: &Cli) -> DdbConfig {

@@ -95,10 +95,10 @@ impl DdbDiskGroup {
         }
     }
 
-    /// Initialize the timestamp source after recovery to
+    /// Initialize the timestamp source after zone load to
     /// `max(now(), max_freed_ts + 1)`. Called once after all zones in
-    /// the disk-group are recovered.
-    pub fn init_free_ts_source_after_recovery(&self, max_freed_ts: u64) {
+    /// the disk-group are loaded.
+    pub fn init_free_ts_source_after_load(&self, max_freed_ts: u64) {
         let now = now_nanos();
         let target = now.max(max_freed_ts + 1);
         self.free_ts_source.store(target, Ordering::Release);

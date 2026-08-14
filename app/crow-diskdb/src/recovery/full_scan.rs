@@ -15,7 +15,7 @@ use crow_protocol::common::DiskId;
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::records::ZoneRecords;
 use crate::model::zone::DdbZone;
-use crate::recovery::{RecoveryError, ZoneStats};
+use crate::recovery::{ZoneLoadError, ZoneStats};
 
 /// Full-scan rebuild of one zone's usage bitmap from the live
 /// `BusyBlockKey` records on the data group.
@@ -28,7 +28,7 @@ pub async fn rebuild_zone_bitmap_full_scan(
     disk_id: DiskId,
     zone_idx: u32,
     unit_capacity: u32,
-) -> Result<(DdbZone, ZoneStats), RecoveryError> {
+) -> Result<(DdbZone, ZoneStats), ZoneLoadError> {
     let records: ZoneRecords = kv.read_zone_records(bind, &disk_id, zone_idx).await?;
 
     let zone = DdbZone::new(disk_id, zone_idx, 0, unit_capacity);
@@ -47,7 +47,7 @@ pub async fn rebuild_zone_bitmap_full_scan(
         std::sync::atomic::Ordering::Release,
     );
 
-    // Full-scan recovery rebuilds from busy records only (no free
+    // Full-scan load rebuilds from busy records only (no free
     // records scanned), so compact_ts = 0. The next compaction will
     // advance it. The bitmap is accurate from records → compacted_ready.
     zone.compacted_ready
@@ -76,7 +76,7 @@ pub async fn rebuild_zone_bitmap_full_scan(
                 disk_id = ?disk_id,
                 zone_index = zone_idx,
                 error = %e,
-                "post-rebuild snapshot write failed; recovery still valid"
+                "post-rebuild snapshot write failed; load still valid"
             );
         }
     }

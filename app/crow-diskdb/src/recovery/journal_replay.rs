@@ -1,17 +1,17 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Strategy 2 — journal-scan replay zone recovery.
+//! Strategy 2 — journal-scan replay zone loading.
 //!
 //! Loads the latest `ZoneValue` snapshot, then replays the journal
 //! (slot-ordered `JournalScan` of busy ops) from `snapshot_slot + 1` to
 //! the applied frontier. Only `Put BusyBlockKey` ops are applied to the
-//! bitmap (Option B — persist-only recovery): `Delete BusyBlockKey` ops
+//! bitmap (Option B — persist-only load): `Delete BusyBlockKey` ops
 //! (frees) are ignored, leaving the bitmap as a conservative over-
 //! estimate. The free records on disk are the source of truth; the
 //! common compaction flow will `range_clear` them naturally. This
-//! eliminates the double-free risk that would arise if recovery cleared
-//! bits for frees while the free records still exist on disk.
+//! eliminates the double-free risk that would arise if the loader
+//! cleared bits for frees while the free records still exist on disk.
 
 use crow_protocol::common::DiskId;
 use crow_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue};
@@ -20,19 +20,19 @@ use crow_protocol::ZoneValueExt;
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::zone::{DdbZone, DdbZoneHealth};
-use crate::recovery::RecoveryError;
+use crate::recovery::ZoneLoadError;
 
-/// Inner zone recovery — strategy 2 (journal scan replay).
-/// Returns a recovered `Zone` and the max `freed_ts` from scanned free
+/// Inner zone load — strategy 2 (journal scan replay).
+/// Returns a loaded `Zone` and the max `freed_ts` from scanned free
 /// records (0 if no free records), or an error indicating why strategy
 /// 2 failed (caller falls back to strategy 1).
-pub async fn recover_zone_inner(
+pub async fn load_zone_inner(
     kv: &DdbKvClient,
     bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
     unit_capacity: u32,
-) -> Result<(DdbZone, u64), RecoveryError> {
+) -> Result<(DdbZone, u64), ZoneLoadError> {
     // Step a: load the latest ZoneValue snapshot.
     let snapshot = kv.get_zone_value(bind, &disk_id, zone_idx).await?;
 
@@ -44,7 +44,7 @@ pub async fn recover_zone_inner(
         }
         Some(_zv) => {
             // CRC fail — fall back to strategy 1.
-            return Err(RecoveryError::SnapshotCrcFail);
+            return Err(ZoneLoadError::SnapshotCrcFail);
         }
         None => {
             // No snapshot — empty bitmap, replay from slot 0.
@@ -62,9 +62,9 @@ pub async fn recover_zone_inner(
     let busy_ops = match busy_ops {
         Ok(ops) => ops,
         Err(crow_kv_client::Error::Server(ref msg)) if msg.contains("gc gap") => {
-            return Err(RecoveryError::JournalScanGcGap);
+            return Err(ZoneLoadError::JournalScanGcGap);
         }
-        Err(e) => return Err(RecoveryError::Kv(e)),
+        Err(e) => return Err(ZoneLoadError::Kv(e)),
     };
 
     // Step c: apply only Put BusyBlockKey ops (allocations). Delete
@@ -97,9 +97,9 @@ pub async fn recover_zone_inner(
     let free_ops = match free_ops {
         Ok(ops) => ops,
         Err(crow_kv_client::Error::Server(ref msg)) if msg.contains("gc gap") => {
-            return Err(RecoveryError::JournalScanGcGap);
+            return Err(ZoneLoadError::JournalScanGcGap);
         }
-        Err(e) => return Err(RecoveryError::Kv(e)),
+        Err(e) => return Err(ZoneLoadError::Kv(e)),
     };
     let net_free_records: i64 = free_ops.iter().map(|op| if op.is_delete { -1 } else { 1 }).sum();
     let uncompacted_free_record_count = u32::try_from(net_free_records.max(0)).unwrap_or(0);
@@ -115,7 +115,7 @@ pub async fn recover_zone_inner(
         .max()
         .unwrap_or(0);
 
-    // Step e: build the recovered Zone. compact_ts stays at
+    // Step e: build the loaded Zone. compact_ts stays at
     // snapshot_compact_ts — no advancement needed (Option B). The free
     // records on disk have freed_ts > snapshot_compact_ts (they were
     // written after the snapshot), so the next compaction will
@@ -143,8 +143,8 @@ pub async fn recover_zone_inner(
 }
 
 /// Check whether a `ZoneValue` snapshot exists for any zone on the
-/// given disk — used by the keep-alive loop to decide between recovery
-/// (snapshots exist) and `disk_add_init` (fresh disks).
+/// given disk — used by the keep-alive loop to decide between zone
+/// load (snapshots exist) and `disk_add_init` (fresh disks).
 pub async fn zone_snapshots_exist(kv: &DdbKvClient, bind: Bind, disk_id: &DiskId, zone_count: u32) -> bool {
     // Check the first zone only — if it has a snapshot, the disk was
     // previously initialized (disk_add_init writes baseline snapshots

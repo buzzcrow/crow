@@ -23,7 +23,7 @@ use crate::ddb_config::CompactionConfig;
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
-use crate::recovery::RecoveryError;
+use crate::recovery::ZoneLoadError;
 
 /// Compact one zone: partition free records by the `compact_ts`
 /// watermark, `range_clear` only the new records, write a new
@@ -42,7 +42,7 @@ pub async fn compact_zone(
     disk_id: DiskId,
     zone: &Arc<DdbZone>,
     zone_idx: u32,
-) -> Result<(), RecoveryError> {
+) -> Result<(), ZoneLoadError> {
     // Step 1: scan free records for the zone (no zone lock — KV read).
     let records = kv.read_zone_records(bind, &disk_id, zone_idx).await?;
     let free_keys: Vec<Vec<u8>> = records.free.iter().map(|r| r.key.to_bytes()).collect();
@@ -181,7 +181,7 @@ impl CompactionEngine {
         disk_id: DiskId,
         zone: &Arc<DdbZone>,
         zone_idx: u32,
-    ) -> Result<(), RecoveryError> {
+    ) -> Result<(), ZoneLoadError> {
         compact_zone(&self.kv, bind, disk_id, zone, zone_idx).await
     }
 }

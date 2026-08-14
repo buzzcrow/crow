@@ -38,9 +38,9 @@ async fn ready_returns_503_when_init() {
 }
 
 #[tokio::test]
-async fn ready_returns_503_when_recovering() {
+async fn ready_returns_503_when_loading() {
     let container = Arc::new(DdbDiskGroupContainer::new(1));
-    container.set_lifecycle_phase(StartupPhase::Recovering);
+    container.set_lifecycle_phase(StartupPhase::Loading);
     let app = health::router(container);
     let resp = app
         .oneshot(
@@ -53,7 +53,7 @@ async fn ready_returns_503_when_recovering() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = body_string(resp).await;
-    assert!(body.contains("\"phase\":\"recovering\""), "body: {body}");
+    assert!(body.contains("\"phase\":\"loading\""), "body: {body}");
 }
 
 #[tokio::test]

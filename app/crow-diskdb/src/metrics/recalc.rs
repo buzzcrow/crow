@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! R74 §5 — recalculation verification. Replays the journal into a
-//! **separate** bitmap per zone (reusing `recover_zone_inner`,
+//! **separate** bitmap per zone (reusing `load_zone_inner`,
 //! strategy 2, with `rebuild_zone_bitmap_full_scan` strategy 1
 //! fallback) and compares against the live `DdbZone` to detect drift.
 //! v1 reports drift only — it does not auto-correct the live bitmap.
@@ -15,8 +15,8 @@ use crow_protocol::DiskGroupId;
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
-use crate::recovery::journal_replay::recover_zone_inner;
-use crate::recovery::RecoveryError;
+use crate::recovery::journal_replay::load_zone_inner;
+use crate::recovery::ZoneLoadError;
 
 /// Per-disk zone list: `(zone_index, unit_capacity, zone_arc)`.
 type ZoneList = Vec<(u32, u32, Arc<DdbZone>)>;
@@ -91,13 +91,13 @@ impl RecalcEngine {
 
         // Strategy 2: journal replay into a throwaway zone.
         let (replayed_busy_blocks, replayed_snapshot_slot, fallback_used) =
-            match recover_zone_inner(&self.kv, bind, disk_id, zone_idx, unit_capacity).await {
+            match load_zone_inner(&self.kv, bind, disk_id, zone_idx, unit_capacity).await {
                 Ok((replayed, _max_freed_ts)) => {
                     let popcount = replayed.usage_bits.count_set();
                     let slot = replayed.snapshot_slot.load(std::sync::atomic::Ordering::Acquire);
                     (u32::try_from(popcount).unwrap_or(u32::MAX), slot, None)
                 }
-                Err(RecoveryError::JournalScanGcGap) => {
+                Err(ZoneLoadError::JournalScanGcGap) => {
                     // Fall back to strategy 1.
                     match self
                         .strategy1_replay(bind, disk_id, zone_idx, unit_capacity)
@@ -107,7 +107,7 @@ impl RecalcEngine {
                         None => (u32::MAX, 0, Some(FallbackReason::JournalScanGcGap)),
                     }
                 }
-                Err(RecoveryError::SnapshotCrcFail) => {
+                Err(ZoneLoadError::SnapshotCrcFail) => {
                     // Fall back to strategy 1; the live bitmap is suspect.
                     match self
                         .strategy1_replay(bind, disk_id, zone_idx, unit_capacity)

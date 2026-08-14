@@ -16,8 +16,8 @@ fn test_lifecycle_transitions() {
     let state = LifecycleState::new();
     state.set(StartupPhase::Syncing);
     assert_eq!(state.get(), StartupPhase::Syncing);
-    state.set(StartupPhase::Recovering);
-    assert_eq!(state.get(), StartupPhase::Recovering);
+    state.set(StartupPhase::Loading);
+    assert_eq!(state.get(), StartupPhase::Loading);
     state.set(StartupPhase::Up);
     assert_eq!(state.get(), StartupPhase::Up);
 }
@@ -26,7 +26,7 @@ fn test_lifecycle_transitions() {
 fn test_phase_allows_mutating_rpcs() {
     assert!(!StartupPhase::Init.allows_mutating_rpcs());
     assert!(!StartupPhase::Syncing.allows_mutating_rpcs());
-    assert!(!StartupPhase::Recovering.allows_mutating_rpcs());
+    assert!(!StartupPhase::Loading.allows_mutating_rpcs());
     assert!(StartupPhase::Up.allows_mutating_rpcs());
 }
 
@@ -34,7 +34,7 @@ fn test_phase_allows_mutating_rpcs() {
 fn test_phase_as_str() {
     assert_eq!(StartupPhase::Init.as_str(), "init");
     assert_eq!(StartupPhase::Syncing.as_str(), "syncing");
-    assert_eq!(StartupPhase::Recovering.as_str(), "recovering");
+    assert_eq!(StartupPhase::Loading.as_str(), "loading");
     assert_eq!(StartupPhase::Up.as_str(), "up");
 }
 

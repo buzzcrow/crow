@@ -4,9 +4,9 @@
 //! Startup lifecycle state — lock-free phase tracking for the diskdb
 //! server.
 //!
-//! The service starts gRPC immediately (phase `Syncing`/`Recovering`)
-//! so health checks work during recovery. RPCs that mutate state are
-//! gated on phase `Up`; read-only RPCs are allowed earlier.
+//! The service starts gRPC immediately (phase `Syncing`/`Loading`)
+//! so health checks work during zone loading. RPCs that mutate state
+//! are gated on phase `Up`; read-only RPCs are allowed earlier.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -18,9 +18,9 @@ pub enum StartupPhase {
     Init = 0,
     /// Keep-alive tick running — populating in-memory state.
     Syncing = 1,
-    /// Recovery in progress — reconstructing zone bitmaps.
-    Recovering = 2,
-    /// Fully up — all disk-groups recovered, serving all RPCs.
+    /// Zone loading in progress — loading zone bitmaps from KV records.
+    Loading = 2,
+    /// Fully up — all disk-groups loaded, serving all RPCs.
     Up = 3,
 }
 
@@ -30,7 +30,7 @@ impl StartupPhase {
         match self {
             Self::Init => "init",
             Self::Syncing => "syncing",
-            Self::Recovering => "recovering",
+            Self::Loading => "loading",
             Self::Up => "up",
         }
     }
@@ -57,7 +57,7 @@ impl LifecycleState {
         match v {
             0 => StartupPhase::Init,
             1 => StartupPhase::Syncing,
-            2 => StartupPhase::Recovering,
+            2 => StartupPhase::Loading,
             _ => StartupPhase::Up,
         }
     }

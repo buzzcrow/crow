@@ -37,7 +37,7 @@ pub struct DdbDisk {
     pub effective_status: RwLock<HwStatus>,
     /// R74 per-disk hot-path counters. `None` in tests that don't
     /// track metrics; attached during `disk_add_init` and
-    /// `recover_disk_group`.
+    /// `load_disk_group`.
     pub metrics: Option<Arc<DiskMetrics>>,
 }
 

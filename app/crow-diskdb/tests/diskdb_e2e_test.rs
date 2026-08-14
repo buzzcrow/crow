@@ -808,10 +808,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
     container.set_lifecycle_phase(crow_diskdb::liveness::lifecycle::StartupPhase::Up);
     let compact_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
     let storage = crow_diskdb::ddb_config::StorageDefaults::default();
-    let recovery = Arc::new(crow_diskdb::recovery::RecoveryEngine::new(
-        Arc::clone(&compact_kv),
-        4,
-    ));
+    let recovery = Arc::new(crow_diskdb::recovery::ZoneLoader::new(Arc::clone(&compact_kv), 4));
     let recalc = Arc::new(crow_diskdb::metrics::RecalcEngine::new(
         Arc::clone(&compact_kv),
         Arc::clone(&container),

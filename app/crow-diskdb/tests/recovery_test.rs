@@ -4,9 +4,9 @@
 //! R73 recovery integration tests.
 //!
 //! Verifies that:
-//! - `RecoveryEngine::rebuild_zone_bitmap_full_scan` (strategy 1)
+//! - `ZoneLoader::rebuild_zone_bitmap_full_scan` (strategy 1)
 //!   correctly reconstructs zone bitmaps after a simulated restart.
-//! - `RecoveryEngine::recover_disk_group` (strategy 2 journal replay
+//! - `ZoneLoader::load_disk_group` (strategy 2 journal replay
 //!   with strategy 1 fallback) correctly reconstructs after restart.
 //! - `CompactionEngine::compact_zone` merges free records into a new
 //!   snapshot and deletes the free records.
@@ -25,7 +25,7 @@ use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::model::zone::DdbZone;
 use crow_diskdb::recovery::compaction::CompactionEngine;
-use crow_diskdb::recovery::RecoveryEngine;
+use crow_diskdb::recovery::ZoneLoader;
 use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -242,7 +242,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     // 5. Run strategy 1 recovery on each zone of each disk.
     let recovery_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
-    let recovery = RecoveryEngine::new(Arc::clone(&recovery_kv), 4);
+    let recovery = ZoneLoader::new(Arc::clone(&recovery_kv), 4);
 
     let disks = dg2.disks.read().unwrap().clone();
     for disk in &disks {
@@ -380,7 +380,7 @@ fn zone_from_zone_value_rejects_bad_crc() {
 }
 
 /// Strategy 2 (journal replay) recovery: allocate + free blocks, then
-/// recover via `RecoveryEngine::recover_disk_group` (which tries
+/// load via `ZoneLoader::load_disk_group` (which tries
 /// strategy 2 first, strategy 1 fallback). Verify the bitmap matches.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
@@ -453,7 +453,7 @@ async fn recovery_strategy2_journal_replay() {
     let bind2 = *dg2.bind.read().unwrap();
     assert_eq!(bind, bind2);
 
-    // 4. Recover via recover_disk_group (strategy 2 with fallback).
+    // 4. Load via load_disk_group (strategy 2 with fallback).
     let disks: Vec<(DiskId, DiskValue)> = {
         let disks_guard = dg2.disks.read().unwrap();
         disks_guard
@@ -462,9 +462,9 @@ async fn recovery_strategy2_journal_replay() {
             .collect()
     };
     let recovery_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
-    let recovery = RecoveryEngine::new(Arc::clone(&recovery_kv), 4);
+    let recovery = ZoneLoader::new(Arc::clone(&recovery_kv), 4);
     let recovered_dg = recovery
-        .recover_disk_group(DG_ID, NODE_ID, RACK_ID, bind2, &disks, 4)
+        .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind2, &disks, 4)
         .await;
 
     // 5. Verify busy segments' bits are set. With Option B (persist-
@@ -987,11 +987,11 @@ async fn recovery_persist_only_is_idempotent() {
             .collect()
     };
 
-    // 4. First recovery — recover_disk_group from KV state.
+    // 4. First load — load_disk_group from KV state.
     let recovery_kv1 = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
-    let recovery1 = RecoveryEngine::new(Arc::clone(&recovery_kv1), 4);
+    let recovery1 = ZoneLoader::new(Arc::clone(&recovery_kv1), 4);
     let dg1 = recovery1
-        .recover_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
+        .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
         .await;
 
     // 5. Collect used_count per zone per disk from first recovery.
@@ -1014,9 +1014,9 @@ async fn recovery_persist_only_is_idempotent() {
 
     // 6. Second recovery — same KV state, new recovery engine.
     let recovery_kv2 = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
-    let recovery2 = RecoveryEngine::new(Arc::clone(&recovery_kv2), 4);
+    let recovery2 = ZoneLoader::new(Arc::clone(&recovery_kv2), 4);
     let dg2 = recovery2
-        .recover_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
+        .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
         .await;
 
     // 7. Collect used_count per zone per disk from second recovery.

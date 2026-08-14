@@ -32,7 +32,7 @@ use crate::model::alloc;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::ZoneUsage;
 use crate::recovery::compaction::compact_zone;
-use crate::recovery::RecoveryEngine;
+use crate::recovery::ZoneLoader;
 use crate::scanner::ScanState;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
@@ -45,7 +45,7 @@ pub struct DiskdbService {
     container: Arc<DdbDiskGroupContainer>,
     kv: Arc<DdbKvClient>,
     storage: StorageDefaults,
-    recovery: Arc<RecoveryEngine>,
+    zone_loader: Arc<ZoneLoader>,
     recalc: Arc<RecalcEngine>,
     scan_state: ScanState,
 }
@@ -55,7 +55,7 @@ impl DiskdbService {
         container: Arc<DdbDiskGroupContainer>,
         kv: Arc<DdbKvClient>,
         storage: StorageDefaults,
-        recovery: Arc<RecoveryEngine>,
+        zone_loader: Arc<ZoneLoader>,
         recalc: Arc<RecalcEngine>,
         scan_state: ScanState,
     ) -> Self {
@@ -63,7 +63,7 @@ impl DiskdbService {
             container,
             kv,
             storage,
-            recovery,
+            zone_loader,
             recalc,
             scan_state,
         }
@@ -550,7 +550,7 @@ impl DiskdbServiceTrait for DiskdbService {
                 zone_size_units as u32
             };
             match self
-                .recovery
+                .zone_loader
                 .rebuild_zone_bitmap_full_scan(bind, disk_value_disk_id, zi, unit_capacity)
                 .await
             {

@@ -180,9 +180,9 @@ pub struct PersistenceConfig {
     /// `uncompacted_free_record_count` exceeds this (default: 4096).
     /// Cadence OR threshold — whichever fires first for a given zone.
     pub snapshot_compaction_threshold: u32,
-    /// static: max concurrent zone recoveries in `recover_node`
+    /// static: max concurrent zone loads in `load_disk_group`
     /// (default: 16).
-    pub recovery_concurrency: usize,
+    pub load_concurrency: usize,
 }
 
 impl Default for PersistenceConfig {
@@ -192,7 +192,7 @@ impl Default for PersistenceConfig {
             free_flush_max_batch: 256,
             compaction_cadence_secs: 300,
             snapshot_compaction_threshold: 4096,
-            recovery_concurrency: 16,
+            load_concurrency: 16,
         }
     }
 }
@@ -354,8 +354,8 @@ pub fn validate(config: &DdbConfig) -> Result<(), String> {
     if config.persistence.compaction_cadence_secs == 0 {
         return Err("compaction_cadence_secs must be > 0".to_string());
     }
-    if config.persistence.recovery_concurrency == 0 {
-        return Err("recovery_concurrency must be > 0".to_string());
+    if config.persistence.load_concurrency == 0 {
+        return Err("load_concurrency must be > 0".to_string());
     }
     if config.server.listen_addr.parse::<SocketAddr>().is_err() {
         return Err(format!(

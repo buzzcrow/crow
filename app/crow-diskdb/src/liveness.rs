@@ -11,8 +11,8 @@
 //!   alive, populates in-memory state, and applies status transitions.
 //! - [`status_machine`] — runtime hardware health: disk
 //!   Up→Suspect→Bad transitions with entry side-effects.
-//! - [`lifecycle`] — startup phase: Init→Syncing→Recovering→Up,
-//!   gating mutating RPCs until recovery is complete.
+//! - [`lifecycle`] — startup phase: Init→Syncing→Loading→Up,
+//!   gating mutating RPCs until zone loading is complete.
 
 pub mod keepalive;
 pub mod lifecycle;

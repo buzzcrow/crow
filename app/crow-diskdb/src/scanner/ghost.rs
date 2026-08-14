@@ -29,8 +29,8 @@ use crow_protocol::UsageBitmap;
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::zone::DdbZone;
-use crate::recovery::journal_replay::recover_zone_inner;
-use crate::recovery::{full_scan::rebuild_zone_bitmap_full_scan, RecoveryError};
+use crate::recovery::journal_replay::load_zone_inner;
+use crate::recovery::{full_scan::rebuild_zone_bitmap_full_scan, ZoneLoadError};
 use crate::scanner::FallbackReason;
 
 /// Direction of a ghost block.
@@ -152,7 +152,7 @@ async fn replay_zone(
     crate::model::records::ZoneRecords,
     Option<FallbackReason>,
 )> {
-    match recover_zone_inner(kv, bind, disk_id, zone_idx, unit_capacity).await {
+    match load_zone_inner(kv, bind, disk_id, zone_idx, unit_capacity).await {
         Ok((z, _)) => {
             let recs = kv
                 .read_zone_records(bind, &disk_id, zone_idx)
@@ -160,7 +160,7 @@ async fn replay_zone(
                 .unwrap_or_default();
             Some((z, recs, None))
         }
-        Err(RecoveryError::JournalScanGcGap) => {
+        Err(ZoneLoadError::JournalScanGcGap) => {
             let (z, _) = rebuild_zone_bitmap_full_scan(kv, bind, disk_id, zone_idx, unit_capacity)
                 .await
                 .ok()?;
@@ -170,7 +170,7 @@ async fn replay_zone(
                 .unwrap_or_default();
             Some((z, recs, Some(FallbackReason::JournalScanGcGap)))
         }
-        Err(RecoveryError::SnapshotCrcFail) => {
+        Err(ZoneLoadError::SnapshotCrcFail) => {
             let (z, _) = rebuild_zone_bitmap_full_scan(kv, bind, disk_id, zone_idx, unit_capacity)
                 .await
                 .ok()?;

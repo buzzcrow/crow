@@ -4,9 +4,9 @@
 //! HTTP health/readiness endpoint.
 //!
 //! Exposes the current `StartupPhase` (+ degraded flag) so operators
-//! and orchestrators can poll readiness during recovery. The gRPC
-//! service starts before recovery completes; this endpoint is the
-//! observable signal that recovery is done.
+//! and orchestrators can poll readiness during zone loading. The gRPC
+//! service starts before zone loading completes; this endpoint is the
+//! observable signal that loading is done.
 
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ pub fn router(container: Arc<DdbDiskGroupContainer>) -> Router {
 ///
 /// Returns `200` when `phase == "up"` (regardless of degraded — the
 /// instance is alive and serving), `503` while still recovering so
-/// load-balancer probes back off until recovery completes.
+/// load-balancer probes back off until loading completes.
 async fn ready(State(state): State<HealthState>) -> (StatusCode, Json<ReadyResponse>) {
     let phase = state.container.lifecycle_phase();
     let degraded = state.container.is_degraded();
