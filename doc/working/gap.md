@@ -13,26 +13,61 @@
 - `KeepAlive` per-disk miss tracking, Missing → Bad on consecutive
   misses, scan spawn on Bad, scan stop on Up, scan resume on startup.
 
-### Open
-1. **Recovery scan block iterator**: the scan task iterates over
-   "impacted blocks" for a Bad disk. The exact source of the block
-   list (WAL replay vs. crow-tree zone index vs. a separate manifest)
-   was not specified in the design doc. Current implementation uses a
-   placeholder iterator that yields an empty list — needs the real
-   source once the storage layer exposes it.
-2. **Scan throttle / rate limit**: the design doc mentions a
-   configurable scan rate limit (blocks/sec) to avoid saturating disk
-   I/O on the recovery path. Not yet implemented; the scan runs
-   unthrottled.
-3. **Operator override API**: the Bad → Up transition is allowed in
-   the state machine, but there is no admin RPC / CLI command to
-   actually trigger it. Needs an admin endpoint (e.g.
-   `POST /admin/disk/{id}/mark-up`).
-4. **Recovery scan progress persistence key collision**: the
-   `RecoveryScanProgressKey` uses `(disk_id)` as the key. If a disk
-   is removed and re-added with the same id, the old progress record
-   would be incorrectly resumed. Consider including a generation /
-   epoch in the key.
+### Open → Resolved / Deferred (review 2026-08-14)
+
+1. **Recovery scan block iterator** — **Resolved in code.**
+   `RecoveryScanTask::scan_zone` (`app/crow-diskdb/src/recovery/
+   disk_recovery.rs`) calls `DdbKvClient::read_zone_records`
+   (`app/crow-diskdb/src/ddb_kv_client.rs`), which does real prefix
+   scans of `BusyBlockKey` per zone (`BusyBlockKey::prefix_for_zone`)
+   and returns live `BusyBlockValue`s. The earlier "placeholder
+   iterator that yields an empty list" note was stale — the scan
+   iterates real busy blocks zone by zone, exactly as the design doc
+   specifies. The list-by-zone approach is correct; a list-by-disk
+   optimization (fewer list ops for sparse disks) is a possible future
+   follow-up, not a correctness gap.
+
+2. **Scan throttle / rate limit** — **Deferred (design decision).**
+   diskdb does not perform the recovery job itself (no `diskio`
+   service); the scan only enumerates impacted blocks. The current
+   loop lists one zone's busy blocks, processes them, then moves to
+   the next zone — naturally bounded by one list op per zone, not an
+   unthrottled hot loop. An explicit blocks/sec rate limit is deferred
+   to the future recovery process that will actually consume disk I/O.
+   No code change now; the decision is recorded here. (The "rate limit"
+   was never in the formal design doc, only in this gap note.)
+
+3. **Operator override API** — **Resolved (API exists in kv-client).**
+   `HardwareClient` in `crow-kv-client` already exposes
+   `set_disk_status(rack_id, node_id, dg_id, disk_id, status)` and
+   `set_disk_group_status(rack_id, node_id, dg_id, status)`
+   (`lib/crow-kv-client/src/hardware.rs`). The operator changes disk /
+   disk-group status directly on the sys group (group 0); diskdb
+   observes the change via the keepalive sync loop (and, when enabled,
+   the R78 watch/notify stream) and runs the unified recovery path on
+   the next `→ Up` transition. The CLI / HTTP admin surface that wraps
+   these client calls is R77's scope (`R77-diskdb-console-cli.md`
+   already references `set_disk_status` / `set_disk_group_status`).
+
+4. **Recovery scan progress persistence key collision** — **Resolved
+   for R76; broader question split to R81.**
+   `RecoveryScanProgressKey` is keyed by `DiskId`, which is a 128-bit
+   **globally unique** identifier (`common_type.proto`: "128-bit disk
+   identifier ... Globally unique"; `design-crow-kv-group0.md` §2.5;
+   `design-crow-protocol-key.md` §3.4). A disk removed and re-added
+   gets a **new** `DiskId`, so the old progress record is never
+   incorrectly resumed — at worst it is orphaned (a minor leak, not a
+   correctness collision). No epoch/generation is needed in this key.
+   The broader question — adding an epoch/generation to the reusable
+   **integer** IDs (`RackId`, `NodeId`, `DiskGroupId`, `store_id`,
+   `group_id`, `replica_id`) so a removed-and-readded entity with the
+   same integer ID can be distinguished — is a large cross-cutting
+   change (proto + key encoding + all sysdata records + all
+   consumers). It is out of R76 scope and tracked as **R81**
+   (`R81-sysdata-epoch-for-integer-ids.md`). Note: paxos groups already
+   carry a `membership_epoch` fence (`design-crow-kv-reconfiguration.md`
+   §6) for consensus safety, but that is per-group reconfiguration
+   fencing, not identity-reuse disambiguation.
 
 ## R78 (Watch/Notify Extension)
 
