@@ -749,3 +749,12 @@ impl BinaryKey for RecoveryScanProgressKey {
         Ok(Self { disk_id })
     }
 }
+
+// ── diskdb watch prefixes ───────────────────────────────────────
+
+/// Group-0 text prefixes that diskdb's `NotifyHandler` should
+/// subscribe to for keepalive-relevant sysdata changes. Each entry
+/// is the `TextKey::prefix_all()` of the corresponding key type
+/// (`OwnerMapKey`, `BindMapKey`, `DiskKey`). Update this list when a
+/// new group-0 key kind becomes keepalive-relevant for diskdb.
+pub const DISKDB_WATCH_PREFIXES: &[&[u8]] = &[b"/hw/dg_owner/", b"/hw/dg_bind/", b"/hw/disk/"];

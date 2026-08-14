@@ -76,7 +76,7 @@ pub mod key;
 pub use key::{
     BinaryKey, BindMapKey, BusyBlockKey, DiskGroupKey, DiskKey, FreeBlockKey, InstanceKey, KeyError,
     KvGroupKey, KvReplicaKey, KvStoreKey, NodeKey, OwnerMapKey, RackKey, RecoveryScanProgressKey, TextKey,
-    ZoneKey, CROW_KEY_MAGIC,
+    ZoneKey, CROW_KEY_MAGIC, DISKDB_WATCH_PREFIXES,
 };
 
 pub mod sysdata;

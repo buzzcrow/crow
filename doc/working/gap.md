@@ -108,43 +108,100 @@
   trigger to keepalive when enabled.
 - `StopHandle::notified()` helper for long-lived tasks that don't
   follow the trigger→cycle model.
+- **Resume from slot / replay — decided not to implement.** The
+  design doc mentioned an optional `from_slot` for replaying changes
+  since a given slot before live tailing. Dropped: the proto
+  `WatchSubscribe` has no `from_slot` field (key-list model only).
+  Rationale: in practice the consumer runs two channels in parallel
+  — the notify stream for low-latency push, and the keepalive timer
+  (`sync.sync_interval_secs`) as a safety-net poller that re-reads
+  the watched prefixes every cycle. The poller already converges to
+  the latest value regardless of any notify gap (reconnect, dropped
+  frame, missed emit), so a slot-based replay would only add WAL /
+  engine history-scan complexity on the server and slot-bookkeeping
+  on the client for no correctness gain. The dual-channel flow is
+  the final design, not a placeholder.
+- **diskdb prefix list centralized.** The three group-0 watch
+  prefixes (`/hw/dg_owner/`, `/hw/dg_bind/`, `/hw/disk/`) are now
+  defined as a single constant `DISKDB_WATCH_PREFIXES` in
+  `crow-protocol` (`key/diskdb.rs`), alongside the key types whose
+  `TextKey::prefix_all()` they correspond to. `NotifyHandler::run`
+  references this constant instead of a local `&[&[u8]]` literal.
+  Adding a new keepalive-relevant group-0 key kind now requires
+  updating only the constant in `crow-protocol`, not the diskdb
+  handler.
+- **Client endpoint cache proactive refresh on reconnect.** The
+  `WatchNotifyClient` reader loop now calls `topology.refresh()`
+  unconditionally at the top of every (re)connect iteration, before
+  looking up the leader endpoint — instead of only refreshing when
+  the cached leader was `None`. This avoids connecting to a stale
+  leader cached before a leader change that happened during the
+  disconnect gap: previously the client would connect to the old
+  leader, get bounced back via `not_leader_hint`, then reconnect
+  (or, if the old leader was down, get stuck in backoff retries
+  against a dead endpoint). The reactive `not_leader_hint` path is
+  kept as a fallback for leader changes that happen between the
+  refresh and the stream open.
+- **Fat notify (keys + values).** The `WatchNotify` proto now
+  carries a `repeated bytes values` field (field 5) parallel to
+  `keys`; `values[i]` is the latest value for `keys[i]` (empty
+  bytes for a Delete tombstone). `WatchRegistry::emit` extracts the
+  value from each `BatchOp` (`Op::Put(v)` → value bytes,
+  `Op::Delete` → empty) and includes it in the notify frame. The
+  client can now act on a notify without a re-read, eliminating the
+  notify-storm → re-read-storm amplification. The `keys`-only
+  contract is preserved as a subset (clients that only need
+  invalidation ignore `values`).
+- **Trie-based prefix index.** `WatchRegistry` is now backed by a
+  byte-level prefix trie (`PrefixTrie` in `watch_registry.rs`)
+  instead of a `DashMap<Vec<u8>, Vec<(u64, Watcher)>>`. `emit`
+  walks each changed key through the trie once (`O(key_len)` per
+  key), collecting watchers at every node whose prefix matches —
+  reducing the per-apply cost from `O(watchers × keys)` to
+  `O(key_len × keys)`. `subscribe`/`unsubscribe`/`remove_all` use
+  a `parking_lot::RwLock` write lock (rare; watcher setup/teardown),
+  while `emit` takes a read lock. The atomic `has_watchers` fast
+  path is unchanged. No mature crate provided the exact "find all
+  registered prefixes that are a prefix of this key" API, so a
+  ~50-line hand-rolled trie was the natural choice.
+- **Backpressure metric + critical log.** `WatchRegistry` now
+  tracks a `dropped_notifies: AtomicU64` counter. When
+  `try_send` fails with `Full`, the counter is incremented and a
+  `tracing::error!` is emitted ("critical: watch notify dropped --
+  watcher channel full, client will catch up via safety-net
+  poller"). The counter is exposed via `WatchRegistry::dropped_notifies()`
+  for future metrics wiring. The client still converges via the
+  safety-net poller, but the drop is now observable instead of
+  silent.
+- **Watch registry re-wire on group rebuild.** The learner's
+  `watch_registry` field changed from `OnceLock` to
+  `RwLock<Option<...>>` so it can be re-wired when a group is
+  rebuilt via `inherit_local_state_from` (the learner is
+  `Arc::clone`-shared across rebuilds, but the new group has a new
+  `WatchRegistry`). Without this, subscribes went to the new
+  registry while `emit` fired on the old (orphaned) registry —
+  notifies never reached the client. `inherit_local_state_from`
+  now calls `set_watch_registry` after constructing the inherited
+  replica.
+- **End-to-end watch/notify tests.** Five integration tests in
+  `tests/group_test/watch_notify_test.rs` exercise the full
+  subscribe → write → notify → client-receive loop against a live
+  gRPC bidi stream (no mocks):
+  - `watch_notify_put_receives_key_and_value` — put a key under
+    the watched prefix, assert the notify arrives with the correct
+    key and value.
+  - `watch_notify_delete_receives_key_with_empty_value` — delete
+    a key under the watched prefix, assert the notify arrives with
+    the key and an empty value (tombstone).
+  - `watch_notify_non_matching_key_no_notify` — write a key
+    outside the watched prefix, assert no notify arrives within a
+    short window.
+  - `watch_notify_batch_write_multiple_keys` — batch-write two
+    keys under the watched prefix, assert both appear in the
+    notify with their correct values.
+  - `watch_notify_follower_redirects_to_leader` — subscribe from
+    a follower, assert the follower returns an error frame with a
+    non-empty `not_leader_hint`.
 
 ### Open
-1. **Resume from slot / replay**: the design doc mentions an optional
-   `from_slot` for replaying changes since a given slot before live
-   tailing. Not implemented — the proto `WatchSubscribe` has no
-   `from_slot` field (dropped in favor of the simpler key-list
-   model). Clients rely on the safety-net poller to catch missed
-   changes during reconnect gaps.
-2. **WatchNotify carries keys, not values**: per the design doc, the
-   notify frame carries only the changed keys (deduplicated), not
-   the values. The client re-reads via the normal `Get` path. This
-   is implemented as designed, but means a notify storm followed by
-   a re-read storm can amplify read load. Consider a future "fat
-   notify" mode that includes the latest value.
-3. **Per-prefix watcher fan-out**: `WatchRegistry::emit` iterates all
-   registered prefixes for each changed key (`O(watchers × keys)` per
-   apply). For large watcher counts this could be a hot-path
-   bottleneck. A trie-based prefix index would reduce this to
-   `O(key_len × keys)`. Not urgent at current scale.
-4. **No tests for the watch/notify flow**: the implementation is
-   compile-checked and lint-clean but has no integration tests
-   exercising the subscribe → write → notify → client-receive loop.
-   Needs a testkit-based test that spins up a group, subscribes,
-   writes, and asserts the notify arrives.
-5. **diskdb prefix list is hardcoded**: `NotifyHandler` subscribes to
-   three hardcoded group-0 prefixes. If the sysdata schema adds new
-   prefixes, the handler must be updated manually. Consider deriving
-   the prefix list from the schema.
-6. **Client endpoint cache proactive refresh (item 7 of the plan)**:
-   the `WatchNotifyClient` updates the topology cache on
-   `not_leader_hint` (reactive), but there is no proactive refresh
-   on stream reconnect. The reader task calls `topology.refresh()`
-   only when the cached leader is `None`. A proactive refresh on
-   every reconnect would catch leader changes that happened while
-   the client was disconnected but before the stream error surfaced.
-7. **Backpressure on slow watchers**: `WatchRegistry::emit` uses
-   `try_send` (non-blocking). If a watcher's channel is full, the
-   notify is silently dropped. The client will catch the missed
-   change on the next safety-net poll, but there's no metric for
-   dropped notifies. Consider a `watch_notify_dropped` counter.
+(none — all R78 open items resolved)

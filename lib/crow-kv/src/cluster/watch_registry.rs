@@ -1,18 +1,18 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
-// Licensed under the Apache License, Version 2.0.
+// Licensed under the Apache License, Version  2.0.
 
 //! Per-group watch registry for the watch/notify extension. Wired
 //! into `PxLearner` via `set_watch_registry`; the learner's
 //! `apply_entry` calls `emit` after each successful engine apply,
 //! gated by `has_watchers`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use crate::kv::BatchOp;
+use crate::kv::{BatchOp, Op};
 use crate::rpc::{WatchNotify, WatchNotifyResponse};
 
 /// One watcher: an outbound channel to push notify frames.
@@ -20,19 +20,100 @@ pub struct Watcher {
     pub tx: mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>,
 }
 
+/// Byte-level prefix trie node. Each node holds the watchers
+/// registered for the prefix that ends at this node (the path from
+/// the root to this node is the prefix bytes). Children are keyed by
+/// the next byte of the key.
+struct TrieNode {
+    watchers: Vec<(u64, Watcher)>,
+    children: HashMap<u8, TrieNode>,
+}
+
+impl TrieNode {
+    fn new() -> Self {
+        Self {
+            watchers: Vec::new(),
+            children: HashMap::new(),
+        }
+    }
+}
+
+/// Prefix → (keys, values) accumulator for `emit`.
+type PrefixMap = HashMap<Vec<u8>, (Vec<Vec<u8>>, Vec<Vec<u8>>)>;
+
+/// Prefix trie: maps registered byte-prefixes to watcher lists.
+/// `emit` walks each changed key through the trie (`O(key_len)` per
+/// key), collecting watchers at every node whose prefix matches.
+/// This replaces the former `O(watchers × keys)` `DashMap` scan.
+struct PrefixTrie {
+    root: TrieNode,
+}
+
+impl PrefixTrie {
+    fn new() -> Self {
+        Self {
+            root: TrieNode::new(),
+        }
+    }
+
+    /// Walk `key` through the trie. At each node that has watchers
+    /// (including the root for the empty prefix), record `(prefix,
+    /// key, value)` into `out`. The prefix is the bytes consumed so
+    /// far on the path to that node.
+    fn collect_matches(&self, key: &[u8], value: &[u8], out: &mut PrefixMap) {
+        let mut node = &self.root;
+        if !node.watchers.is_empty() {
+            let entry = out.entry(Vec::new()).or_default();
+            entry.0.push(key.to_vec());
+            entry.1.push(value.to_vec());
+        }
+        for (i, &byte) in key.iter().enumerate() {
+            match node.children.get(&byte) {
+                Some(child) => {
+                    node = child;
+                    if !node.watchers.is_empty() {
+                        let prefix = key[..=i].to_vec();
+                        let entry = out.entry(prefix).or_default();
+                        entry.0.push(key.to_vec());
+                        entry.1.push(value.to_vec());
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Look up the watcher list for `prefix` (walk to the node at
+    /// the end of `prefix`). Returns `None` if the path doesn't
+    /// exist or has no watchers.
+    fn watchers_for(&self, prefix: &[u8]) -> Option<&[(u64, Watcher)]> {
+        let mut node = &self.root;
+        for &byte in prefix {
+            node = node.children.get(&byte)?;
+        }
+        if node.watchers.is_empty() {
+            None
+        } else {
+            Some(&node.watchers)
+        }
+    }
+}
+
 /// Per-group watch registry. Wired into `PxLearner` via
 /// `set_watch_registry`; the learner's `apply_entry` calls `emit`
 /// after each successful engine apply, gated by `has_watchers`.
 pub struct WatchRegistry {
-    /// prefix -> list of watchers. `DashMap` for concurrent subscribe/
-    /// unsubscribe/emit. Each watcher has a unique `watcher_id` so a
-    /// stream can remove its own watchers on disconnect.
-    watchers: DashMap<Vec<u8>, Vec<(u64, Watcher)>>,
+    trie: RwLock<PrefixTrie>,
     next_id: AtomicU64,
     /// Atomic fast-path flag: true iff at least one watcher is
     /// registered. The apply path checks this (one Acquire load)
-    /// before touching the `DashMap` — zero overhead when no watchers.
+    /// before touching the trie — zero overhead when no watchers.
     has_watchers: AtomicBool,
+    /// Cumulative count of notify frames dropped because a watcher's
+    /// channel was full (`try_send` failed). The client catches up
+    /// via the safety-net poller, but a non-zero value indicates the
+    /// watcher is consuming slower than the produce rate.
+    dropped_notifies: AtomicU64,
 }
 
 impl Default for WatchRegistry {
@@ -45,9 +126,10 @@ impl WatchRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            watchers: DashMap::new(),
+            trie: RwLock::new(PrefixTrie::new()),
             next_id: AtomicU64::new(1),
             has_watchers: AtomicBool::new(false),
+            dropped_notifies: AtomicU64::new(0),
         }
     }
 
@@ -59,8 +141,12 @@ impl WatchRegistry {
         tx: mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>,
     ) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut entry = self.watchers.entry(prefix.to_vec()).or_default();
-        entry.push((id, Watcher { tx }));
+        let mut trie = self.trie.write();
+        let mut node = &mut trie.root;
+        for &byte in prefix {
+            node = node.children.entry(byte).or_insert_with(TrieNode::new);
+        }
+        node.watchers.push((id, Watcher { tx }));
         self.has_watchers.store(true, Ordering::Release);
         id
     }
@@ -68,15 +154,18 @@ impl WatchRegistry {
     /// Remove a specific watcher by `(prefix, watcher_id)`. Updates
     /// `has_watchers` if the registry becomes empty.
     pub fn unsubscribe(&self, prefix: &[u8], watcher_id: u64) {
-        let mut should_check = false;
-        if let Some(mut entry) = self.watchers.get_mut(prefix) {
-            entry.retain(|(id, _)| *id != watcher_id);
-            if entry.is_empty() {
-                drop(entry);
-                self.watchers.remove(prefix);
-                should_check = true;
+        let should_check = {
+            let mut trie = self.trie.write();
+            let mut node = &mut trie.root;
+            for &byte in prefix {
+                match node.children.get_mut(&byte) {
+                    Some(child) => node = child,
+                    None => return,
+                }
             }
-        }
+            node.watchers.retain(|(id, _)| *id != watcher_id);
+            node.watchers.is_empty()
+        };
         if should_check {
             self.recompute_has_watchers();
         }
@@ -85,61 +174,62 @@ impl WatchRegistry {
     /// Remove all watchers whose `watcher_id` is in the list (stream-
     /// end cleanup). Updates `has_watchers`.
     pub fn remove_all(&self, watcher_ids: &[u64]) {
-        let id_set: HashSet<u64> = watcher_ids.iter().copied().collect();
-        let prefixes_to_remove: Vec<Vec<u8>> = self
-            .watchers
-            .iter_mut()
-            .filter_map(|mut entry| {
-                entry.retain(|(id, _)| !id_set.contains(id));
-                if entry.is_empty() {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for p in prefixes_to_remove {
-            self.watchers.remove(&p);
-        }
+        let id_set: std::collections::HashSet<u64> = watcher_ids.iter().copied().collect();
+        let mut trie = self.trie.write();
+        remove_all_from_node(&mut trie.root, &id_set);
+        drop(trie);
         self.recompute_has_watchers();
     }
 
     /// Clear all watchers (leader step-down). Drops all tx senders,
     /// closing client streams. Sets `has_watchers = false`.
     pub fn clear(&self) {
-        self.watchers.clear();
+        let mut trie = self.trie.write();
+        trie.root = TrieNode::new();
+        drop(trie);
         self.has_watchers.store(false, Ordering::Release);
     }
 
     /// For a set of changed keys (from `Batch::decode`), find matching
     /// prefixes and enqueue notify frames. Called by the coalescer or
-    /// directly (debounce=0). Non-blocking: uses `try_send`.
+    /// directly (debounce=0). Non-blocking: uses `try_send`. Each
+    /// notify frame carries both the changed keys and their latest
+    /// values (empty bytes for Delete) so the client can act without
+    /// a re-read.
     pub fn emit(&self, group_id: u64, slot: u64, changed: &[BatchOp]) {
-        // Group changed keys by matching prefix.
-        let mut prefix_keys: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+        let trie = self.trie.read();
+        // For each changed key, walk the trie and collect matching
+        // (prefix, key, value) triples.
+        let mut prefix_map: PrefixMap = HashMap::new();
         for op in changed {
-            for entry in &self.watchers {
-                let prefix = entry.key();
-                if op.key.starts_with(prefix) {
-                    prefix_keys
-                        .entry(prefix.clone())
-                        .or_default()
-                        .push(op.key.to_vec());
-                }
-            }
-        }
-        for (prefix, keys) in prefix_keys {
-            let notify = WatchNotify {
-                group_id,
-                prefix,
-                keys,
-                slot,
+            let value: &[u8] = match &op.op {
+                Op::Put(v) => v.as_ref(),
+                Op::Delete => &[],
             };
-            if let Some(entry) = self.watchers.get(&notify.prefix) {
-                for (_, watcher) in entry.iter() {
-                    let _ = watcher.tx.try_send(Ok(WatchNotifyResponse {
-                        frame: Some(crate::rpc::watch_notify_response::Frame::Notify(notify.clone())),
-                    }));
+            trie.collect_matches(&op.key, value, &mut prefix_map);
+        }
+        // Send one notify per matching prefix.
+        for (prefix, (keys, values)) in prefix_map {
+            if let Some(watchers) = trie.watchers_for(&prefix) {
+                let notify = WatchNotify {
+                    group_id,
+                    prefix,
+                    keys,
+                    slot,
+                    values,
+                };
+                for (_, watcher) in watchers {
+                    if let Err(mpsc::error::TrySendError::Full(_)) =
+                        watcher.tx.try_send(Ok(WatchNotifyResponse {
+                            frame: Some(crate::rpc::watch_notify_response::Frame::Notify(notify.clone())),
+                        }))
+                    {
+                        self.dropped_notifies.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            "critical: watch notify dropped -- watcher channel full, \
+                             client will catch up via safety-net poller"
+                        );
+                    }
                 }
             }
         }
@@ -151,10 +241,41 @@ impl WatchRegistry {
         self.has_watchers.load(Ordering::Acquire)
     }
 
-    /// Recompute `has_watchers` by scanning the `DashMap`. Called after
-    /// removals.
+    /// Cumulative count of dropped notify frames since registry
+    /// creation. Non-zero indicates a slow watcher causing backpressure.
+    #[must_use]
+    pub fn dropped_notifies(&self) -> u64 {
+        self.dropped_notifies.load(Ordering::Relaxed)
+    }
+
+    /// Recompute `has_watchers` by checking if the trie is empty.
+    /// Called after removals.
     fn recompute_has_watchers(&self) {
-        let empty = self.watchers.is_empty();
+        let empty = {
+            let trie = self.trie.read();
+            trie.root.watchers.is_empty() && trie.root.children.is_empty()
+        };
         self.has_watchers.store(!empty, Ordering::Release);
+    }
+}
+
+/// Recursively remove watchers with ids in `id_set` from `node` and
+/// its children. Prune empty child nodes after removal.
+fn remove_all_from_node(node: &mut TrieNode, id_set: &std::collections::HashSet<u64>) {
+    node.watchers.retain(|(id, _)| !id_set.contains(id));
+    let empty_children: Vec<u8> = node
+        .children
+        .iter_mut()
+        .filter_map(|(byte, child)| {
+            remove_all_from_node(child, id_set);
+            if child.watchers.is_empty() && child.children.is_empty() {
+                Some(*byte)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for byte in empty_children {
+        node.children.remove(&byte);
     }
 }

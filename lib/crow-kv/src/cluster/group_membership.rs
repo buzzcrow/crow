@@ -4,6 +4,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use tokio::time::Duration;
 use tokio_stream::StreamExt;
@@ -213,6 +214,14 @@ impl PxGroup {
             .store(prior.leader_read_ready(), Ordering::Release);
         self.group_safe_slot
             .store(prior.group_safe_slot(), Ordering::Release);
+        // Re-wire the watch registry into the inherited learner. The
+        // inherited learner is shared (Arc::clone) from the prior
+        // replica and still points at the prior group's registry; without
+        // this re-wire, subscribes go to the current group's registry
+        // but emit fires on the prior group's registry.
+        self.local_replica
+            .learner
+            .set_watch_registry(self.group_id, Arc::clone(&self.watch_registry));
     }
 
     pub fn set_next_slot(&self, next_slot: SlotIndex) {

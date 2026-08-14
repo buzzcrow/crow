@@ -317,13 +317,16 @@ message WatchUnsubscribe {
 }
 
 // Pushed from leader to watcher when a watched key changes. Carries
-// the changed keys (not values) so the watcher can re-read via the
-// normal path. slot = the apply slot of the triggering write.
+// the changed keys and their latest values so the watcher can act
+// without a re-read. `values[i]` is the value for `keys[i]`; empty
+// bytes for a Delete (tombstone). slot = the apply slot of the
+// triggering write.
 message WatchNotify {
   uint64 group_id      = 1;
   bytes  prefix        = 2;  // which watched prefix matched
   repeated bytes keys  = 3;  // changed keys (deduplicated, coalesced)
   uint64 slot          = 4;
+  repeated bytes values = 5; // latest value per key (empty = Delete)
 }
 
 message WatchNotifyError {

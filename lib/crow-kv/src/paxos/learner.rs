@@ -123,8 +123,10 @@ pub struct PxLearner {
     /// Optional per-group watch registry. Set when the group is
     /// constructed; None in tests that don't use watch/notify. The
     /// apply-path hook in `apply_entry` checks `has_watchers()`
-    /// before touching the registry.
-    watch_registry: OnceLock<(u64, Arc<crate::cluster::watch_registry::WatchRegistry>)>,
+    /// before touching the registry. Uses `RwLock` (not `OnceLock`)
+    /// because `inherit_local_state_from` shares the learner across
+    /// group rebuilds and must re-wire the current group's registry.
+    watch_registry: parking_lot::RwLock<Option<(u64, Arc<crate::cluster::watch_registry::WatchRegistry>)>>,
 }
 
 impl Default for PxLearner {
@@ -147,7 +149,7 @@ impl Default for PxLearner {
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
-            watch_registry: OnceLock::new(),
+            watch_registry: parking_lot::RwLock::new(None),
         }
     }
 }
@@ -175,7 +177,7 @@ impl PxLearner {
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
-            watch_registry: OnceLock::new(),
+            watch_registry: parking_lot::RwLock::new(None),
         }
     }
 
@@ -199,16 +201,17 @@ impl PxLearner {
         let _ = self.engine_apply.set(summary);
     }
 
-    /// Wire the per-group watch registry. Called once during
-    /// `PxGroup` construction (after the learner is created). The
-    /// apply-path hook in `apply_entry` checks `has_watchers()`
-    /// before touching the registry — zero overhead when no watchers.
+    /// Wire the per-group watch registry. Called during `PxGroup`
+    /// construction and re-wired by `inherit_local_state_from` when
+    /// the learner is shared across a group rebuild. The apply-path
+    /// hook in `apply_entry` checks `has_watchers()` before touching
+    /// the registry — zero overhead when no watchers.
     pub(crate) fn set_watch_registry(
         &self,
         group_id: u64,
         registry: Arc<crate::cluster::watch_registry::WatchRegistry>,
     ) {
-        let _ = self.watch_registry.set((group_id, registry));
+        *self.watch_registry.write() = Some((group_id, registry));
     }
 
     /// Live value and its resolved slot for `key`, or `None` if unset or
@@ -571,7 +574,8 @@ impl PxLearner {
         // Fires on ALL apply paths (learn, spawned apply, catch-up) —
         // the etcd model. Followers have empty registries (cleared on
         // step-down) so `has_watchers()` is false → zero overhead.
-        if let Some((group_id, registry)) = self.watch_registry.get() {
+        let watch = self.watch_registry.read();
+        if let Some((group_id, registry)) = watch.as_ref() {
             if registry.has_watchers() {
                 registry.emit(*group_id, slot, &batch.ops);
             }

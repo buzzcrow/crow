@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 use crate::bg_task::StopHandle;
 use crow_kv_client::WatchNotifyClient;
+use crow_protocol::DISKDB_WATCH_PREFIXES;
 
 /// Group-0 store + group ids (system group).
 const G0_STORE: u64 = 0;
@@ -38,7 +39,7 @@ impl NotifyHandler {
     /// the keepalive via `keepalive_trigger.notify_one()`. Runs until
     /// the stop signal.
     pub async fn run(self, stop: StopHandle) {
-        let prefixes: &[&[u8]] = &[b"/hw/dg_owner/", b"/hw/dg_bind/", b"/hw/disk/"];
+        let prefixes: &[&[u8]] = DISKDB_WATCH_PREFIXES;
 
         // Keep subscriptions alive for the lifetime of the handler.
         // Dropping a `WatchSubscription` aborts its reader task, so

@@ -122,3 +122,6 @@ mod coalesce;
 
 #[path = "group_test/r65_replication_test.rs"]
 mod r65_replication;
+
+#[path = "group_test/watch_notify_test.rs"]
+mod watch_notify;

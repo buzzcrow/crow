@@ -100,26 +100,24 @@ async fn reader_loop(
 ) {
     let mut backoff = Duration::from_millis(50);
     loop {
-        // Resolve the leader endpoint.
-        let endpoint = if let Some(e) = kv.topology.leader(store_id, group_id) {
-            e
-        } else {
-            if let Err(e) = kv.topology.refresh().await {
-                tracing::warn!(error = %e, "watch_notify: topology refresh failed");
-                sleep_backoff(&mut backoff).await;
-                continue;
-            }
-            if let Some(e) = kv.topology.leader(store_id, group_id) {
-                e
-            } else {
-                tracing::warn!(
-                    store_id,
-                    group_id,
-                    "watch_notify: leader still unknown after refresh"
-                );
-                sleep_backoff(&mut backoff).await;
-                continue;
-            }
+        // Proactively refresh topology on every (re)connect. A cached
+        // leader endpoint may be stale if the leader changed during the
+        // disconnect gap; refreshing first avoids connecting to the old
+        // leader and getting bounced back via not_leader_hint (or, if
+        // the old leader is down, getting stuck in backoff retries).
+        if let Err(e) = kv.topology.refresh().await {
+            tracing::warn!(error = %e, "watch_notify: topology refresh failed");
+            sleep_backoff(&mut backoff).await;
+            continue;
+        }
+        let Some(endpoint) = kv.topology.leader(store_id, group_id) else {
+            tracing::warn!(
+                store_id,
+                group_id,
+                "watch_notify: leader still unknown after refresh"
+            );
+            sleep_backoff(&mut backoff).await;
+            continue;
         };
 
         let channel = match kv.pool.get(&endpoint) {
