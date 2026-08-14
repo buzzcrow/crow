@@ -67,7 +67,12 @@
    (`R81-sysdata-epoch-for-integer-ids.md`). Note: paxos groups already
    carry a `membership_epoch` fence (`design-crow-kv-reconfiguration.md`
    §6) for consensus safety, but that is per-group reconfiguration
-   fencing, not identity-reuse disambiguation.
+   fencing, not identity-reuse disambiguation. A related placement
+   concern — a disk **moved** between nodes/disk-groups keeps its same
+   `DiskId` (UUID) but changes its bind; an epoch on `DiskValue` is
+   needed to track that placement change (stale bind/ownership +
+   orphaned recovery-scan progress on the old bind). That is also
+   tracked in **R81**.
 
 ## R78 (Watch/Notify Extension)
 

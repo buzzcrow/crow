@@ -58,21 +58,25 @@ complexity, and dependency. Before implementation, follow the
   (§3.2 — caller picks `disk_group_id`); diskdb contributes a
   `GetRebalanceHint` RPC + keepalive summary, not cross-instance
   moves. Real data relocation deferred to a future `diskio` service.
-- **[R81](R81-sysdata-epoch-for-integer-ids.md)** — sysdata
-  epoch/generation for reusable integer IDs — Area: protocol / kv /
-  diskdb / console — The cluster-topology integer IDs (`RackId`,
-  `NodeId`, `DiskGroupId`, paxos `store_id`/`group_id`/`replica_id`)
-  are reusable u64 scalars (unlike `DiskId`/`ChunkId`, which are
-  globally unique). A removed-then-readded entity with the same
-  integer ID inherits stale sysdata records, stale cross-references
-  (ownership/bind/usage maps, parent `node_ids`/`disk_group_ids`
-  lists), and stale derived state. Today mitigated only by operator
-  discipline (use a fresh ID on re-add) and `DiskId` being globally
-  unique for data-path records. Approach deferred to design:
+- **[R81](R81-sysdata-epoch-for-integer-ids.md)** — sysdata epoch for
+  ID reuse + disk placement tracking — Area: protocol / kv / diskdb /
+  console — Two identity problems need an epoch/generation: (1) the
+  cluster-topology integer IDs (`RackId`, `NodeId`, `DiskGroupId`,
+  paxos `store_id`/`group_id`/`replica_id`) are reusable u64 scalars
+  (unlike `DiskId`/`ChunkId`, which are globally unique) — a
+  removed-then-readded entity with the same integer ID inherits stale
+  sysdata records, stale cross-references (ownership/bind/usage maps,
+  parent `node_ids`/`disk_group_ids` lists), and stale derived state;
+  (2) a disk **moved** between nodes/disk-groups keeps its same
+  `DiskId` (UUID) but changes its placement/bind — an epoch on
+  `DiskValue` is needed to track the move (stale bind/ownership +
+  orphaned recovery-scan progress on the old bind). Today mitigated
+  only by operator discipline (use a fresh ID on re-add; accept
+  orphaned records on a disk move). Approach deferred to design:
   per-entity epoch field, globally-unique IDs, monotonic-never-reuse
   allocation, or cascading cleanup on removal. Split out of the R76
-  gap review (R76's `RecoveryScanProgressKey` is already safe — keyed
-  by globally-unique `DiskId`).
+  gap review (R76's `RecoveryScanProgressKey` does not collide on
+  identity reuse — keyed by globally-unique `DiskId`).
 
 - **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
   `spawn_blocking` on the durability path. The WAL's production I/O

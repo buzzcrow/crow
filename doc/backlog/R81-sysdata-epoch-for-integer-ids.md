@@ -1,15 +1,27 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R81: sysdata — Epoch/Generation for Reusable Integer IDs
+### R81: sysdata — Epoch for ID Reuse + Disk Placement Tracking
 
-**Problem**: The cluster-topology integer IDs — `RackId`, `NodeId`,
-`DiskGroupId` (u64), and the paxos `store_id`, `group_id`,
-`replica_id` (u64) — are reusable. They are not globally unique like
-`DiskId` (128-bit) or `ChunkId` (192-bit). When an entity is removed
-and a new entity is later created with the same integer ID, stale
-sysdata records, stale cross-references, and stale derived state can
-be incorrectly associated with the new entity.
+**Problem**: Two distinct identity problems need an epoch/generation:
+
+1. **Reusable integer IDs** — the cluster-topology integer IDs
+   (`RackId`, `NodeId`, `DiskGroupId`, paxos `store_id`/`group_id`/
+   `replica_id`, all u64) are reusable. They are not globally unique
+   like `DiskId` (128-bit) or `ChunkId` (192-bit). When an entity is
+   removed and a new entity is later created with the same integer ID,
+   stale sysdata records, stale cross-references, and stale derived
+   state can be incorrectly associated with the new entity.
+2. **Disk placement change (move) with a stable UUID** — a physical
+   disk keeps its globally-unique `DiskId` (UUID) when it is moved
+   from one node/disk-group to another (e.g. a disk physically
+   relocated, or reassigned to a different disk-group). The `DiskId`
+   does not change, but its *placement* (which `rack_id`/`node_id`/
+   `disk_group_id` it lives under, and which paxos group its zone
+   records are bound to) does. An epoch/generation on the disk record
+   is needed to track that the placement changed, so consumers can
+   detect a stale bind/ownership entry and a stale recovery-scan
+   progress record left on the old bind's paxos group.
 
 - **`DiskGroupId` reuse on a re-added node** — `NodeValue` carries
   `last_used_dg_id` (`common_type.proto`), so dg IDs are monotonically
@@ -39,23 +51,37 @@ be incorrectly associated with the new entity.
   epoch reset to 0 is not distinguished from the old group's
   pre-first-reconfiguration state).
 - **diskdb derived state** — diskdb keys zone/busy/free/recovery-scan
-  records by globally-unique `DiskId`, so those are safe (R76 gap
-  review confirmed `RecoveryScanProgressKey` does not collide). The
-  reuse risk is on the group-0 sysdata side: ownership/bind/usage
-  records keyed by `(rack_id, node_id, dg_id)`.
+  records by globally-unique `DiskId`, so those do not collide on
+  *identity reuse* (R76 gap review confirmed `RecoveryScanProgressKey`
+  is safe). The reuse risk is on the group-0 sysdata side:
+  ownership/bind/usage records keyed by `(rack_id, node_id, dg_id)`.
+  A separate risk — *disk placement change* — applies even to the
+  `DiskId`-keyed records: when a disk is moved between nodes/disk-
+  groups keeping its UUID, its bind (which paxos group holds its zone
+  records) changes, and the `RecoveryScanProgressKey { disk_id }`
+  record left on the old bind's group is orphaned (the scan resumes
+  fresh on the new bind — a minor leak, not a correctness collision,
+  but consumers cannot tell the disk's placement changed without an
+  epoch).
 
 **Current behavior + impact**: nothing distinguishes a re-added entity
-from the original. Removal is by record deletion
+from the original, and nothing records that a disk's placement changed
+on a move. Removal is by record deletion
 (`HardwareClient::remove_rack` / `remove_node` / `remove_disk_group` /
 `remove_disk`), which deletes the primary record but does **not**
 cascade-delete derived/cross-referenced records (ownership map, bind
 map, usage summaries, membership in parent `node_ids`/`disk_group_ids`
 lists). If the operator re-creates an entity with the same integer ID
 without manually cleaning up every derived record, the new entity
-inherits stale state. Today this is mitigated only by operator
-discipline (use a new integer ID on re-add) and by `DiskId`/`ChunkId`
-being globally unique for the data-path records. Root cause: integer
-IDs are bare scalars with no generation, and cleanup is not cascading.
+inherits stale state. A disk move (same `DiskId`, new
+`rack_id`/`node_id`/`disk_group_id`) rewrites the `DiskKey` path but
+leaves the old bind's zone/busy/free/recovery-scan records in place
+with no marker that the placement changed. Today this is mitigated
+only by operator discipline (use a new integer ID on re-add; on a disk
+move, accept orphaned records on the old bind) and by `DiskId`/
+`ChunkId` being globally unique for the data-path records. Root cause:
+integer IDs are bare scalars with no generation, disk records carry no
+placement epoch, and cleanup is not cascading.
 
 **Design pointers**: `design-crow-kv-group0.md` §2.5 (ID types —
 `DiskId` 128-bit globally unique; `RackId`/`NodeId`/`DiskGroupId` are
@@ -87,16 +113,30 @@ aioss analog — aioss uses string node/rack identifiers.
 - **Operator uses a fresh integer ID on re-add (current mitigation)** —
   operator re-adds the node as node_id 3 instead of 2. No collision.
   This is the only safe path today; it is manual and error-prone.
+- **Disk moved between nodes keeping its UUID** — a physical disk
+  (DiskId `D`) is moved from node 2/disk-group 1 to node 5/disk-group
+  1 (or to a different disk-group). `DiskId` stays `D`; the
+  `DiskKey` path changes (`/hw/disk/.../2/1/<D>` →
+  `/hw/disk/.../5/1/<D>`); the bind (which paxos group holds its zone
+  records) may change. Without a placement epoch, a consumer that
+  cached the old placement cannot tell the move happened: it may read
+  zone records from the old bind (stale) or resume a recovery scan
+  from a progress record on the old bind. An epoch on the disk record
+  (bumped on move) lets consumers detect the placement change and
+  re-bind.
 
 **Solution**: **No clear solution yet — deferred to design.** The
-fix is to make entity identity reuse-safe. Candidate directions (to be
-evaluated in the design draft):
+fix is to make entity identity reuse-safe *and* to track disk
+placement changes. Candidate directions (to be evaluated in the
+design draft):
 
 - **(A) Per-entity epoch/generation field** — add `epoch` (or
-  `generation`) to `RackValue`, `NodeValue`, `DiskGroupValue`, and the
-  paxos group identity. Bumped on re-create. Consumers compare
+  `generation`) to `RackValue`, `NodeValue`, `DiskGroupValue`,
+  `DiskValue`, and the paxos group identity. Bumped on re-create
+  (integer IDs) and on disk move (`DiskValue`). Consumers compare
   `(id, epoch)`, not `id` alone. Smaller proto change; touches all
-  consumers that key by these IDs.
+  consumers that key by these IDs. The disk-move case bumps
+  `DiskValue.epoch` when the `DiskKey` path (placement) changes.
 - **(B) Make all IDs globally unique** — widen `RackId`/`NodeId`/
   `DiskGroupId`/`store_id`/`group_id`/`replica_id` to 128-bit
   UUID-like values (like `DiskId`/`ChunkId`). Largest change: key
@@ -122,7 +162,8 @@ goal. Approach-dependent acceptance bullets below are marked
 
 **One-line summary**: deferred to design — pick a mechanism (per-entity
 epoch, globally-unique IDs, monotonic-never-reuse, or cascading
-cleanup) to make reusable integer IDs reuse-safe.
+cleanup) to make reusable integer IDs reuse-safe and to track disk
+placement changes on move.
 
 **Edge cases at a glance**:
 - Re-add with same ID before stale records propagate → collision; the
@@ -132,8 +173,10 @@ cleanup) to make reusable integer IDs reuse-safe.
 - paxos group at same (store, group) with `membership_epoch` reset →
   consensus-fence does not cover identity reuse; needs separate
   treatment.
-- `DiskId`/`ChunkId` already globally unique → out of scope, no
-  change needed for data-path records.
+- Disk move (same `DiskId`, new placement) → no identity collision
+  (UUID is stable), but placement/bind changed; needs a placement
+  epoch so consumers re-bind and do not read the old bind's records.
+- `ChunkId` already globally unique and never moved → out of scope.
 
 **Dependencies**: none on unlanded extensions. Touches
 `crow-protocol` (proto + key encoding if B), `crow-kv-client`
