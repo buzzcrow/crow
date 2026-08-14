@@ -30,3 +30,67 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - The existing `chunkdb_type.proto` has no `ChunkType` enum. R85 adds it per design §5.5.
 - Added `ChunkType` enum (Repo=0, WAL=1, BTreePage=2, PageIndex=3, reserved 4-255) and `ChunkType chunk_type` field to `Chunk`.
 - Also added `CHUNK_STATE_INIT = 0` per design §9, renumbering `ChunkState` values (ACTIVE=1, SEALED=2, DELETED=3). No existing code uses these enum values yet.
+
+---
+
+## R87: placement and allocation
+
+### GAP-4: DiskdbClientPool endpoint routing — v1 uses broadcast free
+
+- The `DiskdbClientPool.free_blocks` implementation in v1 tries freeing via all known channels (broadcast), rather than precisely routing each segment to its owning diskdb instance via `disk_id → disk_group_id` mapping.
+- **Reason**: the `Segment` proto has `disk_id` but not `disk_group_id`; mapping `disk_id → disk_group_id` requires a reverse lookup that is not yet available in the topology cache.
+- **Impact**: in a multi-diskdb-instance cluster, free calls may be rejected by non-owning instances (logged as warnings). The owning instance accepts the free. This is functionally correct but generates noise.
+- **Action needed**: add `disk_id → disk_group_id` reverse mapping to the topology cache (R86) or the diskdb client pool, then route free calls precisely.
+
+### GAP-5: ChunkAllocator does not verify segment count per diskdb response
+
+- The `allocate_blocks_parallel` method checks the total segment count across all responses, but does not verify that each individual diskdb response returned the requested number of segments.
+- **Reason**: the diskdb `AllocateBlocks` RPC may return fewer segments than requested if the disk-group is near-full. The current code treats total count mismatch as a failure (rollback), which is correct, but a partial response from one diskdb instance could be masked by a full response from another.
+- **Impact**: low — the total count check catches the mismatch. A more precise per-instance check would provide better error messages.
+- **Action needed**: add per-instance segment count verification in `allocate_blocks_parallel`.
+
+---
+
+## R88: storage and routing
+
+### GAP-6: put_chunk_if_absent is not atomic (check-then-write)
+
+- The KV client API does not expose a CAS/put-if-absent operation. `put_chunk_if_absent` is implemented as a `get` + `put` sequence (check-then-write).
+- **Impact**: in theory, two concurrent allocations with the same chunk ID could both pass the `get` check and both `put`, with the second overwriting the first. In practice, chunk ID collisions are vanishingly rare (88 random bits), so this is not a real concern.
+- **Action needed**: if strict atomicity is required, add a CAS/put-if-absent RPC to the KV service and use it here. Otherwise, document the check-then-write semantics as sufficient for v1.
+
+### GAP-7: Binding table loaded from group-0 not implemented
+
+- The `BindingCache` is populated with a `default_binding_table(0, 0)` in `main.rs` — all buckets route to store 0, group 0.
+- The full implementation should fetch the binding table from group-0 via `KVClusterMetaClient` on startup, and watch/notify for updates.
+- **Reason**: the binding table schema in group-0 is not yet defined in the proto. The `KVClusterMetaClient` API does not have binding-table-specific methods.
+- **Impact**: chunkdb works for single-KV-group deployments. Multi-group routing + migration requires the binding table to be loaded from group-0.
+- **Action needed**: define the binding table proto schema, add `KVClusterMetaClient` methods for reading/writing binding table entries, and wire the watch/notify in `main.rs`.
+
+---
+
+## R89: lifecycle management
+
+### GAP-8: No CAS on state transitions (concurrent seal/delete)
+
+- The lifecycle handler reads the chunk, validates the state transition, and writes it back. There is no compare-and-swap on the `state` field — two concurrent transitions could both read `Active`, both validate, and both write (last-writer-wins).
+- **Reason**: the KV client API does not expose CAS. The design §9 specifies "KV CAS on state" but the KV service does not have a CAS RPC.
+- **Impact**: in a concurrent seal+delete scenario, both could succeed (one overwrites the other). The design specifies one should win and the other get `StateConflict`.
+- **Action needed**: add a CAS RPC to the KV service (compare revision or compare state), or use a distributed lock. For v1, the low concurrency of lifecycle operations makes this acceptable.
+
+### GAP-9: DeleteChunk is idempotent (design decision)
+
+- Per R89 Open Questions, `DeleteChunk` on an already-deleted chunk returns the existing `Deleted` chunk (idempotent), matching aioss.
+- **Decision taken**: implemented as idempotent — if the chunk is already `Deleted`, return it without error.
+- **Action needed**: none — this is a conscious design decision.
+
+---
+
+## R91: E2E tests
+
+### GAP-10: Full-stack E2E tests require crow-kv-server binary
+
+- The E2E tests in `e2e_test.rs` use mock components (in-memory topology, no real KV/diskdb). Full-stack E2E tests that start a real KV cluster + diskdb + chunkdb in-process (following the diskdb E2E pattern) are not yet implemented.
+- **Reason**: the full-stack harness requires the `crow-kv-server` binary to be built and the `KvCluster` test helper to be adapted for chunkdb. This is a significant integration effort.
+- **Impact**: component-level integration is tested, but cross-component integration (e.g. topology cache feeding stale data to placement, routing sending writes to the wrong KV group during migration) is not verified.
+- **Action needed**: implement the full-stack E2E harness (`ChunkdbCluster` helper) following the diskdb pattern, with real KV + diskdb + chunkdb in-process.
