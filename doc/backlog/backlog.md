@@ -11,10 +11,26 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R85** — Bump this line in the same commit when adding a new item.
+**Next R number: R100** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R85](R85-chunkdb-foundation.md)** — chunkdb project foundation — Area: chunkdb — Design document, protocol definitions, EC wrapper module in crow-common, basic server/client skeleton, build configuration.
+- **[R86](R86-chunkdb-topology.md)** — chunkdb topology management — Area: chunkdb — Topology cache with group-0 integration, periodic refresh, watch/notify for real-time status changes.
+- **[R87](R87-chunkdb-placement-allocation.md)** — chunkdb placement and allocation — Area: chunkdb — Rack/node-aware placement selector (mirror distinct racks, EC rack-aware), chunk allocator with diskdb integration, parallel allocation with rollback.
+- **[R88](R88-chunkdb-storage-routing.md)** — chunkdb storage and routing — Area: chunkdb — Logical hash bucket system (chunk ID → bucket → KV group), group-0 binding table, KV persistence, migration handling with dual-write strategy.
+- **[R89](R89-chunkdb-lifecycle.md)** — chunkdb lifecycle management — Area: chunkdb — Chunk lifecycle handlers (allocate/seal/delete), state machine (Init → Active → Sealed → Deleted), validation and concurrent access protection.
+- **[R90](R90-chunkdb-client.md)** — chunkdb client library — Area: chunkdb — ChunkdbClient with retry logic, connection pooling, error handling following crow-diskdb-client pattern.
+- **[R91](R91-chunkdb-e2e-tests.md)** — chunkdb E2E tests — Area: chunkdb — Full stack integration tests (kv-server + diskdb-server + chunkdb-server), topology/placement/allocation/lifecycle/migration scenarios.
+- **[R99](R99-kv-dynamic-range-binding-framework.md)** — kv dynamic
+  range binding framework + chunkdb instance sharding — Area: kv /
+  chunkdb / diskdb — Shard chunkdb instances by chunk hash range
+  (group-0 binding table, `NotMyRange` reject-and-retry, dynamic
+  binding monitor for instance join/leave). Common framework reusable
+  by diskdb disk-group → paxos group rebinding (replacing the
+  operator-manual `BindMapValue` write). Open questions: common
+  framework vs separate implementations, library location, range
+  assignment algorithm.
 - **[R77](R77-diskdb-console-cli.md)** — diskdb console + CLI
   integration — Area: diskdb / console — `/api/diskdb` REST proxy +
   `crow diskdb` CLI subcommands for runtime queries (usage/zones/scan/
@@ -73,7 +89,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### Medium Priority
 
-**Complexity — Medium:**
 - **[R83](R83-chunkdb-complete-recovery-flow.md)** — chunkdb
   complete recovery flow (real data recovery + speed control) —
   Area: chunkdb / diskdb / diskio — diskdb's recovery is disk-layer
