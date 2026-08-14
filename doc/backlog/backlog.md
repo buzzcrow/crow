@@ -41,34 +41,6 @@ complexity, and dependency. Before implementation, follow the
   (§3.2 — caller picks `disk_group_id`); diskdb contributes a
   `GetRebalanceHint` RPC + keepalive summary, not cross-instance
   moves. Real data relocation deferred to a future `diskio` service.
-- **[R81](R81-sysdata-id-reuse-safety-and-disk-move.md)** — sysdata ID reuse
-  safety + disk move — Area: kv / diskdb / console — Two problems,
-  both solvable without an epoch/generation field: (1) reusable
-  integer IDs (`RackId`, `NodeId`, `DiskGroupId`, paxos
-  `store_id`/`group_id`/`replica_id`) — a removed-then-readded entity
-  with the same integer ID inherits stale on-disk state (WAL, engine),
-  stale node config, stale group 0 sysdata, and stale client caches;
-  codebase-verified analysis shows no consumer caches by bare rack /
-  node / dg / disk / replica ID across the reuse window (all re-read
-  each sync cycle), so cleanup alone is sufficient for those — only
-  `store_id`/`group_id` has long-lived client caches
-  (`TopologyCache` + `write_slot_highwater`, renamed from
-  `write_watermark`) that need eviction; (2) disk
-  move with stable `DiskId` (UUID) to a new node/disk-group without
-  triggering a full recovery scan — the key insight is that
-  zone/busy/free records are keyed only by `DiskId` (globally unique),
-  not by disk-group or paxos group, so copying them between paxos
-  groups is a literal key-value copy (no transformation); during the
-  move (disk in `Maintenance`, no concurrent writes), batch-copy the
-  disk's records from the old disk-group's bind to the new
-  disk-group's bind, then update group 0 placement — after the copy
-  the disk fully belongs to the new disk-group (no per-disk bind, no
-  split records, multi-block allocate works normally); add inline zone
-  load to `disk_add_init` when existing zone snapshots are detected
-  (today it skips the baseline write but leaves zone usage empty — an
-  existing gap also affecting mid-running disk-group reassignment). No
-  epoch on any sysdata record; no proto/key encoding changes. Split
-  out of the disk failure detection + recovery scan gap review.
 - **[R82](R82-kv-watch-notify-coalescing.md)** — watch/notify
   coalescing (debounce) — Area: kv / diskdb — the watch/notify
   extension ships without coalescing: one notify per changed key per
