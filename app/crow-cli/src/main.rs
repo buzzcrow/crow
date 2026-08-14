@@ -22,12 +22,12 @@ use crow_protocol::WEB_BASE;
 
 use commands::{
     run_bench_verb, run_cluster_init, run_cluster_inspect, run_cluster_status, run_cluster_topology,
-    run_disk_group_verb, run_disk_verb, run_group_verb, run_kv_verb, run_node_verb, run_rack_verb,
-    run_replica_verb, run_server_verb, run_store_verb,
+    run_disk_group_verb, run_disk_verb, run_diskdb_verb, run_group_verb, run_kv_verb, run_node_verb,
+    run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
 };
 use commands::{
-    BenchArgs, ClusterVerb, DiskGroupVerb, DiskVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb,
-    ServerVerb, StoreVerb,
+    BenchArgs, ClusterVerb, DiskGroupVerb, DiskVerb, DiskdbVerb, GroupVerb, KvVerb, NodeVerb, RackVerb,
+    ReplicaVerb, ServerVerb, StoreVerb,
 };
 
 #[derive(Parser, Debug)]
@@ -105,6 +105,11 @@ enum Group {
         #[command(subcommand)]
         verb: DiskVerb,
     },
+    /// Diskdb runtime management (R77).
+    Diskdb {
+        #[command(subcommand)]
+        verb: DiskdbVerb,
+    },
     /// Data-plane KV operations.
     Kv {
         #[command(subcommand)]
@@ -161,6 +166,7 @@ async fn dispatch(mut cli: Cli) -> ExitCode {
         Group::Replica { verb } => run_replica_verb(&cli, verb).await,
         Group::DiskGroup { verb } => run_disk_group_verb(&cli, verb).await,
         Group::Disk { verb } => run_disk_verb(&cli, verb).await,
+        Group::Diskdb { verb } => run_diskdb_verb(&cli, verb).await,
         Group::Kv { verb } => run_kv_verb(&cli, verb).await,
         Group::Bench { bench } => run_bench_verb(&cli, bench).await,
     }

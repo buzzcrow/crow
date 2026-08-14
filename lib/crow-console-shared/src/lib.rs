@@ -16,6 +16,7 @@ pub mod clients;
 pub mod cluster;
 pub mod config;
 pub mod corr_id;
+pub mod diskdb;
 pub mod error;
 pub mod expand;
 pub mod lifecycle;

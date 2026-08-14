@@ -657,7 +657,7 @@ impl ConsoleClient {
     // wraps the call (web handler / CLI main), otherwise we generate
     // one inline so unit tests still produce well-formed log records.
 
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
@@ -690,7 +690,7 @@ impl ConsoleClient {
         self.decode(resp, path).await
     }
 
-    async fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(
+    pub(crate) async fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
@@ -761,6 +761,46 @@ impl ConsoleClient {
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(self.rpc_err(format!("DELETE {path}: HTTP {status}: {body}")));
+        }
+        Ok(())
+    }
+
+    /// PUT a JSON body and discard the response body (for 204
+    /// responses). Used by `PUT /api/disks/:id/status`.
+    pub(crate) async fn put_json_no_response<B: Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let url = format!("{}{path}", self.base_url);
+        let cid = crate::corr_id::current_or_new();
+        let started = std::time::Instant::now();
+        let resp = self
+            .inner
+            .put(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "PUT",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("PUT {path}: {e}"))
+            })?;
+        let status = resp.status();
+        crate::ops_log::append_http(
+            &cid,
+            "PUT",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(self.rpc_err(format!("PUT {path}: HTTP {status}: {body}")));
         }
         Ok(())
     }
