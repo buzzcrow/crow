@@ -5,7 +5,8 @@
 //! `crow-kv-server`'s HTTP management API (`GET /topology`). There is no gRPC
 //! `DescribeCluster` RPC — this is the only discovery mechanism.
 
-use std::sync::RwLock;
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -14,6 +15,11 @@ use tokio::sync::Mutex as AsyncMutex;
 use crow_protocol::mgmt::TopologyResponse;
 
 use crate::error::{Error, Result};
+
+/// Eviction hook: called with the set of `(store_id, group_id)` keys
+/// that disappeared from the fresh `/topology` body. Used by
+/// `CrowkvClient` to evict stale `write_slot_highwater` entries.
+pub type EvictionHook = Arc<dyn Fn(&HashSet<(u64, u64)>) + Send + Sync>;
 
 pub struct TopologyCache {
     seeds: RwLock<Vec<String>>,
@@ -32,11 +38,25 @@ pub struct TopologyCache {
     /// callers queue on this lock rather than each issuing their own HTTP
     /// request (: "not a storm").
     refresh_gate: AsyncMutex<Instant>,
+    /// Optional eviction hook called with groups that disappeared from
+    /// a fresh `/topology` body. Set by `CrowkvClient::new` to evict
+    /// stale `write_slot_highwater` entries.
+    eviction_hook: Option<EvictionHook>,
 }
 
 impl TopologyCache {
     #[must_use]
+    #[cfg(test)]
     pub fn new(seeds: Vec<String>, min_refresh_interval: Duration) -> Self {
+        Self::with_eviction_hook(seeds, min_refresh_interval, None)
+    }
+
+    #[must_use]
+    pub fn with_eviction_hook(
+        seeds: Vec<String>,
+        min_refresh_interval: Duration,
+        eviction_hook: Option<EvictionHook>,
+    ) -> Self {
         Self {
             seeds: RwLock::new(seeds),
             http: reqwest::Client::new(),
@@ -49,6 +69,7 @@ impl TopologyCache {
                     .checked_sub(Duration::from_secs(3600))
                     .unwrap_or_else(Instant::now),
             ),
+            eviction_hook,
         }
     }
 
@@ -56,6 +77,18 @@ impl TopologyCache {
     #[must_use]
     pub fn leader(&self, store_id: u64, group_id: u64) -> Option<String> {
         self.leaders.get(&(store_id, group_id)).map(|v| v.clone())
+    }
+
+    /// Test-only: get the current seed list.
+    #[cfg(test)]
+    pub fn seeds_for_test(&self) -> Vec<String> {
+        self.seeds.read().unwrap().clone()
+    }
+
+    /// Test-only: replace the seed list.
+    #[cfg(test)]
+    pub fn set_seeds_for_test(&self, seeds: Vec<String>) {
+        *self.seeds.write().unwrap() = seeds;
     }
 
     /// Cached full replica endpoint list for a group (local + remotes),
@@ -123,6 +156,15 @@ impl TopologyCache {
     }
 
     fn merge(&self, body: TopologyResponse) {
+        // Collect the set of (store_id, group_id) present in the fresh
+        // body so we can evict stale entries after the insert loop.
+        let mut fresh_keys: HashSet<(u64, u64)> = HashSet::new();
+        for store in &body.stores {
+            for group in &store.groups {
+                fresh_keys.insert((store.store_id, group.group_id));
+            }
+        }
+
         for store in body.stores {
             // `listen_addr` is the local replica's gRPC endpoint; it is
             // `None` only for a server that hasn't bound its listener yet,
@@ -159,6 +201,35 @@ impl TopologyCache {
                     self.replicas.insert((store.store_id, group.group_id), replicas);
                 }
             }
+        }
+
+        // Evict stale entries: groups present in the cache but absent
+        // from the fresh body. A removed group's stale leader endpoint
+        // self-heals via `NotLeaderHint`, but evicting keeps the cache
+        // clean. The eviction hook lets `CrowkvClient` evict stale
+        // `write_slot_highwater` entries — a stale `min_slot`
+        // high-watermark does NOT self-heal (silent empty reads forever).
+        let evicted: Vec<(u64, u64)> = self
+            .leaders
+            .iter()
+            .filter_map(|e| {
+                if fresh_keys.contains(e.key()) {
+                    None
+                } else {
+                    Some(*e.key())
+                }
+            })
+            .collect();
+        if evicted.is_empty() {
+            return;
+        }
+        let evicted_set: HashSet<(u64, u64)> = evicted.iter().copied().collect();
+        for key in &evicted {
+            self.leaders.remove(key);
+            self.replicas.remove(key);
+        }
+        if let Some(hook) = &self.eviction_hook {
+            hook(&evicted_set);
         }
     }
 }
@@ -255,5 +326,108 @@ mod tests {
         let cache = TopologyCache::new(vec!["http://unused:1".to_string()], Duration::from_secs(60));
         cache.set_leader(3, 9, "http://leader:8080".to_string());
         assert_eq!(cache.leader(3, 9), Some("http://leader:8080".to_string()));
+    }
+
+    /// Build a topology body with multiple groups in one store.
+    fn multi_group_topology(store_id: u64, group_ids: &[u64], leader_endpoint: &str) -> serde_json::Value {
+        let groups: Vec<serde_json::Value> = group_ids
+            .iter()
+            .map(|gid| {
+                serde_json::json!({
+                    "group_id": gid,
+                    "leader_id": 1,
+                    "local_replica_id": 1,
+                    "force_classic": false,
+                    "status": "ok",
+                    "local_replica": {
+                        "id": 1,
+                        "role": "leader",
+                        "voting": true,
+                        "status": "ok",
+                        "kv_store": { "key_count": 0, "engine_healthy": true }
+                    },
+                    "remotes": []
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "stores": [{
+                "store_id": store_id,
+                "listen_addr": leader_endpoint,
+                "status": "ok",
+                "groups": groups
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn merge_evicts_groups_absent_from_fresh_body() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        // First server: 3 groups (1, 2, 3).
+        let seed_full = spawn_topology_server(
+            multi_group_topology(1, &[1, 2, 3], "http://10.0.0.1:9001"),
+            counter.clone(),
+        )
+        .await;
+        // Second server: 2 groups (1, 2) — group 3 is gone.
+        let seed_partial =
+            spawn_topology_server(multi_group_topology(1, &[1, 2], "http://10.0.0.1:9001"), counter).await;
+
+        let cache = TopologyCache::new(vec![seed_full], Duration::from_millis(50));
+        cache.refresh().await.unwrap();
+        assert_eq!(cache.leader(1, 1), Some("http://10.0.0.1:9001".to_string()));
+        assert_eq!(cache.leader(1, 2), Some("http://10.0.0.1:9001".to_string()));
+        assert_eq!(cache.leader(1, 3), Some("http://10.0.0.1:9001".to_string()));
+
+        // Swap the seed to the partial server and wait past the refresh
+        // interval so the next refresh fetches from it.
+        {
+            let mut seeds = cache.seeds_for_test();
+            seeds[0] = seed_partial.clone();
+            cache.set_seeds_for_test(seeds);
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        cache.refresh().await.unwrap();
+
+        // Groups 1 and 2 survive; group 3 is evicted.
+        assert_eq!(cache.leader(1, 1), Some("http://10.0.0.1:9001".to_string()));
+        assert_eq!(cache.leader(1, 2), Some("http://10.0.0.1:9001".to_string()));
+        assert_eq!(cache.leader(1, 3), None);
+    }
+
+    #[tokio::test]
+    async fn merge_eviction_hook_fires_for_evicted_groups() {
+        let evicted: Arc<std::sync::Mutex<HashSet<(u64, u64)>>> =
+            Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let evicted_clone = Arc::clone(&evicted);
+        let hook: EvictionHook = Arc::new(move |keys| {
+            let mut guard = evicted_clone.lock().unwrap();
+            guard.extend(keys.iter().copied());
+        });
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let seed_full = spawn_topology_server(
+            multi_group_topology(1, &[1, 2, 3], "http://10.0.0.1:9001"),
+            counter.clone(),
+        )
+        .await;
+        let seed_partial =
+            spawn_topology_server(multi_group_topology(1, &[1, 2], "http://10.0.0.1:9001"), counter).await;
+
+        let cache = TopologyCache::with_eviction_hook(vec![seed_full], Duration::from_millis(50), Some(hook));
+        cache.refresh().await.unwrap();
+        assert!(evicted.lock().unwrap().is_empty());
+
+        {
+            let mut seeds = cache.seeds_for_test();
+            seeds[0] = seed_partial.clone();
+            cache.set_seeds_for_test(seeds);
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        cache.refresh().await.unwrap();
+
+        let evicted_guard = evicted.lock().unwrap();
+        assert_eq!(evicted_guard.len(), 1);
+        assert!(evicted_guard.contains(&(1, 3)));
     }
 }

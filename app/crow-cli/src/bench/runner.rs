@@ -99,7 +99,7 @@ pub(crate) struct BenchConfig {
     /// values before warmup begins. `None` or `0` disables. Default
     /// 200,000. Not measured (excluded from latency/TPS); reported
     /// separately as `pre_pop_ms` / `pre_pop_errors`. Also establishes
-    /// the client's `write_watermark` so `MinSlot` reads with
+    /// the client's `write_slot_highwater` so `MinSlot` reads with
     /// `min_slot = auto` carry it.
     pub(crate) pre_populate: Option<u64>,
     /// Number of random bytes to spot-check per `Found` read against
@@ -238,7 +238,7 @@ pub(crate) async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::pat
     // with deterministic values before the measurement window begins.
     // Not measured (excluded from latency/TPS); reported separately as
     // `pre_pop_ms` / `pre_pop_errors`. Also establishes the client's
-    // `write_watermark` so `MinSlot` reads with `min_slot = auto`
+    // `write_slot_highwater` so `MinSlot` reads with `min_slot = auto`
     // carry it. Retries on `NotLeader` (the client follows the hint
     // internally, so a plain `put` retry loop suffices).
     let (pre_pop_ms, pre_pop_errors) = match cfg.pre_populate {

@@ -169,10 +169,13 @@ pub struct CrowkvClient {
     next_seq: AtomicU64,
     pub(crate) metrics: Arc<ClientMetrics>,
     /// Per-`(store_id, group_id)` high-watermark of the last write's
-    /// `revision`, auto-attached as `min_slot` on `MinSlot` reads.
+    /// paxos slot, auto-attached as `min_slot` on `MinSlot` reads.
     /// Bounded by the number of groups this client has written to, not by
-    /// keyspace size.
-    write_watermark: DashMap<(u64, u64), u64>,
+    /// keyspace size. Evicted when a group disappears from the topology
+    /// (via `TopologyCache`'s eviction hook) — a stale `min_slot`
+    /// high-watermark does not self-heal and causes silent empty reads
+    /// on a reused group ID.
+    write_slot_highwater: Arc<DashMap<(u64, u64), u64>>,
     /// `MinSlot` read-endpoint selection policy. `Leader` (default)
     /// preserves the pre-R26 behavior; `AnyReplica` distributes `MinSlot`
     /// reads round-robin across the topology cache's replica list.
@@ -195,14 +198,29 @@ pub struct CrowkvClient {
 impl CrowkvClient {
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
+        // The eviction hook removes stale `write_slot_highwater` entries
+        // when a group disappears from the topology. The hook captures a
+        // raw pointer pattern via `Arc<DashMap>` — we create the DashMap
+        // first, then build the hook referencing it, then the cache.
+        let write_slot_highwater: Arc<DashMap<(u64, u64), u64>> = Arc::new(DashMap::new());
+        let eviction_hook_map = Arc::clone(&write_slot_highwater);
+        let eviction_hook: crate::topology::EvictionHook = Arc::new(move |evicted| {
+            for key in evicted {
+                eviction_hook_map.remove(key);
+            }
+        });
         Self {
-            topology: TopologyCache::new(config.mgmt_seeds, config.topology_min_refresh_interval),
+            topology: TopologyCache::with_eviction_hook(
+                config.mgmt_seeds,
+                config.topology_min_refresh_interval,
+                Some(eviction_hook),
+            ),
             pool: ConnectionPool::new(config.pool_size_per_endpoint),
             retry: config.retry,
             client_id: new_client_id(),
             next_seq: AtomicU64::new(1),
             metrics: Arc::new(ClientMetrics::default()),
-            write_watermark: DashMap::new(),
+            write_slot_highwater,
             read_endpoint_policy: config.read_endpoint_policy,
             read_rr: DashMap::new(),
             endpoint_stats: DashMap::new(),
@@ -452,18 +470,20 @@ impl CrowkvClient {
     }
 
     fn record_write(&self, store_id: u64, group_id: u64, revision: u64) {
-        self.write_watermark
+        self.write_slot_highwater
             .entry((store_id, group_id))
             .and_modify(|w| *w = (*w).max(revision))
             .or_insert(revision);
     }
 
     /// Cached `min_slot` for `MinSlot` reads against this group:
-    /// the highest `revision` this client has observed from its own writes,
+    /// the highest paxos slot this client has observed from its own writes,
     /// or `0` if it has never written to this group.
     #[must_use]
     pub fn read_your_writes_slot(&self, store_id: u64, group_id: u64) -> u64 {
-        self.write_watermark.get(&(store_id, group_id)).map_or(0, |v| *v)
+        self.write_slot_highwater
+            .get(&(store_id, group_id))
+            .map_or(0, |v| *v)
     }
 
     /// `Put` a single key/value.
