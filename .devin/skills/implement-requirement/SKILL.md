@@ -1,13 +1,17 @@
+---
+name: implement-requirement
+description: Lifecycle for implementing requirement items from doc/backlog/backlog.md
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
----
-description: Lifecycle for implementing requirement items from doc/backlog/backlog.md
----
-
 # CROW - Implement Requirement Flow
 
-Use this workflow when picking up an item from `doc/backlog/backlog.md`.
+Use this skill when picking up an item from `doc/backlog/backlog.md`.
 Open the matched `R**-<component>-<topic>.md` detail doc for the full
 problem/approach/files/acceptance analysis.
 
@@ -67,7 +71,7 @@ Step 6 runs the subset affected by the changes; Step 9 runs all of them.
 
 ## Blocking Conditions
 
-The workflow runs autonomously end-to-end. Stop and ask the user only in
+The skill runs autonomously end-to-end. Stop and ask the user only in
 these two cases — in both, append a `## Blocked` section to
 `doc/working/plan-<topic>.md`, commit, then wait:
 

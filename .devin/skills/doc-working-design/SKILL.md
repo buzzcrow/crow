@@ -1,14 +1,18 @@
+---
+name: doc-working-design
+description: How to write doc/working/design-<topic>.md (implementation design draft)
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
-
----
-description: How to write doc/working/design-<topic>.md (implementation design draft)
----
 
 # Design Doc Guide (working draft)
 
 How to write `doc/working/design-<topic>.md` — the implementation design
-draft produced during Step 2 of the `/implement-requirement` workflow. This
+draft produced during Step 2 of the `/implement-requirement` skill. This
 is where the real solution lives: detailed design, change scope, complexity,
 and test case design. Folded into the formal design doc
 (`doc/design/{kv,tree,console}/design-*.md`) and deleted after merge.

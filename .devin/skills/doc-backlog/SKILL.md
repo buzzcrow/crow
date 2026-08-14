@@ -1,9 +1,13 @@
+---
+name: doc-backlog
+description: How to write doc/backlog/R**-<component>-<topic>.md (per-requirement analysis)
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
-
----
-description: How to write doc/backlog/R**-<component>-<topic>.md (per-requirement analysis)
----
 
 # Backlog Requirement Doc Guide
 

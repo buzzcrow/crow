@@ -1,9 +1,14 @@
+---
+name: review
+description: Review Rust code
+subagent: true
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
-
----
-description: Review Rust code
----
 
 # CROW - Code Review
 
@@ -67,6 +72,6 @@ Pre-commit gate (AGENTS.md Hard Constraints) must have already passed — fmt, c
 - Inline `#[cfg(test)] mod tests` instead of `tests/<topic>_test.rs`.
 - Adding a headline type or impl logic to `foo.rs` — it must stay a pure index (docs + `pub mod` + `pub use`).
 - Adding code to a >1000-line file — must extract a submodule first.
-- New file named `types.rs` / `utils.rs` / `impl.rs` / `core.rs` / `mod.rs`-with-logic — rename by subject (see /coding workflow).
+- New file named `types.rs` / `utils.rs` / `impl.rs` / `core.rs` / `mod.rs`-with-logic — rename by subject (see /coding skill).
 - `pub` on a test-only item — gate behind `#[cfg(feature = "test-util")]` instead.
 - New file under `tests/testkit/` — use `tests/common/` (2018 style).

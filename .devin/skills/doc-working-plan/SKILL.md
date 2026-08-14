@@ -1,14 +1,18 @@
+---
+name: doc-working-plan
+description: How to write doc/working/plan-<topic>.md (task plan)
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
-
----
-description: How to write doc/working/plan-<topic>.md (task plan)
----
 
 # Plan Doc Guide
 
 How to write `doc/working/plan-<topic>.md` — the task plan produced during
-Step 3 of the `/implement-requirement` workflow. This is the execution
+Step 3 of the `/implement-requirement` skill. This is the execution
 checklist: it breaks the design into ordered, checkbox-tracked tasks, lists
 the files each task touches, and records progress. It is deleted after merge
 (unless it is a persistent backlog like `plan-test.md`, which states an

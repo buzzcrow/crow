@@ -1,9 +1,14 @@
+---
+name: console-ui-e2e
+description: console-ui-e2e
+subagent: true
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
-
----
-description: console-ui-e2e
----
 
 # CROW - E2E / Playwright Tests
 

@@ -1,13 +1,18 @@
+---
+name: debug-test
+description: Debug a failing test — step-by-step verification, no workarounds
+subagent: true
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
----
-description: Debug a failing test — step-by-step verification, no workarounds
----
-
 # Debug Test Failure Flow
 
-Companion workflows: `/coding`, `/review`.
+Companion skills: `/coding`, `/review`.
 
 ## Principles
 

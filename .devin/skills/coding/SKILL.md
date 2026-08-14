@@ -1,13 +1,17 @@
+---
+name: coding
+description: CROW coding flow — conventions, doc-first
+triggers:
+  - user
+  - model
+---
+
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
----
-description: CROW coding flow — conventions, doc-first
----
-
 # CROW - Coding Flow
 
-Companion workflows: `/review` (pre-push), `/doc` (doc rules), `/console-ui-e2e` (console-ui-e2e).
+Companion skills: `/review` (pre-push), `/doc` (doc rules), `/console-ui-e2e` (console-ui-e2e).
 
 ## Conventions
 
