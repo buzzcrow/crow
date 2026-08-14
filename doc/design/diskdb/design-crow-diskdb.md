@@ -468,12 +468,20 @@ diskdb's first major component:
   records on top. Group 0 holds disk metadata only; zone records live
   on the bound data group.
 
-**Follow-up — group-0 notify/watch:** a future follow-up adds a
-watch/notify mechanism where group 0 pushes hw-status-change and
-ownership-change notifications to registered diskdb endpoints (each
-diskdb registers its endpoint on sync). This replaces polling for
-status changes; polling stays as a safety net with an increased
-interval. v1 ships with fixed-interval polling.
+**Follow-up — group-0 notify/watch:** the watch/notify mechanism is a
+**client-pulled `WatchNotify` bidi stream**: diskdb opens the stream to
+the group-0 leader and subscribes to the prefixes it cares about
+(`/hw/dg_owner/`, `/hw/dg_bind/`, `/hw/disk/`); the leader pushes
+hw-status-change and ownership-change notifications over that stream.
+No separate notify-endpoint registration is needed for notify delivery
+— the `grpc_endpoint` arg of `heartbeat_diskdb` is the diskdb gRPC
+service address for service-registry discovery (so clients can route
+`allocate_blocks`), already populated from `config.server.listen_addr`.
+This replaces polling for status changes as the primary
+change-detection mechanism; polling stays as a safety net with an
+increased interval. The detailed design (proto, registry, apply-path
+trigger, client, diskdb handler, configuration) lives in
+[`design-crow-kv-watch-notify.md`](../kv/design-crow-kv-watch-notify.md).
 
 ## 9. Space Metrics
 
@@ -821,8 +829,9 @@ the full diskdb server.
   probe, disk failure detection.
 - **Console + CLI integration** — disk/disk-group management UI, zone
   busy/free visualization, CLI command design.
-- **Group-0 notify/watch** — replace polling with watch/notify; requires
-  crow-kv extension; polling stays as safety net.
+- **Group-0 notify/watch** — replace polling with watch/notify; see
+  [`design-crow-kv-watch-notify.md`](../kv/design-crow-kv-watch-notify.md).
+  Polling stays as safety net.
 - **Free batch** — size-threshold batching, no timer; graceful-shutdown
   drain + flush.
 

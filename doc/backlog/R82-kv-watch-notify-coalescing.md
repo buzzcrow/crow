@@ -5,8 +5,8 @@
 
 **Problem**:
 
-- **Current behavior + impact** — R78 ships watch/notify without
-  coalescing: `PxLearner::apply_entry` calls `WatchRegistry::emit`
+- **Current behavior + impact** — the watch/notify extension ships
+  without coalescing: `PxLearner::apply_entry` calls `WatchRegistry::emit`
   directly, producing one notify frame per changed key per matching
   prefix. A burst write to a watched prefix (e.g. a diskdb
   `batch_write` touching 10 disks under `/hw/disk/`) generates 10
@@ -19,15 +19,15 @@
   safety-net poller covers any missed notifies. The impact is purely
   load/efficiency under bursty workloads.
 - **Design pointers** —
-  [`doc/working/design-crow-kv-watch-notify.md`](../working/design-crow-kv-watch-notify.md)
-  §3 (Coalescing — deferred to R82) states the rationale and points
+  [`doc/design/kv/design-crow-kv-watch-notify.md`](../design/kv/design-crow-kv-watch-notify.md)
+  §3 (Coalescing — deferred) states the rationale and points
   back to this backlog item. The original coalescer design (struct
   shape, timer-task lifecycle, per-prefix debounce, step-down flush)
-  was specified in the same design draft but removed from R78's
-  scope after the timer-task wiring proved incomplete (the spawned
-  timer captured no registry/coalescer refs, so buffered keys were
-  silently dropped). No direct aioss analog — new work; the
-  reference model is etcd watch (which coalesces at the mvcc
+  was specified in the same design draft but removed from the
+  watch/notify extension's scope after the timer-task wiring proved
+  incomplete (the spawned timer captured no registry/coalescer refs, so
+  buffered keys were silently dropped). No direct aioss analog — new
+  work; the reference model is etcd watch (which coalesces at the mvcc
   backend, not the apply path).
 - **Use scenarios** —
   - **Disk discovery burst** — diskdb runs a periodic discovery
@@ -49,8 +49,8 @@
   questions (timer-task ownership model, Arc/Weak capture, per-prefix
   vs per-watcher debounce, step-down flush semantics) need a design
   draft to resolve. The high-level shape is known from the original
-  R78 design draft, but the timer-task wiring gap that caused R78 to
-  drop the feature must be addressed properly.
+  watch/notify design draft, but the timer-task wiring gap that caused
+  the extension to drop the feature must be addressed properly.
 
 - **One-line summary**: per-prefix debounce coalescer with
   timer-task flush, wired into the apply path between
@@ -69,9 +69,10 @@
      must capture `Weak<WatchRegistry>` + `Weak<WatchCoalescer>` so
      it survives group drop mid-debounce (weak upgrade fails →
      no-op). On wake: lock `pending`, drain the prefix's key set,
-     call `registry.emit`. This is the gap that caused the R78
-     removal — the original code captured no refs and silently
-     dropped buffered keys.
+     call `registry.emit`. This is the gap that caused the
+     coalescer's removal from the initial watch/notify extension —
+     the original code captured no refs and silently dropped buffered
+     keys.
   3. **`PxLearner` wiring** (`lib/crow-kv/src/paxos/learner.rs`) —
      the `watch_registry` `OnceLock` gains a third element
      (`Arc<WatchCoalescer>`); `set_watch_registry` takes the
@@ -138,9 +139,11 @@
 
 **Dependencies**:
 
-- Depends on **R78** (watch/notify extension — `WatchRegistry`,
-  `WatchCoalescer` apply-path hook, `WatchNotifyClient`). R78 must
-  be landed first; this item adds the coalescer layer on top.
+- Depends on the watch/notify extension (`WatchRegistry`,
+  `WatchCoalescer` apply-path hook, `WatchNotifyClient` — see
+  [`doc/design/kv/design-crow-kv-watch-notify.md`](../design/kv/design-crow-kv-watch-notify.md)).
+  That extension must be landed first; this item adds the coalescer
+  layer on top.
 - No items depend on R82 — it is a pure load optimization.
 
 **Acceptance**:

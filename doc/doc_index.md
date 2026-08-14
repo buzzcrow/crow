@@ -56,6 +56,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/kv/design-crow-kv-group0.md` | Group-0 sysdata schema, service registry, cluster topology records. |
 | `doc/design/kv/design-crow-kv-state-machine.md` | Per-key slot tracking, apply semantics, snapshot, compaction. |
 | `doc/design/kv/design-crow-kv-wal.md` | WAL segments, durable flush, replay/restore/recovery, GC. |
+| `doc/design/kv/design-crow-kv-watch-notify.md` | Watch/Notify bidi stream, per-group `WatchRegistry`, apply-path trigger, `WatchNotifyClient`, diskdb notify handler, polling safety net. |
 | `doc/design/kv/design-crow-kv-server.md` | `crow-kv-server` binary: startup, concurrency, HTTP management API, group lifecycle. |
 | `doc/design/kv/design-crow-kv-test.md` | Test strategy, layer-by-layer test guide, coverage rules. |
 | `doc/design/kv/design-crow-kv-observability.md` | Metrics module: five metric types, registry, instrumentation points, log format. |

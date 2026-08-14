@@ -11,33 +11,15 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R83** — Bump this line in the same commit when adding a new item.
+**Next R number: R85** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-- **[R76](R76-diskdb-disk-discovery-health.md)** — diskdb disk failure
-  detection + recovery scan flow — Area: diskdb — Wire the
-  `Missing → Bad → Up` lifecycle into the sync loop: Missing → Bad
-  confirmation, per-disk background recovery scan (iterates busy
-  blocks zone by zone, placeholder recovery, KV-persisted progress,
-  stops on Up), disk recovery (Missing/Bad/Offline → Up — unified
-  path: stop scan + compaction, no full RecoveryEngine rebuild).
-  Disk `effective_status` is the sole allocate gatekeeper — remove
-  redundant zone-level `DdbZoneHealth::Bad` marking (top-layer
-  status overrides). Real data repair is explicitly skipped (no
-  disk-block repair component / `diskio` service).
 - **[R77](R77-diskdb-console-cli.md)** — diskdb console + CLI
   integration — Area: diskdb / console — Disk/disk-group management UI,
   zone busy/free visualization (block array chart), CLI command design
   (`crow diskdb` subcommands vs sub-wrapper binaries). Follow-up after
   core diskdb is functional.
-- **[R78](R78-diskdb-group0-notify-watch.md)** — group-0 notify/watch
-  — Area: diskdb / kv — Replace fixed-interval polling (R71) with a
-  watch/notify mechanism: diskdb subscribes to group-0 prefixes via a
-  client-pulled `WatchNotify` bidi stream and the leader pushes
-  hw-status-change and ownership-change notifications over that
-  stream. Requires a crow-kv watch/notify extension (new sub-design).
-  Polling stays as a safety net. Follow-up after R71; not in v1.
 - **[R79](R79-diskdb-free-batch.md)** — diskdb free batch
   (size-threshold, no timer) — Area: diskdb — Group frees into a
   batch and flush via one `batch_write` when the batch reaches a
@@ -54,41 +36,51 @@ complexity, and dependency. Before implementation, follow the
   no data move), and a per-disk-group rebalance planner that emits
   `RebalancePlanValue` (source busy blocks + `owner_chunk` + target
   disk) with placeholder relocation (`LogOnly`, no `diskio` — same
-  envelope as R76). Disk-group-level rebalance is a caller concern
+  envelope as the disk failure recovery scan). Disk-group-level
+  rebalance is a caller concern
   (§3.2 — caller picks `disk_group_id`); diskdb contributes a
   `GetRebalanceHint` RPC + keepalive summary, not cross-instance
   moves. Real data relocation deferred to a future `diskio` service.
-- **[R81](R81-sysdata-epoch-for-integer-ids.md)** — sysdata epoch for
-  ID reuse + disk placement tracking — Area: protocol / kv / diskdb /
-  console — Two identity problems need an epoch/generation: (1) the
-  cluster-topology integer IDs (`RackId`, `NodeId`, `DiskGroupId`,
-  paxos `store_id`/`group_id`/`replica_id`) are reusable u64 scalars
-  (unlike `DiskId`/`ChunkId`, which are globally unique) — a
-  removed-then-readded entity with the same integer ID inherits stale
-  sysdata records, stale cross-references (ownership/bind/usage maps,
-  parent `node_ids`/`disk_group_ids` lists), and stale derived state;
-  (2) a disk **moved** between nodes/disk-groups keeps its same
-  `DiskId` (UUID) but changes its placement/bind — an epoch on
-  `DiskValue` is needed to track the move (stale bind/ownership +
-  orphaned recovery-scan progress on the old bind). Today mitigated
-  only by operator discipline (use a fresh ID on re-add; accept
-  orphaned records on a disk move). Approach deferred to design:
-  per-entity epoch field, globally-unique IDs, monotonic-never-reuse
-  allocation, or cascading cleanup on removal. Split out of the R76
-  gap review (R76's `RecoveryScanProgressKey` does not collide on
-  identity reuse — keyed by globally-unique `DiskId`).
+- **[R81](R81-sysdata-id-reuse-safety-and-disk-move.md)** — sysdata ID reuse
+  safety + disk move — Area: kv / diskdb / console — Two problems,
+  both solvable without an epoch/generation field: (1) reusable
+  integer IDs (`RackId`, `NodeId`, `DiskGroupId`, paxos
+  `store_id`/`group_id`/`replica_id`) — a removed-then-readded entity
+  with the same integer ID inherits stale on-disk state (WAL, engine),
+  stale node config, stale group 0 sysdata, and stale client caches;
+  codebase-verified analysis shows no consumer caches by bare rack /
+  node / dg / disk / replica ID across the reuse window (all re-read
+  each sync cycle), so cleanup alone is sufficient for those — only
+  `store_id`/`group_id` has long-lived client caches
+  (`TopologyCache` + `write_slot_highwater`, renamed from
+  `write_watermark`) that need eviction; (2) disk
+  move with stable `DiskId` (UUID) to a new node/disk-group without
+  triggering a full recovery scan — the key insight is that
+  zone/busy/free records are keyed only by `DiskId` (globally unique),
+  not by disk-group or paxos group, so copying them between paxos
+  groups is a literal key-value copy (no transformation); during the
+  move (disk in `Maintenance`, no concurrent writes), batch-copy the
+  disk's records from the old disk-group's bind to the new
+  disk-group's bind, then update group 0 placement — after the copy
+  the disk fully belongs to the new disk-group (no per-disk bind, no
+  split records, multi-block allocate works normally); add inline zone
+  load to `disk_add_init` when existing zone snapshots are detected
+  (today it skips the baseline write but leaves zone usage empty — an
+  existing gap also affecting mid-running disk-group reassignment). No
+  epoch on any sysdata record; no proto/key encoding changes. Split
+  out of the disk failure detection + recovery scan gap review.
 - **[R82](R82-kv-watch-notify-coalescing.md)** — watch/notify
-  coalescing (debounce) — Area: kv / diskdb — R78 ships watch/notify
-  without coalescing: one notify per changed key per matching prefix.
-  Burst writes to a watched prefix (e.g. diskdb `batch_write` touching
-  10 disks) generate 10 separate notifies, amplifying subscriber
-  wakeups + re-read load. Add a per-prefix debounce coalescer with
-  timer-task flush between the apply-path hook and
-  `WatchRegistry::emit`. The original R78 coalescer was removed
-  because the timer task captured no registry/coalescer refs (buffered
-  keys were silently dropped); R82 must wire the `Weak` refs properly.
-  Load optimization, not correctness — the safety-net poller covers
-  missed notifies.
+  coalescing (debounce) — Area: kv / diskdb — the watch/notify
+  extension ships without coalescing: one notify per changed key per
+  matching prefix. Burst writes to a watched prefix (e.g. diskdb
+  `batch_write` touching 10 disks) generate 10 separate notifies,
+  amplifying subscriber wakeups + re-read load. Add a per-prefix
+  debounce coalescer with timer-task flush between the apply-path hook
+  and `WatchRegistry::emit`. The original coalescer was removed because
+  the timer task captured no registry/coalescer refs (buffered keys
+  were silently dropped); R82 must wire the `Weak` refs properly. Load
+  optimization, not correctness — the safety-net poller covers missed
+  notifies.
 
 - **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
   `spawn_blocking` on the durability path. The WAL's production I/O
@@ -108,6 +100,42 @@ complexity, and dependency. Before implementation, follow the
 ### Medium Priority
 
 **Complexity — Medium:**
+- **[R83](R83-chunkdb-complete-recovery-flow.md)** — chunkdb
+  complete recovery flow (real data recovery + speed control) —
+  Area: chunkdb / diskdb / diskio — diskdb's recovery is disk-layer
+  only: the R76 `RecoveryScanTask` lists impacted busy blocks +
+  `owner_chunk` but the repair step is a placeholder
+  (`RecoveryAction::LogOnly`, no data rebuild). There is no chunkdb
+  yet (only a reserved proto surface), so when a disk goes `Bad` the
+  impacted blocks are handed to a "future recovery/relocation path"
+  (§8) that does not exist — no surviving replica/parity is read, no
+  rebuilt data is written, no strip is updated. Full data recovery
+  needs chunkdb (the chunk→strip→segment owner) to rebuild lost
+  mirror replicas / EC data+parity from surviving strips via the
+  `diskio` service, `UpdateChunkStrip` to new segments, and free the
+  old `Bad`-disk segments. Recovery speed must be throttled at the
+  chunkdb layer (configurable bandwidth/IOps/concurrency) so
+  foreground traffic is not starved. Blocked on the chunkdb server
+  component + the `diskio` service (both unlanded; must be filed as
+  their own backlog items first). Replaces R76's `LogOnly` with
+  `Relocate` / `RebuildFromEc`.
+- **[R84](R84-chunkdb-post-disk-move-placement-scanner.md)** —
+  chunkdb post-disk-move placement scanner — Area: chunkdb / diskdb —
+  R81 Part 2 adds disk move with a stable `DiskId` (record copy
+  during Maintenance, no full scan). The move is placement-only and
+  the data is intact, but there is no verification that chunk
+  placement is still consistent after a move: chunks reference blocks
+  via `Segment { disk_id, ... }` (in `MirrorStrip` / `EcStrip`), and
+  every chunk with a segment on the moved disk must still reach that
+  segment via the disk's new placement. Add a placement-integrity
+  scanner (chunkdb-side, following diskdb's `ScannerTask` /
+  `BgRunner` pattern, §10) that walks chunk→strip→segment after a
+  move (and periodically), resolves each segment's `DiskId` to its
+  current group-0 placement, and reports unreachable / orphaned
+  segments — handing `Bad`/`Missing`-disk segments to R83 for
+  rebuild. Triggered on move via watch/notify (R78) with a periodic
+  safety net. Blocked on the chunkdb server component (unlanded) and
+  R81 Part 2.
 - **[R32](R32-kv-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
   RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
   connection-level userspace lock (HPACK table, frame buffer,
