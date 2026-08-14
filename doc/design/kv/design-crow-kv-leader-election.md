@@ -3,8 +3,8 @@
 
 # CROW - Design: Leader Election, Term, and Lease
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
-Satisfies: design-crow-kv.md §3 Dependencies](design-crow-kv.md), design-crow-kv.md §4.2](design-crow-kv.md), design-crow-kv.md §6.2](design-crow-kv.md), implicit prerequisites of design-crow-kv.md §7](design-crow-kv.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §3, §4.2, §6.2, §7
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §3, §4.2, §6.2, §7
 
 This document specifies leader election, term management, the `PxBallot`/`PxTerm` separation, and the leader lease used for fast linearizable reads. The design follows Raft very closely; only the per-slot Paxos parts differ.
 

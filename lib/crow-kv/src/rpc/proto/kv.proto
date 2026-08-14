@@ -21,6 +21,9 @@ enum KvErrorCode {
   KV_ERROR_NOT_LEADER  = 1;
   KV_ERROR_UNAVAILABLE = 2;
   KV_ERROR_INTERNAL    = 3;
+  // JournalScan asked for slots already GC'd below the WAL trim point.
+  // The caller falls back to a full-scan rebuild (diskdb strategy 1).
+  KV_ERROR_JOURNAL_SCAN_GC_GAP = 4;
 }
 
 message KvSetRequest {
@@ -181,10 +184,14 @@ service KvService {
   rpc Delete(KvDeleteRequest) returns (KvResponse);
   rpc BatchWrite(KvBatchWriteRequest) returns (KvResponse);
   rpc Scan(KvScanRequest) returns (KvScanResponse);
+  rpc JournalScan(KvJournalScanRequest) returns (KvJournalScanResponse);
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
   rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
   rpc SnapshotScan(SnapshotScanRequest) returns (SnapshotScanResponse);
   rpc ReleaseSnapshot(ReleaseSnapshotRequest) returns (ReleaseSnapshotResponse);
+  // Watch/Notify bidi stream: clients subscribe to key-prefix changes
+  // and receive push notifications when watched keys change.
+  rpc WatchNotify(stream WatchNotifyRequest) returns (stream WatchNotifyResponse);
 }
 
 // Snapshot versioning API (R59): pin a point-in-time-consistent L1 view
@@ -246,4 +253,98 @@ message ReleaseSnapshotRequest {
 message ReleaseSnapshotResponse {
   bool   ok = 1;
   string error = 2;
+}
+
+// Slot-ordered scan over the chosen log. Returns individual KV ops
+// (Put / Delete) in commit (slot) order within [min_slot, max_slot],
+// filtered by key prefix. Used by diskdb strategy 2 (journal scan
+// replay) — the existing `Scan` RPC returns key order, not slot order,
+// so it cannot drive a correct replay. Pagination via `limit` +
+// `last_op_slot`: the caller sends `min_slot = last_op_slot + 1` for
+// the next page.
+message KvJournalScanRequest {
+  uint32 version    = 1;
+  uint64 group_id   = 2;
+  uint64 min_slot   = 3;  // inclusive lower bound
+  uint64 max_slot   = 4;  // inclusive upper bound; 0 = MAX (current applied)
+  bytes  key_prefix = 5;  // only ops whose key starts with this prefix
+  uint32 limit      = 6;  // max ops per response page; 0 = unlimited
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+  ReadMode read_mode = 9;  // LINEARIZABLE or MIN_SLOT (min_slot doubles
+                           // as the read-freshness floor for MIN_SLOT)
+}
+
+message KvJournalOp {
+  bytes  key    = 1;
+  bytes  value  = 2;  // empty for Delete
+  bool   is_delete = 3;
+  uint64 slot   = 4;  // the slot at which this op was committed
+}
+
+message KvJournalScanResponse {
+  uint32 version  = 1;
+  bool   ok       = 2;
+  string error    = 3;
+  repeated KvJournalOp ops = 4;
+  bool   truncated = 5;  // hit `limit`; more ops remain
+  uint64 last_op_slot = 6;  // slot of the last op returned (for pagination)
+  uint64 read_slot = 7;  // the applied frontier when the scan ran
+  KvErrorCode error_code = 8;
+  string not_leader_hint = 9;
+  uint64 request_id = 10;
+  uint64 request_create_ms = 11;
+}
+
+// ── Watch/Notify ────────────────────────────────────────────────
+//
+// Client-to-leader watch subscription. The client opens a WatchNotify
+// bidi stream to a node, sends WatchSubscribe frames for each
+// (group_id, prefix) it wants to watch, and receives WatchNotify
+// frames when watched keys change. If the node is not the leader of
+// the subscribed group_id, it returns a WatchNotifyError with
+// not_leader_hint and the client reconnects to the leader.
+
+message WatchSubscribe {
+  uint32 version   = 1;
+  uint64 group_id  = 2;
+  bytes  prefix    = 3;  // watch all keys with this byte prefix
+}
+
+message WatchUnsubscribe {
+  uint64 group_id  = 1;
+  bytes  prefix    = 2;
+}
+
+// Pushed from leader to watcher when a watched key changes. Carries
+// the changed keys and their latest values so the watcher can act
+// without a re-read. `values[i]` is the value for `keys[i]`; empty
+// bytes for a Delete (tombstone). slot = the apply slot of the
+// triggering write.
+message WatchNotify {
+  uint64 group_id      = 1;
+  bytes  prefix        = 2;  // which watched prefix matched
+  repeated bytes keys  = 3;  // changed keys (deduplicated, coalesced)
+  uint64 slot          = 4;
+  repeated bytes values = 5; // latest value per key (empty = Delete)
+}
+
+message WatchNotifyError {
+  uint64 group_id        = 1;
+  string not_leader_hint = 2;  // empty for non-leader errors
+  string error           = 3;
+}
+
+message WatchNotifyRequest {
+  oneof frame {
+    WatchSubscribe   subscribe   = 1;
+    WatchUnsubscribe unsubscribe = 2;
+  }
+}
+
+message WatchNotifyResponse {
+  oneof frame {
+    WatchNotify       notify = 1;
+    WatchNotifyError  error  = 2;
+  }
 }

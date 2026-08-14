@@ -60,7 +60,7 @@ impl OpenOptions {
         }
     }
     #[must_use]
-    pub fn read_write() -> Self {
+    pub(crate) fn read_write() -> Self {
         Self {
             read: true,
             write: true,
@@ -135,7 +135,8 @@ impl IoBackend {
     /// Real file-backed block device with buffered I/O (aligned, no `O_DIRECT`).
     /// Ideal for benchmarks that exercise block code paths without disk-bound TPS.
     #[must_use]
-    pub fn block_buffered() -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn block_buffered() -> Self {
         Self::BlockDevice(block_backend::BlockDevice::new())
     }
 

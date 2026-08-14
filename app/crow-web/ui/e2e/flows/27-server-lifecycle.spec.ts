@@ -3,7 +3,7 @@
 // Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createRack, createNode, deployNodeServer, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
+import { apiContext, createRack, createNode, deployNodeServer, freePort, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-27 server lifecycle via context menu', () => {
   test.beforeEach(async ({ baseURL }) => {
@@ -11,14 +11,14 @@ test.describe('E2E-27 server lifecycle via context menu', () => {
   });
 
   test('ping, restart, and stop server via context menu', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r27', name: 'r27' });
-    await createNode(baseURL!, { id: 'n27', rack_id: 'r27' });
-    await deployNodeServer(baseURL!, 'n27', 9927, 9937);
+    await createRack(baseURL!, { id: 27, name: 'r27' });
+    await createNode(baseURL!, { id: 27, rack_id: 27 });
+    await deployNodeServer(baseURL!, 27, freePort(), freePort());
 
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
-      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-n27' });
+      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-27' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
 
       // Ping
@@ -40,7 +40,7 @@ test.describe('E2E-27 server lifecycle via context menu', () => {
       // After stop, verify server is no longer running via API
       const api = await apiContext(baseURL!);
       try {
-        const resp = await api.get('/api/nodes/n27');
+        const resp = await api.get('/api/nodes/27');
         expect(resp.ok()).toBeTruthy();
         const node = await resp.json();
         const serverState = node.server?.state ?? node.server?.status ?? 'unknown';
@@ -49,7 +49,7 @@ test.describe('E2E-27 server lifecycle via context menu', () => {
         await api.dispose();
       }
     } finally {
-      await stopNodeServer(baseURL!, 'n27');
+      await stopNodeServer(baseURL!, 27);
     }
   });
 });

@@ -3,7 +3,7 @@
 // Baseline: 0.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * E2E-23 · Embedding isolation (Req §4, design §8).
@@ -17,10 +17,10 @@ import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServe
  */
 test.describe('E2E-23 embedding isolation', () => {
   test('honors apiPrefix, readonly, and module opt-out', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r23', 'n23');
-    await deployNodeServer(baseURL!, 'n23', 9955, 9965);
-    await createStore(baseURL!, 233, ['n23']);
-    await addGroup(baseURL!, 233, 2330, 23300, ['n23']);
+    await seedRackAndNode(baseURL!, 23, 23);
+    await deployNodeServer(baseURL!, 23, freePort(), freePort());
+    await createStore(baseURL!, 233, [23]);
+    await addGroup(baseURL!, 233, 2330, 23300, [23]);
 
     // Reverse-proxy emulation: the SPA issues /proxy/api/* which we rewrite
     // back onto the real /api/* surface served by crow-web.
@@ -61,7 +61,7 @@ test.describe('E2E-23 embedding isolation', () => {
       await expect(inspector.getByRole('tab', { name: 'Details' })).toBeVisible({ timeout: 3_000 });
       await expect(inspector.getByRole('tab', { name: 'KV' })).toHaveCount(0);
     } finally {
-      await stopNodeServer(baseURL!, 'n23');
+      await stopNodeServer(baseURL!, 23);
     }
   });
 });

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+autotests = false
 
 [lints]
 workspace = true
@@ -17,6 +18,7 @@ path = "src/main.rs"
 crow-console-shared = { path = "../../lib/crow-console-shared" }
 crow-kv-client = { path = "../../lib/crow-kv-client" }
 crow-common = { path = "../../lib/crow-common/rust" }
+crow-protocol = { path = "../../lib/crow-protocol" }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }
@@ -36,3 +38,23 @@ dirs = "5"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[[test]]
+name = "bench_benchmark_test"
+path = "tests/bench_benchmark_test.rs"
+
+[[test]]
+name = "cluster_cli_test"
+path = "tests/cluster_cli_test.rs"
+
+[[test]]
+name = "kv_cli_test"
+path = "tests/kv_cli_test.rs"
+
+[[test]]
+name = "lifecycle_cli_test"
+path = "tests/lifecycle_cli_test.rs"
+
+[[test]]
+name = "mgmt_cli_test"
+path = "tests/mgmt_cli_test.rs"

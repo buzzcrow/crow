@@ -4,7 +4,7 @@
 
 import { test, expect } from '../fixtures/realBackend';
 import { consoleBaseURL } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.goto('/');
@@ -19,10 +19,10 @@ test.describe('E2E-29 KV load more', () => {
   });
 
   test('scan with >100 keys shows truncated indicator and Load More button', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r29', 'n29');
-    await deployNodeServer(baseURL!, 'n29', 9929, 9939);
-    await createStore(baseURL!, 290, ['n29']);
-    await addGroup(baseURL!, 290, 2900, 29000, ['n29']);
+    await seedRackAndNode(baseURL!, 29, 29);
+    await deployNodeServer(baseURL!, 29, freePort(), freePort());
+    await createStore(baseURL!, 290, [29]);
+    await addGroup(baseURL!, 290, 2900, 29000, [29]);
     await waitForLeader(baseURL!, 290, 2900);
 
     try {
@@ -67,7 +67,7 @@ test.describe('E2E-29 KV load more', () => {
       // Verify additional rows appear
       await expect(page.getByTestId('kv-scan-table').locator('tbody tr')).toHaveCount(120, { timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n29');
+      await stopNodeServer(baseURL!, 29);
     }
   });
 });

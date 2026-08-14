@@ -24,35 +24,40 @@ struct FakeServer {
     handle: tokio::task::JoinHandle<()>,
 }
 
-async fn start_fake(node_id: &str, store_id: u64) -> FakeServer {
-    let id = node_id.to_string();
-    let app = Router::new().route("/health", get(|| async { Json(json!({ "status": "ok", "messages": [] })) })).route(
-        "/topology",
-        get(move || {
-            let id = id.clone();
-            async move {
-                Json(json!({
-                    "stores": [{
-                        "store_id": store_id,
-                        "listen_addr": "127.0.0.1:0",
-                        "groups": [{
-                            "group_id": 7u64,
-                            "local_replica_id": match id.as_str() { "n1" => 100u64, "n2" => 200, _ => 300 },
-                            "leader_id": 100u64,
-                            "force_classic": false,
-                            "local_replica": {
-                                "id": match id.as_str() { "n1" => 100u64, "n2" => 200, _ => 300 },
-                                "role": if id == "n1" { "Leader" } else { "Follower" },
-                                "voting": true,
-                                "kv_store": { "key_count": 0 }
-                            },
-                            "remotes": []
+async fn start_fake(node_id: u64, store_id: u64) -> FakeServer {
+    let id = node_id;
+    let app = Router::new()
+        .route(
+            "/health",
+            get(|| async { Json(json!({ "status": "ok", "messages": [] })) }),
+        )
+        .route(
+            "/topology",
+            get(move || {
+                let id = id;
+                async move {
+                    Json(json!({
+                        "stores": [{
+                            "store_id": store_id,
+                            "listen_addr": "127.0.0.1:0",
+                            "groups": [{
+                                "group_id": 7u64,
+                                "local_replica_id": match id { 1 => 100u64, 2 => 200, _ => 300 },
+                                "leader_id": 100u64,
+                                "force_classic": false,
+                                "local_replica": {
+                                    "id": match id { 1 => 100u64, 2 => 200, _ => 300 },
+                                    "role": if id == 1 { "Leader" } else { "Follower" },
+                                    "voting": true,
+                                    "kv_store": { "key_count": 0 }
+                                },
+                                "remotes": []
+                            }]
                         }]
-                    }]
-                }))
-            }
-        }),
-    );
+                    }))
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
@@ -88,21 +93,21 @@ where
 
 #[tokio::test]
 async fn monitor_tracks_three_nodes_and_marks_one_down() {
-    let s1 = start_fake("n1", 1).await;
-    let s2 = start_fake("n2", 1).await;
-    let s3 = start_fake("n3", 1).await;
+    let s1 = start_fake(1, 1).await;
+    let s2 = start_fake(2, 1).await;
+    let s3 = start_fake(3, 1).await;
 
     let targets = vec![
         ProbeTarget {
-            node_id: "n1".into(),
+            node_id: 1,
             mgmt_url: format!("http://{}", s1.addr),
         },
         ProbeTarget {
-            node_id: "n2".into(),
+            node_id: 2,
             mgmt_url: format!("http://{}", s2.addr),
         },
         ProbeTarget {
-            node_id: "n3".into(),
+            node_id: 3,
             mgmt_url: format!("http://{}", s3.addr),
         },
     ];
@@ -145,7 +150,7 @@ async fn monitor_tracks_three_nodes_and_marks_one_down() {
         let c = Arc::clone(&c);
         Box::pin(async move {
             let snap = c.snapshot().await;
-            snap.get("n2").is_some_and(|r| r.health == NodeHealth::Down)
+            snap.get(&2).is_some_and(|r| r.health == NodeHealth::Down)
         })
     })
     .await;
@@ -157,8 +162,8 @@ async fn monitor_tracks_three_nodes_and_marks_one_down() {
 
     // n1 and n3 should still be Up.
     let snap = cache.snapshot().await;
-    assert_eq!(snap["n1"].health, NodeHealth::Up);
-    assert_eq!(snap["n3"].health, NodeHealth::Up);
+    assert_eq!(snap[&1].health, NodeHealth::Up);
+    assert_eq!(snap[&3].health, NodeHealth::Up);
 
     handle.shutdown();
     let _ = s1.shutdown.send(());
@@ -169,12 +174,12 @@ async fn monitor_tracks_three_nodes_and_marks_one_down() {
 
 #[tokio::test]
 async fn invalidate_triggers_out_of_cycle_refresh() {
-    let s1 = start_fake("n1", 1).await;
+    let s1 = start_fake(1, 1).await;
     // Use a very long ping interval so only the initial tick + explicit
     // invalidate would touch the node.
     let handle = spawn(
         vec![ProbeTarget {
-            node_id: "n1".into(),
+            node_id: 1,
             mgmt_url: format!("http://{}", s1.addr),
         }],
         MonitorConfig {
@@ -190,7 +195,7 @@ async fn invalidate_triggers_out_of_cycle_refresh() {
         Box::pin(async move {
             c.snapshot()
                 .await
-                .get("n1")
+                .get(&1)
                 .is_some_and(|r| r.health == NodeHealth::Up)
         })
     })
@@ -198,17 +203,17 @@ async fn invalidate_triggers_out_of_cycle_refresh() {
     assert!(up);
 
     // Drop the cache entry manually and confirm invalidate refills it.
-    cache.drop_node("n1").await;
-    assert!(!cache.snapshot().await.contains_key("n1"));
+    cache.drop_node(&1).await;
+    assert!(!cache.snapshot().await.contains_key(&1));
 
-    handle.invalidate("n1");
+    handle.invalidate(1u64);
     let c = Arc::clone(&cache);
     let refilled = wait_for(Duration::from_secs(3), move || {
         let c = Arc::clone(&c);
         Box::pin(async move {
             c.snapshot()
                 .await
-                .get("n1")
+                .get(&1)
                 .is_some_and(|r| r.health == NodeHealth::Up)
         })
     })

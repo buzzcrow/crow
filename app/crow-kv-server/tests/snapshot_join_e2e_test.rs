@@ -6,7 +6,7 @@
 //! joins an already-populated group by pulling a snapshot via
 //! `POST.../join`, instead of replaying full Paxos history from slot 1.
 
-mod testkit;
+mod common;
 
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
 
-use testkit::process::{start_test_server, ServerHandle};
+use common::process::{start_test_server, ServerHandle};
 
 struct ServerNode {
     handle: ServerHandle,

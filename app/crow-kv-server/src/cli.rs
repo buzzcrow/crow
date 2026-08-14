@@ -2,24 +2,23 @@
 // Licensed under the Apache License, Version 2.0.
 
 use clap::Parser;
+use crow_protocol::KV_SERVER_MGMT_BASE;
 
 /// `CrowKV` server — reference implementation wrapping the `crow_kv` library.
 #[derive(Parser, Debug)]
 #[command(name = "crow-kv-server", about = "CrowKV server daemon")]
 pub struct Cli {
     /// HTTP management API listen port. Default: 9910.
-    #[arg(long, default_value_t = 9910)]
+    #[arg(long, default_value_t = KV_SERVER_MGMT_BASE)]
     pub management_port: u16,
 
     /// HTTP management API bind address.
     #[arg(long, default_value = "0.0.0.0")]
     pub management_addr: String,
 
-    /// Path to a JSON config file. When provided, loads `CrowKVConfig`
-    /// from the file; CLI args override individual fields. When omitted,
-    /// uses `CrowKVConfig::default()`.
+    /// Required: path to a TOML config file. Example: `conf/crow_kv_server_config.toml`
     #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
+    pub config: std::path::PathBuf,
 
     /// Port pool for gRPC `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
     #[arg(long)]
@@ -111,6 +110,16 @@ pub struct Cli {
     /// `0` = always drain (disables the heuristic).
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
+
+    /// Instance ID for service-registry keep-alive. If omitted, a
+    /// unique ID is generated at startup.
+    #[arg(long)]
+    pub instance_id: Option<u64>,
+
+    /// Keep-alive heartbeat interval in seconds. 0 disables the
+    /// keep-alive loop. Default: 10.
+    #[arg(long, default_value_t = 10)]
+    pub keepalive_interval: u64,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

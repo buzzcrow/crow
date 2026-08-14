@@ -33,25 +33,25 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByRole('button', { name: 'Physical' }).click();
     await page.getByRole('button', { name: 'Add Rack' }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
-    await page.getByLabel('Rack ID').fill('rsm');
+    await page.getByLabel('Rack ID').fill('77');
     await page.getByLabel('Name (optional)').fill('Rack Smoke');
     await page.getByRole('button', { name: /create rack/i }).click();
-    await expect(aside.getByText('R-rsm (Rack Smoke)')).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('R-77 (Rack Smoke)')).toBeVisible({ timeout: 3_000 });
 
     // --- Physical: add node via context menu ---
-    await aside.getByText('R-rsm (Rack Smoke)').click({ button: 'right' });
+    await aside.getByText('R-77 (Rack Smoke)').click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Add Node' }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
-    await page.getByLabel('Node ID').fill('nsm');
+    await page.getByLabel('Node ID').fill('77');
     await page.getByLabel('Host').fill('127.0.0.1');
     await page.getByLabel('Enable Crow Storage on this node').uncheck();
     await page.getByRole('button', { name: /create node/i }).click();
-    await expect(aside.getByText('N-nsm', { exact: true })).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('N-77', { exact: true })).toBeVisible({ timeout: 3_000 });
 
     // --- Physical: deploy Crow Storage Server via context menu ---
-    await aside.getByText('N-nsm', { exact: true }).click({ button: 'right' });
+    await aside.getByText('N-77', { exact: true }).click({ button: 'right' });
     await page.getByRole('menuitem', { name: /Deploy Crow Storage/i }).click();
-    await expect(page.getByRole('dialog', { name: /Deploy Crow Storage on nsm/ })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: /Deploy Crow Storage on 77/ })).toBeVisible();
     await page.getByLabel('Management Port').fill('9901');
     await page.getByLabel('gRPC Port').fill('9902');
     await page.getByLabel(/Binary Path/).fill(DEFAULT_SERVER_BINARY);
@@ -61,7 +61,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await expect.poll(async () => {
       const api = await apiContext(baseURL!);
       try {
-        const r = await api.get('/api/nodes/nsm/server');
+        const r = await api.get('/api/nodes/77/server');
         if (!r.ok()) return 0;
         const body = await r.json();
         return body.pid ?? 0;
@@ -72,12 +72,12 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     expect(consoleErrors.filter((e) => !/Failed to load resource/i.test(e)), 'console errors after deploy').toEqual([]);
 
     // --- Logical: add empty KV store on n1 ---
-    await clusterInit(baseURL!, ['nsm']);
+    await clusterInit(baseURL!, [77]);
     await page.getByRole('button', { name: 'Logical' }).click();
     await page.getByRole('button', { name: 'Add Store' }).click();
     await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
     await page.getByLabel('KV Store ID (numeric)').fill('7');
-    await page.getByLabel(/^nsm/).check();
+    await page.getByLabel(/^77\b/).check();
     await page.getByRole('button', { name: /create kv store/i }).click();
     await expect(aside.getByText('S-7')).toBeVisible({ timeout: 3_000 });
 
@@ -87,7 +87,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
     await page.getByLabel('Group ID (numeric)').fill('70');
     await page.getByLabel('Starting Replica ID (numeric)').fill('700');
-    await page.getByLabel(/^nsm/).check();
+    await page.getByLabel(/^77\b/).check();
     await page.getByRole('button', { name: /create group/i }).click();
 
     // --- Logical: expand store, see group + replica ---
@@ -147,7 +147,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     } finally {
       // Stop the smoke server so it does not pollute later specs (its
       // bootstrap store 1 would otherwise aggregate into their views).
-      await stopNodeServer(baseURL!, 'nsm');
+      await stopNodeServer(baseURL!, '77');
     }
   });
 });

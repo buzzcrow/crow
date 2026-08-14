@@ -52,8 +52,8 @@ async fn spawn_upstream() -> Option<Upstream> {
     std::fs::create_dir_all(workspace.join("bin")).ok()?;
     std::fs::create_dir_all(workspace.join("log")).ok()?;
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -61,7 +61,7 @@ async fn spawn_upstream() -> Option<Upstream> {
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: "n1".into(),
+        server_id: "n1".to_string(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
@@ -86,12 +86,12 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     let addr = listener.local_addr().expect("local_addr");
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -99,9 +99,9 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         ssh_password: None,
     });
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "n1".to_string(),
         url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
         mgmt_port: None,
         grpc_port: None,
@@ -133,7 +133,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     // 1. Initialize the system group so non-zero stores can be created.
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1"]}))
+        .json(&json!({"nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -143,7 +143,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let store_id: u64 = 7;
     let resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": store_id, "nodes": ["n1"]}))
+        .json(&json!({"store_id": store_id, "nodes": [1]}))
         .send()
         .await
         .expect("POST /api/stores");
@@ -185,7 +185,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let replica_id: u64 = 700;
     let resp = http
         .post(format!("{base}/api/stores/{store_id}/groups"))
-        .json(&json!({"group_id": group_id, "replica_id": replica_id, "nodes": ["n1"]}))
+        .json(&json!({"group_id": group_id, "replica_id": replica_id, "nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -196,7 +196,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let replica_id_2: u64 = 800;
     let resp = http
         .post(format!("{base}/api/stores/{store_id}/groups"))
-        .json(&json!({"group_id": group_id_2, "replica_id": replica_id_2, "nodes": ["n1"]}))
+        .json(&json!({"group_id": group_id_2, "replica_id": replica_id_2, "nodes": [1]}))
         .send()
         .await
         .unwrap();

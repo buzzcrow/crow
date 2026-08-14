@@ -10,6 +10,7 @@
 //! C0 status: skeleton only. Real modules land in C1+.
 
 #![cfg_attr(not(test), allow(dead_code))]
+#![allow(clippy::mod_module_files)]
 
 pub mod clients;
 pub mod cluster;
@@ -19,7 +20,6 @@ pub mod error;
 pub mod expand;
 pub mod lifecycle;
 pub mod mgmt;
-pub mod model;
 pub mod monitor;
 pub mod ops_log;
 pub mod snapshot;
@@ -27,11 +27,14 @@ pub mod ssh;
 pub mod test_ports;
 pub mod topology;
 
-pub use config::{ConsoleConfig, ConsoleConfigEngine, NodeEntry, RackEntry, ServerEntry, TomlFileEngine};
+pub use config::{
+    ConsoleConfig, ConsoleConfigEngine, DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry,
+    TomlFileEngine,
+};
 pub use snapshot::{
-    ClusterSnapshot, ElectionStateSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView,
-    MetricFieldView, MetricPointView, MetricsResponse, ReadStateSnapshot, RemoteMetrics, RemoteReplicaView,
-    ServerSnapshot, StoreView,
+    ClusterSnapshot, CrowTreeStatsSnapshot, ElectionStateSnapshot, GroupView, HealthInfo, KvStoreView,
+    LocalReplicaView, MetricFieldView, MetricPointView, MetricsResponse, ReadStateSnapshot, RemoteMetrics,
+    RemoteReplicaView, ServerSnapshot, StoreView,
 };
 
 /// Library version string, exposed for diagnostic / `--version` use.

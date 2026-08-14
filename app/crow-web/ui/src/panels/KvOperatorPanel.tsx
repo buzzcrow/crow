@@ -102,7 +102,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
       const gid = selectedEntity.id;
       if (sid && stores.some((s) => String(s.store_id) === sid)) {
         if (sid === storeId && gid === groupId) return;
-        setStoreId(sid);
+        setStoreId(String(sid));
         setGroupId(gid);
         setScanRows([]);
         setAutoScanned(false);

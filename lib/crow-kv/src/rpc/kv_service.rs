@@ -21,12 +21,15 @@ use crate::metrics::{Bandwidth, Counter, LatencyHistogram, LatencySummary, Metri
 use crate::rpc::kv_service_client::KvServiceClient;
 use crate::rpc::kv_service_server::KvService;
 use crate::rpc::{
-    CreateSnapshotRequest, CreateSnapshotResponse, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest,
+    watch_notify_request, watch_notify_response, CreateSnapshotRequest, CreateSnapshotResponse,
+    KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvJournalScanRequest, KvJournalScanResponse,
     KvResponse, KvScanRequest, KvScanResponse, KvSetRequest, ListSnapshotsRequest, ListSnapshotsResponse,
     ReleaseSnapshotRequest, ReleaseSnapshotResponse, SnapshotScanRequest, SnapshotScanResponse,
+    WatchNotifyError, WatchNotifyRequest, WatchNotifyResponse,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use tokio_stream::StreamExt as _;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
@@ -179,7 +182,7 @@ impl KvMetrics {
 }
 
 #[derive(Clone)]
-pub struct KvStoreService {
+pub(crate) struct KvStoreService {
     store: Arc<PxKvStore>,
     /// Per-group metrics handles, lazily registered on first RPC for
     /// each `group_id`.
@@ -190,7 +193,7 @@ impl KvStoreService {
     /// Create a new service. If the store has a metrics registry attached,
     /// a per-group metrics map is created (entries are lazily added on
     /// first use by each RPC handler).
-    pub fn new(store: Arc<PxKvStore>) -> Self {
+    pub(crate) fn new(store: Arc<PxKvStore>) -> Self {
         let metrics = store.metrics_registry.as_ref().map(|_| Arc::new(DashMap::new()));
         Self { store, metrics }
     }
@@ -559,6 +562,118 @@ impl KvService for KvStoreService {
         Ok(Response::new(resp))
     }
 
+    #[allow(clippy::too_many_lines)]
+    async fn journal_scan(
+        &self,
+        request: Request<KvJournalScanRequest>,
+    ) -> Result<Response<KvJournalScanResponse>, Status> {
+        let already_forwarded = request.metadata().get(FORWARD_HEADER).is_some();
+        let req = request.into_inner();
+        let req_size = req.key_prefix.len();
+        let start = Instant::now();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            request_id = req.request_id,
+            min_slot = req.min_slot,
+            max_slot = req.max_slot,
+            prefix_len = req.key_prefix.len(),
+            limit = req.limit,
+            forwarded_in = already_forwarded,
+            "received kv journal_scan rpc"
+        );
+
+        // Transparent leader-forward, mirroring `scan`: only
+        // linearizable scans hop to the leader; min_slot scans serve
+        // from the local replica.
+        let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
+        if linearizable && !already_forwarded {
+            if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
+                match forward_kv_journal_scan(&endpoint, req.clone()).await {
+                    Ok(mut resp) => {
+                        debug!(
+                            store_id = self.store.store_id,
+                            group_id = req.group_id,
+                            request_id = req.request_id,
+                            leader = %endpoint,
+                            "kv journal_scan forwarded to leader"
+                        );
+                        if let Some(m) = self.metrics_for(req.group_id) {
+                            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+                            m.bytes_in_bw.observe(req_size as u64);
+                            m.scan_forwarded_c.inc();
+                        }
+                        resp.request_id = req.request_id;
+                        resp.request_create_ms = req.request_create_ms;
+                        return Ok(Response::new(resp));
+                    }
+                    Err(status) => {
+                        warn!(
+                            store_id = self.store.store_id,
+                            group_id = req.group_id,
+                            request_id = req.request_id,
+                            leader = %endpoint,
+                            error = %status,
+                            "kv journal_scan forward failed; next step: serving stale local scan with leader hint"
+                        );
+                        let mut resp = self
+                            .store
+                            .kv_journal_scan(
+                                req.group_id,
+                                req.min_slot,
+                                req.max_slot,
+                                &req.key_prefix,
+                                req.limit,
+                                req.read_mode,
+                                req.request_id,
+                                req.request_create_ms,
+                            )
+                            .await;
+                        if let Some(m) = self.metrics_for(req.group_id) {
+                            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+                            m.bytes_in_bw.observe(req_size as u64);
+                            m.scan_forward_failed_c.inc();
+                        }
+                        resp.not_leader_hint = endpoint;
+                        resp.request_id = req.request_id;
+                        resp.request_create_ms = req.request_create_ms;
+                        return Ok(Response::new(resp));
+                    }
+                }
+            }
+        }
+
+        let mut resp = self
+            .store
+            .kv_journal_scan(
+                req.group_id,
+                req.min_slot,
+                req.max_slot,
+                &req.key_prefix,
+                req.limit,
+                req.read_mode,
+                req.request_id,
+                req.request_create_ms,
+            )
+            .await;
+        if let Some(m) = self.metrics_for(req.group_id) {
+            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+            m.bytes_in_bw.observe(req_size as u64);
+        }
+        if !resp.ok {
+            warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
+                request_id = req.request_id,
+                error = resp.error,
+                "kv journal_scan failed; next step: confirm group exists on this server"
+            );
+        }
+        resp.request_id = req.request_id;
+        resp.request_create_ms = req.request_create_ms;
+        Ok(Response::new(resp))
+    }
+
     async fn batch_write(
         &self,
         request: Request<KvBatchWriteRequest>,
@@ -679,6 +794,108 @@ impl KvService for KvStoreService {
             .await;
         Ok(Response::new(resp))
     }
+
+    type WatchNotifyStream =
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<WatchNotifyResponse, Status>> + Send + 'static>>;
+
+    async fn watch_notify(
+        &self,
+        request: Request<tonic::Streaming<WatchNotifyRequest>>,
+    ) -> Result<Response<Self::WatchNotifyStream>, Status> {
+        let mut inbound = request.into_inner();
+        let store = self.store.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<WatchNotifyResponse, Status>>(64);
+        let store_id = store.store_id;
+
+        tokio::spawn(async move {
+            // (group_id, watcher_id, prefix) for every active
+            // subscription on this stream. Tracked per-group so a
+            // multi-group stream cleans up each group's registry on
+            // close (a single `current_group_id` would leak watchers
+            // on every group but the last).
+            let mut watchers: Vec<(u64, u64, Vec<u8>)> = Vec::new();
+            while let Some(item) = inbound.next().await {
+                let frame = match item {
+                    Ok(req) => req.frame,
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        break;
+                    }
+                };
+                let Some(frame) = frame else { continue };
+                match frame {
+                    watch_notify_request::Frame::Subscribe(sub) => {
+                        let group_id = sub.group_id;
+                        let Some(group) = store.get_group(group_id) else {
+                            let _ = tx
+                                .send(Ok(WatchNotifyResponse {
+                                    frame: Some(watch_notify_response::Frame::Error(WatchNotifyError {
+                                        group_id,
+                                        not_leader_hint: String::new(),
+                                        error: format!("group {group_id} not found on store {store_id}"),
+                                    })),
+                                }))
+                                .await;
+                            continue;
+                        };
+                        if !group.local_replica().is_leader() {
+                            let hint = group.leader_endpoint().unwrap_or_default();
+                            let _ = tx
+                                .send(Ok(WatchNotifyResponse {
+                                    frame: Some(watch_notify_response::Frame::Error(WatchNotifyError {
+                                        group_id,
+                                        not_leader_hint: hint,
+                                        error: String::new(),
+                                    })),
+                                }))
+                                .await;
+                            continue;
+                        }
+                        let registry = group.watch_registry.clone();
+                        let id = registry.subscribe(&sub.prefix, tx.clone());
+                        watchers.push((group_id, id, sub.prefix.clone()));
+                        debug!(store_id, group_id, watcher_id = id, "watch subscribed");
+                    }
+                    watch_notify_request::Frame::Unsubscribe(unsub) => {
+                        let group_id = unsub.group_id;
+                        let Some(group) = store.get_group(group_id) else {
+                            continue;
+                        };
+                        let registry = group.watch_registry.clone();
+                        let prefix = unsub.prefix.clone();
+                        // Match on (group_id, prefix) — a stream may
+                        // watch the same prefix on multiple groups.
+                        watchers.retain(|(gid, id, p)| {
+                            if *gid == group_id && p == &prefix {
+                                registry.unsubscribe(&prefix, *id);
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        debug!(store_id, group_id, "watch unsubscribed");
+                    }
+                }
+            }
+            // Stream end: clean up every watcher this stream
+            // registered, grouped by `group_id` so each group's
+            // registry gets its own `remove_all`.
+            let mut by_group: std::collections::HashMap<u64, Vec<u64>> = std::collections::HashMap::new();
+            for (group_id, id, _) in &watchers {
+                by_group.entry(*group_id).or_default().push(*id);
+            }
+            for (group_id, ids) in by_group {
+                if let Some(group) = store.get_group(group_id) {
+                    let registry = group.watch_registry.clone();
+                    registry.remove_all(&ids);
+                }
+            }
+            debug!(store_id, "watch_notify stream closed");
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
 }
 
 /// Forward a `KvGetRequest` to the group's current leader. Caller is
@@ -701,5 +918,19 @@ async fn forward_kv_scan(endpoint: &str, body: KvScanRequest) -> Result<KvScanRe
     let mut req = Request::new(body);
     forward_header_set(&mut req);
     let resp = client.scan(req).await?;
+    Ok(resp.into_inner())
+}
+
+/// Forward a `KvJournalScanRequest` to the group's current leader. Same
+/// contract as [`forward_kv_scan`].
+async fn forward_kv_journal_scan(
+    endpoint: &str,
+    body: KvJournalScanRequest,
+) -> Result<KvJournalScanResponse, Status> {
+    let channel = forward_channel(endpoint).await?;
+    let mut client = KvServiceClient::new(channel);
+    let mut req = Request::new(body);
+    forward_header_set(&mut req);
+    let resp = client.journal_scan(req).await?;
     Ok(resp.into_inner())
 }

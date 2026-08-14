@@ -19,5 +19,5 @@
 
 - [ ] `pixi run rs-fmt` passes
 - [ ] `pixi run rs-lint` passes (no new warnings)
-- [ ] `pixi run test` passes
+- [ ] `pixi run test-suite` passes
 - [ ] Added/updated tests for the changes

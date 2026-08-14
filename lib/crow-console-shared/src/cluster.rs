@@ -18,20 +18,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::CrowTreeStatsSnapshot;
+pub use crow_protocol::{common_type::DiskGroupId, GroupId, NodeId, RackId, ReplicaId, StoreId};
 
-pub type RackId = String;
-pub type NodeId = String;
-pub type StoreId = u64;
-pub type GroupId = u64;
-pub type ReplicaId = u64;
+use crate::snapshot::CrowTreeStatsSnapshot;
 
 // ── Physical view ───────────────────────────────────────────────────
 
 /// Rack: a logical grouping of nodes. Console-side identity is a string
 /// so simulated and real racks can share the same namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Rack {
+#[allow(dead_code)]
+pub(crate) struct Rack {
     pub id: RackId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -327,7 +324,7 @@ mod tests {
             group_id: 2,
             replicas: vec![ReplicaView {
                 replica_id: 10,
-                node_id: "n1".into(),
+                node_id: 1,
                 role: ReplicaRole::Leader,
                 state: ReplicaState::Running,
                 engine_healthy: true,
@@ -338,7 +335,7 @@ mod tests {
             read_state: None,
         };
         let s = serde_json::to_string(&v).unwrap();
-        assert!(s.contains("\"node_id\":\"n1\""));
+        assert!(s.contains("\"node_id\":1"));
         assert!(s.contains("\"role\":\"leader\""));
         assert_eq!(v.leader_id(), Some(10));
     }

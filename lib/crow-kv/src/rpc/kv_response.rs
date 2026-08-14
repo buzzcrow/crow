@@ -15,12 +15,12 @@ use bytes::Bytes;
 impl KvResponse {
     /// Wire-format version emitted by every response. Bump only when
     /// the protobuf schema gains a backward-incompatible field.
-    pub const VERSION: u32 = 1;
+    pub(crate) const VERSION: u32 = 1;
 
     /// Successful proposal commit at `revision` (Paxos slot). Used by
     /// `kv_put` / `kv_delete` / `kv_batch_write`.
     #[must_use]
-    pub fn ok_chosen(revision: u64, request_id: u64, request_create_ms: u64) -> Self {
+    pub(crate) fn ok_chosen(revision: u64, request_id: u64, request_create_ms: u64) -> Self {
         Self {
             version: Self::VERSION,
             ok: true,
@@ -40,7 +40,7 @@ impl KvResponse {
     /// Attach the slot a read was served at and the serving replica's group
     /// safe-slot. Chainable on `ok_value` / `not_found`.
     #[must_use]
-    pub fn with_read_slots(mut self, read_slot: u64, safe_slot: u64) -> Self {
+    pub(crate) fn with_read_slots(mut self, read_slot: u64, safe_slot: u64) -> Self {
         self.read_slot = read_slot;
         self.safe_slot = safe_slot;
         self
@@ -48,7 +48,8 @@ impl KvResponse {
 
     /// Successful read returning `value`. Used by `kv_get` hits.
     #[must_use]
-    pub fn ok_value(value: Bytes, request_id: u64, request_create_ms: u64) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn ok_value(value: Bytes, request_id: u64, request_create_ms: u64) -> Self {
         Self {
             version: Self::VERSION,
             ok: true,
@@ -69,7 +70,7 @@ impl KvResponse {
     /// `revision`. Used by `kv_get` hits when the engine reports the slot
     /// at which the key was last written.
     #[must_use]
-    pub fn ok_value_with_revision(
+    pub(crate) fn ok_value_with_revision(
         value: Bytes,
         revision: u64,
         request_id: u64,
@@ -93,7 +94,7 @@ impl KvResponse {
 
     /// Read miss — key absent in the local learner store.
     #[must_use]
-    pub fn not_found(request_id: u64, request_create_ms: u64) -> Self {
+    pub(crate) fn not_found(request_id: u64, request_create_ms: u64) -> Self {
         Self {
             version: Self::VERSION,
             ok: false,
@@ -113,7 +114,7 @@ impl KvResponse {
     /// Write rejected because the local replica is not the leader. The
     /// `hint` carries the known leader's gRPC endpoint when available.
     #[must_use]
-    pub fn not_leader(hint: String, request_id: u64, request_create_ms: u64) -> Self {
+    pub(crate) fn not_leader(hint: String, request_id: u64, request_create_ms: u64) -> Self {
         Self {
             version: Self::VERSION,
             ok: false,
@@ -132,7 +133,7 @@ impl KvResponse {
 
     /// Generic error path (proposal failure other than `NotLeader`).
     #[must_use]
-    pub fn err(msg: String, request_id: u64, request_create_ms: u64) -> Self {
+    pub(crate) fn err(msg: String, request_id: u64, request_create_ms: u64) -> Self {
         Self {
             version: Self::VERSION,
             ok: false,

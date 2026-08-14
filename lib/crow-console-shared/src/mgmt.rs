@@ -3,209 +3,18 @@
 
 //! Typed bindings for `crow-kv-server`'s management API (C5).
 //!
-//! Mirrors the request / response JSON shapes from
-//! `crow-kv-server/src/management.rs` and exposes them through a small
-//! set of `async` helpers built on top of [`crate::clients::http::ServerClient`].
-//! Both the CLI and the web backend call into this module so the wire
-//! contract stays in one place.
+//! The HTTP request/response DTOs live in `crow-protocol::mgmt` (the
+//! single home for cross-component protocol types). This module re-
+//! exports them and adds `async` helper methods on [`ServerClient`]
+//! that both the CLI and the web backend call, so the wire contract
+//! stays in one place.
 
-use serde::{Deserialize, Serialize};
+// Re-export all DTOs so existing callers (`use crate::mgmt::*`) keep
+// working until Stage 4 migrates them to `KVClusterAdmin`.
+pub use crow_protocol::mgmt::*;
 
 use crate::clients::http::ServerClient;
 use crate::error::{Error, Result};
-
-// ── Request / response DTOs ─────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AddGroupInitialRole {
-    Leader,
-    Follower,
-}
-
-/// `POST /stores` body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddStoreRequest {
-    pub store_id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-}
-
-/// `POST /stores/{sid}/groups` body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddGroupRequest {
-    pub group_id: u64,
-    pub replica_id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_role: Option<AddGroupInitialRole>,
-    /// When `Some(false)`, the server adds the group without starting its
-    /// election driver, so it cannot self-elect at `quorum == 1` before its
-    /// remotes are wired. Used for multi-replica
-    /// restore / creation; the subsequent remote-wiring rebuild starts the
-    /// driver with a correct quorum. `None` keeps the default (start driver).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_election: Option<bool>,
-}
-
-/// One element of `POST /stores/{sid}/groups/{gid}/remotes` body and
-/// the `GET` response. `endpoint` is the `host:port` of the remote
-/// replica's gRPC service.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoteReplicaInfo {
-    pub replica_id: u64,
-    pub endpoint: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreSummary {
-    pub store_id: u64,
-    #[serde(default)]
-    pub listen_addr: Option<String>,
-    pub group_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreDetail {
-    pub store_id: u64,
-    #[serde(default)]
-    pub listen_addr: Option<String>,
-    #[serde(default)]
-    pub groups: Vec<GroupSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupSummary {
-    pub group_id: u64,
-    pub local_replica_id: u64,
-    pub leader_id: u64,
-    pub remote_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoreListResponse {
-    #[serde(default)]
-    stores: Vec<StoreSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteListResponse {
-    #[serde(default)]
-    remotes: Vec<RemoteReplicaInfo>,
-}
-
-/// `POST /stores/{sid}/groups/{gid}/step-down` body.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StepDownRequest {
-    #[serde(default)]
-    pub reason: String,
-}
-
-/// `POST /stores/{sid}/groups/{gid}/step-down` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepDownResult {
-    /// `false` when the target node was not leader (no-op fence miss).
-    pub accepted: bool,
-    pub current_term: u64,
-    pub current_leader_id: u64,
-}
-
-/// `POST /system/init` body.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SystemInitRequest {
-    #[serde(default = "default_replica_id")]
-    pub replica_id: u64,
-    #[serde(default = "default_start_election_true")]
-    pub start_election: bool,
-}
-
-fn default_replica_id() -> u64 {
-    1
-}
-
-fn default_start_election_true() -> bool {
-    true
-}
-
-/// `POST /system/init` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemInitResponse {
-    pub store_id: u64,
-    pub group_id: u64,
-    pub replica_id: u64,
-    #[serde(default)]
-    pub listen_addr: Option<String>,
-}
-
-/// `POST /topology/finalize` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyFinalizeResponse {
-    pub ready: bool,
-    pub already_finalized: bool,
-}
-
-/// `POST /topology/finalize` request body — carries the full cluster
-/// topology from the console config so the server can write it into
-/// group 0 KV.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TopologyFinalizeRequest {
-    #[serde(default)]
-    pub racks: Vec<TopologyRackInput>,
-    #[serde(default)]
-    pub nodes: Vec<TopologyNodeInput>,
-    #[serde(default)]
-    pub stores: Vec<TopologyStoreInput>,
-    #[serde(default)]
-    pub groups: Vec<TopologyGroupInput>,
-    #[serde(default)]
-    pub replicas: Vec<TopologyReplicaInput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyRackInput {
-    pub rack_id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyNodeInput {
-    pub node_id: String,
-    pub rack_id: String,
-    pub host: String,
-    pub mgmt_endpoint: String,
-    pub grpc_endpoint: String,
-    #[serde(default)]
-    pub election_profile: Option<String>,
-    #[serde(default)]
-    pub auto_start: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyStoreInput {
-    pub store_id: u64,
-    pub nodes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyGroupInput {
-    pub group_id: u64,
-    pub store_id: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyReplicaInput {
-    pub group_id: u64,
-    pub replica_id: u64,
-    pub node_id: String,
-    pub role: String,
-    pub voting: bool,
-    pub endpoint: String,
-}
-
-/// `GET /topology/ready` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyReadyResponse {
-    pub ready: bool,
-}
 
 // ── Client methods ─────────────────────────────────────────────────
 
@@ -320,30 +129,9 @@ impl ServerClient {
         self.post_json("/system/init", req).await
     }
 
-    /// `POST /topology/finalize` — idempotent cutover to group 0 authoritative.
-    /// Writes all topology metadata from `body` into group 0 KV, then sets
-    /// the `/topology/ready` flag.
-    ///
-    /// # Errors
-    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn topology_finalize(
-        &self,
-        body: &TopologyFinalizeRequest,
-    ) -> Result<TopologyFinalizeResponse> {
-        self.post_json("/topology/finalize", body).await
-    }
-
-    /// `GET /topology/ready` — check if group 0 is authoritative.
-    ///
-    /// # Errors
-    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn topology_ready(&self) -> Result<TopologyReadyResponse> {
-        self.get_json("/topology/ready").await
-    }
-
     // ── Transport helpers shared by mgmt methods ────────────────────
 
-    async fn post_json<B: Serialize + ?Sized, T: serde::de::DeserializeOwned>(
+    async fn post_json<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
@@ -387,7 +175,7 @@ impl ServerClient {
             .map_err(|e| self.rpc_err(format!("POST {path}: decode: {e}")))
     }
 
-    async fn post_empty<B: Serialize + ?Sized>(&self, path: &str, body: &B) -> Result<()> {
+    async fn post_empty<B: serde::Serialize + ?Sized>(&self, path: &str, body: &B) -> Result<()> {
         let url = format!("{}{path}", self.base_url());
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();

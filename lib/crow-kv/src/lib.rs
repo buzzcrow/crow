@@ -6,6 +6,8 @@
 //! All business logic lives here as modules. Binaries (`crow-kv-server`)
 //! are thin wrappers that wire configuration and CLI parsing.
 
+#![allow(clippy::mod_module_files)]
+
 pub mod cluster;
 pub mod common;
 pub mod kv;

@@ -36,14 +36,14 @@ use tracing::{info, warn};
 /// Identifier for a stored key: the algorithm name (`"ssh-ed25519"`,
 /// `"ssh-rsa"`, ...) and the base64-encoded public key blob.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyRecord {
+pub(crate) struct KeyRecord {
     pub algo: String,
     pub base64: String,
 }
 
 impl KeyRecord {
     #[must_use]
-    pub fn from_public_key(key: &PublicKey) -> Self {
+    pub(crate) fn from_public_key(key: &PublicKey) -> Self {
         Self {
             algo: key.name().to_string(),
             base64: key.public_key_base64(),
@@ -53,7 +53,7 @@ impl KeyRecord {
 
 /// What happened when we looked up a `host_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// The stored key matches the presented one.
     Known,
     /// We had never seen this host; the presented key has been recorded
@@ -68,7 +68,7 @@ pub enum Outcome {
 /// the file are guarded by a single mutex because the console only
 /// performs a handful of SSH operations at a time.
 #[derive(Debug)]
-pub struct KnownHostsStore {
+pub(crate) struct KnownHostsStore {
     path: PathBuf,
     inner: Mutex<HashMap<String, KeyRecord>>,
 }
@@ -77,7 +77,7 @@ impl KnownHostsStore {
     /// Default file path: `$CROW_KV_KNOWN_HOSTS` if set, else
     /// `~/.crow-kv/known_hosts`.
     #[must_use]
-    pub fn default_path() -> Option<PathBuf> {
+    pub(crate) fn default_path() -> Option<PathBuf> {
         if let Ok(p) = std::env::var("CROW_KV_KNOWN_HOSTS") {
             return Some(PathBuf::from(p));
         }
@@ -90,7 +90,7 @@ impl KnownHostsStore {
     ///
     /// # Errors
     /// I/O or parse errors for existing content.
-    pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
+    pub(crate) fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         let mut inner = HashMap::new();
         if path.exists() {
@@ -138,7 +138,7 @@ impl KnownHostsStore {
     ///
     /// # Errors
     /// I/O errors while persisting a TOFU insert.
-    pub fn check_or_insert(&self, host_id: &str, presented: &KeyRecord) -> io::Result<Outcome> {
+    pub(crate) fn check_or_insert(&self, host_id: &str, presented: &KeyRecord) -> io::Result<Outcome> {
         let mut guard = self.inner.lock().expect("known_hosts mutex");
         if let Some(existing) = guard.get(host_id) {
             if existing == presented {
@@ -161,7 +161,8 @@ impl KnownHostsStore {
     /// # Panics
     /// Panics if the inner mutex is poisoned.
     #[must_use]
-    pub fn get(&self, host_id: &str) -> Option<KeyRecord> {
+    #[allow(dead_code)]
+    pub(crate) fn get(&self, host_id: &str) -> Option<KeyRecord> {
         self.inner
             .lock()
             .expect("known_hosts mutex")

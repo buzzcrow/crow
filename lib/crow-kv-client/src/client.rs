@@ -9,17 +9,15 @@
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use tracing::warn;
 
 use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{
-    CreateSnapshotRequest, CreateSnapshotResponse, KvBatchItem, KvBatchWriteRequest, KvDeleteRequest,
-    KvErrorCode, KvGetRequest, KvResponse, KvScanRequest, KvSetRequest, ListSnapshotsRequest, ReadMode,
-    ReleaseSnapshotRequest, ReleaseSnapshotResponse, SnapshotInfo, SnapshotScanRequest, SnapshotScanResponse,
+    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvJournalScanRequest, KvScanRequest,
+    KvSetRequest, ReadMode,
 };
 
 use crate::config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
@@ -50,6 +48,31 @@ pub struct ScanOutcome {
     pub items: Vec<(Bytes, Bytes)>,
     pub truncated: bool,
     pub timed_out: bool,
+    /// The applied frontier when the scan ran (page 1's `read_slot`).
+    /// Used by `get_applied_slot` to read the data group's frontier via
+    /// a linearizable scan.
+    pub read_slot: u64,
+}
+
+/// One op from a `journal_scan` — a Put or Delete at a specific commit
+/// slot. `value` is empty for Delete. Zero-copy `Bytes` from the prost
+/// response frame.
+#[derive(Debug, Clone)]
+pub struct JournalOp {
+    pub key: Bytes,
+    pub value: Bytes,
+    pub is_delete: bool,
+    pub slot: u64,
+}
+
+/// Outcome of a successful `journal_scan`. Ops are in slot order
+/// (within a slot, in batch order). `truncated` means the caller's
+/// `limit` was reached and more ops exist beyond it.
+#[derive(Debug, Clone)]
+pub struct JournalScanOutcome {
+    pub ops: Vec<JournalOp>,
+    pub truncated: bool,
+    pub read_slot: u64,
 }
 
 /// One item of a `batch_write` call.
@@ -117,7 +140,7 @@ impl EndpointStats {
 /// iteration (covers all exit paths: success, error, redirect, `?`).
 /// Holds an `Arc<EndpointStats>` so it can live across `.await` points
 /// (a `DashMap` entry guard is not `Send`).
-struct InFlightGuard {
+pub(crate) struct InFlightGuard {
     stats: Arc<EndpointStats>,
 }
 
@@ -139,17 +162,20 @@ impl Drop for InFlightGuard {
 /// retries of one logical write, and `ReadMode` routing including
 /// `MinSlot` client-side slot tracking.
 pub struct CrowkvClient {
-    topology: TopologyCache,
-    pool: ConnectionPool,
-    retry: RetryConfig,
+    pub(crate) topology: TopologyCache,
+    pub(crate) pool: ConnectionPool,
+    pub(crate) retry: RetryConfig,
     client_id: u64,
     next_seq: AtomicU64,
-    metrics: Arc<ClientMetrics>,
+    pub(crate) metrics: Arc<ClientMetrics>,
     /// Per-`(store_id, group_id)` high-watermark of the last write's
-    /// `revision`, auto-attached as `min_slot` on `MinSlot` reads.
+    /// paxos slot, auto-attached as `min_slot` on `MinSlot` reads.
     /// Bounded by the number of groups this client has written to, not by
-    /// keyspace size.
-    write_watermark: DashMap<(u64, u64), u64>,
+    /// keyspace size. Evicted when a group disappears from the topology
+    /// (via `TopologyCache`'s eviction hook) — a stale `min_slot`
+    /// high-watermark does not self-heal and causes silent empty reads
+    /// on a reused group ID.
+    write_slot_highwater: Arc<DashMap<(u64, u64), u64>>,
     /// `MinSlot` read-endpoint selection policy. `Leader` (default)
     /// preserves the pre-R26 behavior; `AnyReplica` distributes `MinSlot`
     /// reads round-robin across the topology cache's replica list.
@@ -172,14 +198,29 @@ pub struct CrowkvClient {
 impl CrowkvClient {
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
+        // The eviction hook removes stale `write_slot_highwater` entries
+        // when a group disappears from the topology. The hook captures a
+        // raw pointer pattern via `Arc<DashMap>` — we create the DashMap
+        // first, then build the hook referencing it, then the cache.
+        let write_slot_highwater: Arc<DashMap<(u64, u64), u64>> = Arc::new(DashMap::new());
+        let eviction_hook_map = Arc::clone(&write_slot_highwater);
+        let eviction_hook: crate::topology::EvictionHook = Arc::new(move |evicted| {
+            for key in evicted {
+                eviction_hook_map.remove(key);
+            }
+        });
         Self {
-            topology: TopologyCache::new(config.mgmt_seeds, config.topology_min_refresh_interval),
+            topology: TopologyCache::with_eviction_hook(
+                config.mgmt_seeds,
+                config.topology_min_refresh_interval,
+                Some(eviction_hook),
+            ),
             pool: ConnectionPool::new(config.pool_size_per_endpoint),
             retry: config.retry,
             client_id: new_client_id(),
             next_seq: AtomicU64::new(1),
             metrics: Arc::new(ClientMetrics::default()),
-            write_watermark: DashMap::new(),
+            write_slot_highwater,
             read_endpoint_policy: config.read_endpoint_policy,
             read_rr: DashMap::new(),
             endpoint_stats: DashMap::new(),
@@ -248,6 +289,24 @@ impl CrowkvClient {
         self.topology.set_leader(store_id, group_id, endpoint);
     }
 
+    /// The system KV group's store id (always 0). Group 0 of store 0
+    /// is the fixed directory holding hardware/service-registry/
+    /// KV-cluster-topology records.
+    pub const SYSTEM_STORE: u64 = 0;
+    /// The system KV group's group id (always 0).
+    pub const SYSTEM_GROUP: u64 = 0;
+
+    /// The system KV group `(store_id, group_id)` — group 0 of store
+    /// 0, the fixed directory holding hardware/service-registry/
+    /// KV-cluster-topology records. Group-0 service classes
+    /// (`HardwareClient`, `ServiceRegistryClient`,
+    /// `KVClusterMetaClient`) target this group; callers can use this
+    /// instead of hardcoding `(0, 0)`.
+    #[must_use]
+    pub fn system_group(&self) -> (u64, u64) {
+        (Self::SYSTEM_STORE, Self::SYSTEM_GROUP)
+    }
+
     /// Resolve the current leader endpoint for `(store_id, group_id)`,
     /// retrying an "unknown leader" outcome ("100ms-then-retry") rather
     /// than failing on the first miss. A single failed/empty `/topology`
@@ -292,7 +351,7 @@ impl CrowkvClient {
     /// refreshes `/topology` once and retries, falling back to the
     /// leader if still unknown — a single-replica group or a stale
     /// `/topology` never blocks reads.
-    async fn resolve_read_endpoint(
+    pub(crate) async fn resolve_read_endpoint(
         &self,
         store_id: u64,
         group_id: u64,
@@ -391,7 +450,7 @@ impl CrowkvClient {
     /// `InFlightGuard` that decrements the in-flight count on drop.
     /// Used in the get/scan retry loops to track per-endpoint load for
     /// `LeastConnections` selection.
-    fn incr_in_flight(&self, endpoint: &str) -> InFlightGuard {
+    pub(crate) fn incr_in_flight(&self, endpoint: &str) -> InFlightGuard {
         let entry = self
             .endpoint_stats
             .entry(endpoint.to_string())
@@ -411,18 +470,20 @@ impl CrowkvClient {
     }
 
     fn record_write(&self, store_id: u64, group_id: u64, revision: u64) {
-        self.write_watermark
+        self.write_slot_highwater
             .entry((store_id, group_id))
             .and_modify(|w| *w = (*w).max(revision))
             .or_insert(revision);
     }
 
     /// Cached `min_slot` for `MinSlot` reads against this group:
-    /// the highest `revision` this client has observed from its own writes,
+    /// the highest paxos slot this client has observed from its own writes,
     /// or `0` if it has never written to this group.
     #[must_use]
     pub fn read_your_writes_slot(&self, store_id: u64, group_id: u64) -> u64 {
-        self.write_watermark.get(&(store_id, group_id)).map_or(0, |v| *v)
+        self.write_slot_highwater
+            .get(&(store_id, group_id))
+            .map_or(0, |v| *v)
     }
 
     /// `Put` a single key/value.
@@ -863,6 +924,7 @@ impl CrowkvClient {
                                     items: all_items,
                                     truncated: true,
                                     timed_out: true,
+                                    read_slot: page1_read_slot.unwrap_or(0),
                                 });
                             }
                             page_start_after = all_items.last().expect("non-empty page").0.to_vec();
@@ -884,6 +946,7 @@ impl CrowkvClient {
                             items: all_items,
                             truncated: outcome_truncated,
                             timed_out: resp.timed_out,
+                            read_slot: page1_read_slot.unwrap_or(0),
                         });
                     }
                     self.metrics.record_scan_error();
@@ -1016,9 +1079,147 @@ impl CrowkvClient {
         }
     }
 
+    /// Slot-ordered scan over the chosen log. Returns individual KV ops
+    /// (Put / Delete) in commit (slot) order within `[min_slot,
+    /// max_slot]` (`max_slot = 0` means "up to the current applied
+    /// frontier"), filtered by `key_prefix` (empty = all keys). Used by
+    /// diskdb strategy 2 (journal scan replay) — [`Self::scan`]
+    /// returns key order, not slot order, so it cannot drive a correct
+    /// replay.
+    ///
+    /// Transparent pagination: sends the first request, if `truncated`
+    /// resends with `min_slot = last_op_slot + 1`, repeats until all
+    /// ops in the range are collected or the caller's `limit` is
+    /// reached. `limit = 0` means "no caller limit" (still pages via
+    /// the server's per-page `page_limit`). Returns the full op list
+    /// in slot order.
+    ///
+    /// # Errors
+    /// See [`Error`]. A server `KV_ERROR_JOURNAL_SCAN_GC_GAP` (asked
+    /// for slots already GC'd below the WAL trim point) is surfaced as
+    /// [`Error::Server`] — the caller (diskdb recovery) falls back to
+    /// a full-scan rebuild.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub async fn journal_scan(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        min_slot: u64,
+        max_slot: u64,
+        key_prefix: &[u8],
+        limit: u32,
+        page_limit: u32,
+        read_mode: ReadMode,
+        deadline: Option<u64>,
+    ) -> Result<JournalScanOutcome> {
+        let min_slot_floor = self.resolve_min_slot(store_id, group_id, read_mode, None);
+        let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let mut attempts = 0u32;
+        let mut backoff = self.retry.backoff_base;
+        let mut all_ops: Vec<JournalOp> = Vec::new();
+        let mut page_min_slot = min_slot.max(min_slot_floor);
+        let mut page1_read_slot: Option<u64> = None;
+        loop {
+            let remaining_page_limit = if page_limit == 0 { 0 } else { page_limit };
+            let req = KvJournalScanRequest {
+                version: 1,
+                group_id,
+                min_slot: page_min_slot,
+                max_slot,
+                key_prefix: Bytes::copy_from_slice(key_prefix),
+                limit: remaining_page_limit,
+                request_id: next_request_id(),
+                request_create_ms: now_ms(),
+                read_mode: read_mode as i32,
+            };
+            let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
+            let _in_flight = self.incr_in_flight(&endpoint);
+            match KvServiceClient::new(channel).journal_scan(req).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
+                    if resp.ok {
+                        self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                        if page1_read_slot.is_none() {
+                            page1_read_slot = Some(resp.read_slot);
+                        }
+                        let page_len = resp.ops.len();
+                        let resp_truncated = resp.truncated;
+                        for op in resp.ops {
+                            all_ops.push(JournalOp {
+                                key: op.key,
+                                value: op.value,
+                                is_delete: op.is_delete,
+                                slot: op.slot,
+                            });
+                        }
+                        // Caller's limit reached?
+                        if limit != 0 && all_ops.len() >= limit as usize {
+                            all_ops.truncate(limit as usize);
+                            self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                            return Ok(JournalScanOutcome {
+                                ops: all_ops,
+                                truncated: true,
+                                read_slot: page1_read_slot.unwrap_or(0),
+                            });
+                        }
+                        // Server page truncated → fetch the next page
+                        // from `last_op_slot + 1`. A zero-op truncated
+                        // page is a safety stop (avoid infinite loop).
+                        if resp_truncated && page_len > 0 {
+                            let server_timed_out = deadline.is_some_and(|dl| now_ms() >= dl);
+                            if server_timed_out {
+                                return Ok(JournalScanOutcome {
+                                    ops: all_ops,
+                                    truncated: true,
+                                    read_slot: page1_read_slot.unwrap_or(0),
+                                });
+                            }
+                            page_min_slot = resp.last_op_slot.saturating_add(1);
+                            continue;
+                        }
+                        return Ok(JournalScanOutcome {
+                            ops: all_ops,
+                            truncated: false,
+                            read_slot: page1_read_slot.unwrap_or(0),
+                        });
+                    }
+                    self.metrics.record_scan_error();
+                    // GC gap is deterministic — do not retry; the caller
+                    // (diskdb recovery) falls back to a full-scan rebuild.
+                    if resp.error_code == crow_kv::rpc::KvErrorCode::KvErrorJournalScanGcGap as i32 {
+                        return Err(Error::JournalScanGcGap);
+                    }
+                    if !resp.not_leader_hint.is_empty() {
+                        if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
+                            self.metrics.record_read_endpoint_fallback();
+                        }
+                        self.topology
+                            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
+                        endpoint = resp.not_leader_hint;
+                        continue;
+                    }
+                    attempts = self.count_other(attempts, &resp.error)?;
+                }
+                Err(status) => {
+                    self.metrics.record_scan_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
+                    attempts = self.count_other(attempts, &status.to_string())?;
+                }
+            }
+        }
+    }
+
     /// `MinSlot` auto-attaches this client's own last-write watermark
     /// for the group unless the caller already supplied a `min_slot`.
-    fn resolve_min_slot(
+    pub(crate) fn resolve_min_slot(
         &self,
         store_id: u64,
         group_id: u64,
@@ -1032,224 +1233,6 @@ impl CrowkvClient {
             return self.read_your_writes_slot(store_id, group_id);
         }
         0
-    }
-
-    /// If `resp` carries a `NotLeaderHint`, follow it immediately (uncounted
-    /// retry — forward progress toward the real leader) and update the
-    /// topology cache. Returns `None` if `resp` did not indicate not-leader
-    /// (caller should treat it as a normal application error).
-    fn follow_not_leader(&self, store_id: u64, group_id: u64, resp: &KvResponse) -> Option<String> {
-        if resp.not_leader_hint.is_empty() {
-            return None;
-        }
-        self.topology
-            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
-        Some(resp.not_leader_hint.clone())
-    }
-
-    /// A `not leader` failure with an empty hint (the responding replica
-    /// doesn't know who its leader is either -- typically mid-election,
-    /// e.g. right after a restart; a real hint would have already been
-    /// handled by [`Self::follow_not_leader`] before this is checked).
-    /// Checks the structured `error_code` first, falling back to the
-    /// string for old servers that don't set the code (default 0 =
-    /// `KvErrorNone`).
-    fn is_unknown_leader(error_code: i32, error: &str) -> bool {
-        error_code == KvErrorCode::KvErrorNotLeader as i32 || error == "not leader"
-    }
-
-    /// After an [`Self::is_unknown_leader`] failure, give the election a
-    /// chance to converge and pick up whatever leader the cache learns in
-    /// the meantime, instead of busy-retrying the same non-answering
-    /// replica ("100ms-then-retry"). Logs refresh failures instead of
-    /// silently swallowing them; the caller's `count_other` surfaces
-    /// `RetriesExhausted` if the endpoint stays stale.
-    async fn wait_and_refresh_leader(&self, store_id: u64, group_id: u64, endpoint: &str) -> String {
-        self.metrics.record_unknown_leader_wait();
-        self.metrics.record_leader_query();
-        self.metrics.record_topology_refresh();
-        if let Err(e) = self.topology.refresh().await {
-            warn!(error = %e, "topology refresh failed in wait_and_refresh_leader");
-        }
-        tokio::time::sleep(self.retry.unknown_leader_wait).await;
-        self.topology
-            .leader(store_id, group_id)
-            .unwrap_or_else(|| endpoint.to_string())
-    }
-
-    /// Transport-level failure (connect/timeout/unavailable): best-effort
-    /// topology refresh (covers "leader moved and we don't know where"),
-    /// exponential backoff, then return the (possibly updated) endpoint to
-    /// retry against. Logs refresh failures instead of silently
-    /// swallowing them; the caller's `count_other` surfaces
-    /// `RetriesExhausted` if the endpoint stays stale.
-    async fn handle_transport_err(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        current: &str,
-        backoff: &mut Duration,
-    ) -> String {
-        self.metrics.record_topology_refresh();
-        if let Err(e) = self.topology.refresh().await {
-            warn!(error = %e, "topology refresh failed in handle_transport_err");
-        }
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .unwrap_or_else(|| current.to_string());
-        tokio::time::sleep(*backoff).await;
-        *backoff = (*backoff * 2).min(self.retry.backoff_max);
-        endpoint
-    }
-
-    /// Count one non-`NotLeaderHint` retryable outcome; errors once the
-    /// configured retry budget (`RetryConfig::max_retries`) is exhausted.
-    ///
-    /// # Errors
-    /// `Error::RetriesExhausted` once `attempts` exceeds the budget.
-    fn count_other(&self, attempts: u32, last: &str) -> Result<u32> {
-        let attempts = attempts + 1;
-        if attempts > self.retry.max_retries {
-            self.metrics.record_retries_exhausted();
-            return Err(Error::RetriesExhausted {
-                attempts,
-                last: last.to_string(),
-            });
-        }
-        Ok(attempts)
-    }
-
-    /// R59: Create a point-in-time-consistent snapshot. Flushes L0 → L1
-    /// and pins the durable view at `last_applied_slot`. Returns a
-    /// snapshot handle for use with `snapshot_scan`/`release_snapshot`.
-    ///
-    /// # Errors
-    /// `Error::NotLeader` if this client is not connected to the leader
-    /// (for linearizable mode). `Error::Transport` on transport failure.
-    pub async fn create_snapshot(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        read_mode: ReadMode,
-        min_slot: Option<u64>,
-    ) -> Result<CreateSnapshotResponse> {
-        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
-        let endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
-        let req = CreateSnapshotRequest {
-            group_id,
-            read_mode: read_mode as i32,
-            min_slot,
-        };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .create_snapshot(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp)
-    }
-
-    /// R59: List active snapshot handles for a group.
-    ///
-    /// # Errors
-    /// `Error::NoLeader` if no leader is known. `Error::Transport` on
-    /// transport failure.
-    pub async fn list_snapshots(&self, store_id: u64, group_id: u64) -> Result<Vec<SnapshotInfo>> {
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .ok_or(Error::NoLeader { store_id, group_id })?;
-        let req = ListSnapshotsRequest { group_id };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .list_snapshots(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp.snapshots)
-    }
-
-    /// R59: Iterate a pinned snapshot with prefix/pagination. Returns
-    /// one page of results; the caller advances `start_after` to the
-    /// last returned key for the next page. The snapshot handle must
-    /// have been created by `create_snapshot` and not yet released or
-    /// expired.
-    ///
-    /// # Errors
-    /// `Error::NoLeader` if no leader is known. `Error::Transport` on
-    /// transport failure.
-    pub async fn snapshot_scan(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        snapshot_handle: u64,
-        prefix: &[u8],
-        start_after: &[u8],
-        limit: u32,
-    ) -> Result<SnapshotScanResponse> {
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .ok_or(Error::NoLeader { store_id, group_id })?;
-        let req = SnapshotScanRequest {
-            snapshot_handle,
-            prefix: Bytes::copy_from_slice(prefix),
-            start_after: Bytes::copy_from_slice(start_after),
-            limit,
-            group_id,
-        };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .snapshot_scan(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp)
-    }
-
-    /// R59: Release a snapshot handle, dropping the pinned view.
-    ///
-    /// # Errors
-    /// `Error::NoLeader` if no leader is known. `Error::Transport` on
-    /// transport failure.
-    pub async fn release_snapshot(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        snapshot_handle: u64,
-    ) -> Result<ReleaseSnapshotResponse> {
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .ok_or(Error::NoLeader { store_id, group_id })?;
-        let req = ReleaseSnapshotRequest {
-            snapshot_handle,
-            group_id,
-        };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .release_snapshot(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp)
     }
 }
 
@@ -1269,6 +1252,7 @@ fn next_request_id() -> u64 {
 /// A `client_id` unique enough for one client session ("opaque, assigned
 /// once per client session"). Derived from the
 /// process start time in nanoseconds; not a cryptographic identifier.
-fn new_client_id() -> u64 {
+#[must_use]
+pub fn new_client_id() -> u64 {
     next_request_id()
 }

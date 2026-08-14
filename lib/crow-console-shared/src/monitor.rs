@@ -67,7 +67,7 @@ impl MonitorCache {
 
     /// Drop the node's record entirely (e.g. when the node is removed
     /// from `ConsoleConfig`).
-    pub async fn drop_node(&self, node_id: &str) {
+    pub async fn drop_node(&self, node_id: &NodeId) {
         self.nodes.write().await.remove(node_id);
     }
 
@@ -75,9 +75,9 @@ impl MonitorCache {
     /// stale stores remain visible until a successful refresh replaces
     /// them, which mirrors the design: per-node 4xx/5xx surfaces as
     /// `502` to the caller, not "store disappeared".
-    pub async fn mark_down(&self, node_id: &str, reason: impl Into<String>) {
+    pub async fn mark_down(&self, node_id: NodeId, reason: impl Into<String>) {
         let mut guard = self.nodes.write().await;
-        let entry = guard.entry(node_id.to_string()).or_default();
+        let entry = guard.entry(node_id).or_default();
         entry.health = NodeHealth::Down;
         entry.last_error = Some(reason.into());
     }
@@ -92,7 +92,7 @@ impl MonitorCache {
             let Some(ns) = rec.stores.get(&store_id) else {
                 continue;
             };
-            nodes.push(node_id.clone());
+            nodes.push(*node_id);
             for g in &ns.groups {
                 let entry = groups.entry(g.group_id).or_insert(GroupSummary {
                     group_id: g.group_id,
@@ -137,7 +137,7 @@ impl MonitorCache {
             }
             replicas.push(ReplicaView {
                 replica_id: g.local.replica_id,
-                node_id: node_id.clone(),
+                node_id: *node_id,
                 role: g.local.role,
                 state: g.local.state,
                 engine_healthy: g.local.engine_healthy,
@@ -189,18 +189,18 @@ impl MonitorCache {
         if let Some(r) = view.replicas.iter().find(|r| {
             r.role == ReplicaRole::Leader && guard.get(&r.node_id).is_some_and(|n| n.health == NodeHealth::Up)
         }) {
-            return Some((r.replica_id, r.node_id.clone()));
+            return Some((r.replica_id, r.node_id));
         }
         // First-healthy fallback. Health is read from the per-node
         // record because `ReplicaView` does not carry node health.
         for r in &view.replicas {
             if guard.get(&r.node_id).is_some_and(|n| n.health == NodeHealth::Up) {
-                return Some((r.replica_id, r.node_id.clone()));
+                return Some((r.replica_id, r.node_id));
             }
         }
         // No healthy node — return the first replica so the caller can
         // attempt anyway; gRPC will surface `NodeUnreachable`.
-        view.replicas.first().map(|r| (r.replica_id, r.node_id.clone()))
+        view.replicas.first().map(|r| (r.replica_id, r.node_id))
     }
 }
 
@@ -328,7 +328,7 @@ impl MonitorTask {
                     match msg {
                         Some(MonitorCmd::SetTargets(t)) => {
                             // Drop cache entries for nodes no longer in the target list.
-                            let keep: std::collections::HashSet<_> = t.iter().map(|p| p.node_id.clone()).collect();
+                            let keep: std::collections::HashSet<_> = t.iter().map(|p| p.node_id).collect();
                             let snap = self.cache.snapshot().await;
                             for id in snap.keys() {
                                 if !keep.contains(id) {
@@ -363,7 +363,7 @@ impl MonitorTask {
             Ok(c) => c,
             Err(e) => {
                 self.cache
-                    .mark_down(&t.node_id, format!("client build: {e}"))
+                    .mark_down(t.node_id, format!("client build: {e}"))
                     .await;
                 return;
             }
@@ -387,15 +387,15 @@ impl MonitorTask {
                     // Best-effort translation of the legacy snapshot
                     // shape into the new per-node-store cache entry.
                     // The new RPC (A4) will replace this verbatim.
-                    rec.stores = legacy_topology_to_node_stores(&t.node_id, &stores);
+                    rec.stores = legacy_topology_to_node_stores(t.node_id, &stores);
                 }
-                self.cache.set_node_report(t.node_id.clone(), rec).await;
+                self.cache.set_node_report(t.node_id, rec).await;
             }
             Ok(Err(e)) => {
-                self.cache.mark_down(&t.node_id, format!("health: {e}")).await;
+                self.cache.mark_down(t.node_id, format!("health: {e}")).await;
             }
             Err(_) => {
-                self.cache.mark_down(&t.node_id, "health: timeout").await;
+                self.cache.mark_down(t.node_id, "health: timeout").await;
             }
         }
     }
@@ -403,7 +403,7 @@ impl MonitorTask {
 
 #[must_use]
 pub fn legacy_topology_to_node_stores(
-    node_id: &str,
+    node_id: NodeId,
     stores: &[crate::snapshot::StoreView],
 ) -> BTreeMap<StoreId, NodeStore> {
     use crate::cluster::{LocalReplicaInfo, NodeGroup as ClusterNodeGroup, RemoteReplicaInfo};
@@ -436,14 +436,14 @@ pub fn legacy_topology_to_node_stores(
                 .map(|r| RemoteReplicaInfo {
                     replica_id: r.id,
                     // Legacy snapshot carries `endpoint`, not node_id.
-                    // We surface the endpoint as a stand-in until the
-                    // per-node RPC (A4) sends the real `node_id`.
-                    node_id: r.endpoint.clone(),
+                    // We use 0 as a placeholder until the per-node RPC
+                    // (A4) sends the real numeric `node_id`.
+                    node_id: 0,
                     reachable: true,
                 })
                 .collect();
             groups.push(ClusterNodeGroup {
-                node_id: node_id.to_string(),
+                node_id,
                 store_id: s.store_id,
                 group_id: g.group_id,
                 local,
@@ -455,7 +455,7 @@ pub fn legacy_topology_to_node_stores(
         out.insert(
             s.store_id,
             NodeStore {
-                node_id: node_id.to_string(),
+                node_id,
                 store_id: s.store_id,
                 listen_addr: s.listen_addr.clone(),
                 groups,
@@ -497,7 +497,7 @@ mod tests {
     }
 
     fn ng(
-        node: &str,
+        node: NodeId,
         store: StoreId,
         group: u64,
         replica: ReplicaId,
@@ -505,11 +505,11 @@ mod tests {
         leader_hint: Option<ReplicaId>,
     ) -> NodeStore {
         NodeStore {
-            node_id: node.into(),
+            node_id: node,
             store_id: store,
             listen_addr: None,
             groups: vec![ClusterNodeGroup {
-                node_id: node.into(),
+                node_id: node,
                 store_id: store,
                 group_id: group,
                 local: LocalReplicaInfo {
@@ -531,22 +531,13 @@ mod tests {
     async fn resolve_group_aggregates_three_nodes() {
         let cache = MonitorCache::new();
         cache
-            .set_node_report(
-                "n1".into(),
-                rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))]),
-            )
+            .set_node_report(1, rec(vec![ng(1, 1, 7, 100, ReplicaRole::Leader, Some(100))]))
             .await;
         cache
-            .set_node_report(
-                "n2".into(),
-                rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, Some(100))]),
-            )
+            .set_node_report(2, rec(vec![ng(2, 1, 7, 200, ReplicaRole::Follower, Some(100))]))
             .await;
         cache
-            .set_node_report(
-                "n3".into(),
-                rec(vec![ng("n3", 1, 7, 300, ReplicaRole::Follower, Some(100))]),
-            )
+            .set_node_report(3, rec(vec![ng(3, 1, 7, 300, ReplicaRole::Follower, Some(100))]))
             .await;
 
         let view = cache.resolve_group(1, 7).await.expect("group exists");
@@ -558,16 +549,16 @@ mod tests {
     #[tokio::test]
     async fn leader_for_falls_back_to_first_healthy_when_hint_missing() {
         let cache = MonitorCache::new();
-        // No leader hint anywhere; node n2 is Down.
-        let mut r1 = rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Follower, None)]);
-        let mut r2 = rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, None)]);
-        let r3 = rec(vec![ng("n3", 1, 7, 300, ReplicaRole::Follower, None)]);
+        // No leader hint anywhere; node 2 is Down.
+        let mut r1 = rec(vec![ng(1, 1, 7, 100, ReplicaRole::Follower, None)]);
+        let mut r2 = rec(vec![ng(2, 1, 7, 200, ReplicaRole::Follower, None)]);
+        let r3 = rec(vec![ng(3, 1, 7, 300, ReplicaRole::Follower, None)]);
         r1.health = NodeHealth::Down;
         r2.health = NodeHealth::Up;
-        cache.set_node_report("n1".into(), r1).await;
-        cache.set_node_report("n2".into(), r2).await;
+        cache.set_node_report(1, r1).await;
+        cache.set_node_report(2, r2).await;
         cache
-            .set_node_report("n3".into(), {
+            .set_node_report(3, {
                 let mut x = r3;
                 x.health = NodeHealth::Up;
                 x
@@ -575,9 +566,9 @@ mod tests {
             .await;
 
         let (rid, nid) = cache.leader_for(1, 7).await.expect("some leader");
-        // n2 or n3 — whichever the BTreeMap iteration order picks
-        // first; both are Up. n1 (Down) must not be chosen.
-        assert!(nid == "n2" || nid == "n3", "got {nid}");
+        // node 2 or 3 — whichever the BTreeMap iteration order picks
+        // first; both are Up. node 1 (Down) must not be chosen.
+        assert!(nid == 2 || nid == 3, "got {nid}");
         assert!(rid == 200 || rid == 300);
     }
 
@@ -585,10 +576,7 @@ mod tests {
     async fn resolve_group_not_found_returns_none() {
         let cache = MonitorCache::new();
         cache
-            .set_node_report(
-                "n1".into(),
-                rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))]),
-            )
+            .set_node_report(1, rec(vec![ng(1, 1, 7, 100, ReplicaRole::Leader, Some(100))]))
             .await;
         assert!(cache.resolve_group(1, 8).await.is_none());
         assert!(cache.resolve_group(2, 7).await.is_none());
@@ -598,16 +586,10 @@ mod tests {
     async fn resolve_store_lists_member_nodes_and_groups() {
         let cache = MonitorCache::new();
         cache
-            .set_node_report(
-                "n1".into(),
-                rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))]),
-            )
+            .set_node_report(1, rec(vec![ng(1, 1, 7, 100, ReplicaRole::Leader, Some(100))]))
             .await;
         cache
-            .set_node_report(
-                "n2".into(),
-                rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, Some(100))]),
-            )
+            .set_node_report(2, rec(vec![ng(2, 1, 7, 200, ReplicaRole::Follower, Some(100))]))
             .await;
         let view = cache.resolve_store(1).await.expect("store exists");
         assert_eq!(view.nodes.len(), 2);
@@ -619,13 +601,13 @@ mod tests {
     #[tokio::test]
     async fn group_health_degraded_when_minority_down() {
         let cache = MonitorCache::new();
-        let mut r1 = rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))]);
-        let r2 = rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, Some(100))]);
-        let r3 = rec(vec![ng("n3", 1, 7, 300, ReplicaRole::Follower, Some(100))]);
+        let mut r1 = rec(vec![ng(1, 1, 7, 100, ReplicaRole::Leader, Some(100))]);
+        let r2 = rec(vec![ng(2, 1, 7, 200, ReplicaRole::Follower, Some(100))]);
+        let r3 = rec(vec![ng(3, 1, 7, 300, ReplicaRole::Follower, Some(100))]);
         r1.health = NodeHealth::Down;
-        cache.set_node_report("n1".into(), r1).await;
-        cache.set_node_report("n2".into(), r2).await;
-        cache.set_node_report("n3".into(), r3).await;
+        cache.set_node_report(1, r1).await;
+        cache.set_node_report(2, r2).await;
+        cache.set_node_report(3, r3).await;
         let v = cache.resolve_group(1, 7).await.unwrap();
         assert_eq!(v.state, GroupHealth::Degraded);
     }
@@ -633,8 +615,8 @@ mod tests {
     #[tokio::test]
     async fn drop_node_removes_record() {
         let cache = MonitorCache::new();
-        cache.set_node_report("n1".into(), rec(vec![])).await;
-        cache.drop_node("n1").await;
+        cache.set_node_report(1, rec(vec![])).await;
+        cache.drop_node(&1).await;
         assert!(cache.snapshot().await.is_empty());
     }
 }

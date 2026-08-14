@@ -3,12 +3,12 @@
 // Baseline: 1.1s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, clusterInit, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-05 store group replica chain', () => {
   test('creates store and group through the UI against a real deployed server', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r5', 'n5');
-    await deployNodeServer(baseURL!, 'n5', 9912, 9922);
+    await seedRackAndNode(baseURL!, 5, 5);
+    await deployNodeServer(baseURL!, 5, freePort(), freePort());
 
     const api = await apiContext(baseURL!);
     try {
@@ -16,11 +16,11 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByRole('button', { name: 'Logical' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
-      await clusterInit(baseURL!, ['n5']);
+      await clusterInit(baseURL!, [5]);
       await aside.getByRole('button', { name: 'Add Store' }).click();
       await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
       await page.getByLabel('KV Store ID (numeric)').fill('57');
-      await page.getByLabel(/^n5/).check();
+      await page.getByLabel(/^5\b/).check();
       await page.getByRole('button', { name: /create kv store/i }).click();
 
       await expect(aside.getByText('S-57')).toBeVisible({ timeout: 3_000 });
@@ -31,7 +31,7 @@ test.describe('E2E-05 store group replica chain', () => {
       await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
       await page.getByLabel('Group ID (numeric)').fill('570');
       await page.getByLabel('Starting Replica ID (numeric)').fill('5700');
-      await page.getByLabel(/^n5/).check();
+      await page.getByLabel(/^5\b/).check();
       await page.getByRole('button', { name: /create group/i }).click();
 
       // Expand the freshly-created store row (created after tree mount, so it
@@ -52,7 +52,7 @@ test.describe('E2E-05 store group replica chain', () => {
       await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
       await page.getByLabel('Group ID (numeric)').fill('580');
       await page.getByLabel('Starting Replica ID (numeric)').fill('5800');
-      await page.getByLabel(/^n5/).check();
+      await page.getByLabel(/^5\b/).check();
       await page.getByRole('button', { name: /create group/i }).click();
 
       await expect(aside.getByText('G-580')).toBeVisible({ timeout: 3_000 });
@@ -66,7 +66,7 @@ test.describe('E2E-05 store group replica chain', () => {
       expect(await groups.json()).toEqual(expect.arrayContaining([expect.objectContaining({ group_id: 570 }), expect.objectContaining({ group_id: 580 })]));
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 'n5');
+      await stopNodeServer(baseURL!, 5);
     }
   });
 });

@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = crow_kv_server::mgmt_api::openapi_json();
+    let json = crow_kv_server::mgmt::openapi_json();
     std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
     println!("{}", out.display());
     Ok(())

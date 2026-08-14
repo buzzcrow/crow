@@ -18,8 +18,8 @@ pub enum StoreVerb {
         /// Comma-separated node ids that should host the store. If
         /// empty, the console picks the first node with a running
         /// `crow-kv-server`.
-        #[arg(long, value_delimiter = ',', default_value = "")]
-        nodes: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        nodes: Vec<u64>,
     },
     /// Remove a store from every node hosting it.
     Remove {
@@ -44,7 +44,7 @@ pub async fn run_store_verb(cli: &Cli, verb: StoreVerb) -> ExitCode {
         StoreVerb::Add { store_id, nodes } => {
             let body = CreateStoreBody {
                 store_id,
-                nodes: nodes.into_iter().filter(|n| !n.is_empty()).collect(),
+                nodes: nodes.into_iter().collect(),
             };
             match client.add_store(&body).await {
                 Ok(v) => {
@@ -81,7 +81,16 @@ pub async fn run_store_verb(cli: &Cli, verb: StoreVerb) -> ExitCode {
                 }
                 println!("{:>8}  {:>8}  NODES", "STORE", "GROUPS");
                 for s in &stores {
-                    println!("{:>8}  {:>8}  {}", s.store_id, s.groups.len(), s.nodes.join(","));
+                    println!(
+                        "{:>8}  {:>8}  {}",
+                        s.store_id,
+                        s.groups.len(),
+                        s.nodes
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
                 }
                 ExitCode::SUCCESS
             }
@@ -95,7 +104,16 @@ pub async fn run_store_verb(cli: &Cli, verb: StoreVerb) -> ExitCode {
                 if cli.json {
                     return print_json(&detail);
                 }
-                println!("store {} nodes=[{}]", detail.store_id, detail.nodes.join(","));
+                println!(
+                    "store {} nodes=[{}]",
+                    detail.store_id,
+                    detail
+                        .nodes
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
                 for g in &detail.groups {
                     println!(
                         "  group {} replicas={} leader={}",

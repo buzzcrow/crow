@@ -22,8 +22,8 @@ import type {
  * fields.
  */
 export interface AddNodeRequest {
-  id: string;
-  rack_id: string;
+  id: number;
+  rack_id: number;
   host: string;
   ssh_port?: number;
   ssh_user?: string;
@@ -266,7 +266,7 @@ export async function listRacks(recursive?: number, options?: RequestOptions): P
 /**
  * Get a specific rack by ID
  */
-export async function getRack(rackId: string, recursive?: number, options?: RequestOptions): Promise<Rack> {
+export async function getRack(rackId: number, recursive?: number, options?: RequestOptions): Promise<Rack> {
   const url = `/api/racks/${encodeURIComponent(rackId)}${qs({ recursive })}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
@@ -274,7 +274,7 @@ export async function getRack(rackId: string, recursive?: number, options?: Requ
 /**
  * Create a new rack
  */
-export async function addRack(req: { id: string; name?: string }, options?: RequestOptions): Promise<Rack> {
+export async function addRack(req: { id: number; name?: string }, options?: RequestOptions): Promise<Rack> {
   const body = JSON.stringify(req);
   const url = `/api/racks`;
   return jsonOrThrow(
@@ -291,7 +291,7 @@ export async function addRack(req: { id: string; name?: string }, options?: Requ
 /**
  * Delete a rack
  */
-export async function removeRack(rackId: string, options?: RequestOptions): Promise<void> {
+export async function removeRack(rackId: number, options?: RequestOptions): Promise<void> {
   const url = `/api/racks/${encodeURIComponent(rackId)}`;
   await jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'DELETE', skipDeduplication: true }));
 }
@@ -307,7 +307,7 @@ export async function listNodes(rackId?: string, recursive?: number, options?: R
 /**
  * Get a specific node by ID
  */
-export async function getNode(nodeId: string, recursive?: number, options?: RequestOptions): Promise<Node> {
+export async function getNode(nodeId: number, recursive?: number, options?: RequestOptions): Promise<Node> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}${qs({ recursive })}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
@@ -337,7 +337,7 @@ export async function addNode(req: AddNodeRequest, options?: RequestOptions): Pr
 /**
  * Delete a node
  */
-export async function removeNode(nodeId: string, options?: RequestOptions): Promise<void> {
+export async function removeNode(nodeId: number, options?: RequestOptions): Promise<void> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}`;
   await jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'DELETE', skipDeduplication: true }));
 }
@@ -345,7 +345,7 @@ export async function removeNode(nodeId: string, options?: RequestOptions): Prom
 /**
  * Ping a node to check reachability
  */
-export async function pingNode(nodeId: string, options?: RequestOptions): Promise<{ ok: boolean; error?: string }> {
+export async function pingNode(nodeId: number, options?: RequestOptions): Promise<{ ok: boolean; error?: string }> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/ping`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
@@ -360,7 +360,7 @@ export async function pingNode(nodeId: string, options?: RequestOptions): Promis
  * Deploy a crow-kv-server instance to a node
  */
 export async function deployServer(
-  nodeId: string,
+  nodeId: number,
   req: { mgmt_port: number; grpc_port: number; binary?: string },
   options?: RequestOptions
 ): Promise<ServerProcess> {
@@ -380,7 +380,7 @@ export async function deployServer(
 /**
  * Start a previously deployed server on a node
  */
-export async function startServer(nodeId: string, options?: RequestOptions): Promise<ServerProcess> {
+export async function startServer(nodeId: number, options?: RequestOptions): Promise<ServerProcess> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/server/start`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
@@ -394,7 +394,7 @@ export async function startServer(nodeId: string, options?: RequestOptions): Pro
 /**
  * Stop a running server on a node
  */
-export async function stopServer(nodeId: string, options?: RequestOptions): Promise<ServerProcess> {
+export async function stopServer(nodeId: number, options?: RequestOptions): Promise<ServerProcess> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/server/stop`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
@@ -408,7 +408,7 @@ export async function stopServer(nodeId: string, options?: RequestOptions): Prom
 /**
  * Restart a previously deployed server on a node.
  */
-export async function restartServer(nodeId: string, options?: RequestOptions): Promise<ServerProcess> {
+export async function restartServer(nodeId: number, options?: RequestOptions): Promise<ServerProcess> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/server/restart`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
@@ -422,7 +422,7 @@ export async function restartServer(nodeId: string, options?: RequestOptions): P
 /**
  * Get the server process details for a node
  */
-export async function getServer(nodeId: string, options?: RequestOptions): Promise<ServerProcess> {
+export async function getServer(nodeId: number, options?: RequestOptions): Promise<ServerProcess> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/server`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
@@ -430,7 +430,7 @@ export async function getServer(nodeId: string, options?: RequestOptions): Promi
 /**
  * Delete the server deployment record for a node
  */
-export async function removeServer(nodeId: string, options?: RequestOptions): Promise<void> {
+export async function removeServer(nodeId: number, options?: RequestOptions): Promise<void> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/server`;
   await jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'DELETE', skipDeduplication: true }));
 }
@@ -438,7 +438,7 @@ export async function removeServer(nodeId: string, options?: RequestOptions): Pr
 /**
  * Get the OpenAPI spec for a node's crow-kv-server instance
  */
-export async function getNodeOpenApi(nodeId: string, options?: RequestOptions): Promise<Record<string, any>> {
+export async function getNodeOpenApi(nodeId: number, options?: RequestOptions): Promise<Record<string, any>> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/openapi.json`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
@@ -446,7 +446,7 @@ export async function getNodeOpenApi(nodeId: string, options?: RequestOptions): 
 /**
  * List stores on a specific node (physical view)
  */
-export async function listNodeStores(nodeId: string, recursive?: number, options?: RequestOptions): Promise<NodeStore[]> {
+export async function listNodeStores(nodeId: number, recursive?: number, options?: RequestOptions): Promise<NodeStore[]> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/stores${qs({ recursive })}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
@@ -454,7 +454,7 @@ export async function listNodeStores(nodeId: string, recursive?: number, options
 /**
  * Get a specific store on a node (physical view)
  */
-export async function getNodeStore(nodeId: string, storeId: string, recursive?: number, options?: RequestOptions): Promise<NodeStore> {
+export async function getNodeStore(nodeId: number, storeId: string, recursive?: number, options?: RequestOptions): Promise<NodeStore> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/stores/${encodeURIComponent(storeId)}${qs({ recursive })}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
@@ -462,7 +462,7 @@ export async function getNodeStore(nodeId: string, storeId: string, recursive?: 
 /**
  * List groups on a specific store on a node (physical view)
  */
-export async function listNodeGroups(nodeId: string, storeId: string, recursive?: number, options?: RequestOptions): Promise<NodeGroup[]> {
+export async function listNodeGroups(nodeId: number, storeId: string, recursive?: number, options?: RequestOptions): Promise<NodeGroup[]> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/stores/${encodeURIComponent(storeId)}/groups${qs({ recursive })}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
@@ -471,7 +471,7 @@ export async function listNodeGroups(nodeId: string, storeId: string, recursive?
  * Get a specific group on a node (physical view), including local and remote replicas
  */
 export async function getNodeGroup(
-  nodeId: string,
+  nodeId: number,
   storeId: string,
   groupId: string,
   recursive?: number,
@@ -511,7 +511,7 @@ export async function getStore(storeId: string, recursive?: number, options?: Re
  */
 export interface AddStoreRequest {
   store_id: number | string;
-  nodes: string[];
+  nodes: number[];
 }
 
 /**
@@ -551,7 +551,7 @@ export async function removeStore(storeId: string, options?: RequestOptions): Pr
  * (`crow_web::mgmt::ClusterInitBody`).
  */
 export interface InitClusterRequest {
-  nodes: string[];
+  nodes: number[];
 }
 
 /**
@@ -614,7 +614,7 @@ export async function getGroup(storeId: string, groupId: string, recursive?: num
 export interface AddGroupRequest {
   group_id: number | string;
   replica_id: number | string;
-  nodes: string[];
+  nodes: number[];
 }
 
 /**
@@ -664,7 +664,7 @@ export async function listReplicas(storeId: string, groupId: string, options?: R
  * backend (`max(existing) + 1`) when omitted.
  */
 export interface AddReplicaRequest {
-  node_id: string;
+  node_id: number;
   replica_id?: number | string;
 }
 
@@ -821,7 +821,7 @@ export async function healthCheck(options?: RequestOptions): Promise<{ status: '
  * @param prefix Optional metric name prefix filter
  */
 export async function getNodeMetrics(
-  nodeId: string,
+  nodeId: number,
   prefix?: string,
   options?: RequestOptions
 ): Promise<MetricsResponse> {

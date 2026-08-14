@@ -1,0 +1,51 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// Structured error codes for CROW components.
+//
+// gRPC handlers return `tonic::Status` on error. The status carries an
+// appropriate gRPC code (InvalidArgument, NotFound, etc.) and an
+// `ErrorInfo` message attached as status details for programmatic
+// error handling. Successful responses carry only data fields — no
+// `bool ok` / `string error` placeholder.
+
+syntax = "proto3";
+
+package crow.common;
+
+// Structured error code. Carried in `ErrorInfo` via gRPC status details.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+
+  // ── General ───────────────────────────────────────────────────
+  ERROR_CODE_INVALID_ARGUMENT = 1;
+  ERROR_CODE_NOT_FOUND = 2;
+  ERROR_CODE_ALREADY_EXISTS = 3;
+  ERROR_CODE_PERMISSION_DENIED = 4;
+  ERROR_CODE_INTERNAL = 5;
+  ERROR_CODE_UNAVAILABLE = 6;
+
+  // ── diskdb ────────────────────────────────────────────────────
+  ERROR_CODE_NO_SPACE = 10;
+  ERROR_CODE_NOT_OWNER = 11;
+  ERROR_CODE_DISK_NOT_FOUND = 12;
+  ERROR_CODE_DISK_GROUP_NOT_FOUND = 13;
+  ERROR_CODE_NODE_NOT_FOUND = 14;
+  ERROR_CODE_RACK_NOT_FOUND = 15;
+  ERROR_CODE_DISK_BLOCK_FREED = 16;
+  ERROR_CODE_DEGRADED = 17;
+
+  // ── chunkdb ───────────────────────────────────────────────────
+  ERROR_CODE_CHUNK_NOT_FOUND = 20;
+  ERROR_CODE_CHUNK_EXISTS = 21;
+  ERROR_CODE_CHUNK_SEALED = 22;
+  ERROR_CODE_CHUNK_DELETED = 23;
+  ERROR_CODE_CHUNK_STRIP_NOT_FOUND = 24;
+  ERROR_CODE_CHUNK_INACTIVE = 25;
+}
+
+// Error detail attached to gRPC status details on error.
+message ErrorInfo {
+  ErrorCode code = 1;
+  string message = 2;
+}

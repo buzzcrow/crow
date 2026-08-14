@@ -5,7 +5,7 @@ import { CrowKVServerView } from '../types';
 
 interface SwaggerPanelProps {
   /** Node id whose crow-kv-server OpenAPI doc to load. Empty = no node picked. */
-  nodeId: string;
+  nodeId: number;
   /** API prefix (default "/api"). */
   apiPrefix?: string;
   /** Server views for resolving the selected node's management URL. */

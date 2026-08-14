@@ -1,21 +1,22 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::OnceLock;
+use std::net::TcpListener;
 
-static PORT_BASE: OnceLock<u16> = OnceLock::new();
-static PORT_NEXT: AtomicU16 = AtomicU16::new(0);
-
+/// Allocate a free port by binding to port 0 and reading the
+/// OS-assigned port number. The listener is dropped immediately, so
+/// there is a small TOCTOU window — acceptable for tests. This is
+/// strictly safer than a counter-based scheme, which can collide with
+/// other processes or overflow past 65535.
+///
+/// # Panics
+/// Panics if binding to `127.0.0.1:0` fails (no loopback or no free
+/// ports — both effectively impossible on a healthy machine).
+#[must_use]
 pub fn unique_test_port() -> u16 {
-    let base = *PORT_BASE.get_or_init(|| {
-        let pid = u64::from(std::process::id());
-        let exe_hash = std::env::current_exe().ok().map_or(0, |path| {
-            path.to_string_lossy()
-                .bytes()
-                .fold(0u64, |acc, b| acc.wrapping_mul(131).wrapping_add(u64::from(b)))
-        });
-        20_000 + ((pid ^ exe_hash) % 20_000) as u16
-    });
-    base + PORT_NEXT.fetch_add(1, Ordering::Relaxed)
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind 127.0.0.1:0 for test port")
+        .local_addr()
+        .expect("local_addr for test port")
+        .port()
 }

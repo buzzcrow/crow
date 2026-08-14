@@ -11,9 +11,50 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R69** — Bump this line in the same commit when adding a new item.
+**Next R number: R85** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
+
+- **[R77](R77-diskdb-console-cli.md)** — diskdb console + CLI
+  integration — Area: diskdb / console — `/api/diskdb` REST proxy +
+  `crow diskdb` CLI subcommands for runtime queries (usage/zones/scan/
+  recalc/compact/rebuild), web Diskdb center panel (instance overview,
+  usage dashboard, canvas zone block chart, scanner, recalc), and disk
+  lifecycle UI (tree nodes + dialogs) on the R81 handlers. Follow-up
+  after core diskdb is functional.
+- **[R79](R79-diskdb-free-batch.md)** — diskdb free batch
+  (size-threshold, no timer) — Area: diskdb — Group frees into a
+  batch and flush via one `batch_write` when the batch reaches a
+  configurable size (default 256). No timer — the flush is
+  synchronous on the free path, not a background loop. v1 ships with
+  immediate free (R72); this is a follow-up for high-free-throughput
+  workloads.
+- **[R80](R80-diskdb-rebalance.md)** — diskdb space rebalance across
+  disks + disk-groups — Area: diskdb — New/recovered disks enter
+  `allocating_disks` empty while peers stay near-full; the round-robin
+  allocator is load-unaware so imbalance persists. Add imbalance
+  gauges (per-disk-group `used_pct` spread), load-aware allocation
+  skewing (weight new allocates by free space — passive convergence,
+  no data move), and a per-disk-group rebalance planner that emits
+  `RebalancePlanValue` (source busy blocks + `owner_chunk` + target
+  disk) with placeholder relocation (`LogOnly`, no `diskio` — same
+  envelope as the disk failure recovery scan). Disk-group-level
+  rebalance is a caller concern
+  (§3.2 — caller picks `disk_group_id`); diskdb contributes a
+  `GetRebalanceHint` RPC + keepalive summary, not cross-instance
+  moves. Real data relocation deferred to a future `diskio` service.
+- **[R82](R82-kv-watch-notify-coalescing.md)** — watch/notify
+  coalescing (debounce) — Area: kv / diskdb — the watch/notify
+  extension ships without coalescing: one notify per changed key per
+  matching prefix. Burst writes to a watched prefix (e.g. diskdb
+  `batch_write` touching 10 disks) generate 10 separate notifies,
+  amplifying subscriber wakeups + re-read load. Add a per-prefix
+  debounce coalescer with timer-task flush between the apply-path hook
+  and `WatchRegistry::emit`. The original coalescer was removed because
+  the timer task captured no registry/coalescer refs (buffered keys
+  were silently dropped); R82 must wire the `Weak` refs properly. Load
+  optimization, not correctness — the safety-net poller covers missed
+  notifies.
 
 - **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
   `spawn_blocking` on the durability path. The WAL's production I/O
@@ -33,6 +74,42 @@ complexity, and dependency. Before implementation, follow the
 ### Medium Priority
 
 **Complexity — Medium:**
+- **[R83](R83-chunkdb-complete-recovery-flow.md)** — chunkdb
+  complete recovery flow (real data recovery + speed control) —
+  Area: chunkdb / diskdb / diskio — diskdb's recovery is disk-layer
+  only: the R76 `RecoveryScanTask` lists impacted busy blocks +
+  `owner_chunk` but the repair step is a placeholder
+  (`RecoveryAction::LogOnly`, no data rebuild). There is no chunkdb
+  yet (only a reserved proto surface), so when a disk goes `Bad` the
+  impacted blocks are handed to a "future recovery/relocation path"
+  (§8) that does not exist — no surviving replica/parity is read, no
+  rebuilt data is written, no strip is updated. Full data recovery
+  needs chunkdb (the chunk→strip→segment owner) to rebuild lost
+  mirror replicas / EC data+parity from surviving strips via the
+  `diskio` service, `UpdateChunkStrip` to new segments, and free the
+  old `Bad`-disk segments. Recovery speed must be throttled at the
+  chunkdb layer (configurable bandwidth/IOps/concurrency) so
+  foreground traffic is not starved. Blocked on the chunkdb server
+  component + the `diskio` service (both unlanded; must be filed as
+  their own backlog items first). Replaces R76's `LogOnly` with
+  `Relocate` / `RebuildFromEc`.
+- **[R84](R84-chunkdb-post-disk-move-placement-scanner.md)** —
+  chunkdb post-disk-move placement scanner — Area: chunkdb / diskdb —
+  R81 Part 2 adds disk move with a stable `DiskId` (record copy
+  during Maintenance, no full scan). The move is placement-only and
+  the data is intact, but there is no verification that chunk
+  placement is still consistent after a move: chunks reference blocks
+  via `Segment { disk_id, ... }` (in `MirrorStrip` / `EcStrip`), and
+  every chunk with a segment on the moved disk must still reach that
+  segment via the disk's new placement. Add a placement-integrity
+  scanner (chunkdb-side, following diskdb's `ScannerTask` /
+  `BgRunner` pattern, §10) that walks chunk→strip→segment after a
+  move (and periodically), resolves each segment's `DiskId` to its
+  current group-0 placement, and reports unreachable / orphaned
+  segments — handing `Bad`/`Missing`-disk segments to R83 for
+  rebuild. Triggered on move via watch/notify (R78) with a periodic
+  safety net. Blocked on the chunkdb server component (unlanded) and
+  R81 Part 2.
 - **[R32](R32-kv-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
   RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
   connection-level userspace lock (HPACK table, frame buffer,

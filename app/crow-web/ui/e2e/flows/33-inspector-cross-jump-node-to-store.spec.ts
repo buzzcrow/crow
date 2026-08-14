@@ -3,7 +3,7 @@
 // Baseline: 0.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-33 inspector cross-jump node to store', () => {
   test.beforeEach(async ({ baseURL }) => {
@@ -11,10 +11,10 @@ test.describe('E2E-33 inspector cross-jump node to store', () => {
   });
 
   test('physical node with store shows cross-jump to logical store', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r33', 'n33');
-    await deployNodeServer(baseURL!, 'n33', 9933, 9943);
-    await createStore(baseURL!, 330, ['n33']);
-    await addGroup(baseURL!, 330, 3300, 33000, ['n33']);
+    await seedRackAndNode(baseURL!, 33, 33);
+    await deployNodeServer(baseURL!, 33, freePort(), freePort());
+    await createStore(baseURL!, 330, [33]);
+    await addGroup(baseURL!, 330, 3300, 33000, [33]);
     await waitForLeader(baseURL!, 330, 3300);
 
     try {
@@ -23,9 +23,9 @@ test.describe('E2E-33 inspector cross-jump node to store', () => {
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       // Select the physical node
-      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-n33' });
+      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-33' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
-      await nodeItem.getByRole('button', { name: 'N-n33' }).click();
+      await nodeItem.getByRole('button', { name: 'N-33' }).click();
 
       // Inspector should show Details tab with cross-jump button
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
@@ -42,7 +42,7 @@ test.describe('E2E-33 inspector cross-jump node to store', () => {
       // Store should be selected in the logical tree
       await expect(aside.getByText('S-330')).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n33');
+      await stopNodeServer(baseURL!, 33);
     }
   });
 });

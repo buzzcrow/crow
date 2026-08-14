@@ -3,7 +3,7 @@
 // Baseline: 0.8s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -32,7 +32,7 @@ async function getGroupStatus(baseURL: string, storeId: number, groupId: number)
   }
 }
 
-async function findLeaderNode(baseURL: string, storeId: number, groupId: number): Promise<string | null> {
+async function findLeaderNode(baseURL: string, storeId: number, groupId: number): Promise<number | null> {
   const body = await getGroupStatus(baseURL, storeId, groupId);
   const replicas: any[] = Array.isArray(body.replicas) ? body.replicas : [];
   const leader = replicas.find((r) => String(r.role).toLowerCase() === 'leader');
@@ -44,23 +44,26 @@ test.describe('E2E-46 multi-store reconfig', () => {
     await resetAll(baseURL!);
 
     // 5 nodes. Store A on n46a,b,c. Store B on n46c,d,e (overlap on n46c).
-    for (const r of ['r46a', 'r46b', 'r46c', 'r46d', 'r46e']) {
-      await seedRackAndNode(baseURL!, r, r.replace('r', 'n'));
+    for (const r of [461, 462, 463, 464, 465]) {
+
+      await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 'n46a', 10020, 10021);
-    await deployNodeServer(baseURL!, 'n46b', 10022, 10023);
-    await deployNodeServer(baseURL!, 'n46c', 10024, 10025);
-    await deployNodeServer(baseURL!, 'n46d', 10026, 10027);
-    await deployNodeServer(baseURL!, 'n46e', 10028, 10029);
+    await Promise.all([
+      deployNodeServer(baseURL!, 461, freePort(), freePort()),
+      deployNodeServer(baseURL!, 462, freePort(), freePort()),
+      deployNodeServer(baseURL!, 463, freePort(), freePort()),
+      deployNodeServer(baseURL!, 464, freePort(), freePort()),
+      deployNodeServer(baseURL!, 465, freePort(), freePort()),
+    ]);
 
     // Store A: 460, group 4600 on n46a,b,c
-    await createStore(baseURL!, 460, ['n46a', 'n46b', 'n46c']);
-    await addGroup(baseURL!, 460, 4600, 46000, ['n46a', 'n46b', 'n46c']);
+    await createStore(baseURL!, 460, [461, 462, 463]);
+    await addGroup(baseURL!, 460, 4600, 46000, [461, 462, 463]);
     await waitForLeader(baseURL!, 460, 4600);
 
     // Store B: 461, group 4610 on n46c,d,e
-    await createStore(baseURL!, 461, ['n46c', 'n46d', 'n46e']);
-    await addGroup(baseURL!, 461, 4610, 46100, ['n46c', 'n46d', 'n46e']);
+    await createStore(baseURL!, 461, [463, 464, 465]);
+    await addGroup(baseURL!, 461, 4610, 46100, [463, 464, 465]);
     await waitForLeader(baseURL!, 461, 4610);
 
     try {
@@ -77,11 +80,11 @@ test.describe('E2E-46 multi-store reconfig', () => {
       // Find a non-leader node in both groups — n46c is the overlap node
       // If n46c is a leader, stop a different non-leader from one store
       let stopNode: string;
-      if (leaderA !== 'n46c' && leaderB !== 'n46c') {
-        stopNode = 'n46c';
+      if (leaderA !== 463 && leaderB !== 463) {
+        stopNode = 463;
       } else {
         // n46c is leader of one group — stop a non-leader from store A instead
-        stopNode = leaderA === 'n46a' ? 'n46b' : 'n46a';
+        stopNode = leaderA === 461 ? 462 : 461;
       }
 
       const api = await apiContext(baseURL!);
@@ -94,7 +97,7 @@ test.describe('E2E-46 multi-store reconfig', () => {
       expect(await kvGet(baseURL!, 460, 4600, 'ms46-a-key2')).toBe('val-a2');
 
       // Store B may or may not be affected depending on which node was stopped
-      if (stopNode === 'n46c') {
+      if (stopNode === 463) {
         // n46c is in both stores — store B also lost a replica but quorum 2-of-3
         await kvPut(baseURL!, 461, 4610, 'ms46-b-key2', 'val-b2');
         expect(await kvGet(baseURL!, 461, 4610, 'ms46-b-key2')).toBe('val-b2');
@@ -117,7 +120,7 @@ test.describe('E2E-46 multi-store reconfig', () => {
       expect(await kvGet(baseURL!, 460, 4600, 'ms46-a-key')).toBe('val-a');
       expect(await kvGet(baseURL!, 461, 4610, 'ms46-b-key')).toBe('val-b');
     } finally {
-      for (const n of ['n46a', 'n46b', 'n46c', 'n46d', 'n46e']) {
+      for (const n of [461, 462, 463, 464, 465]) {
         await stopNodeServer(baseURL!, n);
       }
     }

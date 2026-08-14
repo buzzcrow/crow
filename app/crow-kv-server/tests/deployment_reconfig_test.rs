@@ -7,7 +7,7 @@
 //! - Graceful shutdown of a leader node under write load (SIGTERM path).
 //! - Add/remove replica via `POST /remotes` and `DELETE /remotes/:rid`.
 
-mod testkit;
+mod common;
 
 use bytes::Bytes;
 use crow_kv::rpc::kv_service_client::KvServiceClient;
@@ -15,7 +15,7 @@ use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
-use testkit::process::{start_test_server, ServerHandle};
+use common::process::{start_test_server, ServerHandle};
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()

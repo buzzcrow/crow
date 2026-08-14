@@ -7,7 +7,7 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use crow_console_shared::cluster::GroupHealth;
+use crow_console_shared::cluster::{GroupHealth, NodeId};
 use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode, ScanOutcome};
 use hex;
 use serde::{Deserialize, Serialize};
@@ -110,7 +110,7 @@ pub async fn resolve_kv_endpoint(
                 // from dead nodes are skipped — leader_for checks node
                 // health and falls back to the first Up replica.
                 if let Some((_rid, node_id)) = state.monitor_cache.leader_for(sid, gid).await {
-                    return kv_endpoint_for_node(state, sid, &node_id).await;
+                    return kv_endpoint_for_node(state, sid, node_id).await;
                 }
             }
         }
@@ -132,10 +132,8 @@ pub async fn resolve_kv_endpoint(
 async fn kv_endpoint_for_node(
     state: &AppState,
     sid: u64,
-    node_id: &str,
+    node_id: NodeId,
 ) -> Result<String, (StatusCode, Json<ErrorBody>)> {
-    let node_id = node_id.to_string();
-
     // Each `PxKvStore` listens on its own gRPC port (ephemeral when created
     // via the management API with `port: None`), reported as the store's
     // `listen_addr`. KV requests must target that per-store endpoint — the
@@ -154,7 +152,7 @@ async fn kv_endpoint_for_node(
 
     let cfg = state.config.read().unwrap();
     let grpc_url = cfg
-        .server_for_node(&node_id)
+        .server_for_node(node_id)
         .and_then(|s| s.grpc_url.clone())
         .ok_or_else(|| err_502(format!("leader node {node_id} has no gRPC endpoint configured")))?;
 
@@ -208,7 +206,7 @@ fn host_of(grpc_url: &str) -> String {
 /// Node ids hosting a replica of `(sid, gid)`, per the monitor cache, or (if
 /// the cache has no record for the group yet) the persisted config replica
 /// list -- so a restarted web console can still find the nodes to query.
-async fn group_node_ids(state: &AppState, sid: u64, gid: u64) -> Vec<String> {
+async fn group_node_ids(state: &AppState, sid: u64, gid: u64) -> Vec<NodeId> {
     if let Some(view) = state.monitor_cache.resolve_group(sid, gid).await {
         view.replicas.into_iter().map(|r| r.node_id).collect()
     } else {
@@ -216,7 +214,7 @@ async fn group_node_ids(state: &AppState, sid: u64, gid: u64) -> Vec<String> {
         cfg.groups
             .iter()
             .find(|g| g.store_id == sid && g.group_id == gid)
-            .map(|g| g.replicas.iter().map(|r| r.node_id.clone()).collect())
+            .map(|g| g.replicas.iter().map(|r| r.node_id).collect())
             .unwrap_or_default()
     }
 }
@@ -226,7 +224,7 @@ async fn group_node_ids(state: &AppState, sid: u64, gid: u64) -> Vec<String> {
 /// `leader_for` call observes a post-election view.
 async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
     for node_id in &group_node_ids(state, sid, gid).await {
-        refresh_node_cache(state, node_id).await;
+        refresh_node_cache(state, *node_id).await;
     }
 }
 
@@ -261,7 +259,7 @@ async fn mgmt_seeds_for_group(
     let mut seen = HashSet::new();
     let mut seeds = Vec::new();
     for node_id in &node_ids {
-        if let Some(server) = cfg.server_for_node(node_id) {
+        if let Some(server) = cfg.server_for_node(*node_id) {
             if seen.insert(server.url.clone()) {
                 seeds.push(server.url.clone());
             }

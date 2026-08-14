@@ -134,7 +134,6 @@ pub(crate) fn spawn_pipeline_writer(
     (tx, jh)
 }
 
-#[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn pipeline_writer_loop(
     mut rx: mpsc::UnboundedReceiver<WriterCommand>,
@@ -181,202 +180,357 @@ async fn pipeline_writer_loop(
     };
 
     loop {
-        // Park until a command arrives, or until the watchdog fires as a
-        // safety net to drain any queued record in case of a missed wake.
-        // The idle wakeup does a `try_recv` and re-parks if nothing is
-        // queued — no I/O, no allocation.
-        let cmd = match timeout(watchdog, rx.recv()).await {
-            Ok(Some(cmd)) => cmd,
-            Ok(None) => {
-                // Channel closed — engine dropped. Seal and flush, then exit.
-                let _ = segment.seal().await;
-                let _ = segment.flush().await;
-                register_sealed(&index, &segment, pipeline_idx);
-                return;
-            }
-            Err(_) => {
-                // Watchdog fired — defensive drain in case a wake was missed.
-                watchdog_wakeups.fetch_add(1, Ordering::Relaxed);
-                match rx.try_recv() {
-                    Ok(cmd) => cmd,
-                    Err(_) => continue,
-                }
-            }
+        let Some(cmd) = recv_command(
+            &mut rx,
+            watchdog,
+            &mut segment,
+            &index,
+            pipeline_idx,
+            &watchdog_wakeups,
+        )
+        .await
+        else {
+            return;
         };
 
         match cmd {
             WriterCommand::Seal { ack } => {
-                // Seal current segment, register it, open a new one.
-                let result = segment.seal().await;
-                if let Err(ref _e) = result {
-                    failed.store(true, Ordering::Release);
-                } else {
-                    register_sealed(&index, &segment, pipeline_idx);
+                if !handle_seal_command(
+                    &mut segment,
+                    ack,
+                    &mut rx,
+                    &backend,
+                    &pipeline_path,
+                    &next_segment_id,
+                    group_id,
+                    record_format,
+                    &index,
+                    pipeline_idx,
+                    &failed,
+                )
+                .await
+                {
+                    return;
                 }
-                // Open new segment regardless (even on seal error, so future
-                // appends don't panic — though failed flag will reject them).
-                if result.is_ok() {
-                    match create_segment(
-                        &backend,
-                        &pipeline_path,
-                        &next_segment_id,
-                        group_id,
-                        record_format,
-                    )
-                    .await
-                    {
-                        Ok(new_seg) => segment = new_seg,
-                        Err(e) => {
-                            failed.store(true, Ordering::Release);
-                            error!(pipeline_idx, error = %e, "failed to create new segment after seal");
-                            let _ = ack.send(Err(e));
-                            drain_and_fail_all(&mut rx);
-                            return;
-                        }
-                    }
-                }
-                let _ = ack.send(result);
             }
             WriterCommand::Write(first) => {
-                batch.clear();
-                batch.push(first);
-                let mut batch_bytes_acc = batch[0].encoded.total_len();
-                let mut pending_seal_acks: Vec<oneshot::Sender<io::Result<()>>> = Vec::new();
-
-                // Wake-drain: pull every command already queued.
-                loop {
-                    match rx.try_recv() {
-                        Ok(WriterCommand::Write(req)) => {
-                            batch_bytes_acc += req.encoded.total_len();
-                            batch.push(req);
-                            if batch_bytes_acc >= batch_bytes {
-                                break;
-                            }
-                        }
-                        Ok(WriterCommand::Seal { ack }) => {
-                            pending_seal_acks.push(ack);
-                            break;
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                // Capture segment_id before potential rotation.
-                let segment_id = segment.segment_id;
-
-                // Write all batched records to the segment, then fdatasync
-                // (unless skip_fsync is set for benchmark path-overhead
-                // isolation — see WalConfig::wal_skip_fsync).
-                let write_result = write_batch(
-                    &mut segment,
-                    &batch,
+                if !handle_write_command(
+                    first,
+                    &mut batch,
                     &mut offsets,
+                    &mut segment,
+                    &mut rx,
+                    &backend,
+                    &pipeline_path,
+                    record_format,
+                    group_id,
+                    &next_segment_id,
+                    segment_size,
+                    batch_bytes,
                     skip_fsync,
                     &fsync_summary,
                     &write_bandwidth,
+                    &index,
+                    pipeline_idx,
+                    &flush_count,
+                    &records_flushed,
+                    &failed,
                 )
-                .await;
-
-                match write_result {
-                    Ok(()) => {
-                        // Track batch aggregation stats.
-                        flush_count.fetch_add(1, Ordering::Relaxed);
-                        records_flushed.fetch_add(batch.len() as u64, Ordering::Relaxed);
-
-                        // Update index for non-metadata records.
-                        {
-                            let mut idx = index.lock();
-                            for (i, req) in batch.iter().enumerate() {
-                                if req.slot != 0 {
-                                    idx.insert(
-                                        req.slot,
-                                        SlotLocation {
-                                            disk_idx: pipeline_idx,
-                                            segment_id,
-                                            file_offset: offsets[i],
-                                        },
-                                    );
-                                }
-                            }
-                        }
-
-                        // Check rotation after write.
-                        if segment.is_full(segment_size) {
-                            if let Err(e) = segment.seal().await {
-                                failed.store(true, Ordering::Release);
-                                fail_batch(&mut batch, &e);
-                                drain_and_fail_all(&mut rx);
-                                return;
-                            }
-                            register_sealed(&index, &segment, pipeline_idx);
-                            match create_segment(
-                                &backend,
-                                &pipeline_path,
-                                &next_segment_id,
-                                group_id,
-                                record_format,
-                            )
-                            .await
-                            {
-                                Ok(new_seg) => segment = new_seg,
-                                Err(e) => {
-                                    failed.store(true, Ordering::Release);
-                                    fail_batch(&mut batch, &e);
-                                    drain_and_fail_all(&mut rx);
-                                    return;
-                                }
-                            }
-                        }
-
-                        // Resolve all acks with the record's SlotLocation.
-                        for (i, req) in batch.drain(..).enumerate() {
-                            let _ = req.ack.send(Ok(SlotLocation {
-                                disk_idx: pipeline_idx,
-                                segment_id,
-                                file_offset: offsets[i],
-                            }));
-                        }
-
-                        // Process any pending seal acks from the drain phase.
-                        for seal_ack in pending_seal_acks.drain(..) {
-                            let result = segment.seal().await;
-                            if let Err(ref _e) = result {
-                                failed.store(true, Ordering::Release);
-                            } else {
-                                register_sealed(&index, &segment, pipeline_idx);
-                            }
-                            if result.is_ok() {
-                                match create_segment(
-                                    &backend,
-                                    &pipeline_path,
-                                    &next_segment_id,
-                                    group_id,
-                                    record_format,
-                                )
-                                .await
-                                {
-                                    Ok(new_seg) => segment = new_seg,
-                                    Err(e) => {
-                                        failed.store(true, Ordering::Release);
-                                        let _ = seal_ack.send(Err(e));
-                                        drain_and_fail_all(&mut rx);
-                                        return;
-                                    }
-                                }
-                            }
-                            let _ = seal_ack.send(result);
-                        }
-                    }
-                    Err(e) => {
-                        failed.store(true, Ordering::Release);
-                        fail_batch(&mut batch, &e);
-                        drain_and_fail_all(&mut rx);
-                        return;
-                    }
+                .await
+                {
+                    return;
                 }
             }
         }
     }
+}
+
+/// Process a Write command: batch-drain, write, fsync, index, rotate, ack.
+/// Returns `false` if a fatal error occurred and the writer loop should exit.
+#[allow(clippy::too_many_arguments)]
+async fn handle_write_command(
+    first: PendingWrite,
+    batch: &mut Vec<PendingWrite>,
+    offsets: &mut Vec<u64>,
+    segment: &mut WalSegment,
+    rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
+    backend: &Arc<IoBackend>,
+    pipeline_path: &std::path::Path,
+    record_format: WalRecordFormat,
+    group_id: PxGroupId,
+    next_segment_id: &Arc<AtomicU64>,
+    segment_size: u64,
+    batch_bytes: usize,
+    skip_fsync: bool,
+    fsync_summary: &OnceLock<Arc<LatencySummary>>,
+    write_bandwidth: &OnceLock<Arc<Bandwidth>>,
+    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    pipeline_idx: usize,
+    flush_count: &Arc<AtomicU64>,
+    records_flushed: &Arc<AtomicU64>,
+    failed: &Arc<AtomicBool>,
+) -> bool {
+    batch.clear();
+    batch.push(first);
+    let mut batch_bytes_acc = batch[0].encoded.total_len();
+    let mut pending_seal_acks = drain_pending_commands(rx, batch, &mut batch_bytes_acc, batch_bytes);
+
+    // Capture segment_id before potential rotation.
+    let segment_id = segment.segment_id;
+
+    let write_result = write_batch(
+        segment,
+        batch,
+        offsets,
+        skip_fsync,
+        fsync_summary,
+        write_bandwidth,
+    )
+    .await;
+
+    match write_result {
+        Ok(()) => {
+            flush_count.fetch_add(1, Ordering::Relaxed);
+            records_flushed.fetch_add(batch.len() as u64, Ordering::Relaxed);
+            update_index_for_batch(index, batch, offsets, pipeline_idx, segment_id);
+
+            if let Err(e) = rotate_if_full(
+                segment,
+                backend,
+                pipeline_path,
+                next_segment_id,
+                group_id,
+                record_format,
+                index,
+                pipeline_idx,
+                segment_size,
+            )
+            .await
+            {
+                failed.store(true, Ordering::Release);
+                fail_batch(batch, &e);
+                drain_and_fail_all(rx);
+                return false;
+            }
+
+            resolve_batch_acks(batch, offsets, pipeline_idx, segment_id);
+
+            process_pending_seal_acks(
+                segment,
+                &mut pending_seal_acks,
+                rx,
+                backend,
+                pipeline_path,
+                next_segment_id,
+                group_id,
+                record_format,
+                index,
+                pipeline_idx,
+                failed,
+            )
+            .await
+        }
+        Err(e) => {
+            failed.store(true, Ordering::Release);
+            fail_batch(batch, &e);
+            drain_and_fail_all(rx);
+            false
+        }
+    }
+}
+
+/// Park until a command arrives or the watchdog fires. Returns `None` when
+/// the channel is closed (engine dropped), after sealing and flushing. On a
+/// watchdog wakeup with no queued command, re-parks and waits again.
+async fn recv_command(
+    rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
+    watchdog: Duration,
+    segment: &mut WalSegment,
+    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    pipeline_idx: usize,
+    watchdog_wakeups: &Arc<AtomicU64>,
+) -> Option<WriterCommand> {
+    loop {
+        match timeout(watchdog, rx.recv()).await {
+            Ok(Some(cmd)) => return Some(cmd),
+            Ok(None) => {
+                let _ = segment.seal().await;
+                let _ = segment.flush().await;
+                register_sealed(index, segment, pipeline_idx);
+                return None;
+            }
+            Err(_) => {
+                watchdog_wakeups.fetch_add(1, Ordering::Relaxed);
+                if let Ok(cmd) = rx.try_recv() {
+                    return Some(cmd);
+                }
+            }
+        }
+    }
+}
+
+/// Handle a Seal command: seal the current segment, register it, open a new
+/// one, and resolve the ack. Returns `false` if a fatal error occurred.
+#[allow(clippy::too_many_arguments)]
+async fn handle_seal_command(
+    segment: &mut WalSegment,
+    ack: oneshot::Sender<io::Result<()>>,
+    rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
+    backend: &Arc<IoBackend>,
+    pipeline_path: &std::path::Path,
+    next_segment_id: &Arc<AtomicU64>,
+    group_id: PxGroupId,
+    record_format: WalRecordFormat,
+    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    pipeline_idx: usize,
+    failed: &Arc<AtomicBool>,
+) -> bool {
+    let result = segment.seal().await;
+    if result.is_err() {
+        failed.store(true, Ordering::Release);
+    } else {
+        register_sealed(index, segment, pipeline_idx);
+    }
+    if result.is_ok() {
+        match create_segment(backend, pipeline_path, next_segment_id, group_id, record_format).await {
+            Ok(new_seg) => *segment = new_seg,
+            Err(e) => {
+                failed.store(true, Ordering::Release);
+                error!(pipeline_idx, error = %e, "failed to create new segment after seal");
+                let _ = ack.send(Err(e));
+                drain_and_fail_all(rx);
+                return false;
+            }
+        }
+    }
+    let _ = ack.send(result);
+    true
+}
+
+/// Drain all commands already queued in the channel, accumulating writes into
+/// `batch` and collecting any seal acks. Returns the list of pending seal
+/// acks that must be processed after the batch is flushed.
+fn drain_pending_commands(
+    rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
+    batch: &mut Vec<PendingWrite>,
+    batch_bytes_acc: &mut usize,
+    batch_bytes: usize,
+) -> Vec<oneshot::Sender<io::Result<()>>> {
+    let mut pending_seal_acks: Vec<oneshot::Sender<io::Result<()>>> = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(WriterCommand::Write(req)) => {
+                *batch_bytes_acc += req.encoded.total_len();
+                batch.push(req);
+                if *batch_bytes_acc >= batch_bytes {
+                    break;
+                }
+            }
+            Ok(WriterCommand::Seal { ack }) => {
+                pending_seal_acks.push(ack);
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    pending_seal_acks
+}
+
+/// Insert index entries for every non-metadata record in the batch.
+fn update_index_for_batch(
+    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    batch: &[PendingWrite],
+    offsets: &[u64],
+    pipeline_idx: usize,
+    segment_id: u64,
+) {
+    let mut idx = index.lock();
+    for (i, req) in batch.iter().enumerate() {
+        if req.slot != 0 {
+            idx.insert(
+                req.slot,
+                SlotLocation {
+                    disk_idx: pipeline_idx,
+                    segment_id,
+                    file_offset: offsets[i],
+                },
+            );
+        }
+    }
+}
+
+/// If the segment is full, seal it, register it, and open a new segment.
+/// Returns `Err` if sealing or creating the new segment fails.
+#[allow(clippy::too_many_arguments)]
+async fn rotate_if_full(
+    segment: &mut WalSegment,
+    backend: &Arc<IoBackend>,
+    pipeline_path: &std::path::Path,
+    next_segment_id: &Arc<AtomicU64>,
+    group_id: PxGroupId,
+    record_format: WalRecordFormat,
+    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    pipeline_idx: usize,
+    segment_size: u64,
+) -> io::Result<()> {
+    if !segment.is_full(segment_size) {
+        return Ok(());
+    }
+    segment.seal().await?;
+    register_sealed(index, segment, pipeline_idx);
+    *segment = create_segment(backend, pipeline_path, next_segment_id, group_id, record_format).await?;
+    Ok(())
+}
+
+/// Send each pending write its resolved `SlotLocation`.
+fn resolve_batch_acks(batch: &mut Vec<PendingWrite>, offsets: &[u64], pipeline_idx: usize, segment_id: u64) {
+    for (i, req) in batch.drain(..).enumerate() {
+        let _ = req.ack.send(Ok(SlotLocation {
+            disk_idx: pipeline_idx,
+            segment_id,
+            file_offset: offsets[i],
+        }));
+    }
+}
+
+/// Process pending seal acks collected during the wake-drain phase.
+/// Each seal ack triggers a segment seal + new-segment open cycle.
+/// Returns `false` if a fatal error occurred and the writer loop should exit.
+#[allow(clippy::too_many_arguments)]
+async fn process_pending_seal_acks(
+    segment: &mut WalSegment,
+    pending_seal_acks: &mut Vec<oneshot::Sender<io::Result<()>>>,
+    rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
+    backend: &Arc<IoBackend>,
+    pipeline_path: &std::path::Path,
+    next_segment_id: &Arc<AtomicU64>,
+    group_id: PxGroupId,
+    record_format: WalRecordFormat,
+    index: &Arc<parking_lot::Mutex<SegmentIndex>>,
+    pipeline_idx: usize,
+    failed: &Arc<AtomicBool>,
+) -> bool {
+    for seal_ack in pending_seal_acks.drain(..) {
+        let result = segment.seal().await;
+        if result.is_err() {
+            failed.store(true, Ordering::Release);
+        } else {
+            register_sealed(index, segment, pipeline_idx);
+        }
+        if result.is_ok() {
+            match create_segment(backend, pipeline_path, next_segment_id, group_id, record_format).await {
+                Ok(new_seg) => *segment = new_seg,
+                Err(e) => {
+                    failed.store(true, Ordering::Release);
+                    let _ = seal_ack.send(Err(e));
+                    drain_and_fail_all(rx);
+                    return false;
+                }
+            }
+        }
+        let _ = seal_ack.send(result);
+    }
+    true
 }
 
 /// Maximum number of `IoSlice` entries per `writev` call. Linux `IOV_MAX` is

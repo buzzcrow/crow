@@ -1,0 +1,117 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// Group-0 sysdata value types — stored as JSON values at text-path
+// keys in group 0 (store 0, group 0). See
+// doc/design/kv/design-crow-kv-group0.md §3.3.
+//
+// These are the persistent records of the KV cluster's structure
+// (stores, groups, replicas) and the service instance registry
+// (diskdb, kv-server instances with heartbeats).
+
+syntax = "proto3";
+
+package crow.common;
+
+import "common_type.proto";
+
+// ── KV-cluster topology records ─────────────────────────────────
+
+// Store record — which nodes host this store.
+// Key: /kv/store/<store_id>
+message StoreValue {
+  uint64 store_id = 1;
+  repeated uint64 node_ids = 2;
+}
+
+// Group record — a group within a store.
+// Key: /kv/group/<store_id>/<group_id>
+message GroupValue {
+  uint64 store_id = 1;
+  uint64 group_id = 2;
+}
+
+// Replica record — a replica within a group, on a specific node.
+// Key: /kv/replica/<store_id>/<group_id>/<replica_id>
+message ReplicaValue {
+  uint64 store_id    = 1;
+  uint64 group_id    = 2;
+  uint64 replica_id  = 3;
+  uint64 node_id     = 4;
+  string role        = 5;  // "leader", "follower", etc.
+  bool   voting      = 6;
+  string endpoint    = 7;  // gRPC endpoint of this replica
+}
+
+// ── Service instance registry ───────────────────────────────────
+
+// Service instance value — generic across services (diskdb, kv-server,
+// future services). The `extra` oneof carries per-service fields.
+// Key: /srv/<service>/<instance_id>
+message InstanceValue {
+  uint64 instance_id        = 1;
+  string grpc_endpoint      = 2;
+  uint64 last_heartbeat_ms  = 3;
+  ServiceExtra extra        = 4;
+}
+
+// Per-service extra fields for InstanceValue.
+// Uses optional fields instead of a oneof so prost generates a flat
+// struct (serde-derivable) rather than a nested enum (which
+// prost-build's type_attribute cannot target for serde derives).
+// The caller sets the field matching the service and leaves the other
+// as None.
+message ServiceExtra {
+  optional DiskdbExtra    diskdb    = 1;
+  optional KvServerExtra  kv_server = 2;
+}
+
+// diskdb-specific instance fields.
+message DiskdbExtra {
+  repeated uint64 owned_dg_ids = 1;
+  // Per-disk-group usage summaries piggybacked on each keepalive tick.
+  // Derived (recomputed from the in-memory bitmap on each tick), not a
+  // source of truth. See doc/design/diskdb/design-crow-diskdb.md §11.
+  repeated DiskGroupUsageSummary group_usages = 2;
+}
+
+// Per-disk-group usage summary, piggybacked on the diskdb keepalive.
+// Group 0 stores this at `/hw/dg_usage/<dg_id>` (DiskGroupUsageKey).
+message DiskGroupUsageSummary {
+  uint64 disk_group_id          = 1;
+  uint64 capacity_bytes         = 2;
+  uint64 used_bytes             = 3;
+  uint64 free_bytes             = 4;
+  uint32 disk_count             = 5;
+  uint32 allocatable_disk_count = 6;
+}
+
+// kv-server-specific instance fields.
+message KvServerExtra {
+  repeated uint64         hosted_stores  = 1;
+  repeated HostedGroup    hosted_groups  = 2;
+  string                  health         = 3;  // aggregate health summary
+}
+
+// A (store_id, group_id) pair hosted by a kv-server instance.
+message HostedGroup {
+  uint64 store_id = 1;
+  uint64 group_id = 2;
+}
+
+// ── Per-disk-group maps ─────────────────────────────────────────
+
+// Ownership-map value — which diskdb instance owns a disk-group.
+// Key: /hw/dg_owner/<rack_id>/<node_id>/<dg_id>
+message OwnerMapValue {
+  uint64 instance_id      = 1;
+  uint64 lease_expiry_ms  = 2;
+}
+
+// Bind-map value — which paxos data group a disk-group's zone
+// records live on.
+// Key: /hw/dg_bind/<rack_id>/<node_id>/<dg_id>
+message BindMapValue {
+  uint64 store_id = 1;
+  uint64 group_id = 2;
+}

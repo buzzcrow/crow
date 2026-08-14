@@ -1,16 +1,40 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW - Observability Design
+# CROW - Design: Observability
 
-## Mandatory Signals
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §16
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §16
+
+## Table of Contents
+
+- [1. Mandatory Signals](#1-mandatory-signals)
+- [2. Metrics Module](#2-metrics-module)
+  - [2.1 Metric Types](#21-metric-types)
+  - [2.2 Registry and Lifecycle](#22-registry-and-lifecycle)
+  - [2.3 Naming Convention](#23-naming-convention)
+  - [2.4 Instrumentation Points](#24-instrumentation-points)
+  - [2.5 System Metrics Collector](#25-system-metrics-collector)
+  - [2.6 Metrics Log File](#26-metrics-log-file)
+  - [2.7 In-Memory Access](#27-in-memory-access)
+  - [2.8 FFI Boundary](#28-ffi-boundary)
+  - [2.9 Design Principles](#29-design-principles)
+  - [2.10 Read Path Metrics](#210-read-path-metrics)
+  - [2.11 Write Path Metrics](#211-write-path-metrics)
+  - [2.12 Client Metrics](#212-client-metrics)
+  - [2.13 C++ Registry Ownership](#213-c-registry-ownership)
+  - [2.14 Rust/C++ Metric Deduplication](#214-rustc-metric-deduplication)
+  - [2.15 C++ flush_to Format Alignment](#215-c-flush_to-format-alignment)
+  - [2.16 Shared Column Width](#216-shared-column-width)
+
+## 1. Mandatory Signals
 
 Per-group leader/term/max-slot/safe-slot/in-flight/gap count; per-node WAL
 flush latency and throughput; per-RPC rate/latency/error breakdown; structured
 logs with `node_id`, `group_id`, `slot`, `term` on consensus events. Tracing
 hooks reserved but not required in the initial design.
 
-## Metrics Module
+## 2. Metrics Module
 
 A lightweight metrics system with five metric types and periodic flush to a
 dedicated metrics log file. Rust owns the registry for consensus/RPC/WAL
@@ -18,7 +42,7 @@ metrics; C++ owns its own registry for storage-engine metrics. Rust drives
 the flush cycle and triggers C++ to emit its section via FFI — no metric
 handles cross the FFI boundary at runtime.
 
-### Metric Types
+### 2.1 Metric Types
 
 - **Counter** (`AtomicU64` x 2) — monotonic, tracks window delta + total.
   `inc()` / `inc_by(n)`. Flush shows `count`, `tps`, `total`. Use cases:
@@ -52,7 +76,7 @@ handles cross the FFI boundary at runtime.
   (`WindowLatencySnapshot`), bench cumulative run-wide percentiles
   (`CumulativeLatency`). Replaces the external `hdrhistogram` crate.
 
-### Registry and Lifecycle
+### 2.2 Registry and Lifecycle
 
 Each language has a `MetricsRegistry` that owns all metric instances. The
 registry has `start(interval_secs)` (spawns flush thread/task), `stop()`
@@ -74,7 +98,7 @@ reset window state). Interval is typically 5s or 10s.
   `start()`/`stop()` sleep-loop is retained for standalone/test use but not
   called from the server's production flush path.
 
-### Naming Convention
+### 2.3 Naming Convention
 
 Dot-separated hierarchical paths: `s.{store_id}.g.{group_id}.{module}.{metric}`.
 Type suffix on every metric name: `.c` (Counter), `.g` (Gauge), `.bw`
@@ -86,7 +110,7 @@ Prefix-based snapshot: `registry.snapshot("s.1.")` returns all metrics for
 store 1; `snapshot("")` returns all. This is the foundation for future GUI
 integration.
 
-### Instrumentation Points
+### 2.4 Instrumentation Points
 
 - Rust KV service (`kv_service.rs`): put/get latency histograms, scan summary,
   delete counter, bytes in/out bandwidth, read bytes in/out bandwidth,
@@ -115,14 +139,14 @@ integration.
 - C++ flush (`crow-tree.cpp`): flush latency summary, page-build (in-memory
   mutation) latency summary, flush drain/entries magnitude counters.
 
-### System Metrics Collector
+### 2.5 System Metrics Collector
 
 Special collector type polled at flush time (not increment-on-event). Reads
 TCP retransmits/lost (Linux `/proc/net/snmp`, macOS no-op), CPU user/sys
 and memory RSS via `getrusage(RUSAGE_SELF)`. Computes CPU% as delta over
 flush window.
 
-### Metrics Log File
+### 2.6 Metrics Log File
 
 Dedicated file `metrics-{timestamp}-{pid}.log` in the log directory, separate
 from application log. Each flush cycle produces two blocks: `[metrics ...]`
@@ -137,13 +161,13 @@ Rust's column layout (same units, columns, precision). Format designed for
 both human reading and script parsing (split on whitespace, parse as
 numbers).
 
-### In-Memory Access
+### 2.7 In-Memory Access
 
 `registry.snapshot(prefix)` returns current values without resetting window
 state. Enables future `/metrics` HTTP endpoint and GUI integration. No need
 to parse log files to get metric values.
 
-### FFI Boundary
+### 2.8 FFI Boundary
 
 C++ owns its own `MetricsRegistry` per `Crowtree` instance. Rust triggers C++
 to flush its metrics section into the same log file via FFI
@@ -153,7 +177,7 @@ formatted string. Two log blocks per flush cycle: `[metrics]` (Rust) and
 `/topology` and the one remaining `snapshot.pages.c` delta bridge) is
 unaffected.
 
-### Design Principles
+### 2.9 Design Principles
 
 - **Counter/Summary Non-Redundancy** — A `LatencySummary` (or
   `LatencyHistogram`) already carries `count` (window delta) and
@@ -177,7 +201,7 @@ unaffected.
   and passes the same value to both its own `reg.flush()` and the C++ FFI
   call, guaranteeing identical windows across both sections.
 
-### Read Path Metrics
+### 2.10 Read Path Metrics
 
 The read path mirrors the write path's latency-bandwidth-counter hierarchy.
 Handles live in two places: `KvMetrics` (per store, group; in
@@ -218,7 +242,7 @@ path served the read), not call counters — `read.barrier.l` already carries
 the total call count. This follows the counter/summary non-redundancy
 principle (justified under "different population/outcome").
 
-### Write Path Metrics
+### 2.11 Write Path Metrics
 
 The write path mirrors the read path's latency hierarchy. Handles live in
 `WriteRegistryHandles` (per store, group; on `PxGroup` via `OnceLock`,
@@ -244,7 +268,7 @@ for client-observed p99. The `accept_quorum_rpc` timer is meaningful only
 after the quorum short-circuit (§6.1 of `design-crow-kv-rpc.md`); it records the
 quorum-th-fastest remote latency, not the full fan-out tail.
 
-### Client Metrics
+### 2.12 Client Metrics
 
 `crow-kv-client` exposes its own `ClientMetrics` (lock-free `AtomicU64`
 counters, snapshotted via `ClientMetricsSnapshot`) for retry, topology,
@@ -275,7 +299,7 @@ runner's per-worker `WorkerCounters` use `crow-common`'s `Counter`
 `snapshot().total`), unifying the bench and client on the project's own
 metrics primitives and removing the external `hdrhistogram` dependency.
 
-### C++ Registry Ownership
+### 2.13 C++ Registry Ownership
 
 C++ `Crowtree` creates its own `MetricsRegistry` internally via
 `init_metrics(prefix)`, called from `Crowtree::open()`. The external
@@ -284,7 +308,7 @@ C++ `Crowtree` creates its own `MetricsRegistry` internally via
 entirely in C++, then flushed to string via `flush_metrics_str()` and
 written to the log by the Rust `MetricsRunner` post-flush callback.
 
-### Rust/C++ Metric Deduplication
+### 2.14 Rust/C++ Metric Deduplication
 
 Once C++ owns its registry, the Rust-side bridge (`engine_collector.rs`)
 no longer polls C++ cumulative counters and gauges — those metrics appear
@@ -293,7 +317,7 @@ Rust-native metrics (KV service, RPC, Paxos, WAL). The one exception is
 `snapshot.pages.c`, a magnitude counter with no paired latency in the C++
 registry, which remains bridged via `ct_get_stats` delta polling.
 
-### C++ `flush_to` Format Alignment
+### 2.15 C++ `flush_to` Format Alignment
 
 C++ `flush_to()` output is aligned to Rust's column layout: `tps(/s)`
 column on all windowed types, latency in `us` (not `ns`), bandwidth in KB,
@@ -301,7 +325,7 @@ Histogram column order matching Rust, and `window=%.2fs` precision. The
 section header label is parameterized (`"metrics"` for standalone,
 `"cpp-metrics"` for FFI-driven flush).
 
-### Shared Column Width
+### 2.16 Shared Column Width
 
 Both `[metrics]` and `[cpp-metrics]` sections use the same column width
 for metric names. Before each flush tick, Rust queries each C++ engine's

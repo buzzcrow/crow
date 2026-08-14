@@ -3,117 +3,79 @@
 
 # CROW Documentation Index
 
-One-line pointer to every doc and section. Read this first; open the listed
-doc only when a task touches a topic in its row.
+One-line pointer to every doc. Read this first; open the listed doc only
+when a task touches a topic in its row.
 
 ## Top-Level Docs
 
 | Doc | When to read |
 | --- | --- |
-| `doc/design/kv/design-crow-kv.md` | Root KV design document: what CROW is, why key choices were made, architecture overview, data model, read modes, consensus/storage/lifecycle/client interaction, module decomposition, crate layout, concurrency model. Read first for any design or architecture question. |
-| `doc/user-manual/user-guide.md` | User guide: three interfaces (Web UI, CLI, REST API), quick start (bootstrap a 3-node cluster), KV operations, cluster management (health, add/remove replicas, replace nodes), rolling upgrade, emergency procedures, backup, and full CLI + REST API reference. Run `python3 doc/user-manual/build_html.py` to generate `user-guide.html` with tabbed CLI/curl examples. |
+| `doc/design/kv/design-crow-kv.md` | Root KV design — read first for any KV design or architecture question. |
+| `doc/design/protocol/design-crow-protocol.md` | Root protocol design — read first for protocol or key encoding questions. |
+| `doc/design/diskdb/design-crow-diskdb.md` | Root diskdb design — read first for any diskdb design or architecture question. |
+| `doc/design/tree/design-crow-tree.md` | Root tree design — read first for storage-engine work. |
+| `doc/design/console/design-crow-console.md` | Root console design — read first for console work. |
+| `doc/user-manual/user-guide.md` | User guide: Web UI, CLI, REST API, quick start, cluster ops, upgrade. |
 
 ## Backlog (`doc/backlog/`)
 
 | Doc | When to read |
 | --- | --- |
-| `doc/backlog/backlog.md` | Forward-looking implementation backlog index with priority/complexity classification and brief intros. Read before picking up lib/crow-tree/crow-kv follow-up work. Each entry links to its detail doc. |
-| `doc/backlog/R**-<component>-<topic>.md` | Per-requirement detailed analysis (problem, approach, files, acceptance). `<component>` is the owning crate/area (`kv`, `tree`, `console`, `client`, `server`). Open only the matched `R**` file; delete it after the requirement is implemented and merged. |
+| `doc/backlog/backlog.md` | Backlog index with priority/complexity and brief intros. Read before picking up follow-up work. |
+| `doc/backlog/R**-<component>-<topic>.md` | Per-requirement detail (problem, approach, files, acceptance). Open only the matched `R**` file; delete after merge. |
 
 ## Working & Flow-Analysis Docs
 
-Long-lived task backlogs and per-path flow analyses. Plan files live under
-`doc/working/`; flow analyses live under `doc/design/kv/`.
+Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 
 | Doc | When to read |
 | --- | --- |
-| `doc/working/plan-test.md` | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `doc/design/kv/kv-read-flow-analysis.md` | KV point-read (get) flow trace, benchmark results, and open issues. Read when working on read-path performance. |
-| `doc/design/kv/kv-scan-flow-analysis.md` | KV scan (range read) flow trace, benchmark results, and open issues. Read when working on scan-path performance. |
-| `doc/design/kv/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. Read when working on write-path performance. |
+| `doc/working/plan-test.md` | Unfinished test task backlog. Read when picking the next test to implement. |
+| `doc/design/kv/kv-read-flow-analysis.md` | KV point-read flow trace, benchmarks, open issues. |
+| `doc/design/kv/kv-scan-flow-analysis.md` | KV scan flow trace, benchmarks, open issues. |
+| `doc/design/kv/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. |
 
 ## Project Files (repo root)
 
 | File | When to read |
 | --- | --- |
-| `AGENTS.md` | Always — project overview + dispatch table for AI agents |
-| `CONTRIBUTING.md` | Before opening a PR — setup, conventions, process |
-| `CHANGELOG.md` | When releasing or checking what changed between versions |
-| `SECURITY.md` | When reporting or handling a security vulnerability |
-| `CODE_OF_CONDUCT.md` | Community behavior guidelines |
+| `AGENTS.md` | Always — project overview + dispatch table for AI agents. |
+| `CONTRIBUTING.md` | Before opening a PR — setup, conventions, process. |
+| `CHANGELOG.md` | When releasing or checking what changed between versions. |
+| `SECURITY.md` | When reporting or handling a security vulnerability. |
+| `CODE_OF_CONDUCT.md` | Community behavior guidelines. |
 
-## `doc/design/kv/design-crow-kv.md` Sections
-
-| § | Topic |
-| --- | --- |
-| 1 | Overview |
-| 2 | Non-Goals (Design Envelope) |
-| 3 | Key Design Decisions |
-| 4 | Architecture Overview |
-| 5 | Data Model |
-| 6 | Read Modes |
-| 7 | Consensus |
-| 8 | Storage and Durability |
-| 9 | Cluster Lifecycle |
-| 10 | Client Interaction |
-| 11 | Module Decomposition |
-| 12 | Crate Layout |
-| 13 | Concurrency Model |
-| 14 | Components |
-| 15 | Performance Targets |
-| 16 | Observability |
-| 17 | Testing |
-| 18 | References |
-
-## Sub-Designs (`doc/design/{kv,tree,console}/`)
-
-### KV — Consensus
+## Sub-Designs (`doc/design/{kv,tree,console,protocol,diskdb}/`)
 
 | Doc | Read when working on |
 | --- | --- |
-| `doc/design/kv/design-crow-kv-leader-election.md` | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
-| `doc/design/kv/design-crow-kv-slot.md` | Parallel slot pipelining (§1–§14): sliding window, gap detection/repair, safe-slot, per-key resolved-slot, follower-side apply and catch-up via ChosenNotice + FetchGap (§9A), correctness analysis, linearizability proof. Concurrent sparse slot list (§15–§22): `SlotList<T>`, chunk layout, trim/GC, reclamation. Server-side proposal coalescing (§23): timer-driven micro-batcher, dedup tag threading, drain threshold, config, correctness, benchmark results. |
-| `doc/design/kv/design-crow-kv-rpc.md` | Wire protocol design: classic Paxos message surface, LearnerStream bidi stream (why dedicated stream, flow control, parallelism), PxService, version compatibility, Paxos error model (§7). Cluster discovery is HTTP, not gRPC. |
-| `doc/design/kv/design-crow-kv-reconfiguration.md` | Direct per-node mutation model, member add/remove, leader transfer, `membership_epoch` fence, safety argument, design history. Applies to all groups including system group (group 0). |
-| `doc/design/kv/design-crow-kv-state-machine.md` | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
-
-### KV — Storage
-
-| Doc | Read when working on |
-| --- | --- |
-| `doc/design/kv/design-crow-kv-wal.md` | Write-ahead log: multi-disk segments, backend-neutral durable flush, ack contract, replay/restore/recovery, GC, disk loss. |
-| `doc/design/kv/design-crow-kv-server.md` | `crow-kv-server` binary: KV engine selection, startup ordering (§2.2: `node-config.json` auto-restore + group 0 reconciliation), concurrency model, HTTP management API (axum, §2.4: system group endpoints `/system/init`, `/topology/finalize`, `/topology/ready`), group lifecycle, shutdown, port pool. |
-
-### Tree — Storage Engine
-
-| Doc | Read when working on |
-| --- | --- |
-| `doc/design/tree/design-crow-tree.md` | crow-tree overview: goals/non-goals, architecture, `KVEngine`/`EngineView` abstraction, out-of-order apply + two-GC model, FFI boundary, sub-doc map, decision log (D1-D19). Read first for storage-engine work. |
-| `doc/design/tree/design-crow-tree-engine.md` | crow-tree in-memory engine: slot cell, pages/delta records, write path (apply→delta→consolidate→split/merge), versioned root, lock-free epoch reclamation, read path, concurrency invariants; `buffer` memory-ownership model (owned/borrowed, SBO, zero-copy pipelines); io_uring async FFI bridge (reactor, `ct_future`, fast/slow path); Rust-side `KVEngine` async trait (`KVFuture<T>`, §4). |
-| `doc/design/tree/design-crow-tree-storage.md` | crow-tree durable storage: `PageStore` backends (`TextPageStore` debug, `BlockPageStore` O_DIRECT), zero-copy slotted frame format, buffer pool (frame arena, CLOCK eviction, epoch-safe reuse), internal-WAL decision, snapshot pipeline + recovery + export/import, mapping table (PID indirection, segment recycling), GC watermarks + consensus-WAL GC coupling, new-member install. |
-
-### Console — Operations / UI
-
-| Doc | Read when working on |
-| --- | --- |
-| `doc/design/console/design-crow-console.md` | `crow-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting, CLI design rules, persistent cluster config / system group (§4.3: two-phase bootstrap, topology KV schema, three-way fallback, divergence reconciliation). |
-| `doc/design/console/design-crow-console-ui.md` | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/Activity), embedded Swagger, KV Operator center panel (§6.1: store/group selector, paginated scan, inline CRUD, demo inject/delete), minimal embedding contract. |
-
-### KV — Cross-Cutting
-
-| Doc | Read when working on |
-| --- | --- |
-| `doc/design/kv/design-crow-kv-test.md` | Test strategy and layer-by-layer test guide: architecture stack, test binary map, cross-cutting coverage rules (placement, KV-op correctness, cluster verification, leader change & reconfig), per-layer scope, crow-tree C++ test layers. Per-layer coverage checklists in `doc/working/plan-test.md`; benchmark design in `doc/design/kv/kv-write-flow-analysis.md`. Read when designing tests or deciding where a test belongs. |
-| `doc/design/kv/design-crow-kv-observability.md` | Metrics module design: five metric types (Counter, Gauge, Bandwidth, LatencyHistogram, LatencySummary), registry lifecycle, naming convention, instrumentation points, system metrics collector, log file format, in-memory snapshot access, FFI boundary. Read when working on metrics or observability. |
+| `doc/design/kv/design-crow-kv-leader-election.md` | Election protocol, leader lease, ReadIndex, step-down. |
+| `doc/design/kv/design-crow-kv-slot.md` | Parallel slot pipelining, gap repair, follower catch-up, `SlotList`, proposal coalescing. |
+| `doc/design/kv/design-crow-kv-rpc.md` | Wire protocol, LearnerStream, PxService, Paxos error model. |
+| `doc/design/kv/design-crow-kv-reconfiguration.md` | Member add/remove, leader transfer, `membership_epoch` fence. |
+| `doc/design/kv/design-crow-kv-group0.md` | Group-0 sysdata schema, service registry, cluster topology records. |
+| `doc/design/kv/design-crow-kv-sysdata-lifecycle.md` | Sysdata lifecycle: ID reuse safety, cascading cleanup, client cache eviction, disk move, cluster reset. |
+| `doc/design/kv/design-crow-kv-state-machine.md` | Per-key slot tracking, apply semantics, snapshot, compaction. |
+| `doc/design/kv/design-crow-kv-wal.md` | WAL segments, durable flush, replay/restore/recovery, GC. |
+| `doc/design/kv/design-crow-kv-watch-notify.md` | Watch/Notify bidi stream, per-group `WatchRegistry`, apply-path trigger, `WatchNotifyClient`, diskdb notify handler, polling safety net. |
+| `doc/design/kv/design-crow-kv-server.md` | `crow-kv-server` binary: startup, concurrency, HTTP management API, group lifecycle. |
+| `doc/design/kv/design-crow-kv-test.md` | Test strategy, layer-by-layer test guide, coverage rules. |
+| `doc/design/kv/design-crow-kv-observability.md` | Metrics module: five metric types, registry, instrumentation points, log format. |
+| `doc/design/tree/design-crow-tree.md` | crow-tree overview, `KVEngine`/`EngineView`, out-of-order apply + two-GC model, FFI boundary. |
+| `doc/design/tree/design-crow-tree-engine.md` | In-memory engine: slot cell, pages/delta, write path, versioned root, lock-free epoch reclamation, io_uring FFI. |
+| `doc/design/tree/design-crow-tree-storage.md` | Durable storage: `PageStore` backends, slotted frame format, buffer pool, snapshot/recovery, mapping table, GC. |
+| `doc/design/console/design-crow-console.md` | Console core crate, web + CLI frontends, two-hierarchy API, monitor task, SSH lifecycle, bootstrap. |
+| `doc/design/console/design-crow-console-ui.md` | Web UI v1: 3-pane shell, React Flow canvas, inspector, KV Operator center panel. |
+| `doc/design/protocol/design-crow-protocol-key.md` | Key encoding: flat structs, 3-byte header, `BinaryKey` + `TextKey`, frozen layouts, append-only evolution. |
+| `doc/design/protocol/design-crow-protocol-types.md` | Wire types, `u64` ID aliases, re-export pattern, `utoipa` schema derives. |
+| `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, disk status management, space metrics, background scanner, crate layout, concurrency. |
+| `doc/design/diskdb/design-crow-diskdb-zone-management.md` | Zone management: record model, allocation algorithm, persist-only free, compaction-on-rotation, preparatory thread, crash recovery, zone-level concurrency, invariants. |
+| `doc/design/diskdb/design-crow-diskdb-space-metrics.md` | Space metrics component: usage accessors, `QueryCapacityStats` handler, per-disk counters, recalc verifier, reporting loop, keepalive piggyback, kv-client aggregation, `crow-diskdb-client` library. |
 
 ## How AI Should Use This Index
 
 1. Match the task description to a row above.
-2. Open only the matched doc. For docs with sections, jump to the listed §
-   via grep instead of reading top-to-bottom.
-3. If unsure between two docs, prefer the most specific one
-   (`doc/design/{kv,tree,console}/design-crow-*.md` over `doc/design/kv/design-crow-kv.md`).
-4. If the task spans multiple sub-designs, open `doc/design/kv/design-crow-kv.md` first to learn
-   how they interact, then drill into specifics.
-5. After the task: if the index row is now wrong (renamed file, materially
-   changed scope), update this file in the same commit.
+2. Open only the matched doc; grep for the relevant `##` section instead of reading top-to-bottom.
+3. If unsure between two docs, prefer the most specific sub-design over the root design.
+4. If the task spans multiple sub-designs, open the root design first to learn how they interact.
+5. After the task: if the index row is now wrong (renamed file, materially changed scope), update this file in the same commit.

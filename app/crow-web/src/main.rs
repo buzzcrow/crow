@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
+use crow_protocol::WEB_BASE;
 use tracing::info;
 
 #[tokio::main]
@@ -18,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         bind: String,
 
         /// Port for the web server (default: 9920)
-        #[arg(long, default_value_t = 9920)]
+        #[arg(long, default_value_t = WEB_BASE)]
         port: u16,
 
         /// Use an in-memory registry instead of the persisted console config.

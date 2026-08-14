@@ -7,11 +7,9 @@
 //! Mirrors the UI test fixture's `setupCluster`/`teardownCluster`
 //! (`crow-console/web/ui/e2e/fixtures/consoleSetup.ts`), but through
 //! the typed `ConsoleClient` against an **embedded** `crow-web`
-//! instance started in-process (the same pattern used by the CLI's own
-//! integration test harness,
-//! `crow-console/cli/tests/testkit/console.rs::spawn_console_empty`),
-//! so the benchmark is fully self-contained: 1 rack + 3 nodes on
-//! localhost, forming a complete Paxos replication group.
+//! instance started in-process, so the benchmark is fully
+//! self-contained: 1 rack + 3 nodes on localhost, forming a complete
+//! Paxos replication group.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,7 +22,8 @@ use crow_console_shared::error::{Error, Result};
 use crow_console_shared::lifecycle::stop_pid_with_timeout;
 use crow_console_shared::test_ports::unique_test_port;
 
-use super::report::{aggregate_server_metrics, parse_metrics_log, ServerMetrics};
+use super::metrics_log::{aggregate_server_metrics, parse_metrics_log};
+use super::report::ServerMetrics;
 
 /// Number of nodes (and racks, 1:1) provisioned by the fixture.
 const NODE_COUNT: usize = 3;
@@ -94,7 +93,7 @@ impl BenchMode {
 pub struct BenchFixture {
     client: ConsoleClient,
     console_task: tokio::task::JoinHandle<()>,
-    node_ids: Vec<String>,
+    node_ids: Vec<u64>,
     node_pids: Vec<u32>,
     node_grpc_urls: Vec<String>,
     node_mgmt_urls: Vec<String>,
@@ -202,27 +201,27 @@ impl BenchFixture {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
-    ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
+    ) -> Result<(Vec<u64>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
         let mut grpc_urls = Vec::with_capacity(NODE_COUNT);
         let mut mgmt_urls = Vec::with_capacity(NODE_COUNT);
         for i in 0..NODE_COUNT {
-            let rack_id = format!("br{i}");
-            let node_id = format!("bn{i}");
+            let rack_id = i as u64;
+            let node_id = i as u64;
             client
                 .add_rack(&AddRackBody {
-                    id: rack_id.clone(),
-                    name: rack_id.clone(),
+                    id: rack_id,
+                    name: format!("br{i}"),
                 })
                 .await
-                .map_err(|e| upstream_err(&rack_id, "add_rack", &e))?;
+                .map_err(|e| upstream_err(&rack_id.to_string(), "add_rack", &e))?;
             client
                 .add_node(
-                    &rack_id,
+                    rack_id,
                     &NodeEntry {
-                        id: node_id.clone(),
-                        rack_id: rack_id.clone(),
+                        id: node_id,
+                        rack_id,
                         host: "127.0.0.1".into(),
                         ssh_port: 22,
                         ssh_user: String::new(),
@@ -231,7 +230,7 @@ impl BenchFixture {
                     },
                 )
                 .await
-                .map_err(|e| upstream_err(&node_id, "add_node", &e))?;
+                .map_err(|e| upstream_err(&node_id.to_string(), "add_node", &e))?;
 
             let mut body = DeployNodeServerBody {
                 mgmt_port: unique_test_port(),
@@ -246,9 +245,9 @@ impl BenchFixture {
             mode.apply_to(&mut body);
             body.config = node_config.clone();
             let deployed = client
-                .deploy_node_server(&node_id, &body)
+                .deploy_node_server(node_id, &body)
                 .await
-                .map_err(|e| upstream_err(&node_id, "deploy_node_server", &e))?;
+                .map_err(|e| upstream_err(&node_id.to_string(), "deploy_node_server", &e))?;
 
             ids.push(node_id);
             pids.push(deployed.pid);
@@ -260,7 +259,7 @@ impl BenchFixture {
 
     /// Create the single store spanning all nodes, then a 3-replica
     /// group over the same nodes.
-    async fn provision_store_and_group(client: &ConsoleClient, node_ids: &[String]) -> Result<()> {
+    async fn provision_store_and_group(client: &ConsoleClient, node_ids: &[u64]) -> Result<()> {
         client
             .add_store(&CreateStoreBody {
                 store_id: STORE_ID,
@@ -300,7 +299,7 @@ impl BenchFixture {
 
     /// Node ids provisioned by this fixture, in deploy order.
     #[must_use]
-    pub fn node_ids(&self) -> &[String] {
+    pub fn node_ids(&self) -> &[u64] {
         &self.node_ids
     }
 
@@ -317,7 +316,7 @@ impl BenchFixture {
         self.node_ids
             .iter()
             .zip(self.node_grpc_urls.iter())
-            .map(|(nid, url)| (url.clone(), nid.clone()))
+            .map(|(nid, url)| (url.clone(), nid.to_string()))
             .collect()
     }
 
@@ -329,7 +328,7 @@ impl BenchFixture {
             .node_ids
             .iter()
             .zip(&self.node_pids)
-            .filter_map(|(node_id, pid)| self.read_node_metrics_log(node_id, *pid))
+            .filter_map(|(node_id, pid)| self.read_node_metrics_log(*node_id, *pid))
             .map(|content| parse_metrics_log(&content))
             .collect();
         aggregate_server_metrics(&per_node)
@@ -343,7 +342,7 @@ impl BenchFixture {
     /// be created.
     pub fn collect_logs(&self, run_dir: &Path) -> std::io::Result<()> {
         for node_id in &self.node_ids {
-            let src = self.node_workspace(node_id).join("log");
+            let src = self.node_workspace(*node_id).join("log");
             let dst = run_dir.join(format!("node-{node_id}"));
             std::fs::create_dir_all(&dst)?;
             let Ok(entries) = std::fs::read_dir(&src) else {
@@ -367,18 +366,18 @@ impl BenchFixture {
         }
         self.stopped = true;
         for node_id in &self.node_ids {
-            let _ = self.client.stop_node_server(node_id).await;
+            let _ = self.client.stop_node_server(*node_id).await;
         }
         self.console_task.abort();
     }
 
-    fn node_workspace(&self, node_id: &str) -> PathBuf {
+    fn node_workspace(&self, node_id: u64) -> PathBuf {
         self.workspace_dir.join(format!("N-{node_id}"))
     }
 
     /// Locate and read this node's `log/crow-kv-server-metrics-<timestamp>-<pid>.log`
     /// file (see `crow_kv::common::logging::open_metrics_log`).
-    fn read_node_metrics_log(&self, node_id: &str, pid: u32) -> Option<String> {
+    fn read_node_metrics_log(&self, node_id: u64, pid: u32) -> Option<String> {
         let log_dir = self.node_workspace(node_id).join("log");
         let suffix = format!("-{pid}.log");
         let entries = std::fs::read_dir(log_dir).ok()?;

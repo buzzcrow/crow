@@ -73,7 +73,7 @@ pub(crate) async fn start(group: &Arc<PxGroup>) {
 /// dropped group does not leak the task; exits the first time `upgrade`
 /// fails or `cancel` fires.
 #[must_use]
-pub fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) -> JoinHandle<()> {
+pub(crate) fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) -> JoinHandle<()> {
     tokio::spawn(maintenance_loop(group, tick, cancel))
 }
 

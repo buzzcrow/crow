@@ -11,6 +11,7 @@ import {
   createRack,
   createStore,
   deployNodeServer,
+  freePort,
   stopNodeServer,
 } from '../fixtures/consoleSetup';
 
@@ -26,15 +27,17 @@ import {
 test.describe('E2E-21 physical node inspect', () => {
   test('shows local + remote replicas and reflects a removed remote', async ({ page, baseURL }) => {
     // Unique ids/ports: 20-ui-behaviors already uses r21*/n21*.
-    await createRack(baseURL!, { id: 'r26', name: 'Rack TwentySix' });
-    await createNode(baseURL!, { id: 'n26a', rack_id: 'r26' });
-    await createNode(baseURL!, { id: 'n26b', rack_id: 'r26' });
-    await deployNodeServer(baseURL!, 'n26a', 9980, 9990);
-    await deployNodeServer(baseURL!, 'n26b', 9981, 9991);
+    await createRack(baseURL!, { id: 26, name: 'Rack TwentySix' });
+    await createNode(baseURL!, { id: 261, rack_id: 26 });
+    await createNode(baseURL!, { id: 262, rack_id: 26 });
+    await Promise.all([
+      deployNodeServer(baseURL!, 261, freePort(), freePort()),
+      deployNodeServer(baseURL!, 262, freePort(), freePort()),
+    ]);
     // store 266, then group 2660 / replica 26600 on n26a, then a peer on n26b.
-    await createStore(baseURL!, 266, ['n26a']);
-    await addGroup(baseURL!, 266, 2660, 26600, ['n26a']);
-    await addReplica(baseURL!, 266, 2660, 'n26b', 26601);
+    await createStore(baseURL!, 266, [261]);
+    await addGroup(baseURL!, 266, 2660, 26600, [261]);
+    await addReplica(baseURL!, 266, 2660, 262, 26601);
 
     const api = await apiContext(baseURL!);
     try {
@@ -59,7 +62,7 @@ test.describe('E2E-21 physical node inspect', () => {
       await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible({ timeout: 3_000 });
 
       // Remove the remote on n26a out-of-band (simulated mis-wiring).
-      const del = await api.delete('/api/nodes/n26a/stores/266/groups/2660/remotes/26601');
+      const del = await api.delete('/api/nodes/261/stores/266/groups/2660/remotes/26601');
       expect(del.ok(), await del.text()).toBeTruthy();
 
       // After a poll the dashed peer row under n26a is gone; n26b's mirror
@@ -68,8 +71,8 @@ test.describe('E2E-21 physical node inspect', () => {
       await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible();
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 'n26a');
-      await stopNodeServer(baseURL!, 'n26b');
+      await stopNodeServer(baseURL!, 261);
+      await stopNodeServer(baseURL!, 262);
     }
   });
 });

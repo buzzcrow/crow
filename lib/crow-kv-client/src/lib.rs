@@ -18,16 +18,31 @@
 //! its own gRPC client.
 
 mod client;
+mod client_admin;
+mod client_retry;
 mod config;
 mod error;
+mod hardware;
+mod kv_cluster;
 mod metrics;
 mod pool;
+mod service_registry;
+mod space_usage;
 mod topology;
+mod watch_notify;
 
-pub use client::{BatchOp, CrowkvClient, GetOutcome, ScanOutcome, WriteOutcome};
+pub use client::{
+    new_client_id, BatchOp, CrowkvClient, GetOutcome, JournalOp, JournalScanOutcome, ScanOutcome,
+    WriteOutcome,
+};
 pub use config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
 pub use error::{Error, Result};
+pub use hardware::HardwareClient;
+pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
+pub use service_registry::ServiceRegistryClient;
+pub use space_usage::{ClusterUsage, NodeUsage, RackUsage, SpaceUsageClient};
+pub use watch_notify::{WatchNotify, WatchNotifyClient, WatchSubscription};
 
 /// Re-exported so callers don't need a direct `crow_kv` dependency just to
 /// pick a read mode.

@@ -3,7 +3,7 @@
 // Baseline: 1.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -43,15 +43,19 @@ test.describe('E2E-43 stop leader reelection', () => {
   test('stopping leader triggers reelection and KV ops continue', async ({ baseURL }) => {
     await resetAll(baseURL!);
 
-    for (const r of ['r43a', 'r43b', 'r43c']) {
-      await seedRackAndNode(baseURL!, r, r.replace('r', 'n'));
-    }
-    await deployNodeServer(baseURL!, 'n43a', 9980, 9981);
-    await deployNodeServer(baseURL!, 'n43b', 9982, 9983);
-    await deployNodeServer(baseURL!, 'n43c', 9984, 9985);
+    for (const r of [431, 432, 433]) {
 
-    await createStore(baseURL!, 430, ['n43a', 'n43b', 'n43c']);
-    await addGroup(baseURL!, 430, 4300, 43000, ['n43a', 'n43b', 'n43c']);
+
+      await seedRackAndNode(baseURL!, r, r);
+    }
+    await Promise.all([
+      deployNodeServer(baseURL!, 431, freePort(), freePort()),
+      deployNodeServer(baseURL!, 432, freePort(), freePort()),
+      deployNodeServer(baseURL!, 433, freePort(), freePort()),
+    ]);
+
+    await createStore(baseURL!, 430, [431, 432, 433]);
+    await addGroup(baseURL!, 430, 4300, 43000, [431, 432, 433]);
     await waitForLeader(baseURL!, 430, 4300);
 
     try {
@@ -94,9 +98,9 @@ test.describe('E2E-43 stop leader reelection', () => {
         return replicas.filter((r) => r.status !== 'unhealthy').length;
       }, { timeout: 10_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
     } finally {
-      await stopNodeServer(baseURL!, 'n43a');
-      await stopNodeServer(baseURL!, 'n43b');
-      await stopNodeServer(baseURL!, 'n43c');
+      await stopNodeServer(baseURL!, 431);
+      await stopNodeServer(baseURL!, 432);
+      await stopNodeServer(baseURL!, 433);
     }
   });
 });

@@ -43,8 +43,8 @@ async fn spawn_upstream() -> Option<Upstream> {
         return None;
     }
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -74,12 +74,12 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -89,7 +89,7 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     cfg.add_server(ServerEntry {
         id: "n1".into(),
         url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
         mgmt_port: None,
         grpc_port: None,
@@ -107,10 +107,10 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         let rec = NodeRecord {
             health: NodeHealth::Up,
             last_seen_ms: 1,
-            stores: legacy_topology_to_node_stores("n1", &stores),
+            stores: legacy_topology_to_node_stores(1, &stores),
             last_error: None,
         };
-        state.monitor_cache.set_node_report("n1".to_string(), rec).await;
+        state.monitor_cache.set_node_report(1, rec).await;
     }
 
     tokio::spawn(async move {
@@ -127,7 +127,7 @@ async fn init_cluster(web: &SocketAddr) {
     let base = format!("http://{web}");
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1"]}))
+        .json(&json!({"nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -165,7 +165,7 @@ async fn node_metrics_proxy_returns_structured_snapshot() {
     init_cluster(&web).await;
 
     let resp: Value = http
-        .get(format!("{base}/api/nodes/n1/metrics"))
+        .get(format!("{base}/api/nodes/1/metrics"))
         .send()
         .await
         .unwrap()

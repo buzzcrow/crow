@@ -21,7 +21,7 @@ function displayEntityId(entity: SelectedEntity): string {
     case 'Node':
       return nodeLabel(entity.id);
     case 'Server':
-      return entity.parentIds?.node_id ? serverLabel(entity.parentIds.node_id) : entity.id;
+      return entity.parentIds?.node_id ? serverLabel(String(entity.parentIds.node_id)) : entity.id;
     case 'Store':
       return storeLabel(entity.id);
     case 'Group':
@@ -136,7 +136,7 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
     entity.type === 'Server'
       ? servers.find((item) => item.id === entity.id) || servers.find((item) => item.node_id === serverNodeId)
       : entity.type === 'Node'
-        ? servers.find((item) => item.node_id === entity.id)
+        ? servers.find((item) => item.node_id === Number(entity.id))
         : undefined;
   const mgmtPort = server?.mgmt_port ?? null;
   const grpcPort = server?.grpc_port ?? null;
@@ -170,11 +170,13 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
   const readState: ReadState | undefined = groupView?.read_state;
 
   // Metrics poll: build a fetcher for the current entity type.
+  const parentStoreId = entity.parentIds?.store_id != null ? String(entity.parentIds.store_id) : undefined;
+  const parentGroupId = entity.parentIds?.group_id != null ? String(entity.parentIds.group_id) : undefined;
   const metricsFetcherInfo = buildMetricsFetcher(
     entity.type,
     entity.id,
-    entity.parentIds?.store_id,
-    entity.parentIds?.group_id,
+    parentStoreId,
+    parentGroupId,
   );
   const metricsData = useMetricsPoll(
     metricsFetcherInfo?.fetcher ?? null,
@@ -189,7 +191,7 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
     ...(grpcPort ? [{ label: 'gRPC Port', value: String(grpcPort) }] : []),
     ...Object.entries(entity.parentIds || {})
       .filter(([, v]) => v)
-      .map(([k, v]) => ({ label: `Parent: ${k}`, value: v })),
+      .map(([k, v]) => ({ label: `Parent: ${k}`, value: String(v) })),
     ...(replica && typeof replica.engine_healthy === 'boolean'
       ? [{ label: 'Engine Healthy', value: replica.engine_healthy ? 'Yes' : 'No' }]
       : []),
@@ -264,14 +266,14 @@ function buildCrossJump(
   if (entity.viewMode === ViewMode.Logical && entity.type === 'Replica') {
     const nodeId = entity.parentIds?.node_id;
     if (nodeId) {
-      const node = nodes.find((n) => n.id === nodeId);
+      const node = nodes.find((n) => n.id === Number(nodeId));
       return {
         label: `Show on node ${nodeId}`,
         go: () => {
           setViewMode(ViewMode.Physical);
           selectEntity({
             type: 'Node',
-            id: nodeId,
+            id: String(nodeId),
             viewMode: ViewMode.Physical,
             parentIds: node?.rack_id ? { rack_id: node.rack_id } : {},
             name: node?.host,
@@ -282,7 +284,7 @@ function buildCrossJump(
   }
   // Physical Node -> logical Store ("show in cluster").
   if (entity.viewMode === ViewMode.Physical && entity.type === 'Node') {
-    const store = stores.find((s) => String(s.store_id) !== '0' && s.nodes?.includes(entity.id));
+    const store = stores.find((s) => String(s.store_id) !== '0' && s.nodes?.includes(Number(entity.id)));
     if (store) {
       return {
         label: `Show store ${store.store_id} in cluster`,

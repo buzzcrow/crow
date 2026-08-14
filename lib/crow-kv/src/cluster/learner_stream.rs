@@ -55,7 +55,7 @@ const BACKOFF_INITIAL: Duration = Duration::from_millis(50);
 
 /// Reply sent back through an in-flight `oneshot` once the server acks.
 #[derive(Debug)]
-pub enum LearnerStreamReply {
+pub(crate) enum LearnerStreamReply {
     Accepted(AcceptedResponse),
     FetchGap(FetchGapResponse),
 }
@@ -75,7 +75,7 @@ struct OutboundCmd {
 ///
 /// Cheap to clone via `Arc`; the background task is shared.
 #[derive(Debug)]
-pub struct PxLearnerStream {
+pub(crate) struct PxLearnerStream {
     endpoint: String,
     cmd_tx: mpsc::Sender<OutboundCmd>,
     cancel: CancellationToken,
@@ -87,7 +87,7 @@ impl PxLearnerStream {
     /// Spawn a background task that maintains a bidi stream to `endpoint`
     /// and reconnects on transport failure.
     #[must_use]
-    pub fn new(endpoint: String, cfg: &PxElectionConfig) -> Arc<Self> {
+    pub(crate) fn new(endpoint: String, cfg: &PxElectionConfig) -> Arc<Self> {
         let cancel = CancellationToken::new();
         let window = cfg.learner_stream_window_frames.max(1);
         let (cmd_tx, cmd_rx) = mpsc::channel(window);
@@ -119,7 +119,7 @@ impl PxLearnerStream {
     /// Returns [`PxReplicaError::Internal`] if the background task is shut
     /// down, the connection resets while the reply is in flight, or the
     /// correlated reply arrives on the wrong oneshot.
-    pub async fn send_accept(&self, req: AcceptRequest) -> Result<AcceptedResponse, PxReplicaError> {
+    pub(crate) async fn send_accept(&self, req: AcceptRequest) -> Result<AcceptedResponse, PxReplicaError> {
         let request_id = req.request_id;
         let (tx, rx) = oneshot::channel();
         let frame = LearnerStreamRequest {
@@ -158,7 +158,10 @@ impl PxLearnerStream {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] on transport failure, timeout,
     /// or an unexpected reply type.
-    pub async fn send_fetch_gap(&self, req: FetchGapRequest) -> Result<FetchGapResponse, PxReplicaError> {
+    pub(crate) async fn send_fetch_gap(
+        &self,
+        req: FetchGapRequest,
+    ) -> Result<FetchGapResponse, PxReplicaError> {
         let request_id = req.slot;
         let (tx, rx) = oneshot::channel();
         let frame = LearnerStreamRequest {
@@ -194,7 +197,7 @@ impl PxLearnerStream {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the background task has
     /// shut down (the bounded mpsc receiver was dropped).
-    pub fn send_chosen(&self, notice: ChosenNotification) -> Result<(), PxReplicaError> {
+    pub(crate) fn send_chosen(&self, notice: ChosenNotification) -> Result<(), PxReplicaError> {
         let frame = LearnerStreamRequest {
             frame: Some(learner_stream_request::Frame::Chosen(notice)),
         };
@@ -213,7 +216,8 @@ impl PxLearnerStream {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the background task has
     /// shut down (the bounded mpsc receiver was dropped).
-    pub fn send_batch_chosen(&self, batch: BatchChosenNotification) -> Result<(), PxReplicaError> {
+    #[allow(dead_code)]
+    pub(crate) fn send_batch_chosen(&self, batch: BatchChosenNotification) -> Result<(), PxReplicaError> {
         let frame = LearnerStreamRequest {
             frame: Some(learner_stream_request::Frame::BatchChosen(batch)),
         };
@@ -250,12 +254,13 @@ impl PxLearnerStream {
 
     /// Endpoint this stream is connected to.
     #[must_use]
-    pub fn endpoint(&self) -> &str {
+    #[allow(dead_code)]
+    pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
     /// Stop the background task and fail any pending oneshots.
-    pub fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         self.cancel.cancel();
     }
 }

@@ -3,7 +3,7 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -42,21 +42,24 @@ test.describe('E2E-40 multi-group same store', () => {
     await resetAll(baseURL!);
 
     // 5 nodes, 1 store, 3 groups on different 3-node subsets.
-    for (const r of ['r40a', 'r40b', 'r40c', 'r40d', 'r40e']) {
-      await seedRackAndNode(baseURL!, r, r.replace('r', 'n'));
-    }
-    await deployNodeServer(baseURL!, 'n40a', 9960, 9961);
-    await deployNodeServer(baseURL!, 'n40b', 9962, 9963);
-    await deployNodeServer(baseURL!, 'n40c', 9964, 9965);
-    await deployNodeServer(baseURL!, 'n40d', 9966, 9967);
-    await deployNodeServer(baseURL!, 'n40e', 9968, 9969);
+    for (const r of [401, 402, 403, 404, 405]) {
 
-    await createStore(baseURL!, 400, ['n40a', 'n40b', 'n40c', 'n40d', 'n40e']);
+      await seedRackAndNode(baseURL!, r, r);
+    }
+    await Promise.all([
+      deployNodeServer(baseURL!, 401, freePort(), freePort()),
+      deployNodeServer(baseURL!, 402, freePort(), freePort()),
+      deployNodeServer(baseURL!, 403, freePort(), freePort()),
+      deployNodeServer(baseURL!, 404, freePort(), freePort()),
+      deployNodeServer(baseURL!, 405, freePort(), freePort()),
+    ]);
+
+    await createStore(baseURL!, 400, [401, 402, 403, 404, 405]);
 
     // Group 4000: n40a,b,c. Group 4001: n40b,c,d. Group 4002: n40c,d,e.
-    await addGroup(baseURL!, 400, 4000, 40000, ['n40a', 'n40b', 'n40c']);
-    await addGroup(baseURL!, 400, 4001, 40010, ['n40b', 'n40c', 'n40d']);
-    await addGroup(baseURL!, 400, 4002, 40020, ['n40c', 'n40d', 'n40e']);
+    await addGroup(baseURL!, 400, 4000, 40000, [401, 402, 403]);
+    await addGroup(baseURL!, 400, 4001, 40010, [402, 403, 404]);
+    await addGroup(baseURL!, 400, 4002, 40020, [403, 404, 405]);
     await waitForLeader(baseURL!, 400, 4000);
     await waitForLeader(baseURL!, 400, 4001);
     await waitForLeader(baseURL!, 400, 4002);

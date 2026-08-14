@@ -61,16 +61,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const mockRack: Rack = { id: 'r1', name: 'r1', nodes: [] };
+const mockRack: Rack = { id: 1, name: 'r1', nodes: [] };
 const mockNodes: Node[] = [
-  { id: 'n1', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
-  { id: 'n2', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+  { id: 1, rack_id: 1, host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+  { id: 2, rack_id: 1, host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
 ];
 const mockServers: CrowKVServerView[] = [
   {
     id: 'n1-kv',
-    node_id: 'n1',
-    rack_id: 'r1',
+    node_id: 1,
+    rack_id: 1,
     host: '127.0.0.1',
     process: {
       mgmt_url: 'http://127.0.0.1:19910',
@@ -84,15 +84,15 @@ const mockServers: CrowKVServerView[] = [
   },
 ];
 const mockStores: StoreView[] = [
-  { store_id: '7', nodes: ['n1', 'n2'], groups: [] },
+  { store_id: '7', nodes: [1, 2], groups: [] },
 ];
 
 describe('Add Rack dialog', () => {
   it('POSTs { id, name? } to /api/racks', async () => {
-    installFetchMock({ id: 'r1', name: 'Rack 1', nodes: [] });
+    installFetchMock({ id: 1, name: 'Rack 1', nodes: [] });
     render(<AddRackDialog isOpen onClose={() => {}} />, { wrapper });
 
-    fireEvent.change(screen.getByLabelText('Rack ID'), { target: { value: 'r1' } });
+    fireEvent.change(screen.getByLabelText('Rack ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Name (optional)'), { target: { value: 'Rack 1' } });
     fireEvent.click(screen.getByRole('button', { name: /create rack/i }));
 
@@ -100,7 +100,7 @@ describe('Add Rack dialog', () => {
     expect(captured[0]).toMatchObject({
       url: '/api/racks',
       method: 'POST',
-      body: { id: 'r1', name: 'Rack 1' },
+      body: { id: 1, name: 'Rack 1' },
     });
   });
 
@@ -116,13 +116,13 @@ describe('Add Rack dialog', () => {
 
 describe('Add Node dialog', () => {
   it('POSTs flat NodeEntry to /api/nodes', async () => {
-    installFetchMock({ id: 'n1' });
+    installFetchMock({ id: 1 });
     render(
-      <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="r1" />,
+      <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="1" />,
       { wrapper },
     );
 
-    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: 'n1' } });
+    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByLabelText('Enable Crow Storage on this node'));
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
@@ -132,8 +132,8 @@ describe('Add Node dialog', () => {
     expect(captured[0].method).toBe('POST');
     // Backend `NodeEntry` shape — flat fields, NO nested `ssh` object.
     expect(captured[0].body).toEqual({
-      id: 'n1',
-      rack_id: 'r1',
+      id: 1,
+      rack_id: 1,
       host: '127.0.0.1',
       ssh_port: 22,
       ssh_user: '',
@@ -142,13 +142,13 @@ describe('Add Node dialog', () => {
   });
 
   it('includes ssh_user + ssh_key when provided', async () => {
-    installFetchMock({ id: 'n1' });
+    installFetchMock({ id: 1 });
     render(
-      <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="r1" />,
+      <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="1" />,
       { wrapper },
     );
 
-    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: 'n1' } });
+    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '10.0.0.1' } });
     fireEvent.change(screen.getByLabelText('SSH User (optional)'), { target: { value: 'crow-kv' } });
     fireEvent.change(screen.getByLabelText('SSH Key Path (optional)'), {
@@ -159,8 +159,8 @@ describe('Add Node dialog', () => {
 
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0].body).toEqual({
-      id: 'n1',
-      rack_id: 'r1',
+      id: 1,
+      rack_id: 1,
       host: '10.0.0.1',
       ssh_port: 22,
       ssh_user: 'crow-kv',
@@ -175,7 +175,7 @@ describe('Add Node dialog', () => {
         isOpen
         onClose={() => {}}
         racks={[mockRack]}
-        defaultRackId="r1"
+        defaultRackId="1"
         existingNodeIds={['node1']}
       />,
       { wrapper },
@@ -186,8 +186,8 @@ describe('Add Node dialog', () => {
 
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0].body).toEqual({
-      id: '2',
-      rack_id: 'r1',
+      id: 2,
+      rack_id: 1,
       host: '127.0.0.1',
       ssh_port: 22,
       ssh_user: '',
@@ -195,13 +195,13 @@ describe('Add Node dialog', () => {
   });
 
   it('enables Crow Storage by default and deploys immediately after node creation', async () => {
-    installFetchMock({ id: 'n1' });
+    installFetchMock({ id: 1 });
     render(
       <AddNodeDialog
         isOpen
         onClose={() => {}}
         racks={[mockRack]}
-        defaultRackId="r1"
+        defaultRackId="1"
         defaultMgmtPort="19911"
         defaultGrpcPort="19921"
       />,
@@ -209,7 +209,7 @@ describe('Add Node dialog', () => {
     );
 
     expect((screen.getByLabelText('Enable Crow Storage on this node') as HTMLInputElement).checked).toBe(true);
-    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: 'n1' } });
+    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
 
@@ -218,15 +218,15 @@ describe('Add Node dialog', () => {
       url: '/api/nodes',
       method: 'POST',
       body: {
-        id: 'n1',
-        rack_id: 'r1',
+        id: 1,
+        rack_id: 1,
         host: '127.0.0.1',
         ssh_port: 22,
         ssh_user: '',
       },
     });
     expect(captured[1]).toMatchObject({
-      url: '/api/nodes/n1/server/deploy',
+      url: '/api/nodes/1/server/deploy',
       method: 'POST',
       body: { mgmt_port: 19911, grpc_port: 19921 },
     });
@@ -235,8 +235,8 @@ describe('Add Node dialog', () => {
 
 describe('Deploy Server dialog', () => {
   it('POSTs DeployNodeServerBody to /api/nodes/:id/server/deploy', async () => {
-    installFetchMock({ node_id: 'n1', pid: 1234, mgmt_url: 'x', grpc_url: 'y' });
-    render(<DeployServerDialog isOpen onClose={() => {}} nodeId="n1" />, { wrapper });
+    installFetchMock({ node_id: 1, pid: 1234, mgmt_url: 'x', grpc_url: 'y' });
+    render(<DeployServerDialog isOpen onClose={() => {}} nodeId={1} />, { wrapper });
 
     fireEvent.change(screen.getByLabelText('Management Port'), { target: { value: '19911' } });
     fireEvent.change(screen.getByLabelText('gRPC Port'), { target: { value: '19921' } });
@@ -244,7 +244,7 @@ describe('Deploy Server dialog', () => {
 
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0]).toMatchObject({
-      url: '/api/nodes/n1/server/deploy',
+      url: '/api/nodes/1/server/deploy',
       method: 'POST',
       body: { mgmt_port: 19911, grpc_port: 19921 },
     });
@@ -252,12 +252,12 @@ describe('Deploy Server dialog', () => {
   });
 
   it('submits immediately with provided default ports', async () => {
-    installFetchMock({ node_id: 'n1', pid: 1234, mgmt_url: 'x', grpc_url: 'y' });
+    installFetchMock({ node_id: 1, pid: 1234, mgmt_url: 'x', grpc_url: 'y' });
     render(
       <DeployServerDialog
         isOpen
         onClose={() => {}}
-        nodeId="n1"
+        nodeId={1}
         defaultMgmtPort="19915"
         defaultGrpcPort="19925"
       />,
@@ -274,15 +274,15 @@ describe('Deploy Server dialog', () => {
     const defaults = deployPortDefaultsForNode(
       [
         {
-          id: 'n1',
+          id: 1,
           server: { mgmt_url: 'http://127.0.0.1:19910', grpc_url: 'http://127.0.0.1:19920' },
         },
         {
-          id: 'n2',
+          id: 2,
           server: { mgmt_url: 'http://127.0.0.1:19910', grpc_url: 'http://127.0.0.1:19920' },
         },
       ],
-      'n1',
+      1,
     );
 
     expect(defaults).toEqual({ defaultMgmtPort: '19911', defaultGrpcPort: '19921' });
@@ -292,24 +292,24 @@ describe('Deploy Server dialog', () => {
     const defaults = deployPortDefaultsForNode(
       [
         {
-          id: 'n2',
+          id: 2,
           server: { mgmt_url: 'http://127.0.0.1:19910', grpc_url: 'http://127.0.0.1:19920' },
         },
       ],
-      'n1',
+      1,
     );
 
     expect(defaults).toEqual({ defaultMgmtPort: '19911', defaultGrpcPort: '19921' });
   });
 
   it('derives defaults from the node id suffix before checking collisions', () => {
-    const defaults = deployPortDefaultsForNode([], 'n2', 19910, 19920);
+    const defaults = deployPortDefaultsForNode([], 2, 19910, 19920);
 
     expect(defaults).toEqual({ defaultMgmtPort: '19912', defaultGrpcPort: '19922' });
   });
 
   it('can increment from remembered same-node ports even after the server is gone', () => {
-    const defaults = deployPortDefaultsForNode([], 'n1', 19910, 19920, [19910], [19920]);
+    const defaults = deployPortDefaultsForNode([], 1, 19910, 19920, [19910], [19920]);
 
     expect(defaults).toEqual({ defaultMgmtPort: '19911', defaultGrpcPort: '19921' });
   });
@@ -322,14 +322,14 @@ describe('Add Store dialog', () => {
 
     fireEvent.change(screen.getByLabelText('KV Store ID (numeric)'), { target: { value: '7' } });
     // Tick n1.
-    fireEvent.click(screen.getByLabelText(/^n1/));
+    fireEvent.click(screen.getByLabelText(/^1\b/));
     fireEvent.click(screen.getByRole('button', { name: /create kv store/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0]).toMatchObject({
       url: '/api/stores',
       method: 'POST',
-      body: { store_id: 7, nodes: ['n1'] },
+      body: { store_id: 7, nodes: [1] },
     });
   });
 
@@ -339,7 +339,7 @@ describe('Add Store dialog', () => {
     expect(btn).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText('KV Store ID (numeric)'), { target: { value: 'abc' } });
-    fireEvent.click(screen.getByLabelText(/^n1/));
+    fireEvent.click(screen.getByLabelText(/^1\b/));
     expect(btn).toBeDisabled(); // store_id not numeric
 
     fireEvent.change(screen.getByLabelText('KV Store ID (numeric)'), { target: { value: '7' } });
@@ -355,7 +355,7 @@ describe('Add Store dialog', () => {
         nodes={mockNodes}
         servers={mockServers}
         defaultStoreId="9"
-        defaultNodeIds={['n1']}
+        defaultNodeIds={[1]}
       />,
       { wrapper },
     );
@@ -363,13 +363,13 @@ describe('Add Store dialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /create kv store/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
-    expect(captured[0].body).toEqual({ store_id: 9, nodes: ['n1'] });
+    expect(captured[0].body).toEqual({ store_id: 9, nodes: [1] });
   });
 
   it('only lists nodes that already run Crow Storage', () => {
     render(<AddStoreDialog isOpen onClose={() => {}} nodes={mockNodes} servers={mockServers} />, { wrapper });
 
-    expect(screen.getByLabelText(/^n1/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^1\b/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/^n2/)).toBeNull();
   });
 
@@ -378,8 +378,8 @@ describe('Add Store dialog', () => {
       ...mockServers,
       {
         id: 'n2-kv',
-        node_id: 'n2',
-        rack_id: 'r1',
+        node_id: 2,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
@@ -395,7 +395,7 @@ describe('Add Store dialog', () => {
 
     render(<AddStoreDialog isOpen onClose={() => {}} nodes={mockNodes} servers={unavailableServers} />, { wrapper });
 
-    expect(screen.getByLabelText(/^n1/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^1\b/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/^n2/)).toBeNull();
   });
 });
@@ -407,8 +407,8 @@ describe('Add Group dialog', () => {
       ...mockServers,
       {
         id: 'KV-n2',
-        node_id: 'n2',
-        rack_id: 'r1',
+        node_id: 2,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
@@ -430,15 +430,15 @@ describe('Add Group dialog', () => {
     fireEvent.change(screen.getByLabelText('Starting Replica ID (numeric)'), {
       target: { value: '800' },
     });
-    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
-    expect(screen.getByLabelText(/^n2/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^1\b/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^2\b/) as HTMLInputElement).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: /create group/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0]).toMatchObject({
       url: '/api/stores/7/groups',
       method: 'POST',
-      body: { group_id: 80, replica_id: 800, nodes: ['n1', 'n2'] },
+      body: { group_id: 80, replica_id: 800, nodes: [1, 2] },
     });
   });
 
@@ -454,7 +454,7 @@ describe('Add Group dialog', () => {
         servers={mockServers}
         defaultGroupId="81"
         defaultReplicaId="801"
-        defaultNodeIds={['n1']}
+        defaultNodeIds={[1]}
       />,
       { wrapper },
     );
@@ -462,7 +462,7 @@ describe('Add Group dialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /create group/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
-    expect(captured[0].body).toEqual({ group_id: 81, replica_id: 801, nodes: ['n1'] });
+    expect(captured[0].body).toEqual({ group_id: 81, replica_id: 801, nodes: [1] });
   });
 
   it('defaults to all active store nodes when the selected store already has active nodes', () => {
@@ -470,8 +470,8 @@ describe('Add Group dialog', () => {
       ...mockServers,
       {
         id: 'KV-n2',
-        node_id: 'n2',
-        rack_id: 'r1',
+        node_id: 2,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
@@ -490,22 +490,22 @@ describe('Add Group dialog', () => {
       { wrapper },
     );
 
-    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
-    expect(screen.getByLabelText(/^n2/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^1\b/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^2\b/) as HTMLInputElement).toBeChecked();
   });
 
   it('defaults to the first three active nodes when the selected store has no active nodes yet', () => {
     const fourNodes: Node[] = [
-      { id: 'n1', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
-      { id: 'n2', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
-      { id: 'n3', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
-      { id: 'n4', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+      { id: 1, rack_id: 1, host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+      { id: 2, rack_id: 1, host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+      { id: 3, rack_id: 1, host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+      { id: 4, rack_id: 1, host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
     ];
     const fourServers: CrowKVServerView[] = [
       {
         id: 'KV-n1',
-        node_id: 'n1',
-        rack_id: 'r1',
+        node_id: 1,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:19910',
@@ -519,8 +519,8 @@ describe('Add Group dialog', () => {
       },
       {
         id: 'KV-n2',
-        node_id: 'n2',
-        rack_id: 'r1',
+        node_id: 2,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
@@ -534,8 +534,8 @@ describe('Add Group dialog', () => {
       },
       {
         id: 'KV-n3',
-        node_id: 'n3',
-        rack_id: 'r1',
+        node_id: 3,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:39910',
@@ -549,8 +549,8 @@ describe('Add Group dialog', () => {
       },
       {
         id: 'KV-n4',
-        node_id: 'n4',
-        rack_id: 'r1',
+        node_id: 4,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:49910',
@@ -576,10 +576,10 @@ describe('Add Group dialog', () => {
       { wrapper },
     );
 
-    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
-    expect(screen.getByLabelText(/^n2/) as HTMLInputElement).toBeChecked();
-    expect(screen.getByLabelText(/^n3/) as HTMLInputElement).toBeChecked();
-    expect(screen.getByLabelText(/^n4/) as HTMLInputElement).not.toBeChecked();
+    expect(screen.getByLabelText(/^1\b/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^2\b/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^3\b/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^4\b/) as HTMLInputElement).not.toBeChecked();
   });
 
   it('filters selectable nodes to the selected store owners', () => {
@@ -587,8 +587,8 @@ describe('Add Group dialog', () => {
       ...mockServers,
       {
         id: 'KV-n2',
-        node_id: 'n2',
-        rack_id: 'r1',
+        node_id: 2,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
@@ -606,28 +606,28 @@ describe('Add Group dialog', () => {
       <AddGroupDialog
         isOpen
         onClose={() => {}}
-        stores={[{ store_id: '7', nodes: ['n1'], groups: [] }, { store_id: '8', nodes: ['n2'], groups: [] }]}
+        stores={[{ store_id: '7', nodes: [1], groups: [] }, { store_id: '8', nodes: [2], groups: [] }]}
         nodes={mockNodes}
         servers={bothServers}
       />,
       { wrapper },
     );
 
-    expect(screen.getByLabelText(/^n1/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/^n2/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^1\b/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^2\b/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('KV Store'), { target: { value: '8' } });
-    expect(screen.getByLabelText(/^n2/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/^n1/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^2\b/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^1\b/)).toBeInTheDocument();
   });
 
   it('excludes unavailable store owners', () => {
-    const allStores: StoreView[] = [{ store_id: '7', nodes: ['n1', 'n2'], groups: [] }];
+    const allStores: StoreView[] = [{ store_id: '7', nodes: [1, 2], groups: [] }];
     const unavailableN2: CrowKVServerView[] = [
       ...mockServers,
       {
         id: 'KV-n2',
-        node_id: 'n2',
-        rack_id: 'r1',
+        node_id: 2,
+        rack_id: 1,
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
@@ -646,7 +646,7 @@ describe('Add Group dialog', () => {
       { wrapper },
     );
 
-    expect(screen.getByLabelText(/^n1/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^1\b/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/^n2/)).toBeNull();
   });
 });
@@ -665,7 +665,7 @@ describe('Add Replica dialog', () => {
       { wrapper },
     );
 
-    fireEvent.change(screen.getByLabelText('Node'), { target: { value: 'n2' } });
+    fireEvent.change(screen.getByLabelText('Node'), { target: { value: '2' } });
     fireEvent.change(screen.getByLabelText('Replica ID (optional)'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: /add replica/i }));
 
@@ -673,7 +673,7 @@ describe('Add Replica dialog', () => {
     expect(captured[0]).toMatchObject({
       url: '/api/stores/7/groups/70/replicas',
       method: 'POST',
-      body: { node_id: 'n2', replica_id: 2 },
+      body: { node_id: 2, replica_id: 2 },
     });
   });
 
@@ -690,11 +690,11 @@ describe('Add Replica dialog', () => {
       { wrapper },
     );
 
-    fireEvent.change(screen.getByLabelText('Node'), { target: { value: 'n2' } });
+    fireEvent.change(screen.getByLabelText('Node'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: /add replica/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
-    expect(captured[0].body).toEqual({ node_id: 'n2' });
+    expect(captured[0].body).toEqual({ node_id: 2 });
   });
 
   it('can submit with prefilled replica defaults', async () => {
@@ -706,7 +706,7 @@ describe('Add Replica dialog', () => {
         storeId="7"
         groupId="70"
         nodes={mockNodes}
-        defaultNodeId="n1"
+        defaultNodeId={1}
         defaultReplicaId="4"
       />,
       { wrapper },
@@ -715,7 +715,7 @@ describe('Add Replica dialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /add replica/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
-    expect(captured[0].body).toEqual({ node_id: 'n1', replica_id: 4 });
+    expect(captured[0].body).toEqual({ node_id: 1, replica_id: 4 });
   });
 });
 
@@ -730,17 +730,17 @@ describe('end-to-end create flow', () => {
 
     // Rack.
     const rack = render(<AddRackDialog isOpen onClose={() => {}} />, { wrapper });
-    fireEvent.change(screen.getByLabelText('Rack ID'), { target: { value: 'r1' } });
+    fireEvent.change(screen.getByLabelText('Rack ID'), { target: { value: '1' } });
     fireEvent.click(screen.getByRole('button', { name: /create rack/i }));
     await waitFor(() => expect(captured.length).toBe(1));
     rack.unmount();
 
     // Node.
     const node = render(
-      <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="r1" />,
+      <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="1" />,
       { wrapper },
     );
-    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: 'n1' } });
+    fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
     await waitFor(() => expect(captured.length).toBe(3));
@@ -752,7 +752,7 @@ describe('end-to-end create flow', () => {
       { wrapper },
     );
     fireEvent.change(screen.getByLabelText('KV Store ID (numeric)'), { target: { value: '7' } });
-    fireEvent.click(screen.getByLabelText(/^n1/));
+    fireEvent.click(screen.getByLabelText(/^1\b/));
     fireEvent.click(screen.getByRole('button', { name: /create kv store/i }));
     await waitFor(() => expect(captured.length).toBe(4));
     store.unmount();
@@ -766,7 +766,7 @@ describe('end-to-end create flow', () => {
     fireEvent.change(screen.getByLabelText('Starting Replica ID (numeric)'), {
       target: { value: '800' },
     });
-    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^1\b/) as HTMLInputElement).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: /create group/i }));
     await waitFor(() => expect(captured.length).toBe(5));
     group.unmount();
@@ -782,7 +782,7 @@ describe('end-to-end create flow', () => {
       />,
       { wrapper },
     );
-    fireEvent.change(screen.getByLabelText('Node'), { target: { value: 'n2' } });
+    fireEvent.change(screen.getByLabelText('Node'), { target: { value: '2' } });
     fireEvent.change(screen.getByLabelText('Replica ID (optional)'), { target: { value: '701' } });
     fireEvent.click(screen.getByRole('button', { name: /add replica/i }));
     await waitFor(() => expect(captured.length).toBe(6));
@@ -791,16 +791,16 @@ describe('end-to-end create flow', () => {
     expect(captured.map((r) => `${r.method} ${r.url}`)).toEqual([
       'POST /api/racks',
       'POST /api/nodes',
-      'POST /api/nodes/n1/server/deploy',
+      'POST /api/nodes/1/server/deploy',
       'POST /api/stores',
       'POST /api/stores/7/groups',
       'POST /api/stores/7/groups/70/replicas',
     ]);
     expect(captured[3].body).toEqual({
       store_id: 7,
-      nodes: ['n1'],
+      nodes: [1],
     });
-    expect(captured[4].body).toEqual({ group_id: 80, replica_id: 800, nodes: ['n1'] });
-    expect(captured[5].body).toEqual({ node_id: 'n2', replica_id: 701 });
+    expect(captured[4].body).toEqual({ group_id: 80, replica_id: 800, nodes: [1] });
+    expect(captured[5].body).toEqual({ node_id: 2, replica_id: 701 });
   });
 });

@@ -3,7 +3,7 @@
 // Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.goto('/');
@@ -27,10 +27,10 @@ test.describe('E2E-32 inspector activity tab', () => {
   });
 
   test('mutation appears in activity log and clear works', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r32', 'n32');
-    await deployNodeServer(baseURL!, 'n32', 9932, 9942);
-    await createStore(baseURL!, 320, ['n32']);
-    await addGroup(baseURL!, 320, 3200, 32000, ['n32']);
+    await seedRackAndNode(baseURL!, 32, 32);
+    await deployNodeServer(baseURL!, 32, freePort(), freePort());
+    await createStore(baseURL!, 320, [32]);
+    await addGroup(baseURL!, 320, 3200, 32000, [32]);
     await waitForLeader(baseURL!, 320, 3200);
 
     try {
@@ -41,13 +41,13 @@ test.describe('E2E-32 inspector activity tab', () => {
       await page.getByRole('button', { name: 'Physical' }).click();
 
       // Try to find and click the node — rack may already be expanded
-      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-n32' });
+      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-32' });
       // If rack is collapsed, expand it first
-      const expandBtn = page.getByRole('treeitem').filter({ hasText: 'R-r32' }).locator('button[aria-label="Expand"]');
+      const expandBtn = page.getByRole('treeitem').filter({ hasText: 'R-32' }).locator('button[aria-label="Expand"]');
       if (await expandBtn.count() > 0) {
         await expandBtn.click();
       }
-      await nodeItem.getByRole('button', { name: 'N-n32' }).click();
+      await nodeItem.getByRole('button', { name: 'N-32' }).click();
 
       // Open inspector activity tab
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
@@ -63,7 +63,7 @@ test.describe('E2E-32 inspector activity tab', () => {
       // Verify entries are removed
       await expect(inspector.getByText('No activity yet.')).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n32');
+      await stopNodeServer(baseURL!, 32);
     }
   });
 });

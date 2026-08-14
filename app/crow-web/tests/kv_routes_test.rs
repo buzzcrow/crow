@@ -39,8 +39,8 @@ async fn spawn_upstream() -> Option<Upstream> {
         return None;
     }
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -48,7 +48,7 @@ async fn spawn_upstream() -> Option<Upstream> {
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: "n1".into(),
+        server_id: "n1".to_string(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
@@ -70,12 +70,12 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -83,9 +83,9 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         ssh_password: None,
     });
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "n1".to_string(),
         url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
         mgmt_port: None,
         grpc_port: None,
@@ -103,10 +103,10 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         let rec = NodeRecord {
             health: NodeHealth::Up,
             last_seen_ms: 1,
-            stores: legacy_topology_to_node_stores("n1", &stores),
+            stores: legacy_topology_to_node_stores(1, &stores),
             last_error: None,
         };
-        state.monitor_cache.set_node_report("n1".to_string(), rec).await;
+        state.monitor_cache.set_node_report(1, rec).await;
     }
 
     tokio::spawn(async move {
@@ -129,7 +129,7 @@ async fn kv_put_get_delete_through_web_routes() {
     // Initialize the system group so non-zero stores can be created.
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1"]}))
+        .json(&json!({"nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -138,14 +138,14 @@ async fn kv_put_get_delete_through_web_routes() {
     // Create store 1 and group 1 (stores no longer auto-create groups).
     let store_resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": 1, "nodes": ["n1"]}))
+        .json(&json!({"store_id": 1, "nodes": [1]}))
         .send()
         .await
         .expect("add_store");
     assert_eq!(store_resp.status(), 201, "add_store failed");
     let group_resp = http
         .post(format!("{base}/api/stores/1/groups"))
-        .json(&json!({"group_id": 1, "replica_id": 1, "nodes": ["n1"]}))
+        .json(&json!({"group_id": 1, "replica_id": 1, "nodes": [1]}))
         .send()
         .await
         .expect("add_group");
@@ -218,12 +218,12 @@ async fn kv_get_returns_502_when_leader_unreachable() {
 
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -232,9 +232,9 @@ async fn kv_get_returns_502_when_leader_unreachable() {
     });
     // The node has a configured grpc_url, but the port is dead.
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "n1".to_string(),
         url: format!("http://127.0.0.1:{dead_port}"),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(format!("http://127.0.0.1:{dead_port}")),
         mgmt_port: None,
         grpc_port: None,
@@ -252,11 +252,11 @@ async fn kv_get_returns_502_when_leader_unreachable() {
     stores.insert(
         7,
         NodeStore {
-            node_id: "n1".into(),
+            node_id: 1,
             store_id: 7,
             listen_addr: None,
             groups: vec![NodeGroup {
-                node_id: "n1".into(),
+                node_id: 1,
                 store_id: 7,
                 group_id: 70,
                 local: LocalReplicaInfo {
@@ -279,7 +279,7 @@ async fn kv_get_returns_502_when_leader_unreachable() {
         stores,
         last_error: None,
     };
-    state.monitor_cache.set_node_report("n1".to_string(), rec).await;
+    state.monitor_cache.set_node_report(1, rec).await;
 
     tokio::spawn(async move {
         axum::serve(listener, router(state)).await.unwrap();

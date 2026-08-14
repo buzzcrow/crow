@@ -3,7 +3,7 @@
 // Baseline: 0.3s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-36 health pill states', () => {
   test.beforeEach(async ({ baseURL }) => {
@@ -11,8 +11,8 @@ test.describe('E2E-36 health pill states', () => {
   });
 
   test('health pill shows Unknown initially and Healthy after group creation', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r36', 'n36');
-    await deployNodeServer(baseURL!, 'n36', 9936, 9946);
+    await seedRackAndNode(baseURL!, 36, 36);
+    await deployNodeServer(baseURL!, 36, freePort(), freePort());
 
     try {
       await page.goto('/');
@@ -22,8 +22,8 @@ test.describe('E2E-36 health pill states', () => {
       await expect(healthPill).toContainText('Unknown', { timeout: 3_000 });
 
       // Create store + group with leader
-      await createStore(baseURL!, 360, ['n36']);
-      await addGroup(baseURL!, 360, 3600, 36000, ['n36']);
+      await createStore(baseURL!, 360, [36]);
+      await addGroup(baseURL!, 360, 3600, 36000, [36]);
       await waitForLeader(baseURL!, 360, 3600);
 
       // Click refresh to pick up the new state
@@ -32,7 +32,7 @@ test.describe('E2E-36 health pill states', () => {
       // Health should now be Healthy
       await expect(healthPill).toContainText('Healthy', { timeout: 10_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n36');
+      await stopNodeServer(baseURL!, 36);
     }
   });
 });

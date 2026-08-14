@@ -4,6 +4,7 @@
 //! [`KVEngine`] implementation backed by the crow-tree C++ storage engine
 //! (FFI adapter over the crow-tree C ABI, via `crow_tree_ffi`).
 
+#[cfg(feature = "test-util")]
 use super::op::Cell;
 use super::{Batch, KVEngine, KVFuture, Op, SnapshotViewEntry};
 use bytes::Bytes;
@@ -72,7 +73,8 @@ impl CrowTreeEngine {
     /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
     /// log section. Delegates to `crow_tree_ffi::Crowtree::flush_metrics_str`.
     #[must_use]
-    pub fn flush_metrics_str(&self, window_secs: f64, timestamp: &str, width: usize) -> String {
+    #[allow(dead_code)]
+    pub(crate) fn flush_metrics_str(&self, window_secs: f64, timestamp: &str, width: usize) -> String {
         self.inner
             .handle()
             .flush_metrics_str(window_secs, timestamp, width)
@@ -106,8 +108,9 @@ impl CrowTreeEngine {
     }
 
     /// Full ordered stream including tombstones. Test-only utility.
+    #[cfg(feature = "test-util")]
     #[must_use]
-    pub fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
+    pub fn iter_all_for_tests(&self) -> Vec<(Vec<u8>, u64, Cell)> {
         // Use scan(b"", 0, true) which merges L0+L1 internally and includes
         // tombstones — no flush() needed, matching InMemKV's immediate
         // visibility for both live entries and tombstones. Scan returns

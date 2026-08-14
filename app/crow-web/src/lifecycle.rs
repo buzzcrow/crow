@@ -8,8 +8,8 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use crow_console_shared::cluster::{NodeHealth, ProcState, ServerProcess};
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::cluster::{DiskGroupId, NodeHealth, NodeId, ProcState, RackId, ServerProcess};
+use crow_console_shared::config::{DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry};
 use crow_console_shared::expand::RecursiveDepth;
 use crow_console_shared::monitor::NodeRecord;
 use serde::{Deserialize, Serialize};
@@ -38,8 +38,8 @@ fn live_server_process_with_pid(
     rec: Option<&NodeRecord>,
 ) -> ServerProcess {
     let mut proc = live_server_process(entry, rec);
-    if let Some(node_id) = entry.node_id.as_deref() {
-        proc.pid = state.runtime_pid(node_id);
+    if let Some(node_id) = entry.node_id {
+        proc.pid = state.runtime_pid(node_id.to_string());
     }
     proc
 }
@@ -53,7 +53,7 @@ fn live_server_process_with_pid(
 
 #[derive(Debug, Deserialize)]
 pub struct AddRackBody {
-    id: String,
+    id: RackId,
     #[serde(default)]
     name: String,
 }
@@ -62,7 +62,7 @@ pub struct AddRackBody {
 pub struct NodeQuery {
     /// Optional `?rack_id=<id>` filter for `GET /api/nodes`.
     #[serde(default)]
-    rack_id: Option<String>,
+    rack_id: Option<RackId>,
 }
 
 /// List all racks.
@@ -117,6 +117,19 @@ pub async fn http_add_rack(
         cfg.add_rack(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+
+    // Sync group-0 sysdata. Best-effort: config TOML is the source of
+    // truth; sysdata is derived. A later cluster_init re-run reconciles.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::common::RackValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            node_ids: Vec::new(),
+        };
+        if let Err(e) = hw.add_rack(entry.id, &value).await {
+            tracing::warn!(rack_id = entry.id, error = %e, "sysdata sync: add_rack failed");
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -129,13 +142,21 @@ pub async fn http_add_rack(
 /// Returns an error if rack removal or config persistence fails.
 pub async fn http_remove_rack(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.remove_rack(&id).map_err(map_config_err)?;
+        cfg.remove_rack(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata (rack + child nodes + their disk-groups).
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        if let Err(e) = hw.remove_rack_cascade(id).await {
+            tracing::warn!(rack_id = id, error = %e, "sysdata sync: remove_rack_cascade failed");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -150,7 +171,12 @@ pub async fn http_list_nodes(
 ) -> Json<Vec<NodeEntry>> {
     let cfg = state.config.read().unwrap();
     let nodes: Vec<NodeEntry> = match q.rack_id {
-        Some(r) => cfg.nodes.iter().filter(|n| n.rack_id == r).cloned().collect(),
+        Some(rack_id) => cfg
+            .nodes
+            .iter()
+            .filter(|n| n.rack_id == rack_id)
+            .cloned()
+            .collect(),
         None => cfg.nodes.clone(),
     };
     Json(nodes)
@@ -173,8 +199,23 @@ pub async fn http_add_node(
     }
     state.persist().map_err(map_persist_err)?;
     state
-        .prepare_node_workspace(&entry.id)
+        .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::common::NodeValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            last_used_dg_id: 0,
+            disk_group_ids: Vec::new(),
+            status_changed_at_ms: 0,
+            temp_failure_since_ms: None,
+        };
+        if let Err(e) = hw.add_node(entry.rack_id, entry.id, &value).await {
+            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -187,13 +228,26 @@ pub async fn http_add_node(
 /// Returns an error if node removal or config persistence fails.
 pub async fn http_remove_node(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Capture rack_id before removing from config (needed for sysdata cascade).
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.node(id).map(|n| n.rack_id)
+    };
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.remove_node(&id).map_err(map_config_err)?;
+        cfg.remove_node(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata (node + child disk-groups + disks).
+    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
+        if let Err(e) = hw.remove_node_cascade(rack_id, id).await {
+            tracing::warn!(node_id = id, error = %e, "sysdata sync: remove_node_cascade failed");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -217,11 +271,11 @@ pub struct PingResult {
 /// Returns an error if the node is not found.
 pub async fn http_ping_node(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
 ) -> Result<Json<PingResult>, (StatusCode, Json<ErrorBody>)> {
     let node = {
         let cfg = state.config.read().unwrap();
-        cfg.node(&id).cloned().ok_or_else(|| {
+        cfg.node(id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -264,12 +318,13 @@ pub async fn http_ping_node(
 /// Returns `404` if the rack does not exist.
 pub async fn http_get_rack(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
     Recursive(depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let rack_id = id;
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
-        let rack = cfg.racks.iter().find(|r| r.id == id).ok_or_else(|| {
+        let rack = cfg.racks.iter().find(|r| r.id == rack_id).ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -277,11 +332,11 @@ pub async fn http_get_rack(
                 }),
             )
         })?;
-        let node_ids: Vec<&str> = cfg
+        let node_ids: Vec<u64> = cfg
             .nodes
             .iter()
-            .filter(|n| n.rack_id == id)
-            .map(|n| n.id.as_str())
+            .filter(|n| n.rack_id == rack_id)
+            .map(|n| n.id)
             .collect();
         return Ok(Json(serde_json::json!({
             "id": rack.id,
@@ -294,7 +349,7 @@ pub async fn http_get_rack(
     let rack = cfg
         .racks
         .iter()
-        .find(|r| r.id == id)
+        .find(|r| r.id == rack_id)
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -325,12 +380,13 @@ pub async fn http_get_rack(
 /// Returns `404` if the rack does not exist.
 pub async fn http_list_rack_nodes(
     State(state): State<AppState>,
-    Path(rack_id): Path<String>,
+    Path(rack_id): Path<u64>,
     Recursive(depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let rack_id_num = rack_id;
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
-        if !cfg.racks.iter().any(|r| r.id == rack_id) {
+        if !cfg.racks.iter().any(|r| r.id == rack_id_num) {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -341,14 +397,14 @@ pub async fn http_list_rack_nodes(
         let nodes: Vec<NodeEntry> = cfg
             .nodes
             .iter()
-            .filter(|n| n.rack_id == rack_id)
+            .filter(|n| n.rack_id == rack_id_num)
             .cloned()
             .collect();
         return Ok(Json(serde_json::to_value(&nodes).expect("serialize nodes")));
     }
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    if !cfg.racks.iter().any(|r| r.id == rack_id) {
+    if !cfg.racks.iter().any(|r| r.id == rack_id_num) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -359,7 +415,7 @@ pub async fn http_list_rack_nodes(
     let nodes: Vec<NodeEntry> = cfg
         .nodes
         .iter()
-        .filter(|n| n.rack_id == rack_id)
+        .filter(|n| n.rack_id == rack_id_num)
         .cloned()
         .collect();
     let mut builder = PhysicalBuilder::new(&cfg, &snap);
@@ -381,7 +437,7 @@ pub async fn http_list_rack_nodes(
 /// Returns an error if node creation or config persistence fails.
 pub async fn http_add_rack_node(
     State(state): State<AppState>,
-    Path(rack_id): Path<String>,
+    Path(rack_id): Path<u64>,
     Json(mut entry): Json<NodeEntry>,
 ) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
     entry.rack_id = rack_id;
@@ -391,8 +447,23 @@ pub async fn http_add_rack_node(
     }
     state.persist().map_err(map_persist_err)?;
     state
-        .prepare_node_workspace(&entry.id)
+        .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::common::NodeValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            last_used_dg_id: 0,
+            disk_group_ids: Vec::new(),
+            status_changed_at_ms: 0,
+            temp_failure_since_ms: None,
+        };
+        if let Err(e) = hw.add_node(rack_id, entry.id, &value).await {
+            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -407,12 +478,13 @@ pub async fn http_add_rack_node(
 /// Returns `404` if the node does not exist.
 pub async fn http_get_node(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let node_id_num = id;
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    let node = cfg.node(&id).ok_or_else(|| {
+    let node = cfg.node(node_id_num).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -421,8 +493,8 @@ pub async fn http_get_node(
         )
     })?;
     let server = cfg
-        .server_for_node(&id)
-        .map(|entry| live_server_process_with_pid(&state, entry, snap.get(&id)));
+        .server_for_node(node_id_num)
+        .map(|entry| live_server_process_with_pid(&state, entry, snap.get(&node_id_num)));
     Ok(Json(serde_json::json!({
         "id": node.id,
         "rack_id": node.rack_id,
@@ -442,7 +514,7 @@ pub async fn http_get_node(
 pub struct ServerSummary {
     /// Owning node id (`None` for plain externally-registered servers).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
+    pub node_id: Option<u64>,
     pub mgmt_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_url: Option<String>,
@@ -468,12 +540,11 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
         .map(|s| {
             let health = s
                 .node_id
-                .as_deref()
-                .and_then(|n| snap.get(n))
+                .and_then(|n| snap.get(&n))
                 .map_or(NodeHealth::Unknown, |rec| rec.health);
-            let pid = s.node_id.as_deref().and_then(|n| state.runtime_pid(n));
+            let pid = s.node_id.and_then(|n| state.runtime_pid(n.to_string()));
             ServerSummary {
-                node_id: s.node_id.clone(),
+                node_id: s.node_id,
                 mgmt_url: s.url.clone(),
                 grpc_url: s.grpc_url.clone(),
                 pid,
@@ -520,7 +591,7 @@ pub struct DeployNodeServerBody {
 
 #[derive(Debug, Serialize)]
 pub struct DeployResult {
-    node_id: String,
+    node_id: NodeId,
     mgmt_url: String,
     grpc_url: String,
     pid: u32,
@@ -535,12 +606,12 @@ pub struct DeployResult {
 /// Returns `404` if no server is deployed on this node.
 pub async fn http_get_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<ServerEntry>, (StatusCode, Json<ErrorBody>)> {
     let mut entry = {
         let cfg = state.config.read().unwrap();
-        cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
+        cfg.server_for_node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -549,7 +620,7 @@ pub async fn http_get_node_server(
             )
         })?
     };
-    entry.pid = state.runtime_pid(&node_id);
+    entry.pid = state.runtime_pid(node_id);
     Ok(Json(entry))
 }
 
@@ -564,14 +635,14 @@ pub async fn http_get_node_server(
 /// Returns an error if deployment, config persistence, or node lookup fails.
 pub async fn http_deploy_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
     Json(body): Json<DeployNodeServerBody>,
 ) -> Result<(StatusCode, Json<DeployResult>), (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle::{self, DeployRequest};
 
     let node = {
         let cfg = state.config.read().unwrap();
-        if cfg.server_for_node(&node_id).is_some() {
+        if cfg.server_for_node(node_id).is_some() {
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorBody {
@@ -579,7 +650,7 @@ pub async fn http_deploy_node_server(
                 }),
             ));
         }
-        cfg.node(&node_id).cloned().ok_or_else(|| {
+        cfg.node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -590,7 +661,7 @@ pub async fn http_deploy_node_server(
     };
 
     let req = DeployRequest {
-        server_id: node_id.clone(),
+        server_id: node_id.to_string(),
         mgmt_port: body.mgmt_port,
         grpc_port: body.grpc_port,
         election_profile: body
@@ -617,7 +688,7 @@ pub async fn http_deploy_node_server(
             .map_err(|e| err_502(format!("ssh deploy: {e}")))?
     } else {
         let workspace_dir = state
-            .prepare_node_workspace(&node_id)
+            .prepare_node_workspace(node_id)
             .map_err(|e| err_500(e.to_string()))?;
         lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
             .await
@@ -625,9 +696,9 @@ pub async fn http_deploy_node_server(
     };
 
     let entry = ServerEntry {
-        id: node_id.clone(),
+        id: node_id.to_string(),
         url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id.clone()),
+        node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
         mgmt_port: Some(body.mgmt_port),
         grpc_port: Some(body.grpc_port),
@@ -639,13 +710,13 @@ pub async fn http_deploy_node_server(
             .or_else(|| std::env::var("CROW_KV_SERVER_ELECTION_PROFILE").ok()),
         pid: None,
     };
-    state.set_runtime_pid(node_id.clone(), deployed.pid);
+    state.set_runtime_pid(node_id, deployed.pid);
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_server(entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-    crate::mgmt::refresh_node_cache(&state, &node_id).await;
+    crate::mgmt::refresh_node_cache(&state, node_id).await;
     Ok((
         StatusCode::CREATED,
         Json(DeployResult {
@@ -676,13 +747,13 @@ pub async fn http_deploy_node_server(
 /// the SSH/local restart cycle fails.
 pub async fn http_restart_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<Json<DeployResult>, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle::{self, DeployRequest};
 
     let (entry, node) = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
+        let entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -690,7 +761,7 @@ pub async fn http_restart_node_server(
                 }),
             )
         })?;
-        let node = cfg.node(&node_id).cloned().ok_or_else(|| {
+        let node = cfg.node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -713,7 +784,7 @@ pub async fn http_restart_node_server(
         ))
     })?;
 
-    if let Some(pid) = state.runtime_pid(&node_id) {
+    if let Some(pid) = state.runtime_pid(node_id) {
         let _sent = match &node {
             n if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(n, pid)
                 .await
@@ -726,7 +797,7 @@ pub async fn http_restart_node_server(
     }
 
     let req = DeployRequest {
-        server_id: node_id.clone(),
+        server_id: node_id.to_string(),
         mgmt_port,
         grpc_port,
         election_profile: entry
@@ -743,7 +814,7 @@ pub async fn http_restart_node_server(
             .map_err(|e| err_502(format!("ssh redeploy (restart): {e}")))?
     } else {
         let workspace_dir = state
-            .prepare_node_workspace(&node_id)
+            .prepare_node_workspace(node_id)
             .map_err(|e| err_500(e.to_string()))?;
         lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
             .await
@@ -751,9 +822,9 @@ pub async fn http_restart_node_server(
     };
 
     let new_entry = ServerEntry {
-        id: node_id.clone(),
+        id: node_id.to_string(),
         url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id.clone()),
+        node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
         mgmt_port: entry.mgmt_port,
         grpc_port: entry.grpc_port,
@@ -762,15 +833,15 @@ pub async fn http_restart_node_server(
         election_profile: entry.election_profile.clone(),
         pid: None,
     };
-    state.set_runtime_pid(node_id.clone(), deployed.pid);
+    state.set_runtime_pid(node_id, deployed.pid);
     {
         let mut cfg = state.config.write().unwrap();
         // The old entry is still keyed by node_id; replace it.
-        let _ = cfg.remove_server_for_node(&node_id);
+        let _ = cfg.remove_server_for_node(node_id);
         cfg.add_server(new_entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-    crate::mgmt::restore_persisted_topology_for_node(&state, &node_id)
+    crate::mgmt::restore_persisted_topology_for_node(&state, node_id)
         .await
         .map_err(|e| err_502(format!("restore topology after restart: {e}")))?;
 
@@ -810,13 +881,13 @@ pub struct StopResult {
 /// Returns an error if the server is not found or has no tracked pid.
 pub async fn http_stop_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle;
 
     let node = {
         let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
+        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -824,9 +895,9 @@ pub async fn http_stop_node_server(
                 }),
             )
         })?;
-        cfg.node(&node_id).cloned()
+        cfg.node(node_id).cloned()
     };
-    let Some(pid) = state.runtime_pid(&node_id) else {
+    let Some(pid) = state.runtime_pid(node_id) else {
         return Err(err_400(format!("server on node {node_id} has no tracked pid")));
     };
     let sent = match node {
@@ -838,7 +909,7 @@ pub async fn http_stop_node_server(
             .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
             .map_err(|e| err_500(format!("stop_pid: {e}")))?,
     };
-    state.clear_runtime_pid(&node_id);
+    state.clear_runtime_pid(node_id);
     state.monitor_cache.drop_node(&node_id).await;
     Ok(Json(StopResult { sent }))
 }
@@ -853,13 +924,13 @@ pub async fn http_stop_node_server(
 /// Returns `404` if no server is deployed on this node.
 pub async fn http_delete_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle;
 
     let node = {
         let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
+        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -867,9 +938,9 @@ pub async fn http_delete_node_server(
                 }),
             )
         })?;
-        cfg.node(&node_id).cloned()
+        cfg.node(node_id).cloned()
     };
-    if let Some(pid) = state.runtime_pid(&node_id) {
+    if let Some(pid) = state.runtime_pid(node_id) {
         let _ = match node {
             Some(n) if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(&n, pid)
                 .await
@@ -884,10 +955,10 @@ pub async fn http_delete_node_server(
     }
     {
         let mut cfg = state.config.write().unwrap();
-        let _ = cfg.remove_server_for_node(&node_id);
-        cfg.purge_node_topology(&node_id);
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.purge_node_topology(node_id);
     }
-    state.clear_runtime_pid(&node_id);
+    state.clear_runtime_pid(node_id);
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -907,11 +978,11 @@ const OPENAPI_CACHE_TTL: Duration = Duration::from_secs(300);
 /// Returns an error if no server is deployed or the upstream request fails.
 pub async fn http_node_openapi_proxy(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     let mgmt_url = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(&node_id).ok_or_else(|| {
+        let entry = cfg.server_for_node(node_id).ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -986,12 +1057,19 @@ pub async fn http_node_openapi_proxy(
 ///
 /// # Errors
 /// Returns an error if workspace cleanup or config persistence fails.
+#[allow(clippy::too_many_lines)]
 pub async fn http_internal_reset(
     State(state): State<AppState>,
 ) -> Result<Json<ResetResult>, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle;
 
-    // 1. List all stores from the monitor cache.
+    // 0. Capture rack IDs and store IDs, then clean group-0 sysdata
+    //    before stopping servers (R81: cluster reset must remove
+    //    hardware hierarchy and KV-cluster topology from group 0).
+    let rack_ids: Vec<RackId> = {
+        let cfg = state.config.read().unwrap();
+        cfg.racks.iter().map(|r| r.id).collect()
+    };
     let stores: Vec<u64> = {
         let snap = state.monitor_cache.snapshot().await;
         let mut ids: Vec<u64> = snap.values().flat_map(|rec| rec.stores.keys().copied()).collect();
@@ -999,10 +1077,32 @@ pub async fn http_internal_reset(
         ids.dedup();
         ids
     };
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        for rid in &rack_ids {
+            if let Err(e) = hw.remove_rack_cascade(*rid).await {
+                tracing::warn!(rack_id = rid, error = %e, "reset: remove_rack_cascade failed");
+            }
+        }
+        // Also clean KV-cluster topology records (stores, groups)
+        // from group 0 — the existing reset removes them from config
+        // but not from sysdata.
+        let meta = crow_kv_client::KVClusterMetaClient::from_shared(hw.shared_kv());
+        for sid in &stores {
+            if let Err(e) = meta.remove_store(*sid).await {
+                tracing::warn!(store_id = sid, error = %e, "reset: remove_store from sysdata failed");
+            }
+        }
+        tracing::info!(
+            "reset: group-0 sysdata cleanup complete for {} racks",
+            rack_ids.len()
+        );
+    } else {
+        tracing::warn!("reset: no group-0 endpoint, skipping sysdata cleanup");
+    }
 
     let mut stopped: Vec<String> = Vec::new();
 
-    // 2. For each store: list & remove all groups, then remove the store.
+    // 1. For each store: list & remove all groups, then remove the store.
     for sid in &stores {
         // List groups for this store.
         if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
@@ -1010,16 +1110,16 @@ pub async fn http_internal_reset(
             for gid in group_ids {
                 // Remove group: RPC to each node + config cleanup.
                 if let Some(gv) = state.monitor_cache.resolve_group(*sid, gid).await {
-                    let node_ids: Vec<String> = gv.replicas.iter().map(|r| r.node_id.clone()).collect();
+                    let node_ids: Vec<NodeId> = gv.replicas.iter().map(|r| r.node_id).collect();
                     for nid in &node_ids {
-                        if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, nid) {
+                        if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, *nid) {
                             if let Ok(client) = crate::mgmt::build_server_client(url) {
                                 let _ = client.remove_group(*sid, gid).await;
                             }
                         }
                     }
                     for nid in &node_ids {
-                        crate::mgmt::refresh_node_cache(&state, nid).await;
+                        crate::mgmt::refresh_node_cache(&state, *nid).await;
                     }
                 }
                 {
@@ -1032,14 +1132,14 @@ pub async fn http_internal_reset(
         // Remove the store from each node.
         if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
             for nid in &view.nodes {
-                if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, nid) {
+                if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, *nid) {
                     if let Ok(client) = crate::mgmt::build_server_client(url) {
                         let _ = client.remove_store(*sid).await;
                     }
                 }
             }
             for nid in &view.nodes {
-                crate::mgmt::refresh_node_cache(&state, nid).await;
+                crate::mgmt::refresh_node_cache(&state, *nid).await;
             }
         }
         {
@@ -1048,10 +1148,10 @@ pub async fn http_internal_reset(
         }
     }
 
-    // 3. List all nodes, stop their servers, then remove them.
-    let node_ids: Vec<String> = {
+    // 2. List all nodes, stop their servers, then remove them.
+    let node_ids: Vec<NodeId> = {
         let cfg = state.config.read().unwrap();
-        cfg.nodes.iter().map(|n| n.id.clone()).collect()
+        cfg.nodes.iter().map(|n| n.id).collect()
     };
 
     for nid in &node_ids {
@@ -1061,7 +1161,7 @@ pub async fn http_internal_reset(
                 .config
                 .read()
                 .unwrap()
-                .node(nid)
+                .node(*nid)
                 .is_some_and(crow_console_shared::config::NodeEntry::ssh_enabled);
             let sent = if ssh {
                 false
@@ -1072,7 +1172,7 @@ pub async fn http_internal_reset(
                 )
             };
             if sent {
-                stopped.push(nid.clone());
+                stopped.push(nid.to_string());
             }
             state.clear_runtime_pid(nid);
         }
@@ -1080,27 +1180,27 @@ pub async fn http_internal_reset(
         // Remove the server entry + purge topology from config.
         {
             let mut cfg = state.config.write().unwrap();
-            let _ = cfg.remove_server_for_node(nid);
-            cfg.purge_node_topology(nid);
-            let _ = cfg.remove_node(nid);
+            let _ = cfg.remove_server_for_node(*nid);
+            cfg.purge_node_topology(*nid);
+            let _ = cfg.remove_node(*nid);
         }
 
         state.monitor_cache.drop_node(nid).await;
     }
 
-    // 4. Remove all racks.
+    // 3. Remove all racks.
     let rack_ids: Vec<String> = {
         let cfg = state.config.read().unwrap();
-        cfg.racks.iter().map(|r| r.id.clone()).collect()
+        cfg.racks.iter().map(|r| r.id.to_string()).collect()
     };
     {
         let mut cfg = state.config.write().unwrap();
         for rid in &rack_ids {
-            let _ = cfg.remove_rack(rid);
+            let _ = cfg.remove_rack(rid.parse().unwrap());
         }
     }
 
-    // 5. Clear caches and workspace directories.
+    // 4. Clear caches and workspace directories.
     state.openapi_cache.lock().unwrap().clear();
     state
         .clear_workspaces()
@@ -1113,4 +1213,752 @@ pub async fn http_internal_reset(
 #[derive(Serialize)]
 pub struct ResetResult {
     pub stopped: Vec<String>,
+}
+
+// ── Disk-group lifecycle ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddDiskGroupBody {
+    id: DiskGroupId,
+    #[serde(default)]
+    name: String,
+}
+
+/// `GET /api/nodes/:node_id/disk-groups`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the node does not exist.
+pub async fn http_list_node_disk_groups(
+    State(state): State<AppState>,
+    Path(node_id): Path<NodeId>,
+) -> Result<Json<Vec<DiskGroupEntry>>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    if !cfg.nodes.iter().any(|n| n.id == node_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("node {node_id} not found"),
+            }),
+        ));
+    }
+    Ok(Json(
+        cfg.disk_groups
+            .iter()
+            .filter(|dg| dg.node_id == node_id)
+            .cloned()
+            .collect(),
+    ))
+}
+
+/// `GET /api/nodes/:node_id/disk-groups/:dg_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk-group does not exist.
+pub async fn http_get_node_disk_group(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+) -> Result<Json<DiskGroupEntry>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    let dg = cfg
+        .disk_groups
+        .iter()
+        .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk-group {dg_id} not found on node {node_id}"),
+                }),
+            )
+        })?;
+    Ok(Json(dg.clone()))
+}
+
+/// `POST /api/nodes/:node_id/disk-groups`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk-group addition or config persistence fails.
+pub async fn http_add_node_disk_group(
+    State(state): State<AppState>,
+    Path(node_id): Path<NodeId>,
+    Json(body): Json<AddDiskGroupBody>,
+) -> Result<(StatusCode, Json<DiskGroupEntry>), (StatusCode, Json<ErrorBody>)> {
+    // Resolve rack_id from the node.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.node(node_id).map(|n| n.rack_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("node {node_id} not found"),
+                }),
+            )
+        })?
+    };
+    let entry = DiskGroupEntry {
+        id: body.id,
+        rack_id,
+        node_id,
+        name: body.name,
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_disk_group(entry.clone()).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::diskdb::rpc::DiskGroupValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            disk_ids: Vec::new(),
+        };
+        if let Err(e) = hw.add_disk_group(rack_id, node_id, entry.id, &value).await {
+            tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: add_disk_group failed");
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(entry)))
+}
+
+/// `DELETE /api/nodes/:node_id/disk-groups/:dg_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk-group removal or config persistence fails.
+pub async fn http_remove_node_disk_group(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Capture rack_id before removing.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disk_groups
+            .iter()
+            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+            .map(|dg| dg.rack_id)
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_disk_group(dg_id).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata.
+    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
+        if let Err(e) = hw.remove_disk_group_cascade(rack_id, node_id, dg_id).await {
+            tracing::warn!(disk_group_id = dg_id, error = %e, "sysdata sync: remove_disk_group_cascade failed");
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Disk lifecycle ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddDiskBody {
+    disk_id: String,
+    disk_type: String,
+    capacity_bytes: u64,
+    zone_size_bytes: u64,
+    unit_size_bytes: u32,
+}
+
+/// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk-group does not exist.
+pub async fn http_list_disks_in_group(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+) -> Result<Json<Vec<DiskEntry>>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    if !cfg
+        .disk_groups
+        .iter()
+        .any(|dg| dg.node_id == node_id && dg.id == dg_id)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("disk-group {dg_id} not found on node {node_id}"),
+            }),
+        ));
+    }
+    Ok(Json(
+        cfg.disks
+            .iter()
+            .filter(|d| d.disk_group_id == dg_id && d.node_id == node_id)
+            .cloned()
+            .collect(),
+    ))
+}
+
+/// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk does not exist.
+pub async fn http_get_disk(
+    State(state): State<AppState>,
+    Path((node_id, dg_id, disk_id)): Path<(NodeId, DiskGroupId, String)>,
+) -> Result<Json<DiskEntry>, (StatusCode, Json<ErrorBody>)> {
+    let cfg = state.config.read().unwrap();
+    let disk = cfg
+        .disks
+        .iter()
+        .find(|d| d.node_id == node_id && d.disk_group_id == dg_id && d.disk_id == disk_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk {disk_id} not found"),
+                }),
+            )
+        })?;
+    Ok(Json(disk.clone()))
+}
+
+/// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk addition or config persistence fails.
+pub async fn http_add_disk(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+    Json(body): Json<AddDiskBody>,
+) -> Result<(StatusCode, Json<DiskEntry>), (StatusCode, Json<ErrorBody>)> {
+    // Resolve rack_id from the disk-group.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disk_groups
+            .iter()
+            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+            .map(|dg| dg.rack_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("disk-group {dg_id} not found on node {node_id}"),
+                    }),
+                )
+            })?
+    };
+    // Validate the disk_id format before mutating config or syncing
+    // group 0 — a malformed id can never be routed by diskdb.
+    let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("invalid disk_id format: {e}"),
+                }),
+            ));
+        }
+    };
+    // The unit/zone sizes determine the disk's zone layout in diskdb —
+    // reject degenerate values instead of writing a zero-zone disk.
+    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "unit_size_bytes and zone_size_bytes must be non-zero".to_string(),
+            }),
+        ));
+    }
+    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "zone_size_bytes must be a multiple of unit_size_bytes".to_string(),
+            }),
+        ));
+    }
+    if body.capacity_bytes < body.zone_size_bytes {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "capacity_bytes must be >= zone_size_bytes".to_string(),
+            }),
+        ));
+    }
+    let entry = DiskEntry {
+        disk_id: body.disk_id,
+        disk_group_id: dg_id,
+        rack_id,
+        node_id,
+        disk_type: body.disk_type,
+        capacity_bytes: body.capacity_bytes,
+        zone_size_bytes: body.zone_size_bytes,
+        unit_size_bytes: body.unit_size_bytes,
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_disk(entry.clone()).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let unit_size = u64::from(entry.unit_size_bytes);
+        let capacity_units = entry.capacity_bytes / unit_size;
+        let zone_size_units = entry.zone_size_bytes / unit_size;
+        // The diskdb server derives its zone list from this field —
+        // zone count = capacity / zone size (last zone may be smaller,
+        // per design §8).
+        let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
+        let value = crow_protocol::diskdb::rpc::DiskValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            disk_type: match entry.disk_type.as_str() {
+                "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
+                "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
+                "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
+                "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
+                other => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorBody {
+                            error: format!("unknown disk_type: {other}"),
+                        }),
+                    ));
+                }
+            },
+            capacity_units,
+            zone_size_units,
+            unit_size_bytes: entry.unit_size_bytes,
+            zone_count,
+        };
+        if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id_proto, &value).await {
+            tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(entry)))
+}
+
+/// `DELETE /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if disk removal or config persistence fails.
+pub async fn http_remove_disk(
+    State(state): State<AppState>,
+    Path((node_id, dg_id, disk_id)): Path<(NodeId, DiskGroupId, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Capture rack_id before removing.
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disks
+            .iter()
+            .find(|d| d.node_id == node_id && d.disk_group_id == dg_id && d.disk_id == disk_id)
+            .map(|d| d.rack_id)
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_disk(&disk_id).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata.
+    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
+        match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&disk_id) {
+            Ok(disk_id_proto) => {
+                if let Err(e) = hw.remove_disk_cascade(rack_id, node_id, dg_id, &disk_id_proto).await {
+                    tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: remove_disk_cascade failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: invalid disk_id format, skipping cascade");
+            }
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Disk move ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct MoveDiskBody {
+    new_rack_id: RackId,
+    new_node_id: NodeId,
+    new_disk_group_id: DiskGroupId,
+}
+
+/// `POST /api/disks/:disk_id/move`.
+///
+/// Moves a disk from its current placement to a new disk-group. The
+/// disk's records (zone/busy/free) are copied from the old bind to
+/// the new bind, then the group-0 placement is updated.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns an error if the disk is not found, the new disk-group is
+/// not found, or the record copy / group-0 update fails.
+///
+/// B.1: add-before-remove + conditional config update + quiescence
+/// window. The disk is never "nowhere" — it's added to the new
+/// placement before being removed from the old. The console config is
+/// updated only if both group-0 operations succeed.
+#[allow(clippy::too_many_lines)]
+pub async fn http_move_disk(
+    State(state): State<AppState>,
+    Path(disk_id): Path<String>,
+    Json(body): Json<MoveDiskBody>,
+) -> Result<Json<DiskEntry>, (StatusCode, Json<ErrorBody>)> {
+    // 1. Resolve the disk's current placement from config.
+    let (old_rack_id, old_node_id, old_dg_id, disk_entry) = {
+        let cfg = state.config.read().unwrap();
+        let entry = cfg.disk(&disk_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk {disk_id} not found"),
+                }),
+            )
+        })?;
+        (entry.rack_id, entry.node_id, entry.disk_group_id, entry.clone())
+    };
+
+    // 2. Verify the new disk-group exists in config.
+    {
+        let cfg = state.config.read().unwrap();
+        if !cfg
+            .disk_groups
+            .iter()
+            .any(|dg| dg.id == body.new_disk_group_id && dg.node_id == body.new_node_id)
+        {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!(
+                        "disk-group {} on node {} not found",
+                        body.new_disk_group_id, body.new_node_id
+                    ),
+                }),
+            ));
+        }
+    }
+
+    // 3. Parse the disk_id into a proto DiskId.
+    let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&disk_id)
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody { error: format!("invalid disk_id format: {e}") }),
+            ));
+        }
+    };
+
+    let hw = crate::mgmt::build_hardware_client(&state).await.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: "no hardware client available".into(),
+            }),
+        )
+    })?;
+
+    // 4. Set disk to Maintenance in group 0 (old placement) —
+    //    quiescence window. This blocks new allocates. The next
+    //    diskdb sync tick (10 s) applies the status change and drains
+    //    in-flight allocates.
+    if let Err(e) = hw
+        .set_disk_status(
+            old_rack_id,
+            old_node_id,
+            old_dg_id,
+            &disk_id_proto,
+            crow_protocol::common::HwStatus::Maintenance,
+        )
+        .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("move: set Maintenance failed: {e}"),
+            }),
+        ));
+    }
+
+    // 5. Wait for one sync tick (10 s) for diskdb to apply the
+    //    Maintenance status. This is the quiescence window — no source
+    //    lock, but Maintenance prevents new allocates and the sync
+    //    tick ensures the disk is removed from the allocating-disks
+    //    RCU context.
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+    // 6. Copy records from old bind to new bind.
+    let old_bind = match hw.get_bind(old_rack_id, old_node_id, old_dg_id).await {
+        Ok(Some(bind)) => (bind.store_id, bind.group_id),
+        Ok(None) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: format!("no bind for old placement ({old_rack_id}, {old_node_id}, {old_dg_id})"),
+                }),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("get old bind: {e}"),
+                }),
+            ));
+        }
+    };
+    let new_bind = match hw
+        .get_bind(body.new_rack_id, body.new_node_id, body.new_disk_group_id)
+        .await
+    {
+        Ok(Some(bind)) => (bind.store_id, bind.group_id),
+        Ok(None) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: format!(
+                        "no bind for new placement ({}, {}, {}); create bind before move",
+                        body.new_rack_id, body.new_node_id, body.new_disk_group_id
+                    ),
+                }),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("get new bind: {e}"),
+                }),
+            ));
+        }
+    };
+
+    // Build a CrowkvClient seeded with both old and new bind leaders.
+    let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+    if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, old_node_id, old_bind.0).await {
+        kv.seed_leader(old_bind.0, old_bind.1, ep);
+    }
+    if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, body.new_node_id, new_bind.0).await {
+        kv.seed_leader(new_bind.0, new_bind.1, ep);
+    }
+    let copy_count = copy_disk_records(&kv, old_bind, new_bind, &disk_id_proto).await;
+    tracing::info!(disk_id = %disk_id, records_copied = copy_count, "move: records copied");
+
+    // 7. Get the current DiskValue from group 0 (old placement).
+    let disk_value = match hw
+        .get_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
+        .await
+    {
+        Ok(Some(dv)) => dv,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk {disk_id} not found in group 0 (old placement)"),
+                }),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("get disk from old placement: {e}"),
+                }),
+            ));
+        }
+    };
+
+    // 8. Add to new placement (Maintenance status) — add-before-remove.
+    //    If this fails, the disk is still in the old placement
+    //    (Maintenance), no data loss.
+    let mut new_value = disk_value;
+    new_value.status = crow_protocol::common::HwStatus::Maintenance as i32;
+    if let Err(e) = hw
+        .add_disk(
+            body.new_rack_id,
+            body.new_node_id,
+            body.new_disk_group_id,
+            &disk_id_proto,
+            &new_value,
+        )
+        .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("move: add to new placement failed (disk still in old): {e}"),
+            }),
+        ));
+    }
+
+    // 9. Remove from old placement. If this fails, the disk exists in
+    //    both placements (both Maintenance, not allocatable). The
+    //    operator should retry the remove.
+    let remove_ok = hw
+        .remove_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
+        .await
+        .is_ok();
+    if !remove_ok {
+        // Partial success — disk in both placements. Don't update
+        // console config (it stays pointing to old). Return a
+        // partial-success response.
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: format!(
+                    "move: added to new placement but remove from old failed; disk is in both placements (both Maintenance). Retry the remove for ({old_rack_id}, {old_node_id}, {old_dg_id})"
+                ),
+            }),
+        ));
+    }
+
+    // 10. Update ConsoleConfig: move the DiskEntry to the new
+    //     disk-group. Only done if both group-0 operations succeeded.
+    let updated_entry = {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_disk(&disk_id).map_err(map_config_err)?;
+        let new_entry = DiskEntry {
+            disk_id: disk_entry.disk_id,
+            disk_group_id: body.new_disk_group_id,
+            rack_id: body.new_rack_id,
+            node_id: body.new_node_id,
+            disk_type: disk_entry.disk_type,
+            capacity_bytes: disk_entry.capacity_bytes,
+            zone_size_bytes: disk_entry.zone_size_bytes,
+            unit_size_bytes: disk_entry.unit_size_bytes,
+        };
+        cfg.add_disk(new_entry.clone()).map_err(map_config_err)?;
+        new_entry
+    };
+    state.persist().map_err(map_persist_err)?;
+
+    // 11. Set disk to Up in new placement — diskdb at the new
+    //     placement sees the disk on the next sync tick, runs
+    //     background_zone_load (Init → Up), and the disk becomes
+    //     allocatable. We set Up here so the operator doesn't need to
+    //     do it manually.
+    if let Err(e) = hw
+        .set_disk_status(
+            body.new_rack_id,
+            body.new_node_id,
+            body.new_disk_group_id,
+            &disk_id_proto,
+            crow_protocol::common::HwStatus::Up,
+        )
+        .await
+    {
+        tracing::warn!(disk_id = %disk_id, error = %e, "move: set Up at new placement failed (operator can set manually)");
+    }
+
+    Ok(Json(updated_entry))
+}
+
+/// Copy all records for a disk from one bind to another. Scans zone,
+/// busy, and free block records by `DiskId` prefix, batch-writes them
+/// to the new bind.
+async fn copy_disk_records(
+    kv: &crow_kv_client::CrowkvClient,
+    old_bind: (u64, u64),
+    new_bind: (u64, u64),
+    disk_id: &crow_protocol::common::DiskId,
+) -> u64 {
+    use crow_protocol::key::{BusyBlockKey, FreeBlockKey, ZoneKey};
+
+    let prefixes = [
+        ZoneKey::prefix_for_disk(disk_id),
+        BusyBlockKey::prefix_for_disk(disk_id),
+        FreeBlockKey::prefix_for_disk(disk_id),
+    ];
+
+    let mut total_copied: u64 = 0;
+    let batch_size = 100u32;
+
+    for prefix in &prefixes {
+        let mut start_after: Vec<u8> = Vec::new();
+        loop {
+            let outcome = match kv
+                .scan(
+                    old_bind.0,
+                    old_bind.1,
+                    prefix,
+                    &start_after,
+                    &[], // empty end_key = no upper bound
+                    batch_size,
+                    crow_kv_client::ReadMode::Linearizable,
+                    None,
+                    false,
+                    None,
+                )
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(error = %e, "copy_disk_records: scan failed");
+                    break;
+                }
+            };
+
+            if outcome.items.is_empty() {
+                break;
+            }
+
+            // Batch-write to new bind.
+            let ops: Vec<crow_kv_client::BatchOp> = outcome
+                .items
+                .iter()
+                .map(|(k, v)| crow_kv_client::BatchOp::Put {
+                    key: k.clone(),
+                    value: v.clone(),
+                })
+                .collect();
+
+            if let Err(e) = kv.batch_write(new_bind.0, new_bind.1, &ops).await {
+                tracing::warn!(error = %e, "copy_disk_records: batch_write failed");
+                break;
+            }
+
+            total_copied += u64::try_from(outcome.items.len()).unwrap_or(0);
+
+            if !outcome.truncated {
+                break;
+            }
+            // Set start_after to the last key for pagination.
+            if let Some((last_key, _)) = outcome.items.last() {
+                start_after = last_key.to_vec();
+            } else {
+                break;
+            }
+        }
+    }
+
+    total_copied
 }

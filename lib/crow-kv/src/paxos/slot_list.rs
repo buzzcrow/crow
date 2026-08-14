@@ -3,7 +3,6 @@
 
 #![allow(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::too_many_lines)]
 
 use std::marker::PhantomData;
 use std::ops::Deref;

@@ -3,7 +3,7 @@
 // Baseline: 3.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createNode, createRack, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, createNode, createRack, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * E2E-25 · Destructive confirms for store / node / rack (Req §3.2, §6).
@@ -15,12 +15,12 @@ import { apiContext, createNode, createRack, createStore, deployNodeServer, seed
  */
 test.describe('E2E-25 root deletes', () => {
   test('confirm-gates store, node, and rack deletion', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r25', 'n25');
-    await deployNodeServer(baseURL!, 'n25', 9957, 9967);
-    await createStore(baseURL!, 255, ['n25']);
+    await seedRackAndNode(baseURL!, 25, 25);
+    await deployNodeServer(baseURL!, 25, freePort(), freePort());
+    await createStore(baseURL!, 255, [25]);
     // A serverless node (clean to delete) and an empty rack (clean to delete).
-    await createNode(baseURL!, { id: 'n25x', rack_id: 'r25' });
-    await createRack(baseURL!, { id: 'r25e', name: 'Rack TwentyFive Empty' });
+    await createNode(baseURL!, { id: 274, rack_id: 25 });
+    await createRack(baseURL!, { id: 255, name: 'Rack TwentyFive Empty' });
 
     const api = await apiContext(baseURL!);
     try {
@@ -51,7 +51,7 @@ test.describe('E2E-25 root deletes', () => {
 
       // ── Node (physical, serverless n25x) ─────────────────────────
       await page.getByRole('button', { name: 'Physical' }).click();
-      const node25x = page.getByRole('treeitem').filter({ hasText: 'N-n25x' });
+      const node25x = page.getByRole('treeitem').filter({ hasText: 'N-274' });
       await expect(node25x).toBeVisible({ timeout: 3_000 });
 
       await node25x.click({ button: 'right' });
@@ -62,27 +62,27 @@ test.describe('E2E-25 root deletes', () => {
       await node25x.click({ button: 'right' });
       await page.getByRole('menuitem', { name: /delete node/i }).click();
       await page.getByRole('dialog', { name: 'Delete Node' }).getByRole('button', { name: /delete node/i }).click();
-      await expect(page.getByRole('treeitem').filter({ hasText: 'N-n25x' })).toHaveCount(0, { timeout: 3_000 });
+      await expect(page.getByRole('treeitem').filter({ hasText: 'N-274' })).toHaveCount(0, { timeout: 3_000 });
 
-      const nodeResp = await api.get('/api/nodes/n25x');
+      const nodeResp = await api.get('/api/nodes/274');
       expect(nodeResp.status()).toBe(404);
 
       // ── Rack (physical, empty r25e) ──────────────────────────────
-      const rack25e = page.getByRole('treeitem').filter({ hasText: 'R-r25e' });
+      const rack25e = page.getByRole('treeitem').filter({ hasText: 'R-255' });
       await expect(rack25e).toBeVisible({ timeout: 3_000 });
       await rack25e.click({ button: 'right' });
       await page.getByRole('menuitem', { name: /delete rack/i }).click();
       await page.getByRole('dialog', { name: 'Delete Rack' }).getByRole('button', { name: /delete rack/i }).click();
-      await expect(page.getByRole('treeitem').filter({ hasText: 'R-r25e' })).toHaveCount(0, { timeout: 3_000 });
+      await expect(page.getByRole('treeitem').filter({ hasText: 'R-255' })).toHaveCount(0, { timeout: 3_000 });
 
       const racksResp = await api.get('/api/racks');
       expect(racksResp.ok(), await racksResp.text()).toBeTruthy();
       expect(await racksResp.json()).not.toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: 'r25e' })]),
+        expect.arrayContaining([expect.objectContaining({ id: 255 })]),
       );
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 'n25');
+      await stopNodeServer(baseURL!, 25);
     }
   });
 });

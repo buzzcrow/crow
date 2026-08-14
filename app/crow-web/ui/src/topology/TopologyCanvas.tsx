@@ -25,7 +25,8 @@ import { Button } from '../components/ui/Button';
 export interface MenuTarget {
   type: SelectedEntity['type'];
   id: string;
-  parentIds?: Record<string, string>;
+  rawId?: string | number;
+  parentIds?: Record<string, string | number>;
   label?: string;
 }
 

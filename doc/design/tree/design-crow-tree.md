@@ -3,8 +3,8 @@
 
 # CROW - Design: crow-tree Storage Engine (Overview)
 
-Depends on: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md), [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md)
-Satisfies: ../kv/design-crow-kv.md §8.3 learner storage](../kv/design-crow-kv.md)
+Depends on: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md), [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md)
+Satisfies: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §8.3 (learner storage)
 
 This is the parent document for **crow-tree**, the production storage engine that
 backs CROW learners: an embeddable, ordered key-value engine implementing the

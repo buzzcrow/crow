@@ -18,7 +18,7 @@ export interface AddNodeDialogProps {
   defaultHost?: string;
   defaultMgmtPort?: string;
   defaultGrpcPort?: string;
-  onCreatedRackId?: (rackId: string) => void;
+  onCreatedRackId?: (rackId: number) => void;
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -66,9 +66,10 @@ export function AddNodeDialog({
     setIsLoading(true);
     try {
       const trimmedNodeId = nodeId.trim();
+      const numericNodeId = Number(trimmedNodeId);
       await addNode({
-        id: trimmedNodeId,
-        rack_id: rackId,
+        id: numericNodeId,
+        rack_id: Number(rackId),
         host: host.trim(),
         ssh_port: 22,
         ssh_user: sshUser.trim(),
@@ -76,14 +77,14 @@ export function AddNodeDialog({
       });
 
       if (enableCrowKV) {
-        await deployServer(trimmedNodeId, {
+        await deployServer(numericNodeId, {
           mgmt_port: Number(mgmtPort),
           grpc_port: Number(grpcPort),
         });
       }
 
       success(enableCrowKV ? `Node "${trimmedNodeId}" created and Crow Storage enabled` : `Node "${trimmedNodeId}" created successfully`);
-      onCreatedRackId?.(rackId);
+      onCreatedRackId?.(Number(rackId));
       setRackId(initialRackId);
       setNodeId(initialNodeId);
       setHost(defaultHost);

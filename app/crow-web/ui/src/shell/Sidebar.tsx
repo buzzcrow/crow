@@ -56,20 +56,20 @@ export function Sidebar({
       return racks.map((rack) => ({
         id: `R-${rack.id}`,
         rawId: rack.id,
-        label: rack.name ? `${rackLabel(rack.id)} (${rack.name})` : rackLabel(rack.id),
+        label: rack.name ? `${rackLabel(String(rack.id))} (${rack.name})` : rackLabel(String(rack.id)),
         type: 'Rack' as const,
         icon: <FolderTree className="tw-h-4 tw-w-4 tw-text-muted" />,
-        children: (rack.nodes || []).map((entry: any) => {
-          const nodeId: string = typeof entry === 'string' ? entry : entry.id;
+        children: (rack.nodes || []).map((entry) => {
+          const nodeId: number = entry.id;
           const server = serverByNodeId.get(nodeId);
-          const stores = nodeStores[nodeId] || [];
+          const stores = nodeStores[String(nodeId)] || [];
           const hasServer = !!server || stores.length > 0;
           const children: TreeNode[] = [];
           if (hasServer) {
             children.push({
               id: `KV-${nodeId}`,
               rawId: server?.id || `${nodeId}-kv`,
-              label: serverLabel(nodeId),
+              label: serverLabel(String(nodeId)),
               type: 'Server',
               icon: <Cog className="tw-h-4 tw-w-4 tw-text-muted" />,
               health: toUiHealth(server?.process.health),
@@ -130,10 +130,10 @@ export function Sidebar({
           return {
             id: `N-${nodeId}`,
             rawId: nodeId,
-            label: nodeLabel(nodeId),
+            label: nodeLabel(String(nodeId)),
             type: 'Node' as const,
             icon: <Monitor className="tw-h-4 tw-w-4 tw-text-muted" />,
-            health: toUiHealth(nodeHealthById[nodeId]),
+            health: toUiHealth(nodeHealthById[String(nodeId)]),
             parentIds: { rack_id: rack.id },
             children: children.length ? children : undefined,
           };

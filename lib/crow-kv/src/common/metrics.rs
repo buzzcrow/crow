@@ -26,11 +26,12 @@
 //!
 //! Future fields (deferred to V2): `bytes_in`, `bytes_out`, `tps_window`.
 
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) use crow_protocol::mgmt::MetricsSnapshot;
+
 #[derive(Debug, Default)]
-pub struct LayerMetrics {
+pub(crate) struct LayerMetrics {
     rpc_count: AtomicU64,
     err_count: AtomicU64,
     last_rtt_ms: AtomicU64,
@@ -38,38 +39,30 @@ pub struct LayerMetrics {
 
 impl LayerMetrics {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Record a successful RPC and its observed latency (rounded to ms).
-    pub fn record_ok(&self, rtt_ms: u64) {
+    pub(crate) fn record_ok(&self, rtt_ms: u64) {
         self.rpc_count.fetch_add(1, Ordering::Relaxed);
         self.last_rtt_ms.store(rtt_ms, Ordering::Relaxed);
     }
 
     /// Record a failed RPC.
-    pub fn record_err(&self) {
+    pub(crate) fn record_err(&self) {
         self.err_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Take an atomic snapshot for reporting.
     #[must_use]
-    pub fn snapshot(&self) -> MetricsSnapshot {
+    pub(crate) fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             rpc_count: self.rpc_count.load(Ordering::Relaxed),
             err_count: self.err_count.load(Ordering::Relaxed),
             last_rtt_ms: self.last_rtt_ms.load(Ordering::Relaxed),
         }
     }
-}
-
-/// Point-in-time read of `LayerMetrics`. Pure data; trivially serializable.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct MetricsSnapshot {
-    pub rpc_count: u64,
-    pub err_count: u64,
-    pub last_rtt_ms: u64,
 }
 
 /// Per-`PxLocalReplica` leader-election counters.
@@ -84,7 +77,7 @@ pub struct MetricsSnapshot {
 /// never have to keep an `AtomicU64` in sync with the canonical mutex-
 /// guarded state.
 #[derive(Debug, Default)]
-pub struct ElectionMetrics {
+pub(crate) struct ElectionMetrics {
     election_count: AtomicU64,
     step_downs_higher_term: AtomicU64,
     step_downs_lease_unrenewable: AtomicU64,
@@ -93,34 +86,34 @@ pub struct ElectionMetrics {
 
 impl ElectionMetrics {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// One election attempt started (Candidate transition).
-    pub fn record_election(&self) {
+    pub(crate) fn record_election(&self) {
         self.election_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Leader stepped down because it observed `term > current_term`.
-    pub fn record_step_down_higher_term(&self) {
+    pub(crate) fn record_step_down_higher_term(&self) {
         self.step_downs_higher_term.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Leader stepped down because the lease became unrenewable.
-    pub fn record_step_down_lease_unrenewable(&self) {
+    pub(crate) fn record_step_down_lease_unrenewable(&self) {
         self.step_downs_lease_unrenewable.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Leader stepped down because of an admin `StepDown` RPC.
-    pub fn record_step_down_admin(&self) {
+    pub(crate) fn record_step_down_admin(&self) {
         self.step_downs_admin.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read counters (monotonic). Derived gauges are filled in by the
     /// `PxLocalReplica::election_metrics_snapshot()` wrapper.
     #[must_use]
-    pub fn counters(&self) -> ElectionMetricsCounters {
+    pub(crate) fn counters(&self) -> ElectionMetricsCounters {
         ElectionMetricsCounters {
             election_count: self.election_count.load(Ordering::Relaxed),
             step_downs_higher_term: self.step_downs_higher_term.load(Ordering::Relaxed),
@@ -132,11 +125,11 @@ impl ElectionMetrics {
 
 /// Monotonic-counter half of [`ElectionMetricsSnapshot`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ElectionMetricsCounters {
-    pub election_count: u64,
-    pub step_downs_higher_term: u64,
-    pub step_downs_lease_unrenewable: u64,
-    pub step_downs_admin: u64,
+pub(crate) struct ElectionMetricsCounters {
+    pub(crate) election_count: u64,
+    pub(crate) step_downs_higher_term: u64,
+    pub(crate) step_downs_lease_unrenewable: u64,
+    pub(crate) step_downs_admin: u64,
 }
 
 /// Point-in-time election + lease state on one replica. Combines the

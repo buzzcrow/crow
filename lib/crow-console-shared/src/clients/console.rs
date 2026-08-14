@@ -17,7 +17,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cluster::{GroupSummary, GroupView, ReplicaView, StoreView};
+use crow_protocol::{NodeId, RackId};
+
+use crate::cluster::{DiskGroupId, GroupSummary, GroupView, ReplicaView, StoreView};
 use crate::config::{NodeEntry, RackEntry, ServerEntry};
 use crate::error::{Error, Result};
 
@@ -35,21 +37,44 @@ pub struct ConsoleClient {
 pub struct CreateStoreBody {
     pub store_id: u64,
     #[serde(default)]
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateGroupBody {
     pub group_id: u64,
     pub replica_id: u64,
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AddRackBody {
-    pub id: String,
+    pub id: RackId,
     #[serde(default)]
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddDiskGroupBody {
+    pub id: DiskGroupId,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddDiskBody {
+    pub disk_id: String,
+    pub disk_type: String,
+    pub capacity_bytes: u64,
+    pub zone_size_bytes: u64,
+    pub unit_size_bytes: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MoveDiskBody {
+    pub new_rack_id: RackId,
+    pub new_node_id: NodeId,
+    pub new_disk_group_id: DiskGroupId,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -95,7 +120,7 @@ pub struct PingResult {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeployResult {
-    pub node_id: String,
+    pub node_id: NodeId,
     pub mgmt_url: String,
     pub grpc_url: String,
     pub pid: u32,
@@ -108,7 +133,7 @@ pub struct StopResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AddReplicaBody {
-    pub node_id: String,
+    pub node_id: NodeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_id: Option<u64>,
 }
@@ -167,7 +192,7 @@ pub struct KvScanResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerSummary {
     #[serde(default)]
-    pub node_id: Option<String>,
+    pub node_id: Option<NodeId>,
     pub mgmt_url: String,
     #[serde(default)]
     pub grpc_url: Option<String>,
@@ -208,7 +233,7 @@ impl ConsoleClient {
     }
 
     #[must_use]
-    pub fn base_url(&self) -> &str {
+    pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
 
@@ -234,7 +259,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn remove_rack(&self, rack_id: &str) -> Result<()> {
+    pub async fn remove_rack(&self, rack_id: RackId) -> Result<()> {
         self.delete_path(&format!("/api/racks/{rack_id}")).await
     }
 
@@ -244,7 +269,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn list_nodes(&self, rack_id: Option<&str>) -> Result<Vec<NodeEntry>> {
+    pub async fn list_nodes(&self, rack_id: Option<RackId>) -> Result<Vec<NodeEntry>> {
         let path = match rack_id {
             Some(r) => format!("/api/nodes?rack_id={r}"),
             None => "/api/nodes".to_string(),
@@ -258,7 +283,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn add_node(&self, rack_id: &str, entry: &NodeEntry) -> Result<NodeEntry> {
+    pub async fn add_node(&self, rack_id: RackId, entry: &NodeEntry) -> Result<NodeEntry> {
         self.post_json(&format!("/api/racks/{rack_id}/nodes"), entry)
             .await
     }
@@ -267,7 +292,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn remove_node(&self, node_id: &str) -> Result<()> {
+    pub async fn remove_node(&self, node_id: NodeId) -> Result<()> {
         self.delete_path(&format!("/api/nodes/{node_id}")).await
     }
 
@@ -275,9 +300,89 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn ping_node(&self, node_id: &str) -> Result<PingResult> {
+    pub async fn ping_node(&self, node_id: NodeId) -> Result<PingResult> {
         self.post_json(&format!("/api/nodes/{node_id}/ping"), &serde_json::json!({}))
             .await
+    }
+
+    // ── Physical: disk-group lifecycle ────────────────────────────
+
+    /// `GET /api/nodes/:node_id/disk-groups`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn list_disk_groups(&self, node_id: NodeId) -> Result<Vec<crate::config::DiskGroupEntry>> {
+        self.get_json(&format!("/api/nodes/{node_id}/disk-groups")).await
+    }
+
+    /// `POST /api/nodes/:node_id/disk-groups`.
+    ///
+    /// # Errors
+    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
+    pub async fn add_disk_group(
+        &self,
+        node_id: NodeId,
+        body: &AddDiskGroupBody,
+    ) -> Result<crate::config::DiskGroupEntry> {
+        self.post_json(&format!("/api/nodes/{node_id}/disk-groups"), body)
+            .await
+    }
+
+    /// `DELETE /api/nodes/:node_id/disk-groups/:dg_id`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn remove_disk_group(&self, node_id: NodeId, dg_id: DiskGroupId) -> Result<()> {
+        self.delete_path(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}"))
+            .await
+    }
+
+    // ── Physical: disk lifecycle ──────────────────────────────────
+
+    /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn list_disks(
+        &self,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+    ) -> Result<Vec<crate::config::DiskEntry>> {
+        self.get_json(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}/disks"))
+            .await
+    }
+
+    /// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks`.
+    ///
+    /// # Errors
+    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
+    pub async fn add_disk(
+        &self,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        body: &AddDiskBody,
+    ) -> Result<crate::config::DiskEntry> {
+        self.post_json(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}/disks"), body)
+            .await
+    }
+
+    /// `DELETE /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn remove_disk(&self, node_id: NodeId, dg_id: DiskGroupId, disk_id: &str) -> Result<()> {
+        self.delete_path(&format!(
+            "/api/nodes/{node_id}/disk-groups/{dg_id}/disks/{disk_id}"
+        ))
+        .await
+    }
+
+    /// `POST /api/disks/:disk_id/move`.
+    ///
+    /// # Errors
+    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
+    pub async fn move_disk(&self, disk_id: &str, body: &MoveDiskBody) -> Result<crate::config::DiskEntry> {
+        self.post_json(&format!("/api/disks/{disk_id}/move"), body).await
     }
 
     // ── Physical: server lifecycle (one server per node) ──────────
@@ -287,7 +392,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn get_node_server(&self, node_id: &str) -> Result<ServerEntry> {
+    pub async fn get_node_server(&self, node_id: NodeId) -> Result<ServerEntry> {
         self.get_json(&format!("/api/nodes/{node_id}/server")).await
     }
 
@@ -297,7 +402,7 @@ impl ConsoleClient {
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
     pub async fn deploy_node_server(
         &self,
-        node_id: &str,
+        node_id: NodeId,
         body: &DeployNodeServerBody,
     ) -> Result<DeployResult> {
         self.post_json(&format!("/api/nodes/{node_id}/server/deploy"), body)
@@ -308,7 +413,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn stop_node_server(&self, node_id: &str) -> Result<StopResult> {
+    pub async fn stop_node_server(&self, node_id: NodeId) -> Result<StopResult> {
         self.post_json(
             &format!("/api/nodes/{node_id}/server/stop"),
             &serde_json::json!({}),
@@ -330,7 +435,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn restart_node_server(&self, node_id: &str) -> Result<DeployResult> {
+    pub async fn restart_node_server(&self, node_id: NodeId) -> Result<DeployResult> {
         self.post_json(
             &format!("/api/nodes/{node_id}/server/restart"),
             &serde_json::json!({}),
@@ -362,10 +467,10 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn cluster_init(&self, nodes: &[String]) -> Result<Value> {
+    pub async fn cluster_init(&self, nodes: &[NodeId]) -> Result<Value> {
         #[derive(Serialize)]
         struct ClusterInitBody<'a> {
-            nodes: &'a [String],
+            nodes: &'a [NodeId],
         }
         self.post_json("/api/cluster/init", &ClusterInitBody { nodes })
             .await

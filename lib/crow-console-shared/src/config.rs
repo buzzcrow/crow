@@ -9,12 +9,72 @@
 
 use std::path::{Path, PathBuf};
 
+use crow_protocol::{NodeId, RackId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::cluster::DiskGroupId;
 use crate::error::{Error, Result};
 
 use std::fmt;
+
+/// Serde helper: serialize a `BTreeMap<u64, V>` with string keys (TOML
+/// requires string keys) and deserialize back to `u64` keys.
+mod int_key {
+    use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+    use serde::ser::{Serialize, Serializer};
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::marker::PhantomData;
+    use std::str::FromStr;
+
+    pub fn serialize<K, V, S>(map: &BTreeMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: ToString + Ord,
+        V: Serialize,
+        S: Serializer,
+    {
+        let string_map: BTreeMap<String, &V> = map.iter().map(|(k, v)| (k.to_string(), v)).collect();
+        string_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: FromStr + Ord,
+        K::Err: fmt::Display,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        struct IntKeyVisitor<K, V>(PhantomData<(K, V)>);
+
+        impl<'de, K, V> Visitor<'de> for IntKeyVisitor<K, V>
+        where
+            K: FromStr + Ord,
+            K::Err: fmt::Display,
+            V: Deserialize<'de>,
+        {
+            type Value = BTreeMap<K, V>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a map with string-encoded integer keys")
+            }
+
+            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut map = BTreeMap::new();
+                while let Some((key, value)) = access.next_entry::<String, V>()? {
+                    let k = K::from_str(&key).map_err(serde::de::Error::custom)?;
+                    map.insert(k, value);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(IntKeyVisitor::<K, V>(PhantomData))
+    }
+}
 
 pub trait ConsoleConfigEngine: Send + Sync {
     /// Load the console configuration from the engine's storage.
@@ -50,7 +110,8 @@ impl TomlFileEngine {
     }
 
     #[must_use]
-    pub fn path(&self) -> &Path {
+    #[allow(dead_code)]
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
@@ -60,7 +121,8 @@ impl TomlFileEngine {
     }
 
     #[must_use]
-    pub fn from_default_path() -> Option<Self> {
+    #[allow(dead_code)]
+    pub(crate) fn from_default_path() -> Option<Self> {
         Self::default_path().map(Self::new)
     }
 }
@@ -101,34 +163,39 @@ pub struct ConsoleConfig {
     pub stores: Vec<StoreEntry>,
     #[serde(default)]
     pub groups: Vec<GroupEntry>,
+    #[serde(default, rename = "disk_group")]
+    pub disk_groups: Vec<DiskGroupEntry>,
+    #[serde(default, rename = "disk")]
+    pub disks: Vec<DiskEntry>,
     /// Optional `[bench]` section. Reserved for future use.
     #[serde(default, skip_serializing_if = "BenchConfig::is_empty")]
-    pub bench: BenchConfig,
+    pub(crate) bench: BenchConfig,
 }
 
 /// `[bench]` section. Reserved for future knobs (default reporting
 /// dir, max threads, etc.); currently empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BenchConfig {}
+pub(crate) struct BenchConfig {}
 
 impl BenchConfig {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    #[allow(clippy::unused_self)]
+    pub(crate) fn is_empty(&self) -> bool {
         true
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RackEntry {
-    pub id: String,
+    pub id: RackId,
     #[serde(default)]
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeEntry {
-    pub id: String,
-    pub rack_id: String,
+    pub id: NodeId,
+    pub rack_id: RackId,
     /// Default `127.0.0.1` for local simulated nodes.
     pub host: String,
     /// SSH port. Defaults to 22.
@@ -161,6 +228,34 @@ impl NodeEntry {
     }
 }
 
+/// Console-side disk-group entry. Mirrors the group-0 `DiskGroupKey`
+/// placement (`rack_id`, `node_id`, `disk_group_id`) plus a human-readable
+/// name. The console config is the operator's intent; group-0 sysdata is
+/// the derived view synced by the console handlers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskGroupEntry {
+    pub id: DiskGroupId,
+    pub rack_id: RackId,
+    pub node_id: NodeId,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Console-side disk entry. `disk_id` is a UUID hex string (stable across
+/// moves). `disk_type` is `"Hdd"` or `"Ssd"`. Capacity / zone / unit sizes
+/// are the physical disk's parameters, captured at add time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskEntry {
+    pub disk_id: String,
+    pub disk_group_id: DiskGroupId,
+    pub rack_id: RackId,
+    pub node_id: NodeId,
+    pub disk_type: String,
+    pub capacity_bytes: u64,
+    pub zone_size_bytes: u64,
+    pub unit_size_bytes: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerEntry {
     /// Console-side identifier; must be unique within the file.
@@ -170,7 +265,7 @@ pub struct ServerEntry {
     /// Owning node id; populated for console-deployed instances. `None`
     /// for plain "registered external server" entries from C2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
+    pub node_id: Option<NodeId>,
     /// gRPC base URL, e.g. `http://127.0.0.1:28001`. Populated for
     /// console-deployed instances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,7 +288,7 @@ pub struct ServerEntry {
 pub struct StoreEntry {
     pub store_id: u64,
     #[serde(default)]
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,25 +302,50 @@ pub struct GroupEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaEntry {
     pub replica_id: u64,
-    pub node_id: String,
+    pub node_id: NodeId,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedConsoleConfig {
     #[serde(default)]
     version: u32,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    rack: BTreeMap<String, PersistedRackEntry>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    node: BTreeMap<String, PersistedNodeEntry>,
+    #[serde(default, with = "int_key", skip_serializing_if = "BTreeMap::is_empty")]
+    rack: BTreeMap<RackId, PersistedRackEntry>,
+    #[serde(default, with = "int_key", skip_serializing_if = "BTreeMap::is_empty")]
+    node: BTreeMap<NodeId, PersistedNodeEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     crow_kv_server: BTreeMap<String, PersistedServerEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     store: BTreeMap<String, PersistedStoreEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     group: BTreeMap<String, PersistedGroupEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disk_group: BTreeMap<String, PersistedDiskGroupEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disk: BTreeMap<String, PersistedDiskEntry>,
     #[serde(default, skip_serializing_if = "BenchConfig::is_empty")]
     bench: BenchConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedDiskGroupEntry {
+    id: DiskGroupId,
+    rack_id: RackId,
+    node_id: NodeId,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedDiskEntry {
+    disk_id: String,
+    disk_group_id: DiskGroupId,
+    rack_id: RackId,
+    node_id: NodeId,
+    disk_type: String,
+    capacity_bytes: u64,
+    zone_size_bytes: u64,
+    unit_size_bytes: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,7 +356,7 @@ struct PersistedRackEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedNodeEntry {
-    rack_id: String,
+    rack_id: RackId,
     host: String,
     #[serde(default = "default_ssh_port")]
     ssh_port: u16,
@@ -250,7 +370,7 @@ struct PersistedNodeEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedServerEntry {
-    node_id: Option<String>,
+    node_id: Option<NodeId>,
     url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grpc_url: Option<String>,
@@ -270,7 +390,7 @@ struct PersistedServerEntry {
 struct PersistedStoreEntry {
     store_id: u64,
     #[serde(default)]
-    nodes: Vec<String>,
+    nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,7 +426,7 @@ impl ConsoleConfig {
     /// Config is persisted to `runtime-data/crow-kv.db.toml` in the project root.
     /// This file stores registered crow-kv-server instances for the console.
     #[must_use]
-    pub fn default_path() -> Option<PathBuf> {
+    pub(crate) fn default_path() -> Option<PathBuf> {
         TomlFileEngine::default_path()
     }
 
@@ -324,7 +444,7 @@ impl ConsoleConfig {
     ///
     /// # Errors
     /// Filesystem and TOML serialization errors are propagated.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         TomlFileEngine::new(path).save(self)
     }
 
@@ -370,7 +490,7 @@ impl ConsoleConfig {
     ///
     /// # Errors
     /// Returns `Error::NotFound` if no entry has that id.
-    pub fn remove_server(&mut self, id: &str) -> Result<ServerEntry> {
+    pub(crate) fn remove_server(&mut self, id: &str) -> Result<ServerEntry> {
         let pos = self
             .servers
             .iter()
@@ -388,8 +508,8 @@ impl ConsoleConfig {
         self.servers.iter().map(|s| s.url.clone()).collect()
     }
 
-    pub fn record_store(&mut self, store_id: u64, mut nodes: Vec<String>) {
-        nodes.sort();
+    pub fn record_store(&mut self, store_id: u64, mut nodes: Vec<NodeId>) {
+        nodes.sort_unstable();
         nodes.dedup();
         if let Some(store) = self.stores.iter_mut().find(|s| s.store_id == store_id) {
             store.nodes = nodes;
@@ -399,16 +519,16 @@ impl ConsoleConfig {
         self.stores.sort_by_key(|s| s.store_id);
     }
 
-    pub fn ensure_store_node(&mut self, store_id: u64, node_id: &str) {
+    pub fn ensure_store_node(&mut self, store_id: u64, node_id: NodeId) {
         if let Some(store) = self.stores.iter_mut().find(|s| s.store_id == store_id) {
-            if !store.nodes.iter().any(|n| n == node_id) {
-                store.nodes.push(node_id.to_string());
-                store.nodes.sort();
+            if !store.nodes.contains(&node_id) {
+                store.nodes.push(node_id);
+                store.nodes.sort_unstable();
             }
         } else {
             self.stores.push(StoreEntry {
                 store_id,
-                nodes: vec![node_id.to_string()],
+                nodes: vec![node_id],
             });
             self.stores.sort_by_key(|s| s.store_id);
         }
@@ -487,9 +607,9 @@ impl ConsoleConfig {
             .find(|g| g.store_id == store_id && g.group_id == group_id)
     }
 
-    pub fn purge_node_topology(&mut self, node_id: &str) {
+    pub fn purge_node_topology(&mut self, node_id: NodeId) {
         for store in &mut self.stores {
-            store.nodes.retain(|n| n != node_id);
+            store.nodes.retain(|n| *n != node_id);
         }
         self.stores.retain(|s| !s.nodes.is_empty());
         for group in &mut self.groups {
@@ -506,7 +626,7 @@ impl ConsoleConfig {
         if self.racks.iter().any(|r| r.id == entry.id) {
             return Err(Error::Conflict {
                 kind: "rack".into(),
-                id: entry.id,
+                id: entry.id.to_string(),
             });
         }
         self.racks.push(entry);
@@ -518,7 +638,7 @@ impl ConsoleConfig {
     /// # Errors
     /// `Error::NotFound` if no rack with that id; `Error::Conflict` if any
     /// node still references the rack.
-    pub fn remove_rack(&mut self, id: &str) -> Result<RackEntry> {
+    pub fn remove_rack(&mut self, id: RackId) -> Result<RackEntry> {
         if self.nodes.iter().any(|n| n.rack_id == id) {
             return Err(Error::Conflict {
                 kind: "rack".into(),
@@ -544,7 +664,7 @@ impl ConsoleConfig {
         if self.nodes.iter().any(|n| n.id == entry.id) {
             return Err(Error::Conflict {
                 kind: "node".into(),
-                id: entry.id,
+                id: entry.id.to_string(),
             });
         }
         if !self.racks.iter().any(|r| r.id == entry.rack_id) {
@@ -562,8 +682,8 @@ impl ConsoleConfig {
     /// # Errors
     /// `Error::NotFound` if no node; `Error::Conflict` if a server is
     /// still deployed to the node.
-    pub fn remove_node(&mut self, id: &str) -> Result<NodeEntry> {
-        if self.servers.iter().any(|s| s.node_id.as_deref() == Some(id)) {
+    pub fn remove_node(&mut self, id: NodeId) -> Result<NodeEntry> {
+        if self.servers.iter().any(|s| s.node_id == Some(id)) {
             return Err(Error::Conflict {
                 kind: "node".into(),
                 id: format!("{id}: node still hosts a deployed server"),
@@ -582,33 +702,32 @@ impl ConsoleConfig {
 
     /// Look up a node by id.
     #[must_use]
-    pub fn node(&self, id: &str) -> Option<&NodeEntry> {
+    pub fn node(&self, id: NodeId) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
     /// Look up a server entry by id.
     #[must_use]
-    pub fn server(&self, id: &str) -> Option<&ServerEntry> {
+    #[allow(dead_code)]
+    pub(crate) fn server(&self, id: &str) -> Option<&ServerEntry> {
         self.servers.iter().find(|s| s.id == id)
     }
 
     /// Look up the server deployed on a given node.
     #[must_use]
-    pub fn server_for_node(&self, node_id: &str) -> Option<&ServerEntry> {
-        self.servers
-            .iter()
-            .find(|s| s.node_id.as_deref() == Some(node_id))
+    pub fn server_for_node(&self, node_id: NodeId) -> Option<&ServerEntry> {
+        self.servers.iter().find(|s| s.node_id == Some(node_id))
     }
 
     /// Remove the server entry deployed on a given node.
     ///
     /// # Errors
     /// `Error::NotFound` if no server is deployed on this node.
-    pub fn remove_server_for_node(&mut self, node_id: &str) -> Result<ServerEntry> {
+    pub fn remove_server_for_node(&mut self, node_id: NodeId) -> Result<ServerEntry> {
         let pos = self
             .servers
             .iter()
-            .position(|s| s.node_id.as_deref() == Some(node_id))
+            .position(|s| s.node_id == Some(node_id))
             .ok_or_else(|| Error::NotFound {
                 kind: "server".into(),
                 id: format!("no server on node {node_id}"),
@@ -618,17 +737,133 @@ impl ConsoleConfig {
 
     /// Mutable look-up for in-place updates (e.g. `pid` after restart).
     #[must_use]
-    pub fn server_mut(&mut self, id: &str) -> Option<&mut ServerEntry> {
+    #[allow(dead_code)]
+    pub(crate) fn server_mut(&mut self, id: &str) -> Option<&mut ServerEntry> {
         self.servers.iter_mut().find(|s| s.id == id)
     }
 
+    // ── disk-group ────────────────────────────────────────────────
+
+    /// Add a disk-group. Rejects duplicate id and unknown node.
+    ///
+    /// # Errors
+    /// `Error::Conflict` on duplicate id; `Error::Validation` on unknown
+    /// node.
+    pub fn add_disk_group(&mut self, entry: DiskGroupEntry) -> Result<()> {
+        if self.disk_groups.iter().any(|dg| dg.id == entry.id) {
+            return Err(Error::Conflict {
+                kind: "disk_group".into(),
+                id: entry.id.to_string(),
+            });
+        }
+        if !self.nodes.iter().any(|n| n.id == entry.node_id) {
+            return Err(Error::Validation {
+                field: "node_id".into(),
+                message: format!("unknown node {}", entry.node_id),
+            });
+        }
+        self.disk_groups.push(entry);
+        Ok(())
+    }
+
+    /// Remove a disk-group by id.
+    ///
+    /// # Errors
+    /// `Error::NotFound` if no disk-group; `Error::Conflict` if any
+    /// disk still references the disk-group.
+    pub fn remove_disk_group(&mut self, id: DiskGroupId) -> Result<DiskGroupEntry> {
+        if self.disks.iter().any(|d| d.disk_group_id == id) {
+            return Err(Error::Conflict {
+                kind: "disk_group".into(),
+                id: format!("{id}: disk_group still has disks"),
+            });
+        }
+        let pos = self
+            .disk_groups
+            .iter()
+            .position(|dg| dg.id == id)
+            .ok_or_else(|| Error::NotFound {
+                kind: "disk_group".into(),
+                id: id.to_string(),
+            })?;
+        Ok(self.disk_groups.remove(pos))
+    }
+
+    /// Look up a disk-group by id.
+    #[must_use]
+    pub fn disk_group(&self, id: DiskGroupId) -> Option<&DiskGroupEntry> {
+        self.disk_groups.iter().find(|dg| dg.id == id)
+    }
+
+    /// List disk-groups on a node.
+    #[must_use]
+    pub fn disk_groups_on_node(&self, node_id: NodeId) -> Vec<&DiskGroupEntry> {
+        self.disk_groups
+            .iter()
+            .filter(|dg| dg.node_id == node_id)
+            .collect()
+    }
+
+    // ── disk ──────────────────────────────────────────────────────
+
+    /// Add a disk. Rejects duplicate `disk_id` and unknown `disk_group`.
+    ///
+    /// # Errors
+    /// `Error::Conflict` on duplicate `disk_id`; `Error::Validation` on
+    /// unknown `disk_group`.
+    pub fn add_disk(&mut self, entry: DiskEntry) -> Result<()> {
+        if self.disks.iter().any(|d| d.disk_id == entry.disk_id) {
+            return Err(Error::Conflict {
+                kind: "disk".into(),
+                id: entry.disk_id.clone(),
+            });
+        }
+        if !self.disk_groups.iter().any(|dg| dg.id == entry.disk_group_id) {
+            return Err(Error::Validation {
+                field: "disk_group_id".into(),
+                message: format!("unknown disk_group {}", entry.disk_group_id),
+            });
+        }
+        self.disks.push(entry);
+        Ok(())
+    }
+
+    /// Remove a disk by `disk_id`.
+    ///
+    /// # Errors
+    /// `Error::NotFound` if no disk with that `disk_id`.
+    pub fn remove_disk(&mut self, disk_id: &str) -> Result<DiskEntry> {
+        let pos = self
+            .disks
+            .iter()
+            .position(|d| d.disk_id == disk_id)
+            .ok_or_else(|| Error::NotFound {
+                kind: "disk".into(),
+                id: disk_id.to_string(),
+            })?;
+        Ok(self.disks.remove(pos))
+    }
+
+    /// Look up a disk by `disk_id`.
+    #[must_use]
+    pub fn disk(&self, disk_id: &str) -> Option<&DiskEntry> {
+        self.disks.iter().find(|d| d.disk_id == disk_id)
+    }
+
+    /// List disks in a disk-group.
+    #[must_use]
+    pub fn disks_in_group(&self, dg_id: DiskGroupId) -> Vec<&DiskEntry> {
+        self.disks.iter().filter(|d| d.disk_group_id == dg_id).collect()
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn to_persisted(&self) -> PersistedConsoleConfig {
         let rack = self
             .racks
             .iter()
             .map(|entry| {
                 (
-                    entry.id.clone(),
+                    entry.id,
                     PersistedRackEntry {
                         name: entry.name.clone(),
                     },
@@ -640,9 +875,9 @@ impl ConsoleConfig {
             .iter()
             .map(|entry| {
                 (
-                    entry.id.clone(),
+                    entry.id,
                     PersistedNodeEntry {
-                        rack_id: entry.rack_id.clone(),
+                        rack_id: entry.rack_id,
                         host: entry.host.clone(),
                         ssh_port: entry.ssh_port,
                         ssh_user: entry.ssh_user.clone(),
@@ -659,7 +894,7 @@ impl ConsoleConfig {
                 (
                     entry.id.clone(),
                     PersistedServerEntry {
-                        node_id: entry.node_id.clone(),
+                        node_id: entry.node_id,
                         url: entry.url.clone(),
                         grpc_url: entry.grpc_url.clone(),
                         mgmt_port: entry.mgmt_port,
@@ -698,6 +933,40 @@ impl ConsoleConfig {
                 )
             })
             .collect();
+        let disk_group = self
+            .disk_groups
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.to_string(),
+                    PersistedDiskGroupEntry {
+                        id: entry.id,
+                        rack_id: entry.rack_id,
+                        node_id: entry.node_id,
+                        name: entry.name.clone(),
+                    },
+                )
+            })
+            .collect();
+        let disk = self
+            .disks
+            .iter()
+            .map(|entry| {
+                (
+                    entry.disk_id.clone(),
+                    PersistedDiskEntry {
+                        disk_id: entry.disk_id.clone(),
+                        disk_group_id: entry.disk_group_id,
+                        rack_id: entry.rack_id,
+                        node_id: entry.node_id,
+                        disk_type: entry.disk_type.clone(),
+                        capacity_bytes: entry.capacity_bytes,
+                        zone_size_bytes: entry.zone_size_bytes,
+                        unit_size_bytes: entry.unit_size_bytes,
+                    },
+                )
+            })
+            .collect();
         PersistedConsoleConfig {
             version: 2,
             rack,
@@ -705,6 +974,8 @@ impl ConsoleConfig {
             crow_kv_server,
             store,
             group,
+            disk_group,
+            disk,
             bench: self.bench.clone(),
         }
     }
@@ -715,7 +986,7 @@ impl ConsoleConfig {
             .into_iter()
             .map(|(id, entry)| RackEntry { id, name: entry.name })
             .collect();
-        racks.sort_by(|a, b| a.id.cmp(&b.id));
+        racks.sort_by_key(|r| r.id);
         let mut nodes: Vec<NodeEntry> = persisted
             .node
             .into_iter()
@@ -729,7 +1000,7 @@ impl ConsoleConfig {
                 ssh_password: entry.ssh_password,
             })
             .collect();
-        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        nodes.sort_by_key(|n| n.id);
         let mut servers: Vec<ServerEntry> = persisted
             .crow_kv_server
             .into_iter()
@@ -766,12 +1037,40 @@ impl ConsoleConfig {
             })
             .collect();
         groups.sort_by_key(|g| (g.store_id, g.group_id));
+        let mut disk_groups: Vec<DiskGroupEntry> = persisted
+            .disk_group
+            .into_values()
+            .map(|entry| DiskGroupEntry {
+                id: entry.id,
+                rack_id: entry.rack_id,
+                node_id: entry.node_id,
+                name: entry.name,
+            })
+            .collect();
+        disk_groups.sort_by_key(|dg| dg.id);
+        let mut disks: Vec<DiskEntry> = persisted
+            .disk
+            .into_values()
+            .map(|entry| DiskEntry {
+                disk_id: entry.disk_id,
+                disk_group_id: entry.disk_group_id,
+                rack_id: entry.rack_id,
+                node_id: entry.node_id,
+                disk_type: entry.disk_type,
+                capacity_bytes: entry.capacity_bytes,
+                zone_size_bytes: entry.zone_size_bytes,
+                unit_size_bytes: entry.unit_size_bytes,
+            })
+            .collect();
+        disks.sort_by(|a, b| a.disk_id.cmp(&b.disk_id));
         Self {
             racks,
             nodes,
             servers,
             stores,
             groups,
+            disk_groups,
+            disks,
             bench: persisted.bench,
         }
     }
@@ -798,7 +1097,7 @@ mod tests {
 
         let mut cfg = ConsoleConfig::default();
         let mut a = ServerEntry::new("a", "http://127.0.0.1:9910");
-        a.node_id = Some("n1".into());
+        a.node_id = Some(1);
         a.grpc_url = Some("http://127.0.0.1:9921".into());
         a.mgmt_port = Some(9910);
         a.grpc_port = Some(9921);
@@ -810,7 +1109,7 @@ mod tests {
             .unwrap();
         cfg.stores.push(StoreEntry {
             store_id: 7,
-            nodes: vec!["n1".into(), "n2".into()],
+            nodes: vec![1, 2],
         });
         cfg.groups.push(GroupEntry {
             store_id: 7,
@@ -818,11 +1117,11 @@ mod tests {
             replicas: vec![
                 ReplicaEntry {
                     replica_id: 700,
-                    node_id: "n1".into(),
+                    node_id: 1,
                 },
                 ReplicaEntry {
                     replica_id: 701,
-                    node_id: "n2".into(),
+                    node_id: 2,
                 },
             ],
         });

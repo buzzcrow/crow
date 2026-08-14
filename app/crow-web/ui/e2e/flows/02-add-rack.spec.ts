@@ -13,7 +13,7 @@ test.describe('E2E-02 add rack', () => {
     await page.getByRole('button', { name: 'Add Rack' }).click();
 
     await expect(page.getByRole('dialog', { name: 'Add Rack' })).toBeVisible();
-    await page.getByLabel('Rack ID').fill('r1');
+    await page.getByLabel('Rack ID').fill('1');
     await page.getByLabel('Name (optional)').fill('Rack One');
     await page.getByRole('button', { name: /create rack/i }).click();
 
@@ -26,7 +26,7 @@ test.describe('E2E-02 add rack', () => {
       const racks = await response.json();
       expect(racks).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ id: 'r1', name: 'Rack One' }),
+          expect.objectContaining({ id: 1, name: 'Rack One' }),
         ]),
       );
     } finally {

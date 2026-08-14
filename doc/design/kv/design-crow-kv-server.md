@@ -3,8 +3,22 @@
 
 # CROW - Design: KV Server
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md) [§15.2](design-crow-kv.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §15.2
 Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §15.2
+
+---
+
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Design Decisions](#2-design-decisions)
+  - [2.1 KV engine selection](#21-kv-engine-selection)
+  - [2.2 Startup ordering](#22-startup-ordering)
+  - [2.3 Concurrency model](#23-concurrency-model)
+  - [2.4 HTTP framework: axum](#24-http-framework-axum)
+  - [2.5 Group lifecycle](#25-group-lifecycle)
+  - [2.6 Shutdown](#26-shutdown)
+- [3. Port Pool](#3-port-pool)
 
 ---
 
@@ -70,9 +84,13 @@ Key endpoint groups:
 - **Topology export** — `GET /topology` produces a JSON document that
   another server can consume to batch-add remotes.
 - **System group** — `POST /system/init` bootstraps store 0 + group 0
-  on this node. `POST /topology/finalize` writes the `/topology/ready`
-  flag into group 0 (idempotent cutover). `GET /topology/ready` checks
-  if group 0 is authoritative. See `../console/design-crow-console.md` §4.3 for the
+  on this node. (`POST /topology/finalize` and `GET /topology/ready`
+  are removed — persistent topology-record management moves to
+  `crow-kv-client`'s `KVClusterMetaClient` / `HardwareClient`. See
+  [`design-crow-kv-group0.md`](design-crow-kv-group0.md) for the
+  group-0 sysdata architecture.) The lifecycle endpoints (`add_store`,
+  `add_group`, etc.) are now **internal** — only `crow-kv-client`'s
+  `KVClusterAdmin` calls them. See `../console/design-crow-console.md` §4.3 for the
   full persistent cluster config design.
 - **Admin operations** — `step-down` (force leader step-down), `join`
   (new-member snapshot join), `flush` (drain the local replica's L0

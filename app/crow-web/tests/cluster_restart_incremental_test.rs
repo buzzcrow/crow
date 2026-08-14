@@ -130,12 +130,12 @@ async fn json_post(client: &reqwest::Client, url: &str, body: Value) -> (reqwest
     (status, v)
 }
 
-async fn create_rack(client: &reqwest::Client, base: &str, rack_id: &str) {
+async fn create_rack(client: &reqwest::Client, base: &str, rack_id: u64) {
     let (status, body) = json_post(client, &format!("{base}/api/racks"), json!({ "id": rack_id })).await;
     assert_eq!(status.as_u16(), 201, "create rack {rack_id}: {body}");
 }
 
-async fn create_node(client: &reqwest::Client, base: &str, node_id: &str, rack_id: &str) {
+async fn create_node(client: &reqwest::Client, base: &str, node_id: u64, rack_id: u64) {
     let (status, body) = json_post(
         client,
         &format!("{base}/api/nodes"),
@@ -148,7 +148,7 @@ async fn create_node(client: &reqwest::Client, base: &str, node_id: &str, rack_i
 async fn deploy_server(
     client: &reqwest::Client,
     base: &str,
-    node_id: &str,
+    node_id: u64,
     binary: &Path,
     election_profile: &str,
 ) -> u32 {
@@ -167,7 +167,7 @@ async fn deploy_server(
     u32::try_from(body["pid"].as_u64().expect("pid")).unwrap()
 }
 
-async fn stop_server(client: &reqwest::Client, base: &str, node_id: &str) {
+async fn stop_server(client: &reqwest::Client, base: &str, node_id: u64) {
     let (status, body) = json_post(
         client,
         &format!("{base}/api/nodes/{node_id}/server/stop"),
@@ -177,7 +177,7 @@ async fn stop_server(client: &reqwest::Client, base: &str, node_id: &str) {
     assert!(status.is_success(), "stop {node_id}: {status} {body}");
 }
 
-async fn restart_server(client: &reqwest::Client, base: &str, node_id: &str) -> u32 {
+async fn restart_server(client: &reqwest::Client, base: &str, node_id: u64) -> u32 {
     let (status, body) = json_post(
         client,
         &format!("{base}/api/nodes/{node_id}/server/restart"),
@@ -188,7 +188,7 @@ async fn restart_server(client: &reqwest::Client, base: &str, node_id: &str) -> 
     u32::try_from(body["pid"].as_u64().expect("pid")).unwrap()
 }
 
-async fn create_store(client: &reqwest::Client, base: &str, store_id: u64, nodes: &[&str]) {
+async fn create_store(client: &reqwest::Client, base: &str, store_id: u64, nodes: &[u64]) {
     let (status, body) = json_post(
         client,
         &format!("{base}/api/stores"),
@@ -204,7 +204,7 @@ async fn create_group(
     store_id: u64,
     group_id: u64,
     replica_id: u64,
-    nodes: &[&str],
+    nodes: &[u64],
 ) {
     let (status, body) = json_post(
         client,
@@ -216,7 +216,7 @@ async fn create_group(
 }
 
 async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str, value: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let (status, body) = json_post(
             client,
@@ -232,13 +232,13 @@ async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u
             assert_eq!(body["ok"], true);
         }
         // Leader likely changed mid-operation; wait for a stable leader and retry.
-        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
+        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(3)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
 async fn kv_delete(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let (status, body) = json_post(
             client,
@@ -257,7 +257,7 @@ async fn kv_delete(client: &reqwest::Client, base: &str, store_id: u64, group_id
             );
             assert_eq!(body["ok"], true);
         }
-        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
+        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(3)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -524,27 +524,22 @@ struct Cluster {
     client: reqwest::Client,
     dir: PathBuf,
     guard: ProcessGuard,
-    node_ids: Vec<String>,
+    node_ids: Vec<u64>,
 }
 
-async fn setup_cluster(
-    tag: &str,
-    rack_nodes: &[(&str, &str)],
-    bin: &Path,
-    election_profile: &str,
-) -> Cluster {
+async fn setup_cluster(tag: &str, rack_nodes: &[(u64, u64)], bin: &Path, election_profile: &str) -> Cluster {
     let dir = tempdir(tag);
     let cfg_path = dir.join("console.toml");
     let addr = spawn_web_with_path(cfg_path).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let mut racks: BTreeSet<&str> = BTreeSet::new();
+    let mut racks: BTreeSet<u64> = BTreeSet::new();
     for (_, rack_id) in rack_nodes {
-        racks.insert(rack_id);
+        racks.insert(*rack_id);
     }
     for rack_id in &racks {
-        create_rack(&client, &base, rack_id).await;
+        create_rack(&client, &base, *rack_id).await;
     }
 
     let mut guard = ProcessGuard {
@@ -552,10 +547,18 @@ async fn setup_cluster(
     };
     let mut node_ids = Vec::new();
     for (node_id, rack_id) in rack_nodes {
-        create_node(&client, &base, node_id, rack_id).await;
-        let pid = deploy_server(&client, &base, node_id, bin, election_profile).await;
-        guard.pids.insert((*node_id).to_string(), pid);
-        node_ids.push((*node_id).to_string());
+        create_node(&client, &base, *node_id, *rack_id).await;
+        node_ids.push(*node_id);
+    }
+    // Deploy all nodes concurrently — each deploy polls /health until
+    // ready, so parallel deploy overlaps the readiness waits.
+    let deploy_futs: Vec<_> = node_ids
+        .iter()
+        .map(|&nid| deploy_server(&client, &base, nid, bin, election_profile))
+        .collect();
+    let pids = futures::future::join_all(deploy_futs).await;
+    for (nid, pid) in node_ids.iter().zip(pids) {
+        guard.pids.insert(nid.to_string(), pid);
     }
 
     Cluster {
@@ -568,20 +571,28 @@ async fn setup_cluster(
 }
 
 impl Cluster {
-    fn node_wal_dir(&self, node_id: &str) -> PathBuf {
+    fn node_wal_dir(&self, node_id: u64) -> PathBuf {
         self.dir.join(format!("N-{node_id}")).join("waldata")
     }
 
     async fn stop_all(&self) {
-        for node_id in &self.node_ids {
-            stop_server(&self.client, &self.base, node_id).await;
-        }
+        let futs: Vec<_> = self
+            .node_ids
+            .iter()
+            .map(|&nid| stop_server(&self.client, &self.base, nid))
+            .collect();
+        futures::future::join_all(futs).await;
     }
 
     async fn restart_all(&mut self) {
-        for node_id in &self.node_ids.clone() {
-            let pid = restart_server(&self.client, &self.base, node_id).await;
-            self.guard.pids.insert(node_id.clone(), pid);
+        let ids = self.node_ids.clone();
+        let futs: Vec<_> = ids
+            .iter()
+            .map(|&nid| restart_server(&self.client, &self.base, nid))
+            .collect();
+        let pids = futures::future::join_all(futs).await;
+        for (nid, pid) in ids.iter().zip(pids) {
+            self.guard.pids.insert(nid.to_string(), pid);
         }
     }
 
@@ -590,11 +601,11 @@ impl Cluster {
         label: &str,
         store_id: u64,
         group_id: u64,
-        nodes: &[String],
+        nodes: &[u64],
     ) -> Vec<WalSummary> {
         let mut summaries = Vec::new();
         for node_id in nodes {
-            let wal_dir = self.node_wal_dir(node_id);
+            let wal_dir = self.node_wal_dir(*node_id);
             let records = read_wal_records(&wal_dir, store_id, group_id).await;
             let summary = summarize_wal(&records);
             print_wal_summary(
@@ -614,7 +625,7 @@ struct GroupSpec {
     store_id: u64,
     group_id: u64,
     replica_id: u64,
-    nodes: Vec<String>,
+    nodes: Vec<u64>,
     n_puts: u64,
     deleted_keys: Vec<u64>,
 }
@@ -646,7 +657,7 @@ impl GroupSpec {
 #[allow(clippy::too_many_lines)]
 async fn restart_recovery(
     tag: &str,
-    rack_nodes: &[(&str, &str)],
+    rack_nodes: &[(u64, u64)],
     groups: &[GroupSpec],
     election_profile: &str,
 ) {
@@ -675,42 +686,39 @@ async fn restart_recovery(
     // Step 1a: Create all stores + groups first (concurrent startup)
     // Collect the union of nodes for each store_id so the store is created
     // on every node that hosts any of its groups.
-    let mut store_nodes: std::collections::BTreeMap<u64, Vec<String>> = std::collections::BTreeMap::new();
+    let mut store_nodes: std::collections::BTreeMap<u64, Vec<u64>> = std::collections::BTreeMap::new();
     for g in groups {
         store_nodes
             .entry(g.store_id)
             .or_default()
-            .extend(g.nodes.iter().cloned());
+            .extend(g.nodes.iter().copied());
     }
     for (sid, nodes) in &mut store_nodes {
-        nodes.sort();
+        nodes.sort_unstable();
         nodes.dedup();
-        let node_refs: Vec<&str> = nodes.iter().map(String::as_str).collect();
-        create_store(&cluster.client, &cluster.base, *sid, &node_refs).await;
+        create_store(&cluster.client, &cluster.base, *sid, nodes).await;
     }
     for g in groups {
-        let node_refs: Vec<&str> = g.nodes.iter().map(std::string::String::as_str).collect();
         create_group(
             &cluster.client,
             &cluster.base,
             g.store_id,
             g.group_id,
             g.replica_id,
-            &node_refs,
+            &g.nodes,
         )
         .await;
     }
 
     // Step 1b: Wait for all groups to elect a leader
     for g in groups {
-        let node_refs: Vec<&str> = g.nodes.iter().map(std::string::String::as_str).collect();
         wait_for_group_leader(
             &cluster.client,
             &cluster.base,
             g.store_id,
             g.group_id,
-            node_refs.len(),
-            Duration::from_secs(30),
+            g.nodes.len(),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -779,7 +787,7 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             &expected,
-            Duration::from_secs(15),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -820,7 +828,7 @@ async fn restart_recovery(
                 &cluster.base,
                 g.store_id,
                 store_group_count[&g.store_id],
-                Duration::from_secs(45),
+                Duration::from_secs(3),
             )
             .await;
         }
@@ -830,21 +838,20 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             g.nodes.len(),
-            Duration::from_secs(45),
+            Duration::from_secs(3),
         )
         .await;
     }
 
     // Confirm leaders are still stable after all nodes are up (no blind sleep).
     for g in groups {
-        let node_refs: Vec<&str> = g.nodes.iter().map(std::string::String::as_str).collect();
         wait_for_group_leader(
             &cluster.client,
             &cluster.base,
             g.store_id,
             g.group_id,
-            node_refs.len(),
-            Duration::from_secs(30),
+            g.nodes.len(),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -875,7 +882,7 @@ async fn restart_recovery(
             g.store_id,
             g.group_id,
             &expected,
-            Duration::from_secs(30),
+            Duration::from_secs(3),
         )
         .await;
     }
@@ -888,12 +895,12 @@ async fn restart_recovery(
 async fn restart_1node_1group() {
     restart_recovery(
         "restart-1n-1g",
-        &[("n1", "r1")],
+        &[(1, 1)],
         &[GroupSpec {
             store_id: 10,
             group_id: 1,
             replica_id: 1000,
-            nodes: vec!["n1".into()],
+            nodes: vec![1],
             n_puts: 100,
             deleted_keys: vec![1, 50, 100, 150, 200, 250],
         }],
@@ -906,12 +913,12 @@ async fn restart_1node_1group() {
 async fn restart_3node_1group() {
     restart_recovery(
         "restart-3n-1g",
-        &[("n1", "r1"), ("n2", "r1"), ("n3", "r1")],
+        &[(1, 1), (2, 1), (3, 1)],
         &[GroupSpec {
             store_id: 10,
             group_id: 1,
             replica_id: 1000,
-            nodes: vec!["n1".into(), "n2".into(), "n3".into()],
+            nodes: vec![1, 2, 3],
             n_puts: 100,
             deleted_keys: vec![1, 50, 100, 150, 200, 250],
         }],
@@ -924,18 +931,12 @@ async fn restart_3node_1group() {
 async fn restart_5node_1group() {
     restart_recovery(
         "restart-5n-1g",
-        &[
-            ("n1", "r1"),
-            ("n2", "r1"),
-            ("n3", "r1"),
-            ("n4", "r2"),
-            ("n5", "r2"),
-        ],
+        &[(1, 1), (2, 1), (3, 1), (4, 2), (5, 2)],
         &[GroupSpec {
             store_id: 10,
             group_id: 1,
             replica_id: 1000,
-            nodes: vec!["n1".into(), "n2".into(), "n3".into(), "n4".into(), "n5".into()],
+            nodes: vec![1, 2, 3, 4, 5],
             n_puts: 100,
             deleted_keys: vec![1, 50, 100, 200, 300, 400],
         }],
@@ -948,19 +949,13 @@ async fn restart_5node_1group() {
 async fn restart_5node_2group() {
     restart_recovery(
         "restart-5n-2g",
-        &[
-            ("n1", "r1"),
-            ("n2", "r1"),
-            ("n3", "r1"),
-            ("n4", "r2"),
-            ("n5", "r2"),
-        ],
+        &[(1, 1), (2, 1), (3, 1), (4, 2), (5, 2)],
         &[
             GroupSpec {
                 store_id: 11,
                 group_id: 1,
                 replica_id: 1000,
-                nodes: vec!["n1".into(), "n2".into(), "n3".into(), "n4".into(), "n5".into()],
+                nodes: vec![1, 2, 3, 4, 5],
                 n_puts: 100,
                 deleted_keys: vec![1, 50, 100, 200, 300, 400],
             },
@@ -968,7 +963,7 @@ async fn restart_5node_2group() {
                 store_id: 11,
                 group_id: 2,
                 replica_id: 2000,
-                nodes: vec!["n1".into(), "n2".into(), "n3".into()],
+                nodes: vec![1, 2, 3],
                 n_puts: 100,
                 deleted_keys: vec![2, 80, 150, 220],
             },
@@ -982,20 +977,13 @@ async fn restart_5node_2group() {
 async fn restart_6node_2group_overlap() {
     restart_recovery(
         "restart-6n-2g-overlap",
-        &[
-            ("n1", "r1"),
-            ("n2", "r1"),
-            ("n3", "r1"),
-            ("n4", "r2"),
-            ("n5", "r2"),
-            ("n6", "r2"),
-        ],
+        &[(1, 1), (2, 1), (3, 1), (4, 2), (5, 2), (6, 2)],
         &[
             GroupSpec {
                 store_id: 11,
                 group_id: 1,
                 replica_id: 1000,
-                nodes: vec!["n1".into(), "n2".into(), "n3".into(), "n4".into(), "n5".into()],
+                nodes: vec![1, 2, 3, 4, 5],
                 n_puts: 100,
                 deleted_keys: vec![1, 100, 250, 500, 750],
             },
@@ -1003,7 +991,7 @@ async fn restart_6node_2group_overlap() {
                 store_id: 11,
                 group_id: 2,
                 replica_id: 2000,
-                nodes: vec!["n2".into(), "n5".into(), "n6".into()],
+                nodes: vec![2, 5, 6],
                 n_puts: 100,
                 deleted_keys: vec![2, 100, 250, 400],
             },

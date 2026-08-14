@@ -6,13 +6,13 @@
 //! `crow-kv-server`. Exercises the `store / paxos / replica` verbs
 //! end-to-end and confirms the CLI no longer needs `--server`.
 
-mod testkit;
+mod common;
 
 use std::time::Duration;
 
+use common::console::{crow_cli_bin, run, spawn_console, spawn_upstream};
 use crow_console_shared::clients::console::ConsoleClient;
 use crow_console_shared::lifecycle;
-use testkit::console::{crow_cli_bin, run, spawn_console, spawn_upstream};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
@@ -33,10 +33,7 @@ async fn store_paxos_replica_round_trip() {
     let port = console.port();
 
     let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
-    console_client
-        .cluster_init(&["n1".to_string()])
-        .await
-        .expect("cluster_init");
+    console_client.cluster_init(&[1]).await.expect("cluster_init");
 
     let store_id = "9";
     let group_id = "90";
@@ -68,7 +65,7 @@ async fn store_paxos_replica_round_trip() {
             "--replica-id",
             replica_id,
             "--nodes",
-            "n1",
+            "1",
         ],
     );
     assert_eq!(code, 0, "stderr={stderr}");
@@ -95,7 +92,7 @@ async fn store_paxos_replica_round_trip() {
             "--replica-id",
             replica_id_2,
             "--nodes",
-            "n1",
+            "1",
         ],
     );
     assert_eq!(code, 0, "stderr={stderr}");
@@ -120,7 +117,7 @@ async fn store_paxos_replica_round_trip() {
         ],
     );
     assert_eq!(code, 0);
-    assert!(stdout.contains("n1"), "stdout={stdout}");
+    assert!(stdout.contains('1'), "stdout={stdout}");
 
     // paxos remove
     let (code, _, stderr) = run(

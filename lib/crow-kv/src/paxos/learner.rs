@@ -120,6 +120,17 @@ pub struct PxLearner {
     /// Optional registry handle for engine-apply latency. Set via
     /// [`Self::set_engine_apply_summary`] when a registry is wired.
     engine_apply: OnceLock<Arc<crate::metrics::LatencySummary>>,
+    /// Optional per-group watch registry. Set when the group is
+    /// constructed; `None` in tests that don't use watch/notify. The
+    /// apply-path hook in `apply_entry` loads this (lock-free
+    /// `ArcSwap` read) then checks `has_watchers()` before touching
+    /// the registry — zero overhead when no watchers. Uses
+    /// `ArcSwapOption` (not `OnceLock`) because
+    /// `inherit_local_state_from` shares the learner across group
+    /// rebuilds and must re-wire the current group's registry; the
+    /// apply path is a hot path (`learn`) so the read must be
+    /// lock-free, not a `RwLock` read on every apply.
+    watch_registry: arc_swap::ArcSwapOption<(u64, Arc<crate::cluster::watch_registry::WatchRegistry>)>,
 }
 
 impl Default for PxLearner {
@@ -142,6 +153,7 @@ impl Default for PxLearner {
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
+            watch_registry: arc_swap::ArcSwapOption::new(None),
         }
     }
 }
@@ -169,6 +181,7 @@ impl PxLearner {
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
+            watch_registry: arc_swap::ArcSwapOption::new(None),
         }
     }
 
@@ -188,8 +201,21 @@ impl PxLearner {
 
     /// Wire the engine-apply latency summary. Called once during group
     /// creation when a metrics registry is available.
-    pub fn set_engine_apply_summary(&self, summary: Arc<crate::metrics::LatencySummary>) {
+    pub(crate) fn set_engine_apply_summary(&self, summary: Arc<crate::metrics::LatencySummary>) {
         let _ = self.engine_apply.set(summary);
+    }
+
+    /// Wire the per-group watch registry. Called during `PxGroup`
+    /// construction and re-wired by `inherit_local_state_from` when
+    /// the learner is shared across a group rebuild. The apply-path
+    /// hook in `apply_entry` checks `has_watchers()` before touching
+    /// the registry — zero overhead when no watchers.
+    pub(crate) fn set_watch_registry(
+        &self,
+        group_id: u64,
+        registry: Arc<crate::cluster::watch_registry::WatchRegistry>,
+    ) {
+        self.watch_registry.store(Some(Arc::new((group_id, registry))));
     }
 
     /// Live value and its resolved slot for `key`, or `None` if unset or
@@ -546,6 +572,19 @@ impl PxLearner {
         }
         if let Some(h) = self.engine_apply.get() {
             h.observe(apply_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        // Watch/notify apply-path hook: if a watch registry is wired
+        // and has watchers, emit the changed keys as notify frames.
+        // Fires on ALL apply paths (learn, spawned apply, catch-up) —
+        // the etcd model. Followers have empty registries (cleared on
+        // step-down) so `has_watchers()` is false → zero overhead.
+        // The `ArcSwap` load is lock-free (a single atomic load) so
+        // the hot path pays no lock even when no registry is wired.
+        if let Some(entry) = self.watch_registry.load().as_deref() {
+            let (group_id, registry) = entry;
+            if registry.has_watchers() {
+                registry.emit(*group_id, slot, &batch.ops);
+            }
         }
     }
 }

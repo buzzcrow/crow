@@ -3,7 +3,7 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any) {
   await page.goto('/');
@@ -23,10 +23,10 @@ async function putKey(page: any, key: string, value: string) {
 
 test.describe('E2E-11 KV delete', () => {
   test('deletes a key through the real KV UI and verifies it is gone', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r11', 'n11');
-    await deployNodeServer(baseURL!, 'n11', 9913, 9923);
-    await createStore(baseURL!, 111, ['n11']);
-    await addGroup(baseURL!, 111, 1110, 11100, ['n11']);
+    await seedRackAndNode(baseURL!, 11, 11);
+    await deployNodeServer(baseURL!, 11, freePort(), freePort());
+    await createStore(baseURL!, 111, [11]);
+    await addGroup(baseURL!, 111, 1110, 11100, [11]);
     await waitForLeader(baseURL!, 111, 1110);
 
     try {
@@ -50,7 +50,7 @@ test.describe('E2E-11 KV delete', () => {
       expect(getResponse.ok(), await getResponse.text()).toBeTruthy();
       await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n11');
+      await stopNodeServer(baseURL!, 11);
     }
   });
 });

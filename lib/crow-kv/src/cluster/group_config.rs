@@ -77,7 +77,8 @@ impl PxGroupConfig {
     /// Total number of voting members, including the local replica if it is part
     /// of this config.
     #[must_use]
-    pub fn voting_count(&self) -> usize {
+    #[allow(dead_code)]
+    pub(crate) fn voting_count(&self) -> usize {
         self.members.iter().filter(|m| m.voting).count()
     }
 
@@ -85,7 +86,8 @@ impl PxGroupConfig {
     ///
     /// Returns `0` if there are no voting members.
     #[must_use]
-    pub fn quorum(&self) -> usize {
+    #[allow(dead_code)]
+    pub(crate) fn quorum(&self) -> usize {
         let n = self.voting_count();
         if n == 0 {
             return 0;
@@ -189,7 +191,8 @@ impl GroupConfigStore {
 
     /// Path to the config file (for diagnostics / tests).
     #[must_use]
-    pub fn path(&self) -> &Path {
+    #[allow(dead_code)]
+    pub(crate) fn path(&self) -> &Path {
         &self.config_path
     }
 }

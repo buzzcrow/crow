@@ -3,7 +3,7 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
 
 async function kvPut(baseURL: string, storeId: number, groupId: number, key: string, value: string) {
   const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/put`, {
@@ -35,19 +35,22 @@ test.describe('E2E-39 subset group operations', () => {
     await resetAll(baseURL!);
 
     // 5 nodes total. Group A on n39a,b,c. Group B on n39c,d,e (overlap on n39c).
-    for (const r of ['r39a', 'r39b', 'r39c', 'r39d', 'r39e']) {
-      await seedRackAndNode(baseURL!, r, r.replace('r', 'n'));
+    for (const r of [391, 392, 393, 394, 395]) {
+
+      await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 'n39a', 9950, 9951);
-    await deployNodeServer(baseURL!, 'n39b', 9952, 9953);
-    await deployNodeServer(baseURL!, 'n39c', 9954, 9955);
-    await deployNodeServer(baseURL!, 'n39d', 9956, 9957);
-    await deployNodeServer(baseURL!, 'n39e', 9958, 9959);
+    await Promise.all([
+      deployNodeServer(baseURL!, 391, freePort(), freePort()),
+      deployNodeServer(baseURL!, 392, freePort(), freePort()),
+      deployNodeServer(baseURL!, 393, freePort(), freePort()),
+      deployNodeServer(baseURL!, 394, freePort(), freePort()),
+      deployNodeServer(baseURL!, 395, freePort(), freePort()),
+    ]);
 
     // Single store, two groups on different node subsets.
-    await createStore(baseURL!, 390, ['n39a', 'n39b', 'n39c', 'n39d', 'n39e']);
-    await addGroup(baseURL!, 390, 3900, 39000, ['n39a', 'n39b', 'n39c']);
-    await addGroup(baseURL!, 390, 3901, 39010, ['n39c', 'n39d', 'n39e']);
+    await createStore(baseURL!, 390, [391, 392, 393, 394, 395]);
+    await addGroup(baseURL!, 390, 3900, 39000, [391, 392, 393]);
+    await addGroup(baseURL!, 390, 3901, 39010, [393, 394, 395]);
     await waitForLeader(baseURL!, 390, 3900);
     await waitForLeader(baseURL!, 390, 3901);
 

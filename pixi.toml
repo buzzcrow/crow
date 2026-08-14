@@ -92,37 +92,36 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
 test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
 test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
+test-common = { cmd = "cargo test -p crow-common --all-targets", depends-on = ["build"] }
+test-protocol = { cmd = "cargo test -p crow-protocol --all-targets", depends-on = ["build"] }
 test-kv-core = { cmd = "cargo test -p crow-kv --all-targets", depends-on = ["build"] }
-test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets -- --test-threads=1", depends-on = ["build"] }
+test-kv-client = { cmd = "cargo test -p crow-kv-client --all-targets", depends-on = ["build"] }
+test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets", depends-on = ["build"] }
+test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets", depends-on = ["build"] }
+test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets", depends-on = ["build"] }
+test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets", depends-on = ["build"] }
 test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
-test-console-server = { cmd = "cargo test -p crow-web --all-targets -- --test-threads=1", depends-on = ["build"] }
+test-console-server = { cmd = "cargo test -p crow-web --all-targets", depends-on = ["build"] }
 test-console-ui = { cmd = "cargo build -p crow-kv-server && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
-test = { cmd = '''
-bash -c '
-pixi run test-tree-ct & p1=$!
-pixi run test-tree-ffi & p2=$!
-pixi run test-kv-core & p3=$!
-pixi run test-kv-server & p4=$!
-pixi run test-console-cli & p5=$!
-pixi run test-console-server & p6=$!
-pixi run test-console-ui & p7=$!
-wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7
-'
-''', depends-on = ["build", "install-deps"] }
+# Full workspace test suite, grouped by domain. clean-env only runs at start
+# and before the console block (server-spawning tests with the heaviest
+# process/log footprint); non-spawning and self-cleaning tests run back-to-back.
 test-suite = { cmd = '''
 bash -c '
 set -e
 pixi run clean-env
 pixi run test-tree-ct
-pixi run clean-env
 pixi run test-tree-ffi
-pixi run clean-env
+pixi run test-common
+pixi run test-protocol
 pixi run test-kv-core
-pixi run clean-env
+pixi run test-kv-client
+pixi run test-diskdb-client
 pixi run test-kv-server
+pixi run test-diskdb
 pixi run clean-env
+pixi run test-console-shared
 pixi run test-console-cli
-pixi run clean-env
 pixi run test-console-server
 pixi run clean-env
 pixi run test-console-ui
@@ -134,17 +133,50 @@ coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/c
 loc = "tokei --exclude swagger-ui --exclude 'lib/crow-tree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py'"
 
 # ── Clean ────────────────────────────────────────────────────────
+# Removes all build/test/runtime artifacts, keeping only git-tracked
+# files, the pixi env (.pixi/), and install-deps caches (node_modules).
+# System-temp dirs (crow-web-*, crow-cli-test-* from std::env::temp_dir)
+# live outside the repo and are not touched.
 clean = { cmd = '''
 bash -c '
+set -e
 pkill crow-kv-server || true
 pkill crow-web || true
 pkill crow-cli || true
+
+# ── Rust build artifacts ──
 cargo clean
-rm -rf lib/crow-tree/build lib/crow-tree/build-asan lib/crow-tree/build-tsan lib/crow-tree/build-ubsan
-rm -rf app/crow-web/ui/dist app/crow-web/ui/node_modules
-rm -rf test-logs
-find . -type d -name log ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
-find . -type d -name runtime-data ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+rm -f tarpaulin-report.html
+find . -type d -name mutants.out -prune -exec rm -rf {} \; 2>/dev/null || true
+
+# ── C++ (crow-tree) build artifacts ──
+rm -rf lib/crow-tree/build lib/crow-tree/build-*
+rm -rf lib/crow-tree/Testing lib/crow-tree/.cache
+
+# ── Frontend build artifacts (keep node_modules) ──
+rm -rf app/crow-web/ui/dist app/crow-web/ui/.vite app/crow-web/ui/test-results
+rm -f app/crow-web/ui/*.tsbuildinfo
+
+# ── Test runtime data (in-repo) ──
+rm -rf test-logs runtime-data .test-tmp lib/crow-tree/.test-tmp
+rm -rf app/crow-web/ui/e2e/runtime-data
+rm -rf app/crow-cli/bench-runs
+
+# Per-crate runtime dirs — globs are safe (names do not appear in src/).
+find . -type d -name waldata ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+find . -type d -name ctdata  ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+find . -type d -name conf    ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+
+# `log/` is dangerous as a glob (common Rust module name) — explicit per crate.
+rm -rf app/crow-kv-server/log app/crow-cli/log lib/crow-console-shared/log app/crow-web/log
+
+# ── Profiling artifacts ──
+rm -rf doc/working/profile-*
+rm -f doc/working/bench-*.tsv
+rm -f perf.data* perf-script.txt flamegraph.svg
+
+# ── OS junk ──
+find . -name .DS_Store -delete 2>/dev/null || true
 '
 ''' }
 

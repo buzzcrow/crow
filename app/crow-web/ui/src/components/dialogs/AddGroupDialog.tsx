@@ -18,7 +18,7 @@ export interface AddGroupDialogProps {
   servers?: CrowKVServerView[];
   defaultGroupId?: string;
   defaultReplicaId?: string;
-  defaultNodeIds?: string[];
+  defaultNodeIds?: number[];
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -45,13 +45,13 @@ export function AddGroupDialog({
       servers.some((server) => server.node_id === node.id && isCrowKVServerAvailable(server)),
   );
   const availableNodeIds = availableNodes.map((node) => node.id);
-  const resolveDefaultNodeIds = (targetStoreId: string, preferExplicit: boolean): string[] => {
+  const resolveDefaultNodeIds = (targetStoreId: string, preferExplicit: boolean): number[] => {
     const explicit = defaultNodeIds.filter((id) => availableNodeIds.includes(id));
     if (preferExplicit && explicit.length > 0) {
       return explicit;
     }
     const selectedStore = stores.find((store) => String(store.store_id) === targetStoreId);
-    const storeNodeIds = (selectedStore?.nodes || []).map(String).filter((id) => availableNodeIds.includes(id));
+    const storeNodeIds = (selectedStore?.nodes || []).filter((id) => availableNodeIds.includes(id));
     if (storeNodeIds.length > 0) {
       return storeNodeIds;
     }
@@ -60,7 +60,7 @@ export function AddGroupDialog({
   const defaultSelectedNodeIds = resolveDefaultNodeIds(selectedStoreId, true);
   const [groupId, setGroupId] = useState(defaultGroupId);
   const [replicaId, setReplicaId] = useState(defaultReplicaId);
-  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(defaultSelectedNodeIds);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<number[]>(defaultSelectedNodeIds);
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
   const { success, error } = useToast();
@@ -112,7 +112,7 @@ export function AddGroupDialog({
     onClose();
   };
 
-  const toggleNode = (nodeId: string) => {
+  const toggleNode = (nodeId: number) => {
     setSelectedNodeIds((prev) =>
       prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId],
     );

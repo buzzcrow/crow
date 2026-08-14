@@ -5,6 +5,7 @@ use clap::Subcommand;
 use crow_console_shared::clients::console::{ConsoleClient, ServerSummary};
 use crow_console_shared::cluster::{GroupView, NodeHealth, StoreView};
 use crow_console_shared::config::NodeEntry;
+use crow_protocol::NodeId;
 use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
@@ -95,14 +96,25 @@ pub async fn run_cluster_topology(cli: &Cli) -> ExitCode {
 
 pub async fn run_cluster_init(cli: &Cli, nodes: &[String]) -> ExitCode {
     if nodes.is_empty() {
-        eprintln!("error: cluster init requires at least one node (--nodes n1,n2,...)");
+        eprintln!("error: cluster init requires at least one node (--nodes 1,2,...)");
         return ExitCode::from(1);
     }
+    let node_ids: Vec<NodeId> = match nodes
+        .iter()
+        .map(|n| n.parse::<NodeId>())
+        .collect::<Result<_, _>>()
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("error: invalid node id: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.cluster_init(nodes).await {
+    match client.cluster_init(&node_ids).await {
         Ok(v) => {
             if cli.json {
                 print_json(&v)
@@ -138,7 +150,7 @@ pub async fn run_cluster_inspect(cli: &Cli, id: &str) -> ExitCode {
             }),
             Err(e) => fail(&format!("inspect replica {sid}/{gid}/{rid}"), &e),
         },
-        Ok(InspectTarget::Node(node)) => inspect_node(cli, &client, &node).await,
+        Ok(InspectTarget::Node(node)) => inspect_node(cli, &client, node).await,
         Err(msg) => {
             eprintln!("error: {msg}");
             ExitCode::from(1)
@@ -146,7 +158,7 @@ pub async fn run_cluster_inspect(cli: &Cli, id: &str) -> ExitCode {
     }
 }
 
-async fn inspect_node(cli: &Cli, client: &ConsoleClient, node: &str) -> ExitCode {
+async fn inspect_node(cli: &Cli, client: &ConsoleClient, node: NodeId) -> ExitCode {
     match client.get_node_server(node).await {
         Ok(entry) => render(cli, &entry, || {
             println!("node {node}");
@@ -183,7 +195,7 @@ fn fail(what: &str, e: &crow_console_shared::error::Error) -> ExitCode {
 // ── id grammar ──────────────────────────────────────────────────────
 
 enum InspectTarget {
-    Node(String),
+    Node(NodeId),
     Store(u64),
     Group(u64, u64),
     Replica(u64, u64, u64),
@@ -197,7 +209,10 @@ fn parse_inspect_id(id: &str) -> Result<InspectTarget, String> {
     let Some(sid) = segs[0].strip_prefix('s').and_then(|d| d.parse::<u64>().ok()) else {
         // Not a logical path: a single bare token is a node id.
         if segs.len() == 1 && !id.is_empty() {
-            return Ok(InspectTarget::Node(id.to_string()));
+            let nid = id
+                .parse::<NodeId>()
+                .map_err(|_| format!("invalid node id {id:?} (expected a number)"))?;
+            return Ok(InspectTarget::Node(nid));
         }
         return Err(format!(
             "unrecognised id {id:?} (expected s<sid>[/g<gid>[/r<rid>]] or a node id)"
@@ -240,7 +255,7 @@ fn print_status_human(servers: &[ServerSummary], stores: &[StoreView]) {
     for s in servers {
         println!(
             "  {:<12} {:<24} health={} pid={}",
-            s.node_id.as_deref().unwrap_or("-"),
+            s.node_id.map_or_else(|| "-".to_string(), |n| n.to_string()),
             s.mgmt_url,
             health_str(s.health),
             s.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
@@ -280,9 +295,7 @@ fn print_topology_human(
 
     println!("physical:");
     for n in nodes {
-        let server = servers
-            .iter()
-            .find(|s| s.node_id.as_deref() == Some(n.id.as_str()));
+        let server = servers.iter().find(|s| s.node_id == Some(n.id));
         let server_label = server.map_or_else(
             || "none".to_string(),
             |s| format!("{} ({})", s.mgmt_url, health_str(s.health)),

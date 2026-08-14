@@ -4,7 +4,10 @@ members = [
     "lib/crow-common/rust",
     "lib/crow-kv",
     "lib/crow-kv-client",
+    "lib/crow-protocol",
     "app/crow-kv-server",
+    "app/crow-diskdb",
+    "lib/crow-diskdb-client",
     "lib/crow-console-shared",
     "app/crow-web",
     "app/crow-cli",
@@ -48,3 +51,8 @@ unused_must_use = "deny"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# Coding-style rules. "warn" until existing violations are worked down;
+# bump to "deny" per crate as splits land. See /coding workflow.
+mod_module_files = "warn"     # foo.rs + foo/, no mod.rs
+too_many_lines = "warn"       # default threshold 100 (no clippy.toml)
+items_after_statements = "warn" # items after statements

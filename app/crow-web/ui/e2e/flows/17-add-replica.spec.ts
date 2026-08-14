@@ -3,19 +3,21 @@
 // Baseline: 0.8s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-17 add replica', () => {
   test('adds a replica to an existing group through the UI', async ({ page, baseURL }) => {
     // Setup: two racks/nodes with deployed servers.
-    await seedRackAndNode(baseURL!, 'r17a', 'n17a');
-    await seedRackAndNode(baseURL!, 'r17b', 'n17b');
-    await deployNodeServer(baseURL!, 'n17a', 9948, 9958);
-    await deployNodeServer(baseURL!, 'n17b', 9949, 9959);
+    await seedRackAndNode(baseURL!, 171, 171);
+    await seedRackAndNode(baseURL!, 172, 172);
+    await Promise.all([
+      deployNodeServer(baseURL!, 171, freePort(), freePort()),
+      deployNodeServer(baseURL!, 172, freePort(), freePort()),
+    ]);
 
     // Seed a store with an initial group on n17a.
-    await createStore(baseURL!, 177, ['n17a']);
-    await addGroup(baseURL!, 177, 1770, 17700, ['n17a']);
+    await createStore(baseURL!, 177, [171]);
+    await addGroup(baseURL!, 177, 1770, 17700, [171]);
 
     const api = await apiContext(baseURL!);
     try {
@@ -30,7 +32,7 @@ test.describe('E2E-17 add replica', () => {
       await page.getByRole('menuitem', { name: /add replica/i }).click();
 
       await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
-      await page.getByLabel('Node', { exact: true }).selectOption('n17b');
+      await page.getByLabel('Node', { exact: true }).selectOption('172');
       await page.getByRole('button', { name: /add replica/i }).click();
 
       // Verify the new replica appears in the logical tree.
@@ -42,14 +44,14 @@ test.describe('E2E-17 add replica', () => {
       const replicas = await response.json();
       expect(replicas).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ replica_id: 17700, node_id: 'n17a' }),
-          expect.objectContaining({ replica_id: 17701, node_id: 'n17b' }),
+          expect.objectContaining({ replica_id: 17700, node_id: 171 }),
+          expect.objectContaining({ replica_id: 17701, node_id: 172 }),
         ]),
       );
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 'n17a');
-      await stopNodeServer(baseURL!, 'n17b');
+      await stopNodeServer(baseURL!, 171);
+      await stopNodeServer(baseURL!, 172);
     }
   });
 });

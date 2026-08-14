@@ -45,13 +45,13 @@ async fn deploy_local_and_observe_topology() {
     // Build a fresh in-memory config: 1 rack, 1 node.
     let mut cfg = ConsoleConfig::default();
     cfg.add_rack(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "rack-1".into(),
     })
     .unwrap();
     cfg.add_node(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -60,7 +60,7 @@ async fn deploy_local_and_observe_topology() {
     })
     .unwrap();
 
-    let node = cfg.node("n1").unwrap().clone();
+    let node = cfg.node(1).unwrap().clone();
     let (mgmt_port, grpc_port) = pick_two_free_ports();
 
     let req = DeployRequest {
@@ -83,7 +83,7 @@ async fn deploy_local_and_observe_topology() {
     cfg.add_server(ServerEntry {
         id: deployed.server_id.clone(),
         url: deployed.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(deployed.grpc_url.clone()),
         mgmt_port: Some(mgmt_port),
         grpc_port: Some(grpc_port),

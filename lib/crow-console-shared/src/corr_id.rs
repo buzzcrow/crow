@@ -32,7 +32,7 @@ tokio::task_local! {
 
 /// Borrow the current task-local correlation id, if any.
 #[must_use]
-pub fn current() -> Option<String> {
+pub(crate) fn current() -> Option<String> {
     CORR_ID.try_with(Clone::clone).ok()
 }
 

@@ -32,24 +32,20 @@ jobs:
       run: pixi run clean-env
     - name: Run C++ tests
       run: pixi run test-tree-ct
-    - name: Clean env
-      run: pixi run clean-env
     - name: Run FFI tests
       run: pixi run test-tree-ffi
-    - name: Clean env
-      run: pixi run clean-env
+    - name: Run common tests
+      run: pixi run test-common
+    - name: Run protocol tests
+      run: pixi run test-protocol
     - name: Run core tests
       run: pixi run test-kv-core
-    - name: Clean env
-      run: pixi run clean-env
-    - name: Run CLI tests
-      run: pixi run test-console-cli
-    - name: Clean env
-      run: pixi run clean-env
-    - name: Run mgmt-api tests
-      run: pixi run test-console-server
+    - name: Run client tests
+      run: pixi run test-kv-client
+    - name: Run diskdb-client tests
+      run: pixi run test-diskdb-client
 
-  KvServerTests:
+  ServerTests:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -65,8 +61,16 @@ jobs:
         pixi-version: latest
     - name: Clean env
       run: pixi run clean-env
-    - name: Run server tests (serial)
+    - name: Run kv-server tests
       run: pixi run test-kv-server
+    - name: Run diskdb tests
+      run: pixi run test-diskdb
+    - name: Run console-shared tests
+      run: pixi run test-console-shared
+    - name: Run CLI tests
+      run: pixi run test-console-cli
+    - name: Run mgmt-api tests
+      run: pixi run test-console-server
 
   UITests:
     runs-on: ubuntu-latest

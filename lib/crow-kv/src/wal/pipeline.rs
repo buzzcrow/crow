@@ -20,11 +20,11 @@ use super::pipeline_writer::WriterCommand;
 use super::record::WalRecordFormat;
 
 pub(crate) struct WalPipeline {
-    pub(crate) pipeline_path: PathBuf,
-    pub(crate) backend: WalPipelineBackend,
+    pub(super) pipeline_path: PathBuf,
+    pub(super) backend: WalPipelineBackend,
     /// Command channel to the dedicated writer task.
-    pub(crate) writer_tx: mpsc::UnboundedSender<WriterCommand>,
+    pub(super) writer_tx: mpsc::UnboundedSender<WriterCommand>,
     /// Resolved record format for this pipeline. `Auto` is translated to
     /// `Binary` or `TextLine` at construction time.
-    pub(crate) record_format: WalRecordFormat,
+    pub(super) record_format: WalRecordFormat,
 }

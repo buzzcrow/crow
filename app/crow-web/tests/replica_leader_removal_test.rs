@@ -27,14 +27,14 @@ fn pick_free_port() -> u16 {
 }
 
 struct Upstream {
-    node_id: String,
+    node_id: u64,
     pid: u32,
     mgmt_url: String,
     grpc_url: String,
 }
 
 struct Cluster {
-    nodes: BTreeMap<String, Upstream>,
+    nodes: BTreeMap<u64, Upstream>,
     web: SocketAddr,
 }
 
@@ -51,8 +51,8 @@ impl Cluster {
         format!("http://{}", self.web)
     }
 
-    fn mgmt_url(&self, node_id: &str) -> String {
-        self.nodes[node_id].mgmt_url.clone()
+    fn mgmt_url(&self, node_id: u64) -> String {
+        self.nodes[&node_id].mgmt_url.clone()
     }
 
     fn stop(&mut self) {
@@ -87,14 +87,14 @@ fn tempdir(tag: &str) -> PathBuf {
 }
 
 #[allow(clippy::unused_async)]
-async fn spawn_upstream(node_id: &str, workspace: &std::path::Path) -> Option<Upstream> {
+async fn spawn_upstream(node_id: u64, workspace: &std::path::Path) -> Option<Upstream> {
     let bin = crow_kv_server_bin()?;
     if !bin.exists() {
         return None;
     }
     let node = NodeEntry {
-        id: node_id.into(),
-        rack_id: "r1".into(),
+        id: node_id,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -102,41 +102,41 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path) -> Option<Up
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: node_id.into(),
+        server_id: node_id.to_string(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
     };
-    let node_dir = workspace.join(node_id);
+    let node_dir = workspace.join(node_id.to_string());
     std::fs::create_dir_all(node_dir.join("bin")).unwrap();
     std::fs::create_dir_all(node_dir.join("log")).unwrap();
     let deployed = lifecycle::deploy_local_in_dir(&req, &node, &node_dir)
         .await
         .expect("deploy_local_in_dir");
     Some(Upstream {
-        node_id: node_id.into(),
+        node_id,
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
         grpc_url: deployed.grpc_url,
     })
 }
 
-async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
+async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     for u in upstreams.values() {
         cfg.nodes.push(NodeEntry {
-            id: u.node_id.clone(),
-            rack_id: "r1".into(),
+            id: u.node_id,
+            rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
             ssh_user: String::new(),
@@ -144,9 +144,9 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
             ssh_password: None,
         });
         cfg.add_server(ServerEntry {
-            id: u.node_id.clone(),
+            id: u.node_id.to_string(),
             url: u.mgmt_url.clone(),
-            node_id: Some(u.node_id.clone()),
+            node_id: Some(u.node_id),
             grpc_url: Some(u.grpc_url.clone()),
             mgmt_port: None,
             grpc_port: None,
@@ -165,10 +165,10 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
             let rec = NodeRecord {
                 health: NodeHealth::Up,
                 last_seen_ms: 1,
-                stores: legacy_topology_to_node_stores(&u.node_id, &stores),
+                stores: legacy_topology_to_node_stores(u.node_id, &stores),
                 last_error: None,
             };
-            state.monitor_cache.set_node_report(u.node_id.clone(), rec).await;
+            state.monitor_cache.set_node_report(u.node_id, rec).await;
         }
     }
 
@@ -182,8 +182,8 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
 #[allow(clippy::unused_async)]
 async fn spawn_five_node_cluster(test_name: &str) -> Option<Cluster> {
     let workspace = tempdir(test_name);
-    let mut nodes: BTreeMap<String, Upstream> = BTreeMap::new();
-    for id in ["n1", "n2", "n3", "n4", "n5"] {
+    let mut nodes: BTreeMap<u64, Upstream> = BTreeMap::new();
+    for id in 1u64..=5 {
         let Some(node) = spawn_upstream(id, &workspace).await else {
             for n in nodes.into_values() {
                 let _ = lifecycle::stop_pid_with_timeout(n.pid, Duration::from_secs(5));
@@ -191,7 +191,7 @@ async fn spawn_five_node_cluster(test_name: &str) -> Option<Cluster> {
             eprintln!("skipping: crow-kv-server binary not built");
             return None;
         };
-        nodes.insert(id.to_string(), node);
+        nodes.insert(id, node);
     }
     let web = spawn_web(&nodes).await;
     Some(Cluster { nodes, web })
@@ -206,7 +206,7 @@ async fn create_five_node_group(cluster: &Cluster) {
     // Initialize the system group so non-zero stores can be created.
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1", "n2", "n3", "n4", "n5"]}))
+        .json(&json!({"nodes": [1, 2, 3, 4, 5]}))
         .send()
         .await
         .unwrap();
@@ -214,7 +214,7 @@ async fn create_five_node_group(cluster: &Cluster) {
 
     let resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": sid, "nodes": ["n1"]}))
+        .json(&json!({"store_id": sid, "nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -222,16 +222,16 @@ async fn create_five_node_group(cluster: &Cluster) {
 
     let resp = http
         .post(format!("{base}/api/stores/{sid}/groups"))
-        .json(&json!({"group_id": gid, "replica_id": 1, "nodes": ["n1"]}))
+        .json(&json!({"group_id": gid, "replica_id": 1, "nodes": [1]}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "create group: {:?}", resp.text().await.ok());
 
-    for node_id in ["n2", "n3", "n4", "n5"] {
+    for node_id in 2u64..=5 {
         let resp = http
             .post(format!("{base}/api/stores/{sid}/groups/{gid}/replicas"))
-            .json(&json!({"node_id": node_id, "replica_id": node_id[1..].parse::<u64>().unwrap()}))
+            .json(&json!({"node_id": node_id, "replica_id": node_id}))
             .send()
             .await
             .unwrap();
@@ -244,7 +244,7 @@ async fn create_five_node_group(cluster: &Cluster) {
     }
 }
 
-async fn wait_for_leader(cluster: &Cluster, timeout: Duration) -> Option<(u64, String)> {
+async fn wait_for_leader(cluster: &Cluster, timeout: Duration) -> Option<(u64, u64)> {
     let base = cluster.base_url();
     let http = reqwest::Client::new();
     let sid = Cluster::sid();
@@ -266,7 +266,7 @@ async fn wait_for_leader(cluster: &Cluster, timeout: Duration) -> Option<(u64, S
             .find(|r| r["role"] == "leader")
         {
             let rid = leader["replica_id"].as_u64()?;
-            let node_id = leader["node_id"].as_str()?.to_string();
+            let node_id = leader["node_id"].as_u64()?;
             return Some((rid, node_id));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -278,7 +278,7 @@ async fn wait_for_leader_after_removal(
     cluster: &Cluster,
     excluded_rid: u64,
     timeout: Duration,
-) -> Option<(u64, String)> {
+) -> Option<(u64, u64)> {
     let base = cluster.base_url();
     let http = reqwest::Client::new();
     let sid = Cluster::sid();
@@ -300,7 +300,7 @@ async fn wait_for_leader_after_removal(
             .find(|r| r["role"] == "leader" && r["replica_id"].as_u64() != Some(excluded_rid))
         {
             let rid = leader["replica_id"].as_u64()?;
-            let node_id = leader["node_id"].as_str()?.to_string();
+            let node_id = leader["node_id"].as_u64()?;
             return Some((rid, node_id));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -356,7 +356,7 @@ async fn wait_for_replica_count(
     }
 }
 
-async fn role_on_node(cluster: &Cluster, node_id: &str, rid: u64) -> Option<String> {
+async fn role_on_node(cluster: &Cluster, node_id: u64, rid: u64) -> Option<String> {
     let client = ServerClient::new(cluster.mgmt_url(node_id)).unwrap();
     let topology = client.topology().await.ok()?;
     topology
@@ -425,7 +425,7 @@ async fn remove_leader_from_five_node_group_elects_new_leader() {
 
     assert_removed_absent_from_all(&cluster, leader_rid).await;
 
-    let role = role_on_node(&cluster, &new_leader_node, new_leader_rid)
+    let role = role_on_node(&cluster, new_leader_node, new_leader_rid)
         .await
         .expect("new leader node should report its role");
     assert_eq!(role, "leader", "survivor {new_leader_node} should be leader");

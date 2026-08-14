@@ -24,6 +24,9 @@ fn main() {
             "crow_kv.rpc.KvScanItem.value",
             "crow_kv.rpc.SnapshotScanRequest.prefix",
             "crow_kv.rpc.SnapshotScanRequest.start_after",
+            "crow_kv.rpc.KvJournalScanRequest.key_prefix",
+            "crow_kv.rpc.KvJournalOp.key",
+            "crow_kv.rpc.KvJournalOp.value",
         ])
         .type_attribute(".", "#[allow(clippy::must_use_candidate)]")
         .type_attribute("crow_kv.rpc.SnapshotInfo", "#[derive(serde::Serialize)]")

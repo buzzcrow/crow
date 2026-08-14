@@ -3,8 +3,8 @@
 
 # CROW - Design: State Machine
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
-Satisfies: design-crow-kv.md §8.3](design-crow-kv.md), design-crow-kv.md §8.4 import/export](design-crow-kv.md), implementation prerequisites of design-crow-kv.md §14.1 crowbench `compare`](design-crow-kv.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §5.2, §8.3, §8.4
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §8.3, §8.4, §14.1
 
 This document specifies the storage engine abstraction used by CROW learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
 
@@ -163,7 +163,7 @@ In-memory engines can hold a write lock for the duration of the batch. File-base
 
 ### 4.4 Intra-batch order
 
-For a key `k` appearing multiple times in a batch (rare but legal — see [`design-crow-kv-slot.md` §13](design-crow-kv-slot.md#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
+For a key `k` appearing multiple times in a batch (rare but legal — see [`design-crow-kv-slot.md` §13](design-crow-kv-slot.md#13-correctness-analysis-for-parallel-slot-writes)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
 
 ### 4.5 Failure during apply
 
@@ -188,7 +188,7 @@ Truncated payloads (where a key or value length exceeds the remaining
 bytes) yield empty `Bytes` for that field, matching the previous
 `unwrap_or(&[])` behavior.
 
-### 4.7 Async engine apply (R17) and the apply fence (R35)
+### 4.7 Async engine apply and the apply fence
 
 `learn` is the learner's apply entry point: `apply_entry` (the FFI +
 memtable insert) → advance the chosen frontier → advance the applied
@@ -199,11 +199,11 @@ frontier → record dedup. Two frontiers are tracked:
 - `contiguous_applied` — highest slot `S` such that every slot in `[1, S]`
   is applied to the engine.
 
-Under V1 (apply == learn, the default before R35), both advance together
+Under V1 (apply == learn, the default), both advance together
 in `learn` right after the synchronous `apply_entry`, so
 `contiguous_applied` tracks `contiguous_chosen` exactly.
 
-**R17 (`async_engine_apply`) defers the engine apply off the write critical
+**`async_engine_apply`** defers the engine apply off the write critical
 path.** The leader's propose path splits `learn`: the chosen-frontier
 advance and dedup record run **synchronously** (cheap atomics, before
 `propose` returns `Chosen`), and only `apply_entry` + the applied-frontier
@@ -213,7 +213,7 @@ just-chosen slot — while `contiguous_applied` lags by the spawned apply.
 Spawned applies can complete out of order, so the applied frontier has its
 own out-of-order drain (a `BTreeSet`), mirroring the chosen frontier's.
 
-**R35 apply fence (Linearizable read-your-writes).** With R17 on, a
+**Apply fence (Linearizable read-your-writes).** With `async_engine_apply` on, a
 linearizable read that lands between "chosen" and "applied" would miss a
 just-written value: the barrier captures `read_slot = contiguous_chosen`
 (which is current), but the engine get returns the latest *applied* value.
@@ -225,18 +225,18 @@ register-before-load (`notified()` created before the `Acquire` load) so a
 wake racing the load is not missed — the load observes the
 `Release`-stored new frontier and returns without waiting.
 
-- **Fast path** (R17 off, or the slot already applied): one
-  `AtomicU64::load(Acquire)` + compare; no wait, no wake. With R17 off the
+- **Fast path** (`async_engine_apply` off, or the slot already applied): one
+  `AtomicU64::load(Acquire)` + compare; no wait, no wake. With `async_engine_apply` off the
   fence is a no-op — `contiguous_applied == contiguous_chosen` at the
   instant the barrier resolves.
-- **Slow path** (R17 on AND a read races a just-chosen-but-not-applied
+- **Slow path** (`async_engine_apply` on AND a read races a just-chosen-but-not-applied
   write): the fence waits for the spawned apply. The wait is bounded by
-  apply throughput (memtable insert, µs) — exactly the latency R17 removed
+  apply throughput (memtable insert, µs) — exactly the latency `async_engine_apply` removed
   from the write path; the fence redistributes that µs to an occasional
   read, it does not add new latency.
 - **MinSlot** is untouched — it already gates on `contiguous_applied` via
   the client-supplied `min_slot`.
-- **R27 ReadIndex batching** composes: the fence runs per-read after the
+- **ReadIndex batching** composes: the fence runs per-read after the
   (possibly shared) barrier outcome; batched reads share the barrier's
   `read_slot` floor but each awaits its own `contiguous_applied >=
   read_slot` check, and `notify_waiters` wakes all parked reads together.
@@ -244,7 +244,7 @@ wake racing the load is not missed — the load observes the
 `async_engine_apply` defaults to `true`; test profiles (`for_tests`) and
 the `PxGroup::new` test path opt out (`false`) for deterministic
 synchronous apply. The setter `set_async_engine_apply` remains for tests
-that exercise R17. The flag is carried across group rebuild via
+that exercise `async_engine_apply`. The flag is carried across group rebuild via
 `set_from_config(group.config())`.
 
 ---
@@ -273,7 +273,7 @@ A batched point read. Returned as a map; missing keys are simply absent.
 
 - No range-write API. All writes go through `apply(slot, batch)`.
 - No "delete-range" API. Range deletes are decomposed by the consensus layer into per-key deletes inside a batch.
-- No "wait-for-slot" primitive. Wait conditions (RYW, SafeSlot, AtSlot) are implemented in the learner using the engine's `contiguous_applied` watermark, not inside the engine. The Linearizable RYW wait is the R35 apply fence (§4.7): `PxLearner::await_applied` parks on a `Notify` until `contiguous_applied >= read_slot`.
+- No "wait-for-slot" primitive. Wait conditions (RYW, SafeSlot, AtSlot) are implemented in the learner using the engine's `contiguous_applied` watermark, not inside the engine. The Linearizable RYW wait is the apply fence (§4.7): `PxLearner::await_applied` parks on a `Notify` until `contiguous_applied >= read_slot`.
 
 This minimal surface keeps multi-engine compatibility easy.
 

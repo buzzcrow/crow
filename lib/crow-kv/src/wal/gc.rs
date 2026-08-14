@@ -26,7 +26,8 @@ use super::wal_engine::WalEngine;
 /// don't have to restart the worker to pick up a new value.
 ///
 /// The task runs until `cancel` is set to true or the `WalEngine` is dropped.
-pub fn spawn_gc_worker(
+#[allow(dead_code)]
+pub(crate) fn spawn_gc_worker(
     wal: Arc<WalEngine>,
     gc_tick: Duration,
     cancel: Arc<AtomicBool>,
@@ -35,6 +36,7 @@ pub fn spawn_gc_worker(
     tokio::spawn(gc_loop(wal, gc_tick, cancel, safe_slot))
 }
 
+#[allow(dead_code)]
 async fn gc_loop(
     wal: Arc<WalEngine>,
     gc_tick: Duration,
@@ -58,7 +60,7 @@ async fn gc_loop(
 /// `gc_slot = min(safe_slot, snapshot_slot)`. The `snapshot_slot` comes from
 /// the `WalEngine` snapshot state (set by the group when a snapshot is taken).
 #[must_use]
-pub fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
+pub(crate) fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
     safe_slot.min(snapshot_slot)
 }
 

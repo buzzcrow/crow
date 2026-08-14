@@ -3,14 +3,14 @@
 // Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 test.describe('E2E-09 KV put/get', () => {
   test('puts and gets a key through the real KV UI', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r9', 'n9');
-    await deployNodeServer(baseURL!, 'n9', 9919, 9929);
-    await createStore(baseURL!, 99, ['n9']);
-    await addGroup(baseURL!, 99, 990, 9900, ['n9']);
+    await seedRackAndNode(baseURL!, 9, 9);
+    await deployNodeServer(baseURL!, 9, freePort(), freePort());
+    await createStore(baseURL!, 99, [9]);
+    await addGroup(baseURL!, 99, 990, 9900, [9]);
     await waitForLeader(baseURL!, 99, 990);
 
     try {
@@ -57,7 +57,7 @@ test.describe('E2E-09 KV put/get', () => {
       // Verify revision incremented (rev: 2 should be visible)
       await expect(page.getByText(/rev: 2/)).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n9');
+      await stopNodeServer(baseURL!, 9);
     }
   });
 });

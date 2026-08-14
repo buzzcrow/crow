@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Identifiers
-export type RackId = string;
-export type NodeId = string;
+export type RackId = number;
+export type NodeId = number;
 export type StoreId = string;
 export type GroupId = string;
 export type ReplicaId = string;
@@ -42,7 +42,7 @@ export interface ServerProcess {
 export interface Rack {
   id: RackId;
   name?: string;
-  nodes: NodeId[];
+  nodes: Node[];
 }
 
 export interface Node {

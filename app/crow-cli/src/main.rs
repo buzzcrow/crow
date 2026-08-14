@@ -18,14 +18,16 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use crow_protocol::WEB_BASE;
 
 use commands::{
     run_bench_verb, run_cluster_init, run_cluster_inspect, run_cluster_status, run_cluster_topology,
-    run_group_verb, run_kv_verb, run_node_verb, run_rack_verb, run_replica_verb, run_server_verb,
-    run_store_verb,
+    run_disk_group_verb, run_disk_verb, run_group_verb, run_kv_verb, run_node_verb, run_rack_verb,
+    run_replica_verb, run_server_verb, run_store_verb,
 };
 use commands::{
-    BenchArgs, ClusterVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb,
+    BenchArgs, ClusterVerb, DiskGroupVerb, DiskVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb,
+    ServerVerb, StoreVerb,
 };
 
 #[derive(Parser, Debug)]
@@ -38,7 +40,7 @@ struct Cli {
     ip: String,
 
     /// Service port of the `crow-web` instance.
-    #[arg(long, global = true, env = "CROW_KV_PORT", default_value_t = 9920)]
+    #[arg(long, global = true, env = "CROW_KV_PORT", default_value_t = WEB_BASE)]
     port: u16,
 
     /// Path to the console config file. Defaults to
@@ -55,6 +57,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum Group {
     /// Cluster observation commands.
     Cluster {
@@ -91,6 +94,16 @@ enum Group {
     Replica {
         #[command(subcommand)]
         verb: ReplicaVerb,
+    },
+    /// Disk-group management (R81).
+    DiskGroup {
+        #[command(subcommand)]
+        verb: DiskGroupVerb,
+    },
+    /// Disk management + move (R81).
+    Disk {
+        #[command(subcommand)]
+        verb: DiskVerb,
     },
     /// Data-plane KV operations.
     Kv {
@@ -146,6 +159,8 @@ async fn dispatch(mut cli: Cli) -> ExitCode {
         Group::Store { verb } => run_store_verb(&cli, verb).await,
         Group::Paxos { verb } => run_group_verb(&cli, verb).await,
         Group::Replica { verb } => run_replica_verb(&cli, verb).await,
+        Group::DiskGroup { verb } => run_disk_group_verb(&cli, verb).await,
+        Group::Disk { verb } => run_disk_verb(&cli, verb).await,
         Group::Kv { verb } => run_kv_verb(&cli, verb).await,
         Group::Bench { bench } => run_bench_verb(&cli, bench).await,
     }

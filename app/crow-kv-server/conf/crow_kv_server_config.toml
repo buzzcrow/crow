@@ -1,0 +1,110 @@
+# CROW kv-server configuration
+#
+# Every field below has a matching doc comment in
+# lib/crow-kv/src/common/config.rs. Fields not listed here fall back
+# to their Default impl values (sub-structs use #[serde(default)]).
+
+# ── Top-level flags ────────────────────────────────────────────
+# (Must precede any [table] section — these are scalars on the
+# root config, not members of a sub-table.)
+# Force classic (non-optimized) Paxos path.
+force_classic = false
+# Ack WAL writes before learn_chosen (latency vs throughput).
+wal_early_ack = true
+# Apply learned entries asynchronously (off the write critical path).
+async_engine_apply = true
+
+# ── Server-level ───────────────────────────────────────────────
+[server]
+# Per-layer graceful-shutdown timeout in milliseconds. Shutdowns
+# that take longer almost always indicate a stuck task.
+shutdown_timeout_ms = 10000
+# Byte budget for scan responses: caps total key+value bytes in one
+# unary KvScanResponse so every page is provably bounded. 3.5 MiB
+# leaves ~0.5 MiB for proto framing under tonic's 4 MiB default.
+scan_byte_budget = 3670016
+
+# ── Paxos retry / admission ─────────────────────────────────────
+[paxos]
+# Max Phase-1/2 retries before giving up.
+max_paxos_retries = 3
+# Max slot retries (re-prepare after learn conflict).
+max_slot_retries = 3
+# Base backoff between retries (milliseconds).
+retry_base_backoff_ms = 5
+# Max in-flight (allocated-but-not-yet-chosen) proposals the leader
+# admits concurrently.
+max_inflight_proposals = 32
+# Admission policy when all permits are occupied: "Reject" (fail
+# fast with Busy) or "Queue" (block until a permit is freed).
+inflight_admission = "Queue"
+# Max ops per coalesced batch. 0 disables coalescing (one proposal
+# per key).
+coalesce_max_keys = 0
+# Drain threshold: skip draining the pending batch when in-flight
+# slot-tasks >= this count. 0 = always drain.
+coalesce_drain_threshold = 1
+
+# ── Leader election / heartbeat / lease ────────────────────────
+[election]
+# PreVote rounds protect against partition-rejoin disruption.
+prevote_enabled = true
+# Leader's heartbeat tick interval (milliseconds).
+heartbeat_interval_ms = 150
+# Lower bound of the follower's randomized election deadline (ms).
+election_min_ms = 1000
+# Upper bound of the follower's randomized election deadline (ms).
+election_max_ms = 2000
+# Election-side lease duration; also the follower's vote_lockout
+# extension on every heartbeat (milliseconds).
+lease_duration_ms = 3000
+# Maximum admissible clock skew across the cluster (milliseconds).
+max_clock_skew_ms = 500
+# Slots scanned per bulk-Phase-1 batch (new-leader open-prefix repair).
+bulk_prepare_window = 1024
+# Gap count threshold for snapshot fallback.
+catchup_snapshot_threshold = 1024
+# Test-only: when true, the election driver task is not spawned.
+election_driver_disabled = false
+# Bounded capacity of the per-peer learner stream outbound mpsc.
+# Derived as max_inflight_proposals * 4.
+learner_stream_window_frames = 128
+# Maintenance loop tick: flush L0→L1 + GC watermark check (ms).
+maintenance_tick_ms = 10000
+# Min slot advance since the last durable snapshot before
+# persist_snapshot() is called again.
+snapshot_slot_threshold = 100000
+# Max wall-clock time since the last durable snapshot before
+# persist_snapshot() is called again (milliseconds).
+snapshot_time_threshold_ms = 600000
+# Per-RPC deadline for prepare, accept learner-stream, and heartbeat
+# RPCs (milliseconds).
+learner_stream_rpc_timeout_ms = 2000
+
+# ── WAL ────────────────────────────────────────────────────────
+[wal]
+# Directories to distribute WAL segments across.
+wal_disks = ["waldata"]
+# Target segment size before rotation (bytes). 64 MiB.
+wal_segment_size = 67108864
+# Durable flush batch size trigger (bytes). 64 KiB.
+wal_flush_batch_bytes = 65536
+# Safety-net timer that wakes the idle writer every N ms.
+wal_flush_watchdog_ms = 100
+# Disk-pressure watermark for eager GC (percent).
+wal_disk_high_watermark_pct = 80
+# Forensics retention grace period (seconds). 1 hour.
+wal_min_retention_secs = 3600
+# GC scan cadence (seconds).
+gc_tick_secs = 30
+# Whether the WAL backend uses block-aligned I/O (O_DIRECT). false
+# = file backend (byte-addressable media).
+wal_aligned = false
+# SSD/NVMe I/O unit size in bytes. Only used when wal_aligned is
+# true. Must be a power of two.
+wal_io_unit_bytes = 4096
+# Record encoding format. "Auto" selects binary frames (zero-copy).
+wal_record_format = "Auto"
+# Skip durable fdatasync on every write batch. Unsafe for
+# production — only for benchmark path-overhead isolation.
+wal_skip_fsync = false

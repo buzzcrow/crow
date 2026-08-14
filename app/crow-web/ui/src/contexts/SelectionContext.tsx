@@ -14,7 +14,7 @@ export type EntityType = 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Repli
 export interface SelectedEntity {
   type: EntityType;
   id: string;
-  parentIds?: Record<string, string>;
+  parentIds?: Record<string, string | number>;
   viewMode: ViewMode;
   name?: string;
 }

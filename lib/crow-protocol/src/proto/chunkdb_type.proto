@@ -1,0 +1,90 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// chunkdb type definitions: enums and value types for chunk storage.
+// ChunkId is in common_type.proto (shared identifier used by multiple
+// components). Segment (the diskdb allocation handle) is in
+// diskdb_type.proto — chunk strips reference Segments allocated by
+// diskdb.
+//
+// A chunk is a logical block composed of multiple strips, each strip
+// being a set of disk-block allocations (Segments) from diskdb. Strips
+// provide mirror or erasure-coding (EC) protection. See
+// doc/design/diskdb/design-crow-diskdb.md for the component relationship.
+
+syntax = "proto3";
+
+package crow.chunkdb.rpc;
+
+import "common_type.proto";
+import "diskdb_type.proto";
+
+// ── Enums ───────────────────────────────────────────────────────
+
+// Erasure-coding parity state for an EC strip.
+enum ECState {
+  EC_STATE_NO_PARITY = 0;  // parity not yet computed
+  EC_STATE_PARITY    = 1;  // parity computed and stored
+}
+
+// Chunk lifecycle state.
+enum ChunkState {
+  CHUNK_STATE_ACTIVE  = 0;  // open for appends
+  CHUNK_STATE_SEALED  = 1;  // sealed, no more appends
+  CHUNK_STATE_DELETED = 2;  // deleted, blocks freed
+}
+
+// Strip protection type.
+enum StripType {
+  STRIP_TYPE_MIRROR = 0;  // mirror (N copies)
+  STRIP_TYPE_EC     = 1;  // erasure coding (data + code)
+}
+
+// ── Strip types ─────────────────────────────────────────────────
+
+// Mirror strip — N copies of the same data on different disks.
+message MirrorStrip {
+  repeated crow.diskdb.rpc.Segment segments = 1;  // one per replica
+}
+
+// EC strip — data_num + code_num blocks.
+message EcStrip {
+  uint32  data_num  = 1;  // number of data blocks
+  uint32  code_num  = 2;  // number of parity blocks
+  ECState ec_state  = 3;
+  repeated crow.diskdb.rpc.Segment segments = 4;  // data + parity blocks
+}
+
+// A single strip within a chunk. A strip is a horizontal slice of the
+// chunk at a given offset; multiple strips stacked vertically form the
+// chunk's full capacity.
+message ChunkStrip {
+  uint32    chunk_offset   = 1;  // offset within the chunk in units
+  uint32    strip_sequence = 2;  // sequence number within the chunk
+  uint32    unit_kb        = 3;  // unit size in KB for this strip
+  uint32    capacity       = 4;  // strip capacity in units
+  uint64    create_ts_ms   = 5;  // creation timestamp (millis since epoch)
+  uint64    sealed_ts_ms   = 6;  // sealed timestamp (millis since epoch)
+  uint32    sealed_length  = 7;  // sealed length in units
+  StripType strip_type     = 8;
+  oneof strip {
+    MirrorStrip mirror_strip = 9;
+    EcStrip     ec_strip     = 10;
+  }
+  bytes     usage_bitmap   = 11;  // per-unit usage bitmap
+}
+
+// ── Chunk ───────────────────────────────────────────────────────
+
+// A chunk — a logical block composed of strips, with mirror or EC
+// protection across disks. Allocated by chunkdb, backed by diskdb
+// Segments.
+message Chunk {
+  crow.common.ChunkId id            = 1;
+  ChunkState          state         = 2;
+  uint64              create_ts_ms  = 3;  // creation timestamp (millis since epoch)
+  uint64              sealed_ts_ms  = 4;  // sealed timestamp (millis since epoch)
+  uint32              capacity      = 5;  // total capacity in units
+  uint32              sealed_length = 6;  // sealed length in units
+  repeated ChunkStrip strips        = 7;
+}

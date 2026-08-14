@@ -23,7 +23,7 @@ use crow_kv::common::config::{CrowKVConfig, PxElectionConfig, ServerConfig};
 use crow_kv::metrics::MetricsRunner;
 
 use crow_kv_server::cli::{parse_id_list, parse_port_list, Cli};
-use crow_kv_server::mgmt_api::{self, persisted_port_for_store};
+use crow_kv_server::mgmt::{self, persisted_port_for_store};
 use crow_kv_server::startup::create_group_with_wal;
 use crow_kv_server::store_registry::KvStoreRegistry;
 
@@ -83,13 +83,10 @@ async fn main() {
 
     let bootstrap = parse_and_validate_cli_args(&args);
 
-    // Load config: from --config file if provided, else defaults. CLI
-    // args override individual fields after loading.
-    let mut config = match &args.config {
-        Some(path) => CrowKVConfig::load_from_file(path)
-            .unwrap_or_else(|e| panic!("failed to load config from {}: {e}", path.display())),
-        None => CrowKVConfig::default(),
-    };
+    // Load config: from --config file (required). CLI args override
+    // individual fields after loading.
+    let mut config = CrowKVConfig::load_from_file(&args.config)
+        .unwrap_or_else(|e| panic!("failed to load config from {}: {e}", args.config.display()));
 
     // CLI overrides.
     config.election = match args.election_profile.as_str() {
@@ -125,12 +122,32 @@ async fn main() {
         config.paxos.coalesce_drain_threshold = threshold;
     }
 
-    let registry = Arc::new(KvStoreRegistry::with_config(config).with_metrics_registry(
-        metrics_runner.as_ref().map_or_else(
-            || Arc::new(std::sync::Mutex::new(crow_kv::metrics::MetricsRegistry::new())),
-            |r| r.registry().clone(),
+    let registry = Arc::new(
+        KvStoreRegistry::with_config(config.clone()).with_metrics_registry(
+            metrics_runner.as_ref().map_or_else(
+                || Arc::new(std::sync::Mutex::new(crow_kv::metrics::MetricsRegistry::new())),
+                |r| r.registry().clone(),
+            ),
         ),
-    ));
+    );
+
+    // Spawn a config file watcher for diff logging. kv-server has few
+    // dynamic fields; most changes require restart (the registry owns
+    // the config). The watcher logs what changed so the operator knows
+    // a restart is needed.
+    let watcher_old_config = Arc::new(std::sync::Mutex::new(config));
+    let _config_watcher =
+        match crow_common::config::watch::<CrowKVConfig, _>(std::path::Path::new(&args.config), move |new| {
+            let mut old = watcher_old_config.lock().unwrap();
+            crow_common::config::log_diff(&*old, new);
+            *old = new.clone();
+        }) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                tracing::warn!(error = %e, "config file watcher failed to start; live reload disabled");
+                None
+            }
+        };
 
     // Populate the port pool from `--ports` even when `--stores` is not
     // provided, so stores created later via the management API can use
@@ -155,7 +172,7 @@ async fn main() {
             std::process::exit(1);
         });
 
-    let router = mgmt_api::router(crow_kv_server::operation_registry::AppState::new(
+    let router = mgmt::router(crow_kv_server::operation_registry::AppState::new(
         registry.clone(),
     ));
     let listener = tokio::net::TcpListener::bind(mgmt_addr)
@@ -197,6 +214,31 @@ async fn main() {
     // Reconcile local state with group 0 topology KV.
     crow_kv_server::reconcile::reconcile_with_group0(&registry).await;
 
+    // Start the keep-alive loop (registers under /srv/kv-server/<id>).
+    let keepalive = if args.keepalive_interval > 0 {
+        let instance_id = args.instance_id.unwrap_or_else(|| {
+            let id = crow_kv_client::new_client_id();
+            info!(instance_id = id, "keep-alive: generated instance id");
+            id
+        });
+        let mgmt_endpoint = format!("http://{display_addr}");
+        // The group-0 gRPC endpoint is the first store's listen addr,
+        // or the management addr as a fallback (single-node dev).
+        let group0_ep = registry
+            .get_store(0)
+            .and_then(|s| s.listen_addr().map(|a| a.to_string()))
+            .unwrap_or_else(|| format!("http://{display_addr}"));
+        Some(crow_kv_server::keepalive::KeepAliveLoop::spawn(
+            registry.clone(),
+            instance_id,
+            mgmt_endpoint,
+            &group0_ep,
+            args.keepalive_interval,
+        ))
+    } else {
+        None
+    };
+
     // Wire engine stats collector into the metrics runner, then start it.
     // The collector polls C++ engine counters via ct_get_stats each tick,
     // computes deltas, and inc_by()s on registered Rust counters so they
@@ -220,6 +262,10 @@ async fn main() {
     if let Some(ref mut runner) = metrics_runner {
         runner.stop().await;
         info!("metrics runner stopped");
+    }
+    if let Some(ka) = keepalive {
+        ka.stop().await;
+        info!("keep-alive loop stopped");
     }
     graceful_shutdown(registry).await;
 }

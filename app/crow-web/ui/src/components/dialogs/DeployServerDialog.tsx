@@ -10,7 +10,7 @@ import { deployServer } from '../../api';
 export interface DeployServerDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  nodeId: string;
+  nodeId: number;
   defaultMgmtPort?: string;
   defaultGrpcPort?: string;
   onSuccess?: (ports: { mgmtPort: number; grpcPort: number }) => void | Promise<void>;

@@ -3,14 +3,14 @@
 // Baseline: 0.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-08 delete group', () => {
   test('deletes a group through the UI and verifies the real backend', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r8', 'n8');
-    await deployNodeServer(baseURL!, 'n8', 9918, 9928);
-    await createStore(baseURL!, 88, ['n8']);
-    await addGroup(baseURL!, 88, 880, 8800, ['n8']);
+    await seedRackAndNode(baseURL!, 8, 8);
+    await deployNodeServer(baseURL!, 8, freePort(), freePort());
+    await createStore(baseURL!, 88, [8]);
+    await addGroup(baseURL!, 88, 880, 8800, [8]);
 
     const api = await apiContext(baseURL!);
     try {
@@ -31,7 +31,7 @@ test.describe('E2E-08 delete group', () => {
       expect(await response.json()).not.toEqual(expect.arrayContaining([expect.objectContaining({ group_id: 880 })]));
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 'n8');
+      await stopNodeServer(baseURL!, 8);
     }
   });
 });

@@ -1,16 +1,34 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW Console Web UI Design (v1, lean)
+# CROW - Design: Console Web UI
 
-Upstream: `../kv/design-crow-kv.md` §15.4.6 (requirements spec). Sibling:
-`doc/design/design-crow-console.md` (backend Axum routes, registry, SSH
-lifecycle, Swagger asset hosting).
+Depends on: [`design-crow-console.md`](design-crow-console.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §15.4.6
+Satisfies: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §15.4.6
 
 This document covers the **frontend SPA design decisions only** —
 what we chose and why. Requirements (the *what*) live in
 `../kv/design-crow-kv.md`; backend API contracts live in `design-crow-console.md`.
 
+## Table of Contents
+
+- [1. Goals (recap)](#1-goals-recap)
+- [2. Stack decisions](#2-stack-decisions)
+- [3. Information Architecture](#3-information-architecture)
+  - [3.1 Selection & cross-jump](#31-selection--cross-jump)
+- [4. Visual Language](#4-visual-language)
+- [5. Topology Canvas (React Flow, slim)](#5-topology-canvas-react-flow-slim)
+  - [5.1 Physical layout](#51-physical-layout)
+  - [5.2 Logical layout](#52-logical-layout)
+  - [5.3 Interactions](#53-interactions)
+- [6. Inspector Panel](#6-inspector-panel)
+- [6.1 KV Operator Panel (center panel)](#61-kv-operator-panel-center-panel)
+- [7. Embedded Swagger Panel](#7-embedded-swagger-panel)
+- [8. Embedding Contract](#8-embedding-contract)
+- [9. Data & Polling Strategy](#9-data--polling-strategy)
+- [10. Module Layout](#10-module-layout)
+- [11. Accessibility](#11-accessibility)
+- [12. Testing](#12-testing)
 
 ## 1. Goals (recap)
 

@@ -24,8 +24,8 @@ async fn spawn_server() -> Option<(u32, ServerClient)> {
         return None;
     }
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -33,7 +33,7 @@ async fn spawn_server() -> Option<(u32, ServerClient)> {
         ssh_password: None,
     };
     let _ = RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     };
     let req = DeployRequest {
@@ -125,6 +125,7 @@ async fn full_store_group_remote_cycle() {
     let remotes = vec![RemoteReplicaInfo {
         replica_id: 601,
         endpoint: "127.0.0.1:39999".into(),
+        voting: true,
     }];
     client
         .add_remote_replicas(store_id, group_id_2, &remotes)

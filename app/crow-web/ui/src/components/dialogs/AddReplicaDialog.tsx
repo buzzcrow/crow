@@ -14,8 +14,8 @@ export interface AddReplicaDialogProps {
   storeId: string;
   groupId: string;
   nodes: Node[];
-  usedNodeIds?: Set<string>;
-  defaultNodeId?: string;
+  usedNodeIds?: Set<number>;
+  defaultNodeId?: number;
   defaultReplicaId?: string;
   onSuccess?: () => void | Promise<void>;
 }
@@ -30,11 +30,11 @@ export function AddReplicaDialog({
   groupId,
   nodes,
   usedNodeIds = new Set(),
-  defaultNodeId = '',
+  defaultNodeId = 0,
   defaultReplicaId = '',
   onSuccess,
 }: AddReplicaDialogProps) {
-  const [nodeId, setNodeId] = useState(defaultNodeId);
+  const [nodeId, setNodeId] = useState<number>(defaultNodeId);
   const [replicaId, setReplicaId] = useState(defaultReplicaId);
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
@@ -45,7 +45,7 @@ export function AddReplicaDialog({
   const hasAvailableNodes = availableNodes.length > 0;
   const resolvedDefaultNodeId = defaultNodeId && availableNodes.some((node) => node.id === defaultNodeId)
     ? defaultNodeId
-    : (availableNodes[0]?.id || '');
+    : (availableNodes[0]?.id || 0);
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
@@ -109,15 +109,15 @@ export function AddReplicaDialog({
         ) : (
           <Select
             label="Node"
-            value={nodeId}
-            onChange={(e) => setNodeId(e.target.value)}
+            value={String(nodeId)}
+            onChange={(e) => setNodeId(Number(e.target.value))}
             disabled={!hasAvailableNodes}
           >
             {availableNodes.length === 0 ? (
               <option value="" disabled>No available node</option>
             ) : (
               availableNodes.map((node) => (
-                <option key={node.id} value={node.id}>
+                <option key={node.id} value={String(node.id)}>
                   {node.id} ({node.host})
                 </option>
               ))

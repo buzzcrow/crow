@@ -25,7 +25,8 @@ impl WalBlockAlignment {
     }
 
     #[must_use]
-    pub const fn io_unit_bytes(self) -> Option<usize> {
+    #[allow(dead_code)]
+    pub(crate) const fn io_unit_bytes(self) -> Option<usize> {
         match self {
             Self::Unaligned => None,
             Self::Aligned { io_unit_bytes } => Some(io_unit_bytes),
@@ -34,7 +35,8 @@ impl WalBlockAlignment {
 
     /// Whether `offset`/`len` already satisfy this alignment requirement.
     #[must_use]
-    pub const fn is_aligned(self, offset: u64, len: usize) -> bool {
+    #[allow(dead_code)]
+    pub(crate) const fn is_aligned(self, offset: u64, len: usize) -> bool {
         match self {
             Self::Unaligned => true,
             Self::Aligned { io_unit_bytes } => {
@@ -56,7 +58,7 @@ impl WalBlockAlignment {
     /// Panics if the configured I/O unit or computed aligned write length does
     /// not fit into the target integer types on the current platform.
     #[must_use]
-    pub fn plan_write(self, offset: u64, len: usize) -> WalBlockWritePlan {
+    pub(crate) fn plan_write(self, offset: u64, len: usize) -> WalBlockWritePlan {
         match self {
             Self::Unaligned => WalBlockWritePlan {
                 aligned_offset: offset,
@@ -132,7 +134,7 @@ pub enum WalPipelineBackend {
 
 impl WalPipelineBackend {
     #[must_use]
-    pub fn file(root_path: PathBuf) -> Self {
+    pub(crate) fn file(root_path: PathBuf) -> Self {
         Self::File(WalFilePipelineBackend { root_path })
     }
 
@@ -142,7 +144,7 @@ impl WalPipelineBackend {
     }
 
     #[must_use]
-    pub fn block(device_name: impl Into<String>, alignment: WalBlockAlignment) -> Self {
+    pub(crate) fn block(device_name: impl Into<String>, alignment: WalBlockAlignment) -> Self {
         Self::Block(WalBlockPipelineBackend::new(device_name, alignment))
     }
 

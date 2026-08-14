@@ -42,8 +42,11 @@ app/crow-cli/bench-runs/
 # Per-crate runtime dirs — these names don't appear in source code,
 # so globbing is safe and avoids repeating per crate.
 **/waldata/
-**/conf/
 **/ctdata/
+# Runtime config dirs (operator-supplied real configs, not tracked).
+# Tracked default configs live in app/<crate>/conf/*.json.
+app/crow-diskdb/conf/runtime/
+app/crow-kv-server/conf/runtime/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.
@@ -51,6 +54,7 @@ app/crow-kv-server/log/
 app/crow-cli/log/
 lib/crow-console-shared/log/
 app/crow-web/log/
+app/crow-diskdb/log/
 
 # ── Profiling artifacts ─────────────────────────────────────────
 # samply / perf / flamegraph output (profile-write-*.zip, profile-write-*/)

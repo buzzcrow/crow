@@ -7,13 +7,13 @@
 //! end-to-end and verifies the legacy `--server` flag is no longer
 //! required for the four KV verbs.
 
-mod testkit;
+mod common;
 
 use std::time::Duration;
 
+use common::console::{crow_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
 use crow_console_shared::clients::console::ConsoleClient;
 use crow_console_shared::lifecycle;
-use testkit::console::{crow_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
@@ -34,10 +34,7 @@ async fn kv_put_get_delete_round_trip() {
     let port = console.port();
 
     let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
-    console_client
-        .cluster_init(&["n1".to_string()])
-        .await
-        .expect("cluster_init");
+    console_client.cluster_init(&[1]).await.expect("cluster_init");
 
     // Create store 1 / group 1 via the same CLI control path used by the
     // passing bench smoke test, then wait for the single-replica group to
@@ -58,7 +55,7 @@ async fn kv_put_get_delete_round_trip() {
             "--replica-id",
             "1",
             "--nodes",
-            "n1",
+            "1",
         ],
     );
     assert_eq!(code, 0, "paxos add stderr={stderr}");

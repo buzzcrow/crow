@@ -3,8 +3,8 @@
 
 # CROW - Design: Write-Ahead Log
 
-Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
-Satisfies: design-crow-kv.md §8.1](design-crow-kv.md), design-crow-kv.md §8.2](design-crow-kv.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §8.1, §8.2
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §8.1, §8.2
 
 This document specifies CROW's write-ahead log. **There is exactly one durable
 log per group: the replica's consensus log (the per-slot acceptor log).**
@@ -25,7 +25,7 @@ durable accepts.
 - [2. Logical Record Shape](#2-logical-record-shape)
 - [3. Multi-Disk Segment Layout](#3-multi-disk-segment-layout)
 - [4. Write Path and Batched Durable Flush](#4-write-path-and-batched-durable-flush)
-- [4.6 I/O Backend Abstraction](#46-io-backend-abstraction)
+  - [4.6 I/O Backend Abstraction](#46-io-backend-abstraction)
 - [5. Ack Contract and Failure Modes](#5-ack-contract-and-failure-modes)
 - [6. Replay, Restore, and Recovery](#6-replay-restore-and-recovery)
 - [7. Garbage Collection](#7-garbage-collection)

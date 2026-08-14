@@ -3,7 +3,7 @@
 // Baseline: 1.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createRack, createStore, createNode, deployNodeServer, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, createRack, createStore, createNode, deployNodeServer, freePort, stopNodeServer } from '../fixtures/consoleSetup';
 
 function nextNumericId(values: Array<string | number>): string {
   const max = values.reduce<number>((acc, value) => {
@@ -18,21 +18,23 @@ test.describe('E2E-20 UI behaviors', () => {
   test('covers create dialog defaults and eligible candidate lists', async ({ page, baseURL }) => {
     // Batch independent API calls to reduce total round-trip time under load.
     await Promise.all([
-      createRack(baseURL!, { id: 'r20a', name: 'Rack Twenty A' }),
-      createRack(baseURL!, { id: 'r20b', name: 'Rack Twenty B' }),
-      createRack(baseURL!, { id: 'r20c', name: 'Rack Twenty C' }),
-      createRack(baseURL!, { id: 'r20d', name: 'Rack Twenty D' }),
+      createRack(baseURL!, { id: 201, name: 'Rack Twenty A' }),
+      createRack(baseURL!, { id: 202, name: 'Rack Twenty B' }),
+      createRack(baseURL!, { id: 203, name: 'Rack Twenty C' }),
+      createRack(baseURL!, { id: 204, name: 'Rack Twenty D' }),
     ]);
     await Promise.all([
-      createNode(baseURL!, { id: 'n20a', rack_id: 'r20a' }),
-      createNode(baseURL!, { id: 'n20b', rack_id: 'r20b' }),
-      createNode(baseURL!, { id: 'n20c', rack_id: 'r20c' }),
-      createNode(baseURL!, { id: 'n20d', rack_id: 'r20d' }),
+      createNode(baseURL!, { id: 201, rack_id: 201 }),
+      createNode(baseURL!, { id: 202, rack_id: 202 }),
+      createNode(baseURL!, { id: 203, rack_id: 203 }),
+      createNode(baseURL!, { id: 204, rack_id: 204 }),
     ]);
-    await deployNodeServer(baseURL!, 'n20a', 9960, 9970);
-    await deployNodeServer(baseURL!, 'n20b', 9961, 9971);
-    await deployNodeServer(baseURL!, 'n20c', 9962, 9972);
-    await createStore(baseURL!, 207, ['n20a', 'n20b']);
+    await Promise.all([
+      deployNodeServer(baseURL!, 201, freePort(), freePort()),
+      deployNodeServer(baseURL!, 202, freePort(), freePort()),
+      deployNodeServer(baseURL!, 203, freePort(), freePort()),
+    ]);
+    await createStore(baseURL!, 207, [201, 202]);
 
     const api = await apiContext(baseURL!);
     try {
@@ -54,10 +56,10 @@ test.describe('E2E-20 UI behaviors', () => {
       const addStoreDialog = page.getByRole('dialog', { name: 'Add KV Store' });
       await expect(addStoreDialog).toBeVisible();
       await expect(addStoreDialog.getByLabel('KV Store ID (numeric)')).toHaveValue(expectedStoreId);
-      await expect(addStoreDialog.getByLabel(/^n20a/)).toBeVisible();
-      await expect(addStoreDialog.getByLabel(/^n20b/)).toBeVisible();
-      await expect(addStoreDialog.getByLabel(/^n20c/)).toBeVisible();
-      await expect(addStoreDialog.getByLabel(/^n20d/)).toHaveCount(0);
+      await expect(addStoreDialog.getByLabel(/^201\b/)).toBeVisible();
+      await expect(addStoreDialog.getByLabel(/^202\b/)).toBeVisible();
+      await expect(addStoreDialog.getByLabel(/^203\b/)).toBeVisible();
+      await expect(addStoreDialog.getByLabel(/^204\b/)).toHaveCount(0);
       await addStoreDialog.getByRole('button', { name: 'Cancel' }).click();
 
       await expect(aside.getByText('S-207')).toBeVisible({ timeout: 3_000 });
@@ -68,13 +70,13 @@ test.describe('E2E-20 UI behaviors', () => {
       await expect(addGroupDialog.getByLabel('KV Store')).toHaveValue('207');
       await expect(addGroupDialog.getByLabel('Group ID (numeric)')).toHaveValue(expectedGroupId);
       await expect(addGroupDialog.getByLabel('Starting Replica ID (numeric)')).toHaveValue(expectedReplicaId);
-      await expect(addGroupDialog.getByLabel(/^n20a/)).toBeVisible();
-      await expect(addGroupDialog.getByLabel(/^n20b/)).toBeVisible();
-      await expect(addGroupDialog.getByLabel(/^n20c/)).toBeVisible();
-      await expect(addGroupDialog.getByLabel(/^n20d/)).toHaveCount(0);
-      await addGroupDialog.getByLabel(/^n20a/).check();
-      await addGroupDialog.getByLabel(/^n20b/).check();
-      const n20cInput = addGroupDialog.getByLabel(/^n20c/);
+      await expect(addGroupDialog.getByLabel(/^201\b/)).toBeVisible();
+      await expect(addGroupDialog.getByLabel(/^202\b/)).toBeVisible();
+      await expect(addGroupDialog.getByLabel(/^203\b/)).toBeVisible();
+      await expect(addGroupDialog.getByLabel(/^204\b/)).toHaveCount(0);
+      await addGroupDialog.getByLabel(/^201\b/).check();
+      await addGroupDialog.getByLabel(/^202\b/).check();
+      const n20cInput = addGroupDialog.getByLabel(/^203\b/);
       if (await n20cInput.isChecked()) await n20cInput.uncheck();
       await addGroupDialog.getByRole('button', { name: /create group/i }).click();
 
@@ -89,9 +91,9 @@ test.describe('E2E-20 UI behaviors', () => {
         options.map((option) => ({ value: (option as HTMLOptionElement).value, disabled: (option as HTMLOptionElement).disabled })),
       );
       const optionValues = nodeOptions.filter((option) => !option.disabled).map((option) => option.value);
-      expect(optionValues).toEqual(expect.arrayContaining(['n20c', 'n20d']));
-      expect(optionValues).not.toEqual(expect.arrayContaining(['n20a', 'n20b']));
-      await addReplicaDialog.getByLabel('Node', { exact: true }).selectOption('n20c');
+      expect(optionValues).toEqual(expect.arrayContaining(['203', '204']));
+      expect(optionValues).not.toEqual(expect.arrayContaining(['201', '202']));
+      await addReplicaDialog.getByLabel('Node', { exact: true }).selectOption('203');
       await addReplicaDialog.getByRole('button', { name: /add replica/i }).click();
 
       await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
@@ -102,15 +104,15 @@ test.describe('E2E-20 UI behaviors', () => {
         options.map((option) => ({ value: (option as HTMLOptionElement).value, disabled: (option as HTMLOptionElement).disabled })),
       );
       const remainingValues = remainingOptions.filter((option) => !option.disabled).map((option) => option.value);
-      expect(remainingValues).toEqual(expect.arrayContaining(['n20d']));
-      expect(remainingValues).not.toEqual(expect.arrayContaining(['n20a', 'n20b', 'n20c']));
+      expect(remainingValues).toEqual(expect.arrayContaining(['204']));
+      expect(remainingValues).not.toEqual(expect.arrayContaining(['201', '202', '203']));
       await remainingReplicaDialog.getByRole('button', { name: 'Cancel' }).click();
     } finally {
       await api.dispose();
       await Promise.all([
-        stopNodeServer(baseURL!, 'n20a'),
-        stopNodeServer(baseURL!, 'n20b'),
-        stopNodeServer(baseURL!, 'n20c'),
+        stopNodeServer(baseURL!, 201),
+        stopNodeServer(baseURL!, 202),
+        stopNodeServer(baseURL!, 203),
       ]);
     }
   });
@@ -142,17 +144,17 @@ test.describe('E2E-20 UI behaviors', () => {
   });
 
   test('covers tree chevron vs text click behavior', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r21a', name: 'Rack Twenty One A' });
-    await createRack(baseURL!, { id: 'r21b', name: 'Rack Twenty One B' });
-    await createRack(baseURL!, { id: 'r21c', name: 'Rack Twenty One C' });
-    await createNode(baseURL!, { id: 'n21a', rack_id: 'r21a' });
-    await createNode(baseURL!, { id: 'n21b', rack_id: 'r21b' });
-    await createNode(baseURL!, { id: 'n21c', rack_id: 'r21c' });
+    await createRack(baseURL!, { id: 211, name: 'Rack Twenty One A' });
+    await createRack(baseURL!, { id: 212, name: 'Rack Twenty One B' });
+    await createRack(baseURL!, { id: 213, name: 'Rack Twenty One C' });
+    await createNode(baseURL!, { id: 211, rack_id: 211 });
+    await createNode(baseURL!, { id: 212, rack_id: 212 });
+    await createNode(baseURL!, { id: 213, rack_id: 213 });
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
-    const rack21a = page.getByRole('treeitem').filter({ hasText: 'R-r21a (Rack Twenty One A)' });
-    const node21c = page.getByRole('treeitem').filter({ hasText: 'N-n21c' });
+    const rack21a = page.getByRole('treeitem').filter({ hasText: 'R-211 (Rack Twenty One A)' });
+    const node21c = page.getByRole('treeitem').filter({ hasText: 'N-213' });
     await expect(rack21a).toBeVisible({ timeout: 3_000 });
     await expect(node21c).toBeVisible({ timeout: 3_000 });
 
@@ -163,7 +165,7 @@ test.describe('E2E-20 UI behaviors', () => {
     await expect(rack21a).toHaveAttribute('aria-expanded', 'true');
 
     // Text click selects the node
-    await node21c.getByRole('button', { name: 'N-n21c' }).click();
+    await node21c.getByRole('button', { name: 'N-213' }).click();
     await expect(node21c).toHaveAttribute('aria-selected', 'true');
   });
 });

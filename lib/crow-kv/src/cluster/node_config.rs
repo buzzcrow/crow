@@ -142,7 +142,8 @@ impl NodeConfigStore {
 
     /// Path to the config file (for diagnostics / tests).
     #[must_use]
-    pub fn path(&self) -> &Path {
+    #[allow(dead_code)]
+    pub(crate) fn path(&self) -> &Path {
         &self.config_path
     }
 

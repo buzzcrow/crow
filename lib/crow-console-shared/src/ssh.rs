@@ -24,11 +24,11 @@ use russh::keys::load_secret_key;
 use russh::ChannelMsg;
 use tracing::{debug, warn};
 
-pub use known_hosts::{KeyRecord, KnownHostsStore, Outcome as KnownHostsOutcome};
+pub(crate) use known_hosts::{KeyRecord, KnownHostsStore, Outcome as KnownHostsOutcome};
 
 /// Authentication strategy resolved from a `NodeEntry`.
 #[derive(Debug, Clone)]
-pub enum SshCreds {
+pub(crate) enum SshCreds {
     /// PEM private key file path.
     KeyPath(PathBuf),
     /// Plaintext password.
@@ -43,7 +43,7 @@ impl SshCreds {
     ///
     /// # Errors
     /// `Error::Validation` if the node has no usable creds.
-    pub fn resolve(node: &NodeEntry) -> Result<Self> {
+    pub(crate) fn resolve(node: &NodeEntry) -> Result<Self> {
         if let Some(p) = &node.ssh_key {
             return Ok(Self::KeyPath(PathBuf::from(p)));
         }
@@ -70,7 +70,7 @@ impl SshCreds {
 
 /// Result of `Session::exec`.
 #[derive(Debug, Clone)]
-pub struct ExecOutput {
+pub(crate) struct ExecOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit: Option<u32>,
@@ -79,23 +79,23 @@ pub struct ExecOutput {
 impl ExecOutput {
     /// `true` if the remote command exited zero.
     #[must_use]
-    pub fn success(&self) -> bool {
+    pub(crate) fn success(&self) -> bool {
         self.exit == Some(0)
     }
 
     #[must_use]
-    pub fn stdout_str(&self) -> std::borrow::Cow<'_, str> {
+    pub(crate) fn stdout_str(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.stdout)
     }
 
     #[must_use]
-    pub fn stderr_str(&self) -> std::borrow::Cow<'_, str> {
+    pub(crate) fn stderr_str(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.stderr)
     }
 }
 
 /// A connected SSH session. Cheap to keep alive; not pooled in C4.
-pub struct Session {
+pub(crate) struct Session {
     handle: Handle<ClientHandler>,
 }
 
@@ -105,7 +105,7 @@ impl Session {
     /// # Errors
     /// Returns `Error::UpstreamRpc` for any russh / auth failure, with the
     /// `host:port` as the synthetic server id.
-    pub async fn connect(node: &NodeEntry, creds: &SshCreds) -> Result<Self> {
+    pub(crate) async fn connect(node: &NodeEntry, creds: &SshCreds) -> Result<Self> {
         if node.ssh_user.is_empty() {
             return Err(Error::Validation {
                 field: "ssh_user".into(),
@@ -165,7 +165,7 @@ impl Session {
     ///
     /// # Errors
     /// `Error::UpstreamRpc` for channel / exec / IO failures.
-    pub async fn exec(&mut self, command: &str) -> Result<ExecOutput> {
+    pub(crate) async fn exec(&mut self, command: &str) -> Result<ExecOutput> {
         let id = "<ssh>".to_string();
         let mut channel = self
             .handle
@@ -198,7 +198,7 @@ impl Session {
     }
 
     /// Send a clean disconnect. Best-effort — errors are ignored.
-    pub async fn close(self) {
+    pub(crate) async fn close(self) {
         let _ = self
             .handle
             .disconnect(russh::Disconnect::ByApplication, "", "")
@@ -303,7 +303,7 @@ fn known_hosts_store_for_session() -> Result<Arc<KnownHostsStore>> {
 ///
 /// # Errors
 /// Forwarded from `Session::connect` / `Session::exec`.
-pub async fn run_remote(node: &NodeEntry, command: &str) -> Result<ExecOutput> {
+pub(crate) async fn run_remote(node: &NodeEntry, command: &str) -> Result<ExecOutput> {
     let creds = SshCreds::resolve(node)?;
     let mut session = Session::connect(node, &creds).await?;
     let out = session.exec(command).await?;
@@ -387,7 +387,8 @@ pub async fn stop_via_ssh(node: &NodeEntry, pid: u32) -> Result<bool> {
 /// Default SSH key path used when [`SshCreds::resolve`] would walk
 /// `~/.ssh/`. Exposed for unit tests.
 #[must_use]
-pub fn default_key_candidates() -> Vec<PathBuf> {
+#[allow(dead_code)]
+pub(crate) fn default_key_candidates() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(home) = dirs::home_dir() {
         v.push(home.join(".ssh").join("id_ed25519"));
@@ -402,7 +403,7 @@ pub fn default_key_candidates() -> Vec<PathBuf> {
 ///
 /// # Errors
 /// Returns `Error::Config` on parse failure.
-pub fn parse_node_toml(toml_str: &str) -> Result<NodeEntry> {
+pub(crate) fn parse_node_toml(toml_str: &str) -> Result<NodeEntry> {
     toml::from_str(toml_str).map_err(|e| Error::Config(format!("parse: {e}")))
 }
 
@@ -413,8 +414,8 @@ mod tests {
 
     fn node(host: &str, user: &str, key: Option<&str>, password: Option<&str>) -> crate::config::NodeEntry {
         crate::config::NodeEntry {
-            id: "n".into(),
-            rack_id: "r".into(),
+            id: 1,
+            rack_id: 1,
             host: host.into(),
             ssh_port: 22,
             ssh_user: user.into(),
@@ -443,8 +444,8 @@ mod tests {
     #[test]
     fn parse_toml_full_creds() {
         let s = r#"
-            id = "n1"
-            rack_id = "r1"
+            id = 1
+            rack_id = 1
             host = "10.0.0.1"
             ssh_port = 2222
             ssh_user = "ops"
@@ -461,8 +462,8 @@ mod tests {
     #[test]
     fn parse_toml_defaults_port_and_password_optional() {
         let s = r#"
-            id = "n1"
-            rack_id = "r1"
+            id = 1
+            rack_id = 1
             host = "10.0.0.1"
         "#;
         let n = parse_node_toml(s).unwrap();

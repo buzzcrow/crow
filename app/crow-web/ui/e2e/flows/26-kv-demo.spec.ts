@@ -3,7 +3,7 @@
 // Baseline: 1.1s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, resetAll, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, freePort, resetAll, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.goto('/');
@@ -31,10 +31,10 @@ test.describe('E2E-26 KV demo inject + delete', () => {
     await resetAll(baseURL!);
   });
   test('inject into single group then delete all', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r26', 'n26');
-    await deployNodeServer(baseURL!, 'n26', 9960, 9970);
-    await createStore(baseURL!, 260, ['n26']);
-    await addGroup(baseURL!, 260, 2600, 26000, ['n26']);
+    await seedRackAndNode(baseURL!, 26, 26);
+    await deployNodeServer(baseURL!, 26, freePort(), freePort());
+    await createStore(baseURL!, 260, [26]);
+    await addGroup(baseURL!, 260, 2600, 26000, [26]);
     await waitForLeader(baseURL!, 260, 2600);
 
     try {
@@ -67,16 +67,16 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await page.getByRole('button', { name: /scan/i }).click();
       await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/)).toHaveCount(0, { timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n26');
+      await stopNodeServer(baseURL!, 26);
     }
   });
 
   test('inject into All Groups mode distributes across groups', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r26b', 'n26b');
-    await deployNodeServer(baseURL!, 'n26b', 9961, 9971);
-    await createStore(baseURL!, 261, ['n26b']);
-    await addGroup(baseURL!, 261, 2610, 26100, ['n26b']);
-    await addGroup(baseURL!, 261, 2611, 26110, ['n26b']);
+    await seedRackAndNode(baseURL!, 262, 262);
+    await deployNodeServer(baseURL!, 262, freePort(), freePort());
+    await createStore(baseURL!, 261, [262]);
+    await addGroup(baseURL!, 261, 2610, 26100, [262]);
+    await addGroup(baseURL!, 261, 2611, 26110, [262]);
     await waitForLeader(baseURL!, 261, 2610);
     await waitForLeader(baseURL!, 261, 2611);
 
@@ -113,16 +113,16 @@ test.describe('E2E-26 KV demo inject + delete', () => {
         return r0.length + r1.length;
       }, { timeout: 5_000, intervals: [100] }).toBe(0);
     } finally {
-      await stopNodeServer(baseURL!, 'n26b');
+      await stopNodeServer(baseURL!, 262);
     }
   });
 
   test('inject into specific second group only targets that group', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r26c', 'n26c');
-    await deployNodeServer(baseURL!, 'n26c', 9962, 9972);
-    await createStore(baseURL!, 262, ['n26c']);
-    await addGroup(baseURL!, 262, 2620, 26200, ['n26c']);
-    await addGroup(baseURL!, 262, 2621, 26210, ['n26c']);
+    await seedRackAndNode(baseURL!, 263, 263);
+    await deployNodeServer(baseURL!, 263, freePort(), freePort());
+    await createStore(baseURL!, 262, [263]);
+    await addGroup(baseURL!, 262, 2620, 26200, [263]);
+    await addGroup(baseURL!, 262, 2621, 26210, [263]);
     await waitForLeader(baseURL!, 262, 2620);
     await waitForLeader(baseURL!, 262, 2621);
 
@@ -154,7 +154,7 @@ test.describe('E2E-26 KV demo inject + delete', () => {
         return remaining.length;
       }, { timeout: 5_000, intervals: [100] }).toBe(0);
     } finally {
-      await stopNodeServer(baseURL!, 'n26c');
+      await stopNodeServer(baseURL!, 263);
     }
   });
 });
