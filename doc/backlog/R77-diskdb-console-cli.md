@@ -181,8 +181,11 @@ GUI → REST → `DiskdbClient`/`HardwareClient` → gRPC → `crow-diskdb`.
      dialogs following the `AddNodeDialog`/`ConfirmDeleteDialog`
      pattern: `AddDiskGroupDialog`, `AddDiskDialog` (**batch** —
      multiple UUIDs at once; new `POST .../disks/batch` endpoint,
-     atomic all-or-nothing; defaults 4 TiB capacity / 32 GiB zone /
-     1 MiB unit locked), `RemoveDiskDialog`, `MoveDiskDialog` (target
+     atomic all-or-nothing on the config mutation (in-memory +
+     persist); group-0 sysdata sync is best-effort per disk, with
+     failures reported in the response; defaults 4 TiB capacity /
+     32 GiB zone / 1 MiB unit locked), `RemoveDiskDialog`,
+     `MoveDiskDialog` (target
      rack/node/disk-group), `SetDiskStatusDialog` (HwStatus enum).
    - **Two-column status display** on disk rows: "Group-0" (the
      `DiskValue.status` from `HardwareClient.get_disk`, fetched via the
@@ -333,8 +336,11 @@ Edge cases at a glance:
 - Large zones (32K units at 32 GB / 1 MB) → canvas grid (~181×181),
   no per-block DOM; bitmap fetched on demand only. Zone grid for a
   200 TB disk (~6400 zones) → ~80×80 canvas.
-- Batch disk-add with N disks → atomic all-or-nothing; a malformed
-  `disk_id` or group-0 write failure rejects the whole batch.
+- Batch disk-add with N disks → atomic all-or-nothing on the config
+  mutation (in-memory + persist); a malformed `disk_id` or duplicate
+  (in config or within the batch) rejects the whole batch before any
+  mutation. Group-0 sysdata sync is best-effort per disk; failures are
+  reported in the response body, not used to reject the batch.
 - DiskDB deploy failure on AddNode → KV stays deployed; operator
   retries via Server context menu Deploy.
 
@@ -404,10 +410,12 @@ Edge cases at a glance:
   right-clicking a node offers "Add Disk Group"; right-clicking a
   disk-group offers "Add Disk" (batch dialog — multiple UUIDs, defaults
   4 TiB / 32 GiB / 1 MiB locked); the batch endpoint adds all disks
-  atomically via REST → group 0 → diskdb sync, and the disks appear in
-  the tree with `Up` status and zone counts. E2E test.
-- Batch with a malformed `disk_id` → whole batch rejected, 0 disks
-  created. E2E test.
+  atomically (config mutation + persist) via REST → group 0 → diskdb
+  sync, and the disks appear in the tree with `Up` status and zone
+  counts. E2E test.
+- Batch with a malformed `disk_id` or a duplicate `disk_id` (in config
+  or within the batch) → whole batch rejected, 0 disks created. E2E
+  test.
 - `RemoveDiskDialog`, `MoveDiskDialog`, `SetDiskStatusDialog` mutate
   via REST and refresh the tree. E2E test.
 - Disk rows show two status columns — "Group-0" (from

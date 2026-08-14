@@ -260,7 +260,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_rack(&self, rack_id: RackId) -> Result<()> {
-        self.delete_path(&format!("/api/racks/{rack_id}")).await
+        self.delete_no_response(&format!("/api/racks/{rack_id}")).await
     }
 
     // ── Physical: node lifecycle ───────────────────────────────────
@@ -293,7 +293,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_node(&self, node_id: NodeId) -> Result<()> {
-        self.delete_path(&format!("/api/nodes/{node_id}")).await
+        self.delete_no_response(&format!("/api/nodes/{node_id}")).await
     }
 
     /// `POST /api/nodes/:node_id/ping`.
@@ -333,7 +333,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_disk_group(&self, node_id: NodeId, dg_id: DiskGroupId) -> Result<()> {
-        self.delete_path(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}"))
+        self.delete_no_response(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}"))
             .await
     }
 
@@ -371,7 +371,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_disk(&self, node_id: NodeId, dg_id: DiskGroupId, disk_id: &str) -> Result<()> {
-        self.delete_path(&format!(
+        self.delete_no_response(&format!(
             "/api/nodes/{node_id}/disk-groups/{dg_id}/disks/{disk_id}"
         ))
         .await
@@ -489,7 +489,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_store(&self, sid: u64) -> Result<()> {
-        self.delete_path(&format!("/api/stores/{sid}")).await
+        self.delete_no_response(&format!("/api/stores/{sid}")).await
     }
 
     // ── Logical group plane ────────────────────────────────────────
@@ -533,7 +533,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_group(&self, sid: u64, gid: u64) -> Result<()> {
-        self.delete_path(&format!("/api/stores/{sid}/groups/{gid}")).await
+        self.delete_no_response(&format!("/api/stores/{sid}/groups/{gid}"))
+            .await
     }
 
     // ── Logical replica plane ──────────────────────────────────────
@@ -570,7 +571,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
-        self.delete_path(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
+        self.delete_no_response(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
             .await
     }
 
@@ -728,7 +729,7 @@ impl ConsoleClient {
         self.decode(resp, path).await
     }
 
-    async fn delete_path(&self, path: &str) -> Result<()> {
+    pub(crate) async fn delete_no_response(&self, path: &str) -> Result<()> {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();

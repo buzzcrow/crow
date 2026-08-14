@@ -11,6 +11,7 @@
 
 pub mod corr_id;
 pub mod diskdb;
+pub mod diskdb_lifecycle;
 pub mod error;
 pub mod expand;
 pub mod health;
@@ -80,7 +81,7 @@ pub fn router(state: AppState) -> axum::Router {
             get(lifecycle::http_list_disks_in_group).post(lifecycle::http_add_disk),
         )
         .route(
-            "/api/nodes/:id/disk-groups/:dg_id/disks:batch",
+            "/api/nodes/:id/disk-groups/:dg_id/disks/batch",
             post(lifecycle::http_add_disks_batch),
         )
         .route(
@@ -103,9 +104,22 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/diskdb/compact", post(diskdb::http_diskdb_compact))
         .route("/api/diskdb/rebuild", post(diskdb::http_diskdb_rebuild))
         // ── DiskDB deploy lifecycle (R77) ────────────────────────────
-        .route("/api/nodes/:id/diskdb/deploy", post(diskdb::http_deploy_diskdb))
-        .route("/api/nodes/:id/diskdb/restart", post(diskdb::http_restart_diskdb))
-        .route("/api/nodes/:id/diskdb/stop", post(diskdb::http_stop_diskdb))
+        .route(
+            "/api/nodes/:id/diskdb/deploy",
+            post(diskdb_lifecycle::http_deploy_diskdb),
+        )
+        .route(
+            "/api/nodes/:id/diskdb/restart",
+            post(diskdb_lifecycle::http_restart_diskdb),
+        )
+        .route(
+            "/api/nodes/:id/diskdb/stop",
+            post(diskdb_lifecycle::http_stop_diskdb),
+        )
+        .route(
+            "/api/nodes/:id/diskdb",
+            axum::routing::delete(diskdb_lifecycle::http_delete_diskdb),
+        )
         .route(
             "/api/nodes/:id/server",
             get(lifecycle::http_get_node_server).delete(lifecycle::http_delete_node_server),

@@ -84,6 +84,12 @@ pub enum DiskdbVerb {
         #[arg(long)]
         node: u64,
     },
+    /// Stop (best-effort) and remove a diskdb instance's `ServerEntry`.
+    /// Use when `stop` fails with no tracked PID (console restarted).
+    Delete {
+        #[arg(long)]
+        node: u64,
+    },
 }
 
 pub async fn run_diskdb_verb(cli: &Cli, verb: DiskdbVerb) -> ExitCode {
@@ -119,6 +125,7 @@ pub async fn run_diskdb_verb(cli: &Cli, verb: DiskdbVerb) -> ExitCode {
         }
         DiskdbVerb::Restart { node } => diskdb_restart(cli, node).await,
         DiskdbVerb::Stop { node } => diskdb_stop(cli, node).await,
+        DiskdbVerb::Delete { node } => diskdb_delete(cli, node).await,
     }
 }
 
@@ -405,6 +412,27 @@ async fn diskdb_stop(cli: &Cli, node: u64) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: stop diskdb: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn diskdb_delete(cli: &Cli, node: u64) -> ExitCode {
+    let client = match console_client(cli) {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    match client.delete_diskdb(node).await {
+        Ok(()) => {
+            if cli.json {
+                println!("{{\"ok\":true}}");
+            } else {
+                println!("deleted diskdb entry on node {node}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: delete diskdb: {e}");
             ExitCode::from(2)
         }
     }

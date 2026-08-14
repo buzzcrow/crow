@@ -15,6 +15,7 @@ use crow_console_shared::config::{
 use crow_console_shared::expand::RecursiveDepth;
 use crow_console_shared::monitor::NodeRecord;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::Duration;
 
 fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
@@ -778,14 +779,18 @@ pub async fn http_restart_node_server(
     // Extract ports from the persisted URLs. The deploy path stamped
     // them in originally as host:port; if either fails to parse we
     // surface a 500 since that's a console-state-corruption case.
-    let mgmt_port = port_of(&entry.url)
+    let mgmt_port = crate::mgmt::port_of(&entry.url)
         .ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
-    let grpc_port = entry.grpc_url.as_deref().and_then(port_of).ok_or_else(|| {
-        err_500(format!(
-            "server entry has malformed grpc_url: {:?}",
-            entry.grpc_url
-        ))
-    })?;
+    let grpc_port = entry
+        .grpc_url
+        .as_deref()
+        .and_then(crate::mgmt::port_of)
+        .ok_or_else(|| {
+            err_500(format!(
+                "server entry has malformed grpc_url: {:?}",
+                entry.grpc_url
+            ))
+        })?;
 
     if let Some(pid) = state.runtime_pid(node_id) {
         let _sent = match &node {
@@ -857,22 +862,9 @@ pub async fn http_restart_node_server(
     }))
 }
 
-/// Parse `port` out of a URL like `http://host:9910` or `host:9910`.
-/// Returns `None` on any shape we don't recognise.
-fn port_of(url: &str) -> Option<u16> {
-    // Strip scheme if present.
-    let stripped = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
-    let host_port = stripped.split('/').next().unwrap_or(stripped);
-    let port_str = host_port.rsplit(':').next()?;
-    port_str.parse::<u16>().ok()
-}
-
 #[derive(Debug, Serialize)]
 pub struct StopResult {
-    sent: bool,
+    pub sent: bool,
 }
 
 /// `POST /api/nodes/:node_id/server/stop`. Stop the server on this node
@@ -1380,6 +1372,104 @@ pub struct AddDiskBody {
     unit_size_bytes: u32,
 }
 
+/// Validate a single disk-add input, producing the `DiskEntry`, proto
+/// `DiskId`, and `DiskValue` for group-0 sysdata sync. Shared by
+/// `http_add_disk` and `http_add_disks_batch` so both paths reject
+/// bad inputs before any config mutation or persist.
+fn validate_disk_input(
+    body: &AddDiskBody,
+    dg_id: DiskGroupId,
+    rack_id: RackId,
+    node_id: NodeId,
+) -> Result<
+    (
+        DiskEntry,
+        crow_protocol::common::DiskId,
+        crow_protocol::diskdb::rpc::DiskValue,
+    ),
+    (StatusCode, Json<ErrorBody>),
+> {
+    let disk_id_proto =
+        match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
+            Ok(id) => id,
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: format!("invalid disk_id format for {}: {e}", body.disk_id),
+                    }),
+                ));
+            }
+        };
+    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!(
+                    "disk {}: unit_size_bytes and zone_size_bytes must be non-zero",
+                    body.disk_id
+                ),
+            }),
+        ));
+    }
+    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!(
+                    "disk {}: zone_size_bytes must be a multiple of unit_size_bytes",
+                    body.disk_id
+                ),
+            }),
+        ));
+    }
+    if body.capacity_bytes < body.zone_size_bytes {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("disk {}: capacity_bytes must be >= zone_size_bytes", body.disk_id),
+            }),
+        ));
+    }
+    let unit_size = u64::from(body.unit_size_bytes);
+    let capacity_units = body.capacity_bytes / unit_size;
+    let zone_size_units = body.zone_size_bytes / unit_size;
+    let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
+    let disk_type_proto = match body.disk_type.as_str() {
+        "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
+        "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
+        "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
+        "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("disk {}: unknown disk_type: {other}", body.disk_id),
+                }),
+            ));
+        }
+    };
+    let entry = DiskEntry {
+        disk_id: body.disk_id.clone(),
+        disk_group_id: dg_id,
+        rack_id,
+        node_id,
+        disk_type: body.disk_type.clone(),
+        capacity_bytes: body.capacity_bytes,
+        zone_size_bytes: body.zone_size_bytes,
+        unit_size_bytes: body.unit_size_bytes,
+    };
+    let value = crow_protocol::diskdb::rpc::DiskValue {
+        status: crow_protocol::common::HwStatus::Up as i32,
+        disk_type: disk_type_proto,
+        capacity_units,
+        zone_size_units,
+        unit_size_bytes: body.unit_size_bytes,
+        zone_count,
+    };
+    Ok((entry, disk_id_proto, value))
+}
+
 /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
 ///
 /// # Panics
@@ -1468,55 +1558,8 @@ pub async fn http_add_disk(
                 )
             })?
     };
-    // Validate the disk_id format before mutating config or syncing
-    // group 0 — a malformed id can never be routed by diskdb.
-    let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("invalid disk_id format: {e}"),
-                }),
-            ));
-        }
-    };
-    // The unit/zone sizes determine the disk's zone layout in diskdb —
-    // reject degenerate values instead of writing a zero-zone disk.
-    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "unit_size_bytes and zone_size_bytes must be non-zero".to_string(),
-            }),
-        ));
-    }
-    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "zone_size_bytes must be a multiple of unit_size_bytes".to_string(),
-            }),
-        ));
-    }
-    if body.capacity_bytes < body.zone_size_bytes {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "capacity_bytes must be >= zone_size_bytes".to_string(),
-            }),
-        ));
-    }
-    let entry = DiskEntry {
-        disk_id: body.disk_id,
-        disk_group_id: dg_id,
-        rack_id,
-        node_id,
-        disk_type: body.disk_type,
-        capacity_bytes: body.capacity_bytes,
-        zone_size_bytes: body.zone_size_bytes,
-        unit_size_bytes: body.unit_size_bytes,
-    };
+    // Validate all inputs before mutating config or syncing group 0.
+    let (entry, disk_id_proto, value) = validate_disk_input(&body, dg_id, rack_id, node_id)?;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_disk(entry.clone()).map_err(map_config_err)?;
@@ -1525,34 +1568,6 @@ pub async fn http_add_disk(
 
     // Sync group-0 sysdata. Best-effort.
     if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let unit_size = u64::from(entry.unit_size_bytes);
-        let capacity_units = entry.capacity_bytes / unit_size;
-        let zone_size_units = entry.zone_size_bytes / unit_size;
-        // The diskdb server derives its zone list from this field —
-        // zone count = capacity / zone size (last zone may be smaller,
-        // per design §8).
-        let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
-        let value = crow_protocol::diskdb::rpc::DiskValue {
-            status: crow_protocol::common::HwStatus::Up as i32,
-            disk_type: match entry.disk_type.as_str() {
-                "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
-                "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
-                "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
-                "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
-                other => {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorBody {
-                            error: format!("unknown disk_type: {other}"),
-                        }),
-                    ));
-                }
-            },
-            capacity_units,
-            zone_size_units,
-            unit_size_bytes: entry.unit_size_bytes,
-            zone_count,
-        };
         if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id_proto, &value).await {
             tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
         }
@@ -1561,17 +1576,20 @@ pub async fn http_add_disk(
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
-/// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks:batch` —
+/// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks/batch` —
 /// add multiple disks in one request (R77). Validates all inputs
+/// and checks for duplicates (against config and within the batch)
 /// before mutating config; best-effort sysdata sync per disk.
+/// Atomic all-or-nothing on the config mutation: if any `add_disk`
+/// fails, the ones already added are rolled back.
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
 ///
 /// # Errors
 /// Returns `404` if the disk-group doesn't exist, `400` on the
-/// first invalid disk input, `409` on the first duplicate `disk_id`.
-#[allow(clippy::too_many_lines)]
+/// first invalid disk input, `409` on a duplicate `disk_id` (in
+/// config or within the batch).
 pub async fn http_add_disks_batch(
     State(state): State<AppState>,
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
@@ -1593,99 +1611,38 @@ pub async fn http_add_disks_batch(
             })?
     };
 
-    // Validate all inputs before any mutation.
+    // Validate all inputs and check for duplicates before any mutation.
     let mut validated: Vec<(
         DiskEntry,
         crow_protocol::common::DiskId,
         crow_protocol::diskdb::rpc::DiskValue,
-    )> = Vec::new();
+    )> = Vec::with_capacity(body.disks.len());
+    let mut seen_ids: HashSet<String> = HashSet::with_capacity(body.disks.len());
     for d in &body.disks {
-        let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&d.disk_id) {
-            Ok(id) => id,
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorBody {
-                        error: format!("invalid disk_id format for {}: {e}", d.disk_id),
-                    }),
-                ));
-            }
-        };
-        if d.unit_size_bytes == 0 || d.zone_size_bytes == 0 {
+        if !seen_ids.insert(d.disk_id.clone()) {
             return Err((
-                StatusCode::BAD_REQUEST,
+                StatusCode::CONFLICT,
                 Json(ErrorBody {
-                    error: format!(
-                        "disk {}: unit_size_bytes and zone_size_bytes must be non-zero",
-                        d.disk_id
-                    ),
+                    error: format!("duplicate disk_id within batch: {}", d.disk_id),
                 }),
             ));
         }
-        if d.zone_size_bytes % u64::from(d.unit_size_bytes) != 0 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!(
-                        "disk {}: zone_size_bytes must be a multiple of unit_size_bytes",
-                        d.disk_id
-                    ),
-                }),
-            ));
-        }
-        if d.capacity_bytes < d.zone_size_bytes {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("disk {}: capacity_bytes must be >= zone_size_bytes", d.disk_id),
-                }),
-            ));
-        }
-        let unit_size = u64::from(d.unit_size_bytes);
-        let capacity_units = d.capacity_bytes / unit_size;
-        let zone_size_units = d.zone_size_bytes / unit_size;
-        let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
-        let disk_type_proto = match d.disk_type.as_str() {
-            "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
-            "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
-            "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
-            "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
-            other => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorBody {
-                        error: format!("disk {}: unknown disk_type: {other}", d.disk_id),
-                    }),
-                ));
-            }
-        };
-        let entry = DiskEntry {
-            disk_id: d.disk_id.clone(),
-            disk_group_id: dg_id,
-            rack_id,
-            node_id,
-            disk_type: d.disk_type.clone(),
-            capacity_bytes: d.capacity_bytes,
-            zone_size_bytes: d.zone_size_bytes,
-            unit_size_bytes: d.unit_size_bytes,
-        };
-        let value = crow_protocol::diskdb::rpc::DiskValue {
-            status: crow_protocol::common::HwStatus::Up as i32,
-            disk_type: disk_type_proto,
-            capacity_units,
-            zone_size_units,
-            unit_size_bytes: d.unit_size_bytes,
-            zone_count,
-        };
-        validated.push((entry, disk_id_proto, value));
+        validated.push(validate_disk_input(d, dg_id, rack_id, node_id)?);
     }
 
-    // Mutate config: add all disks.
-    let mut added: Vec<DiskEntry> = Vec::new();
+    // Mutate config: add all disks. Roll back on any failure so the
+    // in-memory config stays consistent with the (un-persisted) state.
+    let mut added: Vec<DiskEntry> = Vec::with_capacity(validated.len());
     {
         let mut cfg = state.config.write().unwrap();
         for (entry, _, _) in &validated {
-            cfg.add_disk(entry.clone()).map_err(map_config_err)?;
+            if let Err(e) = cfg.add_disk(entry.clone()).map_err(map_config_err) {
+                // Roll back already-added disks.
+                for a in &added {
+                    let _ = cfg.remove_disk(&a.disk_id);
+                }
+                return Err(e);
+            }
             added.push(entry.clone());
         }
     }

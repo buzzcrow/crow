@@ -363,4 +363,15 @@ impl ConsoleClient {
         let path = format!("/api/nodes/{node_id}/diskdb/stop");
         self.post_json(&path, &serde_json::Value::Null).await
     }
+
+    /// `DELETE /api/nodes/:id/diskdb` — stop (best-effort) and remove
+    /// the diskdb `ServerEntry`. Use when the PID is lost (console
+    /// restarted) and `stop` returns 400.
+    ///
+    /// # Errors
+    /// Surfaces HTTP failures as `Error::UpstreamRpc`.
+    pub async fn delete_diskdb(&self, node_id: u64) -> Result<()> {
+        let path = format!("/api/nodes/{node_id}/diskdb");
+        self.delete_no_response(&path).await
+    }
 }
