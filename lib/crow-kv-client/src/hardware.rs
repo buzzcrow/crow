@@ -18,10 +18,14 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracing::warn;
+
 use crow_protocol::common::{HwStatus, NodeValue, RackValue};
 use crow_protocol::common_type::{DiskGroupId, NodeId, RackId};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskValue};
-use crow_protocol::key::{BindMapKey, DiskGroupKey, DiskKey, NodeKey, OwnerMapKey, RackKey, TextKey};
+use crow_protocol::key::{
+    BindMapKey, DiskGroupKey, DiskGroupUsageKey, DiskKey, NodeKey, OwnerMapKey, RackKey, TextKey,
+};
 use crow_protocol::sysdata::{DiskGroupEntry, DiskdbOwnerEntry, KVGroupBindEntry};
 
 use crate::client::{GetOutcome, ScanOutcome};
@@ -633,6 +637,92 @@ impl HardwareClient {
             .delete(G0_STORE, G0_GROUP, key.to_path().as_bytes(), None)
             .await
             .map(|_| ())
+    }
+}
+
+// ── disk-group usage ─────────────────────────────────────────────
+
+impl HardwareClient {
+    /// Remove the disk-group usage summary record.
+    pub async fn remove_disk_group_usage(&self, dg_id: DiskGroupId) -> Result<()> {
+        let key = DiskGroupUsageKey { disk_group_id: dg_id };
+        self.kv
+            .delete(G0_STORE, G0_GROUP, key.to_path().as_bytes(), None)
+            .await
+            .map(|_| ())
+    }
+}
+
+// ── cascading remove ─────────────────────────────────────────────
+
+impl HardwareClient {
+    /// Remove a disk record + any derived records below it.
+    /// Disks have no derived records in group 0 (zone/busy/free records
+    /// live on the disk-group's bind, not group 0), so this is equivalent
+    /// to `remove_disk`.
+    pub async fn remove_disk_cascade(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        disk_id: &crow_protocol::common::DiskId,
+    ) -> Result<()> {
+        self.remove_disk(rack_id, node_id, dg_id, disk_id).await
+    }
+
+    /// Remove a disk-group record + all derived records: child disks,
+    /// owner map entry, bind map entry, usage summary.
+    pub async fn remove_disk_group_cascade(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+    ) -> Result<()> {
+        // Remove child disks.
+        let disks = self.list_disks_in_group(rack_id, node_id, dg_id).await?;
+        for (disk_id, _) in &disks {
+            if let Err(e) = self.remove_disk(rack_id, node_id, dg_id, disk_id).await {
+                warn!(error = %e, dg_id, "cascade: remove_disk failed; continuing");
+            }
+        }
+        // Remove owner map entry.
+        if let Err(e) = self.remove_owner(rack_id, node_id, dg_id).await {
+            warn!(error = %e, dg_id, "cascade: remove_owner failed; continuing");
+        }
+        // Remove bind map entry.
+        if let Err(e) = self.remove_bind(rack_id, node_id, dg_id).await {
+            warn!(error = %e, dg_id, "cascade: remove_bind failed; continuing");
+        }
+        // Remove usage summary.
+        if let Err(e) = self.remove_disk_group_usage(dg_id).await {
+            warn!(error = %e, dg_id, "cascade: remove_disk_group_usage failed; continuing");
+        }
+        // Remove the disk-group record itself.
+        self.remove_disk_group(rack_id, node_id, dg_id).await
+    }
+
+    /// Remove a node record + all derived records: child disk-groups
+    /// (with their disks, owner, bind, usage), then the node itself.
+    pub async fn remove_node_cascade(&self, rack_id: RackId, node_id: NodeId) -> Result<()> {
+        let dgs = self.list_disk_groups_on_node(rack_id, node_id).await?;
+        for dg in &dgs {
+            if let Err(e) = self.remove_disk_group_cascade(rack_id, node_id, dg.dg_id).await {
+                warn!(error = %e, node_id, dg_id = dg.dg_id, "cascade: remove_disk_group_cascade failed; continuing");
+            }
+        }
+        self.remove_node(rack_id, node_id).await
+    }
+
+    /// Remove a rack record + all derived records: child nodes (with
+    /// their disk-groups, disks, owner, bind, usage), then the rack itself.
+    pub async fn remove_rack_cascade(&self, rack_id: RackId) -> Result<()> {
+        let nodes = self.list_nodes_in_rack(rack_id).await?;
+        for (node_id, _) in &nodes {
+            if let Err(e) = self.remove_node_cascade(rack_id, *node_id).await {
+                warn!(error = %e, rack_id, node_id, "cascade: remove_node_cascade failed; continuing");
+            }
+        }
+        self.remove_rack(rack_id).await
     }
 }
 
