@@ -155,24 +155,12 @@ impl Default for ReportingConfig {
 /// Watch/notify configuration. When enabled, diskdb subscribes to
 /// group-0 prefixes and the keepalive timer serves as a safety-net
 /// poller at `sync.sync_interval_secs`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NotifyConfig {
     /// static: enable watch/notify (default: false). When true,
     /// diskdb subscribes to group-0 prefixes and the keepalive timer
     /// serves as a safety-net poller at `sync.sync_interval_secs`.
     pub notify_enabled: bool,
-    /// dynamic: crow-kv-side coalescing window in ms (default: 100).
-    /// 0 = no coalescing (immediate emit).
-    pub notify_debounce_ms: u64,
-}
-
-impl Default for NotifyConfig {
-    fn default() -> Self {
-        Self {
-            notify_enabled: false,
-            notify_debounce_ms: 100,
-        }
-    }
 }
 
 /// Free batch flush + snapshot compaction + recovery configuration.

@@ -421,10 +421,9 @@ impl PxGroup {
         // so observers reading `group.leader_id` after this point see
         // the "unknown" sentinel until the next heartbeat / vote round.
         self.local_replica().become_follower(target_term);
-        // Watch/notify: flush coalescer (emit pending notifies) then
-        // clear the registry (drops all watcher tx senders, closing
-        // client streams for clean reconnect to the new leader).
-        self.watch_coalescer.flush_and_clear();
+        // Watch/notify: clear the registry (drops all watcher tx
+        // senders, closing client streams for clean reconnect to the
+        // new leader).
         self.watch_registry.clear();
     }
 }

@@ -109,12 +109,8 @@ this section states *what* is built and *where*, not *how*.
    (reliability fallback). When notify is off (v1 default), behavior
    is unchanged — fixed-interval polling at `sync_interval_secs`.
 6. **Configuration** (`app/crow-diskdb/src/ddb_config.rs`) — add a
-   `NotifyConfig { notify_enabled, notify_debounce_ms }` section.
-   `notify_enabled` (default false) toggles polling-only vs
-   notify+polling. `notify_debounce_ms` (default 100) is the crow-kv-
-   side coalescing window (0 = no coalescing). The crow-kv leader's
-   debounce is authoritative (`CrowKVConfig.watch_notify_debounce_ms`);
-   diskdb's field documents operator intent (see Open Questions).
+   `NotifyConfig { notify_enabled }` section. `notify_enabled`
+   (default false) toggles polling-only vs notify+polling.
 7. **Client endpoint cache proactive refresh (R74 use case)**
    (`lib/crow-diskdb-client/src/client.rs`) — `DiskdbClient`'s
    `endpoint_cache` (R74, now implemented: `refresh_endpoints` reads
@@ -148,7 +144,6 @@ updated to the bidi-stream model when the design draft is folded in.
                      ┌──────────────────────────────┐
                      │ PxGroup                       │
                      │  WatchRegistry (per-prefix)   │
-                     │  WatchCoalescer (debounce)    │
                      │  apply-path trigger ──────────┼──┐
                      └─────────────┬────────────────┘  │ (chosen slot
                                    │ WatchNotify       │  touches watched
@@ -243,15 +238,6 @@ updated to the bidi-stream model when the design draft is folded in.
   `unsubscribe` + `clear`. Unit test.
 - `subscribe` 3 watchers, `clear()` → `is_empty` true and all
   channels closed (sender dropped). Unit test.
-- `WatchCoalescer` with `debounce_ms=0`, `record_chosen` a payload
-  with 2 keys → immediate emit (no timer). Unit test.
-- `WatchCoalescer` with `debounce_ms=50`, `record_chosen` 3 payloads
-  to the same prefix within 10 ms → one `WatchNotify` with all keys
-  after ~50 ms (use `tokio::time::pause`). Unit test.
-- `WatchCoalescer` with writes to two prefixes → two separate
-  notifies (one per prefix timer). Unit test.
-- `WatchCoalescer::flush_and_clear` with 2 buffered keys → one final
-  notify with the buffered keys + no timers remain. Unit test.
 
 **WatchNotifyClient (crow-kv-client)**:
 - `WatchNotifyClient::subscribe` to `(group_0, /hw/disk/)` against a
@@ -302,9 +288,6 @@ updated to the bidi-stream model when the design draft is folded in.
 - `notify_enabled=false` (v1 default), add a disk → diskdb sees it
   only on the next timer tick (10 s default), proving zero overhead
   when disabled. E2E test.
-- `notify_debounce_ms=100`, burst-write 10 disks in one
-  `batch_write` → one coalesced notify wakes keepalive once, not 10
-  times. E2E test.
 
 **Client endpoint cache proactive refresh (R74 use case, item 7)**:
 - `DiskdbClient` subscribed to `/srv/diskdb/`, change a diskdb
@@ -337,19 +320,3 @@ updated to the bidi-stream model when the design draft is folded in.
 - Not in v1 — v1 ships with fixed-interval polling (R71) and
   on-demand client cache refresh (R74). This requirement is a
   follow-up.
-
-**Open Questions**:
-
-- **Q1 — `notify_debounce_ms` ownership.** The coalescer runs on the
-  crow-kv leader (group 0), configured via
-  `CrowKVConfig.watch_notify_debounce_ms`. diskdb's
-  `NotifyConfig.notify_debounce_ms` is the operator's intent but is
-  not directly consumed by the coalescer (diskdb is a client, not the
-  leader). Options: (a) diskdb's field is documentation-only — the
-  operator sets the real value in crow-kv config; (b) diskdb sends
-  its desired debounce as a `WatchSubscribe` parameter and the leader
-  uses the per-subscription value (more ergonomic, adds per-watcher
-  debounce state). Recommendation: (a) for v1 — one global debounce
-  on the leader; revisit if per-subscription debounce is needed.
-  Cannot be resolved autonomously — it is an API-ergonomics trade-off
-  that needs a human decision.

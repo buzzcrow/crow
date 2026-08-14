@@ -205,7 +205,6 @@ impl PxGroup {
                                     group_id,
                                     slot, current_term, "stepping down: peer term observed during prepare"
                                 );
-                                self.watch_coalescer.flush_and_clear();
                                 self.watch_registry.clear();
                                 replica.become_follower(*current_term);
                                 return ProposeResult::NotLeader {
@@ -292,7 +291,6 @@ impl PxGroup {
                                 group_id,
                                 slot, current_term, "stepping down: peer term observed during accept"
                             );
-                            self.watch_coalescer.flush_and_clear();
                             self.watch_registry.clear();
                             replica.become_follower(*current_term);
                             return ProposeResult::NotLeader {

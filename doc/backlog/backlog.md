@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R82** — Bump this line in the same commit when adding a new item.
+**Next R number: R83** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -77,6 +77,18 @@ complexity, and dependency. Before implementation, follow the
   allocation, or cascading cleanup on removal. Split out of the R76
   gap review (R76's `RecoveryScanProgressKey` does not collide on
   identity reuse — keyed by globally-unique `DiskId`).
+- **[R82](R82-kv-watch-notify-coalescing.md)** — watch/notify
+  coalescing (debounce) — Area: kv / diskdb — R78 ships watch/notify
+  without coalescing: one notify per changed key per matching prefix.
+  Burst writes to a watched prefix (e.g. diskdb `batch_write` touching
+  10 disks) generate 10 separate notifies, amplifying subscriber
+  wakeups + re-read load. Add a per-prefix debounce coalescer with
+  timer-task flush between the apply-path hook and
+  `WatchRegistry::emit`. The original R78 coalescer was removed
+  because the timer task captured no registry/coalescer refs (buffered
+  keys were silently dropped); R82 must wire the `Weak` refs properly.
+  Load optimization, not correctness — the safety-net poller covers
+  missed notifies.
 
 - **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
   `spawn_blocking` on the durability path. The WAL's production I/O

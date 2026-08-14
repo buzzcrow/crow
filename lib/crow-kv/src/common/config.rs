@@ -465,15 +465,6 @@ pub struct CrowKVConfig {
     /// static: log directory. `#[serde(skip)]` — set from CLI.
     #[serde(skip)]
     pub log_dir: String,
-    /// dynamic: watch/notify coalescing window in ms (default: 100).
-    /// 0 = no coalescing (immediate emit). Read by the leader's
-    /// `WatchCoalescer`; updated live on config reload.
-    #[serde(default = "default_watch_notify_debounce_ms")]
-    pub watch_notify_debounce_ms: u64,
-}
-
-fn default_watch_notify_debounce_ms() -> u64 {
-    100
 }
 
 impl BaseConfig for CrowKVConfig {
@@ -540,7 +531,6 @@ impl Default for CrowKVConfig {
             crowtree_backend: "file".to_string(),
             wal_skip_fsync: false,
             log_dir: "log".to_string(),
-            watch_notify_debounce_ms: default_watch_notify_debounce_ms(),
         }
     }
 }
