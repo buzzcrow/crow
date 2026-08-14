@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState, useMemo } from 'react';
-import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus, Rocket } from 'lucide-react';
+import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus, Rocket, Server } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { Tree, TreeNode } from '../components/Tree';
 import { Button } from '../components/ui/Button';
-import { ViewMode, Rack, StoreView, NodeStore, CrowKVServerView, NodeHealth } from '../types';
+import { ViewMode, Rack, StoreView, NodeStore, CrowKVServerView, NodeHealth, DiskdbInstanceInfo, CapacityUsageResponse } from '../types';
 import { crowKvServerByNodeId } from '../data/crowKvServers';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole } from '../utils/entityDisplay';
 
@@ -23,6 +23,9 @@ interface SidebarProps {
   onNodeClick?: (node: TreeNode) => void;
   onNodeContextMenu?: (node: TreeNode, event: React.MouseEvent) => void;
   onAdd?: () => void;
+  // Capacity view props (R77)
+  diskdbInstances?: DiskdbInstanceInfo[];
+  capacityUsage?: CapacityUsageResponse | null;
 }
 
 export function Sidebar({
@@ -38,6 +41,8 @@ export function Sidebar({
   onNodeClick,
   onNodeContextMenu,
   onAdd,
+  diskdbInstances = [],
+  capacityUsage = null,
 }: SidebarProps) {
   const { viewMode } = useViewMode();
   const [filterQuery, setFilterQuery] = useState('');
@@ -141,6 +146,52 @@ export function Sidebar({
       }));
     }
 
+    if (viewMode === ViewMode.Capacity) {
+      // Capacity tree: diskdb instances → disk groups → disks.
+      if (diskdbInstances.length === 0) return [];
+
+      const usageDgs = capacityUsage?.disk_groups || [];
+      const usageByDgId = new Map(usageDgs.map((g) => [g.disk_group_id, g]));
+
+      return diskdbInstances.map((inst) => ({
+        id: `DDB-${inst.instance_id}`,
+        rawId: inst.instance_id,
+        label: `diskdb-${inst.instance_id}`,
+        type: 'Server' as const,
+        icon: <Server className="tw-h-4 tw-w-4 tw-text-muted" />,
+        parentIds: { instance_id: inst.instance_id },
+        children: (inst.owned_dg_ids || []).map((dgId) => {
+          const dgUsage = usageByDgId.get(dgId);
+          const disks = dgUsage?.disks || [];
+          const busyPct = dgUsage && dgUsage.capacity_bytes > 0
+            ? Math.round((dgUsage.busy_bytes / dgUsage.capacity_bytes) * 100)
+            : 0;
+          return {
+            id: `CDG-${inst.instance_id}-${dgId}`,
+            rawId: dgId,
+            label: `DG-${dgId} (${busyPct}% busy)`,
+            type: 'Group' as const,
+            icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+            parentIds: { instance_id: inst.instance_id, disk_group_id: dgId },
+            children: disks.map((d) => ({
+              id: `CD-${inst.instance_id}-${dgId}-${d.disk_id}`,
+              rawId: d.disk_id,
+              label: d.disk_id.slice(0, 16) + '…',
+              type: 'Replica' as const,
+              icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+              parentIds: {
+                instance_id: inst.instance_id,
+                disk_group_id: dgId,
+                disk_id: d.disk_id,
+                rack_id: d.rack_id,
+                node_id: d.node_id,
+              },
+            })),
+          };
+        }),
+      }));
+    }
+
     return stores.map((store) => {
       const sid = String(store.store_id);
       return {
@@ -174,7 +225,7 @@ export function Sidebar({
         }),
       };
     });
-  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks]);
+  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks, diskdbInstances, capacityUsage]);
 
   const filtered = useMemo(() => {
     if (!filterQuery.trim()) return treeNodes;
@@ -217,7 +268,7 @@ export function Sidebar({
 
       <div className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-border-b tw-border-border">
         <h3 className="tw-text-xs tw-font-semibold tw-text-muted tw-uppercase tw-tracking-wider">
-          {viewMode === ViewMode.Physical ? 'Infrastructure' : 'Cluster'}
+          {viewMode === ViewMode.Physical ? 'Infrastructure' : viewMode === ViewMode.Logical ? 'Cluster' : 'Capacity'}
         </h3>
         {!readonly && onAdd && (
           viewMode === ViewMode.Logical && !clusterInitialized ? (
@@ -265,18 +316,20 @@ export function Sidebar({
             ? 'No matching items'
             : viewMode === ViewMode.Physical
               ? 'No racks registered'
-              : clusterInitialized
-                ? 'No stores yet'
-                : (
-                  <div className="tw-space-y-3">
-                    <div>Cluster not initialized.</div>
-                    {!readonly && (
-                      <Button size="sm" onClick={onAdd} leftIcon={<Rocket className="tw-h-3.5 tw-w-3.5" />}>
-                        Initialize Cluster
-                      </Button>
-                    )}
-                  </div>
-                )}
+              : viewMode === ViewMode.Capacity
+                ? 'No diskdb instances registered'
+                : clusterInitialized
+                  ? 'No stores yet'
+                  : (
+                    <div className="tw-space-y-3">
+                      <div>Cluster not initialized.</div>
+                      {!readonly && (
+                        <Button size="sm" onClick={onAdd} leftIcon={<Rocket className="tw-h-3.5 tw-w-3.5" />}>
+                          Initialize Cluster
+                        </Button>
+                      )}
+                    </div>
+                  )}
         </div>
       )}
     </aside>

@@ -172,7 +172,8 @@ export enum GroupHealth {
 
 export enum ViewMode {
   Physical = 'Physical',
-  Logical = 'Logical'
+  Logical = 'Logical',
+  Capacity = 'Capacity'
 }
 
 export enum ThemeMode {
@@ -241,4 +242,144 @@ export interface MetricsResponse {
   window_secs: number;
   timestamp: string;
   metrics: MetricPoint[];
+}
+
+// ── Capacity view types (R77) ─────────────────────────────────────
+// Mirror the DTOs from crow-web/src/diskdb.rs.
+
+export interface DiskdbInstanceInfo {
+  instance_id: number;
+  grpc_endpoint: string;
+  last_heartbeat_ms: number;
+  owned_dg_ids: number[];
+  group_usages: DiskGroupUsageSummary[];
+}
+
+export interface DiskGroupUsageSummary {
+  disk_group_id: number;
+  capacity_bytes: number;
+  busy_bytes: number;
+  free_bytes: number;
+  disk_count: number;
+}
+
+export interface CapacityUsageResponse {
+  disk_groups: DiskGroupInfoDto[];
+}
+
+export interface DiskGroupInfoDto {
+  rack_id: number;
+  node_id: number;
+  disk_group_id: number;
+  status: number;
+  disk_ids: string[];
+  disks: DiskInfoDto[];
+  capacity_bytes: number;
+  busy_bytes: number;
+  free_bytes: number;
+  allocatable_disk_count: number;
+}
+
+export interface DiskInfoDto {
+  rack_id: number;
+  node_id: number;
+  disk_group_id: number;
+  disk_id: string;
+  disk_type: number;
+  capacity_units: number;
+  zone_size_units: number;
+  unit_size_bytes: number;
+  zone_count: number;
+  status: number;
+  busy_units: number;
+  free_units: number;
+  capacity_bytes: number;
+  busy_bytes: number;
+  free_bytes: number;
+  active_zone_count: number;
+  zone_usages: ZoneUsageDto[];
+}
+
+export interface ZoneUsageDto {
+  zone_index: number;
+  capacity_bytes: number;
+  busy_bytes: number;
+  free_bytes: number;
+  busy_block_count: number;
+  free_block_count: number;
+  alloc_state: number;
+  usage_bitmap?: string;
+}
+
+export interface ScanStatusResponse {
+  summary?: ScanSummaryDto;
+  has_run: boolean;
+  scan_in_progress: boolean;
+}
+
+export interface ScanSummaryDto {
+  started_at_ms: number;
+  duration_ms: number;
+  zones_scanned: number;
+  zones_skipped_active: number;
+  zones_skipped_compacting: number;
+  ghost_busy: number;
+  ghost_free: number;
+  uncompacted_lag: number;
+  corrupt_snapshots: number;
+  corrupt_records: number;
+  owner_mismatches: number;
+  leak_status: string;
+}
+
+export interface RecalcResultResponse {
+  results: DiskGroupRecalcResultDto[];
+}
+
+export interface DiskGroupRecalcResultDto {
+  disk_group_id: number;
+  drift_detected: boolean;
+  zones: ZoneRecalcResultDto[];
+}
+
+export interface ZoneRecalcResultDto {
+  disk_id: string;
+  zone_index: number;
+  matches: boolean;
+  drift_detected: boolean;
+  live_busy_blocks: number;
+  replayed_busy_blocks: number;
+  live_snapshot_slot: number;
+  replayed_snapshot_slot: number;
+  fallback_reason?: string;
+}
+
+export interface CompactResultResponse {
+  compacted_zone_count: number;
+  total_free_records_deleted: number;
+  zones: ZoneCompactionResultDto[];
+}
+
+export interface ZoneCompactionResultDto {
+  zone_index: number;
+  success: boolean;
+  free_records_deleted: number;
+  error?: string;
+}
+
+export interface RebuildResultResponse {
+  rebuilt_zone_count: number;
+  total_busy_units: number;
+  total_free_units: number;
+}
+
+export interface DiskdbDeployResult {
+  node_id: number;
+  mgmt_url: string;
+  grpc_url: string;
+  pid: number;
+}
+
+export interface StopResult {
+  sent: boolean;
 }

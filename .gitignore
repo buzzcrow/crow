@@ -47,6 +47,7 @@ app/crow-cli/bench-runs/
 # Tracked default configs live in app/<crate>/conf/*.json.
 app/crow-diskdb/conf/runtime/
 app/crow-kv-server/conf/runtime/
+lib/crow-console-shared/conf/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.

@@ -7,5 +7,6 @@ export { AddStoreDialog } from './AddStoreDialog';
 export { AddGroupDialog } from './AddGroupDialog';
 export { AddReplicaDialog } from './AddReplicaDialog';
 export { DeployServerDialog } from './DeployServerDialog';
+export { DeployDiskdbDialog } from './DeployDiskdbDialog';
 export { ConfirmDeleteDialog } from './ConfirmDeleteDialog';
 export { InitClusterDialog } from './InitClusterDialog';

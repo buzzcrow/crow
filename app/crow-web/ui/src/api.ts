@@ -13,6 +13,14 @@ import type {
   GroupView,
   ReplicaView,
   MetricsResponse,
+  DiskdbInstanceInfo,
+  CapacityUsageResponse,
+  ScanStatusResponse,
+  RecalcResultResponse,
+  CompactResultResponse,
+  RebuildResultResponse,
+  DiskdbDeployResult,
+  StopResult,
 } from './types';
 
 /**
@@ -859,4 +867,190 @@ export async function getStoreMetrics(
 ): Promise<MetricsResponse> {
   const url = `/api/stores/${encodeURIComponent(storeId)}/metrics${qs({ prefix })}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+// ── Disk / DiskDB API (R77) ───────────────────────────────────────
+
+export interface AddDiskRequest {
+  disk_id: string;
+  disk_type: string;
+  capacity_bytes: number;
+  zone_size_bytes: number;
+  unit_size_bytes: number;
+}
+
+export interface AddDisksBatchRequest {
+  disks: AddDiskRequest[];
+}
+
+export interface AddDisksBatchResult {
+  added: any[];
+  sysdata_errors: string[];
+}
+
+export interface DeployDiskdbRequest {
+  mgmt_port: number;
+  grpc_port: number;
+  binary?: string;
+  listen_addr?: string;
+  http_addr?: string;
+  config?: string;
+}
+
+/** `GET /api/diskdb/instances` — list all diskdb instances. */
+export async function listDiskdbInstances(options?: RequestOptions): Promise<DiskdbInstanceInfo[]> {
+  return jsonOrThrow(await fetchWithOptions('/api/diskdb/instances', { ...options, method: 'GET' }));
+}
+
+/** `GET /api/diskdb/usage` — capacity usage drill-down. */
+export async function getDiskdbUsage(
+  dg?: number,
+  disk?: string,
+  zone?: number,
+  options?: RequestOptions,
+): Promise<CapacityUsageResponse> {
+  const params: Record<string, string> = {};
+  if (dg !== undefined) params.dg = String(dg);
+  if (disk !== undefined) params.disk = disk;
+  if (zone !== undefined) params.zone = String(zone);
+  const url = `/api/diskdb/usage${qs(params)}`;
+  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+/** `GET /api/diskdb/scan-status` — get scan status. */
+export async function getDiskdbScanStatus(dg?: number, options?: RequestOptions): Promise<ScanStatusResponse> {
+  const url = `/api/diskdb/scan-status${qs({ dg })}`;
+  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+/** `POST /api/diskdb/scan` — trigger a scan. */
+export async function triggerDiskdbScan(dg?: number, options?: RequestOptions): Promise<ScanStatusResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/scan', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dg: dg ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/diskdb/recalc` — recalculate disk usage. */
+export async function recalcDiskdbUsage(dg?: number, options?: RequestOptions): Promise<RecalcResultResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/recalc', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dg: dg ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/diskdb/compact` — compact zones on a disk. */
+export async function compactDiskdbZones(
+  diskId: string,
+  zoneIndices?: number[],
+  options?: RequestOptions,
+): Promise<CompactResultResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/compact', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disk_id: diskId, zone_indices: zoneIndices ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/diskdb/rebuild` — rebuild a zone bitmap. */
+export async function rebuildDiskdbZoneBitmap(
+  diskId: string,
+  zoneIndex?: number,
+  options?: RequestOptions,
+): Promise<RebuildResultResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/rebuild', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disk_id: diskId, zone_index: zoneIndex ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `PUT /api/disks/:disk_id/status` — set a disk's hardware status. */
+export async function setDiskStatus(diskId: string, status: string, options?: RequestOptions): Promise<void> {
+  const resp = await fetchWithOptions(`/api/disks/${encodeURIComponent(diskId)}/status`, {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`PUT /api/disks/${diskId}/status: HTTP ${resp.status}: ${body}`);
+  }
+}
+
+/** `POST /api/nodes/:id/diskdb/deploy` — deploy diskdb on a node. */
+export async function deployDiskdb(nodeId: number, req: DeployDiskdbRequest, options?: RequestOptions): Promise<DiskdbDeployResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb/deploy`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/nodes/:id/diskdb/restart` — restart diskdb on a node. */
+export async function restartDiskdb(nodeId: number, options?: RequestOptions): Promise<DiskdbDeployResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb/restart`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/nodes/:id/diskdb/stop` — stop diskdb on a node. */
+export async function stopDiskdb(nodeId: number, options?: RequestOptions): Promise<StopResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb/stop`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/nodes/:id/disk-groups/:dg_id/disks/batch` — batch add disks. */
+export async function addDisksBatch(
+  nodeId: number,
+  dgId: number,
+  req: AddDisksBatchRequest,
+  options?: RequestOptions,
+): Promise<AddDisksBatchResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/disk-groups/${dgId}/disks/batch`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      skipDeduplication: true,
+    }),
+  );
 }

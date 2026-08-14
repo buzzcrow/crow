@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { RefreshCw, Layers, Network, FileJson, Database, RotateCcw } from 'lucide-react';
+import { RefreshCw, Layers, Network, FileJson, Database, RotateCcw, HardDrive } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { ViewMode } from '../types';
 import { cn } from '../utils/cn';
@@ -97,6 +97,16 @@ export function Header({
           aria-pressed={viewMode === ViewMode.Logical && centerPanel === 'topology'}
         >
           <Layers className="tw-h-3.5 tw-w-3.5" /> Logical
+        </button>
+        <button
+          onClick={() => { setViewMode(ViewMode.Capacity); onShowTopology?.(); }}
+          className={cn(
+            'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
+            viewMode === ViewMode.Capacity ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+          )}
+          aria-pressed={viewMode === ViewMode.Capacity}
+        >
+          <HardDrive className="tw-h-3.5 tw-w-3.5" /> Capacity
         </button>
       </div>
 

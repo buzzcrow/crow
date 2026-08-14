@@ -10,6 +10,7 @@ import { ToastProvider, useToast } from './contexts/ToastContext';
 import { ActivityProvider, useActivity } from './contexts/ActivityContext';
 import { usePhysicalTree } from './data/usePhysicalTree';
 import { useLogicalTree } from './data/useLogicalTree';
+import { useCapacityTree } from './data/useCapacityTree';
 import { Header, ClusterHealth } from './shell/Header';
 import { Sidebar } from './shell/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
@@ -23,6 +24,7 @@ import {
   AddGroupDialog,
   AddReplicaDialog,
   DeployServerDialog,
+  DeployDiskdbDialog,
   ConfirmDeleteDialog,
   InitClusterDialog,
 } from './components/dialogs';
@@ -38,6 +40,13 @@ import {
   pingNode,
   setApiBase,
   resetCluster,
+  triggerDiskdbScan,
+  recalcDiskdbUsage,
+  compactDiskdbZones,
+  rebuildDiskdbZoneBitmap,
+  setDiskStatus,
+  restartDiskdb,
+  stopDiskdb,
 } from './api';
 import { deployPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
 import { buildCrowKVServers, crowKvServerNodeIds } from './data/crowKvServers';
@@ -50,6 +59,7 @@ const TopologyCanvas = lazy(() =>
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
 const SwaggerPanel = lazy(() => import('./panels/SwaggerPanel').then((m) => ({ default: m.SwaggerPanel })));
 const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
+const CapacityPanel = lazy(() => import('./panels/CapacityPanel').then((m) => ({ default: m.CapacityPanel })));
 
 export interface CrowConsoleProps {
   /** API prefix for all backend calls (default "/api"). */
@@ -98,6 +108,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     addGroup?: { storeId: string };
     addReplica?: { storeId: string; groupId: string };
     deployServer?: { nodeId: number };
+    deployDiskdb?: boolean;
     delete?: { type: string; id: string | number; onDelete: () => Promise<void> };
     initCluster?: boolean;
   }>({});
@@ -105,6 +116,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const { menuState, openMenu, closeMenu } = useContextMenu();
 
   const physicalActive = viewMode === ViewMode.Physical;
+  const capacityActive = viewMode === ViewMode.Capacity;
   const { racks, nodes, nodeStores, nodeHealthById, loading: physLoading, error: physError, refresh: refreshPhysical } = usePhysicalTree({
     enabled: true,
     recursive: 2,
@@ -117,9 +129,14 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
+  const { instances: diskdbInstances, usage: capacityUsage, scanStatus, loading: capLoading, error: capError, refresh: refreshCapacity } = useCapacityTree({
+    enabled: viewMode === ViewMode.Capacity,
+    pollIntervalActive: 5000,
+    pollIntervalInactive: 30000,
+  });
 
-  const loading = physLoading || logLoading;
-  const dataError = physError || logError;
+  const loading = physLoading || logLoading || capLoading;
+  const dataError = physError || logError || capError;
   const servers = useMemo(() => buildCrowKVServers(nodes, racks), [nodes, racks]);
   const serverNodeIds = useMemo(() => crowKvServerNodeIds(servers), [servers]);
   // Cluster is initialized once the system store (store 0) exists.
@@ -281,6 +298,66 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             onSelect: () => requestDelete('Node', nodeId, async () => { await runMutation('Delete Node', t.label || t.id, () => removeNode(nodeId)); }),
           });
         }
+      } else if (capacityActive) {
+        // Capacity view context menus: diskdb instance, disk-group, disk.
+        if (t.type === 'Server') {
+          // diskdb instance — restart / stop
+          items.push({
+            id: 'ddb-restart',
+            label: 'Restart DiskDB',
+            icon: <RotateCw className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(Number(p.instance_id))),
+          });
+          items.push({
+            id: 'ddb-stop',
+            label: 'Stop DiskDB',
+            icon: <Square className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(Number(p.instance_id))),
+          });
+        } else if (t.type === 'Group') {
+          // disk-group — trigger scan, recalc usage
+          const dgId = Number(t.rawId);
+          items.push({
+            id: 'ddb-scan',
+            label: 'Trigger Scan',
+            icon: <Activity className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Trigger Scan', t.label || t.id, () => triggerDiskdbScan(dgId)),
+          });
+          items.push({
+            id: 'ddb-recalc',
+            label: 'Recalc Usage',
+            icon: <RotateCw className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Recalc Usage', t.label || t.id, () => recalcDiskdbUsage(dgId)),
+          });
+        } else if (t.type === 'Replica') {
+          // disk — compact, rebuild, set status
+          const diskId = String(p.disk_id || t.rawId || t.id);
+          items.push({
+            id: 'ddb-compact',
+            label: 'Compact Zones',
+            icon: <Database className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Compact Zones', t.label || t.id, () => compactDiskdbZones(diskId)),
+          });
+          items.push({
+            id: 'ddb-rebuild',
+            label: 'Rebuild Bitmap',
+            icon: <RotateCw className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Rebuild Bitmap', t.label || t.id, () => rebuildDiskdbZoneBitmap(diskId)),
+          });
+          items.push({ id: 's1', separator: true });
+          items.push({
+            id: 'disk-set-down',
+            label: 'Set Disk Down',
+            icon: <Square className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Set Disk Down', t.label || t.id, () => setDiskStatus(diskId, 'Down')),
+          });
+          items.push({
+            id: 'disk-set-up',
+            label: 'Set Disk Up',
+            icon: <Activity className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Set Disk Up', t.label || t.id, () => setDiskStatus(diskId, 'Up')),
+          });
+        }
       } else {
         if (t.type === 'Store' && modules?.groups !== false) {
           items.push({
@@ -348,7 +425,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       }
       return items;
     },
-    [readonly, physicalActive, modules, requestDelete, runMutation, serverNodeIds],
+    [readonly, physicalActive, capacityActive, modules, requestDelete, runMutation, serverNodeIds],
   );
 
   const onTreeContextMenu = useCallback(
@@ -381,9 +458,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const handleAdd = useCallback(() => {
     if (readonly) return;
     if (physicalActive) setDialog((d) => ({ ...d, addRack: true }));
+    else if (capacityActive) setDialog((d) => ({ ...d, deployDiskdb: true }));
     else if (!clusterInitialized) setDialog((d) => ({ ...d, initCluster: true }));
     else setDialog((d) => ({ ...d, addStore: true }));
-  }, [readonly, physicalActive, clusterInitialized]);
+  }, [readonly, physicalActive, capacityActive, clusterInitialized]);
 
   const closeDialogs = useCallback(() => setDialog({}), []);
 
@@ -544,6 +622,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         onNodeClick={onTreeNodeClick}
         onNodeContextMenu={onTreeContextMenu}
         onAdd={handleAdd}
+        diskdbInstances={diskdbInstances}
+        capacityUsage={capacityUsage}
       />
 
       <div
@@ -565,6 +645,15 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
           ) : centerPanel === 'kv' && kvEnabled ? (
             <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
+          ) : capacityActive ? (
+            <CapacityPanel
+              instances={diskdbInstances}
+              usage={capacityUsage}
+              scanStatus={scanStatus}
+              loading={loading}
+              readonly={readonly}
+              onRefresh={refreshCapacity}
+            />
           ) : (
             <TopologyCanvas
               racks={racks}
@@ -685,6 +774,12 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           onDelete={dialog.delete.onDelete}
         />
       )}
+      <DeployDiskdbDialog
+        isOpen={!!dialog.deployDiskdb}
+        onClose={closeDialogs}
+        nodes={nodes}
+        onSuccess={handleRefresh}
+      />
 
       <ToastContainer />
     </div>
