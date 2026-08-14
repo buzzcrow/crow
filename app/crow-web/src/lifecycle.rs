@@ -117,6 +117,19 @@ pub async fn http_add_rack(
         cfg.add_rack(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+
+    // Sync group-0 sysdata. Best-effort: config TOML is the source of
+    // truth; sysdata is derived. A later cluster_init re-run reconciles.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::common::RackValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            node_ids: Vec::new(),
+        };
+        if let Err(e) = hw.add_rack(entry.id, &value).await {
+            tracing::warn!(rack_id = entry.id, error = %e, "sysdata sync: add_rack failed");
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -136,6 +149,14 @@ pub async fn http_remove_rack(
         cfg.remove_rack(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata (rack + child nodes + their disk-groups).
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        if let Err(e) = hw.remove_rack_cascade(id).await {
+            tracing::warn!(rack_id = id, error = %e, "sysdata sync: remove_rack_cascade failed");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -180,6 +201,21 @@ pub async fn http_add_node(
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::common::NodeValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            last_used_dg_id: 0,
+            disk_group_ids: Vec::new(),
+            status_changed_at_ms: 0,
+            temp_failure_since_ms: None,
+        };
+        if let Err(e) = hw.add_node(entry.rack_id, entry.id, &value).await {
+            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -194,11 +230,24 @@ pub async fn http_remove_node(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Capture rack_id before removing from config (needed for sysdata cascade).
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.node(id).map(|n| n.rack_id)
+    };
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_node(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+
+    // Cascade-remove group-0 sysdata (node + child disk-groups + disks).
+    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
+        if let Err(e) = hw.remove_node_cascade(rack_id, id).await {
+            tracing::warn!(node_id = id, error = %e, "sysdata sync: remove_node_cascade failed");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -400,6 +449,21 @@ pub async fn http_add_rack_node(
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
+
+    // Sync group-0 sysdata. Best-effort.
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        let value = crow_protocol::common::NodeValue {
+            status: crow_protocol::common::HwStatus::Up as i32,
+            last_used_dg_id: 0,
+            disk_group_ids: Vec::new(),
+            status_changed_at_ms: 0,
+            temp_failure_since_ms: None,
+        };
+        if let Err(e) = hw.add_node(rack_id, entry.id, &value).await {
+            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(entry)))
 }
 

@@ -197,6 +197,22 @@ fn remap_zero_host(addr: &str) -> String {
         .map_or_else(|| addr.to_string(), |port| format!("127.0.0.1:{port}"))
 }
 
+/// Build a [`HardwareClient`] pinned to group 0 by finding any node in the
+/// monitor cache that hosts store 0's gRPC listener. Returns `None` when
+/// no group-0 endpoint is known (e.g. cluster not yet initialized).
+pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crow_kv_client::HardwareClient> {
+    let snap = state.monitor_cache.snapshot().await;
+    for node_id in snap.keys() {
+        if let Some(ep) = grpc_endpoint_for_node(state, *node_id, 0).await {
+            let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+            kv.seed_leader(0, 0, ep);
+            return Some(crow_kv_client::HardwareClient::new(kv));
+        }
+    }
+    warn!("build_hardware_client: no group-0 endpoint found in monitor cache");
+    None
+}
+
 // ── Metrics proxy (R11) ───────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
