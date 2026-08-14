@@ -13,6 +13,9 @@
 
 pub mod allocator;
 pub mod chunkdb_config;
+pub mod migration;
+pub mod routing;
 pub mod selector;
 pub mod service;
+pub mod storage;
 pub mod topology;
