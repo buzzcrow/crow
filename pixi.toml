@@ -99,6 +99,8 @@ test-kv-client = { cmd = "cargo test -p crow-kv-client --all-targets", depends-o
 test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets", depends-on = ["build"] }
 test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets", depends-on = ["build"] }
 test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets", depends-on = ["build"] }
+test-chunkdb = { cmd = "cargo test -p crow-chunkdb --all-targets", depends-on = ["build"] }
+test-chunkdb-client = { cmd = "cargo test -p crow-chunkdb-client --all-targets", depends-on = ["build"] }
 test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets", depends-on = ["build"] }
 test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
 test-console-server = { cmd = "cargo test -p crow-web --all-targets", depends-on = ["build"] }

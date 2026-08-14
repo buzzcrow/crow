@@ -29,15 +29,25 @@ enum ECState {
 
 // Chunk lifecycle state.
 enum ChunkState {
-  CHUNK_STATE_ACTIVE  = 0;  // open for appends
-  CHUNK_STATE_SEALED  = 1;  // sealed, no more appends
-  CHUNK_STATE_DELETED = 2;  // deleted, blocks freed
+  CHUNK_STATE_INIT    = 0;  // internal transient state during allocation
+  CHUNK_STATE_ACTIVE  = 1;  // open for appends
+  CHUNK_STATE_SEALED  = 2;  // sealed, no more appends
+  CHUNK_STATE_DELETED = 3;  // deleted, blocks freed
 }
 
 // Strip protection type.
 enum StripType {
   STRIP_TYPE_MIRROR = 0;  // mirror (N copies)
   STRIP_TYPE_EC     = 1;  // erasure coding (data + code)
+}
+
+// Chunk type — identifies the purpose of a chunk.
+enum ChunkType {
+  CHUNK_TYPE_REPO       = 0;  // user data storage
+  CHUNK_TYPE_WAL        = 1;  // write-ahead log entries
+  CHUNK_TYPE_BTREE_PAGE = 2;  // B-tree page storage
+  CHUNK_TYPE_PAGE_INDEX = 3;  // page index metadata
+  reserved 4 to 255;
 }
 
 // ── Strip types ─────────────────────────────────────────────────
@@ -87,4 +97,5 @@ message Chunk {
   uint32              capacity      = 5;  // total capacity in units
   uint32              sealed_length = 6;  // sealed length in units
   repeated ChunkStrip strips        = 7;
+  ChunkType           chunk_type    = 8;  // chunk purpose (Repo/WAL/BTreePage/PageIndex)
 }

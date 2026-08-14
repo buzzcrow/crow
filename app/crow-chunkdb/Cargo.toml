@@ -1,0 +1,50 @@
+[package]
+name = "crow-chunkdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CROW chunkdb server: distributed chunk manager (stateless; persists to CROW KV, allocates via diskdb)."
+autobenches = false
+autotests = false
+
+[[bin]]
+name = "crow-chunkdb"
+path = "src/main.rs"
+
+[lib]
+name = "crow_chunkdb"
+path = "src/lib.rs"
+
+[features]
+# Exposes internal types/methods for integration tests.
+# Auto-enabled for this crate's own tests via the self dev-dependency.
+test-util = []
+
+[lints]
+workspace = true
+
+[dependencies]
+crow-protocol = { path = "../../lib/crow-protocol" }
+crow-kv-client = { path = "../../lib/crow-kv-client" }
+crow-common = { path = "../../lib/crow-common/rust" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "net", "sync"] }
+tonic = { workspace = true }
+prost = { workspace = true }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+arc-swap = "1.9"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dashmap = "6"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+crow-chunkdb = { path = ".", features = ["test-util"] }

@@ -96,6 +96,7 @@ fn main() {
         .type_attribute("ECState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ChunkState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("StripType", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("ChunkType", "#[derive(serde::Serialize, serde::Deserialize)]")
         // chunkdb message types — serde for MirrorStrip and EcStrip
         // (flat message types). ChunkStrip and Chunk contain a oneof
         // (Strip) which prost nests in a submodule; serde on the

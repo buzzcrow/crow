@@ -21,6 +21,10 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 notify = "8.2"
 notify-debouncer-mini = "0.7"
+reed-solomon-erasure = "6"
+getrandom = "0.2"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
