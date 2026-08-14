@@ -352,9 +352,21 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
     // 2. Allocate 1 block to have a real busy record.
     let owner_chunk = make_chunk_id(0, 0, 42);
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let segments = alloc::allocate_blocks(&dg, 1, 1, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
-        .await
-        .expect("allocate 1");
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
+    let segments = alloc::allocate_blocks(
+        &dg,
+        1,
+        1,
+        &[],
+        &owner_chunk,
+        UNIT_SIZE_BYTES,
+        &alloc_kv,
+        100,
+        4,
+        &metrics,
+    )
+    .await
+    .expect("allocate 1");
     assert_eq!(segments.len(), 1);
 
     // 3. Inject a ghost-busy bit: pick a zone outside the active set

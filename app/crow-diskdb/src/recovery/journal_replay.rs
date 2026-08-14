@@ -16,31 +16,35 @@
 use crow_protocol::common::DiskId;
 use crow_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey};
-use crow_protocol::ZoneValueExt;
+use crow_protocol::{DiskGroupId, ZoneValueExt};
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::zone::{DdbZone, DdbZoneHealth};
 use crate::recovery::ZoneLoadError;
 
 /// Inner zone load — strategy 2 (journal scan replay).
-/// Returns a loaded `Zone` and the max `freed_ts` from scanned free
-/// records (0 if no free records), or an error indicating why strategy
-/// 2 failed (caller falls back to strategy 1).
+/// Returns a loaded `Zone`, the max `freed_ts` from scanned free
+/// records (0 if no free records), and whether a valid snapshot was
+/// found (`true` = snapshot existed and was used; `false` = no
+/// snapshot, fresh zone). The `snapshot_found` flag is used by
+/// `background_zone_load` (B.2) to decide whether to write a baseline
+/// `ZoneValue` record.
 pub async fn load_zone_inner(
     kv: &DdbKvClient,
     bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
+    disk_group_id: DiskGroupId,
     unit_capacity: u32,
-) -> Result<(DdbZone, u64), ZoneLoadError> {
+) -> Result<(DdbZone, u64, bool), ZoneLoadError> {
     // Step a: load the latest ZoneValue snapshot.
     let snapshot = kv.get_zone_value(bind, &disk_id, zone_idx).await?;
 
-    let (usage_bits, snapshot_slot, snapshot_compact_ts, dg_id) = match &snapshot {
+    let (usage_bits, snapshot_slot, snapshot_compact_ts, snapshot_found) = match &snapshot {
         Some(zv) if zv.verify_checksum() => {
             // Valid snapshot — restore bitmap + snapshot_slot + compact_ts.
             let bits = crow_protocol::UsageBitmap::restore(&zv.usage_bitmap);
-            (bits, zv.snapshot_slot, zv.compact_ts, 0)
+            (bits, zv.snapshot_slot, zv.compact_ts, true)
         }
         Some(_zv) => {
             // CRC fail — fall back to strategy 1.
@@ -48,7 +52,7 @@ pub async fn load_zone_inner(
         }
         None => {
             // No snapshot — empty bitmap, replay from slot 0.
-            (crow_protocol::UsageBitmap::new(unit_capacity), 0, 0, 0)
+            (crow_protocol::UsageBitmap::new(unit_capacity), 0, 0, false)
         }
     };
 
@@ -124,7 +128,7 @@ pub async fn load_zone_inner(
     let zone = DdbZone {
         disk_id,
         zone_index: zone_idx,
-        disk_group_id: dg_id,
+        disk_group_id,
         zone_state: std::sync::RwLock::new(DdbZoneHealth::Healthy),
         unit_capacity,
         usage_bits,
@@ -137,7 +141,8 @@ pub async fn load_zone_inner(
         uncompacted_free_record_count: std::sync::atomic::AtomicU32::new(uncompacted_free_record_count),
         cas_retry_count: std::sync::atomic::AtomicU64::new(0),
         metrics_cas_retry: None,
+        compacting: std::sync::atomic::AtomicBool::new(false),
     };
 
-    Ok((zone, max_freed_ts))
+    Ok((zone, max_freed_ts, snapshot_found))
 }

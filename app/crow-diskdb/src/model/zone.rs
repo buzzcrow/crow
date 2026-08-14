@@ -86,6 +86,10 @@ pub struct DdbZone {
     /// Optional metrics handle for CAS retry counter. When `Some`,
     /// the `allocate` path increments this counter on each CAS retry.
     pub metrics_cas_retry: Option<std::sync::Arc<Counter>>,
+    /// Compaction-in-progress guard — `try`-set at `compact_zone`
+    /// entry, cleared on exit (RAII). Prevents concurrent compaction
+    /// of the same zone from double-freeing (HIGH-5).
+    pub compacting: AtomicBool,
 }
 
 impl DdbZone {
@@ -108,6 +112,7 @@ impl DdbZone {
             uncompacted_free_record_count: AtomicU32::new(0),
             cas_retry_count: AtomicU64::new(0),
             metrics_cas_retry: None,
+            compacting: AtomicBool::new(false),
         }
     }
 
@@ -538,6 +543,7 @@ impl DdbZone {
             uncompacted_free_record_count: AtomicU32::new(0),
             cas_retry_count: AtomicU64::new(0),
             metrics_cas_retry: None,
+            compacting: AtomicBool::new(false),
         })
     }
 }

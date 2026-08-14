@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crow_protocol::common::DiskId;
-use crow_protocol::UsageBitmap;
+use crow_protocol::{DiskGroupId, UsageBitmap};
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::zone::DdbZone;
@@ -97,8 +97,15 @@ pub async fn scan_ghosts(
             continue;
         }
 
-        let Some((replayed, records, fallback_used)) =
-            replay_zone(kv, bind, disk_id, zone_idx, unit_capacity).await
+        let Some((replayed, records, fallback_used)) = replay_zone(
+            kv,
+            bind,
+            disk_id,
+            zone_idx,
+            live_zone.disk_group_id,
+            unit_capacity,
+        )
+        .await
         else {
             continue;
         };
@@ -146,13 +153,17 @@ async fn replay_zone(
     bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
+    disk_group_id: DiskGroupId,
     unit_capacity: u32,
 ) -> Option<(
     DdbZone,
     crate::model::records::ZoneRecords,
     Option<FallbackReason>,
 )> {
-    match load_zone_inner(kv, bind, disk_id, zone_idx, unit_capacity).await {
+    match load_zone_inner(kv, bind, disk_id, zone_idx, disk_group_id, unit_capacity)
+        .await
+        .map(|(z, ts, _)| (z, ts))
+    {
         Ok((z, _)) => {
             let recs = kv
                 .read_zone_records(bind, &disk_id, zone_idx)
@@ -161,9 +172,10 @@ async fn replay_zone(
             Some((z, recs, None))
         }
         Err(ZoneLoadError::JournalScanGcGap) => {
-            let (z, _) = rebuild_zone_bitmap_full_scan(kv, bind, disk_id, zone_idx, unit_capacity)
-                .await
-                .ok()?;
+            let (z, _) =
+                rebuild_zone_bitmap_full_scan(kv, bind, disk_id, zone_idx, disk_group_id, unit_capacity)
+                    .await
+                    .ok()?;
             let recs = kv
                 .read_zone_records(bind, &disk_id, zone_idx)
                 .await
@@ -171,9 +183,10 @@ async fn replay_zone(
             Some((z, recs, Some(FallbackReason::JournalScanGcGap)))
         }
         Err(ZoneLoadError::SnapshotCrcFail) => {
-            let (z, _) = rebuild_zone_bitmap_full_scan(kv, bind, disk_id, zone_idx, unit_capacity)
-                .await
-                .ok()?;
+            let (z, _) =
+                rebuild_zone_bitmap_full_scan(kv, bind, disk_id, zone_idx, disk_group_id, unit_capacity)
+                    .await
+                    .ok()?;
             let recs = kv
                 .read_zone_records(bind, &disk_id, zone_idx)
                 .await

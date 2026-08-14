@@ -399,13 +399,13 @@ hierarchy) reusing `crow-common`'s `MetricsRegistry`. `DiskdbMetrics` in
 - **Latency histograms** (`Arc<LatencyHistogram>`, hot paths):
   `allocate.rpc.latency_us`, `allocate.bitmap_scan.latency_us`,
   `allocate.kv_persist.latency_us`, `free.rpc.latency_us`,
-  `free.bitmap_clear.latency_us`, `free.kv_persist.latency_us`.
+  `free.persist.latency_us`, `free.kv_persist.latency_us`.
 - **Latency summaries** (`Arc<LatencySummary>`, cold paths):
   `allocate.zone_rotate.latency_us`, `sync.latency_us`,
   `sync.read_group0.latency_us`, `sync.apply_changes.latency_us`,
   `compaction.latency_us`, `compaction.scan_free.latency_us`,
   `compaction.merge_bitmap.latency_us`, `compaction.kv_persist.latency_us`,
-  `sync_duration_ms`, `recovery_duration_ms`.
+  `recovery_duration_ms`.
 
 `register(registry: &mut MetricsRegistry) -> Self` registers all of the
 above (plus the two existing R72 counters). `disabled()` constructs a
@@ -419,7 +419,7 @@ nanoseconds):
   (around `kv.persist_busy_batch`). On persist failure,
   `allocate_errors_total.inc()`.
 - `model/alloc.rs` `free_block`/`free_blocks`: observe
-  `free.rpc.latency_us`, `free.bitmap_clear.latency_us` (around
+  `free.rpc.latency_us`, `free.persist.latency_us` (around
   `dg.free_block`), `free.kv_persist.latency_us`.
 - `liveness/keepalive.rs` `tick`: observe `sync.latency_us`,
   `sync.read_group0.latency_us` (around `observe_ownership` +

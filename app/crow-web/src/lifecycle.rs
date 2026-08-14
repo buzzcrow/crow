@@ -1531,10 +1531,18 @@ pub async fn http_add_disk(
         let value = crow_protocol::diskdb::rpc::DiskValue {
             status: crow_protocol::common::HwStatus::Up as i32,
             disk_type: match entry.disk_type.as_str() {
+                "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
                 "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
                 "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
                 "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
-                _ => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
+                other => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorBody {
+                            error: format!("unknown disk_type: {other}"),
+                        }),
+                    ));
+                }
             },
             capacity_units,
             zone_size_units,
@@ -1613,6 +1621,11 @@ pub struct MoveDiskBody {
 /// # Errors
 /// Returns an error if the disk is not found, the new disk-group is
 /// not found, or the record copy / group-0 update fails.
+///
+/// B.1: add-before-remove + conditional config update + quiescence
+/// window. The disk is never "nowhere" — it's added to the new
+/// placement before being removed from the old. The console config is
+/// updated only if both group-0 operations succeed.
 #[allow(clippy::too_many_lines)]
 pub async fn http_move_disk(
     State(state): State<AppState>,
@@ -1665,116 +1678,171 @@ pub async fn http_move_disk(
         }
     };
 
-    // 4. Set disk to Maintenance in group 0 (old placement).
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        if let Err(e) = hw
-            .set_disk_status(
-                old_rack_id,
-                old_node_id,
-                old_dg_id,
-                &disk_id_proto,
-                crow_protocol::common::HwStatus::Maintenance,
-            )
-            .await
-        {
-            tracing::warn!(disk_id = %disk_id, error = %e, "move: set Maintenance failed");
-        }
+    let hw = crate::mgmt::build_hardware_client(&state).await.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: "no hardware client available".into(),
+            }),
+        )
+    })?;
+
+    // 4. Set disk to Maintenance in group 0 (old placement) —
+    //    quiescence window. This blocks new allocates. The next
+    //    diskdb sync tick (10 s) applies the status change and drains
+    //    in-flight allocates.
+    if let Err(e) = hw
+        .set_disk_status(
+            old_rack_id,
+            old_node_id,
+            old_dg_id,
+            &disk_id_proto,
+            crow_protocol::common::HwStatus::Maintenance,
+        )
+        .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("move: set Maintenance failed: {e}"),
+            }),
+        ));
     }
 
-    // 5. Copy records from old bind to new bind.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let old_bind = match hw.get_bind(old_rack_id, old_node_id, old_dg_id).await {
-            Ok(Some(bind)) => (bind.store_id, bind.group_id),
-            Ok(None) => {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorBody {
-                        error: format!(
-                            "no bind for old placement ({old_rack_id}, {old_node_id}, {old_dg_id})"
-                        ),
-                    }),
-                ));
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorBody {
-                        error: format!("get old bind: {e}"),
-                    }),
-                ));
-            }
-        };
-        let new_bind = match hw
-            .get_bind(body.new_rack_id, body.new_node_id, body.new_disk_group_id)
-            .await
-        {
-            Ok(Some(bind)) => (bind.store_id, bind.group_id),
-            Ok(None) => {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorBody {
-                        error: format!(
-                            "no bind for new placement ({}, {}, {}); create bind before move",
-                            body.new_rack_id, body.new_node_id, body.new_disk_group_id
-                        ),
-                    }),
-                ));
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorBody {
-                        error: format!("get new bind: {e}"),
-                    }),
-                ));
-            }
-        };
+    // 5. Wait for one sync tick (10 s) for diskdb to apply the
+    //    Maintenance status. This is the quiescence window — no source
+    //    lock, but Maintenance prevents new allocates and the sync
+    //    tick ensures the disk is removed from the allocating-disks
+    //    RCU context.
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
-        // Build a CrowkvClient seeded with both old and new bind leaders.
-        let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
-        if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, old_node_id, old_bind.0).await {
-            kv.seed_leader(old_bind.0, old_bind.1, ep);
+    // 6. Copy records from old bind to new bind.
+    let old_bind = match hw.get_bind(old_rack_id, old_node_id, old_dg_id).await {
+        Ok(Some(bind)) => (bind.store_id, bind.group_id),
+        Ok(None) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: format!("no bind for old placement ({old_rack_id}, {old_node_id}, {old_dg_id})"),
+                }),
+            ));
         }
-        if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, body.new_node_id, new_bind.0).await {
-            kv.seed_leader(new_bind.0, new_bind.1, ep);
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("get old bind: {e}"),
+                }),
+            ));
         }
-        let copy_count = copy_disk_records(&kv, old_bind, new_bind, &disk_id_proto).await;
-        tracing::info!(disk_id = %disk_id, records_copied = copy_count, "move: records copied");
+    };
+    let new_bind = match hw
+        .get_bind(body.new_rack_id, body.new_node_id, body.new_disk_group_id)
+        .await
+    {
+        Ok(Some(bind)) => (bind.store_id, bind.group_id),
+        Ok(None) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: format!(
+                        "no bind for new placement ({}, {}, {}); create bind before move",
+                        body.new_rack_id, body.new_node_id, body.new_disk_group_id
+                    ),
+                }),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("get new bind: {e}"),
+                }),
+            ));
+        }
+    };
+
+    // Build a CrowkvClient seeded with both old and new bind leaders.
+    let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+    if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, old_node_id, old_bind.0).await {
+        kv.seed_leader(old_bind.0, old_bind.1, ep);
+    }
+    if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, body.new_node_id, new_bind.0).await {
+        kv.seed_leader(new_bind.0, new_bind.1, ep);
+    }
+    let copy_count = copy_disk_records(&kv, old_bind, new_bind, &disk_id_proto).await;
+    tracing::info!(disk_id = %disk_id, records_copied = copy_count, "move: records copied");
+
+    // 7. Get the current DiskValue from group 0 (old placement).
+    let disk_value = match hw
+        .get_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
+        .await
+    {
+        Ok(Some(dv)) => dv,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("disk {disk_id} not found in group 0 (old placement)"),
+                }),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("get disk from old placement: {e}"),
+                }),
+            ));
+        }
+    };
+
+    // 8. Add to new placement (Maintenance status) — add-before-remove.
+    //    If this fails, the disk is still in the old placement
+    //    (Maintenance), no data loss.
+    let mut new_value = disk_value;
+    new_value.status = crow_protocol::common::HwStatus::Maintenance as i32;
+    if let Err(e) = hw
+        .add_disk(
+            body.new_rack_id,
+            body.new_node_id,
+            body.new_disk_group_id,
+            &disk_id_proto,
+            &new_value,
+        )
+        .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("move: add to new placement failed (disk still in old): {e}"),
+            }),
+        ));
     }
 
-    // 6. Update group 0 placement: remove from old, add to new.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        // Get the current DiskValue from group 0.
-        if let Ok(Some(disk_value)) = hw
-            .get_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
-            .await
-        {
-            // Remove from old placement.
-            if let Err(e) = hw
-                .remove_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
-                .await
-            {
-                tracing::warn!(disk_id = %disk_id, error = %e, "move: remove from old placement failed");
-            }
-            // Add to new placement with Maintenance status.
-            let mut new_value = disk_value;
-            new_value.status = crow_protocol::common::HwStatus::Maintenance as i32;
-            if let Err(e) = hw
-                .add_disk(
-                    body.new_rack_id,
-                    body.new_node_id,
-                    body.new_disk_group_id,
-                    &disk_id_proto,
-                    &new_value,
-                )
-                .await
-            {
-                tracing::warn!(disk_id = %disk_id, error = %e, "move: add to new placement failed");
-            }
-        }
+    // 9. Remove from old placement. If this fails, the disk exists in
+    //    both placements (both Maintenance, not allocatable). The
+    //    operator should retry the remove.
+    let remove_ok = hw
+        .remove_disk(old_rack_id, old_node_id, old_dg_id, &disk_id_proto)
+        .await
+        .is_ok();
+    if !remove_ok {
+        // Partial success — disk in both placements. Don't update
+        // console config (it stays pointing to old). Return a
+        // partial-success response.
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: format!(
+                    "move: added to new placement but remove from old failed; disk is in both placements (both Maintenance). Retry the remove for ({old_rack_id}, {old_node_id}, {old_dg_id})"
+                ),
+            }),
+        ));
     }
 
-    // 7. Update ConsoleConfig: move the DiskEntry to the new disk-group.
+    // 10. Update ConsoleConfig: move the DiskEntry to the new
+    //     disk-group. Only done if both group-0 operations succeeded.
     let updated_entry = {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_disk(&disk_id).map_err(map_config_err)?;
@@ -1792,6 +1860,24 @@ pub async fn http_move_disk(
         new_entry
     };
     state.persist().map_err(map_persist_err)?;
+
+    // 11. Set disk to Up in new placement — diskdb at the new
+    //     placement sees the disk on the next sync tick, runs
+    //     background_zone_load (Init → Up), and the disk becomes
+    //     allocatable. We set Up here so the operator doesn't need to
+    //     do it manually.
+    if let Err(e) = hw
+        .set_disk_status(
+            body.new_rack_id,
+            body.new_node_id,
+            body.new_disk_group_id,
+            &disk_id_proto,
+            crow_protocol::common::HwStatus::Up,
+        )
+        .await
+    {
+        tracing::warn!(disk_id = %disk_id, error = %e, "move: set Up at new placement failed (operator can set manually)");
+    }
 
     Ok(Json(updated_entry))
 }

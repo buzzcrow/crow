@@ -9,6 +9,7 @@
 //! the fallback when strategy 2 cannot run.
 
 use crow_protocol::common::DiskId;
+use crow_protocol::DiskGroupId;
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::records::ZoneRecords;
@@ -25,11 +26,12 @@ pub async fn rebuild_zone_bitmap_full_scan(
     bind: Bind,
     disk_id: DiskId,
     zone_idx: u32,
+    disk_group_id: DiskGroupId,
     unit_capacity: u32,
 ) -> Result<(DdbZone, ZoneStats), ZoneLoadError> {
     let records: ZoneRecords = kv.read_zone_records(bind, &disk_id, zone_idx).await?;
 
-    let zone = DdbZone::new(disk_id, zone_idx, 0, unit_capacity);
+    let zone = DdbZone::new(disk_id, zone_idx, disk_group_id, unit_capacity);
     for busy in &records.busy {
         #[allow(clippy::cast_possible_truncation)]
         let offset = busy.key.unit_offset as u32;

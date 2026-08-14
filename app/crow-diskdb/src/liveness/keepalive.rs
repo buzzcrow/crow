@@ -101,6 +101,11 @@ pub struct KeepAlive {
     /// recovery scan reports its per-disk count; the gauge sums across
     /// all concurrently bad disks. Set in `with_metrics`.
     impacted_blocks: Option<Arc<ImpactedBlocksGauge>>,
+    /// Per-disk Suspect-since timestamps (A.3). Tracks when a disk
+    /// entered `Suspect` for `check_suspect_timeout` (Suspect → Offline
+    /// after `temp_failure_timeout`). Removed when the disk leaves
+    /// Suspect.
+    disk_suspect_since: RwLock<HashMap<DiskId, std::time::Instant>>,
 }
 
 impl KeepAlive {
@@ -127,6 +132,7 @@ impl KeepAlive {
             disk_miss_counts: RwLock::new(HashMap::new()),
             recovery_scans: RwLock::new(HashMap::new()),
             impacted_blocks: None,
+            disk_suspect_since: RwLock::new(HashMap::new()),
         }
     }
 
@@ -231,6 +237,7 @@ impl KeepAlive {
         }
 
         // b+c. Observe ownership (owner map + bind map).
+        let read_start = std::time::Instant::now();
         let Some((owned, groups_added, groups_removed)) = self.observe_ownership().await else {
             if let Some(m) = &self.metrics {
                 m.sync_failure_total.inc();
@@ -243,10 +250,14 @@ impl KeepAlive {
 
         // d+e+f. Reconcile disk-groups + observe disks.
         let mut outcome = self.observe_disks(&owned).await;
+        if let Some(m) = &self.metrics {
+            m.sync_read_group0_latency.observe(elapsed_ns(read_start));
+        }
         outcome.groups_added = groups_added;
         outcome.groups_removed = groups_removed;
 
         // h. Reset missed count on success.
+        let apply_start = std::time::Instant::now();
         let prev = self.missed_count.swap(0, Ordering::SeqCst);
         if prev > 0 {
             self.container.exit_degraded_mode();
@@ -257,6 +268,7 @@ impl KeepAlive {
         if let Some(m) = &self.metrics {
             m.sync_success_total.inc();
             m.sync_latency.observe(elapsed_ns(start));
+            m.sync_apply_changes_latency.observe(elapsed_ns(apply_start));
         }
 
         outcome.sync_duration_ms = elapsed_ms(start);
@@ -429,6 +441,12 @@ impl KeepAlive {
     /// update status on existing disks, detect removed disks. Drives
     /// the `HwStateMachine` on status changes + the R76 Missing→Bad
     /// confirmation + recovery scan spawn + recovery-to-Up path.
+    ///
+    /// A.1: fetches `NodeValue` and `DiskGroupValue` from group 0 to
+    /// compute the three-level effective status `max(node, group,
+    /// disk)`. The group status is applied to `DdbDiskGroup` via
+    /// `transition_disk_group`; the effective status is stored on each
+    /// `DdbDisk`.
     async fn reconcile_disks(
         &self,
         dg: &Arc<DdbDiskGroup>,
@@ -438,7 +456,45 @@ impl KeepAlive {
         disks: &[(DiskId, DiskValue)],
         outcome: &mut KeepAliveOutcome,
     ) {
-        let _ = (rack_id, node_id, dg_id);
+        // A.1: fetch node + disk-group status from group 0.
+        let node_status = match self.hw.get_node(rack_id, node_id).await {
+            Ok(Some(nv)) => HwStatus::try_from(nv.status).unwrap_or(HwStatus::Up),
+            Ok(None) => {
+                warn!(rack_id, node_id, "sync: node value absent; assuming Up");
+                HwStatus::Up
+            }
+            Err(e) => {
+                warn!(error = %e, rack_id, node_id, "sync: get_node failed; assuming Up");
+                HwStatus::Up
+            }
+        };
+        let group_status = match self.hw.get_disk_group(rack_id, node_id, dg_id).await {
+            Ok(Some(dgv)) => HwStatus::try_from(dgv.value.status).unwrap_or(HwStatus::Up),
+            Ok(None) => {
+                warn!(dg_id, "sync: disk-group value absent; assuming Up");
+                HwStatus::Up
+            }
+            Err(e) => {
+                warn!(error = %e, dg_id, "sync: get_disk_group failed; assuming Up");
+                HwStatus::Up
+            }
+        };
+
+        // A.1: apply group status to the in-memory DdbDiskGroup.
+        let current_group_status = *dg.status.read().unwrap();
+        if current_group_status != group_status {
+            match self.status_machine.transition_disk_group(dg, group_status) {
+                Ok(_) => {
+                    dg.rebuild_allocating_disks();
+                    outcome.status_changes += 1;
+                    info!(dg_id, from = ?current_group_status, to = ?group_status, "disk-group status changed");
+                }
+                Err(e) => {
+                    warn!(dg_id, from = ?current_group_status, to = ?group_status, error = %e, "illegal disk-group transition; keeping current");
+                }
+            }
+        }
+
         let current_disk_ids: Vec<DiskId> = {
             let disks_guard = dg.disks.read().unwrap();
             disks_guard.iter().map(|d| d.disk_id).collect()
@@ -448,7 +504,9 @@ impl KeepAlive {
             if current_disk_ids.contains(disk_id) {
                 // Existing disk — reset miss count (present in sync).
                 self.disk_miss_counts.write().unwrap().remove(disk_id);
-                self.reconcile_existing_disk(dg, disk_id, disk_value, outcome)
+                // A.3: disk present → clear Suspect timer.
+                self.disk_suspect_since.write().unwrap().remove(disk_id);
+                self.reconcile_existing_disk(dg, disk_id, disk_value, node_status, group_status, outcome)
                     .await;
             } else {
                 // New disk — disk-add init flow (R81: Init-state).
@@ -460,18 +518,32 @@ impl KeepAlive {
         // Detect removed disks (present in memory but absent from sync).
         for disk_id in &current_disk_ids {
             if !disks.iter().any(|(id, _)| id == disk_id) {
-                self.reconcile_absent_disk(dg, disk_id, outcome);
+                self.reconcile_absent_disk(
+                    dg,
+                    rack_id,
+                    node_id,
+                    dg_id,
+                    disk_id,
+                    node_status,
+                    group_status,
+                    outcome,
+                )
+                .await;
             }
         }
     }
 
     /// Reconcile an existing disk present in the sync response: update
-    /// status if changed, resume recovery scan if still Bad.
+    /// status if changed, resume recovery scan if still Bad. A.1:
+    /// computes the three-level effective status and stores it on the
+    /// disk.
     async fn reconcile_existing_disk(
         &self,
         dg: &Arc<DdbDiskGroup>,
         disk_id: &DiskId,
         disk_value: &DiskValue,
+        node_status: HwStatus,
+        group_status: HwStatus,
         outcome: &mut KeepAliveOutcome,
     ) {
         let disk = {
@@ -488,30 +560,28 @@ impl KeepAlive {
         if old_status == HwStatus::Init {
             return;
         }
-        let new_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
-        if old_status != new_status {
+        let raw_disk_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
+        // A.1: effective = max(node, group, disk).
+        let new_effective = HwStateMachine::effective_status(node_status, group_status, raw_disk_status);
+        if old_status != new_effective {
             // R76: unified recovery path for → Up transitions.
-            if new_status == HwStatus::Up
-                && matches!(old_status, HwStatus::Missing | HwStatus::Bad | HwStatus::Offline)
+            if new_effective == HwStatus::Up
+                && matches!(
+                    old_status,
+                    HwStatus::Missing | HwStatus::Bad | HwStatus::Offline | HwStatus::Suspect
+                )
             {
                 self.recover_disk_to_up(dg, &disk).await;
                 outcome.status_changes += 1;
             } else {
-                match self.status_machine.transition_disk(&disk, new_status) {
-                    Ok(_) => {
-                        dg.rebuild_allocating_disks();
-                        outcome.status_changes += 1;
-                    }
-                    Err(e) => {
-                        warn!(
-                            disk = ?disk.disk_id,
-                            from = ?old_status,
-                            to = ?new_status,
-                            error = %e,
-                            "illegal disk status transition; keeping current"
-                        );
-                    }
-                }
+                // A.1: directly set the effective status (the
+                // transition may not be legal per the disk-only
+                // transition table — e.g. node going Offline while
+                // disk is Up → effective Offline. This is not a disk
+                // status change, it's an effective-status derivation).
+                disk.set_effective_status(new_effective);
+                dg.rebuild_allocating_disks();
+                outcome.status_changes += 1;
             }
         } else if old_status == HwStatus::Bad {
             // R76: on restart, a disk that is still Bad needs its
@@ -524,12 +594,20 @@ impl KeepAlive {
         }
     }
 
-    /// Reconcile a disk absent from the sync response: track miss
-    /// counts, transition Up→Missing→Bad, spawn recovery scan on Bad.
-    fn reconcile_absent_disk(
+    /// Reconcile a disk absent from the sync response. A.3: implements
+    /// the Suspect anti-flapping path — `Up → Suspect` on first
+    /// absence, response-driven resolution after `miss_threshold`.
+    /// A.2: write-back to group 0 before the local transition.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    async fn reconcile_absent_disk(
         &self,
         dg: &Arc<DdbDiskGroup>,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
         disk_id: &DiskId,
+        node_status: HwStatus,
+        group_status: HwStatus,
         outcome: &mut KeepAliveOutcome,
     ) {
         let disk = {
@@ -553,6 +631,7 @@ impl KeepAlive {
         ) {
             dg.remove_disk_from_memory(disk_id);
             self.disk_miss_counts.write().unwrap().remove(disk_id);
+            self.disk_suspect_since.write().unwrap().remove(disk_id);
             outcome.disks_removed += 1;
             info!(disk = ?disk_id, status = ?old_status, "disk absent from sync → removed from memory");
             return;
@@ -566,26 +645,111 @@ impl KeepAlive {
             *c
         };
 
-        if old_status != HwStatus::Missing {
-            // First absence → transition Up → Missing.
-            match self.status_machine.transition_disk(&disk, HwStatus::Missing) {
-                Ok(_) => {
-                    dg.rebuild_allocating_disks();
-                    outcome.status_changes += 1;
-                    info!(disk = ?disk_id, "disk absent from sync → Missing");
+        // A.3: Up → Suspect on first absence (anti-flapping buffer).
+        // Suspect is not allocatable; free is allowed. Suspect is
+        // local-only — NOT written back to group 0. Writing it back
+        // would conflict with A.1c (effective = max over group-0 disk
+        // status): on rediscovery the raw group-0 status would be
+        // Suspect, making effective = Suspect with no path back to Up
+        // (the Suspect timer is cleared on presence, so
+        // check_suspect_timeout never fires). Keeping Suspect local
+        // means the group-0 disk status stays Up, so rediscovery
+        // yields effective = Up and recover_disk_to_up fires.
+        if old_status == HwStatus::Up {
+            disk.set_effective_status(HwStatus::Suspect);
+            self.disk_suspect_since
+                .write()
+                .unwrap()
+                .insert(*disk_id, std::time::Instant::now());
+            dg.rebuild_allocating_disks();
+            outcome.status_changes += 1;
+            info!(disk = ?disk_id, "disk absent from sync → Suspect (anti-flapping)");
+            return;
+        }
+
+        // A.3: Suspect state — resolve based on miss count.
+        if old_status == HwStatus::Suspect {
+            if miss_count >= self.config.miss_threshold {
+                // Threshold reached — resolve based on the sync
+                // response context. Since the disk is absent, the
+                // response either didn't contain it (Missing) or the
+                // whole sync failed (Offline). We can't distinguish
+                // here (the caller already has the response), so we
+                // use the node/group status: if the node or group is
+                // not Up, the whole thing is down → Offline;
+                // otherwise the disk was removed → Missing.
+                let resolved = if node_status != HwStatus::Up || group_status != HwStatus::Up {
+                    HwStatus::Offline
+                } else {
+                    HwStatus::Missing
+                };
+                self.write_back_disk_status(rack_id, node_id, dg_id, disk_id, resolved)
+                    .await;
+                match self.status_machine.transition_disk(&disk, resolved) {
+                    Ok(_) => {
+                        dg.rebuild_allocating_disks();
+                        outcome.status_changes += 1;
+                        self.disk_suspect_since.write().unwrap().remove(disk_id);
+                        info!(disk = ?disk_id, miss_count, resolved = ?resolved, "Suspect → resolved after miss_threshold");
+                        if resolved == HwStatus::Missing {
+                            // Keep counting — Missing → Bad after
+                            // further confirmation.
+                        } else {
+                            // Offline — stop counting.
+                            self.disk_miss_counts.write().unwrap().remove(disk_id);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            disk = ?disk_id,
+                            from = ?old_status,
+                            to = ?resolved,
+                            error = %e,
+                            "illegal Suspect resolution; keeping current"
+                        );
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        disk = ?disk_id,
-                        from = ?old_status,
-                        to = ?HwStatus::Missing,
-                        error = %e,
-                        "illegal disk status transition; keeping current"
-                    );
+            } else {
+                // A.3: check_suspect_timeout — Suspect → Offline
+                // after temp_failure_timeout (intermittent absences
+                // that never reach miss_threshold).
+                let suspect_timed_out = {
+                    let since_guard = self.disk_suspect_since.read().unwrap();
+                    since_guard.get(disk_id).is_some_and(|&s| {
+                        self.status_machine
+                            .check_suspect_timeout(s, std::time::Instant::now())
+                    })
+                };
+                if suspect_timed_out {
+                    self.write_back_disk_status(rack_id, node_id, dg_id, disk_id, HwStatus::Offline)
+                        .await;
+                    match self.status_machine.transition_disk(&disk, HwStatus::Offline) {
+                        Ok(_) => {
+                            dg.rebuild_allocating_disks();
+                            outcome.status_changes += 1;
+                            self.disk_suspect_since.write().unwrap().remove(disk_id);
+                            self.disk_miss_counts.write().unwrap().remove(disk_id);
+                            info!(disk = ?disk_id, "Suspect → Offline (temp_failure_timeout)");
+                        }
+                        Err(e) => {
+                            warn!(
+                                disk = ?disk_id,
+                                from = ?old_status,
+                                to = ?HwStatus::Offline,
+                                error = %e,
+                                "illegal Suspect → Offline; keeping current"
+                            );
+                        }
+                    }
                 }
             }
-        } else if miss_count >= self.config.miss_threshold {
-            // Nth consecutive absence → Missing → Bad + spawn recovery scan.
+            return;
+        }
+
+        // old_status == Missing — continue the Missing → Bad path.
+        if old_status == HwStatus::Missing && miss_count >= self.config.miss_threshold {
+            self.write_back_disk_status(rack_id, node_id, dg_id, disk_id, HwStatus::Bad)
+                .await;
             match self.status_machine.transition_disk(&disk, HwStatus::Bad) {
                 Ok(_) => {
                     dg.rebuild_allocating_disks();
@@ -608,6 +772,32 @@ impl KeepAlive {
                     );
                 }
             }
+        }
+    }
+
+    /// A.2: best-effort write-back of a disk's status to group 0
+    /// before the local transition. Failures are logged and ignored —
+    /// the local transition is the safety-critical action; the
+    /// write-back is observability for the operator.
+    async fn write_back_disk_status(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        disk_id: &DiskId,
+        status: HwStatus,
+    ) {
+        if let Err(e) = self
+            .hw
+            .set_disk_status(rack_id, node_id, dg_id, disk_id, status)
+            .await
+        {
+            warn!(
+                disk = ?disk_id,
+                status = ?status,
+                error = %e,
+                "write-back: set_disk_status failed (best-effort; local transition proceeds)"
+            );
         }
     }
 
@@ -681,7 +871,12 @@ impl KeepAlive {
         // `recover_disk_to_up` helper no longer sets it itself.
         if let Some(ref kv) = self.kv {
             let bind = *dg.bind.read().unwrap();
-            recover_disk_to_up(disk, bind, kv, self.config.zone_rotate_count).await;
+            if let Some(m) = &self.metrics {
+                recover_disk_to_up(disk, bind, kv, self.config.zone_rotate_count, m).await;
+            } else {
+                let m = crate::metrics::DiskdbMetrics::disabled();
+                recover_disk_to_up(disk, bind, kv, self.config.zone_rotate_count, &m).await;
+            }
         } else {
             // No kv client (test mode) — status already set; just
             // rebuild active zones.
@@ -755,7 +950,9 @@ impl KeepAlive {
     /// Background zone load task for a new Init-state disk. Loads all
     /// zones via strategy 2 (journal replay) with strategy 1 (full
     /// scan) fallback, then transitions `Init → disk_value.status`.
-    #[allow(clippy::too_many_arguments)]
+    /// B.2: writes baseline `ZoneValue` records for fresh-disk zones
+    /// that had no snapshot.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn background_zone_load(
         bind: Bind,
         disk_id: DiskId,
@@ -770,46 +967,65 @@ impl KeepAlive {
         let zone_count = disk_value.zone_count;
         let zone_size_units = disk_value.zone_size_units;
         let mut all_ok = true;
+        // B.2: track zones without snapshots (fresh disk) for baseline
+        // ZoneValue writes.
+        let mut zones_needing_baseline: Vec<(u32, Arc<crate::model::zone::DdbZone>)> = Vec::new();
 
         for zi in 0..zone_count {
             let unit_capacity = unit_capacity_for_zone(&disk_value, zi, zone_count, zone_size_units);
-            let (zone, _max_freed_ts) =
-                match journal_replay::load_zone_inner(&kv, bind, disk_id, zi, unit_capacity).await {
-                    Ok((zone, max_freed_ts)) => (zone, max_freed_ts),
-                    Err(e) => {
-                        warn!(
-                            disk = ?disk_id,
-                            zone = zi,
-                            error = %e,
-                            "init-state load: strategy 2 failed; falling back to full scan"
-                        );
-                        match full_scan::rebuild_zone_bitmap_full_scan(&kv, bind, disk_id, zi, unit_capacity)
-                            .await
-                        {
-                            Ok((zone, _)) => (zone, 0),
-                            Err(e2) => {
-                                tracing::error!(
-                                    disk = ?disk_id,
-                                    zone = zi,
-                                    error = %e2,
-                                    "init-state load: strategy 1 also failed; using empty zone"
-                                );
-                                all_ok = false;
-                                // CAS metric is attached below on the
-                                // common path.
-                                (
-                                    crate::model::zone::DdbZone::new(
-                                        disk_id,
-                                        zi,
-                                        dg.disk_group_id,
-                                        unit_capacity,
-                                    ),
-                                    0,
-                                )
-                            }
+            let (zone, _max_freed_ts, snapshot_found) = match journal_replay::load_zone_inner(
+                &kv,
+                bind,
+                disk_id,
+                zi,
+                dg.disk_group_id,
+                unit_capacity,
+            )
+            .await
+            {
+                Ok((zone, max_freed_ts, found)) => (zone, max_freed_ts, found),
+                Err(e) => {
+                    warn!(
+                        disk = ?disk_id,
+                        zone = zi,
+                        error = %e,
+                        "init-state load: strategy 2 failed; falling back to full scan"
+                    );
+                    match full_scan::rebuild_zone_bitmap_full_scan(
+                        &kv,
+                        bind,
+                        disk_id,
+                        zi,
+                        dg.disk_group_id,
+                        unit_capacity,
+                    )
+                    .await
+                    {
+                        // Strategy 1 fallback — not a fresh disk
+                        // (it has records); no baseline needed.
+                        Ok((zone, _)) => (zone, 0, true),
+                        Err(e2) => {
+                            tracing::error!(
+                                disk = ?disk_id,
+                                zone = zi,
+                                error = %e2,
+                                "init-state load: strategy 1 also failed; using empty zone"
+                            );
+                            all_ok = false;
+                            (
+                                crate::model::zone::DdbZone::new(
+                                    disk_id,
+                                    zi,
+                                    dg.disk_group_id,
+                                    unit_capacity,
+                                ),
+                                0,
+                                false,
+                            )
                         }
                     }
-                };
+                }
+            };
 
             // Attach CAS retry metric if configured.
             let zone = if let Some(ref counter) = cas_retry_metric {
@@ -817,7 +1033,46 @@ impl KeepAlive {
             } else {
                 Arc::new(zone)
             };
+
+            // B.2: if no snapshot was found (fresh disk zone), queue
+            // for baseline write. Strategy 1 fallback zones have
+            // records (snapshot_found = true) — no baseline needed.
+            if !snapshot_found {
+                zones_needing_baseline.push((zi, Arc::clone(&zone)));
+            }
+
             disk.add_zone(zone);
+        }
+
+        // B.2: write baseline ZoneValue records for fresh-disk zones
+        // that had no snapshot. Chunked batch_write — the batch size
+        // depends on the operation size. Non-atomicity is harmless
+        // because background_zone_load retries missing baselines on
+        // next restart (strategy 2 finds no snapshot for the missing
+        // zones).
+        if !zones_needing_baseline.is_empty() {
+            let baseline_count = zones_needing_baseline.len();
+            let mut write_ok = true;
+            for (zi, zone) in &zones_needing_baseline {
+                let zv = zone.to_zone_value();
+                if let Err(e) = kv.put_zone(bind, &disk_id, *zi, &zv).await {
+                    warn!(
+                        disk = ?disk_id,
+                        zone = zi,
+                        error = %e,
+                        "baseline ZoneValue write failed; will retry on next restart"
+                    );
+                    write_ok = false;
+                }
+            }
+            if !write_ok {
+                // B.2: baseline write failed → transition to Offline
+                // (not Up). The disk has no/partial snapshots; on
+                // next restart background_zone_load retries the
+                // baseline write for the missing zones.
+                all_ok = false;
+            }
+            info!(disk = ?disk_id, baseline_count, "baseline ZoneValue records written for fresh-disk zones");
         }
 
         // Transition Init → final status.

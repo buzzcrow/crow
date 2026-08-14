@@ -423,8 +423,7 @@ diskdb's first major component:
 - **Sync with group 0** (fixed 10 s interval, same on success and
   failure — no error back-off in v1): fetch latest metadata; update
   group 0 first when local status changes (disk found, disk bad, disk
-  added/removed). An **epoch/revision guard** skips a sync response
-  whose epoch ≤ current (prevents stale overwrites). A disk/node
+  added/removed). A disk/node
   **absent from a sync response** is transitioned to `Missing` (then to
   `Bad` after confirmation or `Up` if rediscovered) — this is how
   `Missing` is detected (§8).

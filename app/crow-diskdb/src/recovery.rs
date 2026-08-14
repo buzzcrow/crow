@@ -148,7 +148,9 @@ impl ZoneLoader {
                 let sem = Arc::clone(&sem);
                 let handle = tokio::spawn(async move {
                     let _permit = sem.acquire().await;
-                    journal_replay::load_zone_inner(&kv, bind, disk_id, zi, unit_capacity).await
+                    journal_replay::load_zone_inner(&kv, bind, disk_id, zi, dg_id, unit_capacity)
+                        .await
+                        .map(|(z, ts, _)| (z, ts))
                 });
                 zone_handles.push((zi, handle));
             }
@@ -172,6 +174,7 @@ impl ZoneLoader {
                             bind,
                             *disk_id,
                             zi,
+                            dg_id,
                             unit_capacity,
                         )
                         .await
@@ -241,9 +244,18 @@ impl ZoneLoader {
         bind: Bind,
         disk_id: DiskId,
         zone_idx: u32,
+        disk_group_id: DiskGroupId,
         unit_capacity: u32,
     ) -> Result<(DdbZone, ZoneStats), ZoneLoadError> {
-        full_scan::rebuild_zone_bitmap_full_scan(&self.kv, bind, disk_id, zone_idx, unit_capacity).await
+        full_scan::rebuild_zone_bitmap_full_scan(
+            &self.kv,
+            bind,
+            disk_id,
+            zone_idx,
+            disk_group_id,
+            unit_capacity,
+        )
+        .await
     }
 }
 
@@ -261,8 +273,11 @@ pub(crate) fn unit_capacity_for_zone(
     if zi == zone_count - 1 {
         let remaining = disk_value.capacity_units - (u64::from(zi) * zone_size_units);
         let rounded = (remaining / 64) * 64;
-        rounded as u32
+        u32::try_from(rounded).unwrap_or(u32::MAX)
     } else {
-        zone_size_units as u32
+        // zone_size_units is validated to fit u32 at disk-add time
+        // (http_add_disk rejects zone_size_bytes / unit_size_bytes
+        // > u32::MAX).
+        u32::try_from(zone_size_units).unwrap_or(u32::MAX)
     }
 }

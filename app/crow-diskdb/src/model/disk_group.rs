@@ -50,7 +50,9 @@ impl DdbDiskGroup {
             disk_group_id,
             node_id,
             rack_id,
-            status: RwLock::new(HwStatus::Up),
+            // A.1: start at Init — the sync loop applies the real
+            // group-0 status on the first tick.
+            status: RwLock::new(HwStatus::Init),
             bind: RwLock::new((0, 0)),
             disks: RwLock::new(Vec::new()),
             disk_index: RwLock::new(HashMap::new()),

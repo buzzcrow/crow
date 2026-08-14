@@ -48,6 +48,8 @@ fn make_disk(low: u64) -> Arc<DdbDisk> {
 
 fn make_dg() -> Arc<DdbDiskGroup> {
     let dg = Arc::new(DdbDiskGroup::new(DG, 10, 1));
+    // Default group status is Init; set to Up for allocation tests.
+    *dg.status.write().unwrap() = HwStatus::Up;
     dg.add_disk(make_disk(1));
     dg.add_disk(make_disk(2));
     dg.rebuild_allocating_disks();

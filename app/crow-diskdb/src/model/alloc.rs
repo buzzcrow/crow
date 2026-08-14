@@ -19,6 +19,11 @@ use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group::{AllocClaim, AllocError, DdbDiskGroup};
 use crate::recovery::compaction::compact_zone;
 
+/// Elapsed nanoseconds as u64 (saturating cast from u128).
+fn elapsed_ns(start: std::time::Instant) -> u64 {
+    start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
 /// Errors from the free path when `validate_owner_on_free` is enabled.
 #[derive(Debug)]
 pub enum FreeError {
@@ -81,7 +86,12 @@ impl From<crow_kv_client::Error> for FreeError {
 /// (up to `zone_rotate_count` per disk), then retry. This reclaims
 /// freed space that hasn't been compacted yet (persist-only free
 /// leaves bits set). See §5 Preparatory thread — Fallback.
-async fn compact_fallback(dg: &Arc<DdbDiskGroup>, kv: &DdbKvClient, zone_rotate_count: u32) {
+async fn compact_fallback(
+    dg: &Arc<DdbDiskGroup>,
+    kv: &DdbKvClient,
+    zone_rotate_count: u32,
+    metrics: &crate::metrics::DiskdbMetrics,
+) {
     let bind = *dg.bind.read().unwrap();
     let disks = dg.disks.read().unwrap().clone();
     for disk in disks {
@@ -104,7 +114,7 @@ async fn compact_fallback(dg: &Arc<DdbDiskGroup>, kv: &DdbKvClient, zone_rotate_
             if zone.compacted_ready.load(std::sync::atomic::Ordering::Acquire) {
                 continue;
             }
-            if let Err(e) = compact_zone(kv, bind, disk.disk_id, &zone, zone.zone_index).await {
+            if let Err(e) = compact_zone(kv, bind, disk.disk_id, &zone, zone.zone_index, metrics).await {
                 tracing::warn!(
                     disk_id = ?disk.disk_id,
                     zone_index = zone.zone_index,
@@ -143,6 +153,7 @@ pub async fn allocate_block(
     kv: &DdbKvClient,
     cas_retry_limit: u32,
     zone_rotate_count: u32,
+    metrics: &crate::metrics::DiskdbMetrics,
 ) -> std::result::Result<Segment, AllocError> {
     // Phase 1: bitmap CAS.
     let (disk, zone, range) = match dg.allocate_block(unit_count, &[], cas_retry_limit, zone_rotate_count) {
@@ -151,7 +162,7 @@ pub async fn allocate_block(
             // Synchronous compaction fallback: compact non-active
             // zones to reclaim freed space, then retry once.
             tracing::info!("allocate NoSpace — running synchronous compaction fallback");
-            compact_fallback(dg, kv, zone_rotate_count).await;
+            compact_fallback(dg, kv, zone_rotate_count, metrics).await;
             dg.allocate_block(unit_count, &[], cas_retry_limit, zone_rotate_count)?
         }
     };
@@ -210,8 +221,10 @@ pub async fn allocate_blocks(
     kv: &DdbKvClient,
     cas_retry_limit: u32,
     zone_rotate_count: u32,
+    metrics: &crate::metrics::DiskdbMetrics,
 ) -> std::result::Result<Vec<Segment>, AllocError> {
     // Phase 1: bitmap CAS for all blocks.
+    let phase1_start = std::time::Instant::now();
     let claims: Vec<AllocClaim> = match dg.allocate_blocks(
         unit_count,
         count,
@@ -228,7 +241,7 @@ pub async fn allocate_blocks(
                 placed = partial.len(),
                 "allocate_blocks partial — running synchronous compaction fallback"
             );
-            compact_fallback(dg, kv, zone_rotate_count).await;
+            compact_fallback(dg, kv, zone_rotate_count, metrics).await;
             dg.allocate_blocks(
                 unit_count,
                 count,
@@ -240,7 +253,7 @@ pub async fn allocate_blocks(
         Err(AllocError::NoSpace) => {
             // No space at all — try compaction fallback then retry.
             tracing::info!("allocate_blocks NoSpace — running synchronous compaction fallback");
-            compact_fallback(dg, kv, zone_rotate_count).await;
+            compact_fallback(dg, kv, zone_rotate_count, metrics).await;
             dg.allocate_blocks(
                 unit_count,
                 count,
@@ -257,6 +270,9 @@ pub async fn allocate_blocks(
             m.record_allocate(range.unit_count, unit_size);
         }
     }
+    metrics
+        .allocate_bitmap_scan_latency
+        .observe(elapsed_ns(phase1_start));
 
     // Phase 2: persist all in one batch_write.
     let records: Vec<(DiskId, u32, u64, BusyBlockValue)> = claims
@@ -277,14 +293,19 @@ pub async fn allocate_blocks(
         .collect();
 
     let bind = *dg.bind.read().unwrap();
+    let phase2_start = std::time::Instant::now();
     if let Err(e) = kv.persist_busy_batch(bind, &records).await {
         // Rollback ALL Phase 1 claims.
         for (_, zone, range) in &claims {
             let _ = zone.rollback_allocate(range.unit_offset, range.unit_count);
         }
         tracing::warn!("allocate_blocks persist failed, rolled back {count} claims: {e}");
+        metrics.allocate_errors_total.inc();
         return Err(AllocError::NoSpace);
     }
+    metrics
+        .allocate_kv_persist_latency
+        .observe(elapsed_ns(phase2_start));
 
     let segments: Vec<Segment> = claims
         .iter()

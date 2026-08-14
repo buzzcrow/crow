@@ -58,7 +58,7 @@ pub struct DiskdbMetrics {
     pub allocate_bitmap_scan_latency: Arc<LatencyHistogram>,
     pub allocate_kv_persist_latency: Arc<LatencyHistogram>,
     pub free_rpc_latency: Arc<LatencyHistogram>,
-    pub free_bitmap_clear_latency: Arc<LatencyHistogram>,
+    pub free_persist_latency: Arc<LatencyHistogram>,
     pub free_kv_persist_latency: Arc<LatencyHistogram>,
 
     // ── R74 §11 latency summaries (cold paths) ───────────────────
@@ -70,7 +70,6 @@ pub struct DiskdbMetrics {
     pub compaction_scan_free_latency: Arc<LatencySummary>,
     pub compaction_merge_bitmap_latency: Arc<LatencySummary>,
     pub compaction_kv_persist_latency: Arc<LatencySummary>,
-    pub sync_duration_ms: Arc<LatencySummary>,
     pub recovery_duration_ms: Arc<LatencySummary>,
 
     // ── Scanner metrics (background scanner) ──────────────────────
@@ -113,7 +112,7 @@ impl DiskdbMetrics {
             allocate_bitmap_scan_latency: registry.register_histogram("allocate.bitmap_scan.latency_us"),
             allocate_kv_persist_latency: registry.register_histogram("allocate.kv_persist.latency_us"),
             free_rpc_latency: registry.register_histogram("free.rpc.latency_us"),
-            free_bitmap_clear_latency: registry.register_histogram("free.bitmap_clear.latency_us"),
+            free_persist_latency: registry.register_histogram("free.persist.latency_us"),
             free_kv_persist_latency: registry.register_histogram("free.kv_persist.latency_us"),
             // R74 latency summaries (cold paths).
             allocate_zone_rotate_latency: registry.register_summary("allocate.zone_rotate.latency_us"),
@@ -124,7 +123,6 @@ impl DiskdbMetrics {
             compaction_scan_free_latency: registry.register_summary("compaction.scan_free.latency_us"),
             compaction_merge_bitmap_latency: registry.register_summary("compaction.merge_bitmap.latency_us"),
             compaction_kv_persist_latency: registry.register_summary("compaction.kv_persist.latency_us"),
-            sync_duration_ms: registry.register_summary("sync_duration_ms"),
             recovery_duration_ms: registry.register_summary("recovery_duration_ms"),
             // Scanner metrics.
             scanner_runs_total: registry.register_counter("scanner.runs.total"),

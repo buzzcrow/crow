@@ -27,7 +27,7 @@ use tonic::{Request, Response, Status};
 
 use crate::ddb_config::StorageDefaults;
 use crate::ddb_kv_client::DdbKvClient;
-use crate::metrics::RecalcEngine;
+use crate::metrics::{DiskdbMetrics, RecalcEngine};
 use crate::model::alloc;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::ZoneUsage;
@@ -41,6 +41,11 @@ const MAX_ALLOCATE_COUNT: u32 = 1024;
 /// `u32::MAX` sentinel for "all zones on the disk".
 const ALL_ZONES: u32 = u32::MAX;
 
+/// Elapsed nanoseconds as u64 (saturating cast from u128).
+fn elapsed_ns(start: std::time::Instant) -> u64 {
+    start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
 pub struct DiskdbService {
     container: Arc<DdbDiskGroupContainer>,
     kv: Arc<DdbKvClient>,
@@ -48,6 +53,7 @@ pub struct DiskdbService {
     zone_loader: Arc<ZoneLoader>,
     recalc: Arc<RecalcEngine>,
     scan_state: ScanState,
+    metrics: Arc<DiskdbMetrics>,
 }
 
 impl DiskdbService {
@@ -58,6 +64,7 @@ impl DiskdbService {
         zone_loader: Arc<ZoneLoader>,
         recalc: Arc<RecalcEngine>,
         scan_state: ScanState,
+        metrics: Arc<DiskdbMetrics>,
     ) -> Self {
         Self {
             container,
@@ -66,6 +73,7 @@ impl DiskdbService {
             zone_loader,
             recalc,
             scan_state,
+            metrics,
         }
     }
 
@@ -129,6 +137,7 @@ impl DiskdbServiceTrait for DiskdbService {
         &self,
         req: Request<AllocateBlocksRequest>,
     ) -> Result<Response<AllocateResponse>, Status> {
+        let rpc_start = std::time::Instant::now();
         let req = req.into_inner();
 
         // Validate unit_count.
@@ -188,16 +197,21 @@ impl DiskdbServiceTrait for DiskdbService {
             &self.kv,
             self.storage.cas_retry_limit,
             self.storage.zone_rotate_count,
+            &self.metrics,
         )
         .await
         .map_err(|e| match e {
             crate::model::disk_group::AllocError::NoSpace => Status::resource_exhausted("no space available"),
         })?;
 
+        self.metrics.allocate_total.inc();
+        self.metrics.allocate_rpc_latency.observe(elapsed_ns(rpc_start));
+
         Ok(Response::new(AllocateResponse { segments }))
     }
 
     async fn free_blocks(&self, req: Request<FreeBlocksRequest>) -> Result<Response<FreeResponse>, Status> {
+        let rpc_start = std::time::Instant::now();
         let req = req.into_inner();
 
         if req.segments.is_empty() {
@@ -250,6 +264,25 @@ impl DiskdbServiceTrait for DiskdbService {
             ))
         })?;
 
+        // Validate all segments belong to the same disk-group (E.1).
+        // A misbuilt request with segments spanning disk-groups would
+        // write frees to the wrong group's bind.
+        {
+            let disks = node.disks.read().unwrap();
+            let group_disk_ids: std::collections::HashSet<&crow_protocol::common::DiskId> =
+                disks.iter().map(|d| &d.disk_id).collect();
+            for seg in &req.segments {
+                if let Some(ref did) = seg.disk_id {
+                    if !group_disk_ids.contains(did) {
+                        return Err(Status::invalid_argument(format!(
+                            "segment disk {} not in the resolved disk-group",
+                            did.to_display_string()
+                        )));
+                    }
+                }
+            }
+        }
+
         // Immediate free (v1).
         alloc::free_blocks(
             &node,
@@ -268,6 +301,8 @@ impl DiskdbServiceTrait for DiskdbService {
 
         #[allow(clippy::cast_possible_truncation)]
         let freed_count = req.segments.len() as u32;
+        self.metrics.free_total.inc();
+        self.metrics.free_rpc_latency.observe(elapsed_ns(rpc_start));
         Ok(Response::new(FreeResponse { freed_count }))
     }
 
@@ -328,6 +363,7 @@ impl DiskdbServiceTrait for DiskdbService {
                 zone_usages: vec![proto_zu],
                 ..Self::build_disk_info(&disk, false)
             };
+            let agg = dg.aggregate_usage();
             let group_info = DiskGroupInfo {
                 rack_id: dg.rack_id,
                 node_id: dg.node_id,
@@ -335,10 +371,10 @@ impl DiskdbServiceTrait for DiskdbService {
                 status: *dg.status.read().unwrap() as i32,
                 disk_ids: vec![disk_id],
                 disks: vec![disk_info],
-                capacity_bytes: 0,
-                busy_bytes: 0,
-                free_bytes: 0,
-                allocatable_disk_count: 0,
+                capacity_bytes: agg.capacity_bytes,
+                busy_bytes: agg.busy_bytes,
+                free_bytes: agg.free_bytes,
+                allocatable_disk_count: agg.allocatable_disk_count,
             };
             return Ok(Response::new(QueryCapacityStatsResponse {
                 disk_groups: vec![group_info],
@@ -363,6 +399,7 @@ impl DiskdbServiceTrait for DiskdbService {
                 ))
             })?;
             let disk_info = Self::build_disk_info(&disk, true);
+            let agg = dg.aggregate_usage();
             let group_info = DiskGroupInfo {
                 rack_id: dg.rack_id,
                 node_id: dg.node_id,
@@ -370,10 +407,10 @@ impl DiskdbServiceTrait for DiskdbService {
                 status: *dg.status.read().unwrap() as i32,
                 disk_ids: vec![disk_id],
                 disks: vec![disk_info],
-                capacity_bytes: 0,
-                busy_bytes: 0,
-                free_bytes: 0,
-                allocatable_disk_count: 0,
+                capacity_bytes: agg.capacity_bytes,
+                busy_bytes: agg.busy_bytes,
+                free_bytes: agg.free_bytes,
+                allocatable_disk_count: agg.allocatable_disk_count,
             };
             return Ok(Response::new(QueryCapacityStatsResponse {
                 disk_groups: vec![group_info],
@@ -546,7 +583,13 @@ impl DiskdbServiceTrait for DiskdbService {
                 unit_capacity_for_zone(&disk_value, zi, zone_count, disk_value.zone_size_units);
             match self
                 .zone_loader
-                .rebuild_zone_bitmap_full_scan(bind, disk_value_disk_id, zi, unit_capacity)
+                .rebuild_zone_bitmap_full_scan(
+                    bind,
+                    disk_value_disk_id,
+                    zi,
+                    node.disk_group_id,
+                    unit_capacity,
+                )
                 .await
             {
                 Ok((_zone, stats)) => {
@@ -707,7 +750,7 @@ impl DiskdbServiceTrait for DiskdbService {
             let backlog_before = zone
                 .uncompacted_free_record_count
                 .load(std::sync::atomic::Ordering::Acquire);
-            match compact_zone(&self.kv, bind, disk_id, &zone, zi).await {
+            match compact_zone(&self.kv, bind, disk_id, &zone, zi, &self.metrics).await {
                 Ok(()) => {
                     let backlog_after = zone
                         .uncompacted_free_record_count

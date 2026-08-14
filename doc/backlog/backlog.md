@@ -16,10 +16,12 @@ complexity, and dependency. Before implementation, follow the
 ### High Priority
 
 - **[R77](R77-diskdb-console-cli.md)** — diskdb console + CLI
-  integration — Area: diskdb / console — Disk/disk-group management UI,
-  zone busy/free visualization (block array chart), CLI command design
-  (`crow diskdb` subcommands vs sub-wrapper binaries). Follow-up after
-  core diskdb is functional.
+  integration — Area: diskdb / console — `/api/diskdb` REST proxy +
+  `crow diskdb` CLI subcommands for runtime queries (usage/zones/scan/
+  recalc/compact/rebuild), web Diskdb center panel (instance overview,
+  usage dashboard, canvas zone block chart, scanner, recalc), and disk
+  lifecycle UI (tree nodes + dialogs) on the R81 handlers. Follow-up
+  after core diskdb is functional.
 - **[R79](R79-diskdb-free-batch.md)** — diskdb free batch
   (size-threshold, no timer) — Area: diskdb — Group frees into a
   batch and flush via one `batch_write` when the batch reaches a

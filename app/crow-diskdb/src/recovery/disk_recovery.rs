@@ -411,7 +411,13 @@ fn now_ms() -> u64 {
 /// In v1 (placeholder recovery = `LogOnly`, no frees written),
 /// compaction is a no-op — the bitmap is already correct, the disk
 /// comes back with its data intact.
-pub async fn recover_disk_to_up(disk: &Arc<DdbDisk>, bind: Bind, kv: &DdbKvClient, zone_rotate_count: u32) {
+pub async fn recover_disk_to_up(
+    disk: &Arc<DdbDisk>,
+    bind: Bind,
+    kv: &DdbKvClient,
+    zone_rotate_count: u32,
+    metrics: &crate::metrics::DiskdbMetrics,
+) {
     // Delete persisted recovery scan progress (if any).
     if let Err(e) = kv.delete_recovery_scan_progress(bind, &disk.disk_id).await {
         warn!(
@@ -431,7 +437,9 @@ pub async fn recover_disk_to_up(disk: &Arc<DdbDisk>, bind: Bind, kv: &DdbKvClien
             let zones = disk.zones.read().unwrap();
             Arc::clone(&zones[zi as usize])
         };
-        if let Err(e) = crate::recovery::compaction::compact_zone(kv, bind, disk.disk_id, &zone, zi).await {
+        if let Err(e) =
+            crate::recovery::compaction::compact_zone(kv, bind, disk.disk_id, &zone, zi, metrics).await
+        {
             warn!(
                 disk = ?disk.disk_id,
                 zone = zi,

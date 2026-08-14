@@ -43,6 +43,8 @@ fn make_disk(disk_low: u64, zone_count: u32, zone_capacity: u32) -> Arc<DdbDisk>
 
 fn make_dg_with_disks(disk_specs: &[(u64, u32, u32)]) -> Arc<DdbDiskGroup> {
     let dg = Arc::new(DdbDiskGroup::new(DG, 1, 1));
+    // Default group status is Init; set to Up for allocation tests.
+    *dg.status.write().unwrap() = HwStatus::Up;
     for &(disk_low, zone_count, zone_capacity) in disk_specs {
         let disk = make_disk(disk_low, zone_count, zone_capacity);
         dg.add_disk(disk);

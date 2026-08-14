@@ -13,6 +13,7 @@
 //! atomic `batch_write` (I6) — they succeed or fail together. No window
 //! where the snapshot is durable but the free records survive.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crow_protocol::common::DiskId;
@@ -21,14 +22,29 @@ use crow_protocol::key::BinaryKey;
 use crate::bg_task::{BackgroundTask, BgCtx, CycleFut, Trigger};
 use crate::ddb_config::CompactionConfig;
 use crate::ddb_kv_client::{Bind, DdbKvClient};
+use crate::metrics::DiskdbMetrics;
 use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::model::zone::DdbZone;
 use crate::recovery::ZoneLoadError;
+
+/// RAII guard that clears the `compacting` flag on drop. Ensures the
+/// flag is cleared even on panic or early return (HIGH-5).
+struct CompactingGuard<'a>(&'a AtomicBool);
+impl Drop for CompactingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 /// Compact one zone: partition free records by the `compact_ts`
 /// watermark, `range_clear` only the new records, write a new
 /// `ZoneValue` + delete all free records in one atomic `batch_write`
 /// (I6). Sets `compacted_ready = true` on success.
+///
+/// A per-zone `AtomicBool` guard prevents concurrent compaction of the
+/// same zone (HIGH-5). If another compaction is already in progress,
+/// returns `Ok(())` immediately (skip — the in-progress compaction
+/// will handle this zone).
 ///
 /// Crash-safety: the atomic `batch_write` ensures the snapshot and
 /// the free-record deletes succeed or fail together — no window
@@ -42,45 +58,102 @@ pub async fn compact_zone(
     disk_id: DiskId,
     zone: &Arc<DdbZone>,
     zone_idx: u32,
+    metrics: &DiskdbMetrics,
 ) -> Result<(), ZoneLoadError> {
+    // Per-zone compaction guard — prevents concurrent compaction of
+    // the same zone (HIGH-5). If already in progress, skip.
+    if zone
+        .compacting
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        tracing::debug!(
+            disk_id = ?disk_id,
+            zone_index = zone_idx,
+            "compaction already in progress; skipping"
+        );
+        return Ok(());
+    }
+    let _guard = CompactingGuard(&zone.compacting);
+    let compaction_start = std::time::Instant::now();
+
     // Step 1: scan free records for the zone (no zone lock — KV read).
+    let scan_start = std::time::Instant::now();
     let records = kv.read_zone_records(bind, &disk_id, zone_idx).await?;
+    metrics
+        .compaction_scan_free_latency
+        .observe(scan_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
     let free_keys: Vec<Vec<u8>> = records.free.iter().map(|r| r.key.to_bytes()).collect();
     #[allow(clippy::cast_possible_truncation)]
     let free_count = free_keys.len() as u32;
     if free_count == 0 {
         // Nothing to compact.
-        zone.uncompacted_free_record_count
-            .store(0, std::sync::atomic::Ordering::Release);
+        zone.uncompacted_free_record_count.store(0, Ordering::Release);
         zone.mark_compacted_ready();
+        metrics.compaction_latency.observe(
+            compaction_start
+                .elapsed()
+                .as_nanos()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
         return Ok(());
     }
 
     // Step 2: in-memory compaction — partition by watermark,
     // range_clear only new records, advance compact_ts (zone lock
     // held only for the bitmap mutation, I9).
+    let merge_start = std::time::Instant::now();
     let result = zone.compact_zone_inner(&records.free);
+    metrics
+        .compaction_merge_bitmap_latency
+        .observe(merge_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
 
     // Step 3: determine snapshot_slot = current applied frontier.
-    let snapshot_slot = kv.get_applied_slot(bind).await.unwrap_or(0);
+    let snapshot_slot = match kv.get_applied_slot(bind).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                disk_id = ?disk_id,
+                zone_index = zone_idx,
+                error = %e,
+                "get_applied_slot failed; anchoring at slot 0"
+            );
+            0
+        }
+    };
 
     // Step 4: build the new ZoneValue (with CRC + advanced compact_ts).
-    zone.snapshot_slot
-        .store(snapshot_slot, std::sync::atomic::Ordering::Release);
+    zone.snapshot_slot.store(snapshot_slot, Ordering::Release);
     let zv = zone.to_zone_value();
 
     // Step 5: atomic batch_write — Put ZoneValue + Delete all free
     // records (I6). They succeed or fail together.
+    let persist_start = std::time::Instant::now();
     kv.compact_zone_batch(bind, &disk_id, zone_idx, &zv, &free_keys)
         .await?;
+    metrics
+        .compaction_kv_persist_latency
+        .observe(persist_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
 
     // Step 6: decrement uncompacted_free_record_count by the total
     // free records processed (both stale and new were deleted).
     zone.uncompacted_free_record_count
-        .fetch_sub(free_count, std::sync::atomic::Ordering::AcqRel);
+        .fetch_sub(free_count, Ordering::AcqRel);
 
     // Step 7: mark the zone as compacted and ready for rotation.
     zone.mark_compacted_ready();
+
+    metrics
+        .compaction_records_deleted_total
+        .inc_by(u64::from(free_count));
+    metrics.compaction_latency.observe(
+        compaction_start
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    );
 
     tracing::info!(
         disk_id = ?disk_id,
@@ -135,7 +208,12 @@ impl CompactionEngine {
     /// `snapshot_compaction_threshold` and call `compact_zone` when
     /// exceeded. Skips zones in the disk's `active_zone_context` (I4 —
     /// no concurrent allocate).
-    pub async fn compaction_cycle(&self, container: &DdbDiskGroupContainer, threshold: u32) {
+    pub async fn compaction_cycle(
+        &self,
+        container: &DdbDiskGroupContainer,
+        threshold: u32,
+        metrics: &DiskdbMetrics,
+    ) {
         for dg_id in container.disk_group_ids() {
             let Some(dg) = container.get_disk_group(dg_id) else {
                 continue;
@@ -160,7 +238,9 @@ impl CompactionEngine {
                     if backlog < threshold {
                         continue;
                     }
-                    if let Err(e) = compact_zone(&self.kv, bind, disk.disk_id, &zone, zone.zone_index).await {
+                    if let Err(e) =
+                        compact_zone(&self.kv, bind, disk.disk_id, &zone, zone.zone_index, metrics).await
+                    {
                         tracing::warn!(
                             disk_id = ?disk.disk_id,
                             zone_index = zone.zone_index,
@@ -181,8 +261,9 @@ impl CompactionEngine {
         disk_id: DiskId,
         zone: &Arc<DdbZone>,
         zone_idx: u32,
+        metrics: &DiskdbMetrics,
     ) -> Result<(), ZoneLoadError> {
-        compact_zone(&self.kv, bind, disk_id, zone, zone_idx).await
+        compact_zone(&self.kv, bind, disk_id, zone, zone_idx, metrics).await
     }
 }
 
@@ -190,7 +271,8 @@ impl BackgroundTask for CompactionEngine {
     fn run_cycle<'a>(&'a self, ctx: &'a BgCtx) -> CycleFut<'a> {
         Box::pin(async move {
             let threshold = ctx.config.load().persistence.snapshot_compaction_threshold;
-            self.compaction_cycle(&ctx.container, threshold).await;
+            self.compaction_cycle(&ctx.container, threshold, &ctx.metrics)
+                .await;
             Ok(())
         })
     }
@@ -251,7 +333,12 @@ impl PreparatoryThread {
     /// Run one preparatory cycle: for each owned disk-group/disk,
     /// identify the next `zone_rotate_count` zones in the rotation
     /// order and compact any that are not ready and not active.
-    pub async fn preparatory_cycle(&self, container: &DdbDiskGroupContainer, zone_rotate_count: u32) {
+    pub async fn preparatory_cycle(
+        &self,
+        container: &DdbDiskGroupContainer,
+        zone_rotate_count: u32,
+        metrics: &DiskdbMetrics,
+    ) {
         for dg_id in container.disk_group_ids() {
             let Some(dg) = container.get_disk_group(dg_id) else {
                 continue;
@@ -259,7 +346,7 @@ impl PreparatoryThread {
             let bind = *dg.bind.read().unwrap();
             let disks = dg.disks.read().unwrap().clone();
             for disk in disks {
-                self.preparatory_cycle_for_disk(bind, &disk, zone_rotate_count)
+                self.preparatory_cycle_for_disk(bind, &disk, zone_rotate_count, metrics)
                     .await;
             }
         }
@@ -271,6 +358,7 @@ impl PreparatoryThread {
         bind: Bind,
         disk: &Arc<crate::model::disk::DdbDisk>,
         zone_rotate_count: u32,
+        metrics: &DiskdbMetrics,
     ) {
         let zones = disk.zones.read().unwrap().clone();
         let zone_num = zones.len();
@@ -309,7 +397,7 @@ impl PreparatoryThread {
                 continue;
             }
             // Compact this zone and mark it ready.
-            if let Err(e) = compact_zone(&self.kv, bind, disk.disk_id, zone, zone.zone_index).await {
+            if let Err(e) = compact_zone(&self.kv, bind, disk.disk_id, zone, zone.zone_index, metrics).await {
                 tracing::warn!(
                     disk_id = ?disk.disk_id,
                     zone_index = zone.zone_index,
@@ -326,7 +414,8 @@ impl BackgroundTask for PreparatoryThread {
     fn run_cycle<'a>(&'a self, ctx: &'a BgCtx) -> CycleFut<'a> {
         Box::pin(async move {
             let zone_rotate_count = ctx.config.load().storage.zone_rotate_count;
-            self.preparatory_cycle(&ctx.container, zone_rotate_count).await;
+            self.preparatory_cycle(&ctx.container, zone_rotate_count, &ctx.metrics)
+                .await;
             Ok(())
         })
     }

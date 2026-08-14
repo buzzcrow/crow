@@ -241,6 +241,7 @@ async fn diskdb_e2e_allocate_free() {
     // 7. Allocate one block.
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let owner_chunk = make_chunk_id(0, 0, 42);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segment = alloc::allocate_block(
         &dg,
         1, // unit_count
@@ -249,6 +250,7 @@ async fn diskdb_e2e_allocate_free() {
         &alloc_kv,
         100, // cas_retry_limit
         4,   // zone_rotate_count
+        &metrics,
     )
     .await
     .expect("allocate should succeed");
@@ -315,6 +317,7 @@ async fn diskdb_e2e_allocate_free() {
         &alloc_kv2,
         100,
         4,
+        &metrics,
     )
     .await
     .expect("allocate 3 blocks should succeed");
@@ -400,8 +403,9 @@ async fn diskdb_e2e_validate_owner_on_free() {
 
     // Allocate a block.
     let owner_chunk = make_chunk_id(0, 0, 100);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+    let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
         .await
         .expect("allocate should succeed");
 
@@ -427,9 +431,18 @@ async fn diskdb_e2e_validate_owner_on_free() {
     // 2. Allocate again, then free with validate_owner_on_free=true but
     //    a WRONG owner → OwnerMismatch, no bitmap clear.
     let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let segment2 = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
-        .await
-        .expect("allocate should succeed");
+    let segment2 = alloc::allocate_block(
+        &dg,
+        1,
+        &owner_chunk,
+        UNIT_SIZE_BYTES,
+        &alloc_kv2,
+        100,
+        4,
+        &metrics,
+    )
+    .await
+    .expect("allocate should succeed");
 
     let wrong_owner = make_chunk_id(0, 0, 999);
     let mut wrong_segment = segment2;
@@ -532,6 +545,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
     let total_cap = 3 * 4 * 128u64; // 3 disks × 4 zones × 128 units
     let total_cap_bytes = total_cap * u64::from(UNIT_SIZE_BYTES);
     let owner_chunk = make_chunk_id(0, 0, 42);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
 
     // Helper: verify the busy + free == capacity invariant on a
     // DiskGroupUsage, and that per-disk usage sums match the aggregate.
@@ -596,6 +610,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
         &alloc_kv,
         100,
         4,
+        &metrics,
     )
     .await
     {
@@ -698,7 +713,17 @@ async fn diskdb_e2e_allocate_all_free_all() {
     // The bitmap still shows all blocks busy. Allocation must fail
     // (NoSpace). Compaction (tested separately) is required to reclaim.
     let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let result = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4).await;
+    let result = alloc::allocate_block(
+        &dg,
+        1,
+        &owner_chunk,
+        UNIT_SIZE_BYTES,
+        &alloc_kv2,
+        100,
+        4,
+        &metrics,
+    )
+    .await;
     assert!(
         result.is_err(),
         "persist-only free should not make space available without compaction"
@@ -757,10 +782,11 @@ async fn diskdb_e2e_compact_zone_rpc() {
     // 2. Allocate 4 blocks (one at a time — allocate_blocks enforces
     // anti-affinity across disks, but we only have 3 disks).
     let owner_chunk = make_chunk_id(0, 0, 42);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let mut segments = Vec::new();
     for _ in 0..4 {
-        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
             .await
             .expect("allocate");
         segments.push(seg);
@@ -814,6 +840,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
         recovery,
         recalc,
         crow_diskdb::scanner::ScanState::new(),
+        Arc::new(crow_diskdb::metrics::DiskdbMetrics::disabled()),
     );
     let req = tonic::Request::new(crow_protocol::diskdb::rpc::CompactZoneRequest {
         disk_id: Some(disk_id),
@@ -877,14 +904,160 @@ async fn diskdb_e2e_compact_zone_rpc() {
     let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let mut new_segments = Vec::new();
     for _ in 0..2 {
-        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
-            .await
-            .expect("should reclaim after compaction");
+        let seg = alloc::allocate_block(
+            &dg,
+            1,
+            &owner_chunk,
+            UNIT_SIZE_BYTES,
+            &alloc_kv2,
+            100,
+            4,
+            &metrics,
+        )
+        .await
+        .expect("should reclaim after compaction");
         new_segments.push(seg);
     }
     assert_eq!(new_segments.len(), 2);
 
     eprintln!("diskdb_e2e_compact_zone_rpc: ALL CHECKS PASSED");
+}
+
+/// A.3: Suspect path — Up → Suspect on first absence, Suspect → Up on
+/// rediscovery. Regression test for H1: the Up → Suspect transition
+/// must NOT write Suspect back to group 0 (Suspect is local-only). If
+/// it did, the write-back would re-create the `DiskKey` with Suspect
+/// status, and on the next tick `reconcile_existing_disk` would see
+/// `raw_disk_status` = Suspect → effective = Suspect → no transition,
+/// permanently wedging the disk (not allocatable, no timer to fire).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn diskdb_e2e_suspect_rediscovery() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+
+    let cluster = KvCluster::start().await;
+    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    seed_hardware(&hw).await;
+
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
+    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
+    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+
+    let keepalive_cfg = KeepAliveConfig {
+        interval: Duration::from_secs(10),
+        miss_threshold: 3,
+        zone_rotate_count: 4,
+        cas_retry_limit: 100,
+        temp_failure_timeout_secs: 900,
+    };
+    let keepalive = KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
+
+    // 1. Initial sync — 3 disks added, wait for zone load (Init → Up).
+    let outcome = keepalive.tick().await;
+    assert_eq!(outcome.groups_added, 1);
+    assert_eq!(outcome.disks_added, 3);
+    wait_for_disks_ready(&container, DG_ID, 3, ZONE_COUNT).await;
+
+    let dg = container
+        .get_disk_group(DG_ID)
+        .expect("disk-group should be in container");
+
+    // Pick one disk to remove + rediscover.
+    let target_disk_id = make_disk_id(0, 1);
+    let target_disk = {
+        let disks = dg.disks.read().unwrap();
+        disks
+            .iter()
+            .find(|d| d.disk_id == target_disk_id)
+            .cloned()
+            .expect("target disk should exist")
+    };
+
+    // Verify disk is Up and allocatable before the test.
+    assert_eq!(
+        *target_disk.effective_status.read().unwrap(),
+        HwStatus::Up,
+        "disk should be Up before absence"
+    );
+    assert!(
+        target_disk.allocatable(),
+        "disk should be allocatable before absence"
+    );
+
+    // 2. Remove the disk from group 0 (simulates absence — the sync
+    //    scan no longer returns it).
+    hw.remove_disk(RACK_ID, NODE_ID, DG_ID, &target_disk_id)
+        .await
+        .expect("remove disk");
+
+    // 3. Tick → Up → Suspect (first absence, anti-flapping buffer).
+    let outcome = keepalive.tick().await;
+    assert_eq!(
+        outcome.status_changes, 1,
+        "expected 1 status change (Up → Suspect)"
+    );
+    assert_eq!(
+        *target_disk.effective_status.read().unwrap(),
+        HwStatus::Suspect,
+        "disk should be Suspect after first absence"
+    );
+    assert!(
+        !target_disk.allocatable(),
+        "Suspect disk should not be allocatable"
+    );
+
+    // 4. H1 regression: verify group 0 does NOT have the disk with
+    //    Suspect status. With the bug (write-back), the DiskKey would
+    //    be re-created with Suspect. With the fix, it stays deleted.
+    let group0_disk = hw
+        .get_disk(RACK_ID, NODE_ID, DG_ID, &target_disk_id)
+        .await
+        .expect("get_disk should not error");
+    assert!(
+        group0_disk.is_none(),
+        "H1: disk should NOT exist in group 0 after Up → Suspect (Suspect is local-only)"
+    );
+
+    // 5. Re-add the disk to group 0 with Up status (simulates
+    //    rediscovery — the disk comes back).
+    hw.add_disk(
+        RACK_ID,
+        NODE_ID,
+        DG_ID,
+        &target_disk_id,
+        &DiskValue {
+            disk_type: DiskType::BlockSsd as i32,
+            capacity_units: CAPACITY_UNITS,
+            zone_size_units: ZONE_SIZE_UNITS,
+            unit_size_bytes: UNIT_SIZE_BYTES,
+            zone_count: ZONE_COUNT,
+            status: HwStatus::Up as i32,
+        },
+    )
+    .await
+    .expect("re-add disk");
+
+    // 6. Tick → Suspect → Up (rediscovery via recover_disk_to_up).
+    let outcome = keepalive.tick().await;
+    assert_eq!(
+        outcome.status_changes, 1,
+        "expected 1 status change (Suspect → Up)"
+    );
+    assert_eq!(
+        *target_disk.effective_status.read().unwrap(),
+        HwStatus::Up,
+        "disk should be Up after rediscovery"
+    );
+    assert!(
+        target_disk.allocatable(),
+        "disk should be allocatable after rediscovery"
+    );
+
+    eprintln!("diskdb_e2e_suspect_rediscovery: ALL CHECKS PASSED");
 }
 
 /// Find the crow-kv-server binary (mirrors the cluster module's logic).

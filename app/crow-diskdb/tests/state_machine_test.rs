@@ -164,7 +164,8 @@ fn test_transition_disk_rejects_illegal() {
 fn test_transition_disk_group_legal() {
     let machine = HwStateMachine::new(900);
     let dg = Arc::new(DdbDiskGroup::new(1, 1, 1));
-    // Default status is Up; Up -> Suspect is legal.
+    // Default status is Init; Init -> Up is legal, then Up -> Suspect.
+    machine.transition_disk_group(&dg, HwStatus::Up).unwrap();
     let result = machine.transition_disk_group(&dg, HwStatus::Suspect);
     assert_eq!(result, Ok(HwStatus::Suspect));
     assert_eq!(*dg.status.read().unwrap(), HwStatus::Suspect);
@@ -174,7 +175,8 @@ fn test_transition_disk_group_legal() {
 fn test_transition_disk_group_rejects_illegal() {
     let machine = HwStateMachine::new(900);
     let dg = Arc::new(DdbDiskGroup::new(1, 1, 1));
-    // Up -> Init is illegal.
+    // Default status is Init; Init -> Up is legal, then Up -> Init is illegal.
+    machine.transition_disk_group(&dg, HwStatus::Up).unwrap();
     let result = machine.transition_disk_group(&dg, HwStatus::Init);
     assert!(result.is_err());
     assert_eq!(*dg.status.read().unwrap(), HwStatus::Up);

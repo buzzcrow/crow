@@ -201,9 +201,21 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     //    free 1 of them. After this, 2 blocks remain busy.
     let owner_chunk = make_chunk_id(0, 0, 42);
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let segments = alloc::allocate_blocks(&dg, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
-        .await
-        .expect("allocate 3");
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
+    let segments = alloc::allocate_blocks(
+        &dg,
+        1,
+        3,
+        &[],
+        &owner_chunk,
+        UNIT_SIZE_BYTES,
+        &alloc_kv,
+        100,
+        4,
+        &metrics,
+    )
+    .await
+    .expect("allocate 3");
     assert_eq!(segments.len(), 3);
 
     // Free the first 1.
@@ -261,7 +273,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
                 zone_size_units as u32
             };
             let (recovered_zone, _stats) = recovery
-                .rebuild_zone_bitmap_full_scan(bind2, disk.disk_id, zi, unit_capacity)
+                .rebuild_zone_bitmap_full_scan(bind2, disk.disk_id, zi, DG_ID, unit_capacity)
                 .await
                 .expect("recovery should succeed");
             // Replace the empty zone with the recovered zone.
@@ -423,9 +435,21 @@ async fn recovery_strategy2_journal_replay() {
     // 2. Allocate 3 blocks, free 1. 2 remain busy.
     let owner_chunk = make_chunk_id(0, 0, 42);
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let segments = alloc::allocate_blocks(&dg, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
-        .await
-        .expect("allocate 3");
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
+    let segments = alloc::allocate_blocks(
+        &dg,
+        1,
+        3,
+        &[],
+        &owner_chunk,
+        UNIT_SIZE_BYTES,
+        &alloc_kv,
+        100,
+        4,
+        &metrics,
+    )
+    .await
+    .expect("allocate 3");
     let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
         .await
@@ -553,8 +577,15 @@ async fn recovery_strategy2_journal_replay() {
     };
     let compaction_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let engine = CompactionEngine::new(Arc::new(compaction_kv), CompactionConfig::default());
+    let compaction_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     engine
-        .compact_zone_now(bind2, freed_disk_id, &freed_zone, freed_zone_idx)
+        .compact_zone_now(
+            bind2,
+            freed_disk_id,
+            &freed_zone,
+            freed_zone_idx,
+            &compaction_metrics,
+        )
         .await
         .expect("compaction should succeed");
 
@@ -630,8 +661,9 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
 
     // 2. Allocate 1 block, then free it. This creates 1 free record.
     let owner_chunk = make_chunk_id(0, 0, 42);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+    let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
         .await
         .expect("allocate");
     let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
@@ -681,8 +713,9 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     // 4. Run compaction on the zone.
     let compaction_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
     let compaction = CompactionEngine::new(compaction_kv, CompactionConfig::default());
+    let compaction_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     compaction
-        .compact_zone_now(bind, disk_id, &zone, zone_idx)
+        .compact_zone_now(bind, disk_id, &zone, zone_idx, &compaction_metrics)
         .await
         .expect("compaction should succeed");
 
@@ -775,8 +808,9 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     // 2. Allocate block A at offset 0, then free it. This creates a
     // free record with freed_ts = T1.
     let owner_chunk = make_chunk_id(0, 0, 42);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let seg_a = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+    let seg_a = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
         .await
         .expect("allocate A");
     let disk_id = seg_a.disk_id.unwrap();
@@ -896,8 +930,9 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     // bit stays SET (block B is busy). No double-free.
     let compaction_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
     let compaction = CompactionEngine::new(compaction_kv, CompactionConfig::default());
+    let compaction_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     compaction
-        .compact_zone_now(bind, disk_id, &zone, zone_idx)
+        .compact_zone_now(bind, disk_id, &zone, zone_idx, &compaction_metrics)
         .await
         .expect("compaction should succeed");
 
@@ -980,10 +1015,11 @@ async fn recovery_persist_only_is_idempotent() {
     // 2. Allocate 3 blocks, then free 1. This creates a mix of busy
     // and free records on disk.
     let owner_chunk = make_chunk_id(0, 0, 42);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let mut segments = Vec::new();
     for _ in 0..3 {
-        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
             .await
             .expect("allocate");
         segments.push(seg);
@@ -1132,11 +1168,12 @@ async fn preparatory_thread_produces_ready_zones() {
     // This creates uncompacted free records on non-active zones
     // (rotation spreads allocations across zones).
     let owner_chunk = make_chunk_id(0, 0, 42);
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
     let mut freed_segments = Vec::new();
     for _ in 0..10 {
-        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
             .await
             .expect("allocate");
         alloc::free_block(&dg, &seg, &free_kv, false).await.expect("free");
@@ -1170,7 +1207,8 @@ async fn preparatory_thread_produces_ready_zones() {
     let prep_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
     let prep =
         crow_diskdb::recovery::compaction::PreparatoryThread::new(prep_kv, CompactionConfig::default());
-    prep.preparatory_cycle(&container, 2).await;
+    let prep_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
+    prep.preparatory_cycle(&container, 2, &prep_metrics).await;
 
     // 5. Verify: at least some non-active zones with backlog are now
     // compacted_ready = true.

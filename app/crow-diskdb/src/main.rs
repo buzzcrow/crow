@@ -175,6 +175,7 @@ async fn main() {
         Arc::clone(&zone_loader),
         Arc::clone(&recalc_engine),
         scan_state.clone(),
+        Arc::new(metrics.clone()),
     )
     .into_server();
     info!(%listen_addr, "gRPC server listening (zone load pending)");
@@ -186,8 +187,9 @@ async fn main() {
     let load_container = Arc::clone(&container);
     let load_kv = Arc::clone(&dg_kv);
     let load_cfg = (**config.load()).clone();
+    let load_metrics = metrics.clone();
     let load_handle = tokio::spawn(async move {
-        run_zone_load(load_kv, load_container, &load_cfg).await;
+        run_zone_load(load_kv, load_container, &load_cfg, &load_metrics).await;
     });
 
     // Build the background-task runner with keepalive + compaction.
@@ -302,7 +304,12 @@ async fn main() {
 /// Up. Uses `ZoneLoader::load_disk_group` (strategy 2 journal replay
 /// with strategy 1 full-scan fallback) and replaces each disk-group in
 /// the container with its loaded counterpart.
-async fn run_zone_load(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContainer>, config: &DdbConfig) {
+async fn run_zone_load(
+    kv: Arc<DdbKvClient>,
+    container: Arc<DdbDiskGroupContainer>,
+    config: &DdbConfig,
+    metrics: &DiskdbMetrics,
+) {
     info!("running R73 zone load (background)");
     let zone_loader = ZoneLoader::new(kv, config.persistence.load_concurrency);
     for dg_id in container.disk_group_ids() {
@@ -320,6 +327,7 @@ async fn run_zone_load(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContaine
                 .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
                 .collect()
         };
+        let load_start = std::time::Instant::now();
         let loaded = zone_loader
             .load_disk_group(
                 dg_id,
@@ -331,6 +339,9 @@ async fn run_zone_load(kv: Arc<DdbKvClient>, container: Arc<DdbDiskGroupContaine
             )
             .await;
         container.replace_disk_group(loaded);
+        metrics
+            .recovery_duration_ms
+            .observe(load_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
         info!(dg_id, "disk-group loaded (strategy 2 + strategy 1 fallback)");
     }
     container.set_lifecycle_phase(StartupPhase::Up);

@@ -90,35 +90,44 @@ impl RecalcEngine {
         let live_snapshot_slot = live_zone.snapshot_slot.load(std::sync::atomic::Ordering::Acquire);
 
         // Strategy 2: journal replay into a throwaway zone.
-        let (replayed_busy_blocks, replayed_snapshot_slot, fallback_used) =
-            match load_zone_inner(&self.kv, bind, disk_id, zone_idx, unit_capacity).await {
-                Ok((replayed, _max_freed_ts)) => {
-                    let popcount = replayed.usage_bits.count_set();
-                    let slot = replayed.snapshot_slot.load(std::sync::atomic::Ordering::Acquire);
-                    (u32::try_from(popcount).unwrap_or(u32::MAX), slot, None)
+        let (replayed_busy_blocks, replayed_snapshot_slot, fallback_used) = match load_zone_inner(
+            &self.kv,
+            bind,
+            disk_id,
+            zone_idx,
+            live_zone.disk_group_id,
+            unit_capacity,
+        )
+        .await
+        .map(|(z, ts, _)| (z, ts))
+        {
+            Ok((replayed, _max_freed_ts)) => {
+                let popcount = replayed.usage_bits.count_set();
+                let slot = replayed.snapshot_slot.load(std::sync::atomic::Ordering::Acquire);
+                (u32::try_from(popcount).unwrap_or(u32::MAX), slot, None)
+            }
+            Err(ZoneLoadError::JournalScanGcGap) => {
+                // Fall back to strategy 1.
+                match self
+                    .strategy1_replay(bind, disk_id, zone_idx, live_zone.disk_group_id, unit_capacity)
+                    .await
+                {
+                    Some((popcount, slot)) => (popcount, slot, Some(FallbackReason::JournalScanGcGap)),
+                    None => (u32::MAX, 0, Some(FallbackReason::JournalScanGcGap)),
                 }
-                Err(ZoneLoadError::JournalScanGcGap) => {
-                    // Fall back to strategy 1.
-                    match self
-                        .strategy1_replay(bind, disk_id, zone_idx, unit_capacity)
-                        .await
-                    {
-                        Some((popcount, slot)) => (popcount, slot, Some(FallbackReason::JournalScanGcGap)),
-                        None => (u32::MAX, 0, Some(FallbackReason::JournalScanGcGap)),
-                    }
+            }
+            Err(ZoneLoadError::SnapshotCrcFail) => {
+                // Fall back to strategy 1; the live bitmap is suspect.
+                match self
+                    .strategy1_replay(bind, disk_id, zone_idx, live_zone.disk_group_id, unit_capacity)
+                    .await
+                {
+                    Some((popcount, slot)) => (popcount, slot, Some(FallbackReason::SnapshotCrcFail)),
+                    None => (u32::MAX, 0, Some(FallbackReason::SnapshotCrcFail)),
                 }
-                Err(ZoneLoadError::SnapshotCrcFail) => {
-                    // Fall back to strategy 1; the live bitmap is suspect.
-                    match self
-                        .strategy1_replay(bind, disk_id, zone_idx, unit_capacity)
-                        .await
-                    {
-                        Some((popcount, slot)) => (popcount, slot, Some(FallbackReason::SnapshotCrcFail)),
-                        None => (u32::MAX, 0, Some(FallbackReason::SnapshotCrcFail)),
-                    }
-                }
-                Err(_) => (u32::MAX, 0, None),
-            };
+            }
+            Err(_) => (u32::MAX, 0, None),
+        };
 
         // A CRC-fail fallback means the live snapshot was corrupt —
         // drift is flagged even if counts happen to match.
@@ -146,6 +155,7 @@ impl RecalcEngine {
         bind: Bind,
         disk_id: DiskId,
         zone_idx: u32,
+        disk_group_id: DiskGroupId,
         unit_capacity: u32,
     ) -> Option<(u32, u64)> {
         match crate::recovery::full_scan::rebuild_zone_bitmap_full_scan(
@@ -153,6 +163,7 @@ impl RecalcEngine {
             bind,
             disk_id,
             zone_idx,
+            disk_group_id,
             unit_capacity,
         )
         .await
