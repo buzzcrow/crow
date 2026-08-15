@@ -74,39 +74,6 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// Write a chunk record only if it doesn't already exist
-    /// (idempotent create). Check-then-write — not atomic, but chunk
-    /// ID collisions are vanishingly rare (88 random bits).
-    pub async fn put_chunk_if_absent(&self, chunk: &Chunk) -> Result<()> {
-        let id = chunk.id.as_ref().expect("chunk has id");
-        let r = route(&self.bindings, id)?;
-        let key = chunk_key(id);
-
-        // Check new group first.
-        if self.get_chunk_raw(&r, &key).await?.is_some() {
-            return Err(StoreError::ChunkAlreadyExists);
-        }
-
-        // During migration, also check old group.
-        if r.migration_state == MigrationState::Copying || r.migration_state == MigrationState::Cutover {
-            if let (Some(old_store), Some(old_group)) = (r.old_kv_store_id, r.old_kv_group_id) {
-                let old_route = Route {
-                    kv_store_id: old_store,
-                    kv_group_id: old_group,
-                    migration_state: MigrationState::NotMigrating,
-                    old_kv_store_id: None,
-                    old_kv_group_id: None,
-                };
-                if self.get_chunk_raw(&old_route, &key).await?.is_some() {
-                    return Err(StoreError::ChunkAlreadyExists);
-                }
-            }
-        }
-
-        // Write.
-        self.put_chunk(chunk).await
-    }
-
     /// Read a chunk by ID.
     pub async fn get_chunk(&self, id: &ChunkId) -> Result<Chunk> {
         let r = route(&self.bindings, id)?;
@@ -220,12 +187,11 @@ impl ChunkStore {
     }
 }
 
-/// Build the KV key for a chunk ID: `/chunk/<24-byte-id>`.
+/// Build the KV key for a chunk ID: `/chunk/<16-byte-id>`.
 fn chunk_key(id: &ChunkId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(31);
+    let mut key = Vec::with_capacity(23);
     key.extend_from_slice(b"/chunk/");
     key.extend_from_slice(&id.high.to_be_bytes());
-    key.extend_from_slice(&id.mid.to_be_bytes());
     key.extend_from_slice(&id.low.to_be_bytes());
     key
 }

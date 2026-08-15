@@ -82,6 +82,7 @@ fn main() {
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
         .type_attribute("BlockState", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("CommitState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ErrorCode", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Recovery scan progress (bincode storage on data groups).
         .type_attribute(

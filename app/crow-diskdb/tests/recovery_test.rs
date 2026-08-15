@@ -47,8 +47,8 @@ fn make_disk_id(high: u64, low: u64) -> DiskId {
     DiskId { high, low }
 }
 
-fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
-    ChunkId { high, mid, low }
+fn make_chunk_id(high: u64, low: u64) -> ChunkId {
+    ChunkId { high, low }
 }
 
 async fn seed_hardware(hw: &HardwareClient) {
@@ -180,7 +180,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     // 3. Allocate 3 blocks (anti-affinity spreads across 3 disks),
     //    free 1 of them. After this, 2 blocks remain busy.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let alloc_kv = cluster.make_ddb_kv_client();
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segments = alloc::allocate_blocks(
@@ -414,7 +414,7 @@ async fn recovery_strategy2_journal_replay() {
     let bind = *dg.bind.read().unwrap();
 
     // 2. Allocate 3 blocks, free 1. 2 remain busy.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let alloc_kv = cluster.make_ddb_kv_client();
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segments = alloc::allocate_blocks(
@@ -641,7 +641,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     let bind = *dg.bind.read().unwrap();
 
     // 2. Allocate 1 block, then free it. This creates 1 free record.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = cluster.make_ddb_kv_client();
     let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
@@ -788,7 +788,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
 
     // 2. Allocate block A at offset 0, then free it. This creates a
     // free record with freed_ts = T1.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = cluster.make_ddb_kv_client();
     let seg_a = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
@@ -899,6 +899,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
         owner_chunk: Some(owner_chunk),
         unit_size: UNIT_SIZE_BYTES,
         state: crow_protocol::diskdb::rpc::BlockState::Ok as i32,
+        commit_state: crow_protocol::diskdb::rpc::CommitState::Committed as i32,
     };
     let busy_kv = cluster.make_ddb_kv_client();
     busy_kv
@@ -995,7 +996,7 @@ async fn recovery_persist_only_is_idempotent() {
 
     // 2. Allocate 3 blocks, then free 1. This creates a mix of busy
     // and free records on disk.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = cluster.make_ddb_kv_client();
     let mut segments = Vec::new();
@@ -1148,7 +1149,7 @@ async fn preparatory_thread_produces_ready_zones() {
     // 2. Churn: allocate + free 10 blocks across the disk-group.
     // This creates uncompacted free records on non-active zones
     // (rotation spreads allocations across zones).
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = cluster.make_ddb_kv_client();
     let free_kv = cluster.make_ddb_kv_client();

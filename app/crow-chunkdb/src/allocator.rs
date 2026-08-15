@@ -90,71 +90,95 @@ impl ChunkAllocator {
     }
 
     /// Allocate blocks in parallel across all placement entries.
+    ///
+    /// Per-instance verification: each diskdb response is checked for
+    /// the requested segment count. Partial responses trigger a retry
+    /// for just the missing blocks (up to `MAX_ALLOC_RETRIES`). On
+    /// final failure, all successfully-allocated segments are freed.
     async fn allocate_blocks_parallel(
         &self,
         owner_chunk: &ChunkId,
         plan: &PlacementPlan,
         unit_count: u32,
     ) -> Result<Vec<Segment>, AllocError> {
-        let mut futures = Vec::new();
-        for entry in &plan.entries {
-            let pool = Arc::clone(&self.pool);
-            let owner = *owner_chunk;
-            let dg_id = entry.disk_group_id;
-            let count = entry.block_count;
-            futures.push(async move {
-                pool.allocate_blocks(dg_id, count, unit_count, &owner)
-                    .await
-                    .map_err(|e| AllocError::AllocateFailed {
-                        dg_id,
-                        error: e.clone(),
-                    })
-            });
-        }
+        const MAX_ALLOC_RETRIES: usize = 3;
 
-        let results = join_all(futures).await;
+        let mut all_segments: Vec<Segment> = Vec::new();
+        // Remaining requests per entry: (disk_group_id, block_count).
+        let mut pending: Vec<(u64, u32)> = plan
+            .entries
+            .iter()
+            .map(|e| (e.disk_group_id, e.block_count))
+            .collect();
 
-        // Check for failures. On any failure, collect successful
-        // segments for rollback.
-        let mut all_segments = Vec::new();
-        let mut errors = Vec::new();
-        for result in results {
-            match result {
-                Ok(resp) => {
-                    all_segments.extend(resp.segments);
-                }
-                Err(e) => {
-                    errors.push(e);
+        for attempt in 0..=MAX_ALLOC_RETRIES {
+            if pending.is_empty() {
+                break;
+            }
+
+            let mut futures = Vec::new();
+            for (dg_id, count) in &pending {
+                let pool = Arc::clone(&self.pool);
+                let owner = *owner_chunk;
+                let dg = *dg_id;
+                let cnt = *count;
+                futures.push(async move {
+                    pool.allocate_blocks(dg, cnt, unit_count, &owner)
+                        .await
+                        .map_err(|e| AllocError::AllocateFailed {
+                            dg_id: dg,
+                            error: e.clone(),
+                        })
+                });
+            }
+
+            let results = join_all(futures).await;
+
+            // Check for hard failures and per-instance count mismatches.
+            let mut errors = Vec::new();
+            let mut next_pending: Vec<(u64, u32)> = Vec::new();
+            for (result, (dg_id, requested)) in results.into_iter().zip(&pending) {
+                match result {
+                    Ok(resp) => {
+                        let got = u32::try_from(resp.segments.len()).unwrap_or(u32::MAX);
+                        if got < *requested {
+                            warn!(
+                                disk_group_id = *dg_id,
+                                requested, got, attempt, "partial response from diskdb, will retry missing"
+                            );
+                            all_segments.extend(resp.segments);
+                            next_pending.push((*dg_id, *requested - got));
+                        } else {
+                            all_segments.extend(resp.segments);
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(e);
+                    }
                 }
             }
-        }
 
-        if !errors.is_empty() {
-            // Rollback successfully-allocated segments.
-            if !all_segments.is_empty() {
+            if !errors.is_empty() {
+                // Hard failure — free everything allocated so far.
+                self.free_all(&all_segments).await;
+                return Err(errors.into_iter().next().expect("at least one error"));
+            }
+
+            pending = next_pending;
+            if !pending.is_empty() && attempt < MAX_ALLOC_RETRIES {
                 warn!(
-                    segment_count = all_segments.len(),
-                    error_count = errors.len(),
-                    "allocation failed, rolling back"
+                    pending_count = pending.len(),
+                    attempt = attempt + 1,
+                    "retrying partial allocation"
                 );
-                if let Err(rb_err) = self.pool.free_blocks(all_segments.clone()).await {
-                    // Rollback failure: log for orphan scanner.
-                    warn!(
-                        error = %rb_err,
-                        segments = ?all_segments.iter().map(|s| (&s.disk_id, s.zone_index, s.unit_offset)).collect::<Vec<_>>(),
-                        "rollback free_blocks failed — orphan segments logged for scanner"
-                    );
-                }
             }
-            return Err(errors.into_iter().next().expect("at least one error"));
         }
 
-        // Verify we got the expected number of segments.
-        let expected: u32 = plan.entries.iter().map(|e| e.block_count).sum();
-        let got = u32::try_from(all_segments.len()).unwrap_or(u32::MAX);
-        if got < expected {
-            warn!(expected, got, "partial allocation, rolling back");
-            let _ = self.pool.free_blocks(all_segments).await;
+        if !pending.is_empty() {
+            let expected: u32 = plan.entries.iter().map(|e| e.block_count).sum();
+            let got = u32::try_from(all_segments.len()).unwrap_or(u32::MAX);
+            warn!(expected, got, "allocation retries exhausted, freeing all");
+            self.free_all(&all_segments).await;
             return Err(AllocError::PartialAllocation {
                 requested: expected,
                 got,
@@ -163,6 +187,21 @@ impl ChunkAllocator {
 
         info!(segment_count = all_segments.len(), "strip allocated");
         Ok(all_segments)
+    }
+
+    /// Free all allocated segments (rollback). Logs failures for the
+    /// orphan scanner but does not propagate the free error.
+    async fn free_all(&self, segments: &[Segment]) {
+        if segments.is_empty() {
+            return;
+        }
+        if let Err(rb_err) = self.pool.free_blocks(segments.to_vec()).await {
+            warn!(
+                error = %rb_err,
+                segments = ?segments.iter().map(|s| (&s.disk_id, s.zone_index, s.unit_offset)).collect::<Vec<_>>(),
+                "rollback free_blocks failed — orphan segments logged for scanner"
+            );
+        }
     }
 }
 

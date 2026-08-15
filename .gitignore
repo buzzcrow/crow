@@ -55,6 +55,7 @@ app/crow-cli/log/
 lib/crow-console-shared/log/
 app/crow-web/log/
 app/crow-diskdb/log/
+app/crow-chunkdb/log/
 
 # ── Profiling artifacts ─────────────────────────────────────────
 # samply / perf / flamegraph output (profile-write-*.zip, profile-write-*/)

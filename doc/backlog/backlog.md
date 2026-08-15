@@ -11,17 +11,12 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R100** — Bump this line in the same commit when adding a new item.
+**Next R number: R102** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-- **[R85](R85-chunkdb-foundation.md)** — chunkdb project foundation — Area: chunkdb — Design document, protocol definitions, EC wrapper module in crow-common, basic server/client skeleton, build configuration.
-- **[R86](R86-chunkdb-topology.md)** — chunkdb topology management — Area: chunkdb — Topology cache with group-0 integration, periodic refresh, watch/notify for real-time status changes.
-- **[R87](R87-chunkdb-placement-allocation.md)** — chunkdb placement and allocation — Area: chunkdb — Rack/node-aware placement selector (mirror distinct racks, EC rack-aware), chunk allocator with diskdb integration, parallel allocation with rollback.
-- **[R88](R88-chunkdb-storage-routing.md)** — chunkdb storage and routing — Area: chunkdb — Logical hash bucket system (chunk ID → bucket → KV group), group-0 binding table, KV persistence, migration handling with dual-write strategy.
-- **[R89](R89-chunkdb-lifecycle.md)** — chunkdb lifecycle management — Area: chunkdb — Chunk lifecycle handlers (allocate/seal/delete), state machine (Init → Active → Sealed → Deleted), validation and concurrent access protection.
-- **[R90](R90-chunkdb-client.md)** — chunkdb client library — Area: chunkdb — ChunkdbClient with retry logic, connection pooling, error handling following crow-diskdb-client pattern.
-- **[R91](R91-chunkdb-e2e-tests.md)** — chunkdb E2E tests — Area: chunkdb — Full stack integration tests (kv-server + diskdb-server + chunkdb-server), topology/placement/allocation/lifecycle/migration scenarios.
+- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv — Add `expected_revision` to `KvSetRequest` for optimistic concurrency; leader checks key revision before propose (lease-protected). Defense-in-depth for R100's chunkdb lock; enables cross-instance CAS on `put_chunk` if R99 ownership is ever bypassed.
+- **[R100](R100-chunkdb-lifecycle-lock.md)** — chunkdb per-chunk-ID lifecycle lock — Area: chunkdb — Per-chunk-ID mutex in `LifecycleHandler` to serialize concurrent mutating RPCs on the same chunk (append/seal/delete race protection).
 - **[R99](R99-kv-dynamic-range-binding-framework.md)** — kv dynamic
   range binding framework + chunkdb instance sharding — Area: kv /
   chunkdb / diskdb — Shard chunkdb instances by chunk hash range

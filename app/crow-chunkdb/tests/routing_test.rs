@@ -11,7 +11,6 @@ use crow_protocol::common::ChunkId;
 fn make_chunk_id(n: u64) -> ChunkId {
     ChunkId {
         high: n,
-        mid: n.wrapping_mul(31),
         low: n.wrapping_mul(37),
     }
 }

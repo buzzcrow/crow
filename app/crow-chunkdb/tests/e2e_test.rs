@@ -115,11 +115,7 @@ async fn routing_and_storage_integration() {
         migration_state: MigrationState::NotMigrating,
     }]));
 
-    let id = ChunkId {
-        high: 1,
-        mid: 2,
-        low: 3,
-    };
+    let id = ChunkId { high: 1, low: 3 };
     let bucket = hash_to_bucket(&id);
     assert!(bucket < 65535);
 
@@ -154,11 +150,7 @@ async fn migration_cursor_advances_on_out_of_range() {
     // range check logic directly.
     use crow_chunkdb::routing::hash_to_bucket;
 
-    let id = ChunkId {
-        high: 1,
-        mid: 2,
-        low: 3,
-    };
+    let id = ChunkId { high: 1, low: 3 };
     let bucket = hash_to_bucket(&id);
 
     // Simulate the in-range check from migration.rs.

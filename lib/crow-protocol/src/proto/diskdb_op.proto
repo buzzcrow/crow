@@ -37,6 +37,20 @@ message FreeResponse {
   uint32 freed_count = 1;  // how many succeeded
 }
 
+// ── Commit (two-phase allocate → persist) ───────────────────────
+
+// Marks previously-allocated blocks as committed (permanent). Called
+// by chunkdb after the chunk record is persisted to the KV group.
+// Tentative blocks not committed within a timeout are reclaimable by
+// the orphan scanner.
+message CommitBlocksRequest {
+  repeated Segment segments = 1;
+}
+
+message CommitBlocksResponse {
+  uint32 committed_count = 1;  // how many succeeded
+}
+
 // ── Query capacity stats ────────────────────────────────────────
 
 message QueryCapacityStatsRequest {

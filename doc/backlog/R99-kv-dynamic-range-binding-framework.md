@@ -168,6 +168,20 @@ new crate). These need a design draft before implementation.
      - This is a diskdb change, not a chunkdb change — filed here
        because it shares the framework. May be split into a separate
        requirement if the scope grows.
+  7. **chunkdb DiskdbClientPool precise free_blocks routing** (was
+     chunkdb-gap GAP-4) — `app/crow-chunkdb/src/allocator/pool.rs`
+     (update):
+     - Replace the v1 broadcast `free_blocks` (free via all known diskdb
+       channels) with precise per-segment routing: `disk_id →
+       disk_group_id` reverse lookup (from the topology cache /
+       `OwnerMapValue`) → owning diskdb instance → free that segment on
+       that instance only, instead of broadcasting to every instance.
+     - Falls back to broadcast when the reverse lookup misses (binding
+       cache cold or `disk_id` unknown), logged as a warning — preserves
+       v1 correctness while eliminating steady-state noise.
+     - The `Segment` proto gains a `disk_group_id` field (or the reverse
+       lookup is added to the topology cache) so the mapping is
+       available without an extra RPC per free.
 
 - **Flow diagram**:
 
@@ -282,6 +296,25 @@ new crate). These need a design draft before implementation.
 - The monitor rebinds a disk-group's paxos group; diskdb switches to
   the new binding for subsequent allocations; in-flight allocations
   complete on the old group. Integration test.
+
+**DiskdbClientPool precise free_blocks routing (item 7, GAP-4)**:
+- `free_blocks` with segments spanning two disk-groups owned by
+  different diskdb instances → each segment's free RPC is sent only to
+  its owning instance (no broadcast); both instances accept. Integration
+  test.
+- `free_blocks` with a segment whose `disk_id → disk_group_id` reverse
+  lookup misses (binding cache cold or `disk_id` unknown) → falls back
+  to broadcast, logged as a warning; the owning instance still accepts.
+  Integration test.
+
+**Binding table loaded from group-0 (GAP-7)**:
+- `crow-chunkdb/src/main.rs` startup → fetches the binding table from
+  group-0 via `KVClusterMetaClient` (replacing the hardcoded
+  `default_binding_table(0, 0)`); the `BindingCache` is populated from
+  group-0, not the default. Integration test.
+- Binding table updated in group-0 → watch/notify fires; the running
+  chunkdb instance's `BindingCache` updates without restart.
+  Integration test.
 
 **Edge cases**:
 - Binding cache empty on startup → first `route` triggers synchronous

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tracing::warn;
 
-use crow_common::chunk_id::ChunkIdParts;
+use crow_protocol::chunk_id::ChunkIdParts;
 use crow_protocol::common::ChunkId;
 
 /// Migration state for a bucket range (design §5.4b).
@@ -129,7 +129,6 @@ impl Default for BindingCache {
 pub fn chunk_id_to_parts(id: &ChunkId) -> ChunkIdParts {
     ChunkIdParts {
         high: id.high,
-        mid: id.mid,
         low: id.low,
     }
 }

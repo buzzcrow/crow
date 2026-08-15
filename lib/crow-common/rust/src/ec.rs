@@ -3,13 +3,14 @@
 
 //! Erasure-coding wrapper — Reed-Solomon GF(2^8) encode/decode.
 //!
-//! Backend: `reed-solomon-erasure` (pure Rust). The public API is
-//! backend-agnostic; isa-l can replace it behind the same interface
-//! when available (see chunkdb-gap.md GAP-2).
+//! Backend: isa-l (FFI, AVX2/AVX512-accelerated). The public API is
+//! backend-agnostic.
 
 #![allow(clippy::must_use_candidate, clippy::missing_errors_doc)]
 
 use thiserror::Error;
+
+use crate::ec_isal::{isal_decode, isal_encode};
 
 /// EC error.
 #[derive(Debug, Error)]
@@ -77,19 +78,14 @@ pub fn encode(scheme: EcScheme, data: &[u8]) -> Result<Vec<Vec<u8>>> {
         shards.push(shard);
     }
 
-    // Initialize code_num parity shards (zero-filled).
-    for _ in 0..scheme.code_num {
-        shards.push(vec![0u8; shard_size]);
-    }
-
-    let r: reed_solomon_erasure::ReedSolomon<reed_solomon_erasure::galois_8::Field> =
-        reed_solomon_erasure::ReedSolomon::new(scheme.data_num, scheme.code_num)
-            .map_err(|e| EcError::Backend(e.to_string()))?;
-
-    // Encode: fill parity shards in-place.
-    let shard_refs: Vec<&mut [u8]> = shards.iter_mut().map(Vec::as_mut_slice).collect();
-    r.encode(shard_refs)
-        .map_err(|e| EcError::Backend(e.to_string()))?;
+    // Encode parity via isa-l.
+    let mut data_refs: Vec<&mut [u8]> = shards
+        .iter_mut()
+        .take(scheme.data_num)
+        .map(Vec::as_mut_slice)
+        .collect();
+    let parity = isal_encode(&mut data_refs, scheme.data_num, scheme.code_num);
+    shards.extend(parity);
 
     Ok(shards)
 }
@@ -123,38 +119,15 @@ pub fn decode(scheme: EcScheme, blocks: Vec<Option<Vec<u8>>>) -> Result<Vec<Vec<
         });
     }
 
-    let shard_size = blocks
-        .iter()
-        .filter_map(|b| b.as_ref())
-        .map(Vec::len)
-        .max()
-        .unwrap_or(0);
-
-    // Build (shard, present) tuples for the reconstruct API.
-    let mut shards: Vec<(Vec<u8>, bool)> = Vec::with_capacity(total);
-    for block in blocks {
-        match block {
-            Some(b) => {
-                if b.len() < shard_size {
-                    let mut padded = b;
-                    padded.resize(shard_size, 0);
-                    shards.push((padded, true));
-                } else {
-                    shards.push((b, true));
-                }
-            }
-            None => shards.push((vec![0u8; shard_size], false)),
-        }
+    if lost == 0 {
+        return Ok(blocks
+            .into_iter()
+            .map(std::option::Option::unwrap_or_default)
+            .collect());
     }
 
-    let r: reed_solomon_erasure::ReedSolomon<reed_solomon_erasure::galois_8::Field> =
-        reed_solomon_erasure::ReedSolomon::new(scheme.data_num, scheme.code_num)
-            .map_err(|e| EcError::Backend(e.to_string()))?;
-
-    r.reconstruct(&mut shards)
-        .map_err(|e| EcError::Backend(e.to_string()))?;
-
-    Ok(shards.into_iter().map(|(s, _)| s).collect())
+    let reconstructed = isal_decode(blocks, scheme.data_num, scheme.code_num);
+    Ok(reconstructed)
 }
 
 /// Convenience: encode and return only the parity shards.

@@ -44,8 +44,8 @@ fn make_disk_id(high: u64, low: u64) -> DiskId {
     DiskId { high, low }
 }
 
-fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
-    ChunkId { high, mid, low }
+fn make_chunk_id(high: u64, low: u64) -> ChunkId {
+    ChunkId { high, low }
 }
 
 /// Point-lookup a key in the data group, returning the value bytes
@@ -218,7 +218,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 7. Allocate one block.
     let alloc_kv = cluster.make_ddb_kv_client();
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segment = alloc::allocate_block(
         &dg,
@@ -380,7 +380,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         .expect("disk-group should be in container");
 
     // Allocate a block.
-    let owner_chunk = make_chunk_id(0, 0, 100);
+    let owner_chunk = make_chunk_id(0, 100);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = cluster.make_ddb_kv_client();
     let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
@@ -422,7 +422,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     .await
     .expect("allocate should succeed");
 
-    let wrong_owner = make_chunk_id(0, 0, 999);
+    let wrong_owner = make_chunk_id(0, 999);
     let mut wrong_segment = segment2;
     wrong_segment.owner_chunk = Some(wrong_owner);
 
@@ -522,7 +522,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
 
     let total_cap = 3 * 4 * 128u64; // 3 disks × 4 zones × 128 units
     let total_cap_bytes = total_cap * u64::from(UNIT_SIZE_BYTES);
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
 
     // Helper: verify the busy + free == capacity invariant on a
@@ -759,7 +759,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
 
     // 2. Allocate 4 blocks (one at a time — allocate_blocks enforces
     // anti-affinity across disks, but we only have 3 disks).
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let alloc_kv = cluster.make_ddb_kv_client();
     let mut segments = Vec::new();

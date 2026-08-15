@@ -50,8 +50,8 @@ fn make_disk_id(high: u64, low: u64) -> DiskId {
     DiskId { high, low }
 }
 
-fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
-    ChunkId { high, mid, low }
+fn make_chunk_id(high: u64, low: u64) -> ChunkId {
+    ChunkId { high, low }
 }
 
 async fn seed_hardware(hw: &HardwareClient) {
@@ -232,21 +232,9 @@ fn diff_bitmaps_respects_unit_capacity() {
 
 #[test]
 fn is_zero_chunk_detects_all_zeros() {
-    assert!(is_zero_chunk(&ChunkId {
-        high: 0,
-        mid: 0,
-        low: 0
-    }));
-    assert!(!is_zero_chunk(&ChunkId {
-        high: 0,
-        mid: 0,
-        low: 1
-    }));
-    assert!(!is_zero_chunk(&ChunkId {
-        high: 1,
-        mid: 0,
-        low: 0
-    }));
+    assert!(is_zero_chunk(&ChunkId { high: 0, low: 0 }));
+    assert!(!is_zero_chunk(&ChunkId { high: 0, low: 1 }));
+    assert!(!is_zero_chunk(&ChunkId { high: 1, low: 0 }));
 }
 
 #[test]
@@ -256,6 +244,7 @@ fn is_zero_owner_handles_none() {
         owner_chunk: None,
         unit_size: 1024,
         state: 0,
+        commit_state: 0,
     };
     assert!(is_zero_owner(&bv));
 }
@@ -264,13 +253,10 @@ fn is_zero_owner_handles_none() {
 fn is_zero_owner_handles_zero_chunk() {
     let bv = BusyBlockValue {
         unit_count: 1,
-        owner_chunk: Some(ChunkId {
-            high: 0,
-            mid: 0,
-            low: 0,
-        }),
+        owner_chunk: Some(ChunkId { high: 0, low: 0 }),
         unit_size: 1024,
         state: 0,
+        commit_state: 0,
     };
     assert!(is_zero_owner(&bv));
 }
@@ -279,13 +265,10 @@ fn is_zero_owner_handles_zero_chunk() {
 fn is_zero_owner_handles_valid_chunk() {
     let bv = BusyBlockValue {
         unit_count: 1,
-        owner_chunk: Some(ChunkId {
-            high: 0,
-            mid: 0,
-            low: 42,
-        }),
+        owner_chunk: Some(ChunkId { high: 0, low: 42 }),
         unit_size: 1024,
         state: 0,
+        commit_state: 0,
     };
     assert!(!is_zero_owner(&bv));
 }
@@ -331,7 +314,7 @@ async fn scan_ghosts_detects_and_corrects_ghost_busy() {
     let bind = *dg.bind.read().unwrap();
 
     // 2. Allocate 1 block to have a real busy record.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let alloc_kv = cluster.make_ddb_kv_client();
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segments = alloc::allocate_blocks(

@@ -106,6 +106,13 @@ message BusyBlockValue {
   crow.common.ChunkId owner_chunk = 2;  // chunk that owns this allocation
   uint32 unit_size        = 3;  // size of one unit in bytes (carried per-block for the data-IO layer)
   BlockState state        = 4;  // per-block I/O-behavior state; default OK on allocate
+  CommitState commit_state = 5; // two-phase commit: tentative until chunkdb confirms persist
+}
+
+// Two-phase commit state for a busy block.
+enum CommitState {
+  COMMIT_STATE_TENTATIVE = 0;  // allocated but chunk not yet persisted (default)
+  COMMIT_STATE_COMMITTED = 1;  // chunk persisted, block is permanent
 }
 
 // ── FreeBlock value ─────────────────────────────────────────────

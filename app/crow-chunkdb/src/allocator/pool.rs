@@ -12,7 +12,9 @@ use tonic::transport::Channel;
 
 use crow_kv_client::ServiceRegistryClient;
 use crow_protocol::common::ChunkId;
-use crow_protocol::diskdb::rpc::{AllocateBlocksRequest, AllocateResponse, FreeBlocksRequest, Segment};
+use crow_protocol::diskdb::rpc::{
+    AllocateBlocksRequest, AllocateResponse, CommitBlocksRequest, FreeBlocksRequest, Segment,
+};
 
 /// Pool of diskdb gRPC clients, keyed by disk-group ID.
 pub struct DiskdbClientPool {
@@ -63,7 +65,8 @@ impl DiskdbClientPool {
     }
 
     /// Warm the endpoint cache by reading all diskdb instances from the
-    /// service registry.
+    /// service registry. Maps each instance's `owned_dg_ids` to its
+    /// gRPC endpoint so `channel_for_dg` can route by disk-group ID.
     ///
     /// # Errors
     /// Returns a String error if the service registry read fails.
@@ -73,8 +76,14 @@ impl DiskdbClientPool {
             .read_all_instances("diskdb")
             .await
             .map_err(|e| format!("read_all_instances: {e}"))?;
-        for (id, value) in instances {
-            self.endpoints.insert(id, value.grpc_endpoint);
+        for (_id, value) in instances {
+            if let Some(ref extra) = value.extra {
+                if let Some(ref diskdb) = extra.diskdb {
+                    for dg_id in &diskdb.owned_dg_ids {
+                        self.endpoints.insert(*dg_id, value.grpc_endpoint.clone());
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -105,6 +114,44 @@ impl DiskdbClientPool {
             .await
             .map(tonic::Response::into_inner)
             .map_err(|e| format!("allocate_blocks RPC: {e}"))
+    }
+
+    /// Commit blocks (mark as permanent) on the diskdb instances that
+    /// own them. Broadcasts to all known channels — the owning instance
+    /// accepts the commit, others reject.
+    ///
+    /// # Errors
+    /// Returns a String error if all commit RPCs fail.
+    pub async fn commit_blocks(&self, segments: Vec<Segment>) -> Result<(), String> {
+        if segments.is_empty() {
+            return Ok(());
+        }
+
+        let mut futures = Vec::new();
+        for endpoint in &self.channels {
+            let channel = endpoint.value().clone();
+            let segs = segments.clone();
+            futures.push(async move {
+                let mut client =
+                    crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(channel);
+                let req = CommitBlocksRequest { segments: segs };
+                client.commit_blocks(req).await
+            });
+        }
+
+        if futures.is_empty() {
+            return Err("no channels available for commit_blocks".into());
+        }
+
+        let results = futures::future::join_all(futures).await;
+        let mut failed = 0;
+        for result in &results {
+            if result.is_ok() {
+                return Ok(());
+            }
+            failed += 1;
+        }
+        Err(format!("all commit_blocks RPCs failed ({failed} attempts)"))
     }
 
     /// Free blocks via the diskdb instances that own them.

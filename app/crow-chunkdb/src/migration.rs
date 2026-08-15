@@ -186,15 +186,14 @@ impl MigrationTask {
     }
 }
 
-/// Parse a chunk key (`/chunk/<24-bytes>`) back to a `ChunkId`.
+/// Parse a chunk key (`/chunk/<16-bytes>`) back to a `ChunkId`.
 fn key_to_chunk_id(key: &[u8]) -> Option<ChunkId> {
-    if key.len() != 31 || &key[..7] != b"/chunk/" {
+    if key.len() != 23 || &key[..7] != b"/chunk/" {
         return None;
     }
     let high = u64::from_be_bytes(key[7..15].try_into().ok()?);
-    let mid = u64::from_be_bytes(key[15..23].try_into().ok()?);
-    let low = u64::from_be_bytes(key[23..31].try_into().ok()?);
-    Some(ChunkId { high, mid, low })
+    let low = u64::from_be_bytes(key[15..23].try_into().ok()?);
+    Some(ChunkId { high, low })
 }
 
 /// Check if a binding is in an active migration state.

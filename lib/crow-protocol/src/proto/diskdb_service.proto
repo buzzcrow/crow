@@ -19,6 +19,7 @@ import "diskdb_op.proto";
 service DiskdbService {
   rpc AllocateBlocks(AllocateBlocksRequest)     returns (AllocateResponse);
   rpc FreeBlocks(FreeBlocksRequest)             returns (FreeResponse);
+  rpc CommitBlocks(CommitBlocksRequest)         returns (CommitBlocksResponse);
   rpc QueryCapacityStats(QueryCapacityStatsRequest) returns (QueryCapacityStatsResponse);
   rpc GetDiskGroupInfo(GetDiskGroupInfoRequest) returns (GetDiskGroupInfoResponse);
   rpc GetDiskInfo(GetDiskInfoRequest)           returns (GetDiskInfoResponse);

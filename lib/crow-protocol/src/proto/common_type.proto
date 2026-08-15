@@ -27,13 +27,15 @@ message DiskId {
   uint64 low  = 2;
 }
 
-// 192-bit chunk identifier (owner of allocated blocks).
+// 128-bit chunk identifier (owner of allocated blocks).
 // A chunk is a logical block composed of multiple busy-blocks from
 // different nodes/disks, with EC or mirror protection.
+//
+// Layout (design §5.4): 8 type + 48 timestamp + 72 random, packed into
+// high (type + timestamp + 16 random bits) and low (56 random bits).
 message ChunkId {
   uint64 high = 1;
-  uint64 mid  = 2;
-  uint64 low  = 3;
+  uint64 low  = 2;
 }
 
 // ── Rack value ──────────────────────────────────────────────────

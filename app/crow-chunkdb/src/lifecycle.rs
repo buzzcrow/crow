@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crow_common::chunk_id::generate as generate_chunk_id;
 use crow_protocol::chunkdb::rpc::{
     Chunk, ChunkState as ProtoChunkState, ChunkStrip, ChunkType, StripType as ProtoStripType,
 };
 use crow_protocol::common::ChunkId;
+use crow_protocol::generate_chunk_id;
 
 use crate::allocator::{AllocError, ChunkAllocator, StripAllocType};
 use crate::selector::PlacementConstraints;
@@ -77,11 +77,7 @@ impl LifecycleHandler {
     ) -> Result<Chunk, LifecycleError> {
         let id = chunk_id.unwrap_or_else(|| {
             let parts = generate_chunk_id(chunk_type as u8);
-            crow_protocol::common::ChunkId {
-                high: parts.high,
-                mid: parts.mid,
-                low: parts.low,
-            }
+            parts.to_proto()
         });
         let snap = self.topology.snapshot();
 
@@ -123,7 +119,9 @@ impl LifecycleHandler {
             chunk_type: chunk_type as i32,
         };
 
-        self.store.put_chunk_if_absent(&chunk).await?;
+        // Persist the chunk record, then commit the disk blocks.
+        self.store.put_chunk(&chunk).await?;
+        self.commit_strip_segments(&chunk.strips).await;
         info!(chunk_id = ?id, strips = strip_count, "chunk allocated");
         Ok(chunk)
     }
@@ -170,6 +168,9 @@ impl LifecycleHandler {
 
         chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();
         self.store.put_chunk(&chunk).await?;
+        // Commit the newly-appended strip segments.
+        let new_strips = &chunk.strips[chunk.strips.len() - strip_count as usize..];
+        self.commit_strip_segments(new_strips).await;
         info!(chunk_id = ?chunk_id, added_strips = strip_count, "chunk appended");
         Ok(chunk)
     }
@@ -194,15 +195,16 @@ impl LifecycleHandler {
     }
 
     /// Delete a chunk — marks deleted and frees segments.
-    /// Idempotent: deleting an already-deleted chunk returns the
-    /// existing deleted chunk (design decision, matching aioss).
+    /// Returns `ChunkNotFound` if the chunk is already deleted (callers
+    /// that want idempotent delete treat `NOT_FOUND` as success).
     pub async fn delete_chunk(&self, chunk_id: &ChunkId) -> Result<Chunk, LifecycleError> {
         let mut chunk = self.store.get_chunk(chunk_id).await?;
         let current_state = ChunkState::from_proto(chunk.state);
 
-        // Idempotent: already deleted → return existing.
+        // Already deleted → not-found (error codes carry status, not
+        // return flags).
         if current_state == ChunkState::Deleted {
-            return Ok(chunk);
+            return Err(LifecycleError::ChunkNotFound);
         }
 
         current_state.check_can_delete()?;
@@ -242,6 +244,22 @@ impl LifecycleHandler {
             .list_chunks(start_after, max_keys)
             .await
             .map_err(LifecycleError::Storage)
+    }
+
+    /// Commit all segments in the given strips to diskdb (two-phase
+    /// commit: mark tentative blocks as permanent after chunk persist).
+    /// Best-effort — logs failures for the orphan scanner.
+    async fn commit_strip_segments(&self, strips: &[ChunkStrip]) {
+        let all_segments: Vec<_> = strips.iter().flat_map(extract_segments).collect();
+        if all_segments.is_empty() {
+            return;
+        }
+        if let Err(e) = self.allocator.pool().commit_blocks(all_segments).await {
+            warn!(
+                error = %e,
+                "commit_blocks failed — blocks remain tentative (orphan scanner will reclaim)"
+            );
+        }
     }
 }
 

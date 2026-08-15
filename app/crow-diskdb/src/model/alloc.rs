@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use crow_protocol::common::{ChunkId, DiskId};
-use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, FreeBlockValue, Segment};
+use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, CommitState, FreeBlockValue, Segment};
 
 use crate::ddb_kv_client::{Bind, DdbKvClient};
 use crate::model::disk_group::{AllocClaim, AllocError, DdbDiskGroup};
@@ -178,6 +178,7 @@ pub async fn allocate_block(
         owner_chunk: Some(*owner_chunk),
         unit_size,
         state: BlockState::Ok as i32,
+        commit_state: CommitState::Tentative as i32,
     };
     let bind = *dg.bind.read().unwrap();
     if let Err(e) = kv
@@ -287,6 +288,7 @@ pub async fn allocate_blocks(
                     owner_chunk: Some(*owner_chunk),
                     unit_size,
                     state: BlockState::Ok as i32,
+                    commit_state: CommitState::Tentative as i32,
                 },
             )
         })
@@ -546,4 +548,60 @@ pub async fn free_blocks(
     }
 
     Ok(())
+}
+
+/// Commit blocks — mark previously-allocated blocks as permanent.
+///
+/// For each segment, reads the current `BusyBlockValue`, sets
+/// `commit_state = COMMITTED`, and persists the update in one
+/// `batch_write`. Tentative blocks not committed within a timeout are
+/// reclaimable by the orphan scanner.
+///
+/// # Errors
+/// Returns `FreeError::NotBusy` if a segment has no busy-block record.
+/// Returns `FreeError::Kv` if the read or persist fails.
+pub async fn commit_blocks(
+    dg: &Arc<DdbDiskGroup>,
+    segments: &[Segment],
+    kv: &DdbKvClient,
+) -> std::result::Result<u32, FreeError> {
+    let bind: Bind = *dg.bind.read().unwrap();
+
+    // Read each busy block and prepare the updated value.
+    let mut records: Vec<(DiskId, u32, u64, BusyBlockValue)> = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let disk_id = seg.disk_id.ok_or_else(|| {
+            FreeError::Kv(crow_kv_client::Error::SysdataDecode {
+                key: "segment.disk_id".to_string(),
+                reason: "missing disk_id in Segment".to_string(),
+            })
+        })?;
+        let busy = kv
+            .get_busy(bind, &disk_id, seg.zone_index, seg.unit_offset)
+            .await?;
+        match busy {
+            None => {
+                return Err(FreeError::NotBusy {
+                    disk_id,
+                    zone_index: seg.zone_index,
+                    unit_offset: seg.unit_offset,
+                });
+            }
+            Some(mut bv) => {
+                bv.commit_state = CommitState::Committed as i32;
+                records.push((disk_id, seg.zone_index, seg.unit_offset, bv));
+            }
+        }
+    }
+
+    if records.is_empty() {
+        return Ok(0);
+    }
+
+    // Persist all updates in one batch.
+    kv.persist_busy_batch(bind, &records)
+        .await
+        .map_err(FreeError::from)?;
+
+    Ok(u32::try_from(records.len()).unwrap_or(u32::MAX))
 }
