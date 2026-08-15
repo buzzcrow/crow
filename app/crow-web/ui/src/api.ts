@@ -1037,6 +1037,17 @@ export async function stopDiskdb(nodeId: number, options?: RequestOptions): Prom
   );
 }
 
+/** `DELETE /api/nodes/:id/diskdb` — stop and remove diskdb deployment record. */
+export async function removeDiskdb(nodeId: number, options?: RequestOptions): Promise<void> {
+  await jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb`, {
+      ...options,
+      method: 'DELETE',
+      skipDeduplication: true,
+    }),
+  );
+}
+
 /** `POST /api/nodes/:id/disk-groups/:dg_id/disks/batch` — batch add disks. */
 export async function addDisksBatch(
   nodeId: number,

@@ -19,15 +19,19 @@ test.describe('E2E-47 async operation UI feedback', () => {
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-47' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
 
-      // Ping — should show a success toast
+      // Ping — on the node context menu.
       await nodeItem.click({ button: 'right' });
       await page.getByRole('menuitem', { name: /ping/i }).click();
 
       const pingToast = page.getByRole('alert').filter({ hasText: /ping/i });
       await expect(pingToast).toBeVisible({ timeout: 3_000 });
 
+      // Restart and Stop are on the server (KV) context menu.
+      const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-47' });
+      await expect(serverItem).toBeVisible({ timeout: 5_000 });
+
       // Restart — should show a success toast
-      await nodeItem.click({ button: 'right' });
+      await serverItem.click({ button: 'right' });
       const restartResponse = page.waitForResponse((r: any) => r.url().includes('/server/restart'));
       await page.getByRole('menuitem', { name: /restart Crow Storage/i }).click();
       await restartResponse;
@@ -36,7 +40,7 @@ test.describe('E2E-47 async operation UI feedback', () => {
       await expect(restartToast).toBeVisible({ timeout: 3_000 });
 
       // Stop — should show a success toast
-      await nodeItem.click({ button: 'right' });
+      await serverItem.click({ button: 'right' });
       const stopResponse = page.waitForResponse((r: any) => r.url().includes('/server/stop'));
       await page.getByRole('menuitem', { name: /stop Crow Storage/i }).click();
       await stopResponse;

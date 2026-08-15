@@ -28,7 +28,7 @@ test.describe('E2E-24 KV not-found', () => {
 
     try {
       await page.goto('/');
-      await page.locator('header').getByRole('button', { name: 'KV' }).click();
+      await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
       await page.getByLabel('Store').selectOption('244');
       await page.getByLabel('Group').selectOption('2440');
 

@@ -138,6 +138,9 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       lastViewModeRef.current = viewMode;
       viewportsRef.current[viewMode] = undefined;
       fittedOnceRef.current[viewMode] = false;
+      // Reset the action-key guard so the fit actually runs instead of
+      // short-circuiting on the stale key from the previous visit.
+      lastActionKeyRef.current = undefined;
     }
     if (positioned.nodes.length === 0 || !nodesInitialized) {
       fittedOnceRef.current[viewMode] = false;

@@ -7,7 +7,7 @@ import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, sto
 
 async function openKvPanel(page: any) {
   await page.goto('/');
-  await page.locator('header').getByRole('button', { name: 'KV' }).click();
+  await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
   await page.getByLabel('Store').selectOption('111');
   await page.getByLabel('Group').selectOption('1110');
 }

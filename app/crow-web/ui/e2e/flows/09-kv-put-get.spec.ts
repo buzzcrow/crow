@@ -15,7 +15,7 @@ test.describe('E2E-09 KV put/get', () => {
 
     try {
       await page.goto('/');
-      await page.locator('header').getByRole('button', { name: 'KV' }).click();
+      await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
 
       // Select store 99 and group 990
       await page.getByLabel('Store').selectOption('99');

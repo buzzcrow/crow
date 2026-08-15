@@ -47,6 +47,8 @@ import {
   setDiskStatus,
   restartDiskdb,
   stopDiskdb,
+  removeServer,
+  removeDiskdb,
 } from './api';
 import { deployPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
 import { buildCrowKVServers, crowKvServerNodeIds } from './data/crowKvServers';
@@ -257,12 +259,22 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         } else if (t.type === 'Node') {
           const nodeId = Number(t.rawId);
           const hasServer = serverNodeIds.has(nodeId);
+          const hasDiskdb = diskdbNodeIds.has(nodeId);
+          // Add Services — deploy Crow Storage and/or DiskDB.
           if (!hasServer) {
             items.push({
               id: 'deploy',
               label: 'Deploy Crow Storage',
               icon: <Server className="tw-h-4 tw-w-4" />,
               onSelect: () => setDialog((d) => ({ ...d, deployServer: { nodeId } })),
+            });
+          }
+          if (!hasDiskdb) {
+            items.push({
+              id: 'deploy-diskdb',
+              label: 'Deploy DiskDB',
+              icon: <HardDrive className="tw-h-4 tw-w-4" />,
+              onSelect: () => setDialog((d) => ({ ...d, deployDiskdb: true })),
             });
           }
           items.push({
@@ -275,27 +287,45 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
                 if (!r.ok) throw new Error(r.error || 'unreachable');
               }),
           });
-          if (hasServer) {
-            items.push({
-              id: 'restart',
-              label: 'Restart Crow Storage',
-              icon: <RotateCw className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Restart Crow Storage', t.label || t.id, () => restartServer(nodeId)),
-            });
-            items.push({
-              id: 'stop',
-              label: 'Stop Crow Storage',
-              icon: <Square className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Stop Crow Storage', t.label || t.id, () => stopServer(nodeId)),
-            });
-          }
           items.push({ id: 's1', separator: true });
           items.push({
             id: 'del-node',
             label: 'Delete Node',
             icon: <Trash2 className="tw-h-4 tw-w-4" />,
             destructive: true,
-            onSelect: () => requestDelete('Node', nodeId, async () => { await runMutation('Delete Node', t.label || t.id, () => removeNode(nodeId)); }),
+            // Cascade: stop + remove all services before deleting the node.
+            onSelect: () => requestDelete('Node', nodeId, async () => {
+              await runMutation('Delete Node', t.label || t.id, async () => {
+                if (hasDiskdb) await removeDiskdb(nodeId);
+                if (hasServer) await removeServer(nodeId);
+                await removeNode(nodeId);
+              });
+            }),
+          });
+        } else if (t.type === 'Server') {
+          // CrowKV service context menu: restart, stop, delete.
+          const nodeId = Number(p.node_id);
+          items.push({
+            id: 'restart',
+            label: 'Restart Crow Storage',
+            icon: <RotateCw className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Restart Crow Storage', t.label || t.id, () => restartServer(nodeId)),
+          });
+          items.push({
+            id: 'stop',
+            label: 'Stop Crow Storage',
+            icon: <Square className="tw-h-4 tw-w-4" />,
+            onSelect: () => runMutation('Stop Crow Storage', t.label || t.id, () => stopServer(nodeId)),
+          });
+          items.push({ id: 's1', separator: true });
+          items.push({
+            id: 'del-service',
+            label: 'Delete Crow Storage',
+            icon: <Trash2 className="tw-h-4 tw-w-4" />,
+            destructive: true,
+            onSelect: () => requestDelete('Crow Storage', t.label || t.id, async () => {
+              await runMutation('Delete Crow Storage', t.label || t.id, () => removeServer(nodeId));
+            }),
           });
         }
       } else if (capacityActive) {

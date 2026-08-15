@@ -23,7 +23,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
 
     // --- Shell renders ---
     await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByRole('button', { name: 'KV Cluster' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'KV', exact: true })).toBeVisible();
     await expect(page.getByPlaceholder('Filter...')).toBeVisible();
 
     const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
@@ -114,7 +114,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     }, { timeout: 10_000, intervals: [100] }).toBe(true);
 
     // --- KV via KV Operator panel ---
-    await page.locator('header').getByRole('button', { name: 'KV' }).click();
+    await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
 
     // Put
     await page.getByLabel('Put key').fill('smoke-key');

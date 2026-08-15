@@ -79,7 +79,7 @@ test.describe('E2E-38 multi-store isolation', () => {
 
       // Verify via UI: open KV panel, select store A, scan, see only A keys
       await page.goto('/');
-      await page.locator('header').getByRole('button', { name: 'KV' }).click();
+      await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
       await page.getByLabel('Store').selectOption('380');
       await page.getByLabel('Group').selectOption('3800');
 

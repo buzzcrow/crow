@@ -21,18 +21,22 @@ test.describe('E2E-27 server lifecycle via context menu', () => {
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-27' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
 
-      // Ping
+      // Ping — on the node context menu.
       await nodeItem.click({ button: 'right' });
       await page.getByRole('menuitem', { name: /ping/i }).click();
 
+      // Restart and Stop are on the server (KV) context menu, not the node.
+      const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-27' });
+      await expect(serverItem).toBeVisible({ timeout: 5_000 });
+
       // Restart
-      await nodeItem.click({ button: 'right' });
+      await serverItem.click({ button: 'right' });
       const restartResponse = page.waitForResponse((r: any) => r.url().includes('/server/restart'));
       await page.getByRole('menuitem', { name: /restart Crow Storage/i }).click();
       await restartResponse;
 
       // Stop
-      await nodeItem.click({ button: 'right' });
+      await serverItem.click({ button: 'right' });
       const stopResponse = page.waitForResponse((r: any) => r.url().includes('/server/stop'));
       await page.getByRole('menuitem', { name: /stop Crow Storage/i }).click();
       await stopResponse;
