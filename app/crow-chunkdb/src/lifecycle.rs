@@ -72,6 +72,7 @@ impl LifecycleHandler {
         strip_type: ProtoStripType,
         data_num: u32,
         code_num: u32,
+        copy_count: u32,
         chunk_type: ChunkType,
     ) -> Result<Chunk, LifecycleError> {
         let id = chunk_id.unwrap_or_else(|| {
@@ -84,9 +85,10 @@ impl LifecycleHandler {
         });
         let snap = self.topology.snapshot();
 
+        let mirror_copies = if copy_count == 0 { 3 } else { copy_count as usize };
         let strip_alloc_type = match strip_type {
             ProtoStripType::Mirror => StripAllocType::Mirror {
-                copy_count: 3, // default 3 copies for mirror
+                copy_count: mirror_copies,
             },
             ProtoStripType::Ec => StripAllocType::Ec {
                 data_num: data_num as usize,
@@ -99,11 +101,11 @@ impl LifecycleHandler {
 
         let mut strips = Vec::with_capacity(strip_count as usize);
         for seq in 0..strip_count {
-            let allocated = self
+            let strip = self
                 .allocator
                 .allocate_strip(&snap, &id, strip_alloc_type, unit_count, seq, &constraints)
                 .await?;
-            strips.push(allocated.strip);
+            strips.push(strip);
         }
 
         let now_ms = std::time::SystemTime::now()
@@ -127,6 +129,7 @@ impl LifecycleHandler {
     }
 
     /// Append strips to an active chunk.
+    #[allow(clippy::too_many_arguments)]
     pub async fn append_chunk(
         &self,
         chunk_id: &ChunkId,
@@ -134,14 +137,19 @@ impl LifecycleHandler {
         strip_type: ProtoStripType,
         data_num: u32,
         code_num: u32,
+        copy_count: u32,
+        unit_count: u32,
     ) -> Result<Chunk, LifecycleError> {
         let mut chunk = self.store.get_chunk(chunk_id).await?;
         let current_state = ChunkState::from_proto(chunk.state);
         current_state.check_can_append()?;
 
         let snap = self.topology.snapshot();
+        let mirror_copies = if copy_count == 0 { 3 } else { copy_count as usize };
         let strip_alloc_type = match strip_type {
-            ProtoStripType::Mirror => StripAllocType::Mirror { copy_count: 3 },
+            ProtoStripType::Mirror => StripAllocType::Mirror {
+                copy_count: mirror_copies,
+            },
             ProtoStripType::Ec => StripAllocType::Ec {
                 data_num: data_num as usize,
                 code_num: code_num as usize,
@@ -153,11 +161,11 @@ impl LifecycleHandler {
 
         for i in 0..strip_count {
             let seq = start_seq + i;
-            let allocated = self
+            let strip = self
                 .allocator
-                .allocate_strip(&snap, chunk_id, strip_alloc_type, 1024, seq, &constraints)
+                .allocate_strip(&snap, chunk_id, strip_alloc_type, unit_count, seq, &constraints)
                 .await?;
-            chunk.strips.push(allocated.strip);
+            chunk.strips.push(strip);
         }
 
         chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();

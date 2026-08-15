@@ -52,7 +52,7 @@ impl EcPlacement {
         let node_count = dgs.iter().map(|dg| dg.node_id).collect::<HashSet<_>>().len();
 
         // Try safe mode first: max `code_num` blocks per node.
-        let safe_plan = try_distribute(&dgs, &by_rack, total_blocks, code_num);
+        let safe_plan = try_distribute(&by_rack, total_blocks, code_num);
         if let Some(entries) = safe_plan {
             return Ok(PlacementPlan {
                 entries,
@@ -69,7 +69,7 @@ impl EcPlacement {
             "EC placement: safe mode failed, falling back to unsafe mode"
         );
         let unsafe_limit = total_blocks;
-        if let Some(entries) = try_distribute(&dgs, &by_rack, total_blocks, unsafe_limit) {
+        if let Some(entries) = try_distribute(&by_rack, total_blocks, unsafe_limit) {
             return Ok(PlacementPlan {
                 entries,
                 safe_mode: false,
@@ -88,13 +88,11 @@ impl EcPlacement {
 /// `max_per_node` blocks per node. Distributes across racks first
 /// (round-robin), then within each rack across nodes.
 fn try_distribute(
-    dgs: &[crow_protocol::sysdata::DiskGroupEntry],
     by_rack: &HashMap<RackId, Vec<&crow_protocol::sysdata::DiskGroupEntry>>,
     total_blocks: usize,
     max_per_node: usize,
 ) -> Option<Vec<PlacementEntry>> {
     let mut rack_ids: Vec<RackId> = by_rack.keys().copied().collect();
-    rack_ids.sort_unstable();
     rack_ids.shuffle(&mut rand::thread_rng());
 
     let mut node_load: HashMap<NodeId, u32> = HashMap::new();
@@ -140,7 +138,5 @@ fn try_distribute(
         }
     }
 
-    // Suppress unused warning for dgs (used via by_rack).
-    let _ = dgs;
     Some(entries)
 }

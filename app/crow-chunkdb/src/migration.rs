@@ -97,12 +97,18 @@ impl MigrationTask {
             }
 
             for (key, value) in &outcome.items {
+                // Always advance the cursor — even for out-of-range
+                // items, otherwise a batch of only out-of-range items
+                // would loop forever.
+                start_after = key.to_vec();
+
                 // Check if this chunk's bucket is in our range.
-                if let Some(chunk_id) = key_to_chunk_id(key) {
-                    let bucket = crate::routing::hash_to_bucket(&chunk_id);
-                    if bucket < self.binding.start || bucket >= self.binding.end {
-                        continue;
-                    }
+                let in_range = key_to_chunk_id(key).is_some_and(|id| {
+                    let b = crate::routing::hash_to_bucket(&id);
+                    b >= self.binding.start && b < self.binding.end
+                });
+                if !in_range {
+                    continue;
                 }
 
                 // Copy to new group (overwrite — idempotent).
@@ -116,8 +122,6 @@ impl MigrationTask {
                     )
                     .await
                     .map_err(|e| format!("copy put: {e}"))?;
-
-                start_after = key.to_vec();
             }
 
             if !outcome.truncated {
@@ -157,18 +161,20 @@ impl MigrationTask {
             }
 
             for (key, _value) in &outcome.items {
-                if let Some(chunk_id) = key_to_chunk_id(key) {
-                    let bucket = crate::routing::hash_to_bucket(&chunk_id);
-                    if bucket < self.binding.start || bucket >= self.binding.end {
-                        continue;
-                    }
+                // Always advance the cursor.
+                start_after = key.to_vec();
+
+                let in_range = key_to_chunk_id(key).is_some_and(|id| {
+                    let b = crate::routing::hash_to_bucket(&id);
+                    b >= self.binding.start && b < self.binding.end
+                });
+                if !in_range {
+                    continue;
                 }
 
                 if let Err(e) = self.kv.delete(old_store, old_group, key, None).await {
                     warn!(error = %e, "cleanup: delete failed for old copy");
                 }
-
-                start_after = key.to_vec();
             }
 
             if !outcome.truncated {

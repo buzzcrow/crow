@@ -7,12 +7,7 @@
 //! backend-agnostic; isa-l can replace it behind the same interface
 //! when available (see chunkdb-gap.md GAP-2).
 
-#![allow(
-    clippy::must_use_candidate,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::cast_possible_truncation
-)]
+#![allow(clippy::must_use_candidate, clippy::missing_errors_doc)]
 
 use thiserror::Error;
 

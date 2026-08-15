@@ -165,33 +165,38 @@ impl ChunkStore {
             return Err(StoreError::Route(crate::routing::RouteError::NoBinding));
         }
 
-        let binding = &table.bindings()[0];
         let prefix = b"/chunk/";
         let start = start_after.map(chunk_key).unwrap_or_default();
+        let start_key: &[u8] = if start.is_empty() { &[] } else { &start };
 
-        let outcome: ScanOutcome = self
-            .kv
-            .scan(
-                binding.kv_store_id,
-                binding.kv_group_id,
-                prefix,
-                if start.is_empty() { &[] } else { &start },
-                &[],
-                max_keys,
-                ReadMode::Linearizable,
-                None,
-                false,
-                None,
-            )
-            .await
-            .map_err(|e| StoreError::Kv(e.to_string()))?;
+        // Scan all bindings — chunks may be spread across multiple KV
+        // groups. Each binding gets up to `max_keys` results; the
+        // caller merges them.
+        let mut chunks = Vec::new();
+        for binding in table.bindings() {
+            let outcome: ScanOutcome = self
+                .kv
+                .scan(
+                    binding.kv_store_id,
+                    binding.kv_group_id,
+                    prefix,
+                    start_key,
+                    &[],
+                    max_keys,
+                    ReadMode::Linearizable,
+                    None,
+                    false,
+                    None,
+                )
+                .await
+                .map_err(|e| StoreError::Kv(e.to_string()))?;
 
-        let mut chunks = Vec::with_capacity(outcome.items.len());
-        for (_key, value) in outcome.items {
-            match decode_chunk(&value) {
-                Ok(chunk) => chunks.push(chunk),
-                Err(e) => {
-                    warn!(error = %e, "list_chunks: failed to decode chunk, skipping");
+            for (_key, value) in outcome.items {
+                match decode_chunk(&value) {
+                    Ok(chunk) => chunks.push(chunk),
+                    Err(e) => {
+                        warn!(error = %e, "list_chunks: failed to decode chunk, skipping");
+                    }
                 }
             }
         }

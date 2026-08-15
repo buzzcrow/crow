@@ -35,15 +35,17 @@ impl DiskdbClientPool {
 
     /// Get or create a channel for the diskdb instance owning
     /// `disk_group_id`.
-    fn channel_for_dg(&self, dg_id: u64) -> Result<Channel, String> {
+    async fn channel_for_dg(&self, dg_id: u64) -> Result<Channel, String> {
         // Check endpoint cache.
         if let Some(endpoint) = self.endpoints.get(&dg_id) {
             return self.get_or_create_channel(endpoint.value());
         }
 
-        // Refresh from service registry (synchronous — caller should
-        // handle the error). In v1 we do a lazy lookup; a full refresh
-        // can be triggered by the caller.
+        // Cache miss — refresh from service registry and retry.
+        self.refresh_endpoints().await?;
+        if let Some(endpoint) = self.endpoints.get(&dg_id) {
+            return self.get_or_create_channel(endpoint.value());
+        }
         Err(format!("no endpoint cached for disk_group {dg_id}"))
     }
 
@@ -89,7 +91,7 @@ impl DiskdbClientPool {
         unit_count: u32,
         owner_chunk: &ChunkId,
     ) -> Result<AllocateResponse, String> {
-        let channel = self.channel_for_dg(dg_id)?;
+        let channel = self.channel_for_dg(dg_id).await?;
         let mut client = crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(channel);
         let req = AllocateBlocksRequest {
             disk_group_id: dg_id,

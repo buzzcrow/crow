@@ -136,18 +136,16 @@ fn ec_select_8_4_unsafe_fallback_3_nodes() {
 }
 
 #[test]
-fn ec_select_insufficient_nodes() {
+fn ec_select_unsafe_mode_succeeds_with_single_node() {
     let cache = build_topology(&[(1, &[10])]);
     let snap = cache.snapshot();
 
-    // 8+4 = 12 blocks, 1 node — even unsafe mode can't handle if
-    // max_per_node = total_blocks and we only have 1 node. Actually
-    // unsafe mode sets max_per_node = total_blocks = 12, so 1 node
-    // can hold all 12. Let's use a case that truly fails.
-    // With 1 node and 12 blocks, unsafe mode places all 12 on 1 node.
-    // That succeeds. So this test should actually pass.
-    let plan = EcPlacement::select(&snap, 8, 4, &PlacementConstraints::new());
-    assert!(plan.is_ok(), "1 node can hold all 12 blocks in unsafe mode");
+    // 8+4 = 12 blocks, 1 node. Safe mode fails (max 4 per node = 4
+    // capacity < 12), but unsafe mode sets max_per_node = 12, so 1
+    // node can hold all 12 blocks.
+    let plan = EcPlacement::select(&snap, 8, 4, &PlacementConstraints::new()).unwrap();
+    assert_eq!(plan.entries.len(), 12);
+    assert!(!plan.safe_mode);
 }
 
 #[test]

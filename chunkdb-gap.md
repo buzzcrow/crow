@@ -90,7 +90,7 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 
 ### GAP-10: Full-stack E2E tests require crow-kv-server binary
 
-- The E2E tests in `e2e_test.rs` use mock components (in-memory topology, no real KV/diskdb). Full-stack E2E tests that start a real KV cluster + diskdb + chunkdb in-process (following the diskdb E2E pattern) are not yet implemented.
+- The E2E tests in `e2e_test.rs` verify component-level integration (topology, selector, routing, state machine, handler construction, service wiring) with mock components. Full-stack E2E tests that start a real KV cluster + diskdb + chunkdb in-process (following the diskdb E2E pattern) are not yet implemented.
 - **Reason**: the full-stack harness requires the `crow-kv-server` binary to be built and the `KvCluster` test helper to be adapted for chunkdb. This is a significant integration effort.
 - **Impact**: component-level integration is tested, but cross-component integration (e.g. topology cache feeding stale data to placement, routing sending writes to the wrong KV group during migration) is not verified.
 - **Action needed**: implement the full-stack E2E harness (`ChunkdbCluster` helper) following the diskdb pattern, with real KV + diskdb + chunkdb in-process.

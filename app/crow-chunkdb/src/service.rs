@@ -1,9 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! chunkdb gRPC service stub.
-//!
-//! All RPCs return `Unimplemented` — real handlers land in R89.
+//! chunkdb gRPC service — delegates to lifecycle handlers.
+
+use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
@@ -11,18 +11,23 @@ use crow_protocol::chunkdb::rpc::chunkdb_service_server::{
     ChunkdbService as ChunkdbServiceTrait, ChunkdbServiceServer,
 };
 use crow_protocol::chunkdb::rpc::{
-    AllocateChunkRequest, AllocateChunkResponse, AppendChunkRequest, AppendChunkResponse,
+    AllocateChunkRequest, AllocateChunkResponse, AppendChunkRequest, AppendChunkResponse, ChunkType,
     DeleteChunkRangeRequest, DeleteChunkRangeResponse, DeleteChunkRequest, DeleteChunkResponse,
     ListChunksRequest, ListChunksResponse, QueryChunkRequest, QueryChunkResponse, SealChunkRequest,
-    SealChunkResponse, UpdateChunkStripRequest, UpdateChunkStripResponse,
+    SealChunkResponse, StripType as ProtoStripType, UpdateChunkStripRequest, UpdateChunkStripResponse,
 };
 
-/// chunkdb gRPC service (stub — all RPCs return Unimplemented).
-pub struct ChunkdbService;
+use crate::lifecycle::{LifecycleError, LifecycleHandler};
+
+/// chunkdb gRPC service.
+pub struct ChunkdbService {
+    handler: Arc<LifecycleHandler>,
+}
 
 impl ChunkdbService {
-    pub fn new() -> Self {
-        Self
+    #[must_use]
+    pub fn new(handler: Arc<LifecycleHandler>) -> Self {
+        Self { handler }
     }
 
     pub fn into_server(self) -> ChunkdbServiceServer<Self> {
@@ -30,9 +35,16 @@ impl ChunkdbService {
     }
 }
 
-impl Default for ChunkdbService {
-    fn default() -> Self {
-        Self::new()
+/// Map a `LifecycleError` to a gRPC `Status`.
+fn map_error(e: &LifecycleError) -> Status {
+    match e {
+        LifecycleError::InvalidStateTransition(_) => Status::failed_precondition(e.to_string()),
+        LifecycleError::ChunkNotFound => Status::not_found(e.to_string()),
+        LifecycleError::ChunkAlreadyExists => Status::already_exists(e.to_string()),
+        LifecycleError::StateConflict => Status::aborted(e.to_string()),
+        LifecycleError::Allocation(_) => Status::internal(e.to_string()),
+        LifecycleError::Storage(_) => Status::internal(e.to_string()),
+        LifecycleError::InvalidRequest(_) => Status::invalid_argument(e.to_string()),
     }
 }
 
@@ -40,61 +52,129 @@ impl Default for ChunkdbService {
 impl ChunkdbServiceTrait for ChunkdbService {
     async fn allocate_chunk(
         &self,
-        _req: Request<AllocateChunkRequest>,
+        req: Request<AllocateChunkRequest>,
     ) -> Result<Response<AllocateChunkResponse>, Status> {
-        Err(Status::unimplemented("allocate_chunk not yet implemented (R89)"))
+        let req = req.into_inner();
+        let strip_type = ProtoStripType::try_from(req.strip_type)
+            .map_err(|_| Status::invalid_argument("invalid strip_type"))?;
+        let chunk_type = ChunkType::try_from(req.chunk_type)
+            .map_err(|_| Status::invalid_argument("invalid chunk_type"))?;
+        let chunk = self
+            .handler
+            .allocate_chunk(
+                req.chunk_id,
+                req.write_granularity,
+                req.strip_count,
+                strip_type,
+                req.data_num,
+                req.code_num,
+                req.copy_count,
+                chunk_type,
+            )
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(Response::new(AllocateChunkResponse { chunk: Some(chunk) }))
     }
 
     async fn append_chunk(
         &self,
-        _req: Request<AppendChunkRequest>,
+        req: Request<AppendChunkRequest>,
     ) -> Result<Response<AppendChunkResponse>, Status> {
-        Err(Status::unimplemented("append_chunk not yet implemented (R89)"))
+        let req = req.into_inner();
+        let chunk_id = req
+            .chunk_id
+            .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
+        let strip_type = ProtoStripType::try_from(req.strip_type)
+            .map_err(|_| Status::invalid_argument("invalid strip_type"))?;
+        let chunk = self
+            .handler
+            .append_chunk(
+                &chunk_id,
+                req.strip_count,
+                strip_type,
+                req.data_num,
+                req.code_num,
+                req.copy_count,
+                req.strip_size,
+            )
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(Response::new(AppendChunkResponse { chunk: Some(chunk) }))
     }
 
     async fn query_chunk(
         &self,
-        _req: Request<QueryChunkRequest>,
+        req: Request<QueryChunkRequest>,
     ) -> Result<Response<QueryChunkResponse>, Status> {
-        Err(Status::unimplemented("query_chunk not yet implemented (R89)"))
+        let req = req.into_inner();
+        let chunk_id = req
+            .chunk_id
+            .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
+        let chunk = self
+            .handler
+            .query_chunk(&chunk_id)
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(Response::new(QueryChunkResponse { chunk: Some(chunk) }))
     }
 
     async fn seal_chunk(
         &self,
-        _req: Request<SealChunkRequest>,
+        req: Request<SealChunkRequest>,
     ) -> Result<Response<SealChunkResponse>, Status> {
-        Err(Status::unimplemented("seal_chunk not yet implemented (R89)"))
+        let req = req.into_inner();
+        let chunk_id = req
+            .chunk_id
+            .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
+        let chunk = self
+            .handler
+            .seal_chunk(&chunk_id, req.seal_length)
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(Response::new(SealChunkResponse { chunk: Some(chunk) }))
     }
 
     async fn delete_chunk(
         &self,
-        _req: Request<DeleteChunkRequest>,
+        req: Request<DeleteChunkRequest>,
     ) -> Result<Response<DeleteChunkResponse>, Status> {
-        Err(Status::unimplemented("delete_chunk not yet implemented (R89)"))
+        let req = req.into_inner();
+        let chunk_id = req
+            .chunk_id
+            .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
+        let chunk = self
+            .handler
+            .delete_chunk(&chunk_id)
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(Response::new(DeleteChunkResponse { chunk: Some(chunk) }))
     }
 
     async fn delete_chunk_range(
         &self,
         _req: Request<DeleteChunkRangeRequest>,
     ) -> Result<Response<DeleteChunkRangeResponse>, Status> {
-        Err(Status::unimplemented(
-            "delete_chunk_range not yet implemented (R89)",
-        ))
+        Err(Status::unimplemented("delete_chunk_range not yet implemented"))
     }
 
     async fn update_chunk_strip(
         &self,
         _req: Request<UpdateChunkStripRequest>,
     ) -> Result<Response<UpdateChunkStripResponse>, Status> {
-        Err(Status::unimplemented(
-            "update_chunk_strip not yet implemented (R89)",
-        ))
+        Err(Status::unimplemented("update_chunk_strip not yet implemented"))
     }
 
     async fn list_chunks(
         &self,
-        _req: Request<ListChunksRequest>,
+        req: Request<ListChunksRequest>,
     ) -> Result<Response<ListChunksResponse>, Status> {
-        Err(Status::unimplemented("list_chunks not yet implemented (R89)"))
+        let req = req.into_inner();
+        let chunks = self
+            .handler
+            .list_chunks(req.start_token.as_ref(), req.max_keys)
+            .await
+            .map_err(|e| map_error(&e))?;
+        let next_token = chunks.last().and_then(|c| c.id);
+        Ok(Response::new(ListChunksResponse { chunks, next_token }))
     }
 }

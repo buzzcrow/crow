@@ -8,7 +8,6 @@
 //! frees successfully-allocated segments on any failure.
 
 pub mod pool;
-pub mod rollback;
 
 use std::sync::Arc;
 
@@ -24,7 +23,6 @@ use crate::selector::{EcPlacement, MirrorPlacement, PlacementConstraints, Placem
 use crate::topology::TopologySnapshot;
 
 pub use pool::DiskdbClientPool;
-pub use rollback::rollback_segments;
 
 /// Allocator error.
 #[derive(Debug, thiserror::Error)]
@@ -44,11 +42,6 @@ pub enum AllocError {
 pub enum StripAllocType {
     Mirror { copy_count: usize },
     Ec { data_num: usize, code_num: usize },
-}
-
-/// Result of a strip allocation.
-pub struct AllocatedStrip {
-    pub strip: ChunkStrip,
 }
 
 /// Chunk allocator — orchestrates placement + parallel diskdb calls.
@@ -80,7 +73,7 @@ impl ChunkAllocator {
         unit_count: u32,
         strip_sequence: u32,
         constraints: &PlacementConstraints,
-    ) -> Result<AllocatedStrip, AllocError> {
+    ) -> Result<ChunkStrip, AllocError> {
         let plan = match strip_type {
             StripAllocType::Mirror { copy_count } => MirrorPlacement::select(snap, copy_count, constraints)?,
             StripAllocType::Ec { data_num, code_num } => {
@@ -93,7 +86,7 @@ impl ChunkAllocator {
             .await?;
 
         let strip = assemble_strip(&segments, strip_type, strip_sequence, &plan);
-        Ok(AllocatedStrip { strip })
+        Ok(strip)
     }
 
     /// Allocate blocks in parallel across all placement entries.

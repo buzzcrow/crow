@@ -55,11 +55,9 @@ impl NotifyHandler {
         let (merge_tx, mut merge_rx) = mpsc::channel::<Vec<u8>>(64);
         let mut merge_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         for mut sub in subscriptions {
-            let rx = std::mem::replace(&mut sub.notify_rx, mpsc::channel(1).1);
             let tx = merge_tx.clone();
             merge_handles.push(tokio::spawn(async move {
-                let mut rx = rx;
-                while let Some(notify) = rx.recv().await {
+                while let Some(notify) = sub.notify_rx.recv().await {
                     // Forward the first changed key (coalesced refresh
                     // handles the rest).
                     if let Some(key) = notify.keys.first() {
@@ -68,7 +66,7 @@ impl NotifyHandler {
                         }
                     }
                 }
-                drop(sub);
+                // sub drops here, triggering the abort signal.
             }));
         }
         drop(merge_tx);

@@ -46,7 +46,6 @@ impl MirrorPlacement {
         }
 
         let mut rack_ids: Vec<RackId> = by_rack.keys().copied().collect();
-        rack_ids.sort_unstable();
         rack_ids.shuffle(&mut rand::thread_rng());
 
         // Phase 1: pick one node per rack (round-robin through racks).

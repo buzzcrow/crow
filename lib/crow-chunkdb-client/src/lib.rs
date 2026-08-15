@@ -9,12 +9,7 @@
 //! caches `instance_id -> grpc_endpoint`, and lazily refreshes on
 //! cache miss. Retry on transient errors with exponential backoff.
 
-#![allow(
-    clippy::must_use_candidate,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::doc_markdown
-)]
+#![allow(clippy::must_use_candidate, clippy::missing_errors_doc)]
 
 pub mod client;
 

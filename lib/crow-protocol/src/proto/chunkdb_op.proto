@@ -23,6 +23,8 @@ message AllocateChunkRequest {
   StripType           strip_type        = 4;
   uint32              data_num          = 5;  // EC data blocks (ignored for mirror)
   uint32              code_num          = 6;  // EC parity blocks (ignored for mirror)
+  uint32              copy_count        = 7;  // mirror copies (default 3, ignored for EC)
+  ChunkType           chunk_type        = 8;  // chunk purpose (default Repo)
 }
 
 message AllocateChunkResponse {
@@ -39,6 +41,7 @@ message AppendChunkRequest {
   StripType           strip_type  = 4;
   uint32              data_num    = 5;
   uint32              code_num    = 6;
+  uint32              copy_count  = 7;  // mirror copies (default 3, ignored for EC)
 }
 
 message AppendChunkResponse {
