@@ -119,8 +119,10 @@ pixi run test-protocol
 pixi run test-kv-core
 pixi run test-kv-client
 pixi run test-diskdb-client
+pixi run test-chunkdb-client
 pixi run test-kv-server
 pixi run test-diskdb
+pixi run test-chunkdb
 pixi run clean-env
 pixi run test-console-shared
 pixi run test-console-cli

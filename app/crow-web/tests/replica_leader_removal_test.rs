@@ -101,10 +101,15 @@ async fn spawn_upstream(node_id: u64, workspace: &std::path::Path) -> Option<Ups
         ssh_key: None,
         ssh_password: None,
     };
+    let mgmt_port = pick_free_port();
+    let mut grpc_port = pick_free_port();
+    while grpc_port == mgmt_port {
+        grpc_port = pick_free_port();
+    }
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
+        mgmt_port,
+        grpc_port,
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()

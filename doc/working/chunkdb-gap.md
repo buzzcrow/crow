@@ -17,6 +17,10 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - **Decision taken**: kept the 192-bit proto as-is (changing it would break diskdb). The chunk ID generator packs type bits into the high byte and uses timestamp + random across all 192 bits. The design doc §5.4 should be updated to match the 192-bit proto.
 - **Action needed**: update `doc/design/chunkdb/design-crow-chunkdb.md` §5.4 to reflect 192-bit ChunkId.
 
+
+ai-todo : use 128 bit and follow the design, write UUID util class in crow-protocol, change proto
+
+
 ### GAP-2: EC backend — isa-l (design) vs pure-Rust reed-solomon-erasure
 
 - **Design doc §3.5/§10** specifies isa-l via FFI for AVX2/AVX512 performance.
@@ -25,12 +29,16 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - **Decision taken**: used the pure-Rust `reed-solomon-erasure` crate (v6.0.0, GF(2^8)) as the EC backend. The public API (`EcScheme`, `encode`, `decode`) is backend-agnostic — isa-l can be swapped in later behind the same API when it's available and the `unsafe` exception is granted.
 - **Action needed**: decide whether to (a) install isa-l + grant `crow-common` an `unsafe` exception, or (b) keep the pure-Rust backend and update the design doc.
 
+
+ai-todo: use isa-l, we have depends on it in pixi, wrap EC functionality in crow-common and write UT test it. 
+
 ### GAP-3: ChunkType enum — not in existing proto
 
 - The existing `chunkdb_type.proto` has no `ChunkType` enum. R85 adds it per design §5.5.
 - Added `ChunkType` enum (Repo=0, WAL=1, BTreePage=2, PageIndex=3, reserved 4-255) and `ChunkType chunk_type` field to `Chunk`.
 - Also added `CHUNK_STATE_INIT = 0` per design §9, renumbering `ChunkState` values (ACTIVE=1, SEALED=2, DELETED=3). No existing code uses these enum values yet.
 
+ai-todo : add it.
 ---
 
 ## R87: placement and allocation
@@ -42,12 +50,21 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - **Impact**: in a multi-diskdb-instance cluster, free calls may be rejected by non-owning instances (logged as warnings). The owning instance accepts the free. This is functionally correct but generates noise.
 - **Action needed**: add `disk_id → disk_group_id` reverse mapping to the topology cache (R86) or the diskdb client pool, then route free calls precisely.
 
+
+ai-todo:  no, you can broadcase.  R99 fix it.
+
 ### GAP-5: ChunkAllocator does not verify segment count per diskdb response
 
 - The `allocate_blocks_parallel` method checks the total segment count across all responses, but does not verify that each individual diskdb response returned the requested number of segments.
 - **Reason**: the diskdb `AllocateBlocks` RPC may return fewer segments than requested if the disk-group is near-full. The current code treats total count mismatch as a failure (rollback), which is correct, but a partial response from one diskdb instance could be masked by a full response from another.
 - **Impact**: low — the total count check catches the mismatch. A more precise per-instance check would provide better error messages.
 - **Action needed**: add per-instance segment count verification in `allocate_blocks_parallel`.
+
+
+ai-todo: fix it. the handle the partial allocate. The review all allocation result and continue allocate lack blocks. Try some time and failed to allocate if can not get left blocks.
+If fail, we need free all allocated blocks.
+
+It bring another design change: when diskdb first allocate the block, it should mark the disk block as allocate. After chunk is persistent to kvGroup, it will send a commit message to diskdb to mark the disk block as allocated. Please design and fix it.
 
 ---
 
@@ -59,6 +76,8 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - **Impact**: in theory, two concurrent allocations with the same chunk ID could both pass the `get` check and both `put`, with the second overwriting the first. In practice, chunk ID collisions are vanishingly rare (88 random bits), so this is not a real concern.
 - **Action needed**: if strict atomicity is required, add a CAS/put-if-absent RPC to the KV service and use it here. Otherwise, document the check-then-write semantics as sufficient for v1.
 
+ai-todo: we do not need put if absent , just PUT to override.  chunk has one owner chunkdb instance at a time. There is no race condition across different chunkdb instance. Change the function name. 
+
 ### GAP-7: Binding table loaded from group-0 not implemented
 
 - The `BindingCache` is populated with a `default_binding_table(0, 0)` in `main.rs` — all buckets route to store 0, group 0.
@@ -67,6 +86,7 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - **Impact**: chunkdb works for single-KV-group deployments. Multi-group routing + migration requires the binding table to be loaded from group-0.
 - **Action needed**: define the binding table proto schema, add `KVClusterMetaClient` methods for reading/writing binding table entries, and wire the watch/notify in `main.rs`.
 
+ai-todo: R99 should define and impl it. Review current status and check gaps.
 ---
 
 ## R89: lifecycle management
@@ -78,12 +98,15 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - **Impact**: in a concurrent seal+delete scenario, both could succeed (one overwrites the other). The design specifies one should win and the other get `StateConflict`.
 - **Action needed**: add a CAS RPC to the KV service (compare revision or compare state), or use a distributed lock. For v1, the low concurrency of lifecycle operations makes this acceptable.
 
+ai-todo : design a lock mechanism for chunkdb lifecycle operations. the lock should be scoped to the chunk id. The lock can be wait (avoid blocking the thread), and should have a way to wake up on timeout or when the lock is released. We need a high performance and low cost design for it.  Create sperate requirment if needed.
+
 ### GAP-9: DeleteChunk is idempotent (design decision)
 
 - Per R89 Open Questions, `DeleteChunk` on an already-deleted chunk returns the existing `Deleted` chunk (idempotent), matching aioss.
 - **Decision taken**: implemented as idempotent — if the chunk is already `Deleted`, return it without error.
 - **Action needed**: none — this is a conscious design decision.
 
+ai-todo: return not-exist. The error handling can treat it success. We should avoid return true/false for API / rpc call, need use return code/ error code show real status.
 ---
 
 ## R91: E2E tests
@@ -94,3 +117,5 @@ Gaps encountered during R85-R91 + R99 implementation that need user feedback.
 - **Reason**: the full-stack harness requires the `crow-kv-server` binary to be built and the `KvCluster` test helper to be adapted for chunkdb. This is a significant integration effort.
 - **Impact**: component-level integration is tested, but cross-component integration (e.g. topology cache feeding stale data to placement, routing sending writes to the wrong KV group during migration) is not verified.
 - **Action needed**: implement the full-stack E2E harness (`ChunkdbCluster` helper) following the diskdb pattern, with real KV + diskdb + chunkdb in-process.
+
+ai-todo: then use it. diskdb already use it.
