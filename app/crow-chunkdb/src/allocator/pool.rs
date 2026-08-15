@@ -7,14 +7,25 @@
 //! instance per disk-group, using `ServiceRegistryClient` for endpoint
 //! discovery.
 
+use std::collections::HashMap;
+
 use dashmap::DashMap;
 use tonic::transport::Channel;
+use tracing::warn;
 
 use crow_kv_client::ServiceRegistryClient;
-use crow_protocol::common::ChunkId;
+use crow_protocol::common::{ChunkId, DiskId};
 use crow_protocol::diskdb::rpc::{
-    AllocateBlocksRequest, AllocateResponse, CommitBlocksRequest, FreeBlocksRequest, Segment,
+    AllocateBlocksRequest, AllocateResponse, CommitBlocksRequest, FreeBlocksRequest, FreeResponse, Segment,
 };
+
+/// Pinned boxed future for a `free_blocks` RPC call.
+type FreeFut = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = std::result::Result<tonic::Response<FreeResponse>, tonic::Status>>
+            + Send,
+    >,
+>;
 
 /// Pool of diskdb gRPC clients, keyed by disk-group ID.
 pub struct DiskdbClientPool {
@@ -23,6 +34,10 @@ pub struct DiskdbClientPool {
     endpoints: DashMap<u64, String>,
     /// `grpc_endpoint -> Channel` pool.
     channels: DashMap<String, Channel>,
+    /// `disk_id -> disk_group_id` reverse lookup cache (GAP-4).
+    /// Populated from the topology cache's `DiskGroupEntry` list.
+    /// Used for precise `free_blocks` routing.
+    disk_id_to_dg: DashMap<DiskId, u64>,
 }
 
 impl DiskdbClientPool {
@@ -32,7 +47,24 @@ impl DiskdbClientPool {
             svc,
             endpoints: DashMap::new(),
             channels: DashMap::new(),
+            disk_id_to_dg: DashMap::new(),
         }
+    }
+
+    /// Update the `disk_id → disk_group_id` reverse lookup cache from
+    /// a topology snapshot. Called by the topology refresh loop.
+    pub fn update_disk_id_lookup(&self, entries: &[crow_protocol::sysdata::DiskGroupEntry]) {
+        self.disk_id_to_dg.clear();
+        for entry in entries {
+            for disk_id in &entry.value.disk_ids {
+                self.disk_id_to_dg.insert(*disk_id, entry.dg_id);
+            }
+        }
+    }
+
+    /// Look up the disk-group ID for a disk_id (reverse lookup).
+    fn dg_for_disk(&self, disk_id: &DiskId) -> Option<u64> {
+        self.disk_id_to_dg.get(disk_id).map(|r| *r)
     }
 
     /// Get or create a channel for the diskdb instance owning
@@ -156,7 +188,10 @@ impl DiskdbClientPool {
 
     /// Free blocks via the diskdb instances that own them.
     ///
-    /// Segments are grouped by disk-group and freed in parallel.
+    /// Segments are grouped by disk-group (via `disk_id → dg_id`
+    /// reverse lookup) and freed in parallel to the owning instances.
+    /// Falls back to broadcast when the reverse lookup misses (cache
+    /// cold or unknown disk_id).
     ///
     /// # Errors
     /// Returns a String error if any free RPC fails.
@@ -165,21 +200,55 @@ impl DiskdbClientPool {
             return Ok(());
         }
 
-        // Group segments by disk-group (from the disk_id in each
-        // segment — the diskdb instance that owns the disk-group owns
-        // the segment). We use the endpoint cache to route.
-        // For simplicity in v1, we try freeing via all known endpoints.
-        // A more precise routing would map disk_id → disk_group_id.
-        let mut futures = Vec::new();
-        for endpoint in &self.channels {
-            let channel = endpoint.value().clone();
-            let segs = segments.clone();
-            futures.push(async move {
-                let mut client =
-                    crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(channel);
-                let req = FreeBlocksRequest { segments: segs };
-                client.free_blocks(req).await
-            });
+        // Group segments by disk-group ID via reverse lookup.
+        let mut grouped: HashMap<u64, Vec<Segment>> = HashMap::new();
+        let mut ungrouped: Vec<Segment> = Vec::new();
+        for seg in segments {
+            if let Some(disk_id) = &seg.disk_id {
+                if let Some(dg_id) = self.dg_for_disk(disk_id) {
+                    grouped.entry(dg_id).or_default().push(seg);
+                    continue;
+                }
+            }
+            ungrouped.push(seg);
+        }
+
+        let mut futures: Vec<FreeFut> = Vec::new();
+
+        // Precise routing: one free RPC per disk-group.
+        for (dg_id, segs) in grouped {
+            match self.channel_for_dg(dg_id).await {
+                Ok(channel) => {
+                    futures.push(Box::pin(async move {
+                        let mut client =
+                            crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(
+                                channel,
+                            );
+                        let req = FreeBlocksRequest { segments: segs };
+                        client.free_blocks(req).await
+                    }));
+                }
+                Err(e) => {
+                    warn!(error = %e, disk_group_id = dg_id, "free_blocks: no endpoint for dg, falling back to broadcast");
+                    for seg in segs {
+                        ungrouped.push(seg);
+                    }
+                }
+            }
+        }
+
+        // Broadcast fallback for ungrouped segments (reverse lookup miss).
+        if !ungrouped.is_empty() {
+            for endpoint in &self.channels {
+                let channel = endpoint.value().clone();
+                let segs = ungrouped.clone();
+                futures.push(Box::pin(async move {
+                    let mut client =
+                        crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(channel);
+                    let req = FreeBlocksRequest { segments: segs };
+                    client.free_blocks(req).await
+                }));
+            }
         }
 
         if futures.is_empty() {

@@ -13,25 +13,75 @@ use crow_protocol::chunkdb::rpc::chunkdb_service_server::{
 use crow_protocol::chunkdb::rpc::{
     AllocateChunkRequest, AllocateChunkResponse, AppendChunkRequest, AppendChunkResponse, ChunkType,
     DeleteChunkRangeRequest, DeleteChunkRangeResponse, DeleteChunkRequest, DeleteChunkResponse,
-    ListChunksRequest, ListChunksResponse, QueryChunkRequest, QueryChunkResponse, SealChunkRequest,
-    SealChunkResponse, StripType as ProtoStripType, UpdateChunkStripRequest, UpdateChunkStripResponse,
+    ListChunksRequest, ListChunksResponse, NotMyRangeHint, QueryChunkRequest, QueryChunkResponse,
+    SealChunkRequest, SealChunkResponse, StripType as ProtoStripType, UpdateChunkStripRequest,
+    UpdateChunkStripResponse,
 };
 
 use crate::lifecycle::{LifecycleError, LifecycleHandler};
+use crate::range_guard::RangeGuard;
 
 /// chunkdb gRPC service.
 pub struct ChunkdbService {
     handler: Arc<LifecycleHandler>,
+    /// Optional range guard — used to build `NotMyRangeHint` details
+    /// when rejecting out-of-range requests.
+    range_guard: Option<Arc<RangeGuard>>,
 }
 
 impl ChunkdbService {
     #[must_use]
     pub fn new(handler: Arc<LifecycleHandler>) -> Self {
-        Self { handler }
+        Self {
+            handler,
+            range_guard: None,
+        }
+    }
+
+    /// Attach a range guard for `NotMyRangeHint` detail construction.
+    #[must_use]
+    pub fn with_range_guard(mut self, guard: Arc<RangeGuard>) -> Self {
+        self.range_guard = Some(guard);
+        self
     }
 
     pub fn into_server(self) -> ChunkdbServiceServer<Self> {
         ChunkdbServiceServer::new(self)
+    }
+
+    /// Build a `NotMyRange` gRPC status. When a range guard is
+    /// attached, includes the owning range as `NotMyRangeHint`
+    /// details so the client can re-route.
+    fn not_my_range_status(&self, bucket: u16) -> Status {
+        let hint = self
+            .range_guard
+            .as_ref()
+            .and_then(|guard| {
+                guard
+                    .snapshot()
+                    .into_iter()
+                    .find(|r| bucket >= r.start && bucket <= r.end)
+            })
+            .map_or_else(
+                || NotMyRangeHint {
+                    range_start: 0,
+                    range_end: 0,
+                    instance_id: 0,
+                    grpc_endpoint: String::new(),
+                },
+                |r| NotMyRangeHint {
+                    range_start: u32::from(r.start),
+                    range_end: u32::from(r.end),
+                    instance_id: 0,
+                    grpc_endpoint: String::new(),
+                },
+            );
+        let details = prost::Message::encode_to_vec(&hint);
+        Status::with_details(
+            tonic::Code::FailedPrecondition,
+            format!("chunk bucket {bucket} not in owned ranges"),
+            details.into(),
+        )
     }
 }
 
@@ -45,6 +95,7 @@ fn map_error(e: &LifecycleError) -> Status {
         LifecycleError::Allocation(_) => Status::internal(e.to_string()),
         LifecycleError::Storage(_) => Status::internal(e.to_string()),
         LifecycleError::InvalidRequest(_) => Status::invalid_argument(e.to_string()),
+        LifecycleError::NotMyRange { bucket: _ } => Status::failed_precondition(e.to_string()),
     }
 }
 
@@ -72,7 +123,10 @@ impl ChunkdbServiceTrait for ChunkdbService {
                 chunk_type,
             )
             .await
-            .map_err(|e| map_error(&e))?;
+            .map_err(|e| match &e {
+                LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+                _ => map_error(&e),
+            })?;
         Ok(Response::new(AllocateChunkResponse { chunk: Some(chunk) }))
     }
 
@@ -98,7 +152,10 @@ impl ChunkdbServiceTrait for ChunkdbService {
                 req.strip_size,
             )
             .await
-            .map_err(|e| map_error(&e))?;
+            .map_err(|e| match &e {
+                LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+                _ => map_error(&e),
+            })?;
         Ok(Response::new(AppendChunkResponse { chunk: Some(chunk) }))
     }
 
@@ -130,7 +187,10 @@ impl ChunkdbServiceTrait for ChunkdbService {
             .handler
             .seal_chunk(&chunk_id, req.seal_length)
             .await
-            .map_err(|e| map_error(&e))?;
+            .map_err(|e| match &e {
+                LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+                _ => map_error(&e),
+            })?;
         Ok(Response::new(SealChunkResponse { chunk: Some(chunk) }))
     }
 
@@ -142,11 +202,10 @@ impl ChunkdbServiceTrait for ChunkdbService {
         let chunk_id = req
             .chunk_id
             .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
-        let chunk = self
-            .handler
-            .delete_chunk(&chunk_id)
-            .await
-            .map_err(|e| map_error(&e))?;
+        let chunk = self.handler.delete_chunk(&chunk_id).await.map_err(|e| match &e {
+            LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+            _ => map_error(&e),
+        })?;
         Ok(Response::new(DeleteChunkResponse { chunk: Some(chunk) }))
     }
 

@@ -12,9 +12,11 @@
 )]
 
 pub mod allocator;
+pub mod binding_monitor;
 pub mod chunkdb_config;
 pub mod lifecycle;
 pub mod migration;
+pub mod range_guard;
 pub mod routing;
 pub mod selector;
 pub mod service;

@@ -11,11 +11,14 @@ use clap::Parser;
 use crow_chunkdb::allocator::{ChunkAllocator, DiskdbClientPool};
 use crow_chunkdb::chunkdb_config::ChunkdbConfig;
 use crow_chunkdb::lifecycle::LifecycleHandler;
+use crow_chunkdb::range_guard::RangeGuard;
 use crow_chunkdb::routing::{default_binding_table, BindingCache};
 use crow_chunkdb::service::ChunkdbService;
 use crow_chunkdb::storage::ChunkStore;
 use crow_chunkdb::topology::{notify::NotifyHandler, refresh::run_refresh_loop, TopologyCache};
-use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient};
+use crow_kv_client::{
+    ClientConfig, CrowkvClient, HardwareClient, RangeBindingClient, ServiceRegistryClient, WatchNotifyClient,
+};
 use tracing::{info, warn};
 
 /// CROW chunkdb server CLI.
@@ -81,13 +84,46 @@ async fn main() {
     bindings.replace(default_binding_table(0, 0));
     let store = Arc::new(ChunkStore::new(Arc::clone(&kv), bindings));
 
+    // Range guard (R99): load chunkdb instance binding from group-0.
+    // Falls back to allow-all when no binding table exists (v1 compat).
+    let range_binding = RangeBindingClient::from_shared(Arc::clone(&kv));
+    let range_guard = Arc::new(RangeGuard::new(config.range_guard.allow_all_when_empty));
+    if let Err(e) = range_binding.refresh().await {
+        warn!(error = %e, "failed to load chunkdb range binding from group-0 (using allow-all fallback)");
+    }
+    if !range_binding.is_empty() {
+        let instance_id = config
+            .server
+            .instance_id
+            .as_ref()
+            .and_then(|s| s.parse::<u64>().ok());
+        if let Some(iid) = instance_id {
+            if let Err(e) = range_guard.load_from_group0(&kv, iid).await {
+                warn!(error = %e, "failed to load owned ranges for instance {iid}");
+            }
+        }
+    }
+    // Spawn range binding notifier to keep the guard fresh.
+    let _binding_notify_handle = match range_binding.spawn_notifier() {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            warn!(error = %e, "failed to spawn range binding notifier");
+            None
+        }
+    };
+
     // Diskdb client pool + chunk allocator.
     let pool = Arc::new(DiskdbClientPool::new(svc));
     let allocator = Arc::new(ChunkAllocator::new(Arc::clone(&pool)));
 
     // Lifecycle handler + gRPC service.
-    let handler = Arc::new(LifecycleHandler::new(Arc::clone(&store), allocator, cache));
-    let grpc_service = ChunkdbService::new(handler).into_server();
+    let handler = Arc::new(
+        LifecycleHandler::new(Arc::clone(&store), allocator, cache)
+            .with_range_guard(Arc::clone(&range_guard)),
+    );
+    let grpc_service = ChunkdbService::new(handler)
+        .with_range_guard(range_guard)
+        .into_server();
 
     // Start HTTP health server.
     let http_handle = tokio::spawn(async move {

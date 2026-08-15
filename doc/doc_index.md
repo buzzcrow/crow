@@ -70,6 +70,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/protocol/design-crow-protocol-key.md` | Key encoding: flat structs, 3-byte header, `BinaryKey` + `TextKey`, frozen layouts, append-only evolution. |
 | `doc/design/protocol/design-crow-protocol-types.md` | Wire types, `u64` ID aliases, re-export pattern, `utoipa` schema derives. |
 | `doc/design/chunkdb/design-crow-chunkdb.md` | chunkdb root: architecture, chunk lifecycle, strip types (mirror/EC), disk-group placement, EC integration, crate layout, concurrency. |
+| `doc/design/chunkdb/design-crow-chunkdb-range-binding.md` | chunkdb instance sharding: group-0 binding schema, `RangeBindingClient` (route + retry), `RangeGuard` enforcement, `BindingMonitor`, `NotMyRange` reject-and-retry, precise `free_blocks` routing. |
 | `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, disk status management, space metrics, background scanner, crate layout, concurrency. |
 | `doc/design/diskdb/design-crow-diskdb-zone-management.md` | Zone management: record model, allocation algorithm, persist-only free, compaction-on-rotation, preparatory thread, crash recovery, zone-level concurrency, invariants. |
 | `doc/design/diskdb/design-crow-diskdb-space-metrics.md` | Space metrics component: usage accessors, `QueryCapacityStats` handler, per-disk counters, recalc verifier, reporting loop, keepalive piggyback, kv-client aggregation, `crow-diskdb-client` library. |

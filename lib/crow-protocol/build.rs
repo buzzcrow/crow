@@ -1,6 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let proto_dir = "src/proto";
 
@@ -68,6 +69,23 @@ fn main() {
         .type_attribute("BindMapValue", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ServiceExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("DiskdbExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // chunkdb range binding sysdata types (serde for JSON storage in group 0).
+        .type_attribute(
+            "ChunkdbRangeBindingValue",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "ChunkdbRangeMigrationValue",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "ChunkdbMigrationState",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "NotMyRangeHint",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .type_attribute(
             "DiskGroupUsageSummary",
             "#[derive(serde::Serialize, serde::Deserialize)]",

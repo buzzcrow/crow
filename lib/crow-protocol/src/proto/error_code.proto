@@ -42,6 +42,7 @@ enum ErrorCode {
   ERROR_CODE_CHUNK_DELETED = 23;
   ERROR_CODE_CHUNK_STRIP_NOT_FOUND = 24;
   ERROR_CODE_CHUNK_INACTIVE = 25;
+  ERROR_CODE_NOT_MY_RANGE = 30;
 }
 
 // Error detail attached to gRPC status details on error.

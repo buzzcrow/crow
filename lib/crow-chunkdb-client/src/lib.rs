@@ -15,6 +15,11 @@ pub mod client;
 
 pub use client::{ChunkdbClient, RetryConfig};
 
+// Re-export RangeBindingClient so callers can construct it without a
+// direct crow-kv-client dependency for this one type.
+pub use crow_kv_client::RangeBindingClient;
+
+use prost::Message as _;
 use thiserror::Error;
 
 /// Error type for chunkdb client operations.
@@ -38,6 +43,8 @@ pub enum ChunkdbClientError {
     Internal(String),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    #[error("chunk bucket not in owned ranges: {0}")]
+    NotMyRange(String),
     #[error("RPC error: {0}")]
     Rpc(String),
 }
@@ -47,14 +54,27 @@ impl ChunkdbClientError {
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::Unavailable(_) | Self::DeadlineExceeded(_) | Self::Unreachable(_)
+            Self::Unavailable(_) | Self::DeadlineExceeded(_) | Self::Unreachable(_) | Self::NotMyRange(_)
         )
     }
 }
 
-/// Map a gRPC status to a `ChunkdbClientError`.
+/// Map a gRPC status to a `ChunkdbClientError`. If the status carries
+/// a `NotMyRangeHint` detail, maps to `NotMyRange` (retryable).
 pub fn from_status(status: &tonic::Status) -> ChunkdbClientError {
     let msg = status.message().to_string();
+    // Check for NotMyRangeHint details on FailedPrecondition.
+    if status.code() == tonic::Code::FailedPrecondition {
+        let details = status.details();
+        if !details.is_empty() {
+            if let Ok(hint) = crow_protocol::chunkdb::rpc::NotMyRangeHint::decode(details) {
+                return ChunkdbClientError::NotMyRange(format!(
+                    "bucket not in owned ranges [{}, {}] → instance {} at {}",
+                    hint.range_start, hint.range_end, hint.instance_id, hint.grpc_endpoint
+                ));
+            }
+        }
+    }
     match status.code() {
         tonic::Code::Unavailable => ChunkdbClientError::Unavailable(msg),
         tonic::Code::DeadlineExceeded => ChunkdbClientError::DeadlineExceeded(msg),

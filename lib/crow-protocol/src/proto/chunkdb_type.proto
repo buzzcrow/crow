@@ -99,3 +99,14 @@ message Chunk {
   repeated ChunkStrip strips        = 7;
   ChunkType           chunk_type    = 8;  // chunk purpose (Repo/WAL/BTreePage/PageIndex)
 }
+
+// Hint carried in gRPC status details when a chunkdb instance receives
+// a request for a chunk outside its owned hash range. The client uses
+// the hint to refresh its binding cache and retry against the correct
+// instance.
+message NotMyRangeHint {
+  uint32 range_start   = 1;  // current owner's range start
+  uint32 range_end     = 2;  // current owner's range end
+  uint64 instance_id   = 3;  // current owner's instance ID
+  string grpc_endpoint = 4;  // current owner's gRPC endpoint
+}

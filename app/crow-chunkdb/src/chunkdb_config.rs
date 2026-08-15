@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub struct ChunkdbConfig {
     pub server: ServerConfig,
     pub topology: TopologyConfig,
+    #[serde(default)]
+    pub range_guard: RangeGuardConfig,
 }
 
 impl BaseConfig for ChunkdbConfig {
@@ -23,6 +25,24 @@ impl BaseConfig for ChunkdbConfig {
             return Err("topology.refresh_interval_secs must be > 0".into());
         }
         Ok(())
+    }
+}
+
+/// Range guard configuration (R99 sharded mode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RangeGuardConfig {
+    /// When `true` (default), an empty range guard allows all
+    /// requests — preserving v1 single-instance behavior before the
+    /// binding table is loaded. When `false`, an empty guard rejects
+    /// all mutating requests until the binding table is loaded.
+    pub allow_all_when_empty: bool,
+}
+
+impl Default for RangeGuardConfig {
+    fn default() -> Self {
+        Self {
+            allow_all_when_empty: true,
+        }
     }
 }
 

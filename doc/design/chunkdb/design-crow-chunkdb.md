@@ -415,6 +415,11 @@ Example mapping:
 - Example: If KV group 2 is overloaded, move some buckets to KV group 3 by updating ranges
 - Changes take effect immediately as chunkdb servers refresh their binding cache
 
+**Instance sharding:** The bucket space is also used to shard chunkdb
+instances — each instance owns a range of buckets and rejects requests
+for chunks outside its range. See sub-design
+[`design-crow-chunkdb-range-binding.md`](design-crow-chunkdb-range-binding.md).
+
 ### 5.4b Request Handling During Migration
 
 When chunk records are being migrated from old KV group to new KV group, requests

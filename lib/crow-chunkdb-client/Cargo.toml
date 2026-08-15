@@ -17,6 +17,7 @@ crow-kv-client = { path = "../crow-kv-client" }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tonic = { workspace = true }
 bytes = "1"
+prost = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 dashmap = "6"

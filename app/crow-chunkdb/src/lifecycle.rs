@@ -20,6 +20,7 @@ use crow_protocol::common::ChunkId;
 use crow_protocol::generate_chunk_id;
 
 use crate::allocator::{AllocError, ChunkAllocator, StripAllocType};
+use crate::range_guard::RangeGuard;
 use crate::selector::PlacementConstraints;
 use crate::storage::{ChunkStore, StoreError};
 use crate::topology::TopologyCache;
@@ -43,6 +44,8 @@ pub enum LifecycleError {
     Storage(#[from] StoreError),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("chunk bucket {bucket} not in owned ranges")]
+    NotMyRange { bucket: u16 },
 }
 
 /// Lifecycle handler — orchestrates allocate/append/seal/delete/query/list.
@@ -50,6 +53,10 @@ pub struct LifecycleHandler {
     store: Arc<ChunkStore>,
     allocator: Arc<ChunkAllocator>,
     topology: TopologyCache,
+    /// Range guard — enforces chunkdb instance sharding. `None` for
+    /// v1 single-instance mode (no binding table); `Some` for R99
+    /// sharded mode.
+    range_guard: Option<Arc<RangeGuard>>,
 }
 
 impl LifecycleHandler {
@@ -59,7 +66,26 @@ impl LifecycleHandler {
             store,
             allocator,
             topology,
+            range_guard: None,
         }
+    }
+
+    /// Attach a range guard for R99 sharded mode.
+    #[must_use]
+    pub fn with_range_guard(mut self, guard: Arc<RangeGuard>) -> Self {
+        self.range_guard = Some(guard);
+        self
+    }
+
+    /// Check the range guard (if present) before processing a
+    /// mutating RPC. Read-only RPCs (query, list) bypass the guard.
+    fn check_range(&self, chunk_id: &ChunkId) -> Result<(), LifecycleError> {
+        if let Some(guard) = &self.range_guard {
+            guard
+                .check(chunk_id)
+                .map_err(|e| LifecycleError::NotMyRange { bucket: e.bucket })?;
+        }
+        Ok(())
     }
 
     /// Allocate a new chunk.
@@ -79,6 +105,7 @@ impl LifecycleHandler {
             let parts = generate_chunk_id(chunk_type as u8);
             parts.to_proto()
         });
+        self.check_range(&id)?;
         let snap = self.topology.snapshot();
 
         let mirror_copies = if copy_count == 0 { 3 } else { copy_count as usize };
@@ -138,6 +165,7 @@ impl LifecycleHandler {
         copy_count: u32,
         unit_count: u32,
     ) -> Result<Chunk, LifecycleError> {
+        self.check_range(chunk_id)?;
         let mut chunk = self.store.get_chunk(chunk_id).await?;
         let current_state = ChunkState::from_proto(chunk.state);
         current_state.check_can_append()?;
@@ -177,6 +205,7 @@ impl LifecycleHandler {
 
     /// Seal a chunk — no more appends allowed.
     pub async fn seal_chunk(&self, chunk_id: &ChunkId, seal_length: u32) -> Result<Chunk, LifecycleError> {
+        self.check_range(chunk_id)?;
         let mut chunk = self.store.get_chunk(chunk_id).await?;
         let current_state = ChunkState::from_proto(chunk.state);
         current_state.check_can_seal()?;
@@ -198,6 +227,7 @@ impl LifecycleHandler {
     /// Returns `ChunkNotFound` if the chunk is already deleted (callers
     /// that want idempotent delete treat `NOT_FOUND` as success).
     pub async fn delete_chunk(&self, chunk_id: &ChunkId) -> Result<Chunk, LifecycleError> {
+        self.check_range(chunk_id)?;
         let mut chunk = self.store.get_chunk(chunk_id).await?;
         let current_state = ChunkState::from_proto(chunk.state);
 

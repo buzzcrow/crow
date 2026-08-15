@@ -15,7 +15,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use tonic::transport::Channel;
 
-use crow_kv_client::ServiceRegistryClient;
+use crow_kv_client::{RangeBindingClient, ServiceRegistryClient};
 use crow_protocol::chunkdb::rpc::chunkdb_service_client::ChunkdbServiceClient;
 use crow_protocol::chunkdb::rpc::{
     AllocateChunkRequest, AllocateChunkResponse, AppendChunkRequest, AppendChunkResponse,
@@ -23,6 +23,7 @@ use crow_protocol::chunkdb::rpc::{
     ListChunksRequest, ListChunksResponse, QueryChunkRequest, QueryChunkResponse, SealChunkRequest,
     SealChunkResponse, UpdateChunkStripRequest, UpdateChunkStripResponse,
 };
+use crow_protocol::common::ChunkId;
 use crow_protocol::InstanceId;
 
 use crate::{ChunkdbClientError, Result};
@@ -51,6 +52,10 @@ pub struct ChunkdbClient {
     /// `grpc_endpoint -> Channel` pool.
     channels: DashMap<String, Channel>,
     retry: RetryConfig,
+    /// Optional range binding client for R99 sharded mode. When
+    /// present, chunk IDs are routed to the owning instance. When
+    /// `None`, falls back to "any instance" (v1 behavior).
+    range_binding: Option<RangeBindingClient>,
 }
 
 impl ChunkdbClient {
@@ -61,6 +66,7 @@ impl ChunkdbClient {
             endpoint_cache: DashMap::new(),
             channels: DashMap::new(),
             retry: RetryConfig::default(),
+            range_binding: None,
         }
     }
 
@@ -72,7 +78,16 @@ impl ChunkdbClient {
             endpoint_cache: DashMap::new(),
             channels: DashMap::new(),
             retry,
+            range_binding: None,
         }
+    }
+
+    /// Enable R99 range-based routing. When set, chunk IDs are routed
+    /// to the owning chunkdb instance via the `RangeBindingClient`.
+    #[must_use]
+    pub fn with_range_binding(mut self, binding: RangeBindingClient) -> Self {
+        self.range_binding = Some(binding);
+        self
     }
 
     /// Eager warm: read all chunkdb instances, populate the endpoint cache.
@@ -122,9 +137,31 @@ impl ChunkdbClient {
         Ok(ChunkdbServiceClient::new(channel))
     }
 
+    /// Get or create a gRPC client for the chunk ID's owning instance.
+    /// Falls back to `client()` (any instance) when range binding is
+    /// not configured or routing fails.
+    async fn client_for_chunk(&self, chunk_id: Option<&ChunkId>) -> Result<ChunkdbServiceClient<Channel>> {
+        if let Some(binding) = &self.range_binding {
+            if let Some(id) = chunk_id {
+                if let Ok(b) = binding.route(id).await {
+                    let channel = self.channel_for(&b.grpc_endpoint)?;
+                    return Ok(ChunkdbServiceClient::new(channel));
+                }
+                // Refresh failed or unbound — fall back to any instance.
+            }
+        }
+        self.client().await
+    }
+
     /// Execute an RPC with retry on transient errors.
     /// `build_req` produces a fresh request clone for each attempt.
-    async fn with_retry<Req, F, Fut, T>(&self, build_req: impl Fn() -> Req, op: F) -> Result<T>
+    /// `chunk_id` is used for range-based routing when available.
+    async fn with_retry<Req, F, Fut, T>(
+        &self,
+        chunk_id: Option<&ChunkId>,
+        build_req: impl Fn() -> Req,
+        op: F,
+    ) -> Result<T>
     where
         Req: Send,
         F: Fn(ChunkdbServiceClient<Channel>, Req) -> Fut,
@@ -133,7 +170,7 @@ impl ChunkdbClient {
         let mut attempts = 0u32;
         let mut backoff = self.retry.initial_backoff;
         loop {
-            let client = self.client().await?;
+            let client = self.client_for_chunk(chunk_id).await?;
             let req = build_req();
             match op(client, req).await {
                 Ok(value) => return Ok(value),
@@ -146,6 +183,13 @@ impl ChunkdbClient {
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2);
                     let _ = self.refresh_endpoints().await;
+                    // On NotMyRange, refresh the binding cache so the
+                    // next attempt routes to the correct instance.
+                    if matches!(err, ChunkdbClientError::NotMyRange(_)) {
+                        if let Some(binding) = &self.range_binding {
+                            let _ = binding.refresh().await;
+                        }
+                    }
                 }
             }
         }
@@ -153,7 +197,9 @@ impl ChunkdbClient {
 
     /// Allocate a new chunk.
     pub async fn allocate_chunk(&self, req: AllocateChunkRequest) -> Result<AllocateChunkResponse> {
+        let chunk_id = req.chunk_id.as_ref();
         self.with_retry(
+            chunk_id,
             || req,
             |mut c, r| async move { c.allocate_chunk(r).await.map(tonic::Response::into_inner) },
         )
@@ -162,7 +208,9 @@ impl ChunkdbClient {
 
     /// Append strips to an existing chunk.
     pub async fn append_chunk(&self, req: AppendChunkRequest) -> Result<AppendChunkResponse> {
+        let chunk_id = req.chunk_id.as_ref();
         self.with_retry(
+            chunk_id,
             || req,
             |mut c, r| async move { c.append_chunk(r).await.map(tonic::Response::into_inner) },
         )
@@ -171,7 +219,9 @@ impl ChunkdbClient {
 
     /// Query a chunk by ID.
     pub async fn query_chunk(&self, req: QueryChunkRequest) -> Result<QueryChunkResponse> {
+        let chunk_id = req.chunk_id.as_ref();
         self.with_retry(
+            chunk_id,
             || req,
             |mut c, r| async move { c.query_chunk(r).await.map(tonic::Response::into_inner) },
         )
@@ -180,7 +230,9 @@ impl ChunkdbClient {
 
     /// Seal a chunk.
     pub async fn seal_chunk(&self, req: SealChunkRequest) -> Result<SealChunkResponse> {
+        let chunk_id = req.chunk_id.as_ref();
         self.with_retry(
+            chunk_id,
             || req,
             |mut c, r| async move { c.seal_chunk(r).await.map(tonic::Response::into_inner) },
         )
@@ -189,7 +241,9 @@ impl ChunkdbClient {
 
     /// Delete a chunk.
     pub async fn delete_chunk(&self, req: DeleteChunkRequest) -> Result<DeleteChunkResponse> {
+        let chunk_id = req.chunk_id.as_ref();
         self.with_retry(
+            chunk_id,
             || req,
             |mut c, r| async move { c.delete_chunk(r).await.map(tonic::Response::into_inner) },
         )
@@ -198,7 +252,9 @@ impl ChunkdbClient {
 
     /// Delete a range within a chunk.
     pub async fn delete_chunk_range(&self, req: DeleteChunkRangeRequest) -> Result<DeleteChunkRangeResponse> {
+        let chunk_id = req.chunk_id.as_ref();
         self.with_retry(
+            chunk_id,
             || req,
             |mut c, r| async move { c.delete_chunk_range(r).await.map(tonic::Response::into_inner) },
         )
@@ -207,7 +263,9 @@ impl ChunkdbClient {
 
     /// Update a single strip within a chunk.
     pub async fn update_chunk_strip(&self, req: UpdateChunkStripRequest) -> Result<UpdateChunkStripResponse> {
+        let chunk_id = req.chunk_id.as_ref();
         self.with_retry(
+            chunk_id,
             || req.clone(),
             |mut c, r| async move { c.update_chunk_strip(r).await.map(tonic::Response::into_inner) },
         )
@@ -217,6 +275,7 @@ impl ChunkdbClient {
     /// List chunks with pagination.
     pub async fn list_chunks(&self, req: ListChunksRequest) -> Result<ListChunksResponse> {
         self.with_retry(
+            None,
             || req,
             |mut c, r| async move { c.list_chunks(r).await.map(tonic::Response::into_inner) },
         )

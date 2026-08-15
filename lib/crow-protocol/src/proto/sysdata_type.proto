@@ -115,3 +115,37 @@ message BindMapValue {
   uint64 store_id = 1;
   uint64 group_id = 2;
 }
+
+// ── chunkdb instance range binding ───────────────────────────────
+
+// chunkdb instance range binding — which chunkdb instance owns a hash
+// bucket range. Stored in group 0; read by chunkdb clients to route
+// chunk IDs to the correct instance.
+// Key: /chunkdb/range_bind/<range_start>
+message ChunkdbRangeBindingValue {
+  uint32 range_start   = 1;  // bucket range start (inclusive), 0-65535
+  uint32 range_end     = 2;  // bucket range end (inclusive), 0-65535
+  uint64 instance_id   = 3;  // chunkdb instance ID
+  string grpc_endpoint = 4;  // chunkdb gRPC endpoint
+}
+
+// chunkdb range migration state — tracks ownership transfer between
+// chunkdb instances. Stored in group 0 alongside the binding table.
+// Key: /chunkdb/range_mig/<range_start>
+message ChunkdbRangeMigrationValue {
+  uint32 range_start      = 1;
+  uint32 range_end        = 2;
+  uint64 old_instance_id  = 3;
+  string old_endpoint     = 4;
+  uint64 new_instance_id  = 5;
+  string new_endpoint     = 6;
+  ChunkdbMigrationState state = 7;
+}
+
+// chunkdb range migration lifecycle.
+enum ChunkdbMigrationState {
+  CHUNKDB_MIG_NOT_MIGRATING = 0;
+  CHUNKDB_MIG_COPYING       = 1;
+  CHUNKDB_MIG_CUTOVER       = 2;
+  CHUNKDB_MIG_COMPLETE      = 3;
+}
