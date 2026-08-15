@@ -16,7 +16,7 @@ test.describe('E2E-01 fresh registry', () => {
     await page.goto('/');
 
     await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByRole('button', { name: 'Logical' })).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByRole('button', { name: 'KV Cluster' })).toBeVisible({ timeout: 3_000 });
     await expect(page.getByPlaceholder('Filter...')).toBeVisible();
 
     const healthText = page.locator('header').getByText(/healthy|degraded|failed|unknown/i);

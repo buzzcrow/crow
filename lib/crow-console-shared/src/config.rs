@@ -280,9 +280,9 @@ pub struct ServerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grpc_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mgmt_port: Option<u16>,
+    pub rest_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grpc_port: Option<u16>,
+    pub rpc_port: Option<u16>,
     #[serde(default)]
     pub auto_start: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,8 +325,6 @@ pub struct ReplicaEntry {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedConsoleConfig {
-    #[serde(default)]
-    version: u32,
     #[serde(default, with = "int_key", skip_serializing_if = "BTreeMap::is_empty")]
     rack: BTreeMap<RackId, PersistedRackEntry>,
     #[serde(default, with = "int_key", skip_serializing_if = "BTreeMap::is_empty")]
@@ -393,9 +391,9 @@ struct PersistedServerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grpc_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    mgmt_port: Option<u16>,
+    rest_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    grpc_port: Option<u16>,
+    rpc_port: Option<u16>,
     #[serde(default)]
     auto_start: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,8 +428,8 @@ impl ServerEntry {
             url: url.into(),
             node_id: None,
             grpc_url: None,
-            mgmt_port: None,
-            grpc_port: None,
+            rest_port: None,
+            rpc_port: None,
             auto_start: false,
             binary: None,
             election_profile: None,
@@ -918,8 +916,8 @@ impl ConsoleConfig {
                         node_id: entry.node_id,
                         url: entry.url.clone(),
                         grpc_url: entry.grpc_url.clone(),
-                        mgmt_port: entry.mgmt_port,
-                        grpc_port: entry.grpc_port,
+                        rest_port: entry.rest_port,
+                        rpc_port: entry.rpc_port,
                         auto_start: entry.auto_start,
                         binary: entry.binary.clone(),
                         election_profile: entry.election_profile.clone(),
@@ -990,7 +988,6 @@ impl ConsoleConfig {
             })
             .collect();
         PersistedConsoleConfig {
-            version: 2,
             rack,
             node,
             crow_kv_server,
@@ -1031,8 +1028,8 @@ impl ConsoleConfig {
                 url: entry.url,
                 node_id: entry.node_id,
                 grpc_url: entry.grpc_url,
-                mgmt_port: entry.mgmt_port,
-                grpc_port: entry.grpc_port,
+                rest_port: entry.rest_port,
+                rpc_port: entry.rpc_port,
                 auto_start: entry.auto_start,
                 binary: entry.binary,
                 election_profile: entry.election_profile,
@@ -1122,8 +1119,8 @@ mod tests {
         let mut a = ServerEntry::new("a", "http://127.0.0.1:9910");
         a.node_id = Some(1);
         a.grpc_url = Some("http://127.0.0.1:9921".into());
-        a.mgmt_port = Some(9910);
-        a.grpc_port = Some(9921);
+        a.rest_port = Some(9910);
+        a.rpc_port = Some(9921);
         a.auto_start = true;
         a.election_profile = Some("test".into());
         a.pid = Some(12345);

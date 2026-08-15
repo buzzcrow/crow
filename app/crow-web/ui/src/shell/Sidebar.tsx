@@ -268,7 +268,7 @@ export function Sidebar({
 
       <div className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-border-b tw-border-border">
         <h3 className="tw-text-xs tw-font-semibold tw-text-muted tw-uppercase tw-tracking-wider">
-          {viewMode === ViewMode.Physical ? 'Infrastructure' : viewMode === ViewMode.Logical ? 'Cluster' : 'Capacity'}
+          {viewMode === ViewMode.Physical ? 'Infrastructure' : viewMode === ViewMode.Logical ? 'KV Cluster' : 'Capacity'}
         </h3>
         {!readonly && onAdd && (
           viewMode === ViewMode.Logical && !clusterInitialized ? (

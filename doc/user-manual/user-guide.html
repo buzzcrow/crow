@@ -365,7 +365,7 @@ crow-cli rack add --id r1 --name "rack-one"
 crow-cli node add --id n1 --rack r1 --host 127.0.0.1
 
 # Deploy a crow-kv-server process on each node (repeat for n2, n3)
-crow-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001</code></pre></div>
+crow-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code># Create a rack
 curl -X POST "http://$IP:$PORT/api/racks" -H 'Content-Type: application/json' \
   -d '{"id":"r1"}'
@@ -377,7 +377,7 @@ curl -X POST "http://$IP:$PORT/api/nodes" -H 'Content-Type: application/json' \
 # Deploy a crow-kv-server process on each node (repeat for n2, n3)
 curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
   -H 'Content-Type: application/json' \
-  -d '{"mgmt_port":2001,"grpc_port":20001}'</code></pre></div>
+  -d '{"rest_port":2001,"rpc_port":20001}'</code></pre></div>
 </div>
 <h3 id="12-initialize-the-cluster">1.2 Initialize the cluster</h3>
 <p>Before creating data stores or groups, the cluster must be</p>
@@ -565,10 +565,10 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <button class="tab-btn active" data-tab="0">cli</button>
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
-<div class="tab-panel active" data-panel="0"><pre><code>   crow-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001</code></pre></div>
+<div class="tab-panel active" data-panel="0"><pre><code>   crow-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>   curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
      -H 'Content-Type: application/json' \
-     -d '{"mgmt_port":2001,"grpc_port":20001}'</code></pre></div>
+     -d '{"rest_port":2001,"rpc_port":20001}'</code></pre></div>
 </div>
 <p>   If <code>node-config.json</code> is lost, fall back to explicit bootstrap args</p>
 <p>   by starting <code>crow-kv-server</code> manually with <code>--stores</code>/<code>--groups</code>/</p>
@@ -679,7 +679,7 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <li><strong><code>crow-cli node remove --id &lt;id&gt;</code></strong></li>
 <li><strong><code>crow-cli node list</code></strong></li>
 <li><strong><code>crow-cli node ping &lt;node&gt;</code></strong></li>
-<li><strong><code>crow-cli server deploy --node &lt;id&gt; --mgmt-port &lt;p&gt; --grpc-port &lt;p&gt;</code></strong></li>
+<li><strong><code>crow-cli server deploy --node &lt;id&gt; --rest-port &lt;p&gt; --rpc-port &lt;p&gt;</code></strong></li>
 <li><strong><code>crow-cli server restart --node &lt;id&gt;</code></strong></li>
 <li><strong><code>crow-cli server stop --node &lt;id&gt;</code></strong></li>
 <li><strong><code>crow-cli server list</code></strong></li>

@@ -84,7 +84,7 @@ crow-cli rack add --id r1 --name "rack-one"
 crow-cli node add --id n1 --rack r1 --host 127.0.0.1
 
 # Deploy a crow-kv-server process on each node (repeat for n2, n3)
-crow-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001
+crow-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001
 ```
 
 **curl:**
@@ -101,7 +101,7 @@ curl -X POST "http://$IP:$PORT/api/nodes" -H 'Content-Type: application/json' \
 # Deploy a crow-kv-server process on each node (repeat for n2, n3)
 curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
   -H 'Content-Type: application/json' \
-  -d '{"mgmt_port":2001,"grpc_port":20001}'
+  -d '{"rest_port":2001,"rpc_port":20001}'
 ```
 
 ### 1.2 Initialize the cluster
@@ -438,7 +438,7 @@ waits for a new leader, then removes the replica.
    **CLI:**
 
    ```bash
-   crow-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001
+   crow-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001
    ```
 
    **curl:**
@@ -446,7 +446,7 @@ waits for a new leader, then removes the replica.
    ```bash
    curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
      -H 'Content-Type: application/json' \
-     -d '{"mgmt_port":2001,"grpc_port":20001}'
+     -d '{"rest_port":2001,"rpc_port":20001}'
    ```
 
    If `node-config.json` is lost, fall back to explicit bootstrap args
@@ -595,7 +595,7 @@ and `--json` for JSON output.
 - **`crow-cli node remove --id <id>`**
 - **`crow-cli node list`**
 - **`crow-cli node ping <node>`**
-- **`crow-cli server deploy --node <id> --mgmt-port <p> --grpc-port <p>`**
+- **`crow-cli server deploy --node <id> --rest-port <p> --rpc-port <p>`**
 - **`crow-cli server restart --node <id>`**
 - **`crow-cli server stop --node <id>`**
 - **`crow-cli server list`**

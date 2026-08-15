@@ -37,6 +37,7 @@ interface TopologyCanvasProps {
   stores: StoreView[];
   nodeStores?: Record<string, NodeStore[]>;
   nodeHealthById?: Record<string, NodeHealth>;
+  diskdbNodeIds?: Set<number>;
   refreshToken?: number;
   focusRequest?: { targetId: string; subtree: boolean; nonce: number } | null;
   /** Right-click on a canvas node. */
@@ -75,7 +76,7 @@ export function TopologyCanvas(props: TopologyCanvasProps) {
  * be highlighted on the canvas. */
 function selectedNodeId(entity: SelectedEntity): string | null {
   const p = entity.parentIds || {};
-  if (entity.viewMode === ViewMode.Physical) {
+  if (entity.viewMode === ViewMode.Physical || entity.viewMode === ViewMode.Capacity) {
     switch (entity.type) {
       case 'Rack': return `R-${entity.id}`;
       case 'Node': return `N-${entity.id}`;
@@ -98,7 +99,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
   }
 }
 
-function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
+function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
   const { viewMode } = useViewMode();
   const { selectedEntity, selectEntity } = useSelection();
   const { fitView, setViewport, setCenter, getZoom, getNodes } = useReactFlow();
@@ -107,6 +108,7 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   const fittedOnceRef = useRef<Partial<Record<ViewMode, boolean>>>({});
   const lastRefreshTokenRef = useRef<number | undefined>(refreshToken);
   const lastFocusNonceRef = useRef<number | undefined>(undefined);
+  const lastViewModeRef = useRef<ViewMode | undefined>(undefined);
   const nodeIdsKeyRef = useRef<Partial<Record<ViewMode, string>>>({});
   // Tracks the last (viewMode, nodeIds, refreshToken) triple that triggered
   // a fit/restore. Polls return new array references for the same data, which
@@ -114,8 +116,8 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   const lastActionKeyRef = useRef<string | undefined>(undefined);
 
   const { nodes: rawNodes, edges } = useMemo(
-    () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById),
-    [viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById],
+    () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds),
+    [viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds],
   );
 
   const positioned = useMemo(() => layoutTree(rawNodes, edges), [rawNodes, edges]);
@@ -129,6 +131,14 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   }, [refreshToken]);
 
   useEffect(() => {
+    // On view-mode switch, always fit to window — don't restore a stale
+    // saved viewport from a previous visit to this mode.
+    const viewModeChanged = lastViewModeRef.current !== viewMode;
+    if (viewModeChanged) {
+      lastViewModeRef.current = viewMode;
+      viewportsRef.current[viewMode] = undefined;
+      fittedOnceRef.current[viewMode] = false;
+    }
     if (positioned.nodes.length === 0 || !nodesInitialized) {
       fittedOnceRef.current[viewMode] = false;
       return;
@@ -242,28 +252,28 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     [onEntityContextMenu, selectEntity, viewMode],
   );
 
-  if (decoratedNodes.length === 0) {
-    return (
-      <div className="tw-w-full tw-h-full tw-flex tw-items-center tw-justify-center tw-text-muted tw-text-sm tw-bg-bg">
-        {viewMode === ViewMode.Physical
-          ? 'No racks registered. Add a rack to get started.'
-          : 'No stores yet. Switch to a deployed node and add a store.'}
-      </div>
-    );
-  }
-
   return (
     <div className="tw-relative tw-w-full tw-h-full tw-bg-bg tw-overflow-hidden">
-      <div className="tw-absolute tw-top-3 tw-right-3 tw-z-10">
+      <div className="tw-absolute tw-top-3 tw-right-3 tw-z-20">
         <Button
           variant="secondary"
           size="sm"
           leftIcon={<ScanSearch className="tw-h-3.5 tw-w-3.5" />}
           onClick={handleFitAll}
+          data-testid="fit-all-btn"
         >
           Fit All
         </Button>
       </div>
+      {decoratedNodes.length === 0 ? (
+        <div className="tw-w-full tw-h-full tw-flex tw-items-center tw-justify-center tw-text-muted tw-text-sm">
+          {viewMode === ViewMode.Physical
+            ? 'No racks registered. Add a rack to get started.'
+            : viewMode === ViewMode.Capacity
+              ? 'No racks registered. Add a rack to get started.'
+              : 'No stores yet. Switch to a deployed node and add a store.'}
+        </div>
+      ) : (
       <ReactFlow
         nodes={decoratedNodes}
         edges={positioned.edges}
@@ -281,6 +291,7 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       >
         <Background gap={24} color="#2e3440" />
       </ReactFlow>
+      )}
     </div>
   );
 }

@@ -44,7 +44,7 @@
 - [ ] **4.3 RemoveDiskDialog / RemoveDiskGroupDialog**: confirm + cascade warning. Follow `ConfirmDeleteDialog` pattern. Files: `app/crow-web/ui/src/components/dialogs/RemoveDiskDialog.tsx`, `.../RemoveDiskGroupDialog.tsx`.
 - [ ] **4.4 MoveDiskDialog**: target rack/node/disk-group selectors → `PUT .../disks/:id/move`. Files: `app/crow-web/ui/src/components/dialogs/MoveDiskDialog.tsx`.
 - [ ] **4.5 SetDiskStatusDialog**: `HwStatus` enum dropdown → `PUT /api/disks/:id/status`. Files: `app/crow-web/ui/src/components/dialogs/SetDiskStatusDialog.tsx`.
-- [ ] **4.6 DeployDiskdbDialog**: grpc_port/http_port (defaults 9941/9942) → `POST /api/nodes/:id/diskdb/deploy`. Mirror `DeployServerDialog`. Files: `app/crow-web/ui/src/components/dialogs/DeployDiskdbDialog.tsx`.
+- [ ] **4.6 DeployDiskdbDialog**: rpc_port/http_port (defaults 9941/9942) → `POST /api/nodes/:id/diskdb/deploy`. Mirror `DeployServerDialog`. Files: `app/crow-web/ui/src/components/dialogs/DeployDiskdbDialog.tsx`.
 - [ ] **4.7 AddNodeDialog auto-deploy DiskDB**: add `enableDiskDB` checkbox (default true) + DiskDB port fields; after `addNode` + KV deploy, call `deployDiskdb`. Files: `app/crow-web/ui/src/components/dialogs/AddNodeDialog.tsx`.
 - [ ] **4.8 Dialog barrel export**: update `app/crow-web/ui/src/components/dialogs/index.ts`. Files: `app/crow-web/ui/src/components/dialogs/index.ts`.
 

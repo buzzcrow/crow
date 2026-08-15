@@ -15,7 +15,7 @@ test.describe('E2E-07 delete replica', () => {
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       await expect(aside.getByText('LR-7700')).toBeVisible({ timeout: 3_000 });
 

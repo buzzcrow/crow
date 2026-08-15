@@ -205,7 +205,7 @@ New handlers in `app/crow-web/src/lifecycle.rs` (or a new
 
 ```rust
 pub struct DeployDiskdbBody {
-    grpc_port: u16,
+    rpc_port: u16,
     http_port: u16,
     #[serde(default)]
     binary: Option<String>,
@@ -226,7 +226,7 @@ pub async fn http_stop_node_diskdb(
 
 a. `http_deploy_node_diskdb` — checks no existing diskdb on the node
    (409 if present), resolves the node, builds a `DeployRequest` with
-   `grpc_port`/`http_port` from `ServicePort::DiskdbGrpc`/`DiskdbHttp`
+   `rpc_port`/`http_port` from `ServicePort::DiskdbGrpc`/`DiskdbHttp`
    defaults (or body overrides), spawns via SSH or local fork, persists
    a `ServerEntry` with `service_type: Diskdb`, records the pid.
    Routes: `POST /api/nodes/:id/diskdb/deploy`.

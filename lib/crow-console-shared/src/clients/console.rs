@@ -79,8 +79,8 @@ pub struct MoveDiskBody {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeployNodeServerBody {
-    pub mgmt_port: u16,
-    pub grpc_port: u16,
+    pub rest_port: u16,
+    pub rpc_port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -108,8 +108,8 @@ async fn spawn_upstream(node_id: u64, workspace: &std::path::Path) -> Option<Ups
     }
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port,
-        grpc_port,
+        rest_port: pick_free_port(),
+        rpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
@@ -153,8 +153,8 @@ async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
             url: u.mgmt_url.clone(),
             node_id: Some(u.node_id),
             grpc_url: Some(u.grpc_url.clone()),
-            mgmt_port: None,
-            grpc_port: None,
+            rest_port: None,
+            rpc_port: None,
             auto_start: true,
             binary: None,
             election_profile: None,

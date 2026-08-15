@@ -54,8 +54,8 @@ test.describe('E2E-18 full chain', () => {
       await page.getByRole('treeitem').filter({ hasText: 'N-181' }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
       await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 181/i })).toBeVisible();
-      await page.getByLabel('Management Port').fill('9933');
-      await page.getByLabel('gRPC Port').fill('9943');
+      await page.getByLabel('REST Port').fill('9933');
+      await page.getByLabel('RPC Port').fill('9943');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
@@ -63,8 +63,8 @@ test.describe('E2E-18 full chain', () => {
       await page.getByRole('treeitem').filter({ hasText: 'N-182' }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
       await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 182/i })).toBeVisible();
-      await page.getByLabel('Management Port').fill('9934');
-      await page.getByLabel('gRPC Port').fill('9944');
+      await page.getByLabel('REST Port').fill('9934');
+      await page.getByLabel('RPC Port').fill('9944');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
@@ -81,7 +81,7 @@ test.describe('E2E-18 full chain', () => {
       }, { timeout: 3_000 }).toBeGreaterThan(0);
 
       // Switch to Cluster (Logical) view.
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
 
       // 6. Create empty store 188 on n18a.

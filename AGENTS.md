@@ -17,7 +17,7 @@ Rust workspace + C++ storage engine (via FFI).
 
 ## Hard Constraints
 
-- All build/test/format commands run under **pixi** — never bare `cargo` or `clang-format`.
+- All build/test/run commands run under **pixi** — never bare `cargo`, `clang-format`, or `cargo run`. Pixi provides system deps (e.g. `isa-l` headers) that bare cargo can't find.
 - `unsafe_code = deny` (except `crow-tree-ffi`); Clippy `pedantic = warn`.
 - Markdown is read as raw text — prefer bullet or definition lists; tables allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results). `doc_index.md` always uses tables.
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.

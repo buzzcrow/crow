@@ -57,9 +57,9 @@ async fn rack_node_server_lifecycle() {
     assert!(stdout.contains("reachable"), "stdout={stdout}");
 
     // server deploy / list / restart / stop on n1.
-    let (mgmt_port, grpc_port) = common::console::pick_two_distinct_free_ports();
-    let mgmt_port = mgmt_port.to_string();
-    let grpc_port = grpc_port.to_string();
+    let (rest_port, rpc_port) = common::console::pick_two_distinct_free_ports();
+    let rest_port = rest_port.to_string();
+    let rpc_port = rpc_port.to_string();
     let (code, stdout, stderr) = run(
         &cli,
         &ip,
@@ -69,10 +69,10 @@ async fn rack_node_server_lifecycle() {
             "deploy",
             "--node",
             "1",
-            "--mgmt-port",
-            &mgmt_port,
-            "--grpc-port",
-            &grpc_port,
+            "--rest-port",
+            &rest_port,
+            "--rpc-port",
+            &rpc_port,
             "--binary",
             &server_bin,
         ],

@@ -69,7 +69,7 @@ fn diskdb_paired_ports_stay_adjacent_across_instances() {
 }
 
 #[test]
-fn kv_server_grpc_port_increments_by_one() {
+fn kv_server_rpc_port_increments_by_one() {
     assert_eq!(ServicePort::KvServerGrpc.port(0), 28001);
     assert_eq!(ServicePort::KvServerGrpc.port(1), 28002);
     assert_eq!(ServicePort::KvServerGrpc.port(199), 28200);

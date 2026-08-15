@@ -14,7 +14,7 @@ test.describe('E2E-06 cross jump', () => {
 
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       await expect(aside.getByText('LR-6600')).toBeVisible({ timeout: 3_000 });
       await aside.getByText('LR-6600').click();

@@ -197,8 +197,8 @@ pub struct SetStatusBody {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DeployDiskdbBody {
-    pub mgmt_port: u16,
-    pub grpc_port: u16,
+    pub rest_port: u16,
+    pub rpc_port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

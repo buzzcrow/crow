@@ -21,8 +21,8 @@ export function DeployDiskdbDialog({
   onSuccess,
 }: DeployDiskdbDialogProps) {
   const [nodeId, setNodeId] = useState('');
-  const [mgmtPort, setMgmtPort] = useState('29910');
-  const [grpcPort, setGrpcPort] = useState('29920');
+  const [restPort, setRestPort] = useState('29910');
+  const [rpcPort, setRpcPort] = useState('29920');
   const [binary, setBinary] = useState('');
   const [listenAddr, setListenAddr] = useState('');
   const [httpAddr, setHttpAddr] = useState('');
@@ -34,8 +34,8 @@ export function DeployDiskdbDialog({
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
       setNodeId(nodes.length > 0 ? String(nodes[0].id) : '');
-      setMgmtPort('29910');
-      setGrpcPort('29920');
+      setRestPort('29910');
+      setRpcPort('29920');
       setBinary('');
       setListenAddr('');
       setHttpAddr('');
@@ -45,15 +45,15 @@ export function DeployDiskdbDialog({
   }, [isOpen, nodes]);
 
   const isPort = (v: string) => /^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536;
-  const valid = nodeId !== '' && isPort(mgmtPort) && isPort(grpcPort) && mgmtPort !== grpcPort;
+  const valid = nodeId !== '' && isPort(restPort) && isPort(rpcPort) && restPort !== rpcPort;
 
   const handleSubmit = async () => {
     if (!valid) return;
     setIsLoading(true);
     try {
       await deployDiskdb(Number(nodeId), {
-        mgmt_port: Number(mgmtPort),
-        grpc_port: Number(grpcPort),
+        rest_port: Number(restPort),
+        rpc_port: Number(rpcPort),
         ...(binary.trim() ? { binary: binary.trim() } : {}),
         ...(listenAddr.trim() ? { listen_addr: listenAddr.trim() } : {}),
         ...(httpAddr.trim() ? { http_addr: httpAddr.trim() } : {}),
@@ -99,16 +99,16 @@ export function DeployDiskdbDialog({
           </select>
         </div>
         <Input
-          label="Management Port"
+          label="REST Port"
           inputMode="numeric"
-          value={mgmtPort}
-          onChange={(e) => setMgmtPort(e.target.value)}
+          value={restPort}
+          onChange={(e) => setRestPort(e.target.value)}
         />
         <Input
-          label="gRPC Port"
+          label="RPC Port"
           inputMode="numeric"
-          value={grpcPort}
-          onChange={(e) => setGrpcPort(e.target.value)}
+          value={rpcPort}
+          onChange={(e) => setRpcPort(e.target.value)}
         />
         <Input
           label="Binary Path (optional)"

@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { Dialog } from '../Dialog';
 import { Input, Select } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
-import { addNode, deployServer } from '../../api';
+import { addNode, deployServer, deployDiskdb } from '../../api';
 import { Rack } from '../../types';
 import { nextIdFromSuffix } from './defaults';
 
@@ -16,8 +16,8 @@ export interface AddNodeDialogProps {
   defaultRackId?: string;
   existingNodeIds?: string[];
   defaultHost?: string;
-  defaultMgmtPort?: string;
-  defaultGrpcPort?: string;
+  defaultRestPort?: string;
+  defaultRpcPort?: string;
   onCreatedRackId?: (rackId: number) => void;
   onSuccess?: () => void | Promise<void>;
 }
@@ -32,8 +32,8 @@ export function AddNodeDialog({
   defaultRackId,
   existingNodeIds = [],
   defaultHost = '127.0.0.1',
-  defaultMgmtPort = '19910',
-  defaultGrpcPort = '19920',
+  defaultRestPort = '19910',
+  defaultRpcPort = '19920',
   onCreatedRackId,
   onSuccess,
 }: AddNodeDialogProps) {
@@ -45,23 +45,30 @@ export function AddNodeDialog({
   const [sshUser, setSshUser] = useState('');
   const [sshKeyPath, setSshKeyPath] = useState('');
   const [enableCrowKV, setEnableCrowKV] = useState(true);
-  const [mgmtPort, setMgmtPort] = useState(defaultMgmtPort);
-  const [grpcPort, setGrpcPort] = useState(defaultGrpcPort);
+  const [restPort, setRestPort] = useState(defaultRestPort);
+  const [rpcPort, setRpcPort] = useState(defaultRpcPort);
+  const [enableDiskdb, setEnableDiskdb] = useState(false);
+  const [diskdbRestPort, setDiskdbRestPort] = useState('29910');
+  const [diskdbRpcPort, setDiskdbRpcPort] = useState('29920');
   const [isLoading, setIsLoading] = useState(false);
   const { success, error } = useToast();
 
   useEffect(() => {
     if (!isOpen) return;
-    setMgmtPort(defaultMgmtPort);
-    setGrpcPort(defaultGrpcPort);
+    setRestPort(defaultRestPort);
+    setRpcPort(defaultRpcPort);
     setEnableCrowKV(true);
-  }, [defaultGrpcPort, defaultMgmtPort, isOpen]);
+    setEnableDiskdb(false);
+    setDiskdbRestPort('29910');
+    setDiskdbRpcPort('29920');
+  }, [defaultRpcPort, defaultRestPort, isOpen]);
 
   const isPort = (value: string) => /^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536;
-  const deployPortsValid = isPort(mgmtPort) && isPort(grpcPort) && mgmtPort !== grpcPort;
+  const deployPortsValid = isPort(restPort) && isPort(rpcPort) && restPort !== rpcPort;
+  const diskdbPortsValid = isPort(diskdbRestPort) && isPort(diskdbRpcPort) && diskdbRestPort !== diskdbRpcPort;
 
   const handleSubmit = async () => {
-    if (!rackId || !nodeId.trim() || !host.trim() || (enableCrowKV && !deployPortsValid)) return;
+    if (!rackId || !nodeId.trim() || !host.trim() || (enableCrowKV && !deployPortsValid) || (enableDiskdb && !diskdbPortsValid)) return;
 
     setIsLoading(true);
     try {
@@ -78,12 +85,22 @@ export function AddNodeDialog({
 
       if (enableCrowKV) {
         await deployServer(numericNodeId, {
-          mgmt_port: Number(mgmtPort),
-          grpc_port: Number(grpcPort),
+          rest_port: Number(restPort),
+          rpc_port: Number(rpcPort),
         });
       }
 
-      success(enableCrowKV ? `Node "${trimmedNodeId}" created and Crow Storage enabled` : `Node "${trimmedNodeId}" created successfully`);
+      if (enableDiskdb) {
+        await deployDiskdb(numericNodeId, {
+          rest_port: Number(diskdbRestPort),
+          rpc_port: Number(diskdbRpcPort),
+        });
+      }
+
+      const parts = [`Node "${trimmedNodeId}" created`];
+      if (enableCrowKV) parts.push('Crow Storage enabled');
+      if (enableDiskdb) parts.push('DiskDB enabled');
+      success(parts.join(', '));
       onCreatedRackId?.(Number(rackId));
       setRackId(initialRackId);
       setNodeId(initialNodeId);
@@ -91,8 +108,11 @@ export function AddNodeDialog({
       setSshUser('');
       setSshKeyPath('');
       setEnableCrowKV(true);
-      setMgmtPort(defaultMgmtPort);
-      setGrpcPort(defaultGrpcPort);
+      setRestPort(defaultRestPort);
+      setRpcPort(defaultRpcPort);
+      setEnableDiskdb(false);
+      setDiskdbRestPort('29910');
+      setDiskdbRpcPort('29920');
       onClose();
       await onSuccess?.();
     } catch (err) {
@@ -110,8 +130,11 @@ export function AddNodeDialog({
     setSshUser('');
     setSshKeyPath('');
     setEnableCrowKV(true);
-    setMgmtPort(defaultMgmtPort);
-    setGrpcPort(defaultGrpcPort);
+    setRestPort(defaultRestPort);
+    setRpcPort(defaultRpcPort);
+    setEnableDiskdb(false);
+    setDiskdbRestPort('29910');
+    setDiskdbRpcPort('29920');
     onClose();
   };
 
@@ -123,7 +146,7 @@ export function AddNodeDialog({
       description="Add a new physical node to your infrastructure"
       confirmLabel="Create Node"
       onConfirm={handleSubmit}
-      confirmDisabled={!rackId || !nodeId.trim() || !host.trim() || isLoading || (enableCrowKV && !deployPortsValid)}
+      confirmDisabled={!rackId || !nodeId.trim() || !host.trim() || isLoading || (enableCrowKV && !deployPortsValid) || (enableDiskdb && !diskdbPortsValid)}
       confirmLoading={isLoading}
     >
       <div className="tw-space-y-4">
@@ -182,16 +205,41 @@ export function AddNodeDialog({
         {enableCrowKV && (
           <>
             <Input
-              label="Management Port"
+              label="REST Port"
               inputMode="numeric"
-              value={mgmtPort}
-              onChange={(e) => setMgmtPort(e.target.value)}
+              value={restPort}
+              onChange={(e) => setRestPort(e.target.value)}
             />
             <Input
-              label="gRPC Port"
+              label="RPC Port"
               inputMode="numeric"
-              value={grpcPort}
-              onChange={(e) => setGrpcPort(e.target.value)}
+              value={rpcPort}
+              onChange={(e) => setRpcPort(e.target.value)}
+            />
+          </>
+        )}
+        <label className="tw-flex tw-items-center tw-gap-2 tw-text-sm tw-text-text">
+          <input
+            type="checkbox"
+            checked={enableDiskdb}
+            onChange={(e) => setEnableDiskdb(e.target.checked)}
+            className="tw-h-4 tw-w-4 tw-rounded tw-border tw-border-border tw-bg-bg tw-text-accent focus:tw-ring-accent"
+          />
+          <span>Enable DiskDB on this node</span>
+        </label>
+        {enableDiskdb && (
+          <>
+            <Input
+              label="DiskDB REST Port"
+              inputMode="numeric"
+              value={diskdbRestPort}
+              onChange={(e) => setDiskdbRestPort(e.target.value)}
+            />
+            <Input
+              label="DiskDB RPC Port"
+              inputMode="numeric"
+              value={diskdbRpcPort}
+              onChange={(e) => setDiskdbRpcPort(e.target.value)}
             />
           </>
         )}

@@ -369,7 +369,7 @@ export async function pingNode(nodeId: number, options?: RequestOptions): Promis
  */
 export async function deployServer(
   nodeId: number,
-  req: { mgmt_port: number; grpc_port: number; binary?: string },
+  req: { rest_port: number; rpc_port: number; binary?: string },
   options?: RequestOptions
 ): Promise<ServerProcess> {
   const body = JSON.stringify(req);
@@ -889,8 +889,8 @@ export interface AddDisksBatchResult {
 }
 
 export interface DeployDiskdbRequest {
-  mgmt_port: number;
-  grpc_port: number;
+  rest_port: number;
+  rpc_port: number;
   binary?: string;
   listen_addr?: string;
   http_addr?: string;

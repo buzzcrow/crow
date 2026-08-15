@@ -26,8 +26,8 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Default)]
 pub struct DeployRequest {
     pub server_id: String,
-    pub mgmt_port: u16,
-    pub grpc_port: u16,
+    pub rest_port: u16,
+    pub rpc_port: u16,
     /// Optional override of the binary path. Defaults via
     /// `crow_kv_server_bin()` resolution: `$CROW_KV_SERVER_BIN` →
     /// `$PATH` → `target/{debug,release}/crow-kv-server` next to the
@@ -144,7 +144,7 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
 /// config fields are `#[serde(default)]`, so an empty file loads defaults.
 /// In a workspace deploy the file lives at `<dir>/conf/crow_kv_server_config.toml`
 /// (matching the server's default `config_root`); otherwise a unique file
-/// under the system temp dir keyed by `mgmt_port`.
+/// under the system temp dir keyed by `rest_port`.
 fn resolve_config_path(req: &DeployRequest, workspace_dir: Option<&std::path::Path>) -> Result<PathBuf> {
     if let Some(config) = &req.config {
         return Ok(config.clone());
@@ -155,7 +155,7 @@ fn resolve_config_path(req: &DeployRequest, workspace_dir: Option<&std::path::Pa
             std::fs::create_dir_all(&conf).map_err(Error::Io)?;
             conf.join("crow_kv_server_config.toml")
         }
-        None => std::env::temp_dir().join(format!("crow-kv-server-deploy-{}.toml", req.mgmt_port)),
+        None => std::env::temp_dir().join(format!("crow-kv-server-deploy-{}.toml", req.rest_port)),
     };
     std::fs::write(
         &path,
@@ -171,16 +171,16 @@ async fn deploy_local_in_workspace(
     workspace_dir: Option<&std::path::Path>,
     extra_args: &[String],
 ) -> Result<DeployedServer> {
-    if req.mgmt_port == 0 || req.grpc_port == 0 {
+    if req.rest_port == 0 || req.rpc_port == 0 {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "mgmt_port and grpc_port must be non-zero".into(),
+            message: "rest_port and rpc_port must be non-zero".into(),
         });
     }
-    if req.mgmt_port == req.grpc_port {
+    if req.rest_port == req.rpc_port {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "mgmt_port and grpc_port must differ".into(),
+            message: "rest_port and rpc_port must differ".into(),
         });
     }
 
@@ -199,8 +199,8 @@ async fn deploy_local_in_workspace(
 
     let config_path = resolve_config_path(req, workspace_dir)?;
 
-    let mgmt_url = format!("http://{}:{}", node.host, req.mgmt_port);
-    let grpc_url = format!("http://{}:{}", node.host, req.grpc_port);
+    let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
+    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--config")
@@ -208,9 +208,9 @@ async fn deploy_local_in_workspace(
         .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
-        .arg(req.mgmt_port.to_string())
+        .arg(req.rest_port.to_string())
         .arg("--ports")
-        .arg(req.grpc_port.to_string())
+        .arg(req.rpc_port.to_string())
         .arg("--election-profile")
         .arg(
             req.election_profile
@@ -368,8 +368,8 @@ pub(crate) fn remote_start_command(req: &DeployRequest, server_bin: &str) -> Str
         "nohup {bin}{config_arg} --management-addr 127.0.0.1 --management-port {mp} --ports {gp} \
          >/tmp/crow-kv-server.{mp}.out 2>/tmp/crow-kv-server.{mp}.err </dev/null & echo $!",
         bin = server_bin,
-        mp = req.mgmt_port,
-        gp = req.grpc_port,
+        mp = req.rest_port,
+        gp = req.rpc_port,
     )
 }
 
@@ -524,14 +524,14 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
 #[derive(Debug, Clone, Default)]
 pub struct DiskdbDeployRequest {
     pub server_id: String,
-    pub mgmt_port: u16,
-    pub grpc_port: u16,
+    pub rest_port: u16,
+    pub rpc_port: u16,
     pub binary: Option<PathBuf>,
     /// Optional `--listen-addr` override (gRPC). Defaults to
-    /// `node.host:grpc_port`.
+    /// `node.host:rpc_port`.
     pub listen_addr: Option<String>,
     /// Optional `--http-addr` override. Defaults to
-    /// `node.host:mgmt_port`.
+    /// `node.host:rest_port`.
     pub http_addr: Option<String>,
     /// Optional `--config` path. Defaults to an auto-generated
     /// minimal config in the workspace.
@@ -600,16 +600,16 @@ pub async fn deploy_diskdb_local(
     node: &NodeEntry,
     workspace_dir: &std::path::Path,
 ) -> Result<DeployedServer> {
-    if req.mgmt_port == 0 || req.grpc_port == 0 {
+    if req.rest_port == 0 || req.rpc_port == 0 {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "mgmt_port and grpc_port must be non-zero".into(),
+            message: "rest_port and rpc_port must be non-zero".into(),
         });
     }
-    if req.mgmt_port == req.grpc_port {
+    if req.rest_port == req.rpc_port {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "mgmt_port and grpc_port must differ".into(),
+            message: "rest_port and rpc_port must differ".into(),
         });
     }
 
@@ -623,8 +623,8 @@ pub async fn deploy_diskdb_local(
     let launch_binary = stage_server_binary(&binary, workspace_dir)?;
 
     let config_path = resolve_diskdb_config_path(req, workspace_dir)?;
-    let mgmt_url = format!("http://{}:{}", node.host, req.mgmt_port);
-    let grpc_url = format!("http://{}:{}", node.host, req.grpc_port);
+    let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
+    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--config").arg(&config_path);
@@ -632,13 +632,13 @@ pub async fn deploy_diskdb_local(
         cmd.arg("--listen-addr").arg(listen_addr);
     } else {
         cmd.arg("--listen-addr")
-            .arg(format!("{}:{}", node.host, req.grpc_port));
+            .arg(format!("{}:{}", node.host, req.rpc_port));
     }
     if let Some(http_addr) = &req.http_addr {
         cmd.arg("--http-addr").arg(http_addr);
     } else {
         cmd.arg("--http-addr")
-            .arg(format!("{}:{}", node.host, req.mgmt_port));
+            .arg(format!("{}:{}", node.host, req.rest_port));
     }
     cmd.kill_on_drop(false);
     let log_dir = workspace_dir.join("log");

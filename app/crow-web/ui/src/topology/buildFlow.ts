@@ -292,6 +292,50 @@ export function buildLogicalFlow(stores: StoreView[]): { nodes: Node[]; edges: E
   return { nodes: flowNodes, edges: flowEdges };
 }
 
+/**
+ * Capacity view: Rack -> Node. Shows the physical hierarchy for
+ * disk-management operations. Node sublabel indicates whether a
+ * DiskDB instance is deployed.
+ */
+export function buildCapacityFlow(
+  racks: Rack[],
+  nodes: NodeEntity[],
+  diskdbNodeIds: Set<number> = new Set(),
+  nodeHealthById: Record<string, NodeHealth> = {},
+): { nodes: Node[]; edges: Edge[] } {
+  const flowNodes: Node[] = [];
+  const flowEdges: Edge[] = [];
+
+  for (const rack of racks) {
+    flowNodes.push(
+      mkNode(`R-${rack.id}`, {
+        kind: 'Rack',
+        label: rackLabel(String(rack.id)),
+        sublabel: `${rack.nodes?.length ?? 0} node(s)`,
+        layer: 0,
+        entity: { type: 'Rack', id: String(rack.id), name: rack.name },
+      }),
+    );
+  }
+
+  for (const node of nodes) {
+    const hasDiskdb = diskdbNodeIds.has(node.id);
+    flowNodes.push(
+      mkNode(`N-${node.id}`, {
+        kind: 'Node',
+        label: nodeLabel(String(node.id)),
+        sublabel: hasDiskdb ? 'DiskDB active' : node.host,
+        health: nodeHealthById[node.id],
+        layer: 1,
+        entity: { type: 'Node', id: String(node.id), parentIds: { rack_id: node.rack_id } },
+      }),
+    );
+    flowEdges.push({ id: `e-R-${node.rack_id}-N-${node.id}`, source: `R-${node.rack_id}`, target: `N-${node.id}`, type: 'smoothstep' });
+  }
+
+  return { nodes: flowNodes, edges: flowEdges };
+}
+
 export function buildFlowForViewMode(
   viewMode: ViewMode,
   racks: Rack[],
@@ -300,8 +344,14 @@ export function buildFlowForViewMode(
   stores: StoreView[],
   nodeStores: Record<string, NodeStore[]> = {},
   nodeHealthById: Record<string, NodeHealth> = {},
+  diskdbNodeIds: Set<number> = new Set(),
 ): { nodes: Node[]; edges: Edge[] } {
-  return viewMode === ViewMode.Physical
-    ? buildPhysicalFlow(racks, nodes, servers, nodeStores, nodeHealthById)
-    : buildLogicalFlow(stores);
+  switch (viewMode) {
+    case ViewMode.Physical:
+      return buildPhysicalFlow(racks, nodes, servers, nodeStores, nodeHealthById);
+    case ViewMode.Capacity:
+      return buildCapacityFlow(racks, nodes, diskdbNodeIds, nodeHealthById);
+    default:
+      return buildLogicalFlow(stores);
+  }
 }

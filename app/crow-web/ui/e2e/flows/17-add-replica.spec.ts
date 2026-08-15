@@ -22,7 +22,7 @@ test.describe('E2E-17 add replica', () => {
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       await expect(aside.getByText('G-1770')).toBeVisible({ timeout: 3_000 });
 

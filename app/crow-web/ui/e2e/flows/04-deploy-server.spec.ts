@@ -9,8 +9,8 @@ test.describe('E2E-04 deploy server', () => {
   test('deploys and stops a real crow-kv-server through the UI', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 4, 4);
 
-    const mgmtPort = freePort();
-    const grpcPort = freePort();
+    const restPort = freePort();
+    const rpcPort = freePort();
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
@@ -22,8 +22,8 @@ test.describe('E2E-04 deploy server', () => {
       await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
 
       await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 4/i })).toBeVisible();
-      await page.getByLabel('Management Port').fill(String(mgmtPort));
-      await page.getByLabel('gRPC Port').fill(String(grpcPort));
+      await page.getByLabel('REST Port').fill(String(restPort));
+      await page.getByLabel('RPC Port').fill(String(rpcPort));
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
@@ -34,8 +34,8 @@ test.describe('E2E-04 deploy server', () => {
       }, { timeout: 5_000 }).toEqual(
         expect.objectContaining({
           node_id: 4,
-          url: `http://127.0.0.1:${mgmtPort}`,
-          grpc_url: `http://127.0.0.1:${grpcPort}`,
+          url: `http://127.0.0.1:${restPort}`,
+          grpc_url: `http://127.0.0.1:${rpcPort}`,
           pid: expect.any(Number),
         }),
       );

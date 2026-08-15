@@ -28,7 +28,7 @@ test.describe('E2E-25 root deletes', () => {
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       // ── Store (logical) ──────────────────────────────────────────
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       await expect(aside.getByText('S-255', { exact: true })).toBeVisible({ timeout: 3_000 });
 
       // Cancel first.

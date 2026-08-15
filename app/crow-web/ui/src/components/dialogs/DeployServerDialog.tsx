@@ -11,9 +11,9 @@ export interface DeployServerDialogProps {
   isOpen: boolean;
   onClose: () => void;
   nodeId: number;
-  defaultMgmtPort?: string;
-  defaultGrpcPort?: string;
-  onSuccess?: (ports: { mgmtPort: number; grpcPort: number }) => void | Promise<void>;
+  defaultRestPort?: string;
+  defaultRpcPort?: string;
+  onSuccess?: (ports: { restPort: number; rpcPort: number }) => void | Promise<void>;
 }
 
 /**
@@ -25,12 +25,12 @@ export function DeployServerDialog({
   isOpen,
   onClose,
   nodeId,
-  defaultMgmtPort = '19910',
-  defaultGrpcPort = '19920',
+  defaultRestPort = '19910',
+  defaultRpcPort = '19920',
   onSuccess,
 }: DeployServerDialogProps) {
-  const [mgmtPort, setMgmtPort] = useState(defaultMgmtPort);
-  const [grpcPort, setGrpcPort] = useState(defaultGrpcPort);
+  const [restPort, setRestPort] = useState(defaultRestPort);
+  const [rpcPort, setRpcPort] = useState(defaultRpcPort);
   const [binary, setBinary] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
@@ -38,27 +38,27 @@ export function DeployServerDialog({
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
-      setMgmtPort(defaultMgmtPort);
-      setGrpcPort(defaultGrpcPort);
+      setRestPort(defaultRestPort);
+      setRpcPort(defaultRpcPort);
       setBinary('');
     }
     wasOpenRef.current = isOpen;
-  }, [defaultGrpcPort, defaultMgmtPort, isOpen, nodeId]);
+  }, [defaultRpcPort, defaultRestPort, isOpen, nodeId]);
 
   const isPort = (v: string) => /^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536;
-  const valid = isPort(mgmtPort) && isPort(grpcPort) && mgmtPort !== grpcPort;
+  const valid = isPort(restPort) && isPort(rpcPort) && restPort !== rpcPort;
 
   const handleSubmit = async () => {
     if (!valid) return;
     setIsLoading(true);
     try {
       const deployedPorts = {
-        mgmtPort: Number(mgmtPort),
-        grpcPort: Number(grpcPort),
+        restPort: Number(restPort),
+        rpcPort: Number(rpcPort),
       };
       await deployServer(nodeId, {
-        mgmt_port: deployedPorts.mgmtPort,
-        grpc_port: deployedPorts.grpcPort,
+        rest_port: deployedPorts.restPort,
+        rpc_port: deployedPorts.rpcPort,
         ...(binary.trim() ? { binary: binary.trim() } : {}),
       });
       success(`Crow Storage deployed on ${nodeId}`);
@@ -85,17 +85,17 @@ export function DeployServerDialog({
     >
       <div className="tw-space-y-4">
         <Input
-          label="Management Port"
+          label="REST Port"
           inputMode="numeric"
-          value={mgmtPort}
-          onChange={(e) => setMgmtPort(e.target.value)}
+          value={restPort}
+          onChange={(e) => setRestPort(e.target.value)}
           autoFocus
         />
         <Input
-          label="gRPC Port"
+          label="RPC Port"
           inputMode="numeric"
-          value={grpcPort}
-          onChange={(e) => setGrpcPort(e.target.value)}
+          value={rpcPort}
+          onChange={(e) => setRpcPort(e.target.value)}
         />
         <Input
           label="Binary Path (optional)"

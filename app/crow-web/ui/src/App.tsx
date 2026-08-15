@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Suspense, useState, useCallback, useMemo, lazy, useEffect } from 'react';
-import { Server, Database, Plus, Trash2, Activity, RotateCw, Square } from 'lucide-react';
+import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
 import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
@@ -59,7 +59,6 @@ const TopologyCanvas = lazy(() =>
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
 const SwaggerPanel = lazy(() => import('./panels/SwaggerPanel').then((m) => ({ default: m.SwaggerPanel })));
 const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
-const CapacityPanel = lazy(() => import('./panels/CapacityPanel').then((m) => ({ default: m.CapacityPanel })));
 
 export interface CrowConsoleProps {
   /** API prefix for all backend calls (default "/api"). */
@@ -129,7 +128,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
-  const { instances: diskdbInstances, usage: capacityUsage, scanStatus, loading: capLoading, error: capError, refresh: refreshCapacity } = useCapacityTree({
+  const { instances: diskdbInstances, usage: capacityUsage, loading: capLoading, error: capError, refresh: refreshCapacity } = useCapacityTree({
     enabled: viewMode === ViewMode.Capacity,
     pollIntervalActive: 5000,
     pollIntervalInactive: 30000,
@@ -139,6 +138,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const dataError = physError || logError || capError;
   const servers = useMemo(() => buildCrowKVServers(nodes, racks), [nodes, racks]);
   const serverNodeIds = useMemo(() => crowKvServerNodeIds(servers), [servers]);
+  const diskdbNodeIds = useMemo(() => new Set(diskdbInstances.map((i) => i.instance_id)), [diskdbInstances]);
   // Cluster is initialized once the system store (store 0) exists.
   const clusterInitialized = useMemo(
     () => stores.some((s) => String(s.store_id) === '0'),
@@ -158,12 +158,12 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await Promise.all([refreshPhysical(), refreshLogical()]);
+      await Promise.all([refreshPhysical(), refreshLogical(), refreshCapacity()]);
       setLastRefreshTime(new Date());
     } finally {
       setRefreshing(false);
     }
-  }, [refreshPhysical, refreshLogical]);
+  }, [refreshPhysical, refreshLogical, refreshCapacity]);
 
   // After cluster init succeeds, refresh the tree so the system group
   // appears. Init only bootstraps store 0 / group 0; store creation is
@@ -299,8 +299,32 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           });
         }
       } else if (capacityActive) {
-        // Capacity view context menus: diskdb instance, disk-group, disk.
-        if (t.type === 'Server') {
+        // Capacity view context menus: node, diskdb instance, disk-group, disk.
+        if (t.type === 'Node') {
+          const nodeId = Number(t.rawId ?? t.id);
+          const hasDiskdb = diskdbNodeIds.has(nodeId);
+          if (!hasDiskdb) {
+            items.push({
+              id: 'ddb-deploy',
+              label: 'Deploy DiskDB',
+              icon: <HardDrive className="tw-h-4 tw-w-4" />,
+              onSelect: () => setDialog((d) => ({ ...d, deployDiskdb: true })),
+            });
+          } else {
+            items.push({
+              id: 'ddb-restart',
+              label: 'Restart DiskDB',
+              icon: <RotateCw className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(nodeId)),
+            });
+            items.push({
+              id: 'ddb-stop',
+              label: 'Stop DiskDB',
+              icon: <Square className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(nodeId)),
+            });
+          }
+        } else if (t.type === 'Server') {
           // diskdb instance — restart / stop
           items.push({
             id: 'ddb-restart',
@@ -425,7 +449,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       }
       return items;
     },
-    [readonly, physicalActive, capacityActive, modules, requestDelete, runMutation, serverNodeIds],
+    [readonly, physicalActive, capacityActive, modules, requestDelete, runMutation, serverNodeIds, diskdbNodeIds],
   );
 
   const onTreeContextMenu = useCallback(
@@ -457,8 +481,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const handleAdd = useCallback(() => {
     if (readonly) return;
-    if (physicalActive) setDialog((d) => ({ ...d, addRack: true }));
-    else if (capacityActive) setDialog((d) => ({ ...d, deployDiskdb: true }));
+    if (physicalActive || capacityActive) setDialog((d) => ({ ...d, addRack: true }));
     else if (!clusterInitialized) setDialog((d) => ({ ...d, initCluster: true }));
     else setDialog((d) => ({ ...d, addStore: true }));
   }, [readonly, physicalActive, capacityActive, clusterInitialized]);
@@ -487,7 +510,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const deployDialogDefaults = useMemo(() => {
     if (!dialog.deployServer?.nodeId) {
-      return { defaultMgmtPort: '19910', defaultGrpcPort: '19920' };
+      return { defaultRestPort: '19910', defaultRpcPort: '19920' };
     }
     return deployPortDefaultsForNode(
       servers,
@@ -645,15 +668,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
           ) : centerPanel === 'kv' && kvEnabled ? (
             <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
-          ) : capacityActive ? (
-            <CapacityPanel
-              instances={diskdbInstances}
-              usage={capacityUsage}
-              scanStatus={scanStatus}
-              loading={loading}
-              readonly={readonly}
-              onRefresh={refreshCapacity}
-            />
           ) : (
             <TopologyCanvas
               racks={racks}
@@ -662,6 +676,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               stores={stores}
               nodeStores={nodeStores}
               nodeHealthById={nodeHealthById}
+              diskdbNodeIds={diskdbNodeIds}
               refreshToken={lastRefreshTime.getTime()}
               focusRequest={canvasFocusRequest}
               onEntityContextMenu={onCanvasContextMenu}
@@ -699,8 +714,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           racks={racks}
           defaultRackId={String(defaultAddNodeRackId)}
           existingNodeIds={nodeIds.map(String)}
-          defaultMgmtPort={addNodeDeployDefaults.defaultMgmtPort}
-          defaultGrpcPort={addNodeDeployDefaults.defaultGrpcPort}
+          defaultRestPort={addNodeDeployDefaults.defaultRestPort}
+          defaultRpcPort={addNodeDeployDefaults.defaultRpcPort}
           onCreatedRackId={(rackId) => setLastUsedRackId(Number(rackId))}
           onSuccess={handleRefresh}
         />
@@ -754,12 +769,12 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           isOpen
           onClose={closeDialogs}
           nodeId={dialog.deployServer.nodeId}
-          defaultMgmtPort={deployDialogDefaults.defaultMgmtPort}
-          defaultGrpcPort={deployDialogDefaults.defaultGrpcPort}
-          onSuccess={async ({ mgmtPort, grpcPort }) => {
+          defaultRestPort={deployDialogDefaults.defaultRestPort}
+          defaultRpcPort={deployDialogDefaults.defaultRpcPort}
+          onSuccess={async ({ restPort, rpcPort }) => {
             setRememberedDeployPorts((prev) => ({
-              mgmt: prev.mgmt.includes(mgmtPort) ? prev.mgmt : [...prev.mgmt, mgmtPort],
-              grpc: prev.grpc.includes(grpcPort) ? prev.grpc : [...prev.grpc, grpcPort],
+              mgmt: prev.mgmt.includes(restPort) ? prev.mgmt : [...prev.mgmt, restPort],
+              grpc: prev.grpc.includes(rpcPort) ? prev.grpc : [...prev.grpc, rpcPort],
             }));
             await handleRefresh();
           }}

@@ -23,7 +23,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
 
     // --- Shell renders ---
     await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByRole('button', { name: 'Logical' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'KV Cluster' })).toBeVisible();
     await expect(page.getByPlaceholder('Filter...')).toBeVisible();
 
     const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
@@ -52,8 +52,8 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await aside.getByText('N-77', { exact: true }).click({ button: 'right' });
     await page.getByRole('menuitem', { name: /Deploy Crow Storage/i }).click();
     await expect(page.getByRole('dialog', { name: /Deploy Crow Storage on 77/ })).toBeVisible();
-    await page.getByLabel('Management Port').fill('9901');
-    await page.getByLabel('gRPC Port').fill('9902');
+    await page.getByLabel('REST Port').fill('9901');
+    await page.getByLabel('RPC Port').fill('9902');
     await page.getByLabel(/Binary Path/).fill(DEFAULT_SERVER_BINARY);
     await page.getByRole('button', { name: /^Deploy$/ }).click();
 
@@ -73,7 +73,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
 
     // --- Logical: add empty KV store on n1 ---
     await clusterInit(baseURL!, [77]);
-    await page.getByRole('button', { name: 'Logical' }).click();
+    await page.getByRole('button', { name: 'KV Cluster' }).click();
     await page.getByRole('button', { name: 'Add Store' }).click();
     await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
     await page.getByLabel('KV Store ID (numeric)').fill('7');

@@ -49,7 +49,7 @@ test.describe('E2E-20 UI behaviors', () => {
       const expectedReplicaId = '1';
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       await aside.getByRole('button', { name: 'Add Store' }).click();

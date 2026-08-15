@@ -96,7 +96,7 @@ export function Header({
           )}
           aria-pressed={viewMode === ViewMode.Logical && centerPanel === 'topology'}
         >
-          <Layers className="tw-h-3.5 tw-w-3.5" /> Logical
+          <Layers className="tw-h-3.5 tw-w-3.5" /> KV Cluster
         </button>
         <button
           onClick={() => { setViewMode(ViewMode.Capacity); onShowTopology?.(); }}

@@ -10,16 +10,16 @@ test.describe('E2E-19 large cluster leader monitor', () => {
     test.setTimeout(30_000);
     // Setup: 3 racks, 3 nodes, 3 deployed servers.
     const racks = [
-      { rack: 191, node: 191, mgmtPort: freePort(), grpcPort: freePort() },
-      { rack: 192, node: 192, mgmtPort: freePort(), grpcPort: freePort() },
-      { rack: 193, node: 193, mgmtPort: freePort(), grpcPort: freePort() },
+      { rack: 191, node: 191, restPort: freePort(), rpcPort: freePort() },
+      { rack: 192, node: 192, restPort: freePort(), rpcPort: freePort() },
+      { rack: 193, node: 193, restPort: freePort(), rpcPort: freePort() },
     ];
 
     for (const r of racks) {
       await seedRackAndNode(baseURL!, r.rack, r.node);
     }
     await Promise.all(
-      racks.map((r) => deployNodeServer(baseURL!, r.node, r.mgmtPort, r.grpcPort)),
+      racks.map((r) => deployNodeServer(baseURL!, r.node, r.restPort, r.rpcPort)),
     );
 
     // Bootstrap store 199 with group 1990 (replica 19900) on n19a only.
@@ -43,7 +43,7 @@ test.describe('E2E-19 large cluster leader monitor', () => {
     try {
       // Navigate to Cluster view and verify all groups appear in UI.
       await page.goto('/');
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       for (const gid of [1990, 1991, 1992]) {

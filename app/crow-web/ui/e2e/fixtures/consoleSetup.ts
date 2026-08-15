@@ -76,13 +76,13 @@ export async function seedRackAndNode(baseURL: string, rackId = 1, nodeId = 1) {
   await createNode(baseURL, { id: nodeId, rack_id: rackId });
 }
 
-export async function deployNodeServer(baseURL: string, nodeId: number, mgmtPort: number, grpcPort: number) {
+export async function deployNodeServer(baseURL: string, nodeId: number, restPort: number, rpcPort: number) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/server/deploy`, {
       data: {
-        mgmt_port: mgmtPort,
-        grpc_port: grpcPort,
+        rest_port: restPort,
+        rpc_port: rpcPort,
         binary: DEFAULT_SERVER_BINARY,
         election_profile: 'e2e',
       },

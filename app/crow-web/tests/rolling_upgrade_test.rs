@@ -35,8 +35,8 @@ struct Upstream {
     pid: u32,
     mgmt_url: String,
     grpc_url: String,
-    mgmt_port: u16,
-    grpc_port: u16,
+    rest_port: u16,
+    rpc_port: u16,
     binary: PathBuf,
 }
 
@@ -89,8 +89,8 @@ impl Cluster {
         ];
         let req = DeployRequest {
             server_id: node_id.to_string(),
-            mgmt_port: u.mgmt_port,
-            grpc_port: u.grpc_port,
+            rest_port: u.rest_port,
+            rpc_port: u.rpc_port,
             election_profile: Some("e2e".into()),
             binary: Some(u.binary.clone()),
             ..Default::default()
@@ -158,8 +158,8 @@ async fn spawn_upstream(node_id: u64, workspace: &std::path::Path, binary: &Path
     };
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
+        rest_port: pick_free_port(),
+        rpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(binary.to_path_buf()),
         ..Default::default()
@@ -175,8 +175,8 @@ async fn spawn_upstream(node_id: u64, workspace: &std::path::Path, binary: &Path
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
         grpc_url: deployed.grpc_url,
-        mgmt_port: req.mgmt_port,
-        grpc_port: req.grpc_port,
+        rest_port: req.rest_port,
+        rpc_port: req.rpc_port,
         binary: binary.to_path_buf(),
     })
 }
@@ -206,8 +206,8 @@ async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
             url: u.mgmt_url.clone(),
             node_id: Some(u.node_id),
             grpc_url: Some(u.grpc_url.clone()),
-            mgmt_port: None,
-            grpc_port: None,
+            rest_port: None,
+            rpc_port: None,
             auto_start: true,
             binary: None,
             election_profile: None,

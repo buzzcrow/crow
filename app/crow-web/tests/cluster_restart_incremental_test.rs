@@ -156,8 +156,8 @@ async fn deploy_server(
         client,
         &format!("{base}/api/nodes/{node_id}/server/deploy"),
         json!({
-            "mgmt_port": pick_free_port(),
-            "grpc_port": pick_free_port(),
+            "rest_port": pick_free_port(),
+            "rpc_port": pick_free_port(),
             "binary": binary.to_string_lossy().to_string(),
             "election_profile": election_profile,
         }),

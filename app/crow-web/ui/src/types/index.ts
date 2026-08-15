@@ -59,8 +59,8 @@ export interface CrowKVServerView {
   rack_id: RackId;
   host: string;
   process: ServerProcess;
-  mgmt_port: number | null;
-  grpc_port: number | null;
+  rest_port: number | null;
+  rpc_port: number | null;
 }
 
 export interface NodeStore {

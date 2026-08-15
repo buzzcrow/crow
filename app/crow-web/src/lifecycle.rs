@@ -560,8 +560,8 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
 
 #[derive(Debug, Deserialize)]
 pub struct DeployNodeServerBody {
-    mgmt_port: u16,
-    grpc_port: u16,
+    rest_port: u16,
+    rpc_port: u16,
     #[serde(default)]
     binary: Option<String>,
     #[serde(default)]
@@ -665,8 +665,8 @@ pub async fn http_deploy_node_server(
 
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port: body.mgmt_port,
-        grpc_port: body.grpc_port,
+        rest_port: body.rest_port,
+        rpc_port: body.rpc_port,
         election_profile: body
             .election_profile
             .clone()
@@ -703,8 +703,8 @@ pub async fn http_deploy_node_server(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
-        mgmt_port: Some(body.mgmt_port),
-        grpc_port: Some(body.grpc_port),
+        rest_port: Some(body.rest_port),
+        rpc_port: Some(body.rpc_port),
         auto_start: true,
         binary: body.binary.clone(),
         election_profile: body
@@ -779,9 +779,9 @@ pub async fn http_restart_node_server(
     // Extract ports from the persisted URLs. The deploy path stamped
     // them in originally as host:port; if either fails to parse we
     // surface a 500 since that's a console-state-corruption case.
-    let mgmt_port = crate::mgmt::port_of(&entry.url)
+    let rest_port = crate::mgmt::port_of(&entry.url)
         .ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
-    let grpc_port = entry
+    let rpc_port = entry
         .grpc_url
         .as_deref()
         .and_then(crate::mgmt::port_of)
@@ -806,8 +806,8 @@ pub async fn http_restart_node_server(
 
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port,
-        grpc_port,
+        rest_port,
+        rpc_port,
         election_profile: entry
             .election_profile
             .clone()
@@ -834,8 +834,8 @@ pub async fn http_restart_node_server(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
-        mgmt_port: entry.mgmt_port,
-        grpc_port: entry.grpc_port,
+        rest_port: entry.rest_port,
+        rpc_port: entry.rpc_port,
         auto_start: entry.auto_start,
         binary: entry.binary.clone(),
         election_profile: entry.election_profile.clone(),

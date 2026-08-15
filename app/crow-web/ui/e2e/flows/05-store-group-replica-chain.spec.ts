@@ -13,7 +13,7 @@ test.describe('E2E-05 store group replica chain', () => {
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'Logical' }).click();
+      await page.getByRole('button', { name: 'KV Cluster' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       await clusterInit(baseURL!, [5]);

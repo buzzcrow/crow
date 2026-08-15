@@ -138,8 +138,8 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
       : entity.type === 'Node'
         ? servers.find((item) => item.node_id === Number(entity.id))
         : undefined;
-  const mgmtPort = server?.mgmt_port ?? null;
-  const grpcPort = server?.grpc_port ?? null;
+  const restPort = server?.rest_port ?? null;
+  const rpcPort = server?.rpc_port ?? null;
 
   // Logical Replica: dig the full ReplicaView (role/state/engine_healthy/
   // crowtree_stats) out of `stores`, whose `groups[].replicas` carry it
@@ -187,8 +187,8 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
     { label: 'Type', value: displayType },
     { label: 'ID', value: displayId },
     ...(entity.name && entity.type !== 'Server' ? [{ label: 'Name', value: entity.name }] : []),
-    ...(mgmtPort ? [{ label: 'Management Port', value: String(mgmtPort) }] : []),
-    ...(grpcPort ? [{ label: 'gRPC Port', value: String(grpcPort) }] : []),
+    ...(restPort ? [{ label: 'REST Port', value: String(restPort) }] : []),
+    ...(rpcPort ? [{ label: 'RPC Port', value: String(rpcPort) }] : []),
     ...Object.entries(entity.parentIds || {})
       .filter(([, v]) => v)
       .map(([k, v]) => ({ label: `Parent: ${k}`, value: String(v) })),

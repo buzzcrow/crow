@@ -120,7 +120,7 @@ pub struct NodeStore {
     pub node_id: NodeId,
     pub store_id: StoreId,
     /// gRPC listen address (`host:port`) of this `PxKvStore`. Each store
-    /// binds its own port, so the bootstrap grpc port reported in
+    /// binds its own port, so the bootstrap rpc port reported in
     /// `ServerEntry::grpc_url` is only correct for the bootstrap store
     /// (id 1). Operator-created stores get a random port and must wire
     /// Paxos remotes to *this* address. `None` until the next monitor

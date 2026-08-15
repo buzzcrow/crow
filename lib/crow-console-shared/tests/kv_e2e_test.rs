@@ -35,8 +35,8 @@ async fn spawn_server() -> Option<(u32, String)> {
     };
     let req = DeployRequest {
         server_id: "s1".into(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
+        rest_port: pick_free_port(),
+        rpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()

@@ -62,9 +62,9 @@ pub enum DiskdbVerb {
         #[arg(long)]
         node: u64,
         #[arg(long)]
-        mgmt_port: u16,
+        rest_port: u16,
         #[arg(long)]
-        grpc_port: u16,
+        rpc_port: u16,
         #[arg(long)]
         binary: Option<String>,
         #[arg(long)]
@@ -104,8 +104,8 @@ pub async fn run_diskdb_verb(cli: &Cli, verb: DiskdbVerb) -> ExitCode {
         DiskdbVerb::SetStatus { disk, status } => diskdb_set_status(cli, &disk, &status).await,
         DiskdbVerb::Deploy {
             node,
-            mgmt_port,
-            grpc_port,
+            rest_port,
+            rpc_port,
             binary,
             listen_addr,
             http_addr,
@@ -114,8 +114,8 @@ pub async fn run_diskdb_verb(cli: &Cli, verb: DiskdbVerb) -> ExitCode {
             diskdb_deploy(
                 cli,
                 node,
-                mgmt_port,
-                grpc_port,
+                rest_port,
+                rpc_port,
                 binary,
                 listen_addr,
                 http_addr,
@@ -337,8 +337,8 @@ async fn diskdb_set_status(cli: &Cli, disk: &str, status: &str) -> ExitCode {
 async fn diskdb_deploy(
     cli: &Cli,
     node: u64,
-    mgmt_port: u16,
-    grpc_port: u16,
+    rest_port: u16,
+    rpc_port: u16,
     binary: Option<String>,
     listen_addr: Option<String>,
     http_addr: Option<String>,
@@ -349,8 +349,8 @@ async fn diskdb_deploy(
         Err(c) => return c,
     };
     let body = DeployDiskdbBody {
-        mgmt_port,
-        grpc_port,
+        rest_port,
+        rpc_port,
         binary,
         listen_addr,
         http_addr,
