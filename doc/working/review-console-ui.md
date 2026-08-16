@@ -78,18 +78,6 @@ ai-todo: need add e2e test for these components and function
 
 ## E2E flow review — remaining findings
 
-### Test 22 has an API-only third sub-test
-
-`22-kv-cluster-topology.spec.ts` has three tests. The first two use
-`page` (lines 113-206, 208-283) — they open the UI and verify tree
-rendering and KV panel scan isolation. The third
-(`two groups on overlapping 3-node subsets operate independently`,
-line 285) takes only `{ baseURL }` — no `page`, entirely API-only. It
-creates nodes/stores/groups via fixtures and verifies via `fetch`, never
-opening the UI.
-
-ai-todo: should use UI operation. We need every design function works correct on UI and tack by e2e test. 
-
 ### Capacity test mocks API responses
 
 `50-capacity-diskdb.spec.ts` uses `page.route()` to mock 5 endpoints:
@@ -114,8 +102,6 @@ ai-todo: avoid mock-based test, start real service and inject real data. We need
 1. Add a direct `CapacityPanel` E2E (empty/error/loading states).
 2. Decide on `NotLeaderHint` retry in `api.ts` after confirming the KV
    ops request path.
-3. Rewrite test 22's third sub-test to drive through the UI, or rename
-   to indicate it's API-only.
-4. Add a real-backend smoke test for capacity compact/rebuild (companion
+3. Add a real-backend smoke test for capacity compact/rebuild (companion
    to the mock-based test in 50).
-5. Split `App.tsx` and `app/crow-web/src/lifecycle.rs`.
+4. Split `App.tsx` and `app/crow-web/src/lifecycle.rs`.

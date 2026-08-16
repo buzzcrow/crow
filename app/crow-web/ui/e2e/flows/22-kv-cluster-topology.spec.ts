@@ -1,6 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
-// Baseline: 4.3s (2026-08-16)
+// Baseline: 33s (2026-08-17)
 
 import { test, expect } from '../fixtures/realBackend';
 import {
@@ -34,15 +34,6 @@ async function kvGet(baseURL: string, storeId: number, groupId: number, key: str
   expect(resp.ok).toBeTruthy();
   const body = await resp.json();
   return body.found ? body.value_utf8 : null;
-}
-
-async function kvDelete(baseURL: string, storeId: number, groupId: number, key: string) {
-  const resp = await fetch(`${baseURL}/api/stores/${storeId}/groups/${groupId}/kv/delete`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key }),
-  });
-  expect(resp.ok).toBeTruthy();
 }
 
 async function kvScanAll(baseURL: string, storeId: number, groupId: number): Promise<string[]> {
@@ -282,7 +273,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
     }
   });
 
-  test('two groups on overlapping 3-node subsets operate independently', async ({ baseURL }) => {
+  test('two groups on overlapping 3-node subsets operate independently', async ({ page, baseURL }) => {
     await resetAll(baseURL!);
 
     // 5 nodes total. Group A on n39a,b,c. Group B on n39c,d,e (overlap on n39c).
@@ -305,21 +296,71 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
     await waitForLeader(baseURL!, 390, 3901);
 
     try {
-      // Group A: put, get, delete
-      await kvPut(baseURL!, 390, 3900, 'g39a-key', 'val-a');
-      expect(await kvGet(baseURL!, 390, 3900, 'g39a-key')).toBe('val-a');
+      // Drive all KV ops through the UI KV panel. Setup (deploy/create
+      // group) stays via API — same pattern as the other tests in this
+      // file — but the put/get/delete + cross-group isolation checks
+      // exercise the real UI path.
+      await page.goto('/');
+      await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
+      await page.getByLabel('Store').selectOption('390');
 
-      // Group B: put, get, delete
-      await kvPut(baseURL!, 390, 3901, 'g39b-key', 'val-b');
-      expect(await kvGet(baseURL!, 390, 3901, 'g39b-key')).toBe('val-b');
+      // Group A (3900): put + get g39a-key.
+      await page.getByLabel('Group').selectOption('3900');
+      await page.getByLabel('Put key').fill('g39a-key');
+      await page.getByLabel('Put value').fill('val-a');
+      const putA = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
+      await page.getByRole('button', { name: /^Put$/ }).click();
+      expect((await putA).ok()).toBeTruthy();
+      await page.getByLabel('Get key').fill('g39a-key');
+      const getA = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
+      await page.getByRole('button', { name: /^Get$/ }).click();
+      await getA;
+      await expect(page.getByTestId('kv-get-result')).toHaveText('val-a', { timeout: 3_000 });
 
-      // Cross-group get: key from group A should not be visible in group B
-      expect(await kvGet(baseURL!, 390, 3901, 'g39a-key')).toBeNull();
+      // Group B (3901): put + get g39b-key.
+      await page.getByLabel('Group').selectOption('3901');
+      await page.getByLabel('Put key').fill('g39b-key');
+      await page.getByLabel('Put value').fill('val-b');
+      const putB = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
+      await page.getByRole('button', { name: /^Put$/ }).click();
+      expect((await putB).ok()).toBeTruthy();
+      await page.getByLabel('Get key').fill('g39b-key');
+      const getB = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
+      await page.getByRole('button', { name: /^Get$/ }).click();
+      await getB;
+      await expect(page.getByTestId('kv-get-result')).toHaveText('val-b', { timeout: 3_000 });
 
-      // Delete in group A, verify gone from A but B still has its key
-      await kvDelete(baseURL!, 390, 3900, 'g39a-key');
-      expect(await kvGet(baseURL!, 390, 3900, 'g39a-key')).toBeNull();
-      expect(await kvGet(baseURL!, 390, 3901, 'g39b-key')).toBe('val-b');
+      // Cross-group isolation: g39a-key (from group A) must not be
+      // visible in group B — the UI should report not-found.
+      await page.getByLabel('Get key').fill('g39a-key');
+      const getCross = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
+      await page.getByRole('button', { name: /^Get$/ }).click();
+      await getCross;
+      await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
+
+      // Delete g39a-key in group A, then verify it is gone from A but
+      // group B still serves g39b-key.
+      await page.getByLabel('Group').selectOption('3900');
+      await page.getByLabel('Delete key').fill('g39a-key');
+      await page.getByRole('button', { name: /Delete$/ }).click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const delA = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
+      await dialog.getByRole('button', { name: 'Delete' }).click();
+      expect((await delA).ok()).toBeTruthy();
+
+      await page.getByLabel('Get key').fill('g39a-key');
+      const getAAfterDelete = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
+      await page.getByRole('button', { name: /^Get$/ }).click();
+      await getAAfterDelete;
+      await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
+
+      await page.getByLabel('Group').selectOption('3901');
+      await page.getByLabel('Get key').fill('g39b-key');
+      const getBAfterDelete = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
+      await page.getByRole('button', { name: /^Get$/ }).click();
+      await getBAfterDelete;
+      await expect(page.getByTestId('kv-get-result')).toHaveText('val-b', { timeout: 3_000 });
     } finally {
       for (const n of [391, 392, 393, 394, 395]) {
         await stopNodeServer(baseURL!, n);
