@@ -7,28 +7,6 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
 `app/crow-web/src/`. This doc captures the code-level review findings
 (issues open, coverage gaps).
 
-## Fixed
-
-- **`as any` casts in entity traversal** (`shell/Inspector.tsx`,
-  `topology/buildFlow.ts`, `data/usePhysicalTree.ts`,
-  `data/useLogicalTree.ts`, `shell/Sidebar.tsx`): the casts existed
-  because `StoreView.groups` was typed `GroupSummary[]` but
-  `useLogicalTree` enriches each group to a full `GroupView` at runtime
-  (it fetches every group via `getGroup` and replaces the summary), and
-  because the recursive racks response carries `has_server` on node
-  entries that the frontend `Node` type lacked. Added
-  `EnrichedStoreView` (`StoreView` with `groups: GroupView[]`) and
-  switched every consumer of `useLogicalTree.stores` to it
-  (`Inspector`, `Sidebar`, `buildFlow`, `TopologyCanvas`,
-  `KvOperatorPanel`, `AddGroupDialog`); added `has_server?` to `Node`
-  (mirrors `crow_web::physical_view::NodeView`); fixed `GroupSummary`
-  to match the backend struct (removed the phantom `health` field —
-  `crow_console_shared::cluster::GroupSummary` is group_id /
-  replica_count / leader only; the `useLogicalTree` fallback now uses
-  `GroupHealth.Unknown` instead of the always-undefined `g.health`).
-  All five cast sites are now typed. `tsc -b` and the e2e `tsc
-  --noEmit` both pass.
-
 ## Open issues
 
 ### Dead code
@@ -36,6 +14,9 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
 - **`ConsoleClient::set_disk_group_status`** (`lib/crow-console-shared/src/diskdb.rs:338`):
   no callers — no CLI verb, no test. Held off per user note (diskdb /
   capacity view still in progress); revisit when that work lands.
+
+  ai-todo: impl it. We can change disk-group and disk status from UI. At capacity view , and right click the left sidebar items.
+  we also require show a ICON for disk-group and disk, shoud current state.  The task may be get losted. We need impl it and track by e2e test. 
 
 ### Consensus redirect not handled in UI layer
 
@@ -50,6 +31,8 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
   (which hides leader location) or directly to a node — verify the path
   before implementing.
 
+  ai-todo: we should use crow-kv-client in UI, then we have same code for error handling. All kv operation should use crow-kv-client. reivew other case and fix. 
+
 ### Hardcoded defaults
 
 - **Default ports `19910` / `19920` / `29920`** appear in
@@ -59,11 +42,15 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
   configurable for production. Low priority — extract when a deployment
   config story lands.
 
+  ai-todo: avoid use static, we can define some port range for different services, but generate the ports dynamically, avoid use busy port.
+
 ### File size
 
 - `app/crow-web/ui/src/App.tsx` is 1018 lines (crossed the 1000-line
   "must split" threshold in this branch). `app/crow-web/src/lifecycle.rs`
   is 2114 (pre-existing). Both are split candidates.
+
+  ai-todo: split by review guide
 
 ## E2E coverage gaps
 
@@ -87,14 +74,7 @@ by feature:
     `ConfirmDeleteDialog` — reached via context menus but not tested as
     standalone dialog flows (cancel, validation error states).
 
-## Pre-existing test failure (not introduced here)
-
-- `tracked_config_file_loads_and_validates`
-  (`app/crow-diskdb/tests/ddb_config_test.rs:88`) fails under bare
-  `cargo test` because `conf/crow_diskdb_config.toml` is not at
-  `CARGO_MANIFEST_DIR` in the bare-cargo layout. Passes under the pixi
-  task. Unrelated to this review's changes (verified by stashing and
-  re-running).
+ai-todo: need add e2e test for these components and function
 
 ## E2E flow review — remaining findings
 
@@ -107,6 +87,8 @@ rendering and KV panel scan isolation. The third
 line 285) takes only `{ baseURL }` — no `page`, entirely API-only. It
 creates nodes/stores/groups via fixtures and verifies via `fetch`, never
 opening the UI.
+
+ai-todo: should use UI operation. We need every design function works correct on UI and tack by e2e test. 
 
 ### Capacity test mocks API responses
 
@@ -125,54 +107,7 @@ This is acceptable for UI-interaction testing; the mock-based sections
 are marked with comments in the test file. A companion test against the
 real backend (even a smoke-level one) would close the gap.
 
-### Flows that are verified correct
-
-The following flows were traced end-to-end and confirmed to work
-correctly — UI component → api.ts → backend handler all match:
-
-- **KV put/get/scan/delete** (`30`, `31`): `KvOperatorPanel` sends
-  correct store_id/group_id in all requests; `kv-get-result`,
-  `kv-not-found`, `kv-scan-table`, `rev: N` testids all match real
-  component rendering; delete confirm dialog is real.
-- **All-groups mode** (`31`): `KvOperatorPanel` aggregates scan across
-  groups via separate `kvScan` calls per group; Group column appears.
-- **Demo inject/delete** (`31`): uses real `/kv/put` and `/kv/delete`
-  endpoints, not test mocks.
-- **Rack/node CRUD** (`10`): `AddRackDialog` / `AddNodeDialog` labels
-  match; context-menu items exist in `App.tsx`; POST field names match
-  backend handlers.
-- **Deploy server** (`11`): `DeployServerDialog` sends `rest_port` /
-  `rpc_port`; backend `http_deploy_node_server` accepts and returns
-  `DeployResult` with PID.
-- **Server restart/stop** (`11`): context-menu items exist on the
-  server tree item (not the node); hit correct endpoints.
-- **Cross-jump** (`12`): `Inspector.buildCrossJump` switches view mode
-  and selects target entity; selection persists.
-- **Node inspect replicas** (`12`): `Sidebar` renders LR-/RR- labels
-  from `listNodeStores` data; remote replica health from `reachable`.
-- **Store/group/replica CRUD** (`20`): dialog fields match; POST shapes
-  match backend; tree renders new entities.
-- **Reconfig / leader failover** (`21`): stop/restart via context menus,
-  add replica via dialog, tree health badges, KV panel ops — all drive
-  through the UI; replica catch-up verified by polling state = running
-  + reading pre-existing keys via the UI.
-- **Topology tree rendering** (`22`): multi-rack/multi-store hierarchy
-  renders correctly in the sidebar.
-- **Store isolation** (`22`): KV panel scan correctly shows only the
-  selected store's keys.
-- **Capacity dialogs** (`50`): `DeployDiskdbDialog`, `AddDiskGroupDialog`,
-  `AddDiskDialog`, `ZoneSelectDialog` all have matching fields and POST
-  shapes; zone validation works.
-- **Activity log** (`40`): `runMutation` wrapper logs success/failure
-  for all mutations; in-memory only (no persistence — design
-  limitation, not a bug).
-- **Canvas fit/pan** (`41`): `TopologyCanvas` implements real
-  `fitView` with `requestAnimationFrame` retry; assertions check actual
-  viewport transform, not just button existence.
-- **Swagger iframe** (`00`): `SwaggerPanel` renders iframe with correct
-  `src`; `key={nodeId}` forces remount on selection change.
-- **Shell behaviors** (`01`): dialog defaults, cancel, chevron vs text
-  click, filter, refresh, health pill — all match component behavior.
+ai-todo: avoid mock-based test, start real service and inject real data. We need every design function works correct on UI and tack by e2e test. 
 
 ## Recommendation order
 
