@@ -40,12 +40,22 @@ and Rust source; this doc covers decisions and architecture only.
   - [7.2 EC placement](#72-ec-placement)
 - [8. Allocation Flow](#8-allocation-flow)
 - [9. Chunk Lifecycle](#9-chunk-lifecycle)
-- [10. EC Encoding/Decoding](#10-ec-encodingdecoding)
-- [11. Crate Layout](#11-crate-layout)
-- [12. Concurrency Model](#12-concurrency-model)
-- [13. Configuration](#13-configuration)
-- [14. Implementation Scope](#14-implementation-scope)
-- [15. References](#15-references)
+- [10. Per-Chunk-ID Lifecycle Lock + Chunk Cache](#10-per-chunk-id-lifecycle-lock--chunk-cache)
+  - [10.1 ChunkLockMap](#101-chunklockmap)
+  - [10.2 Lock policy + cache hint](#102-lock-policy--cache-hint)
+  - [10.3 ChunkGuard](#103-chunkguard)
+  - [10.4 Chunk cache](#104-chunk-cache)
+  - [10.5 Sweep task](#105-sweep-task)
+  - [10.6 LifecycleHandler integration](#106-lifecyclehandler-integration)
+  - [10.7 Error variants + service mapping](#107-error-variants--service-mapping)
+  - [10.8 Metrics + HTTP endpoints](#108-metrics--http-endpoints)
+  - [10.9 Edge cases](#109-edge-cases)
+- [11. EC Encoding/Decoding](#11-ec-encodingdecoding)
+- [12. Crate Layout](#12-crate-layout)
+- [13. Concurrency Model](#13-concurrency-model)
+- [14. Configuration](#14-configuration)
+- [15. Implementation Scope](#15-implementation-scope)
+- [16. References](#16-references)
 
 ## 1. Overview
 
@@ -651,7 +661,259 @@ Init ──> Active ──> Sealed ──> Deleted
 **Concurrency**: KV CAS or state machine guards prevent conflicting
 transitions. Last writer wins with validation.
 
-## 10. EC Encoding/Decoding
+## 10. Per-Chunk-ID Lifecycle Lock + Chunk Cache
+
+`LifecycleHandler`'s four mutating RPCs (allocate/append/seal/delete)
+each perform a read-modify-write cycle on a chunk record. Without
+per-chunk serialization, two concurrent `AppendChunk` RPCs on the same
+chunk ID both read the chunk, both append strips, both `put_chunk` —
+the second overwrite loses the first's strips. A per-chunk mutex
+serializes the RMW cycle. A payload cache avoids the `get_chunk` store
+round-trip on every mutating RPC (the latest chunk is known in-process
+right after the previous `put_chunk`).
+
+The lock and the payload have different eviction requirements (lock:
+evict only when uncontended; payload: evict freely by
+recency/frequency), so they are separate structures. See
+[`design-crow-chunkdb-range-binding.md`](design-crow-chunkdb-range-binding.md)
+for the range guard that ensures a chunk reaches exactly one chunkdb
+instance — the per-chunk lock assumes that one-owner invariant.
+
+### 10.1 ChunkLockMap
+
+`app/crow-chunkdb/src/lifecycle.rs`:
+
+```rust
+pub struct ChunkLockMap {
+    locks: DashMap<ChunkId, Arc<Mutex<()>>>,
+    chunks: Arc<quick_cache::Cache<ChunkId, Chunk>>,
+    metrics: Arc<LifecycleMetrics>,
+    hold_warn_threshold: Duration,
+}
+```
+
+- `new(cache_capacity, metrics, hold_warn_threshold) -> Self` — creates
+  an empty `DashMap` and a `Cache::new(cache_capacity)`.
+- `acquire(&self, chunk_id, store, policy, hint) -> Result<ChunkGuard,
+  LifecycleError>` — for existing chunks (append/seal/delete). Steps:
+  1. `entry().or_default()` to get-or-create the `Arc<Mutex<()>>`.
+  2. Record lock-wait start time.
+  3. Acquire the mutex per `policy`:
+     - `TryLock` → `try_lock_owned()`. On `Err`, increment
+       `lock_busy_count`, return `LockBusy`.
+     - `Wait(d)` → `lock_owned()` with `tokio::time::timeout(d, ...)`.
+       On timeout, increment `lock_timeout_count`, return
+       `LockTimeout`.
+  4. Record lock-wait time into the histogram.
+  5. Serve payload: if `hint == Cache` and `self.chunks.get(&chunk_id)`
+     returns `Some(chunk)` → cache hit (increment `cache_hit_count`),
+     return guard with that chunk. Otherwise → cache miss (increment
+     `cache_miss_count`), `store.get_chunk(chunk_id)`. On
+     `StoreError::ChunkNotFound` → return `ChunkNotFound`. On success,
+     if `hint == Cache`, `self.chunks.insert(chunk_id, chunk.clone())`.
+  6. Return `ChunkGuard` with the chunk, hint, hold_start, metrics.
+- `acquire_for_create(&self, chunk_id, policy, hint) -> Result<ChunkGuard,
+  LifecycleError>` — for `allocate_chunk` with caller-supplied ID. Same
+  lock acquisition as `acquire` but does NOT fetch from store (chunk
+  does not exist yet). Returns a guard with `chunk: None`. Caller must
+  `refresh()` after creating the chunk.
+- `populate_cache(&self, chunk_id, chunk)` — for `allocate_chunk` with
+  auto-generated ID (skips the lock; UUID collision negligible).
+- `reap_idle(&self)` — iterates `self.locks.retain(|_, arc|
+  Arc::strong_count(arc) > 1)`. Entries where only the map holds a
+  clone (`strong_count == 1`) are removed. Increments `reap_idle_count`
+  and `reap_idle_entries_removed` by the number removed. Payload cache
+  is untouched (bounded by its own capacity).
+- `invalidate_chunk(&self, chunk_id) -> bool` — calls
+  `self.chunks.remove(&chunk_id).is_some()`. Increments
+  `invalidate_count`. Used by range migration.
+- `invalidate_range(&self, bucket_start, bucket_end) -> u32` — iterates
+  cache entries and removes those whose chunk ID hashes to a bucket in
+  `[bucket_start, bucket_end]`. Returns the count removed. Increments
+  `invalidate_count` by the count. O(n) on cache size — acceptable for
+  rare range migrations.
+- `cache_len() -> usize`, `metrics_snapshot() -> LifecycleMetricsSnapshot`.
+
+### 10.2 Lock policy + cache hint
+
+```rust
+pub enum LockPolicy {
+    TryLock,
+    Wait(Duration),
+}
+
+impl Default for LockPolicy {
+    fn default() -> Self { Self::Wait(Duration::from_secs(10)) }
+}
+
+pub enum CacheHint {
+    Cache,
+    NoCache,
+}
+
+impl Default for CacheHint {
+    fn default() -> Self { Self::Cache }
+}
+```
+
+- `LockPolicy::TryLock` → fail fast with `LockBusy` on contention.
+- `LockPolicy::Wait(d)` → park the task up to `d`, then `LockTimeout`.
+  No `WaitForever` variant — a bounded wait prevents indefinite stalls.
+- `CacheHint::Cache` (default) → populate cache on miss, write to cache
+  on `refresh`.
+- `CacheHint::NoCache` → skip cache population; the guard's local copy
+  is still updated so the current operation sees the chunk.
+
+All mutating RPCs use `LockPolicy::default()` and `CacheHint::Cache`.
+These are internal in v1 — not exposed in the gRPC API.
+
+### 10.3 ChunkGuard
+
+```rust
+pub struct ChunkGuard {
+    guard: OwnedMutexGuard<()>,  // held for Drop — releases the lock
+    chunk: Option<Chunk>,
+    hint: CacheHint,
+    chunk_id: ChunkId,
+    hold_start: Instant,
+    metrics: Arc<LifecycleMetrics>,
+    hold_warn_threshold: Duration,
+}
+```
+
+- `chunk(&self) -> Option<&Chunk>` — returns the latest chunk record.
+  `None` for `acquire_for_create` before `refresh`.
+- `refresh(&mut self, chunk: Chunk)` — updates the guard's local copy.
+  If `hint == Cache`, also writes to the lock map's cache. Caller MUST
+  have persisted via `put_chunk` first.
+- `Drop` — records lock-hold time into the histogram (from `hold_start`
+  to now). If hold time > `hold_warn_threshold`, emits a `warn!` log
+  with chunk_id and hold duration.
+
+### 10.4 Chunk cache
+
+`quick-cache = "0.7"` (`app/crow-chunkdb/Cargo.toml`). Default capacity
+10_000 entries (configurable via `lifecycle.cache_capacity`). The
+design supports 100_000+ — `quick_cache::Cache::new(capacity)` accepts
+any `usize`; the only constraint is memory (~1-2 KB per `Chunk` → 10k
+entries ≈ 10-20 MB, 100k entries ≈ 100-200 MB).
+
+Cache operations:
+- `Cache::get(&key) -> Option<Chunk>` — cache hit check. O(1).
+- `Cache::insert(key, value)` — populate on miss, refresh after
+  `put_chunk`. O(1) amortized.
+- `Cache::remove(&key) -> Option<(Key, Val)>` — `invalidate_chunk`.
+  O(1).
+- `Cache::entry_count()` — gauge for metrics snapshot.
+
+### 10.5 Sweep task
+
+The lock map grows unbounded without reaping (one entry per chunk ever
+touched). `reap_idle` removes uncontended entries periodically, keeping
+the map bounded by concurrent locks, not by chunks-ever-touched.
+
+`main.rs` spawns a background task (`run_sweep_loop`) that calls
+`locks.reap_idle()` every `lifecycle.sweep_chunk_lock_interval_secs`
+(default 60s). Uses the same `watch::channel(false)` stop signal
+pattern as the topology refresh loop. `reap_idle` is a single
+`DashMap::retain` call — no allocation, no blocking.
+
+### 10.6 LifecycleHandler integration
+
+`LifecycleHandler` gains a `locks: Arc<ChunkLockMap>` field. Each
+mutating RPC acquires the per-chunk lock before its RMW cycle:
+
+- `allocate_chunk` (caller-supplied ID): `check_range` →
+  `acquire_for_create` → existence check (`store.get_chunk`; return
+  `ChunkAlreadyExists` if taken) → build chunk, allocate strips,
+  `put_chunk`, `commit_strip_segments` → `guard.refresh(chunk)`.
+- `allocate_chunk` (auto-generated ID): skip the lock (UUID collision
+  negligible). After `put_chunk`, `populate_cache(id, chunk)` directly.
+- `append_chunk`: `check_range` → `acquire` → state check, allocate
+  strips, `put_chunk`, `commit_strip_segments` → `guard.refresh(chunk)`.
+- `seal_chunk`: same as append but no diskdb calls (fast path).
+- `delete_chunk`: `check_range` → `acquire` → state check (already
+  deleted → `ChunkNotFound`) → free segments (`free_blocks` — inside
+  the lock) → `put_chunk`, `guard.refresh(chunk)` (keeps Deleted chunk
+  cached).
+- `query_chunk` / `list_chunks` — unchanged (no lock, no cache).
+
+### 10.7 Error variants + service mapping
+
+```rust
+#[error("chunk lock busy — retry later")]
+LockBusy,
+#[error("chunk lock acquire timed out")]
+LockTimeout,
+```
+
+`map_error` in `service.rs`:
+- `LifecycleError::LockBusy => Status::unavailable(e.to_string())`
+- `LifecycleError::LockTimeout => Status::unavailable(e.to_string())`
+
+Both map to `UNAVAILABLE` — the client's existing retry logic handles
+this (same as `NotLeaderHint` transient errors).
+
+### 10.8 Metrics + HTTP endpoints
+
+`app/crow-chunkdb/src/metrics.rs` — `LifecycleMetrics` with
+`AtomicU64` counters + `Mutex<PreciseHistogram>` for lock wait/hold
+latency. Counters (all `AtomicU64`, `Relaxed` ordering):
+
+- `lock_wait_time` — `PreciseHistogram` (wait duration in acquire).
+- `lock_timeout_count` — incremented on `LockTimeout`.
+- `lock_busy_count` — incremented on `LockBusy`.
+- `lock_hold_time` — `PreciseHistogram` (hold duration in guard Drop).
+- `cache_hit_count` — incremented on cache hit in `acquire`.
+- `cache_miss_count` — incremented on cache miss in `acquire`.
+- `cache_size` — gauge, read from `Cache::entry_count()` at snapshot.
+- `reap_idle_count` — incremented each `reap_idle` run.
+- `reap_idle_entries_removed` — entries removed per `reap_idle`.
+- `invalidate_count` — incremented on `invalidate_chunk`/
+  `invalidate_range`.
+
+`snapshot() -> LifecycleMetricsSnapshot` drains counters, reads
+histograms, returns a serializable struct (JSON).
+
+HTTP endpoints (`main.rs` HTTP server, alongside `/ready` +
+`/health`):
+
+- `GET /metrics` → returns `LifecycleMetricsSnapshot` as JSON.
+- `POST /invalidate_chunk` → body `{ "chunk_id": { "high": u64, "low":
+  u64 } }` → calls `ChunkLockMap::invalidate_chunk`. Returns
+  `{ "invalidated": bool }`.
+- `POST /invalidate_range` → body `{ "bucket_start": u16, "bucket_end":
+  u16 }` → calls `ChunkLockMap::invalidate_range`. Returns
+  `{ "invalidated_count": u32 }`.
+
+All internal (no auth, same as `/ready` and `/health`).
+
+### 10.9 Edge cases
+
+- Lock map entry does not exist → created on first `acquire` via
+  `DashMap::entry().or_default()`.
+- Lock holder panics → `tokio::sync::Mutex<()>` auto-releases (no
+  poisoning for `Mutex<()>`); cache slot may be stale but next
+  `acquire` re-fetches on miss.
+- `reap_idle` runs while an acquirer holds a clone →
+  `Arc::strong_count > 1`, entry is retained. No race:
+  `DashMap::retain` holds the shard lock.
+- Process crash → all in-memory state lost; KV store is source of
+  truth.
+- Cache evicts a chunk between two operations → next `acquire` is a
+  miss, re-fetches. Correctness unaffected.
+- `CacheHint::NoCache` → skip `insert` on miss and `refresh`; the
+  guard's local copy is still updated so the current operation sees
+  the chunk.
+- `delete_chunk` keeps the Deleted-state chunk cached via `refresh` →
+  next `delete_chunk` retry gets a cache hit, returns `ChunkNotFound`
+  without a store round-trip.
+- `acquire` returns `ChunkNotFound` (store miss during acquire) → the
+  chunk does not exist; `append`/`seal`/`delete` return
+  `ChunkNotFound`.
+- `LockBusy` / `LockTimeout` → mapped to gRPC `UNAVAILABLE`.
+
+## 11. EC Encoding/Decoding
 
 **EC encoding** (strip allocation):
 1. Allocate data_num + code_num blocks via diskdb
@@ -675,7 +937,7 @@ transitions. Last writer wins with validation.
 **Rationale**: isa-l is highly optimized for AVX2/AVX512. Strip-level EC
 aligns with redundancy unit design.
 
-## 11. Crate Layout
+## 12. Crate Layout
 
 ```
 app/crow-chunkdb/              # chunkdb server binary
@@ -720,7 +982,7 @@ lib/crow-protocol/             # Protocol definitions
     └── chunkdb_types.proto   # Data types
 ```
 
-## 12. Concurrency Model
+## 13. Concurrency Model
 
 - **Async everywhere**: All public APIs are async (`async fn`).
 - **Shared state**: `Arc<RwLock<T>>` for topology cache, allocator state.
@@ -732,7 +994,7 @@ lib/crow-protocol/             # Protocol definitions
 **Rationale**: tokio provides efficient async I/O. Lock scoping prevents
 deadlocks with `.await`. Parallel allocation minimizes latency.
 
-## 13. Configuration
+## 14. Configuration
 
 Key configuration parameters:
 
@@ -744,10 +1006,14 @@ Key configuration parameters:
 | topology_refresh_interval  | 30 s    | Topology cache refresh interval       |
 | placement_safe_mode        | true    | Enforce safe EC placement constraints |
 | max_allocation_parallelism | 10      | Max parallel strip allocations        |
+| lifecycle.cache_capacity   | 10_000  | Per-chunk payload cache capacity (§10) |
+| lifecycle.sweep_chunk_lock_interval_secs | 60 | Idle lock reap interval (§10) |
+| lifecycle.lock_hold_warn_threshold_ms   | 1000 | Lock hold warn threshold (§10) |
+| server.keepalive_interval_secs          | 10   | Service-registry heartbeat interval |
 
 Configuration is loaded from CLI args or config file at startup.
 
-## 14. Implementation Scope
+## 15. Implementation Scope
 
 **v1 (R85)**:
 - Basic chunkdb server and client
@@ -769,7 +1035,7 @@ Configuration is loaded from CLI args or config file at startup.
 - Console/CLI integration
 - Custom RPC for performance
 
-## 15. References
+## 16. References
 
 References (other projects, not ports):
 

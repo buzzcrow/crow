@@ -18,29 +18,21 @@ complexity, and dependency. Before implementation, follow the
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
-  instance range ownership (GAP-R99-8 follow-up). Dual-serve reads during
-  cutover, new-owner-only writes, background metadata verification, graceful
-  client redirect. Distinct from R102: R103 transfers which chunkdb instance
-  serves a hash range; R102 rebinds which paxos group stores a disk-group's
-  data. Both reuse the R99 common binding framework.
+  instance range ownership. Dual-serve reads during cutover, new-owner-only
+  writes, background metadata verification, graceful client redirect.
+  Distinct from R102: R103 transfers which chunkdb instance serves a hash
+  range; R102 rebinds which paxos group stores a disk-group's data. Both
+  reuse the common `BindingStrategy` framework
+  (`doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5).
 - **[R102](R102-diskdb-dynamic-binding-migration.md)** — diskdb dynamic
-  disk-group binding migration — Area: diskdb / kv — Reuse R99's common
-  binding framework to dynamically rebind diskdb disk-groups to paxos
-  groups, replacing the operator-manual `BindMapValue` write with automatic
-  monitoring + rebinding (GAP-R99-5 follow-up). Monitor detects instance
-  join/leave, rebalances disk-group assignments, migrates data during
-  rebinding.
-- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv — Add `expected_revision` to `KvSetRequest` for optimistic concurrency; leader checks key revision before propose (lease-protected). Defense-in-depth for R100's chunkdb lock; enables cross-instance CAS on `put_chunk` if R99 ownership is ever bypassed.
-- **[R100](R100-chunkdb-lifecycle-lock.md)** — chunkdb per-chunk-ID lifecycle lock — Area: chunkdb — Per-chunk-ID mutex in `LifecycleHandler` to serialize concurrent mutating RPCs on the same chunk (append/seal/delete race protection).
-- **[R99](R99-kv-dynamic-range-binding-framework.md)** — kv dynamic
-  range binding framework + chunkdb instance sharding — Area: kv /
-  chunkdb / diskdb — Shard chunkdb instances by chunk hash range
-  (group-0 binding table, `NotMyRange` reject-and-retry, dynamic
-  binding monitor for instance join/leave). Common framework reusable
-  by diskdb disk-group → paxos group rebinding (replacing the
-  operator-manual `BindMapValue` write). Open questions: common
-  framework vs separate implementations, library location, range
-  assignment algorithm.
+  disk-group binding migration — Area: diskdb / kv — Reuse the common
+  `BindingStrategy` framework
+  (`doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5) to
+  dynamically rebind diskdb disk-groups to paxos groups, replacing the
+  operator-manual `BindMapValue` write with automatic monitoring +
+  rebinding. Monitor detects instance join/leave, rebalances disk-group
+  assignments, migrates data during rebinding.
+- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv — Add `expected_revision` to `KvSetRequest` for optimistic concurrency; leader checks key revision before propose (lease-protected). Defense-in-depth for the chunkdb per-chunk lock (`doc/design/chunkdb/design-crow-chunkdb.md` §10); enables cross-instance CAS on `put_chunk` if range ownership is ever bypassed.
 - **[R77](R77-diskdb-console-cli.md)** — diskdb console + CLI
   integration — Area: diskdb / console — `/api/diskdb` REST proxy +
   `crow diskdb` CLI subcommands for runtime queries (usage/zones/scan/
