@@ -335,64 +335,35 @@ new crate). These need a design draft before implementation.
 
 **Open Questions**:
 
-- **Common framework or separate implementations?** chunkdb instance
-  sharding and diskdb disk-group binding share the same shape (key →
-  instance binding in group-0, dynamic monitor, reject-and-retry).
-  Options: (a) build one common framework with pluggable algorithms
-  (range-based for chunkdb, table-based for diskdb) — more upfront
-  work, less duplication; (b) build two separate implementations that
-  share the group-0 binding schema pattern but not code — simpler,
-  some duplication. Trade-off: (a) is cleaner if diskdb migration is
-  in scope; (b) is faster if chunkdb sharding is urgent and diskdb
-  migration can wait. Recommendation: (a) — the user explicitly asked
-  for a common framework, and the diskdb binding is operator-manual
-  today (a pain point). Design decision — needs human confirmation
-  on scope (is diskdb migration in R99 or a follow-up?).
+All open questions resolved — see `doc/working/gap.md` for the decision
+log and `doc/working/design-r99-dynamic-range-binding.md` for the rework
+design draft. Summary of resolutions:
 
-- **Where does the framework library live?** Options: (a)
-  `crow-kv-client` — the binding client (read + cache + retry) lives
-  here (already the sysdata API surface per design group0 §2.1); the
-  binding monitor lives in `crow-kv-server` (group-0 is the natural
-  home for cluster-wide binding management); (b) `crow-common` —
-  shared binding utilities (but `crow-common` is for low-level
-  primitives like EC, not sysdata clients); (c) a new
-  `crow-binding` crate — cleanest separation but adds a crate.
-  Trade-off: (a) reuses the existing sysdata API surface and keeps
-  the monitor in group-0 (where the service registry + watch/notify
-  already live); (b) is a poor fit (wrong layer); (c) is clean but
-  premature if the framework is small. Recommendation: (a) — binding
-  client in `crow-kv-client`, binding monitor in `crow-kv-server`
-  (group-0). Design decision.
+- **Common framework (GAP-R99-1):** Adopt a shared high-level
+  `BindingStrategy` trait in `crow-kv-client` with pluggable strategies
+  (range-based for chunkdb, table-based for diskdb). Conceptual
+  unification is prioritized over strict code reuse; some duplication
+  is acceptable.
+- **Framework location (GAP-R99-2/4/6):** Binding client + strategy +
+  generic monitor in `crow-kv-client`; monitor wired into
+  `crow-kv-server` group-0 leader (leader writes, followers monitor
+  only). Shared protocol types in `crow-protocol`.
+- **Range assignment (GAP-R99-3):** Explicit, non-contiguous bucket
+  sub-ranges (capped at 1024/4096) with per-sub-range metadata (current
+  owner, original owner, status, last change time). Routing prefers
+  current owner, falls back to original owner during transition.
+- **diskdb migration (GAP-R99-5):** Filed as separate requirement R102
+  (`doc/backlog/R102-diskdb-dynamic-binding-migration.md`).
+- **Range migration (GAP-R99-8):** Filed as separate requirement R103
+  (`doc/backlog/R103-chunkdb-range-migration.md`). Not the same as
+  R102 — R103 transfers chunkdb instance range ownership; R102 rebinds
+  diskdb disk-groups to paxos groups.
+- **NotMyRange error (GAP-R99-7):** Confirmed — new `ErrorCode` value
+  with client refresh-and-retry. Already implemented in R99 v1.
 
-- **Range assignment algorithm — consistent hashing or explicit
-  ranges?** Options: (a) consistent hashing (instances own virtual
-  nodes on a ring; adding/removing an instance moves only adjacent
-  virtual nodes) — minimal data movement, but ranges are implicit;
-  (b) explicit bucket ranges (instances own contiguous bucket ranges;
-  adding an instance splits a range, removing merges) — simple to
-  reason about, ranges are explicit in the binding table. Trade-off:
-  (a) minimizes migration but is harder to debug; (b) is simpler and
-  matches the R88 bucket-range pattern. Recommendation: (b) —
-  explicit bucket ranges, matching R88's design §5.4a. Design
-  decision.
-
-- **Binding monitor location — group-0 leader or separate service?**
-  The monitor writes to group-0, so it must run where it can write to
-  group-0. Options: (a) a background task in the `crow-kv-server`
-  group-0 leader (the leader already runs sysdata management loops);
-  (b) a separate `crow-binding-manager` service. Trade-off: (a) is
-  simpler (no new service) and the group-0 leader is the natural
-  cluster-wide coordinator; (b) is cleaner separation but adds a
-  service to deploy. Recommendation: (a) — background task in the
-  group-0 leader. Design decision.
-
-- **diskdb migration in R99 or a follow-up?** Item 6 (diskdb
-  disk-group rebinding) shares the framework but is a diskdb change.
-  Options: (a) include it in R99 (one requirement, one framework,
-  two use cases); (b) split it into a separate R-item (R99 is
-  chunkdb-only, diskdb migration is a follow-up). Trade-off: (a)
-  delivers the common framework value immediately but increases R99
-  scope; (b) is faster to land for chunkdb but delays the diskdb
-  benefit. Recommendation: (b) — R99 lands the framework + chunkdb
-  sharding; diskdb migration is a follow-up requirement that reuses
-  the framework. Design decision — needs human confirmation.
+**Rework scope:** R99 v1 is committed but needs rework per the gap
+decisions. The rework changes the range model from contiguous to
+non-contiguous sub-ranges, moves the monitor from `crow-chunkdb` to
+`crow-kv-server`, and introduces the common `BindingStrategy` trait.
+See `doc/working/design-r99-dynamic-range-binding.md` for the detailed
+rework design.
