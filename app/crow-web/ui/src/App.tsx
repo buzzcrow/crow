@@ -57,7 +57,7 @@ import {
   removeDisk,
   listServers,
 } from './api';
-import { deployPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
+import { deployPortDefaultsForNode, diskdbPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
 import { buildCrowKVServers, crowKvServerNodeIds } from './data/crowKvServers';
 import { isCrowKVServerAvailable } from './data/crowKvServers';
 import { toUiHealth } from './utils/entityDisplay';
@@ -100,7 +100,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   }, [apiPrefix]);
 
   const [lastUsedRackId, setLastUsedRackId] = useState<number>(0);
-  const [rememberedDeployPorts, setRememberedDeployPorts] = useState<{ mgmt: number[]; grpc: number[] }>({ mgmt: [], grpc: [] });
+  const [rememberedDeployPorts, setRememberedDeployPorts] = useState<{ mgmt: number[]; grpc: number[]; diskdbRpc: number[] }>({ mgmt: [], grpc: [], diskdbRpc: [] });
   const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
   const [refreshing, setRefreshing] = useState(false);
   const [centerPanel, setCenterPanel] = useState<CenterPanelMode>('topology');
@@ -679,6 +679,16 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     [nodeIds, rememberedDeployPorts, servers],
   );
 
+  const deployDiskdbDefaults = useMemo(() => {
+    if (!dialog.deployDiskdb?.nodeId) return '29920';
+    return diskdbPortDefaultsForNode(
+      diskdbInstances,
+      dialog.deployDiskdb.nodeId,
+      undefined,
+      rememberedDeployPorts.diskdbRpc,
+    );
+  }, [dialog.deployDiskdb?.nodeId, diskdbInstances, rememberedDeployPorts.diskdbRpc]);
+
   const storeDialogDefaults = useMemo(() => {
     const availableNodeIds = servers.filter((server) => isCrowKVServerAvailable(server)).map((server) => server.node_id);
     const defaultNodeIds = availableNodeIds.length <= 7 ? availableNodeIds : availableNodeIds.slice(0, 3);
@@ -919,6 +929,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             setRememberedDeployPorts((prev) => ({
               mgmt: prev.mgmt.includes(restPort) ? prev.mgmt : [...prev.mgmt, restPort],
               grpc: prev.grpc.includes(rpcPort) ? prev.grpc : [...prev.grpc, rpcPort],
+              diskdbRpc: prev.diskdbRpc,
             }));
             await handleRefresh();
           }}
@@ -956,7 +967,17 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         onClose={closeDialogs}
         nodes={nodes}
         defaultNodeId={dialog.deployDiskdb?.nodeId}
-        onSuccess={handleRefresh}
+        defaultRpcPort={deployDiskdbDefaults}
+        onSuccess={async () => {
+          setRememberedDeployPorts((prev) => ({
+            mgmt: prev.mgmt,
+            grpc: prev.grpc,
+            diskdbRpc: prev.diskdbRpc.includes(Number(deployDiskdbDefaults))
+              ? prev.diskdbRpc
+              : [...prev.diskdbRpc, Number(deployDiskdbDefaults)],
+          }));
+          await handleRefresh();
+        }}
       />
 
       {dialog.compactZones && (

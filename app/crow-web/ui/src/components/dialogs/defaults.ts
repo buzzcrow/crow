@@ -1,6 +1,14 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+// Per-service port bases. Ports are generated dynamically from these
+// bases (offset by the node-id suffix, then incremented past collisions
+// against ports already assigned in the console config). The bases are
+// dev defaults; production should override via a deployment config story.
+export const KV_SERVER_REST_PORT_BASE = 19910;
+export const KV_SERVER_RPC_PORT_BASE = 19920;
+export const DISKDB_RPC_PORT_BASE = 29920;
+
 const DIGIT_SUFFIX = /(\d+)$/;
 
 interface ServerPortSource {
@@ -107,8 +115,8 @@ function preferredPortStart(base: number, nodeId: number): number {
 export function deployPortDefaultsForNode(
   servers: ServerPortSource[],
   nodeId: number,
-  restStart = 19910,
-  rpcStart = 19920,
+  restStart = KV_SERVER_REST_PORT_BASE,
+  rpcStart = KV_SERVER_RPC_PORT_BASE,
   extraUsedRestPorts: number[] = [],
   extraUsedRpcPorts: number[] = [],
 ): { defaultRestPort: string; defaultRpcPort: string } {
@@ -135,4 +143,29 @@ export function deployPortDefaultsForNode(
   );
 
   return { defaultRestPort, defaultRpcPort };
+}
+
+interface DiskdbPortSource {
+  grpc_endpoint?: string | null;
+}
+
+/**
+ * Pick a dynamic diskdb gRPC port for a node: offset the base by the
+ * node-id suffix, then increment past ports already assigned to other
+ * diskdb instances (extracted from their `grpc_endpoint`) and any
+ * extra remembered ports. Mirrors `deployPortDefaultsForNode` so diskdb
+ * deploy gets the same collision-avoidance as kv-server deploy.
+ */
+export function diskdbPortDefaultsForNode(
+  instances: DiskdbPortSource[],
+  nodeId: number,
+  rpcStart = DISKDB_RPC_PORT_BASE,
+  extraUsedRpcPorts: number[] = [],
+): string {
+  const usedRpcPorts: number[] = [...extraUsedRpcPorts];
+  for (const inst of instances) {
+    const port = extractPort(inst.grpc_endpoint);
+    if (port) usedRpcPorts.push(port);
+  }
+  return nextAvailablePort(usedRpcPorts, preferredPortStart(rpcStart, nodeId));
 }

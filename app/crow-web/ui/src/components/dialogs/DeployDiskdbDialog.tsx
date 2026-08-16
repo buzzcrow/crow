@@ -12,6 +12,7 @@ export interface DeployDiskdbDialogProps {
   onClose: () => void;
   nodes: { id: number; label?: string }[];
   defaultNodeId?: number;
+  defaultRpcPort?: string;
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -20,10 +21,11 @@ export function DeployDiskdbDialog({
   onClose,
   nodes,
   defaultNodeId,
+  defaultRpcPort = '29920',
   onSuccess,
 }: DeployDiskdbDialogProps) {
   const [nodeId, setNodeId] = useState('');
-  const [rpcPort, setRpcPort] = useState('29920');
+  const [rpcPort, setRpcPort] = useState(defaultRpcPort);
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
   const { success, error } = useToast();
@@ -34,10 +36,10 @@ export function DeployDiskdbDialog({
         ? String(defaultNodeId)
         : nodes.length > 0 ? String(nodes[0].id) : '';
       setNodeId(initial);
-      setRpcPort('29920');
+      setRpcPort(defaultRpcPort);
     }
     wasOpenRef.current = isOpen;
-  }, [isOpen, nodes, defaultNodeId]);
+  }, [isOpen, nodes, defaultNodeId, defaultRpcPort]);
 
   const isPort = (v: string) => /^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536;
   const valid = nodeId !== '' && isPort(rpcPort);

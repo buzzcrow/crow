@@ -13,7 +13,7 @@ import { AddReplicaDialog } from './AddReplicaDialog';
 import { DeployServerDialog } from './DeployServerDialog';
 import { NodeHealth, ProcState } from '../../types';
 import type { Node, Rack, CrowKVServerView, EnrichedStoreView } from '../../types';
-import { deployPortDefaultsForNode } from './defaults';
+import { deployPortDefaultsForNode, diskdbPortDefaultsForNode } from './defaults';
 
 /**
  * These tests pin down the exact request bodies the SPA must send for the
@@ -312,6 +312,25 @@ describe('Deploy Server dialog', () => {
     const defaults = deployPortDefaultsForNode([], 1, 19910, 19920, [19910], [19920]);
 
     expect(defaults).toEqual({ defaultRestPort: '19911', defaultRpcPort: '19921' });
+  });
+});
+
+describe('diskdbPortDefaultsForNode', () => {
+  it('returns the base port when no instances or remembered ports collide', () => {
+    expect(diskdbPortDefaultsForNode([], 1)).toBe('29921');
+  });
+
+  it('derives defaults from the node id suffix before checking collisions', () => {
+    expect(diskdbPortDefaultsForNode([], 2)).toBe('29922');
+  });
+
+  it('increments past ports already assigned to other diskdb instances', () => {
+    const instances = [{ grpc_endpoint: 'http://127.0.0.1:29921' }];
+    expect(diskdbPortDefaultsForNode(instances, 1)).toBe('29922');
+  });
+
+  it('increments past remembered ports even when no instances exist', () => {
+    expect(diskdbPortDefaultsForNode([], 1, undefined, [29921])).toBe('29922');
   });
 });
 

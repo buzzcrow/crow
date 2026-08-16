@@ -33,8 +33,6 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
   configurable for production. Low priority — extract when a deployment
   config story lands.
 
-  ai-todo: avoid use static, we can define some port range for different services, but generate the ports dynamically, avoid use busy port.
-
 ### File size
 
 - `app/crow-web/ui/src/App.tsx` is 1018 lines (crossed the 1000-line
