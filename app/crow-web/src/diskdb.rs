@@ -462,9 +462,9 @@ pub async fn http_diskdb_rebuild(
                 .rebuild_zone_bitmap(disk_id, z)
                 .await
                 .map_err(|e| err_502(format!("rebuild_zone_bitmap zone {z}: {e}")))?;
-            total_rebuilt += resp.rebuilt_zone_count;
-            total_busy += resp.total_busy_units;
-            total_free += resp.total_free_units;
+            total_rebuilt = total_rebuilt.saturating_add(resp.rebuilt_zone_count);
+            total_busy = total_busy.saturating_add(resp.total_busy_units);
+            total_free = total_free.saturating_add(resp.total_free_units);
         }
         Ok(Json(RebuildResultResponse {
             rebuilt_zone_count: total_rebuilt,

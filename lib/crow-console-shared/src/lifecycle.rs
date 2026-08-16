@@ -603,50 +603,16 @@ fn resolve_diskdb_config_path(workspace_dir: &std::path::Path, rpc_port: u16) ->
     if path.exists() {
         return Ok(path);
     }
-    let http_port = rpc_port + 1;
-    // Minimal valid config — all sections present with default values
-    // matching `DdbConfig::default()`. The diskdb binary requires
-    // [server], [storage], [heartbeat], [persistence], [scanner],
-    // [sync], [reporting], [notify].
+    let http_port = rpc_port.saturating_add(1);
+    // Minimal valid config — only [server] is required; all other
+    // sections default via `#[serde(default)]` on `DdbConfig` fields
+    // (values match `DdbConfig::default()`).
     let config = format!(
         "[server]\n\
          listen_addr = \"0.0.0.0:{rpc_port}\"\n\
          http_listen_addr = \"0.0.0.0:{http_port}\"\n\
-         kv_server_mgmt_seeds = [\"http://127.0.0.1:9910\"]\n\
-         [storage]\n\
-         zone_size_bytes = 17179869184\n\
-         block_size_bytes = 1048576\n\
-         allocate_granularity = 1048576\n\
-         zone_rotate_count = 4\n\
-         cas_retry_limit = 100\n\
-         validate_owner_on_free = false\n\
-         [heartbeat]\n\
-         interval_secs = 10\n\
-         miss_threshold = 3\n\
-         temp_failure_timeout_secs = 900\n\
-         [persistence]\n\
-         free_batch_enabled = false\n\
-         free_flush_max_batch = 256\n\
-         compaction_cadence_secs = 300\n\
-         snapshot_compaction_threshold = 4096\n\
-         load_concurrency = 16\n\
-         [scanner]\n\
-         scan_interval_secs = 600\n\
-         reverify_delay_ms = 1000\n\
-         [scanner.ghost]\n\
-         detect = true\n\
-         auto_correct = false\n\
-         [scanner.integrity]\n\
-         verify = true\n\
-         detect_owner_mismatch = false\n\
-         [sync]\n\
-         group0_store_id = 0\n\
-         group0_group_id = 0\n\
-         sync_interval_secs = 10\n\
-         [reporting]\n\
-         interval_secs = 10\n\
-         [notify]\n\
-         notify_enabled = false\n",
+         kv_server_mgmt_seeds = [\"http://127.0.0.1:{}\"]\n",
+        crow_protocol::KV_SERVER_MGMT_BASE,
     );
     std::fs::write(&path, config).map_err(Error::Io)?;
     Ok(path)
@@ -667,8 +633,20 @@ struct DiskdbConfigServerSection {
 /// Extract the HTTP listen address from a diskdb config TOML file.
 /// Returns `None` if the file cannot be parsed or the field is absent.
 fn http_listen_addr_from_config(config_path: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(config_path).ok()?;
-    let parsed: DiskdbConfigHttpAddr = toml::from_str(&content).ok()?;
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("diskdb config read failed {config_path:?}: {e}");
+            return None;
+        }
+    };
+    let parsed: DiskdbConfigHttpAddr = match toml::from_str(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("diskdb config parse failed {config_path:?}: {e}");
+            return None;
+        }
+    };
     parsed.server?.http_listen_addr
 }
 

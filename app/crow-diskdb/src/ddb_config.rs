@@ -14,12 +14,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DdbConfig {
     pub server: ServerConfig,
+    #[serde(default)]
     pub storage: StorageDefaults,
+    #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
     pub persistence: PersistenceConfig,
+    #[serde(default)]
     pub scanner: ScannerConfig,
+    #[serde(default)]
     pub sync: SyncConfig,
+    #[serde(default)]
     pub reporting: ReportingConfig,
+    #[serde(default)]
     pub notify: NotifyConfig,
 }
 

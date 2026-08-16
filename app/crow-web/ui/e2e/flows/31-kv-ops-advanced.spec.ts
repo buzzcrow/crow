@@ -99,8 +99,10 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     const deletePrefixResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
     await dialog.getByRole('button', { name: 'Delete' }).click();
     await deletePrefixResponse;
-    // Wait for the component's automatic re-scan (setTimeout 100ms) to settle
-    await page.waitForTimeout(500);
+    // Wait for the component's automatic re-scan (setTimeout 100ms) to
+    // complete before triggering a manual scan, so the two /kv/scan
+    // responses don't race and overwrite each other.
+    await page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
 
     // Scan again — adv-a-* keys should be gone
     await scanAndRefresh(page);

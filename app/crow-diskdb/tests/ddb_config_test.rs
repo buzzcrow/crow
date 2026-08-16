@@ -92,3 +92,22 @@ fn config_load_from_file_roundtrip() {
     assert_eq!(loaded.server.listen_addr, config.server.listen_addr);
     let _ = std::fs::remove_file(&tmp);
 }
+
+/// A minimal `[server]`-only config must parse and fill the remaining
+/// sections from `Default` — this is the shape the console's
+/// `resolve_diskdb_config_path` fallback generates. Guards against a
+/// future required field on a sub-struct silently breaking that path.
+#[test]
+fn minimal_server_only_config_uses_section_defaults() {
+    let toml = "[server]\n\
+         listen_addr = \"0.0.0.0:50051\"\n\
+         http_listen_addr = \"0.0.0.0:50052\"\n\
+         kv_server_mgmt_seeds = [\"http://127.0.0.1:9910\"]\n";
+    let config: DdbConfig = toml::from_str(toml).expect("minimal config parses");
+    config.validate().expect("minimal config validates");
+    // Defaults filled in for the omitted sections.
+    assert_eq!(config.storage.block_size_bytes, 1024 * 1024);
+    assert_eq!(config.heartbeat.interval_secs, 10);
+    assert!(config.scanner.ghost.detect);
+    assert_eq!(config.sync.sync_interval_secs, 10);
+}
