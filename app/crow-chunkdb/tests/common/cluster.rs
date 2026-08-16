@@ -640,11 +640,15 @@ impl ChunkdbHarness {
         pool.refresh_endpoints().await.expect("refresh endpoints");
         let allocator = Arc::new(ChunkAllocator::new(Arc::clone(&pool)));
 
-        let handler = Arc::new(LifecycleHandler::new(
-            Arc::clone(&store),
-            Arc::clone(&allocator),
-            topology.clone(),
-        ));
+        let handler = Arc::new(
+            LifecycleHandler::new(Arc::clone(&store), Arc::clone(&allocator), topology.clone()).with_locks(
+                Arc::new(crow_chunkdb::lifecycle::ChunkLockMap::new(
+                    10_000,
+                    Arc::new(crow_chunkdb::metrics::LifecycleMetrics::new()),
+                    std::time::Duration::from_secs(60),
+                )),
+            ),
+        );
 
         Self {
             handler,

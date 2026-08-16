@@ -14,6 +14,8 @@ pub struct ChunkdbConfig {
     pub topology: TopologyConfig,
     #[serde(default)]
     pub range_guard: RangeGuardConfig,
+    #[serde(default)]
+    pub lifecycle: LifecycleConfig,
 }
 
 impl BaseConfig for ChunkdbConfig {
@@ -24,6 +26,7 @@ impl BaseConfig for ChunkdbConfig {
         if self.topology.refresh_interval_secs == 0 {
             return Err("topology.refresh_interval_secs must be > 0".into());
         }
+        self.lifecycle.validate()?;
         Ok(())
     }
 }
@@ -77,5 +80,38 @@ impl Default for TopologyConfig {
         Self {
             refresh_interval_secs: 30,
         }
+    }
+}
+
+/// Lifecycle lock + cache configuration (R100).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleConfig {
+    /// Max entries in the chunk payload cache.
+    pub cache_capacity: usize,
+    /// Reap idle chunk locks every N seconds.
+    pub sweep_chunk_lock_interval_secs: u32,
+    /// Warn if a chunk lock is held longer than N milliseconds.
+    pub lock_hold_warn_threshold_ms: u64,
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self {
+            cache_capacity: 10_000,
+            sweep_chunk_lock_interval_secs: 60,
+            lock_hold_warn_threshold_ms: 1000,
+        }
+    }
+}
+
+impl LifecycleConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.cache_capacity == 0 {
+            return Err("lifecycle.cache_capacity must be > 0".into());
+        }
+        if self.sweep_chunk_lock_interval_secs == 0 {
+            return Err("lifecycle.sweep_chunk_lock_interval_secs must be > 0".into());
+        }
+        Ok(())
     }
 }

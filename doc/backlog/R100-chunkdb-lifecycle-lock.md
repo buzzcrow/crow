@@ -327,7 +327,7 @@ queries).
   follow-up.
 - **`reap_idle` background task** (`app/crow-chunkdb/src/main.rs` or
   wherever the chunkdb service loop lives) — spawn a task that calls
-  `locks.reap_idle()` every 60s to keep the lock map bounded by
+  `locks.reap_idle()` every `sweep_chunk_lock_interval` (default 60s) to keep the lock map bounded by
   concurrent locks, not by chunks-ever-touched.
 - **`quick-cache` dependency** (`app/crow-chunkdb/Cargo.toml`) — add
   `quick-cache = "0.7"` to `[dependencies]`. Verify the published version
@@ -416,7 +416,7 @@ Mutating RPC (append/seal/delete)          allocate_chunk (caller ID)
   drop guard → release lock                 drop guard → release lock
         │                                            │
         ▼                                            ▼
-  (background) reap_idle() every 60s        (background) reap_idle() every 60s
+  (background) reap_idle() every sweep_interval  (background) reap_idle() every sweep_interval
   removes uncontended lock entries          removes uncontended lock entries
   (background) metrics recorded throughout  (background) metrics recorded throughout
   (background) invalidate_chunk/range (R99)  (background) invalidate_chunk/range (R99)
@@ -633,48 +633,21 @@ future implementers of `DeleteChunkRange` and `UpdateChunkStrip`):
 - `pixi run cargo fmt --all -- --check`
 - `pixi run cargo clippy --all-targets -- -D warnings`
 
-## Open Questions
+## Resolved Questions (from `doc/working/gap.md`)
 
-- **Lock hold time during diskdb network RPCs.** `allocate_chunk` and
-  `append_chunk` call `allocate_strip` (N parallel diskdb RPCs, up to 3
-  retries each, `allocator.rs:98-105`) and `commit_strip_segments`
-  (diskdb RPC, `lifecycle.rs:252`) while the lock is held.
-  `delete_chunk` calls `free_blocks` (diskdb RPC, `lifecycle.rs:215`)
-  while the lock is held. If diskdb is slow or retrying, the lock is
-  held for seconds, causing `LockTimeout` for concurrent ops on the
-  same chunk with the default 10s wait. `seal_chunk` is fast (no diskdb
-  call — only `put_chunk`). Two options:
-  - **(a) Keep all diskdb calls inside the lock** — correct; the lock
-    guards the entire RMW + commit/free cycle. Acceptable if same-chunk
-    concurrency is rare (chunks are typically owned by one writer).
-    Simple, no refactor.
-  - **(b) Release the lock after `put_chunk`, before commit/free** —
-    the chunk record is already persisted, so the lock can be released.
-    `commit_strip_segments` and `free_blocks` are best-effort (orphan
-    scanner reclaims failures), so deferring them is safe. Risk: a
-    concurrent `delete_chunk` could `free_blocks` on segments that
-    haven't been `commit_blocks`'d yet — but `free_blocks` and
-    `commit_blocks` are independent operations on the same diskdb
-    blocks, and free-after-uncommitted just means the blocks return to
-    the free pool (the orphan scanner would have reclaimed them anyway).
-    This halves the lock hold time for allocate/append and eliminates
-    it for delete's `free_blocks`. Needs a decision: correctness
-    simplicity (a) vs. concurrency throughput (b). Default to (a) for
-    v1 — same-chunk concurrency is expected to be rare, and (a) is
-    simpler to reason about. Revisit (b) if LockTimeout becomes
-    frequent in practice.
-- **`reap_idle` cadence and trigger.** 60s periodic background task is
-  proposed. Alternative: opportunistic reap on every Nth `acquire`
-  (avoids a dedicated task but adds latency to some acquires). Trade-off:
-  background task is simpler and decoupled; opportunistic avoids a task
-  and reaps more promptly under load. Cannot be resolved autonomously —
-  needs a decision on whether chunkdb wants a background maintenance task
-  at this layer (it already runs topology refresh etc., so a task is
-  idiomatic here). Default to background task unless reviewed otherwise.
-- **Cache capacity default.** `quick_cache::Cache::new(capacity)` needs a
-  concrete number. 100k entries × ~1-2 KB per `Chunk` ≈ 100-200 MB.
-  Proposed default: 100_000, configurable via the chunkdb config file
-  (`crow-chunkdb.toml`) under a `lifecycle.cache_capacity` key.
-  Alternative: derive from available memory. Needs a decision on whether
-  to add a config field now or hardcode and revisit. Default to
-  configurable with 100k default.
+- **Lock hold time during diskdb network RPCs** (GAP-R100-1) — **Decision:
+  option (a)** keep all diskdb calls inside the lock. Additionally: a
+  `lock_timeout_count` counter tracks how often `LockTimeout` occurs — if
+  it rises, the operator can tune `DEFAULT_LOCK_WAIT` or consider switching
+  to option (b). A warning log fires when any single lock hold exceeds a
+  configurable threshold (`lock_hold_warn_threshold_ms`, default 1000ms),
+  surfacing slow diskdb RPCs in real time.
+- **`reap_idle` cadence and trigger** (GAP-R100-2) — **Decision: periodic
+  background task**, interval configurable via
+  `lifecycle.sweep_chunk_lock_interval_secs` (default 60s).
+- **Cache capacity default** (GAP-R100-3) — **Decision: default 10_000**
+  entries (configurable via `lifecycle.cache_capacity`). The design
+  supports 100_000+ — `quick_cache::Cache::new(capacity)` accepts any
+  `usize`; the only constraint is memory.
+- **quick-cache version** (GAP-R100-4) — **Decision: `quick-cache =
+  "0.7"`** (published 2026-06-27, >7 days old per CROW dep policy).

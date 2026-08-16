@@ -96,6 +96,8 @@ fn map_error(e: &LifecycleError) -> Status {
         LifecycleError::Storage(_) => Status::internal(e.to_string()),
         LifecycleError::InvalidRequest(_) => Status::invalid_argument(e.to_string()),
         LifecycleError::NotMyRange { bucket: _ } => Status::failed_precondition(e.to_string()),
+        LifecycleError::LockBusy => Status::unavailable(e.to_string()),
+        LifecycleError::LockTimeout => Status::unavailable(e.to_string()),
     }
 }
 

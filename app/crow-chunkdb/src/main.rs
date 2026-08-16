@@ -10,7 +10,8 @@ use std::time::Duration;
 use clap::Parser;
 use crow_chunkdb::allocator::{ChunkAllocator, DiskdbClientPool};
 use crow_chunkdb::chunkdb_config::ChunkdbConfig;
-use crow_chunkdb::lifecycle::LifecycleHandler;
+use crow_chunkdb::lifecycle::{ChunkLockMap, LifecycleHandler};
+use crow_chunkdb::metrics::LifecycleMetrics;
 use crow_chunkdb::range_guard::RangeGuard;
 use crow_chunkdb::routing::{default_binding_table, BindingCache};
 use crow_chunkdb::service::ChunkdbService;
@@ -116,28 +117,35 @@ async fn main() {
     let pool = Arc::new(DiskdbClientPool::new(svc));
     let allocator = Arc::new(ChunkAllocator::new(Arc::clone(&pool)));
 
+    // Per-chunk lock map + payload cache (R100).
+    let lifecycle_metrics = Arc::new(LifecycleMetrics::new());
+    let hold_warn_threshold = Duration::from_millis(config.lifecycle.lock_hold_warn_threshold_ms);
+    let lock_map = Arc::new(ChunkLockMap::new(
+        config.lifecycle.cache_capacity,
+        Arc::clone(&lifecycle_metrics),
+        hold_warn_threshold,
+    ));
+
+    // Spawn sweep task for idle lock reaping.
+    let sweep_interval = Duration::from_secs(u64::from(config.lifecycle.sweep_chunk_lock_interval_secs));
+    let sweep_handle = tokio::spawn(run_sweep_loop(
+        Arc::clone(&lock_map),
+        sweep_interval,
+        stop_rx.clone(),
+    ));
+
     // Lifecycle handler + gRPC service.
     let handler = Arc::new(
         LifecycleHandler::new(Arc::clone(&store), allocator, cache)
-            .with_range_guard(Arc::clone(&range_guard)),
+            .with_range_guard(Arc::clone(&range_guard))
+            .with_locks(Arc::clone(&lock_map)),
     );
     let grpc_service = ChunkdbService::new(handler)
         .with_range_guard(range_guard)
         .into_server();
 
-    // Start HTTP health server.
-    let http_handle = tokio::spawn(async move {
-        let app = axum::Router::new()
-            .route("/ready", axum::routing::get(|| async { "ok" }))
-            .route("/health", axum::routing::get(|| async { "ok" }));
-        info!(%http_listen_addr, "HTTP health server listening");
-        let listener = tokio::net::TcpListener::bind(http_listen_addr)
-            .await
-            .expect("bind http_listen_addr");
-        axum::serve(listener, app)
-            .await
-            .expect("HTTP health server error");
-    });
+    // Start HTTP health + metrics + cache invalidation server.
+    let http_handle = tokio::spawn(run_http_server(http_listen_addr, Arc::clone(&lock_map)));
 
     info!(%listen_addr, "gRPC server listening");
 
@@ -156,7 +164,75 @@ async fn main() {
     let _ = http_handle.await;
     let _ = refresh_handle.await;
     let _ = notify_handle.await;
+    let _ = sweep_handle.await;
     info!("crow-chunkdb stopped");
+}
+
+/// Periodic sweep loop — reaps idle chunk locks.
+async fn run_sweep_loop(
+    locks: Arc<ChunkLockMap>,
+    interval: Duration,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = timer.tick() => {
+                locks.reap_idle();
+            }
+            _ = stop.changed() => {
+                if *stop.borrow() {
+                    info!("sweep task stopping");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// HTTP server — health, metrics, cache invalidation endpoints.
+async fn run_http_server(addr: SocketAddr, locks: Arc<ChunkLockMap>) {
+    let app = axum::Router::new()
+        .route("/ready", axum::routing::get(|| async { "ok" }))
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/metrics",
+            axum::routing::get({
+                let locks = Arc::clone(&locks);
+                move || async move {
+                    let snap = locks.metrics_snapshot();
+                    axum::Json(snap)
+                }
+            }),
+        )
+        .route(
+            "/invalidate_chunk",
+            axum::routing::post({
+                let locks = Arc::clone(&locks);
+                move |axum::Json(body): axum::Json<InvalidateChunkBody>| async move {
+                    if let Some(id) = body.chunk_id {
+                        let invalidated = locks.invalidate_chunk(&id);
+                        axum::Json(serde_json::json!({ "invalidated": invalidated }))
+                    } else {
+                        axum::Json(serde_json::json!({ "invalidated": false }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/invalidate_range",
+            axum::routing::post({
+                let locks = Arc::clone(&locks);
+                move |axum::Json(body): axum::Json<InvalidateRangeBody>| async move {
+                    let count = locks.invalidate_range(body.bucket_start, body.bucket_end);
+                    axum::Json(serde_json::json!({ "invalidated_count": count }))
+                }
+            }),
+        );
+    info!(%addr, "HTTP server listening");
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind http addr");
+    axum::serve(listener, app).await.expect("HTTP server error");
 }
 
 fn load_config(args: &Cli) -> ChunkdbConfig {
@@ -172,4 +248,17 @@ fn load_config(args: &Cli) -> ChunkdbConfig {
     }
 
     config
+}
+
+/// Request body for `POST /invalidate_chunk`.
+#[derive(serde::Deserialize)]
+struct InvalidateChunkBody {
+    chunk_id: Option<crow_protocol::common::ChunkId>,
+}
+
+/// Request body for `POST /invalidate_range`.
+#[derive(serde::Deserialize)]
+struct InvalidateRangeBody {
+    bucket_start: u16,
+    bucket_end: u16,
 }
