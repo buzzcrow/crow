@@ -156,6 +156,14 @@ acceptable for v1, or if a full Copying/Cutover/Complete flow is needed.
 
 ai-todo: create new requirment by describe the request in detail. Is it same with GAP-R99-5?
 
+**Resolution:** Not the same as GAP-R99-5. GAP-R99-5 is diskdb disk-group →
+paxos-group rebinding (R102). GAP-R99-8 is chunkdb instance range ownership
+transfer (R103). Both reuse the common binding framework from R99, but they
+are distinct concerns: R102 rebinds which paxos group stores a disk-group's
+data; R103 transfers which chunkdb instance serves a hash range. Filed as
+separate requirements: R102 (`doc/backlog/R102-diskdb-dynamic-binding-migration.md`)
+and R103 (`doc/backlog/R103-chunkdb-range-migration.md`).
+
 ---
 
 ## R100: Per-Chunk-ID Lifecycle Lock + Chunk Cache
