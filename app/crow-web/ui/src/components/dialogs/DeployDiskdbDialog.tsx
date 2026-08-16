@@ -11,6 +11,7 @@ export interface DeployDiskdbDialogProps {
   isOpen: boolean;
   onClose: () => void;
   nodes: { id: number; label?: string }[];
+  defaultNodeId?: number;
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -18,46 +19,35 @@ export function DeployDiskdbDialog({
   isOpen,
   onClose,
   nodes,
+  defaultNodeId,
   onSuccess,
 }: DeployDiskdbDialogProps) {
   const [nodeId, setNodeId] = useState('');
-  const [restPort, setRestPort] = useState('29910');
   const [rpcPort, setRpcPort] = useState('29920');
-  const [binary, setBinary] = useState('');
-  const [listenAddr, setListenAddr] = useState('');
-  const [httpAddr, setHttpAddr] = useState('');
-  const [config, setConfig] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
   const { success, error } = useToast();
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
-      setNodeId(nodes.length > 0 ? String(nodes[0].id) : '');
-      setRestPort('29910');
+      const initial = defaultNodeId != null
+        ? String(defaultNodeId)
+        : nodes.length > 0 ? String(nodes[0].id) : '';
+      setNodeId(initial);
       setRpcPort('29920');
-      setBinary('');
-      setListenAddr('');
-      setHttpAddr('');
-      setConfig('');
     }
     wasOpenRef.current = isOpen;
-  }, [isOpen, nodes]);
+  }, [isOpen, nodes, defaultNodeId]);
 
   const isPort = (v: string) => /^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536;
-  const valid = nodeId !== '' && isPort(restPort) && isPort(rpcPort) && restPort !== rpcPort;
+  const valid = nodeId !== '' && isPort(rpcPort);
 
   const handleSubmit = async () => {
     if (!valid) return;
     setIsLoading(true);
     try {
       await deployDiskdb(Number(nodeId), {
-        rest_port: Number(restPort),
         rpc_port: Number(rpcPort),
-        ...(binary.trim() ? { binary: binary.trim() } : {}),
-        ...(listenAddr.trim() ? { listen_addr: listenAddr.trim() } : {}),
-        ...(httpAddr.trim() ? { http_addr: httpAddr.trim() } : {}),
-        ...(config.trim() ? { config: config.trim() } : {}),
       });
       success(`DiskDB deployed on node ${nodeId}`);
       onClose();
@@ -75,7 +65,7 @@ export function DeployDiskdbDialog({
       isOpen={isOpen}
       onClose={onClose}
       title="Deploy DiskDB"
-      description="Spawn a DiskDB instance on a node. Required before disk capacity can be managed."
+      description="Spawn a DiskDB instance on a node. The binary and config are pre-copied to the node's bin/ and conf/ folders."
       confirmLabel="Deploy"
       onConfirm={handleSubmit}
       confirmDisabled={!valid || isLoading}
@@ -99,40 +89,10 @@ export function DeployDiskdbDialog({
           </select>
         </div>
         <Input
-          label="REST Port"
-          inputMode="numeric"
-          value={restPort}
-          onChange={(e) => setRestPort(e.target.value)}
-        />
-        <Input
-          label="RPC Port"
+          label="RPC Port (gRPC)"
           inputMode="numeric"
           value={rpcPort}
           onChange={(e) => setRpcPort(e.target.value)}
-        />
-        <Input
-          label="Binary Path (optional)"
-          placeholder="leave empty to use $CROW_DISKDB_BIN"
-          value={binary}
-          onChange={(e) => setBinary(e.target.value)}
-        />
-        <Input
-          label="Listen Address (optional)"
-          placeholder="0.0.0.0"
-          value={listenAddr}
-          onChange={(e) => setListenAddr(e.target.value)}
-        />
-        <Input
-          label="HTTP Address (optional)"
-          placeholder="0.0.0.0:29930"
-          value={httpAddr}
-          onChange={(e) => setHttpAddr(e.target.value)}
-        />
-        <Input
-          label="Config Path (optional)"
-          placeholder="path to diskdb config file"
-          value={config}
-          onChange={(e) => setConfig(e.target.value)}
         />
       </div>
     </Dialog>

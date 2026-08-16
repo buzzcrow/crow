@@ -526,6 +526,8 @@ pub struct ServerSummary {
     pub pid: Option<u32>,
     /// Latest health from the monitor cache (`unknown` until probed).
     pub health: NodeHealth,
+    /// Service type: "kv" (crow-kv-server) or "diskdb".
+    pub service_type: String,
 }
 
 /// `GET /api/servers`. Cluster-wide list of deployed servers, one row
@@ -552,6 +554,11 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
                 grpc_url: s.grpc_url.clone(),
                 pid,
                 health,
+                service_type: match s.service_type {
+                    crow_console_shared::config::ServiceType::Kv => "kv",
+                    crow_console_shared::config::ServiceType::Diskdb => "diskdb",
+                }
+                .to_string(),
             }
         })
         .collect();

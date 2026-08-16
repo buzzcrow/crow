@@ -62,17 +62,7 @@ pub enum DiskdbVerb {
         #[arg(long)]
         node: u64,
         #[arg(long)]
-        rest_port: u16,
-        #[arg(long)]
         rpc_port: u16,
-        #[arg(long)]
-        binary: Option<String>,
-        #[arg(long)]
-        listen_addr: Option<String>,
-        #[arg(long)]
-        http_addr: Option<String>,
-        #[arg(long)]
-        config: Option<String>,
     },
     /// Restart a diskdb instance on a node.
     Restart {
@@ -102,27 +92,7 @@ pub async fn run_diskdb_verb(cli: &Cli, verb: DiskdbVerb) -> ExitCode {
         DiskdbVerb::Compact { disk, zones } => diskdb_compact(cli, &disk, zones).await,
         DiskdbVerb::Rebuild { disk, zone } => diskdb_rebuild(cli, &disk, zone).await,
         DiskdbVerb::SetStatus { disk, status } => diskdb_set_status(cli, &disk, &status).await,
-        DiskdbVerb::Deploy {
-            node,
-            rest_port,
-            rpc_port,
-            binary,
-            listen_addr,
-            http_addr,
-            config,
-        } => {
-            diskdb_deploy(
-                cli,
-                node,
-                rest_port,
-                rpc_port,
-                binary,
-                listen_addr,
-                http_addr,
-                config,
-            )
-            .await
-        }
+        DiskdbVerb::Deploy { node, rpc_port } => diskdb_deploy(cli, node, rpc_port).await,
         DiskdbVerb::Restart { node } => diskdb_restart(cli, node).await,
         DiskdbVerb::Stop { node } => diskdb_stop(cli, node).await,
         DiskdbVerb::Delete { node } => diskdb_delete(cli, node).await,
@@ -294,7 +264,7 @@ async fn diskdb_rebuild(cli: &Cli, disk: &str, zone: Option<u32>) -> ExitCode {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.diskdb_rebuild(disk, zone).await {
+    match client.diskdb_rebuild(disk, zone.map(|z| vec![z])).await {
         Ok(resp) => {
             if cli.json {
                 return print_json(&resp);
@@ -333,29 +303,12 @@ async fn diskdb_set_status(cli: &Cli, disk: &str, status: &str) -> ExitCode {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn diskdb_deploy(
-    cli: &Cli,
-    node: u64,
-    rest_port: u16,
-    rpc_port: u16,
-    binary: Option<String>,
-    listen_addr: Option<String>,
-    http_addr: Option<String>,
-    config: Option<String>,
-) -> ExitCode {
+async fn diskdb_deploy(cli: &Cli, node: u64, rpc_port: u16) -> ExitCode {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    let body = DeployDiskdbBody {
-        rest_port,
-        rpc_port,
-        binary,
-        listen_addr,
-        http_addr,
-        config,
-    };
+    let body = DeployDiskdbBody { rpc_port };
     match client.deploy_diskdb(node, &body).await {
         Ok(resp) => {
             if cli.json {

@@ -247,6 +247,26 @@ export interface MetricsResponse {
 // ── Capacity view types (R77) ─────────────────────────────────────
 // Mirror the DTOs from crow-web/src/diskdb.rs.
 
+// Console-config disk-group entry (mirrors crow-console-shared DiskGroupEntry).
+export interface DiskGroupEntry {
+  id: number;
+  rack_id: number;
+  node_id: number;
+  name?: string;
+}
+
+// Console-config disk entry (mirrors crow-console-shared DiskEntry).
+export interface DiskEntry {
+  disk_id: string;
+  disk_group_id: number;
+  rack_id: number;
+  node_id: number;
+  disk_type: string;
+  capacity_bytes: number;
+  zone_size_bytes: number;
+  unit_size_bytes: number;
+}
+
 export interface DiskdbInstanceInfo {
   instance_id: number;
   grpc_endpoint: string;

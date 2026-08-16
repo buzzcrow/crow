@@ -3,7 +3,7 @@
 // Baseline: 2.0s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, clusterInit, DEFAULT_SERVER_BINARY, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * End-to-end smoke for the rewritten (v1 lean) console UI. Drives the full
@@ -45,6 +45,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('Node ID').fill('77');
     await page.getByLabel('Host').fill('127.0.0.1');
     await page.getByLabel('Enable Crow Storage on this node').uncheck();
+    await page.getByLabel('Enable DiskDB on this node').uncheck();
     await page.getByRole('button', { name: /create node/i }).click();
     await expect(aside.getByText('N-77', { exact: true })).toBeVisible({ timeout: 3_000 });
 
@@ -54,7 +55,6 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await expect(page.getByRole('dialog', { name: /Deploy Crow Storage on 77/ })).toBeVisible();
     await page.getByLabel('REST Port').fill('9901');
     await page.getByLabel('RPC Port').fill('9902');
-    await page.getByLabel(/Binary Path/).fill(DEFAULT_SERVER_BINARY);
     await page.getByRole('button', { name: /^Deploy$/ }).click();
 
     // Backend confirms the server is running.

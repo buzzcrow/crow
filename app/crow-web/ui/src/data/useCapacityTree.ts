@@ -2,17 +2,24 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { listDiskdbInstances, getDiskdbUsage, getDiskdbScanStatus } from '../api';
+import { listDiskdbInstances, getDiskdbUsage, getDiskdbScanStatus, listNodeDiskGroups, listDisksInGroup } from '../api';
 import type {
   DiskdbInstanceInfo,
   CapacityUsageResponse,
   ScanStatusResponse,
+  DiskGroupEntry,
+  DiskEntry,
 } from '../types';
 
 interface UseCapacityTreeOptions {
   pollIntervalActive?: number;
   pollIntervalInactive?: number;
   enabled?: boolean;
+}
+
+export interface NodeDiskGroups {
+  diskGroups: DiskGroupEntry[];
+  disksByDg: Record<number, DiskEntry[]>;
 }
 
 interface UseCapacityTreeResult {
@@ -22,6 +29,8 @@ interface UseCapacityTreeResult {
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
+  nodeDiskGroups: Record<number, NodeDiskGroups>;
+  fetchNodeDiskGroups: (nodeIds: number[]) => Promise<void>;
 }
 
 export function useCapacityTree({
@@ -32,6 +41,7 @@ export function useCapacityTree({
   const [instances, setInstances] = useState<DiskdbInstanceInfo[]>([]);
   const [usage, setUsage] = useState<CapacityUsageResponse | null>(null);
   const [scanStatus, setScanStatus] = useState<ScanStatusResponse | null>(null);
+  const [nodeDiskGroups, setNodeDiskGroups] = useState<Record<number, NodeDiskGroups>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const isActiveRef = useRef(true);
@@ -46,8 +56,6 @@ export function useCapacityTree({
         setLoading(true);
       }
 
-      // Fetch all three in parallel. If instances/usage fail (no
-      // diskdb deployed yet), we still want scan status.
       const [instancesResult, usageResult, scanResult] = await Promise.allSettled([
         listDiskdbInstances(),
         getDiskdbUsage(),
@@ -79,6 +87,42 @@ export function useCapacityTree({
     } finally {
       hasLoadedRef.current = true;
       setLoading(false);
+    }
+  }, [enabled]);
+
+  const fetchNodeDiskGroups = useCallback(async (nodeIds: number[]) => {
+    if (!enabled || nodeIds.length === 0) {
+      setNodeDiskGroups({});
+      return;
+    }
+    try {
+      const entries = await Promise.all(
+        nodeIds.map(async (nodeId) => {
+          try {
+            const dgs = await listNodeDiskGroups(nodeId);
+            const disksByDg: Record<number, DiskEntry[]> = {};
+            await Promise.all(
+              dgs.map(async (dg) => {
+                try {
+                  disksByDg[dg.id] = await listDisksInGroup(nodeId, dg.id);
+                } catch {
+                  disksByDg[dg.id] = [];
+                }
+              }),
+            );
+            return [nodeId, { diskGroups: dgs, disksByDg }] as const;
+          } catch {
+            return [nodeId, { diskGroups: [] as DiskGroupEntry[], disksByDg: {} as Record<number, DiskEntry[]> }] as const;
+          }
+        }),
+      );
+      const map: Record<number, NodeDiskGroups> = {};
+      for (const [id, val] of entries) {
+        map[id] = val;
+      }
+      setNodeDiskGroups(map);
+    } catch (err) {
+      console.error('Failed to fetch node disk-groups:', err);
     }
   }, [enabled]);
 
@@ -126,5 +170,7 @@ export function useCapacityTree({
     loading,
     error,
     refresh: fetchData,
+    nodeDiskGroups,
+    fetchNodeDiskGroups,
   };
 }

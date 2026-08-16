@@ -3,7 +3,7 @@
 // Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY, seedRackAndNode, stopNodeServer, freePort } from '../fixtures/consoleSetup';
+import { apiContext, seedRackAndNode, stopNodeServer, freePort } from '../fixtures/consoleSetup';
 
 test.describe('E2E-04 deploy server', () => {
   test('deploys and stops a real crow-kv-server through the UI', async ({ page, baseURL }) => {
@@ -24,7 +24,6 @@ test.describe('E2E-04 deploy server', () => {
       await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 4/i })).toBeVisible();
       await page.getByLabel('REST Port').fill(String(restPort));
       await page.getByLabel('RPC Port').fill(String(rpcPort));
-      await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
       await expect.poll(async () => {

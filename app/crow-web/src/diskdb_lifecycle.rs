@@ -17,16 +17,7 @@ use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct DeployDiskdbBody {
-    pub rest_port: u16,
     pub rpc_port: u16,
-    #[serde(default)]
-    pub binary: Option<String>,
-    #[serde(default)]
-    pub listen_addr: Option<String>,
-    #[serde(default)]
-    pub http_addr: Option<String>,
-    #[serde(default)]
-    pub config: Option<String>,
 }
 
 /// `POST /api/nodes/:id/diskdb/deploy` — spawn `crow-diskdb` on the
@@ -79,12 +70,7 @@ pub async fn http_deploy_diskdb(
 
     let req = DiskdbDeployRequest {
         server_id: format!("diskdb-{node_id}"),
-        rest_port: body.rest_port,
         rpc_port: body.rpc_port,
-        binary: body.binary.clone().map(std::path::PathBuf::from),
-        listen_addr: body.listen_addr.clone(),
-        http_addr: body.http_addr.clone(),
-        config: body.config.clone().map(std::path::PathBuf::from),
     };
 
     let workspace_dir = state
@@ -99,10 +85,10 @@ pub async fn http_deploy_diskdb(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
-        rest_port: Some(body.rest_port),
+        rest_port: None,
         rpc_port: Some(body.rpc_port),
         auto_start: true,
-        binary: body.binary.clone(),
+        binary: None,
         election_profile: None,
         pid: None,
         service_type: ServiceType::Diskdb,
@@ -168,12 +154,9 @@ pub async fn http_restart_diskdb(
         (entry, node)
     };
 
-    let rest_port = crate::mgmt::port_of(&entry.url)
-        .ok_or_else(|| err_500(format!("diskdb entry has malformed mgmt_url: {}", entry.url)))?;
     let rpc_port = entry
-        .grpc_url
-        .as_deref()
-        .and_then(crate::mgmt::port_of)
+        .rpc_port
+        .or_else(|| entry.grpc_url.as_deref().and_then(crate::mgmt::port_of))
         .ok_or_else(|| {
             err_500(format!(
                 "diskdb entry has malformed grpc_url: {:?}",
@@ -191,10 +174,7 @@ pub async fn http_restart_diskdb(
 
     let req = DiskdbDeployRequest {
         server_id: format!("diskdb-{node_id}"),
-        rest_port,
         rpc_port,
-        binary: entry.binary.clone().map(std::path::PathBuf::from),
-        ..Default::default()
     };
     let workspace_dir = state
         .prepare_node_workspace(node_id)
@@ -208,10 +188,10 @@ pub async fn http_restart_diskdb(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
-        rest_port: entry.rest_port,
-        rpc_port: entry.rpc_port,
+        rest_port: None,
+        rpc_port: Some(rpc_port),
         auto_start: entry.auto_start,
-        binary: entry.binary.clone(),
+        binary: None,
         election_profile: None,
         pid: None,
         service_type: ServiceType::Diskdb,

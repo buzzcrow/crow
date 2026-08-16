@@ -95,6 +95,11 @@ pub fn router(state: AppState) -> axum::Router {
             "/api/disks/:disk_id/status",
             axum::routing::put(diskdb::http_set_disk_status),
         )
+        // Disk-group status set.
+        .route(
+            "/api/disk-groups/:rack_id/:node_id/:dg_id/status",
+            axum::routing::put(diskdb::http_set_disk_group_status),
+        )
         // ── Diskdb runtime proxy (R77): /api/diskdb/* ───────────────
         .route("/api/diskdb/instances", get(diskdb::http_list_diskdb_instances))
         .route("/api/diskdb/usage", get(diskdb::http_diskdb_usage))

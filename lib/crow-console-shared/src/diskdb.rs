@@ -187,7 +187,7 @@ pub struct CompactBody {
 pub struct RebuildBody {
     pub disk_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub zone_index: Option<u32>,
+    pub zone_indices: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,16 +197,7 @@ pub struct SetStatusBody {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DeployDiskdbBody {
-    pub rest_port: u16,
     pub rpc_port: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub binary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub listen_addr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub http_addr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub config: Option<String>,
 }
 
 // ── ConsoleClient extension methods ───────────────────────────────
@@ -303,20 +294,23 @@ impl ConsoleClient {
         .await
     }
 
-    /// `POST /api/diskdb/rebuild` — rebuild zone bitmap.
+    /// `POST /api/diskdb/rebuild` — rebuild zone bitmap(s).
+    ///
+    /// `zone_indices`: `None` or empty = all zones; `Some([z, ...])` =
+    /// specific zones.
     ///
     /// # Errors
     /// Surfaces HTTP / decode failures as `Error::UpstreamRpc`.
     pub async fn diskdb_rebuild(
         &self,
         disk_id: &str,
-        zone_index: Option<u32>,
+        zone_indices: Option<Vec<u32>>,
     ) -> Result<RebuildResultResponse> {
         self.post_json(
             "/api/diskdb/rebuild",
             &RebuildBody {
                 disk_id: disk_id.to_string(),
-                zone_index,
+                zone_indices,
             },
         )
         .await
@@ -328,6 +322,27 @@ impl ConsoleClient {
     /// Surfaces HTTP / decode failures as `Error::UpstreamRpc`.
     pub async fn set_disk_status(&self, disk_id: &str, status: &str) -> Result<()> {
         let path = format!("/api/disks/{disk_id}/status");
+        self.put_json_no_response(
+            &path,
+            &SetStatusBody {
+                status: status.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// `PUT /api/disk-groups/:rack_id/:node_id/:dg_id/status` — set disk-group status.
+    ///
+    /// # Errors
+    /// Surfaces HTTP / decode failures as `Error::UpstreamRpc`.
+    pub async fn set_disk_group_status(
+        &self,
+        rack_id: u64,
+        node_id: u64,
+        dg_id: u64,
+        status: &str,
+    ) -> Result<()> {
+        let path = format!("/api/disk-groups/{rack_id}/{node_id}/{dg_id}/status");
         self.put_json_no_response(
             &path,
             &SetStatusBody {

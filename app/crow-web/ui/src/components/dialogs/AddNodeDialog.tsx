@@ -47,8 +47,7 @@ export function AddNodeDialog({
   const [enableCrowKV, setEnableCrowKV] = useState(true);
   const [restPort, setRestPort] = useState(defaultRestPort);
   const [rpcPort, setRpcPort] = useState(defaultRpcPort);
-  const [enableDiskdb, setEnableDiskdb] = useState(false);
-  const [diskdbRestPort, setDiskdbRestPort] = useState('29910');
+  const [enableDiskdb, setEnableDiskdb] = useState(true);
   const [diskdbRpcPort, setDiskdbRpcPort] = useState('29920');
   const [isLoading, setIsLoading] = useState(false);
   const { success, error } = useToast();
@@ -58,14 +57,13 @@ export function AddNodeDialog({
     setRestPort(defaultRestPort);
     setRpcPort(defaultRpcPort);
     setEnableCrowKV(true);
-    setEnableDiskdb(false);
-    setDiskdbRestPort('29910');
+    setEnableDiskdb(true);
     setDiskdbRpcPort('29920');
   }, [defaultRpcPort, defaultRestPort, isOpen]);
 
   const isPort = (value: string) => /^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536;
   const deployPortsValid = isPort(restPort) && isPort(rpcPort) && restPort !== rpcPort;
-  const diskdbPortsValid = isPort(diskdbRestPort) && isPort(diskdbRpcPort) && diskdbRestPort !== diskdbRpcPort;
+  const diskdbPortsValid = isPort(diskdbRpcPort);
 
   const handleSubmit = async () => {
     if (!rackId || !nodeId.trim() || !host.trim() || (enableCrowKV && !deployPortsValid) || (enableDiskdb && !diskdbPortsValid)) return;
@@ -92,7 +90,6 @@ export function AddNodeDialog({
 
       if (enableDiskdb) {
         await deployDiskdb(numericNodeId, {
-          rest_port: Number(diskdbRestPort),
           rpc_port: Number(diskdbRpcPort),
         });
       }
@@ -110,8 +107,7 @@ export function AddNodeDialog({
       setEnableCrowKV(true);
       setRestPort(defaultRestPort);
       setRpcPort(defaultRpcPort);
-      setEnableDiskdb(false);
-      setDiskdbRestPort('29910');
+      setEnableDiskdb(true);
       setDiskdbRpcPort('29920');
       onClose();
       await onSuccess?.();
@@ -132,8 +128,7 @@ export function AddNodeDialog({
     setEnableCrowKV(true);
     setRestPort(defaultRestPort);
     setRpcPort(defaultRpcPort);
-    setEnableDiskdb(false);
-    setDiskdbRestPort('29910');
+    setEnableDiskdb(true);
     setDiskdbRpcPort('29920');
     onClose();
   };
@@ -228,20 +223,12 @@ export function AddNodeDialog({
           <span>Enable DiskDB on this node</span>
         </label>
         {enableDiskdb && (
-          <>
-            <Input
-              label="DiskDB REST Port"
-              inputMode="numeric"
-              value={diskdbRestPort}
-              onChange={(e) => setDiskdbRestPort(e.target.value)}
-            />
-            <Input
-              label="DiskDB RPC Port"
-              inputMode="numeric"
-              value={diskdbRpcPort}
-              onChange={(e) => setDiskdbRpcPort(e.target.value)}
-            />
-          </>
+          <Input
+            label="DiskDB RPC Port"
+            inputMode="numeric"
+            value={diskdbRpcPort}
+            onChange={(e) => setDiskdbRpcPort(e.target.value)}
+          />
         )}
       </div>
     </Dialog>

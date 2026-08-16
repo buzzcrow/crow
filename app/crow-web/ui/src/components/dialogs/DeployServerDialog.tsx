@@ -31,7 +31,6 @@ export function DeployServerDialog({
 }: DeployServerDialogProps) {
   const [restPort, setRestPort] = useState(defaultRestPort);
   const [rpcPort, setRpcPort] = useState(defaultRpcPort);
-  const [binary, setBinary] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
   const { success, error } = useToast();
@@ -40,7 +39,6 @@ export function DeployServerDialog({
     if (isOpen && !wasOpenRef.current) {
       setRestPort(defaultRestPort);
       setRpcPort(defaultRpcPort);
-      setBinary('');
     }
     wasOpenRef.current = isOpen;
   }, [defaultRpcPort, defaultRestPort, isOpen, nodeId]);
@@ -59,7 +57,6 @@ export function DeployServerDialog({
       await deployServer(nodeId, {
         rest_port: deployedPorts.restPort,
         rpc_port: deployedPorts.rpcPort,
-        ...(binary.trim() ? { binary: binary.trim() } : {}),
       });
       success(`Crow Storage deployed on ${nodeId}`);
       onClose();
@@ -96,12 +93,6 @@ export function DeployServerDialog({
           inputMode="numeric"
           value={rpcPort}
           onChange={(e) => setRpcPort(e.target.value)}
-        />
-        <Input
-          label="Binary Path (optional)"
-          placeholder="leave empty to use $CROW_KV_SERVER_BIN"
-          value={binary}
-          onChange={(e) => setBinary(e.target.value)}
         />
       </div>
     </Dialog>

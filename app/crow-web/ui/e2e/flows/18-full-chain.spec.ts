@@ -3,7 +3,7 @@
 // Baseline: 2.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, clusterInit, DEFAULT_SERVER_BINARY, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-18 full chain', () => {
   test('creates rack, node, server, store, group, and replica entirely through the UI', async ({ page, baseURL }) => {
@@ -31,6 +31,7 @@ test.describe('E2E-18 full chain', () => {
       await page.getByLabel('Node ID').fill('181');
       await page.getByLabel('Host').fill('127.0.0.1');
       await page.getByLabel('Enable Crow Storage on this node').uncheck();
+      await page.getByLabel('Enable DiskDB on this node').uncheck();
       await page.getByRole('button', { name: /create node/i }).click();
 
       // 3. Add node n18b to r18 via rack context menu.
@@ -41,6 +42,7 @@ test.describe('E2E-18 full chain', () => {
       await page.getByLabel('Node ID').fill('182');
       await page.getByLabel('Host').fill('127.0.0.1');
       await page.getByLabel('Enable Crow Storage on this node').uncheck();
+      await page.getByLabel('Enable DiskDB on this node').uncheck();
       await page.getByRole('button', { name: /create node/i }).click();
 
       // Ensure rack r18 is expanded so its nodes are visible. The tree may
@@ -56,7 +58,6 @@ test.describe('E2E-18 full chain', () => {
       await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 181/i })).toBeVisible();
       await page.getByLabel('REST Port').fill('9933');
       await page.getByLabel('RPC Port').fill('9943');
-      await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
       // 5. Deploy Crow Storage Server on n18b.
@@ -65,7 +66,6 @@ test.describe('E2E-18 full chain', () => {
       await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 182/i })).toBeVisible();
       await page.getByLabel('REST Port').fill('9934');
       await page.getByLabel('RPC Port').fill('9944');
-      await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
       // Verify both servers are running via API before proceeding.

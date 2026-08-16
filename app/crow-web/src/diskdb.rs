@@ -434,6 +434,10 @@ pub async fn http_diskdb_compact(
 
 /// `POST /api/diskdb/rebuild` — `RebuildZoneBitmap`.
 ///
+/// Accepts `zone_indices` (array) for multiple zones or empty/absent
+/// for all zones. Calls gRPC rebuild once per zone (or once with
+/// `u32::MAX` for all).
+///
 /// # Errors
 /// Returns `400` if `disk_id` is missing, `502` on gRPC errors.
 pub async fn http_diskdb_rebuild(
@@ -442,12 +446,32 @@ pub async fn http_diskdb_rebuild(
 ) -> Result<Json<RebuildResultResponse>, (StatusCode, Json<ErrorBody>)> {
     let disk_id = parse_disk_id(&body.disk_id).ok_or_else(|| err_400("invalid or missing disk_id"))?;
     let client = get_diskdb_client(&state).await?;
-    let zone_index = body.zone_index.unwrap_or(u32::MAX);
-    let resp = client
-        .rebuild_zone_bitmap(disk_id, zone_index)
-        .await
-        .map_err(|e| err_502(format!("rebuild_zone_bitmap: {e}")))?;
-    Ok(Json(RebuildResultResponse::from(resp)))
+    let zones = body.zone_indices.unwrap_or_default();
+    if zones.is_empty() {
+        let resp = client
+            .rebuild_zone_bitmap(disk_id, u32::MAX)
+            .await
+            .map_err(|e| err_502(format!("rebuild_zone_bitmap: {e}")))?;
+        Ok(Json(RebuildResultResponse::from(resp)))
+    } else {
+        let mut total_rebuilt = 0u32;
+        let mut total_busy = 0u64;
+        let mut total_free = 0u64;
+        for z in zones {
+            let resp = client
+                .rebuild_zone_bitmap(disk_id, z)
+                .await
+                .map_err(|e| err_502(format!("rebuild_zone_bitmap zone {z}: {e}")))?;
+            total_rebuilt += resp.rebuilt_zone_count;
+            total_busy += resp.total_busy_units;
+            total_free += resp.total_free_units;
+        }
+        Ok(Json(RebuildResultResponse {
+            rebuilt_zone_count: total_rebuilt,
+            total_busy_units: total_busy,
+            total_free_units: total_free,
+        }))
+    }
 }
 
 /// `PUT /api/disks/:disk_id/status` — set a disk's `HwStatus` via
@@ -488,6 +512,30 @@ pub async fn http_set_disk_status(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /api/disk-groups/:rack_id/:node_id/:dg_id/status` — set a
+/// disk-group's `HwStatus` via `HardwareClient.set_disk_group_status`.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `400` on invalid status, `502` on group-0 write failure.
+pub async fn http_set_disk_group_status(
+    State(state): State<AppState>,
+    Path((rack_id, node_id, dg_id)): Path<(u64, u64, u64)>,
+    Json(body): Json<SetStatusBody>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let status =
+        parse_hw_status(&body.status).ok_or_else(|| err_400(format!("invalid status: {}", body.status)))?;
+    let hw = build_hardware_client(&state)
+        .await
+        .ok_or_else(|| err_502("no group-0 endpoint; cluster not initialized"))?;
+    hw.set_disk_group_status(rack_id, node_id, dg_id, status)
+        .await
+        .map_err(|e| err_502(format!("set_disk_group_status: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── request/response DTOs ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -513,7 +561,7 @@ pub struct CompactBody {
 pub struct RebuildBody {
     pub disk_id: String,
     #[serde(default)]
-    pub zone_index: Option<u32>,
+    pub zone_indices: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Deserialize)]

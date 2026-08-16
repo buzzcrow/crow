@@ -388,6 +388,34 @@ async fn wait_for_ready(mgmt_url: &str, timeout: Duration) -> Result<()> {
     })
 }
 
+/// Poll `GET /health` until it returns HTTP 200, without requiring
+/// the response body to match `HealthResponse`. Used for diskdb,
+/// whose `/health` endpoint returns a different JSON shape
+/// (`{"phase":"up","degraded":true,"ready":true}`).
+async fn wait_for_http_ok(url: &str, timeout: Duration) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| Error::UpstreamRpc {
+            node_id: url.to_string(),
+            status: format!("client build failed: {e}"),
+        })?;
+    let health_url = format!("{url}/health");
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(Error::UpstreamRpc {
+        node_id: url.to_string(),
+        status: "did not become healthy within timeout".into(),
+    })
+}
+
 /// Poll a server's `/topology` until `(store_id, group_id)` reports a
 /// non-zero `leader_id`, meaning the per-group Paxos election driver has
 /// elected a leader.
@@ -519,23 +547,15 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
 
 // ── DiskDB deploy (R77) ───────────────────────────────────────────
 
-/// Inputs for a diskdb deploy (R77). Simpler than `DeployRequest`
-/// — diskdb only needs `--config`, `--listen-addr`, `--http-addr`.
+/// Inputs for a diskdb deploy (R77). The binary and config file are
+/// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
+/// and `<workspace>/conf/crow_diskdb_config.toml`); the deploy only
+/// needs the gRPC port to override `--listen-addr`. The HTTP port is
+/// read from the config file for readiness checking.
 #[derive(Debug, Clone, Default)]
 pub struct DiskdbDeployRequest {
     pub server_id: String,
-    pub rest_port: u16,
     pub rpc_port: u16,
-    pub binary: Option<PathBuf>,
-    /// Optional `--listen-addr` override (gRPC). Defaults to
-    /// `node.host:rpc_port`.
-    pub listen_addr: Option<String>,
-    /// Optional `--http-addr` override. Defaults to
-    /// `node.host:rest_port`.
-    pub http_addr: Option<String>,
-    /// Optional `--config` path. Defaults to an auto-generated
-    /// minimal config in the workspace.
-    pub config: Option<PathBuf>,
 }
 
 /// Resolve the path to the `crow-diskdb` binary.
@@ -570,27 +590,93 @@ pub fn crow_diskdb_bin() -> Option<PathBuf> {
     None
 }
 
-/// Resolve the `--config` path for a diskdb deploy. When `req.config`
-/// is set, it is used verbatim. Otherwise a minimal config is written
-/// to `<workspace>/conf/crow_diskdb_config.toml`.
-fn resolve_diskdb_config_path(req: &DiskdbDeployRequest, workspace_dir: &std::path::Path) -> Result<PathBuf> {
-    if let Some(config) = &req.config {
-        return Ok(config.clone());
-    }
+/// Resolve the `--config` path for a diskdb deploy. Uses the
+/// pre-copied config at `<workspace>/conf/crow_diskdb_config.toml`.
+/// Falls back to a minimal auto-generated config with all required
+/// sections if the file is missing. The auto-generated config sets
+/// `http_listen_addr` to `0.0.0.0:{rpc_port + 1}` so each instance
+/// gets a unique HTTP port.
+fn resolve_diskdb_config_path(workspace_dir: &std::path::Path, rpc_port: u16) -> Result<PathBuf> {
     let conf = workspace_dir.join("conf");
     std::fs::create_dir_all(&conf).map_err(Error::Io)?;
     let path = conf.join("crow_diskdb_config.toml");
-    std::fs::write(
-        &path,
-        "# auto-generated minimal config; all fields use defaults\n",
-    )
-    .map_err(Error::Io)?;
+    if path.exists() {
+        return Ok(path);
+    }
+    let http_port = rpc_port + 1;
+    // Minimal valid config — all sections present with default values
+    // matching `DdbConfig::default()`. The diskdb binary requires
+    // [server], [storage], [heartbeat], [persistence], [scanner],
+    // [sync], [reporting], [notify].
+    let config = format!(
+        "[server]\n\
+         listen_addr = \"0.0.0.0:{rpc_port}\"\n\
+         http_listen_addr = \"0.0.0.0:{http_port}\"\n\
+         kv_server_mgmt_seeds = [\"http://127.0.0.1:9910\"]\n\
+         [storage]\n\
+         zone_size_bytes = 17179869184\n\
+         block_size_bytes = 1048576\n\
+         allocate_granularity = 1048576\n\
+         zone_rotate_count = 4\n\
+         cas_retry_limit = 100\n\
+         validate_owner_on_free = false\n\
+         [heartbeat]\n\
+         interval_secs = 10\n\
+         miss_threshold = 3\n\
+         temp_failure_timeout_secs = 900\n\
+         [persistence]\n\
+         free_batch_enabled = false\n\
+         free_flush_max_batch = 256\n\
+         compaction_cadence_secs = 300\n\
+         snapshot_compaction_threshold = 4096\n\
+         load_concurrency = 16\n\
+         [scanner]\n\
+         scan_interval_secs = 600\n\
+         reverify_delay_ms = 1000\n\
+         [scanner.ghost]\n\
+         detect = true\n\
+         auto_correct = false\n\
+         [scanner.integrity]\n\
+         verify = true\n\
+         detect_owner_mismatch = false\n\
+         [sync]\n\
+         group0_store_id = 0\n\
+         group0_group_id = 0\n\
+         sync_interval_secs = 10\n\
+         [reporting]\n\
+         interval_secs = 10\n\
+         [notify]\n\
+         notify_enabled = false\n",
+    );
+    std::fs::write(&path, config).map_err(Error::Io)?;
     Ok(path)
 }
 
-/// Spawn `crow-diskdb` locally. The binary takes `--config`,
-/// `--listen-addr`, `--http-addr`. A minimal config is written to
-/// the workspace `conf/` dir if none is supplied.
+/// Minimal shape for extracting `server.http_listen_addr` from a
+/// diskdb config TOML file.
+#[derive(serde::Deserialize)]
+struct DiskdbConfigHttpAddr {
+    server: Option<DiskdbConfigServerSection>,
+}
+
+#[derive(serde::Deserialize)]
+struct DiskdbConfigServerSection {
+    http_listen_addr: Option<String>,
+}
+
+/// Extract the HTTP listen address from a diskdb config TOML file.
+/// Returns `None` if the file cannot be parsed or the field is absent.
+fn http_listen_addr_from_config(config_path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let parsed: DiskdbConfigHttpAddr = toml::from_str(&content).ok()?;
+    parsed.server?.http_listen_addr
+}
+
+/// Spawn `crow-diskdb` locally. The binary and config file are
+/// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
+/// and `<workspace>/conf/crow_diskdb_config.toml`). The deploy only
+/// overrides `--listen-addr` with the gRPC port; the HTTP port comes
+/// from the config file.
 ///
 /// # Errors
 /// Returns `Error::Validation` for bad inputs and `Error::Io` for
@@ -600,46 +686,44 @@ pub async fn deploy_diskdb_local(
     node: &NodeEntry,
     workspace_dir: &std::path::Path,
 ) -> Result<DeployedServer> {
-    if req.rest_port == 0 || req.rpc_port == 0 {
+    if req.rpc_port == 0 {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "rest_port and rpc_port must be non-zero".into(),
-        });
-    }
-    if req.rest_port == req.rpc_port {
-        return Err(Error::Validation {
-            field: "port".into(),
-            message: "rest_port and rpc_port must differ".into(),
+            message: "rpc_port must be non-zero".into(),
         });
     }
 
-    let binary = match &req.binary {
-        Some(p) => p.clone(),
-        None => crow_diskdb_bin().ok_or_else(|| Error::Validation {
+    // Use the pre-copied binary in the workspace bin/ dir, falling
+    // back to a PATH/env search if not yet staged.
+    let staged = workspace_dir.join("bin").join("crow-diskdb");
+    let launch_binary = if staged.exists() {
+        staged
+    } else {
+        let binary = crow_diskdb_bin().ok_or_else(|| Error::Validation {
             field: "binary".into(),
             message: "could not locate crow-diskdb binary; set $CROW_DISKDB_BIN".into(),
-        })?,
+        })?;
+        stage_server_binary(&binary, workspace_dir)?
     };
-    let launch_binary = stage_server_binary(&binary, workspace_dir)?;
 
-    let config_path = resolve_diskdb_config_path(req, workspace_dir)?;
-    let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
+    let config_path = resolve_diskdb_config_path(workspace_dir, req.rpc_port)?;
     let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+
+    // Read the HTTP listen address from the config file for readiness
+    // checking. If absent, the diskdb binary uses its default HTTP
+    // port (DISKDB_HTTP_BASE = 9942). Replace 0.0.0.0 with the node
+    // host so the readiness check can actually connect.
+    let http_addr = http_listen_addr_from_config(&config_path);
+    let mgmt_url = match &http_addr {
+        Some(addr) if addr.starts_with("http") => addr.replace("0.0.0.0", &node.host),
+        Some(addr) => format!("http://{}", addr.replace("0.0.0.0", &node.host)),
+        None => format!("http://{}:{}", node.host, crow_protocol::DISKDB_HTTP_BASE),
+    };
 
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--config").arg(&config_path);
-    if let Some(listen_addr) = &req.listen_addr {
-        cmd.arg("--listen-addr").arg(listen_addr);
-    } else {
-        cmd.arg("--listen-addr")
-            .arg(format!("{}:{}", node.host, req.rpc_port));
-    }
-    if let Some(http_addr) = &req.http_addr {
-        cmd.arg("--http-addr").arg(http_addr);
-    } else {
-        cmd.arg("--http-addr")
-            .arg(format!("{}:{}", node.host, req.rest_port));
-    }
+    cmd.arg("--listen-addr")
+        .arg(format!("{}:{}", node.host, req.rpc_port));
     cmd.kill_on_drop(false);
     let log_dir = workspace_dir.join("log");
     let tmp_path = log_dir.join("crow-diskdb.stdout.log");
@@ -661,7 +745,7 @@ pub async fn deploy_diskdb_local(
     let _ = std::fs::rename(&from, &to);
     // Detach: drop the Child handle so the process is not killed.
     std::mem::forget(child);
-    wait_for_ready(&mgmt_url, Duration::from_secs(5)).await?;
+    wait_for_http_ok(&mgmt_url, Duration::from_secs(15)).await?;
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
         mgmt_url,
