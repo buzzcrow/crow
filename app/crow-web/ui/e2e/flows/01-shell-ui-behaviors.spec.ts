@@ -1,9 +1,21 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
-// Baseline: 1.6s (2026-07-16)
+// Baseline: 2.5s (2026-08-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createRack, createStore, createNode, deployNodeServer, freePort, stopNodeServer } from '../fixtures/consoleSetup';
+import {
+  addGroup,
+  apiContext,
+  createNode,
+  createRack,
+  createStore,
+  deployNodeServer,
+  freePort,
+  resetAll,
+  seedRackAndNode,
+  stopNodeServer,
+  waitForLeader,
+} from '../fixtures/consoleSetup';
 
 function nextNumericId(values: Array<string | number>): string {
   const max = values.reduce<number>((acc, value) => {
@@ -14,8 +26,9 @@ function nextNumericId(values: Array<string | number>): string {
   return String(max + 1);
 }
 
-test.describe('E2E-20 UI behaviors', () => {
-  test('covers create dialog defaults and eligible candidate lists', async ({ page, baseURL }) => {
+test.describe('shell · UI behaviors', () => {
+  test('dialog defaults, cancel, and tree interactions', async ({ page, baseURL }) => {
+    // --- create dialog defaults and eligible candidate lists ---
     // Batch independent API calls to reduce total round-trip time under load.
     await Promise.all([
       createRack(baseURL!, { id: 201, name: 'Rack Twenty A' }),
@@ -115,9 +128,8 @@ test.describe('E2E-20 UI behaviors', () => {
         stopNodeServer(baseURL!, 203),
       ]);
     }
-  });
 
-  test('dialog cancel does not create entity', async ({ page, baseURL }) => {
+    // --- dialog cancel does not create entity ---
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
 
@@ -129,21 +141,20 @@ test.describe('E2E-20 UI behaviors', () => {
     await dialog.getByRole('button', { name: 'Cancel' }).click();
 
     await expect(dialog).toHaveCount(0);
-    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-    await expect(aside.getByText('r20cancel')).toHaveCount(0);
+    const cancelAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+    await expect(cancelAside.getByText('r20cancel')).toHaveCount(0);
 
-    const api = await apiContext(baseURL!);
+    const cancelApi = await apiContext(baseURL!);
     try {
-      const resp = await api.get('/api/racks');
+      const resp = await cancelApi.get('/api/racks');
       expect(resp.ok()).toBeTruthy();
       const racks = await resp.json();
       expect(racks).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'r20cancel' })]));
     } finally {
-      await api.dispose();
+      await cancelApi.dispose();
     }
-  });
 
-  test('covers tree chevron vs text click behavior', async ({ page, baseURL }) => {
+    // --- tree chevron vs text click behavior ---
     await createRack(baseURL!, { id: 211, name: 'Rack Twenty One A' });
     await createRack(baseURL!, { id: 212, name: 'Rack Twenty One B' });
     await createRack(baseURL!, { id: 213, name: 'Rack Twenty One C' });
@@ -167,5 +178,88 @@ test.describe('E2E-20 UI behaviors', () => {
     // Text click selects the node
     await node21c.getByRole('button', { name: 'N-213' }).click();
     await expect(node21c).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('sidebar filter, header refresh, and health pill states', async ({ page, baseURL }) => {
+    // --- sidebar filter narrows tree and clearing restores all items ---
+    await resetAll(baseURL!);
+    await createRack(baseURL!, { id: 341, name: 'Alpha' });
+    await createRack(baseURL!, { id: 342, name: 'Beta' });
+    await createRack(baseURL!, { id: 343, name: 'Gamma' });
+    await createNode(baseURL!, { id: 341, rack_id: 341 });
+    await createNode(baseURL!, { id: 342, rack_id: 342 });
+    await createNode(baseURL!, { id: 343, rack_id: 343 });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Physical' }).click();
+
+    const filterAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+    const rackA = page.getByRole('treeitem').filter({ hasText: 'R-341' });
+    const rackB = page.getByRole('treeitem').filter({ hasText: 'R-342' });
+    const rackC = page.getByRole('treeitem').filter({ hasText: 'R-343' });
+
+    // All visible initially
+    await expect(rackA).toBeVisible({ timeout: 3_000 });
+    await expect(rackB).toBeVisible();
+    await expect(rackC).toBeVisible();
+
+    // Type filter "alpha"
+    await filterAside.getByPlaceholder('Filter...').fill('alpha');
+    await expect(rackA).toBeVisible({ timeout: 3_000 });
+    await expect(rackB).toHaveCount(0);
+    await expect(rackC).toHaveCount(0);
+
+    // Clear filter
+    await filterAside.getByPlaceholder('Filter...').fill('');
+    await expect(rackA).toBeVisible({ timeout: 3_000 });
+    await expect(rackB).toBeVisible();
+    await expect(rackC).toBeVisible();
+
+    // --- header refresh picks up backend changes without page reload ---
+    await resetAll(baseURL!);
+    await createRack(baseURL!, { id: 351, name: 'r35a' });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Physical' }).click();
+    const refreshAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+
+    // Verify initial rack
+    await expect(refreshAside.getByText('R-351')).toBeVisible({ timeout: 3_000 });
+
+    // Add a new rack via API (backend change)
+    await createRack(baseURL!, { id: 352, name: 'r35b' });
+
+    // Click Refresh button
+    await page.getByRole('button', { name: 'Refresh' }).click();
+
+    // New rack should appear without page reload
+    await expect(refreshAside.getByText('R-352')).toBeVisible({ timeout: 3_000 });
+    await expect(refreshAside.getByText('R-351')).toBeVisible();
+
+    // --- health pill shows Unknown initially and Healthy after group creation ---
+    await resetAll(baseURL!);
+    await seedRackAndNode(baseURL!, 36, 36);
+    await deployNodeServer(baseURL!, 36, freePort(), freePort());
+
+    try {
+      await page.goto('/');
+
+      // With no stores/groups, health should be Unknown
+      const healthPill = page.locator('header').getByText(/Unknown|Healthy|Degraded|Failed/);
+      await expect(healthPill).toContainText('Unknown', { timeout: 3_000 });
+
+      // Create store + group with leader
+      await createStore(baseURL!, 360, [36]);
+      await addGroup(baseURL!, 360, 3600, 36000, [36]);
+      await waitForLeader(baseURL!, 360, 3600);
+
+      // Click refresh to pick up the new state
+      await page.getByRole('button', { name: 'Refresh' }).click();
+
+      // Health should now be Healthy
+      await expect(healthPill).toContainText('Healthy', { timeout: 10_000 });
+    } finally {
+      await stopNodeServer(baseURL!, 36);
+    }
   });
 });

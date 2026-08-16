@@ -1,37 +1,78 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
-// Baseline: 2s (2026-08-15)
+// Baseline: 2s (2026-08-16)
 
-import { test, expect } from '../fixtures/realBackend';
+import { test, expect, consoleBaseURL } from '../fixtures/realBackend';
 import { createRack, createNode, deployNodeServer, stopNodeServer, freePort } from '../fixtures/consoleSetup';
 
-test.describe('E2E-48 canvas fit & pan', () => {
-  test('Fit All button is visible in empty state and after data loads', async ({ page, baseURL }) => {
+// One rack/node/server shared by every test in this file so the canvas
+// has content in Physical and Capacity views (IDs reused from the former
+// 48-canvas-fit-pan spec so they stay unique).
+const apiBase = consoleBaseURL();
+
+test.describe('canvas · fit + pan', () => {
+  test.beforeAll(async () => {
+    try {
+      await createRack(apiBase, { id: 480, name: 'Rack 480' });
+      await createNode(apiBase, { id: 480, rack_id: 480 });
+      await deployNodeServer(apiBase, 480, freePort(), freePort());
+    } catch (err) {
+      await stopNodeServer(apiBase, 480);
+      throw err;
+    }
+  });
+
+  test.afterAll(async () => {
+    await stopNodeServer(apiBase, 480);
+  });
+
+  test('Fit All is available in every view and autofit centers nodes on load', async ({ page }) => {
+    // --- Fit All button visible/enabled in Physical view with content ---
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
 
-    // Fit All button must be visible even when the canvas is empty.
     const fitBtn = page.getByTestId('fit-all-btn');
     await expect(fitBtn).toBeVisible();
     await expect(fitBtn).toBeEnabled();
-
-    // Create a rack + node + deploy server so the canvas has content.
-    await createRack(baseURL!, { id: 480, name: 'Rack 480' });
-    await createNode(baseURL!, { id: 480, rack_id: 480 });
-    await deployNodeServer(baseURL!, 480, freePort(), freePort());
 
     // Wait for the canvas to render at least one react-flow node.
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
     await expect(fitBtn).toBeVisible();
 
-    await stopNodeServer(baseURL!, 480);
+    // --- Fit All button visible in KV Cluster view (empty canvas) ---
+    await page.getByRole('button', { name: 'KV Cluster' }).click();
+    await expect(page.getByTestId('fit-all-btn')).toBeVisible();
+
+    // --- Fit All button visible in Capacity view ---
+    await page.getByRole('button', { name: 'Capacity' }).click();
+    await expect(page.getByTestId('fit-all-btn')).toBeVisible();
+
+    // --- autofit centers nodes on initial load ---
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Physical' }).click();
+
+    // Wait for nodes and the auto-fit to settle. The canvas should
+    // center the nodes in the viewport — verify a node is within the
+    // visible area (not scrolled off-screen).
+    await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
+
+    // Verify at least one node is within the viewport bounds.
+    const nodeBox = await page.locator('.react-flow__node').first().boundingBox();
+    const canvasBox = await page.locator('.react-flow').boundingBox();
+    expect(nodeBox).not.toBeNull();
+    expect(canvasBox).not.toBeNull();
+    if (nodeBox && canvasBox) {
+      // Node center should be within the canvas bounds (with some margin).
+      const nodeCenterX = nodeBox.x + nodeBox.width / 2;
+      const nodeCenterY = nodeBox.y + nodeBox.height / 2;
+      expect(nodeCenterX).toBeGreaterThan(canvasBox.x);
+      expect(nodeCenterX).toBeLessThan(canvasBox.x + canvasBox.width);
+      expect(nodeCenterY).toBeGreaterThan(canvasBox.y);
+      expect(nodeCenterY).toBeLessThan(canvasBox.y + canvasBox.height);
+    }
   });
 
-  test('clicking Fit All resets the viewport', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 481, name: 'Rack 481' });
-    await createNode(baseURL!, { id: 481, rack_id: 481 });
-    await deployNodeServer(baseURL!, 481, freePort(), freePort());
-
+  test('clicking Fit All resets the viewport after panning', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
 
@@ -57,67 +98,16 @@ test.describe('E2E-48 canvas fit & pan', () => {
     await expect.poll(async () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
     }, { timeout: 3_000, intervals: [100] }).not.toEqual(transformAfterPan);
-
-    await stopNodeServer(baseURL!, 481);
   });
 
-  test('autofit centers nodes on initial load', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 482, name: 'Rack 482' });
-    await createNode(baseURL!, { id: 482, rack_id: 482 });
-    await deployNodeServer(baseURL!, 482, freePort(), freePort());
-
-    await page.goto('/');
-    await page.getByRole('button', { name: 'Physical' }).click();
-
-    // Wait for nodes and the auto-fit to settle. The canvas should
-    // center the nodes in the viewport — verify a node is within the
-    // visible area (not scrolled off-screen).
-    await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
-
-    // Verify at least one node is within the viewport bounds.
-    const nodeBox = await page.locator('.react-flow__node').first().boundingBox();
-    const canvasBox = await page.locator('.react-flow').boundingBox();
-    expect(nodeBox).not.toBeNull();
-    expect(canvasBox).not.toBeNull();
-    if (nodeBox && canvasBox) {
-      // Node center should be within the canvas bounds (with some margin).
-      const nodeCenterX = nodeBox.x + nodeBox.width / 2;
-      const nodeCenterY = nodeBox.y + nodeBox.height / 2;
-      expect(nodeCenterX).toBeGreaterThan(canvasBox.x);
-      expect(nodeCenterX).toBeLessThan(canvasBox.x + canvasBox.width);
-      expect(nodeCenterY).toBeGreaterThan(canvasBox.y);
-      expect(nodeCenterY).toBeLessThan(canvasBox.y + canvasBox.height);
-    }
-
-    await stopNodeServer(baseURL!, 482);
-  });
-
-  test('Fit All button visible in KV Cluster view', async ({ page, baseURL }) => {
-    await page.goto('/');
-    await page.getByRole('button', { name: 'KV Cluster' }).click();
-    const fitBtn = page.getByTestId('fit-all-btn');
-    await expect(fitBtn).toBeVisible();
-  });
-
-  test('Fit All button visible in Capacity view', async ({ page, baseURL }) => {
-    await page.goto('/');
-    await page.getByRole('button', { name: 'Capacity' }).click();
-    const fitBtn = page.getByTestId('fit-all-btn');
-    await expect(fitBtn).toBeVisible();
-  });
-
-  test('switching views always fits to window, not stale viewport', async ({ page, baseURL }) => {
-    // Set up topology with a rack + node + deployed server so Physical
-    // and Capacity views have nodes to render.
-    await createRack(baseURL!, { id: 483, name: 'Rack 483' });
-    await createNode(baseURL!, { id: 483, rack_id: 483 });
-    await deployNodeServer(baseURL!, 483, freePort(), freePort());
-
+  test('switching views always fits to window, not the stale viewport', async ({ page }) => {
+    // --- Physical -> KV Cluster -> Physical ---
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
 
     const viewport = page.locator('.react-flow__viewport');
+    const canvas = page.locator('.react-flow');
 
     // Wait for the initial auto-fit to settle, capturing the fitted transform.
     await page.waitForTimeout(500);
@@ -125,7 +115,6 @@ test.describe('E2E-48 canvas fit & pan', () => {
     expect(fittedTransform).toBeTruthy();
 
     // Pan the canvas away from the fitted position.
-    const canvas = page.locator('.react-flow');
     await canvas.hover({ position: { x: 200, y: 200 } });
     await page.mouse.down();
     await page.mouse.move(400, 400);
@@ -152,20 +141,10 @@ test.describe('E2E-48 canvas fit & pan', () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
     }, { timeout: 3_000, intervals: [100] }).not.toEqual(pannedTransform);
 
-    await stopNodeServer(baseURL!, 483);
-  });
-
-  test('switching Physical -> Capacity -> Physical fits each time', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 484, name: 'Rack 484' });
-    await createNode(baseURL!, { id: 484, rack_id: 484 });
-    await deployNodeServer(baseURL!, 484, freePort(), freePort());
-
+    // --- Physical -> Capacity -> Physical ---
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
-
-    const viewport = page.locator('.react-flow__viewport');
-    const canvas = page.locator('.react-flow');
 
     // Pan in Physical view.
     await canvas.hover({ position: { x: 200, y: 200 } });
@@ -196,7 +175,5 @@ test.describe('E2E-48 canvas fit & pan', () => {
     await expect.poll(async () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
     }, { timeout: 3_000, intervals: [100] }).not.toEqual(physicalPanned);
-
-    await stopNodeServer(baseURL!, 484);
   });
 });
