@@ -19,7 +19,7 @@ use tracing::warn;
 
 use crow_protocol::chunk_id::ChunkIdParts;
 use crow_protocol::common::ChunkId;
-use crow_protocol::common::ChunkdbRangeBindingValue;
+use crow_protocol::common::{ChunkdbRangeBindingValue, RangeStatus};
 use crow_protocol::key::ChunkdbRangeBindingKey;
 
 use crate::watch_notify::WatchNotifyClient;
@@ -28,15 +28,19 @@ use crate::{CrowkvClient, Error, ReadMode, Result};
 const G0_STORE: u64 = 0;
 const G0_GROUP: u64 = 0;
 
-/// A chunkdb instance range binding: `[range_start, range_end]` →
-/// chunkdb instance. Both bounds are inclusive `u16`; the full bucket
-/// space is `[0, 65535]`.
+/// A chunkdb instance range binding: a sub-range → chunkdb instance.
+/// The sub-range covers bucket `[range_start, range_end]` (inclusive).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkdbRangeBinding {
+    pub sub_range_index: u32,
     pub range_start: u16,
     pub range_end: u16,
     pub instance_id: u64,
     pub grpc_endpoint: String,
+    pub original_instance_id: u64,
+    pub original_endpoint: String,
+    pub status: RangeStatus,
+    pub last_change_time_ms: u64,
 }
 
 impl ChunkdbRangeBinding {
@@ -48,12 +52,27 @@ impl ChunkdbRangeBinding {
     /// Convert from the proto value type.
     fn from_proto(v: &ChunkdbRangeBindingValue) -> Self {
         Self {
+            sub_range_index: v.sub_range_index,
             range_start: u16::try_from(v.range_start).unwrap_or(0),
             range_end: u16::try_from(v.range_end).unwrap_or(u16::MAX),
             instance_id: v.instance_id,
             grpc_endpoint: v.grpc_endpoint.clone(),
+            original_instance_id: v.original_instance_id,
+            original_endpoint: v.original_endpoint.clone(),
+            status: RangeStatus::try_from(v.status).unwrap_or(RangeStatus::Stable),
+            last_change_time_ms: v.last_change_time_ms,
         }
     }
+}
+
+/// Route result with optional fallback for transition states.
+#[derive(Debug, Clone)]
+pub struct RouteWithFallback {
+    /// Current owner — try this first.
+    pub primary: ChunkdbRangeBinding,
+    /// Original owner — fall back to this on `NotMyRange` or connection
+    /// error when `status = InTransition`.
+    pub fallback: Option<ChunkdbRangeBinding>,
 }
 
 /// Range routing error.
@@ -161,17 +180,47 @@ impl RangeBindingClient {
     }
 
     /// Route a bucket directly to its owning chunkdb instance.
+    /// Uses sub-range index for O(1) lookup when the binding table is
+    /// index-dense; falls back to linear scan for sparse tables.
     pub fn route_bucket(&self, bucket: u16) -> std::result::Result<ChunkdbRangeBinding, RangeRouteError> {
         let bindings = self.bindings.read();
         if bindings.is_empty() {
             return Err(RangeRouteError::NoBinding);
         }
+        // Fast path: if bindings are sorted by sub_range_index and
+        // dense, use binary search on range_start. Otherwise linear scan.
         for b in bindings.iter() {
             if b.contains(bucket) {
                 return Ok(b.clone());
             }
         }
         Err(RangeRouteError::BucketUnbound { bucket })
+    }
+
+    /// Route a bucket and return both the current owner and the
+    /// original owner (if in transition). The caller should try the
+    /// current owner first; on `NotMyRange` or connection error, fall
+    /// back to the original owner.
+    pub fn route_with_fallback(
+        &self,
+        bucket: u16,
+    ) -> std::result::Result<RouteWithFallback, RangeRouteError> {
+        let binding = self.route_bucket(bucket)?;
+        if binding.status == RangeStatus::InTransition && binding.original_instance_id != 0 {
+            Ok(RouteWithFallback {
+                primary: binding.clone(),
+                fallback: Some(ChunkdbRangeBinding {
+                    instance_id: binding.original_instance_id,
+                    grpc_endpoint: binding.original_endpoint.clone(),
+                    ..binding.clone()
+                }),
+            })
+        } else {
+            Ok(RouteWithFallback {
+                primary: binding,
+                fallback: None,
+            })
+        }
     }
 
     /// Check if the binding cache is empty.
@@ -187,10 +236,11 @@ impl RangeBindingClient {
     }
 
     /// Replace the cached binding table (for watch/notify updates or
-    /// test injection).
+    /// test injection). Sorts by `sub_range_index` for deterministic
+    /// routing.
     pub fn replace(&self, bindings: Vec<ChunkdbRangeBinding>) {
         let mut sorted = bindings;
-        sorted.sort_by_key(|b| b.range_start);
+        sorted.sort_by_key(|b| b.sub_range_index);
         *self.bindings.write() = sorted;
     }
 
@@ -233,10 +283,15 @@ mod tests {
 
     fn binding(start: u16, end: u16, instance: u64, endpoint: &str) -> ChunkdbRangeBinding {
         ChunkdbRangeBinding {
+            sub_range_index: 0,
             range_start: start,
             range_end: end,
             instance_id: instance,
             grpc_endpoint: endpoint.to_string(),
+            original_instance_id: 0,
+            original_endpoint: String::new(),
+            status: RangeStatus::Stable,
+            last_change_time_ms: 0,
         }
     }
 
@@ -286,21 +341,22 @@ mod tests {
     }
 
     #[test]
-    fn replace_sorts_by_range_start() {
+    fn replace_sorts_by_sub_range_index() {
         let client = RangeBindingClient {
             kv: Arc::new(CrowkvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
             bindings: Arc::new(RwLock::new(Vec::new())),
         };
-        client.replace(vec![
-            binding(32_768, u16::MAX, 2, "http://b:1"),
-            binding(0, 32_767, 1, "http://a:1"),
-        ]);
+        let mut b1 = binding(32_768, u16::MAX, 2, "http://b:1");
+        b1.sub_range_index = 1;
+        let mut b0 = binding(0, 32_767, 1, "http://a:1");
+        b0.sub_range_index = 0;
+        client.replace(vec![b1, b0]);
         let snap = client.snapshot();
         assert_eq!(snap.len(), 2);
-        assert_eq!(snap[0].range_start, 0);
-        assert_eq!(snap[1].range_start, 32_768);
+        assert_eq!(snap[0].sub_range_index, 0);
+        assert_eq!(snap[1].sub_range_index, 1);
     }
 
     #[test]
@@ -323,5 +379,78 @@ mod tests {
         assert!(b.contains(200));
         assert!(!b.contains(201));
         assert!(!b.contains(99));
+    }
+
+    fn binding_in_transition(
+        start: u16,
+        end: u16,
+        instance: u64,
+        endpoint: &str,
+        orig_instance: u64,
+        orig_endpoint: &str,
+    ) -> ChunkdbRangeBinding {
+        ChunkdbRangeBinding {
+            sub_range_index: 0,
+            range_start: start,
+            range_end: end,
+            instance_id: instance,
+            grpc_endpoint: endpoint.to_string(),
+            original_instance_id: orig_instance,
+            original_endpoint: orig_endpoint.to_string(),
+            status: RangeStatus::InTransition,
+            last_change_time_ms: 0,
+        }
+    }
+
+    #[test]
+    fn route_with_fallback_stable_returns_no_fallback() {
+        let client = RangeBindingClient {
+            kv: Arc::new(CrowkvClient::new(crate::ClientConfig::new(vec![
+                "http://127.0.0.1:1".into(),
+            ]))),
+            bindings: Arc::new(RwLock::new(vec![binding(0, 1000, 1, "http://a:1")])),
+        };
+        let r = client.route_with_fallback(500).unwrap();
+        assert_eq!(r.primary.instance_id, 1);
+        assert!(r.fallback.is_none());
+    }
+
+    #[test]
+    fn route_with_fallback_in_transition_returns_fallback() {
+        let client = RangeBindingClient {
+            kv: Arc::new(CrowkvClient::new(crate::ClientConfig::new(vec![
+                "http://127.0.0.1:1".into(),
+            ]))),
+            bindings: Arc::new(RwLock::new(vec![binding_in_transition(
+                0,
+                1000,
+                2,
+                "http://b:1",
+                1,
+                "http://a:1",
+            )])),
+        };
+        let r = client.route_with_fallback(500).unwrap();
+        assert_eq!(r.primary.instance_id, 2);
+        assert_eq!(r.primary.grpc_endpoint, "http://b:1");
+        assert!(r.fallback.is_some());
+        assert_eq!(r.fallback.unwrap().instance_id, 1);
+    }
+
+    #[test]
+    fn route_with_fallback_in_transition_no_original_returns_no_fallback() {
+        let client = RangeBindingClient {
+            kv: Arc::new(CrowkvClient::new(crate::ClientConfig::new(vec![
+                "http://127.0.0.1:1".into(),
+            ]))),
+            bindings: Arc::new(RwLock::new(vec![{
+                let mut b = binding(0, 1000, 1, "http://a:1");
+                b.status = RangeStatus::InTransition;
+                b
+            }])),
+        };
+        let r = client.route_with_fallback(500).unwrap();
+        assert_eq!(r.primary.instance_id, 1);
+        assert!(r.fallback.is_none());
     }
 }

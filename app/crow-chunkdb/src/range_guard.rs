@@ -17,11 +17,12 @@ use crow_protocol::key::ChunkdbRangeBindingKey;
 
 use crate::routing::hash_to_bucket;
 
-/// An owned hash bucket range `[start, end]` (inclusive).
+/// An owned hash bucket sub-range `[start, end]` (inclusive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OwnedRange {
     pub start: u16,
     pub end: u16,
+    pub sub_range_index: u32,
 }
 
 impl OwnedRange {
@@ -144,6 +145,7 @@ impl RangeGuard {
                     new_ranges.push(OwnedRange {
                         start: u16::try_from(val.range_start).unwrap_or(0),
                         end: u16::try_from(val.range_end).unwrap_or(u16::MAX),
+                        sub_range_index: val.sub_range_index,
                     });
                 }
             }
@@ -183,7 +185,11 @@ mod tests {
     use super::*;
 
     fn owned(start: u16, end: u16) -> OwnedRange {
-        OwnedRange { start, end }
+        OwnedRange {
+            start,
+            end,
+            sub_range_index: 0,
+        }
     }
 
     fn chunk_with_bucket(bucket: u16) -> ChunkId {

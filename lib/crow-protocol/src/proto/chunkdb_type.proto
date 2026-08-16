@@ -109,4 +109,5 @@ message NotMyRangeHint {
   uint32 range_end     = 2;  // current owner's range end
   uint64 instance_id   = 3;  // current owner's instance ID
   string grpc_endpoint = 4;  // current owner's gRPC endpoint
+  uint32 sub_range_index = 5;  // sub-range index (R99 rework)
 }

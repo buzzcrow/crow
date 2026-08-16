@@ -119,14 +119,25 @@ message BindMapValue {
 // ── chunkdb instance range binding ───────────────────────────────
 
 // chunkdb instance range binding — which chunkdb instance owns a hash
-// bucket range. Stored in group 0; read by chunkdb clients to route
+// bucket sub-range. Stored in group 0; read by chunkdb clients to route
 // chunk IDs to the correct instance.
-// Key: /chunkdb/range_bind/<range_start>
+// Key: /chunkdb/range_bind/<sub_range_index>
 message ChunkdbRangeBindingValue {
-  uint32 range_start   = 1;  // bucket range start (inclusive), 0-65535
-  uint32 range_end     = 2;  // bucket range end (inclusive), 0-65535
-  uint64 instance_id   = 3;  // chunkdb instance ID
-  string grpc_endpoint = 4;  // chunkdb gRPC endpoint
+  uint32 sub_range_index = 1;  // sub-range index (0..N-1, N = sub_range_count)
+  uint32 range_start     = 2;  // derived from sub_range_index (cached for routing)
+  uint32 range_end       = 3;  // derived from sub_range_index
+  uint64 instance_id     = 4;  // current owner chunkdb instance ID
+  string grpc_endpoint   = 5;  // current owner gRPC endpoint
+  uint64 original_instance_id = 6;  // original owner (for migration fallback)
+  string original_endpoint     = 7;  // original owner gRPC endpoint
+  RangeStatus status     = 8;  // STABLE or IN_TRANSITION
+  uint64 last_change_time_ms = 9;  // last ownership change timestamp
+}
+
+// Sub-range ownership status.
+enum RangeStatus {
+  RANGE_STATUS_STABLE        = 0;
+  RANGE_STATUS_IN_TRANSITION = 1;
 }
 
 // chunkdb range migration state — tracks ownership transfer between

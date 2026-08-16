@@ -78,6 +78,7 @@ fn main() {
             "ChunkdbRangeMigrationValue",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
+        .type_attribute("RangeStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute(
             "ChunkdbMigrationState",
             "#[derive(serde::Serialize, serde::Deserialize)]",

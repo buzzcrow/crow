@@ -68,12 +68,14 @@ impl ChunkdbService {
                     range_end: 0,
                     instance_id: 0,
                     grpc_endpoint: String::new(),
+                    sub_range_index: 0,
                 },
                 |r| NotMyRangeHint {
                     range_start: u32::from(r.start),
                     range_end: u32::from(r.end),
                     instance_id: 0,
                     grpc_endpoint: String::new(),
+                    sub_range_index: r.sub_range_index,
                 },
             );
         let details = prost::Message::encode_to_vec(&hint);

@@ -18,10 +18,10 @@ use super::encoding::{
 // ── ChunkdbRangeBindingKey ──────────────────────────────────────
 
 /// Key for a chunkdb instance range binding entry.
-/// Text path: `/chunkdb/range_bind/<range_start>`.
+/// Text path: `/chunkdb/range_bind/<sub_range_index>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkdbRangeBindingKey {
-    pub range_start: u16,
+    pub sub_range_index: u32,
 }
 
 impl TextKey for ChunkdbRangeBindingKey {
@@ -30,16 +30,16 @@ impl TextKey for ChunkdbRangeBindingKey {
 
     fn encode_to_path(&self, out: &mut String) {
         encode_path_header(out, Self::PATH_MAGIC, Self::PATH_TYPE);
-        encode_path_u64(out, u64::from(self.range_start));
+        encode_path_u64(out, u64::from(self.sub_range_index));
     }
 
     fn decode_path(parts: &[&str]) -> Result<Self, KeyError> {
         if parts.is_empty() {
             return Err(KeyError::ShortInput);
         }
-        let range_start = u16::try_from(decode_path_u64(parts[0])?).map_err(|_| KeyError::ShortInput)?;
+        let sub_range_index = u32::try_from(decode_path_u64(parts[0])?).map_err(|_| KeyError::ShortInput)?;
         check_path_exact(parts, 1)?;
-        Ok(Self { range_start })
+        Ok(Self { sub_range_index })
     }
 }
 
@@ -55,10 +55,10 @@ impl ChunkdbRangeBindingKey {
 // ── ChunkdbRangeMigrationKey ────────────────────────────────────
 
 /// Key for a chunkdb range migration state entry.
-/// Text path: `/chunkdb/range_mig/<range_start>`.
+/// Text path: `/chunkdb/range_mig/<sub_range_index>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkdbRangeMigrationKey {
-    pub range_start: u16,
+    pub sub_range_index: u32,
 }
 
 impl TextKey for ChunkdbRangeMigrationKey {
@@ -67,16 +67,16 @@ impl TextKey for ChunkdbRangeMigrationKey {
 
     fn encode_to_path(&self, out: &mut String) {
         encode_path_header(out, Self::PATH_MAGIC, Self::PATH_TYPE);
-        encode_path_u64(out, u64::from(self.range_start));
+        encode_path_u64(out, u64::from(self.sub_range_index));
     }
 
     fn decode_path(parts: &[&str]) -> Result<Self, KeyError> {
         if parts.is_empty() {
             return Err(KeyError::ShortInput);
         }
-        let range_start = u16::try_from(decode_path_u64(parts[0])?).map_err(|_| KeyError::ShortInput)?;
+        let sub_range_index = u32::try_from(decode_path_u64(parts[0])?).map_err(|_| KeyError::ShortInput)?;
         check_path_exact(parts, 1)?;
-        Ok(Self { range_start })
+        Ok(Self { sub_range_index })
     }
 }
 
@@ -95,9 +95,9 @@ mod tests {
 
     #[test]
     fn range_binding_key_round_trip() {
-        let key = ChunkdbRangeBindingKey { range_start: 16_384 };
+        let key = ChunkdbRangeBindingKey { sub_range_index: 512 };
         let path = key.to_path();
-        assert_eq!(path, "/chunkdb/range_bind/16384");
+        assert_eq!(path, "/chunkdb/range_bind/512");
         let decoded = ChunkdbRangeBindingKey::from_path(&path).unwrap();
         assert_eq!(decoded, key);
     }
@@ -109,9 +109,9 @@ mod tests {
 
     #[test]
     fn range_migration_key_round_trip() {
-        let key = ChunkdbRangeMigrationKey { range_start: 32_768 };
+        let key = ChunkdbRangeMigrationKey { sub_range_index: 256 };
         let path = key.to_path();
-        assert_eq!(path, "/chunkdb/range_mig/32768");
+        assert_eq!(path, "/chunkdb/range_mig/256");
         let decoded = ChunkdbRangeMigrationKey::from_path(&path).unwrap();
         assert_eq!(decoded, key);
     }
@@ -123,7 +123,8 @@ mod tests {
 
     #[test]
     fn range_binding_key_rejects_overflow() {
-        let path = "/chunkdb/range_bind/70000";
+        // u32::MAX + 1 = 4294967296 — overflows u32.
+        let path = "/chunkdb/range_bind/4294967296";
         assert!(ChunkdbRangeBindingKey::from_path(path).is_err());
     }
 }
