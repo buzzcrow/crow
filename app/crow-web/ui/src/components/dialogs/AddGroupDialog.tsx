@@ -6,14 +6,14 @@ import { Dialog } from '../Dialog';
 import { Input, Select } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
 import { addGroup } from '../../api';
-import { Node, StoreView, CrowKVServerView } from '../../types';
+import { Node, EnrichedStoreView, CrowKVServerView } from '../../types';
 import { isCrowKVServerAvailable } from '../../data/crowKvServers';
 
 export interface AddGroupDialogProps {
   isOpen: boolean;
   onClose: () => void;
   storeId?: string;
-  stores: StoreView[];
+  stores: EnrichedStoreView[];
   nodes: Node[];
   servers?: CrowKVServerView[];
   defaultGroupId?: string;

@@ -6,7 +6,7 @@ import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { cn } from '../utils/cn';
-import { ViewMode, Node, StoreView, CrowKVServerView, ElectionState, ReadState } from '../types';
+import { ViewMode, Node, EnrichedStoreView, CrowKVServerView, ElectionState, ReadState, ReplicaRole } from '../types';
 import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
 import { useMetricsPoll, buildMetricsFetcher } from '../utils/useMetricsPoll';
@@ -40,7 +40,7 @@ interface InspectorProps {
   modules?: Record<string, boolean>;
   nodes?: Node[];
   servers?: CrowKVServerView[];
-  stores?: StoreView[];
+  stores?: EnrichedStoreView[];
   width?: number;
 }
 
@@ -125,7 +125,7 @@ interface DetailsTabProps {
   entity: SelectedEntity;
   nodes: Node[];
   servers: CrowKVServerView[];
-  stores: StoreView[];
+  stores: EnrichedStoreView[];
   selectEntity: (e: SelectedEntity | null) => void;
   setViewMode: (m: ViewMode) => void;
   readonly?: boolean;
@@ -145,31 +145,29 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode,
   const rpcPort = server?.rpc_port ?? null;
 
   // Logical Replica: dig the full ReplicaView (role/state/engine_healthy/
-  // crowtree_stats) out of `stores`, whose `groups[].replicas` carry it
-  // even though StoreView's declared type is summary-only (the runtime
-  // object is enriched -- same `as any` pattern used by buildFlow.ts/
-  // Sidebar.tsx for the same reason).
+  // crowtree_stats) out of `stores`. `stores` is `EnrichedStoreView[]`,
+  // so `groups[].replicas` is typed `ReplicaView[]` — no cast needed.
   const replica =
     entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
-      ? (stores as any[])
+      ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
-          ?.groups?.find((g: any) => String(g.group_id) === entity.parentIds?.group_id)
-          ?.replicas?.find((r: any) => String(r.replica_id) === entity.id)
+          ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
+          ?.replicas.find((r) => String(r.replica_id) === entity.id)
       : undefined;
 
   // Logical Group: dig the full GroupView (read_state) out of `stores`.
   const groupView =
     entity.type === 'Group' && entity.viewMode === ViewMode.Logical
-      ? (stores as any[])
+      ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
-          ?.groups?.find((g: any) => String(g.group_id) === entity.id)
+          ?.groups.find((g) => String(g.group_id) === entity.id)
       : entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
-        ? (stores as any[])
+        ? stores
             .find((s) => String(s.store_id) === entity.parentIds?.store_id)
-            ?.groups?.find((g: any) => String(g.group_id) === entity.parentIds?.group_id)
+            ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
         : undefined;
 
-  const electionState: ElectionState | undefined = replica?.election ?? groupView?.replicas?.find((r: any) => r.role === 'leader')?.election;
+  const electionState: ElectionState | undefined = replica?.election ?? groupView?.replicas.find((r) => r.role === ReplicaRole.Leader)?.election;
   const readState: ReadState | undefined = groupView?.read_state;
 
   // Metrics poll: build a fetcher for the current entity type.
@@ -270,7 +268,7 @@ function bufferPoolHitRate(hits: number, misses: number): string {
 function buildCrossJump(
   entity: SelectedEntity,
   nodes: Node[],
-  stores: StoreView[],
+  stores: EnrichedStoreView[],
   selectEntity: (e: SelectedEntity | null) => void,
   setViewMode: (m: ViewMode) => void,
 ): { label: string; go: () => void } | null {

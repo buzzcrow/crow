@@ -16,7 +16,7 @@ import { ScanSearch } from 'lucide-react';
 import 'reactflow/dist/style.css';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
-import { Rack, Node as NodeEntity, StoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth } from '../types';
+import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth } from '../types';
 import { buildFlowForViewMode, FlowNodeData } from './buildFlow';
 import { layoutTree } from './layout';
 import { CrowKVNode } from './CrowKVNode';
@@ -34,7 +34,7 @@ interface TopologyCanvasProps {
   racks: Rack[];
   nodes: NodeEntity[];
   servers: CrowKVServerView[];
-  stores: StoreView[];
+  stores: EnrichedStoreView[];
   nodeStores?: Record<string, NodeStore[]>;
   nodeHealthById?: Record<string, NodeHealth>;
   diskdbNodeIds?: Set<number>;

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Node, Edge, MarkerType } from 'reactflow';
-import { Rack, Node as NodeEntity, StoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth, ReplicaState } from '../types';
+import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth, ReplicaState } from '../types';
 import type { SelectedEntity } from '../contexts/SelectionContext';
 import { crowKvServerByNodeId } from '../data/crowKvServers';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toDisplayState, toUiReplicaRole } from '../utils/entityDisplay';
@@ -217,7 +217,7 @@ export function buildPhysicalFlow(
  * Logical view: Cluster -> Store -> Group -> Replica. The leader radiates
  * accent edges to followers; replicas are badged by `node_id`.
  */
-export function buildLogicalFlow(stores: StoreView[]): { nodes: Node[]; edges: Edge[] } {
+export function buildLogicalFlow(stores: EnrichedStoreView[]): { nodes: Node[]; edges: Edge[] } {
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
 
@@ -235,16 +235,14 @@ export function buildLogicalFlow(stores: StoreView[]): { nodes: Node[]; edges: E
 
     for (const group of store.groups || []) {
       const gid = String(group.group_id);
-      const replicas: any[] = 'replicas' in group && Array.isArray((group as any).replicas)
-        ? (group as any).replicas
-        : [];
-      const leader = (group as any).leader ?? (group as any).leader_id;
+      const replicas = group.replicas;
+      const leader = group.leader;
       flowNodes.push(
         mkNode(`G-${sid}-${gid}`, {
           kind: 'Group',
           label: groupLabel(gid),
           sublabel: leader ? `leader ${leader}` : `${replicas.length} replica(s)`,
-          health: (group as any).health || (group as any).state,
+          health: group.state,
           layer: 1,
           entity: { type: 'Group', id: gid, parentIds: { store_id: sid } },
         }),
@@ -341,7 +339,7 @@ export function buildFlowForViewMode(
   racks: Rack[],
   nodes: NodeEntity[],
   servers: CrowKVServerView[],
-  stores: StoreView[],
+  stores: EnrichedStoreView[],
   nodeStores: Record<string, NodeStore[]> = {},
   nodeHealthById: Record<string, NodeHealth> = {},
   diskdbNodeIds: Set<number> = new Set(),

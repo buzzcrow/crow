@@ -12,7 +12,7 @@ import { AddGroupDialog } from './AddGroupDialog';
 import { AddReplicaDialog } from './AddReplicaDialog';
 import { DeployServerDialog } from './DeployServerDialog';
 import { NodeHealth, ProcState } from '../../types';
-import type { Node, Rack, CrowKVServerView, StoreView } from '../../types';
+import type { Node, Rack, CrowKVServerView, EnrichedStoreView } from '../../types';
 import { deployPortDefaultsForNode } from './defaults';
 
 /**
@@ -83,7 +83,7 @@ const mockServers: CrowKVServerView[] = [
     rpc_port: 19920,
   },
 ];
-const mockStores: StoreView[] = [
+const mockStores: EnrichedStoreView[] = [
   { store_id: '7', nodes: [1, 2], groups: [] },
 ];
 
@@ -621,7 +621,7 @@ describe('Add Group dialog', () => {
   });
 
   it('excludes unavailable store owners', () => {
-    const allStores: StoreView[] = [{ store_id: '7', nodes: [1, 2], groups: [] }];
+    const allStores: EnrichedStoreView[] = [{ store_id: '7', nodes: [1, 2], groups: [] }];
     const unavailableN2: CrowKVServerView[] = [
       ...mockServers,
       {

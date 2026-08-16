@@ -7,7 +7,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useActivity } from '../contexts/ActivityContext';
 import { Dialog } from '../components/Dialog';
 import { kvGet, kvPut, kvDelete, kvScan, type KvGetResponse, type KvScanItem } from '../api';
-import type { StoreView, GroupSummary } from '../types';
+import type { EnrichedStoreView, GroupView } from '../types';
 import type { SelectedEntity } from '../contexts/SelectionContext';
 
 const ALL_GROUPS = '__all__';
@@ -19,7 +19,7 @@ interface ScanRow extends KvScanItem {
 }
 
 interface KvOperatorPanelProps {
-  stores: StoreView[];
+  stores: EnrichedStoreView[];
   selectedEntity: SelectedEntity | null;
   readonly?: boolean;
   /** True when the backend is unreachable (fetch error). */
@@ -61,7 +61,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
   const [demoLoading, setDemoLoading] = useState(false);
 
   const groupsInStore = useMemo(() => {
-    if (!storeId) return [] as GroupSummary[];
+    if (!storeId) return [] as GroupView[];
     const store = stores.find((s) => String(s.store_id) === storeId);
     return store?.groups || [];
   }, [storeId, stores]);

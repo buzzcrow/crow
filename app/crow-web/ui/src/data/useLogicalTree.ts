@@ -3,7 +3,8 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getGroup, listStores, listGroups } from '../api';
-import type { StoreView, GroupView, ReplicaView } from '../types';
+import { GroupHealth } from '../types';
+import type { EnrichedStoreView, GroupView, ReplicaView } from '../types';
 
 interface UseLogicalTreeOptions {
   /** Polling interval in milliseconds when active (view is visible) */
@@ -18,7 +19,7 @@ interface UseLogicalTreeOptions {
 
 interface UseLogicalTreeResult {
   /** List of stores with nested groups */
-  stores: StoreView[];
+  stores: EnrichedStoreView[];
   /** Flat list of all groups across all stores */
   groups: GroupView[];
   /** Flat list of all replicas across all groups */
@@ -30,7 +31,7 @@ interface UseLogicalTreeResult {
   /** Manually trigger a refresh */
   refresh: () => Promise<void>;
   /** Get a specific store by ID */
-  getStoreById: (storeId: string) => StoreView | undefined;
+  getStoreById: (storeId: string) => EnrichedStoreView | undefined;
   /** Get a specific group by store ID and group ID */
   getGroupById: (storeId: string, groupId: string) => GroupView | undefined;
   /** Get a specific replica by store ID, group ID, and replica ID */
@@ -46,7 +47,7 @@ export function useLogicalTree({
   enabled = true,
   recursive = 3,
 }: UseLogicalTreeOptions = {}): UseLogicalTreeResult {
-  const [stores, setStores] = useState<StoreView[]>([]);
+  const [stores, setStores] = useState<EnrichedStoreView[]>([]);
   const [groups, setGroups] = useState<GroupView[]>([]);
   const [replicas, setReplicas] = useState<ReplicaView[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,7 +79,7 @@ export function useLogicalTree({
       const allGroups: GroupView[] = [];
       const allReplicas: ReplicaView[] = [];
 
-      const enrichedStores: StoreView[] = [];
+      const enrichedStores: EnrichedStoreView[] = [];
       for (const store of sourceStores) {
         // Fetch groups for each store (or use existing if recursive included them)
         let storeGroups: GroupView[];
@@ -92,12 +93,15 @@ export function useLogicalTree({
                 replicas: detail.replicas || [],
               };
             } catch {
+              // `GroupSummary` carries no health (the backend struct is
+              // group_id/replica_count/leader only), so a failed detail
+              // fetch leaves the group's state unknown.
               return {
                 store_id: store.store_id,
                 group_id: g.group_id,
                 leader: g.leader,
                 replicas: [],
-                state: g.health || 'Unknown',
+                state: GroupHealth.Unknown,
               };
             }
           }));
@@ -112,7 +116,7 @@ export function useLogicalTree({
         allGroups.push(...storeGroups);
         enrichedStores.push({
           ...store,
-          groups: storeGroups as any,
+          groups: storeGroups,
         });
 
         for (const group of storeGroups) {
@@ -179,7 +183,7 @@ export function useLogicalTree({
 
   // Get a store by ID
   const getStoreById = useCallback(
-    (storeId: string): StoreView | undefined => {
+    (storeId: string): EnrichedStoreView | undefined => {
       return stores.find(s => s.store_id === storeId);
     },
     [stores]

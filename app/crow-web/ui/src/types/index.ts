@@ -51,6 +51,11 @@ export interface Node {
   host: string;
   ssh: SshCreds;
   server?: ServerProcess;
+  // Present on the recursive `GET /api/racks?recursive=N` and flat
+  // `GET /api/nodes` responses (mirrors `crow_web::physical_view::NodeView`
+  // / the manually-built node JSON in `lifecycle`). Absent on the bare
+  // rack-membership shape.
+  has_server?: boolean;
 }
 
 export interface CrowKVServerView {
@@ -121,11 +126,24 @@ export interface StoreView {
   groups: GroupSummary[];
 }
 
+// Lightweight summary used by `StoreView::groups`. The full view is
+// `GroupView`, returned from `GET /api/stores/:s/groups/:g`. Mirrors
+// `crow_console_shared::cluster::GroupSummary` (group_id, replica_count,
+// leader only — no health field).
 export interface GroupSummary {
   group_id: GroupId;
-  leader?: ReplicaId;
-  health: GroupHealth;
   replica_count: number;
+  leader?: ReplicaId;
+}
+
+// `StoreView` with each summary group expanded to its full `GroupView`.
+// This is the shape `useLogicalTree` exposes: it fetches every group via
+// `getGroup` and replaces `groups` with the detailed views, so consumers
+// (Sidebar, buildFlow, Inspector) can read `replicas` / `state` /
+// `read_state` without `as any` casts. The raw `listStores` / `getStore`
+// APIs still return `StoreView` (summary groups).
+export interface EnrichedStoreView extends Omit<StoreView, 'groups'> {
+  groups: GroupView[];
 }
 
 export interface GroupView {

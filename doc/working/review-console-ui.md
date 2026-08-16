@@ -5,66 +5,29 @@
 
 Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
 `app/crow-web/src/`. This doc captures the code-level review findings
-(bugs fixed, issues open, coverage gaps).
+(issues open, coverage gaps).
 
-## Fixed in this pass
+## Fixed
 
-- **Overflow panic — `rpc_port + 1`** (`lib/crow-console-shared/src/lifecycle.rs`):
-  `let http_port = rpc_port + 1` panicked in debug builds when
-  `rpc_port == 65535`. Now `saturating_add(1)`.
-- **Overflow panic — rebuild accumulators** (`app/crow-web/src/diskdb.rs`):
-  the multi-zone rebuild loop accumulated `total_rebuilt` / `total_busy`
-  / `total_free` with plain `+=`, panicking in debug builds on overflow.
-  Now `saturating_add` per field.
-- **Generated TOML duplication** (`lib/crow-console-shared/src/lifecycle.rs`):
-  `resolve_diskdb_config_path` hand-wrote a 39-line TOML config
-  duplicating `DdbConfig::default()`. Any new required field on a
-  `DdbConfig` sub-struct would have broken the fallback at deploy time
-  with a TOML parse error and no compile-time signal. Added
-  `#[serde(default)]` to all `DdbConfig` sub-struct fields
-  (`app/crow-diskdb/src/ddb_config.rs`); collapsed the generated config
-  to a 4-line `[server]`-only block. Added a regression test
-  `minimal_server_only_config_uses_section_defaults` in
-  `app/crow-diskdb/tests/ddb_config_test.rs` that round-trips the
-  minimal shape through the deserializer + validator.
-- **Hardcoded mgmt port** (same block): `kv_server_mgmt_seeds` hardcoded
-  `9910`; now uses `crow_protocol::KV_SERVER_MGMT_BASE` (consistent with
-  the `DISKDB_HTTP_BASE` use four lines below).
-- **Silent parse failures** (`http_listen_addr_from_config`): read/parse
-  failures were swallowed into `None` with no log. Now emits `warn!`
-  with the path and error — `tracing` is already a dep.
-- **Brittle `waitForTimeout` in E2E** (`31-kv-ops-advanced.spec.ts:103`):
-  replaced a fixed 500ms sleep with `waitForResponse` for the
-  component's auto-rescan, eliminating the flaky wait while preserving
-  the race-avoidance semantics.
-- **Backend node-delete cascade** (`app/crow-web/src/lifecycle.rs`):
-  `http_remove_node` removed the node from config but did not stop the
-  server process — a direct `DELETE /api/nodes/:id` orphaned the
-  running process. Added a shared `server_stop_and_remove` helper called
-  from both `http_remove_node` and the existing delete-server path.
-- **`listServers` silent catch** (`app/crow-web/ui/src/App.tsx`):
-  `catch { setAllServers([]); }` silently emptied the server list with
-  no toast. Now surfaces a toast on failure (the `ToastContext` is
-  already wired everywhere else).
-- **`KvPanel` wired in** (`app/crow-web/ui/src/shell/Inspector.tsx`):
-  `KvPanel` was exported but imported by nothing. Now integrated into
-  the Inspector to display KV operations when a group is selected
-  (simple single-group view).
-- **E2E cascade-delete strengthened**
-  (`11-physical-server-lifecycle.spec.ts`): added assertions for ping
-  success, health-pill status after stop, and a 404 check for the
-  server after cascade delete — verifying the server was actually
-  stopped, not just that the node disappeared from the tree.
-- **E2E test 21 rewritten** (`21-kv-cluster-reconfig.spec.ts`): was
-  entirely API-only (zero `page` references). Now drives all
-  reconfiguration actions through the UI (context menus, Add Replica
-  dialog, tree health badges) and verifies KV ops through the KV
-  panel. Replica catch-up verified by polling the API until the new
-  replica reports `state = running`, then confirming pre-existing keys
-  are readable via the UI.
-- **E2E mock-based sections documented**
-  (`50-capacity-diskdb.spec.ts`): added comments noting which sections
-  use `page.route` mocks and why.
+- **`as any` casts in entity traversal** (`shell/Inspector.tsx`,
+  `topology/buildFlow.ts`, `data/usePhysicalTree.ts`,
+  `data/useLogicalTree.ts`, `shell/Sidebar.tsx`): the casts existed
+  because `StoreView.groups` was typed `GroupSummary[]` but
+  `useLogicalTree` enriches each group to a full `GroupView` at runtime
+  (it fetches every group via `getGroup` and replaces the summary), and
+  because the recursive racks response carries `has_server` on node
+  entries that the frontend `Node` type lacked. Added
+  `EnrichedStoreView` (`StoreView` with `groups: GroupView[]`) and
+  switched every consumer of `useLogicalTree.stores` to it
+  (`Inspector`, `Sidebar`, `buildFlow`, `TopologyCanvas`,
+  `KvOperatorPanel`, `AddGroupDialog`); added `has_server?` to `Node`
+  (mirrors `crow_web::physical_view::NodeView`); fixed `GroupSummary`
+  to match the backend struct (removed the phantom `health` field —
+  `crow_console_shared::cluster::GroupSummary` is group_id /
+  replica_count / leader only; the `useLogicalTree` fallback now uses
+  `GroupHealth.Unknown` instead of the always-undefined `g.health`).
+  All five cast sites are now typed. `tsc -b` and the e2e `tsc
+  --noEmit` both pass.
 
 ## Open issues
 
@@ -73,18 +36,6 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
 - **`ConsoleClient::set_disk_group_status`** (`lib/crow-console-shared/src/diskdb.rs:338`):
   no callers — no CLI verb, no test. Held off per user note (diskdb /
   capacity view still in progress); revisit when that work lands.
-
-### Type safety
-
-- **`as any` casts in entity traversal**: `shell/Inspector.tsx:151-169`,
-  `topology/buildFlow.ts:238-247`, `data/usePhysicalTree.ts:100`,
-  `data/useLogicalTree.ts:115`, `shell/Sidebar.tsx:241-243` all cast
-  group/replica/rack structures to `any` to read fields. The
-  `types/index.ts` definitions exist but don't match the runtime shape
-  these components navigate. Risk: a backend field rename silently
-  breaks rendering with no type error. Tighten the `GroupView` /
-  `StoreView` / `RackView` types to match the actual API responses and
-  drop the casts.
 
 ### Consensus redirect not handled in UI layer
 
@@ -110,16 +61,16 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
 
 ### File size
 
-- `app/crow-web/ui/src/App.tsx` is 1017 lines (crossed the 1000-line
+- `app/crow-web/ui/src/App.tsx` is 1018 lines (crossed the 1000-line
   "must split" threshold in this branch). `app/crow-web/src/lifecycle.rs`
-  is 2094 (pre-existing). Both are split candidates.
+  is 2114 (pre-existing). Both are split candidates.
 
 ## E2E coverage gaps
 
 The 14-file E2E suite is clean: no `test.skip` / `test.fixme`, no
-TODO/FIXME in test files, only one `waitForTimeout(500)` in
-`31-kv-ops-advanced.spec.ts:103` (auto-scan after delete). Coverage by
-feature:
+TODO/FIXME in test files. Two `waitForTimeout(500)` remain in
+`41-canvas-fit-pan.spec.ts:113,159` (canvas animation settle). Coverage
+by feature:
 
 - **Fully covered**: shell embedding/swagger (00), shell UI behaviors
   (01), physical rack/node CRUD (10), server lifecycle (11), node
@@ -170,8 +121,8 @@ not the real backend. This means:
 - The test verifies the UI handles the mocked response correctly, not
   that the backend actually performs the operation.
 
-This is acceptable for UI-interaction testing but should be documented
-as mock-based (done — comments added). A companion test against the
+This is acceptable for UI-interaction testing; the mock-based sections
+are marked with comments in the test file. A companion test against the
 real backend (even a smoke-level one) would close the gap.
 
 ### Flows that are verified correct
@@ -225,13 +176,11 @@ correctly — UI component → api.ts → backend handler all match:
 
 ## Recommendation order
 
-1. Tighten `as any` casts in Inspector / buildFlow / tree hooks against
-   the real API types.
-2. Add a direct `CapacityPanel` E2E (empty/error/loading states).
-3. Decide on `NotLeaderHint` retry in `api.ts` after confirming the KV
+1. Add a direct `CapacityPanel` E2E (empty/error/loading states).
+2. Decide on `NotLeaderHint` retry in `api.ts` after confirming the KV
    ops request path.
-4. Rewrite test 22's third sub-test to drive through the UI, or rename
+3. Rewrite test 22's third sub-test to drive through the UI, or rename
    to indicate it's API-only.
-5. Add a real-backend smoke test for capacity compact/rebuild (companion
+4. Add a real-backend smoke test for capacity compact/rebuild (companion
    to the mock-based test in 50).
-6. Split `App.tsx` and `app/crow-web/src/lifecycle.rs`.
+5. Split `App.tsx` and `app/crow-web/src/lifecycle.rs`.

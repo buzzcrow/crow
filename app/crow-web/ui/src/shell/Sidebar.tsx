@@ -6,7 +6,7 @@ import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Co
 import { useViewMode } from '../contexts/ViewModeContext';
 import { Tree, TreeNode } from '../components/Tree';
 import { Button } from '../components/ui/Button';
-import { ViewMode, Rack, StoreView, NodeStore, CrowKVServerView, NodeHealth, DiskdbInstanceInfo, CapacityUsageResponse } from '../types';
+import { ViewMode, Rack, EnrichedStoreView, NodeStore, CrowKVServerView, NodeHealth, DiskdbInstanceInfo, CapacityUsageResponse } from '../types';
 import { crowKvServerByNodeId } from '../data/crowKvServers';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole, hwStatusToUiHealth } from '../utils/entityDisplay';
 import type { NodeDiskGroups } from '../data/useCapacityTree';
@@ -14,7 +14,7 @@ import type { NodeDiskGroups } from '../data/useCapacityTree';
 interface SidebarProps {
   racks?: Rack[];
   servers?: CrowKVServerView[];
-  stores?: StoreView[];
+  stores?: EnrichedStoreView[];
   nodeStores?: Record<string, NodeStore[]>;
   nodeHealthById?: Record<string, NodeHealth>;
   loading?: boolean;
@@ -238,16 +238,16 @@ export function Sidebar({
         label: store.name ? `${storeLabel(sid)} (${store.name})` : storeLabel(sid),
         type: 'Store',
         icon: <Database className="tw-h-4 tw-w-4 tw-text-muted" />,
-        children: (store.groups || []).map((group: any) => {
+        children: (store.groups || []).map((group) => {
           const gid = String(group.group_id);
-          const replicas: any[] = Array.isArray(group.replicas) ? group.replicas : [];
+          const replicas = group.replicas;
           return {
             id: `G-${sid}-${gid}`,
             rawId: gid,
             label: groupLabel(gid),
             type: 'Group' as const,
             icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
-            health: toUiHealth(group.health || group.state),
+            health: toUiHealth(group.state),
             parentIds: { store_id: sid },
             children: replicas.map((r) => ({
               id: `LR-${sid}-${gid}-${r.replica_id}`,
