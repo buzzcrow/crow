@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { useState } from 'react';
+import { useState, lazy, Suspense } from 'react';
 import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
@@ -11,6 +11,8 @@ import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
 import { useMetricsPoll, buildMetricsFetcher } from '../utils/useMetricsPoll';
 import { MetricsRegion, ElectionStateRegion, ReadStateRegion } from '../components/MetricsRegion';
+
+const KvPanel = lazy(() => import('../panels/KvPanel').then((m) => ({ default: m.KvPanel })));
 
 type TabId = 'details' | 'activity';
 
@@ -46,7 +48,7 @@ interface InspectorProps {
  * Right-side inspector. Reacts to SelectionContext: Details + Activity for any
  * selection.
  */
-export function Inspector({ readonly: _readonly, modules: _modules, nodes = [], servers = [], stores = [], width = 320 }: InspectorProps) {
+export function Inspector({ readonly, modules: _modules, nodes = [], servers = [], stores = [], width = 320 }: InspectorProps) {
   const { selectedEntity, clearSelection, selectEntity } = useSelection();
   const { setViewMode } = useViewMode();
   const [activeTab, setActiveTab] = useState<TabId>('details');
@@ -81,7 +83,7 @@ export function Inspector({ readonly: _readonly, modules: _modules, nodes = [], 
 
       <div className="tw-flex-1 tw-overflow-y-auto">
         {activeTab === 'details' && (
-          <DetailsTab entity={selectedEntity} nodes={nodes} servers={servers} stores={stores} selectEntity={selectEntity} setViewMode={setViewMode} />
+          <DetailsTab entity={selectedEntity} nodes={nodes} servers={servers} stores={stores} selectEntity={selectEntity} setViewMode={setViewMode} readonly={readonly} />
         )}
         {activeTab === 'activity' && <ActivityLog />}
       </div>
@@ -126,9 +128,10 @@ interface DetailsTabProps {
   stores: StoreView[];
   selectEntity: (e: SelectedEntity | null) => void;
   setViewMode: (m: ViewMode) => void;
+  readonly?: boolean;
 }
 
-function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode }: DetailsTabProps) {
+function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode, readonly }: DetailsTabProps) {
   const displayType = entity.type === 'Server' ? 'Crow Storage' : entity.type;
   const displayId = displayEntityId(entity);
   const serverNodeId = entity.type === 'Node' ? entity.id : entity.parentIds?.node_id;
@@ -243,6 +246,15 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
       {electionState && <ElectionStateRegion state={electionState} />}
       {readState && <ReadStateRegion state={readState} />}
       <MetricsRegion data={metricsData} />
+
+      {entity.type === 'Group' && parentStoreId && (
+        <div className="tw-space-y-1">
+          <div className="tw-text-[10px] tw-uppercase tw-tracking-wider tw-text-muted">KV</div>
+          <Suspense fallback={null}>
+            <KvPanel storeId={parentStoreId} groupId={entity.id} readonly={readonly} />
+          </Suspense>
+        </div>
+      )}
     </div>
   );
 }

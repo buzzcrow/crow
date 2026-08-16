@@ -143,9 +143,12 @@ test.describe('physical · server lifecycle', () => {
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-27' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
 
-      // Ping — on the node context menu.
+      // Ping — on the node context menu. Verify it actually succeeds.
       await nodeItem.click({ button: 'right' });
+      const pingPromise = page.waitForResponse((r: any) => r.url().includes('/ping'));
       await page.getByRole('menuitem', { name: /ping/i }).click();
+      const pingResp = await pingPromise;
+      expect((await pingResp.json()).ok).toBe(true);
 
       // Restart and Stop are on the server (KV) context menu, not the node.
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-27' });
@@ -162,6 +165,11 @@ test.describe('physical · server lifecycle', () => {
       const stopResponse = page.waitForResponse((r: any) => r.url().includes('/server/stop'));
       await page.getByRole('menuitem', { name: /stop Crow Storage/i }).click();
       await stopResponse;
+
+      // Health pill: the server badge should drop from Healthy after stop
+      // (usePhysicalTree polls every 1s; monitor_cache is dropped on stop).
+      const healthBadge = serverItem.locator('[title]').filter({ hasText: /^(Healthy|Failed|Unknown|Degraded)$/ });
+      await expect(healthBadge.filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 });
 
       // After stop, verify server is no longer running via API
       const api = await apiContext(baseURL!);
@@ -193,24 +201,27 @@ test.describe('physical · server lifecycle', () => {
       // Wait for server to appear so the cascade knows to remove it.
       await expect(aside.getByText('KV-493')).toBeVisible({ timeout: 10_000 });
 
-      // Right-click node → Delete Node.
-      await aside.getByText('N-493', { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /delete node/i }).click();
-
-      // Confirm delete dialog.
-      const deleteDialog = page.getByRole('dialog', { name: /delete node/i });
-      await expect(deleteDialog).toBeVisible();
-      const confirmBtn = deleteDialog.getByRole('button', { name: /delete node/i });
-      await confirmBtn.evaluate((el) => (el as HTMLElement).click());
-
-      // Node should disappear from the tree.
-      await expect(aside.getByText('N-493', { exact: true })).toHaveCount(0, { timeout: 10_000 });
-
-      // Verify via API: node is gone.
+      // Server is deployed before the cascade delete.
       const api = await apiContext(baseURL!);
       try {
-        const r = await api.get('/api/nodes/493');
-        expect(r.status()).toBe(404);
+        expect((await api.get('/api/nodes/493/server')).status()).toBe(200);
+
+        // Right-click node → Delete Node.
+        await aside.getByText('N-493', { exact: true }).click({ button: 'right' });
+        await page.getByRole('menuitem', { name: /delete node/i }).click();
+
+        // Confirm delete dialog.
+        const deleteDialog = page.getByRole('dialog', { name: /delete node/i });
+        await expect(deleteDialog).toBeVisible();
+        const confirmBtn = deleteDialog.getByRole('button', { name: /delete node/i });
+        await confirmBtn.evaluate((el) => (el as HTMLElement).click());
+
+        // Node should disappear from the tree.
+        await expect(aside.getByText('N-493', { exact: true })).toHaveCount(0, { timeout: 10_000 });
+
+        // Server record removed by the cascade (not orphaned), node gone.
+        expect((await api.get('/api/nodes/493/server')).status()).toBe(404);
+        expect((await api.get('/api/nodes/493')).status()).toBe(404);
       } finally {
         await api.dispose();
       }

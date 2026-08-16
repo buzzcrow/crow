@@ -155,10 +155,11 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const refreshAllServers = useCallback(async () => {
     try {
       setAllServers(await listServers());
-    } catch {
+    } catch (err) {
       setAllServers([]);
+      error(`Failed to load server list: ${err instanceof Error ? err.message : 'backend unreachable'}`);
     }
-  }, []);
+  }, [error]);
   useEffect(() => {
     if (capacityActive) {
       refreshAllServers();

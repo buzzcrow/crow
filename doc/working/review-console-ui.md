@@ -4,9 +4,8 @@
 # Console Web UI Review
 
 Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
-`app/crow-web/src/`. Companion to `plan-console-ui-e2e-refactor.md` —
-that plan covers the E2E suite reorganization; this doc captures the
-code-level review findings (bugs fixed, issues open, coverage gaps).
+`app/crow-web/src/`. This doc captures the code-level review findings
+(bugs fixed, issues open, coverage gaps).
 
 ## Fixed in this pass
 
@@ -38,27 +37,42 @@ code-level review findings (bugs fixed, issues open, coverage gaps).
   replaced a fixed 500ms sleep with `waitForResponse` for the
   component's auto-rescan, eliminating the flaky wait while preserving
   the race-avoidance semantics.
+- **Backend node-delete cascade** (`app/crow-web/src/lifecycle.rs`):
+  `http_remove_node` removed the node from config but did not stop the
+  server process — a direct `DELETE /api/nodes/:id` orphaned the
+  running process. Added a shared `server_stop_and_remove` helper called
+  from both `http_remove_node` and the existing delete-server path.
+- **`listServers` silent catch** (`app/crow-web/ui/src/App.tsx`):
+  `catch { setAllServers([]); }` silently emptied the server list with
+  no toast. Now surfaces a toast on failure (the `ToastContext` is
+  already wired everywhere else).
+- **`KvPanel` wired in** (`app/crow-web/ui/src/shell/Inspector.tsx`):
+  `KvPanel` was exported but imported by nothing. Now integrated into
+  the Inspector to display KV operations when a group is selected
+  (simple single-group view).
+- **E2E cascade-delete strengthened**
+  (`11-physical-server-lifecycle.spec.ts`): added assertions for ping
+  success, health-pill status after stop, and a 404 check for the
+  server after cascade delete — verifying the server was actually
+  stopped, not just that the node disappeared from the tree.
+- **E2E test 21 rewritten** (`21-kv-cluster-reconfig.spec.ts`): was
+  entirely API-only (zero `page` references). Now drives all
+  reconfiguration actions through the UI (context menus, Add Replica
+  dialog, tree health badges) and verifies KV ops through the KV
+  panel. Replica catch-up verified by polling the API until the new
+  replica reports `state = running`, then confirming pre-existing keys
+  are readable via the UI.
+- **E2E mock-based sections documented**
+  (`50-capacity-diskdb.spec.ts`): added comments noting which sections
+  use `page.route` mocks and why.
 
 ## Open issues
 
 ### Dead code
 
-- **`KvPanel` is unreachable** (`app/crow-web/ui/src/panels/KvPanel.tsx`):
-  exported but imported by nothing — `App.tsx` only mounts
-  `KvOperatorPanel`. Either wire it in (single-group simple view) or
-  delete it. The subagent flagged "no E2E coverage"; the real status is
-  "not shipped."
 - **`ConsoleClient::set_disk_group_status`** (`lib/crow-console-shared/src/diskdb.rs:338`):
   no callers — no CLI verb, no test. Held off per user note (diskdb /
   capacity view still in progress); revisit when that work lands.
-
-### Silent error swallowing
-
-- **`listServers` failure** (`app/crow-web/ui/src/App.tsx:158`):
-  `catch { setAllServers([]); }` silently empties the server list with
-  no toast. A user seeing an empty Capacity server list gets no signal
-  that the backend is unreachable vs. genuinely empty. Surface a toast
-  on failure (the `ToastContext` is already wired everywhere else).
 
 ### Type safety
 
@@ -121,7 +135,6 @@ feature:
   - `AddDiskGroupDialog` / `AddDiskDialog` / `ZoneSelectDialog` /
     `ConfirmDeleteDialog` — reached via context menus but not tested as
     standalone dialog flows (cancel, validation error states).
-- **Dead (not shipped, so no coverage needed)**: `KvPanel.tsx`.
 
 ## Pre-existing test failure (not introduced here)
 
@@ -132,61 +145,7 @@ feature:
   task. Unrelated to this review's changes (verified by stashing and
   re-running).
 
-## Recommendation order
-
-1. Fix `App.tsx:158` silent `listServers` catch (one-line toast).
-2. Delete or wire in `KvPanel.tsx`.
-3. Tighten `as any` casts in Inspector / buildFlow / tree hooks against
-   the real API types.
-4. Add a direct `CapacityPanel` E2E (empty/error/loading states).
-5. Decide on `NotLeaderHint` retry in `api.ts` after confirming the KV
-   ops request path.
-6. Split `App.tsx` and `app/crow-web/src/lifecycle.rs`.
-
-## E2E flow review — does the tested flow really work?
-
-Each E2E spec was traced through the full stack: UI interaction →
-component handler → `api.ts` fetch → backend route. Findings below are
-grouped by severity. All file:line references verified against the
-current source.
-
-### Backend gap — node delete doesn't cascade-stop the server
-
-`http_remove_node` (`app/crow-web/src/lifecycle.rs:232-255`) removes
-the node from config and cascades group-0 sysdata, but **does not stop
-the server process**. The UI compensates by calling `removeServer`
-before `removeNode` (`App.tsx:336-338`), so the UI flow works — but a
-direct `DELETE /api/nodes/:id` API call orphans the running process.
-
-The cascade-delete test
-(`11-physical-server-lifecycle.spec.ts:182-217`) is named "deleting a
-node cascades service shutdown" but only verifies the node disappears
-from the tree (line 207) and returns 404 via API (line 213). It does
-**not** verify the server was actually stopped — no check that
-`/api/nodes/493/server` returns 404 or that the PID is gone. The test
-passes even if the server process is still running.
-
-### Test 21 is API-only — not a UI flow test
-
-`21-kv-cluster-reconfig.spec.ts` has **zero `page` references** — every
-operation uses direct `fetch()` calls and API polling. The test
-describes leader election, quorum preservation, and replica catch-up,
-but none of it goes through the UI. Specifically:
-
-- Leader election on stop: stops via `fetch` (line 67-76), polls
-  `/api/stores/:id/groups/:id` for a new leader (lines 133-137). The UI
-  is never opened.
-- Quorum preservation: verifies by calling `kvPut`/`kvGet` via direct
-  `fetch` (lines 78-82). "No error" is the only health signal — no
-  explicit group health status check.
-- Replica catch-up: adds a replica via API (lines 254-259), then polls
-  replica **count** (lines 262-266). Does not verify the new replica
-  actually caught up on data — only that it appeared in the group
-  status. A stuck replica that never catches up would pass this test.
-
-This file should either be renamed to indicate it's an API integration
-test, or rewritten to drive the same flows through the UI (context-menu
-stop, tree health updates, AddReplicaDialog).
+## E2E flow review — remaining findings
 
 ### Test 22 has an API-only third sub-test
 
@@ -197,38 +156,6 @@ rendering and KV panel scan isolation. The third
 line 285) takes only `{ baseURL }` — no `page`, entirely API-only. It
 creates nodes/stores/groups via fixtures and verifies via `fetch`, never
 opening the UI.
-
-### Brittle wait in KV advanced test — fixed
-
-`31-kv-ops-advanced.spec.ts:103` used `page.waitForTimeout(500)` after
-a prefix delete, waiting for the component's 100ms auto-rescan
-(`KvOperatorPanel.tsx:322`: `setTimeout(() => handleScan(), 100)`).
-The auto-rescan is unconditional (not gated by the autoScan toggle), so
-the sleep served a real purpose — ensuring the auto-rescan's
-`/kv/scan` response completed before the manual `scanAndRefresh` at
-line 106, avoiding a race where two scan responses overwrite each
-other. But a fixed sleep is brittle. Replaced with
-`page.waitForResponse((r) => r.url().includes('/kv/scan'))` — a
-precise wait for the auto-rescan response, no fixed timeout.
-
-### Ping has no success assertion
-
-`11-physical-server-lifecycle.spec.ts:146-148` clicks the Ping menu
-item and immediately moves on to restart/stop. There is no assertion
-that the ping succeeded, no toast check, no activity-log check. If ping
-silently failed, the test would still pass. The activity-log test
-(`40-inspector-activity.spec.ts`) does verify ping appears in the log,
-but that's a separate test — the lifecycle test itself doesn't verify
-ping works.
-
-### Health pill not verified after stop
-
-`11-physical-server-lifecycle.spec.ts:160-173` stops the server and
-verifies via API that `serverState` is not `'running'` (line 172), but
-does not verify the UI health pill updated. The UI relies on
-`usePhysicalTree` polling (5s interval) to update `nodeHealthById`. The
-test doesn't wait for or assert on the health pill in the tree, so a
-stale-health-pill bug would go undetected.
 
 ### Capacity test mocks API responses
 
@@ -244,8 +171,8 @@ not the real backend. This means:
   that the backend actually performs the operation.
 
 This is acceptable for UI-interaction testing but should be documented
-as mock-based. A companion test against the real backend (even a
-smoke-level one) would close the gap.
+as mock-based (done — comments added). A companion test against the
+real backend (even a smoke-level one) would close the gap.
 
 ### Flows that are verified correct
 
@@ -274,6 +201,10 @@ correctly — UI component → api.ts → backend handler all match:
   from `listNodeStores` data; remote replica health from `reachable`.
 - **Store/group/replica CRUD** (`20`): dialog fields match; POST shapes
   match backend; tree renders new entities.
+- **Reconfig / leader failover** (`21`): stop/restart via context menus,
+  add replica via dialog, tree health badges, KV panel ops — all drive
+  through the UI; replica catch-up verified by polling state = running
+  + reading pre-existing keys via the UI.
 - **Topology tree rendering** (`22`): multi-rack/multi-store hierarchy
   renders correctly in the sidebar.
 - **Store isolation** (`22`): KV panel scan correctly shows only the
@@ -292,12 +223,15 @@ correctly — UI component → api.ts → backend handler all match:
 - **Shell behaviors** (`01`): dialog defaults, cancel, chevron vs text
   click, filter, refresh, health pill — all match component behavior.
 
-### E2E recommendation order
+## Recommendation order
 
-1. **Fix cascade-delete test**: add `expect((await api.get('/api/nodes/493/server')).status()).toBe(404)` after the cascade delete to verify the server was actually stopped.
-2. **Decide on Test 21**: either rename to `21-kv-cluster-reconfig-api.spec.ts` to indicate API-only, or rewrite to drive flows through the UI.
-3. **Remove `waitForTimeout(500)`** in `31-kv-ops-advanced.spec.ts:103` — done; replaced with `waitForResponse` for the auto-rescan.
-4. **Add ping success assertion** in `11-physical-server-lifecycle.spec.ts` — check the activity log or toast after ping.
-5. **Add health-pill assertion** after stop in `11-physical-server-lifecycle.spec.ts` — verify the tree health badge updates.
-6. **Document mock-based capacity tests** — add a comment in `50-capacity-diskdb.spec.ts` noting which sections use `page.route` mocks.
-7. **Strengthen replica catch-up** in Test 21 — verify data on the new replica, not just count.
+1. Tighten `as any` casts in Inspector / buildFlow / tree hooks against
+   the real API types.
+2. Add a direct `CapacityPanel` E2E (empty/error/loading states).
+3. Decide on `NotLeaderHint` retry in `api.ts` after confirming the KV
+   ops request path.
+4. Rewrite test 22's third sub-test to drive through the UI, or rename
+   to indicate it's API-only.
+5. Add a real-backend smoke test for capacity compact/rebuild (companion
+   to the mock-based test in 50).
+6. Split `App.tsx` and `app/crow-web/src/lifecycle.rs`.

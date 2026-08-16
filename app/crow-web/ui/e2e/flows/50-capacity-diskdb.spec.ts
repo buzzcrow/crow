@@ -309,6 +309,11 @@ test.describe('capacity · diskdb', () => {
     await addDisksBatch(baseURL!, nodeId, dg552, [{ disk_id: disk552 }]);
 
     try {
+      // --- Mock-based section: the status/recalc/scan/usage endpoints
+      // below are intercepted with page.route and fulfilled with canned
+      // responses. This verifies the UI handles those response shapes
+      // correctly, NOT that the diskdb backend performs the operations.
+      // Real-backend coverage of compact/rebuild/scan is a known gap. ---
       // Intercept the disk-group status PUT and fulfill with 204.
       const dgStatusRequest = page.waitForRequest(
         (req) => req.method() === 'PUT' && req.url().includes(`/api/disk-groups/${rackId}/${nodeId}/${dg548}/status`),
@@ -503,8 +508,8 @@ test.describe('capacity · diskdb', () => {
 
       // --- sidebar shows health badges for disk-group and disk when usage data is available ---
 
-      // The usage API is mocked from here on, so this section runs last and
-      // reloads the page to pick the mock up.
+      // The usage API is mocked from here on (page.route below), so this
+      // section runs last and reloads the page to pick the mock up.
       await apiAddDiskGroup(baseURL!, nodeId, dg553, 'test-dg-553');
       await addDisksBatch(baseURL!, nodeId, dg553, [{ disk_id: disk553 }]);
 

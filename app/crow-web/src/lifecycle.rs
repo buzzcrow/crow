@@ -238,6 +238,11 @@ pub async fn http_remove_node(
         let cfg = state.config.read().unwrap();
         cfg.node(id).map(|n| n.rack_id)
     };
+    // Cascade-stop the server process and drop its deployment record +
+    // topology before removing the node, so a direct DELETE /api/nodes/:id
+    // does not orphan a running crow-kv-server. No-op when no server is
+    // deployed (e.g. the UI already called DELETE .../server first).
+    stop_and_remove_server_for_node(&state, id).await;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_node(id).map_err(map_config_err)?;
@@ -917,6 +922,46 @@ pub async fn http_stop_node_server(
     Ok(Json(StopResult { sent }))
 }
 
+/// Stop the server process deployed on `node_id` (best-effort) and remove
+/// its deployment record + topology from config. Returns `true` if a
+/// server was deployed (and is now removed), `false` if no server was
+/// deployed on the node. Does NOT persist — the caller persists. Does NOT
+/// remove the node itself. Used by both `DELETE /api/nodes/:id/server`
+/// and the node-delete cascade so a direct `DELETE /api/nodes/:id` does
+/// not orphan a running crow-kv-server.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool {
+    use crow_console_shared::lifecycle;
+
+    let node = {
+        let cfg = state.config.read().unwrap();
+        if cfg.server_for_node(node_id).is_none() {
+            return false;
+        }
+        cfg.node(node_id).cloned()
+    };
+    if let Some(pid) = state.runtime_pid(node_id) {
+        let _ = match node {
+            Some(n) if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(&n, pid)
+                .await
+                .unwrap_or(false),
+            _ => matches!(
+                tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
+                Ok(Ok(true))
+            ),
+        };
+    }
+    {
+        let mut cfg = state.config.write().unwrap();
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.purge_node_topology(node_id);
+    }
+    state.clear_runtime_pid(node_id);
+    true
+}
+
 /// `DELETE /api/nodes/:node_id/server`. Stop and remove the deployment
 /// record. Returns 204 on success, 404 if no server is deployed.
 ///
@@ -929,39 +974,14 @@ pub async fn http_delete_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    use crow_console_shared::lifecycle;
-
-    let node = {
-        let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
-        cfg.node(node_id).cloned()
-    };
-    if let Some(pid) = state.runtime_pid(node_id) {
-        let _ = match node {
-            Some(n) if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(&n, pid)
-                .await
-                .unwrap_or(false),
-            _ => {
-                matches!(
-                    tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
-                    Ok(Ok(true))
-                )
-            }
-        };
+    if !stop_and_remove_server_for_node(&state, node_id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("no server deployed on node {node_id}"),
+            }),
+        ));
     }
-    {
-        let mut cfg = state.config.write().unwrap();
-        let _ = cfg.remove_server_for_node(node_id);
-        cfg.purge_node_topology(node_id);
-    }
-    state.clear_runtime_pid(node_id);
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
