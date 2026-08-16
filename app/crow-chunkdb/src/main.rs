@@ -40,6 +40,7 @@ struct Cli {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     let args = Cli::parse();
     tracing_subscriber::fmt().init();
@@ -62,6 +63,7 @@ async fn main() {
     let refresh_hw = HardwareClient::from_shared(Arc::clone(&kv));
     let watch = WatchNotifyClient::from_shared(Arc::clone(&kv));
     let svc = ServiceRegistryClient::from_shared(Arc::clone(&kv));
+    let svc_keepalive = ServiceRegistryClient::from_shared(Arc::clone(&kv));
 
     // Topology cache + refresh loop + notify handler.
     let cache = TopologyCache::new();
@@ -112,6 +114,18 @@ async fn main() {
             None
         }
     };
+
+    // Service-registry keep-alive: register this chunkdb instance under
+    // `/srv/chunkdb/<instance_id>` and heartbeat periodically. The
+    // crow-kv-server group-0 leader's `BindingMonitor` reads these
+    // entries to compute the chunkdb range binding table.
+    let keepalive_handle = spawn_chunkdb_keepalive(
+        svc_keepalive,
+        config.server.instance_id.as_deref(),
+        &config.server.listen_addr,
+        Duration::from_secs(u64::from(config.server.keepalive_interval_secs)),
+        stop_rx.clone(),
+    );
 
     // Diskdb client pool + chunk allocator.
     let pool = Arc::new(DiskdbClientPool::new(svc));
@@ -165,6 +179,9 @@ async fn main() {
     let _ = refresh_handle.await;
     let _ = notify_handle.await;
     let _ = sweep_handle.await;
+    if let Some(h) = keepalive_handle {
+        let _ = h.await;
+    }
     info!("crow-chunkdb stopped");
 }
 
@@ -189,6 +206,52 @@ async fn run_sweep_loop(
             }
         }
     }
+}
+
+/// Spawn a chunkdb service-registry keep-alive loop. Registers the
+/// instance under `/srv/chunkdb/<instance_id>` and heartbeats every
+/// `interval`. Stops on the `stop` signal, unregistering on clean
+/// shutdown. `instance_id_str` parses to a `u64`; if it is `None` or
+/// unparseable, the loop is skipped with a warning (the binding
+/// monitor will not see this instance).
+fn spawn_chunkdb_keepalive(
+    svc: ServiceRegistryClient,
+    instance_id_str: Option<&str>,
+    listen_addr: &str,
+    interval: Duration,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let instance_id = instance_id_str?.parse::<u64>().ok()?;
+    let grpc_endpoint = format!("http://{listen_addr}");
+    let handle = tokio::spawn(async move {
+        if let Err(e) = svc.register_chunkdb(instance_id, &grpc_endpoint).await {
+            warn!(error = %e, "chunkdb keep-alive: initial register failed");
+        } else {
+            info!(instance_id, "chunkdb keep-alive: registered");
+        }
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Err(e) = svc.heartbeat_chunkdb(instance_id, &grpc_endpoint).await {
+                        warn!(error = %e, "chunkdb keep-alive: heartbeat failed");
+                    }
+                }
+                _ = stop.changed() => {
+                    if *stop.borrow() {
+                        info!(instance_id, "chunkdb keep-alive: shutting down; unregistering");
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            svc.unregister("chunkdb", instance_id),
+                        ).await;
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    Some(handle)
 }
 
 /// HTTP server — health, metrics, cache invalidation endpoints.

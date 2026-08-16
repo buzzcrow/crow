@@ -56,6 +56,15 @@ pub struct ServerConfig {
     pub http_listen_addr: String,
     pub instance_id: Option<String>,
     pub kv_server_mgmt_seeds: Vec<String>,
+    /// Service-registry keep-alive interval in seconds. 0 disables
+    /// registration (the binding monitor will not see this instance).
+    /// Default: 10.
+    #[serde(default = "default_keepalive_interval_secs")]
+    pub keepalive_interval_secs: u32,
+}
+
+fn default_keepalive_interval_secs() -> u32 {
+    10
 }
 
 impl Default for ServerConfig {
@@ -65,6 +74,7 @@ impl Default for ServerConfig {
             http_listen_addr: format!("0.0.0.0:{CHUNKDB_HTTP_BASE}"),
             instance_id: None,
             kv_server_mgmt_seeds: vec![format!("http://127.0.0.1:{KV_SERVER_MGMT_BASE}")],
+            keepalive_interval_secs: default_keepalive_interval_secs(),
         }
     }
 }

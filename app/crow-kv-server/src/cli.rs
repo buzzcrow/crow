@@ -120,6 +120,13 @@ pub struct Cli {
     /// keep-alive loop. Default: 10.
     #[arg(long, default_value_t = 10)]
     pub keepalive_interval: u64,
+
+    /// chunkdb range binding monitor tick interval in seconds. 0
+    /// disables the monitor (the binding table is then operator-manual).
+    /// Only the group-0 leader writes the table; followers run the tick
+    /// but skip the write. Default: 30.
+    #[arg(long, default_value_t = 30)]
+    pub binding_monitor_interval: u64,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

@@ -239,6 +239,25 @@ async fn main() {
         None
     };
 
+    // Start the chunkdb range binding monitor (leader-gated on group-0).
+    // Reuses the keep-alive group-0 endpoint derivation. Only the
+    // group-0 leader writes the binding table; followers compute only.
+    let binding_monitor = if args.binding_monitor_interval > 0 {
+        let group0_ep = registry
+            .get_store(0)
+            .and_then(|s| s.listen_addr().map(|a| a.to_string()))
+            .unwrap_or_else(|| format!("http://{display_addr}"));
+        Some(
+            crow_kv_server::binding_monitor_wiring::spawn_chunkdb_binding_monitor(
+                &registry,
+                group0_ep,
+                args.binding_monitor_interval,
+            ),
+        )
+    } else {
+        None
+    };
+
     // Wire engine stats collector into the metrics runner, then start it.
     // The collector polls C++ engine counters via ct_get_stats each tick,
     // computes deltas, and inc_by()s on registered Rust counters so they
@@ -266,6 +285,10 @@ async fn main() {
     if let Some(ka) = keepalive {
         ka.stop().await;
         info!("keep-alive loop stopped");
+    }
+    if let Some(bm) = binding_monitor {
+        bm.stop();
+        info!("chunkdb binding monitor stopped");
     }
     graceful_shutdown(registry).await;
 }
