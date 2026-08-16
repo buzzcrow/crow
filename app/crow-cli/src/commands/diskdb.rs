@@ -57,6 +57,17 @@ pub enum DiskdbVerb {
         #[arg(long)]
         status: String,
     },
+    /// Set a disk-group's hardware status.
+    SetDgStatus {
+        #[arg(long)]
+        rack: u64,
+        #[arg(long)]
+        node: u64,
+        #[arg(long)]
+        dg: u64,
+        #[arg(long)]
+        status: String,
+    },
     /// Deploy a diskdb instance on a node.
     Deploy {
         #[arg(long)]
@@ -92,6 +103,12 @@ pub async fn run_diskdb_verb(cli: &Cli, verb: DiskdbVerb) -> ExitCode {
         DiskdbVerb::Compact { disk, zones } => diskdb_compact(cli, &disk, zones).await,
         DiskdbVerb::Rebuild { disk, zone } => diskdb_rebuild(cli, &disk, zone).await,
         DiskdbVerb::SetStatus { disk, status } => diskdb_set_status(cli, &disk, &status).await,
+        DiskdbVerb::SetDgStatus {
+            rack,
+            node,
+            dg,
+            status,
+        } => diskdb_set_dg_status(cli, rack, node, dg, &status).await,
         DiskdbVerb::Deploy { node, rpc_port } => diskdb_deploy(cli, node, rpc_port).await,
         DiskdbVerb::Restart { node } => diskdb_restart(cli, node).await,
         DiskdbVerb::Stop { node } => diskdb_stop(cli, node).await,
@@ -298,6 +315,27 @@ async fn diskdb_set_status(cli: &Cli, disk: &str, status: &str) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: set disk status: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn diskdb_set_dg_status(cli: &Cli, rack: u64, node: u64, dg: u64, status: &str) -> ExitCode {
+    let client = match console_client(cli) {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    match client.set_disk_group_status(rack, node, dg, status).await {
+        Ok(()) => {
+            if cli.json {
+                println!("{{\"ok\":true}}");
+            } else {
+                println!("set disk-group {rack}/{node}/{dg} status → {status}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: set disk-group status: {e}");
             ExitCode::from(2)
         }
     }

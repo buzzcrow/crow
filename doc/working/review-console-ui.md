@@ -9,15 +9,6 @@ Scope: `app/crow-web/ui/` (React + TS) and its Rust-side HTTP handlers in
 
 ## Open issues
 
-### Dead code
-
-- **`ConsoleClient::set_disk_group_status`** (`lib/crow-console-shared/src/diskdb.rs:338`):
-  no callers — no CLI verb, no test. Held off per user note (diskdb /
-  capacity view still in progress); revisit when that work lands.
-
-  ai-todo: impl it. We can change disk-group and disk status from UI. At capacity view , and right click the left sidebar items.
-  we also require show a ICON for disk-group and disk, shoud current state.  The task may be get losted. We need impl it and track by e2e test. 
-
 ### Consensus redirect not handled in UI layer
 
 - **`leader_hint` used for display only** (`shell/Sidebar.tsx:59`,
