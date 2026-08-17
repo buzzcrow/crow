@@ -29,12 +29,27 @@ what we chose and why. Requirements (the *what*) live in
 - [10. Module Layout](#10-module-layout)
 - [11. Accessibility](#11-accessibility)
 - [12. Testing](#12-testing)
+- [13. View-Mode Restructure: Physical / Capacity / KV](#13-view-mode-restructure-physical--capacity--kv)
+  - [13.1 Three view-modes](#131-three-view-modes)
+  - [13.2 Physical view: DiskDB Server sub-tree](#132-physical-view-diskdb-server-sub-tree)
+  - [13.3 Capacity view sidebar + dialogs](#133-capacity-view-sidebar--dialogs)
+  - [13.4 Batch Add Disk](#134-batch-add-disk)
+- [14. DiskDB Server Deploy / Restart / Stop](#14-diskdb-server-deploy--restart--stop)
+- [15. REST Proxy for DiskDB Runtime](#15-rest-proxy-for-diskdb-runtime)
+- [16. Capacity Panel (Canvas Visualization)](#16-capacity-panel-canvas-visualization)
+  - [16.1 Rendering](#161-rendering)
+  - [16.2 Color encoding](#162-color-encoding)
+  - [16.3 Polling](#163-polling)
+- [17. Console-Shared DiskDB Client + CLI](#17-console-shared-diskdb-client--cli)
+  - [17.1 Console-shared client](#171-console-shared-client)
+  - [17.2 CLI subcommands](#172-cli-subcommands)
 
 ## 1. Goals (recap)
 
 - Single page, no full-page navigation.
-- Two first-class hierarchy views (Physical ⇄ Logical) that drive the
-  sidebar tree, the topology canvas, and the inspector together.
+- Three first-class hierarchy views (Physical / Capacity / KV) that
+  drive the sidebar tree, the topology canvas, and the inspector
+  together.
 - Full operator surface: rack/node/server lifecycle, store/group/replica
   CRUD, KV data plane, embedded Swagger.
 - Offline-capable: no third-party CDN at runtime.
@@ -58,8 +73,8 @@ what we chose and why. Requirements (the *what*) live in
 
 ## 3. Information Architecture
 
-A fixed three-pane shell. A single root-level **view-mode** (Physical |
-Logical) selects which hierarchy every pane renders.
+A fixed three-pane shell. A single root-level **view-mode** (Physical /
+Capacity / KV) selects which hierarchy every pane renders.
 
 ```
 ┌─ Header ───────────────────────────────────────────────────────────┐
@@ -277,3 +292,402 @@ needed for the lean surface.
 - The Playwright real-backend E2E suite (`app/crow-web/ui/e2e/`)
   targets this lean SPA; selectors track the rewritten DOM. The full
   chain rack→node→deploy→store→group→replica→KV is the acceptance bar.
+
+---
+
+## 13. View-Mode Restructure: Physical / Capacity / KV
+
+The header view-toggle expanded from two modes (Physical | Logical) to
+three (Physical | Capacity / KV). This separation gives each view a
+single responsibility: Physical handles infrastructure + service
+management, Capacity handles disk-group/disk lifecycle + capacity
+visualization, and KV handles KV data-plane operations. Disk lifecycle
+actions (Add Disk Group, Add Disk) do not belong on the Physical view's
+Node context menu — they are capacity concerns, not infrastructure
+concerns. Splitting them into a dedicated Capacity view also lets the
+Capacity center panel render capacity visualization without competing
+with the topology canvas.
+
+### 13.1 Three view-modes
+
+- **Physical** — rack → node → server(s) → (KV: store → group;
+  DiskDB: disk-group → disk). Infrastructure + service management
+  only. Read-only resource listing under each server. Context menus:
+  - Rack: Add Node, Delete Rack.
+  - Node: Ping, Delete Node. No Add Disk Group / Add Disk.
+  - Server (KV or DiskDB): Restart, Stop, (if no server: Deploy).
+  - Server sub-tree (store/group/disk-group/disk): read-only, no
+    context menu.
+- **Capacity** — rack → node → disk-group → disk (no server nodes —
+  infrastructure is visible in Physical). The only place to
+  add/remove/move/set-status disk groups and disks. Center panel
+  renders capacity visualization (§16). Context menus:
+  - Node: Add Disk Group.
+  - DiskGroup: Add Disk (batch), Remove Disk Group, Set Status.
+  - Disk: Remove Disk, Move Disk, Set Disk Status.
+- **KV** (renamed from "Logical") — cluster → store → group →
+  replica. KV data-plane operations via the KV Operator panel (§6.1).
+  Unchanged from the former Logical view except the name.
+
+`ViewModeContext` expanded from `Physical | Logical` to
+`Physical | Capacity | KV`. The sidebar tree data hook switches on
+the active mode; the center panel mode set changes per mode (Physical
+→ topology canvas; Capacity → capacity panel; KV → KV operator
+panel).
+
+### 13.2 Physical view: DiskDB Server sub-tree
+
+The Physical view's `Server` tree node renders both server types
+under a Node:
+
+- `KV-${nodeId}` — existing; children `Store → Group → Replica`.
+- `DDB-${nodeId}` — new; children `DiskGroup → Disk` (read-only,
+  fetched from `GET /api/nodes/:id/disk-groups` +
+  `GET /api/nodes/:id/disk-groups/:dg_id/disks`).
+
+`TreeNode.type` gains `'DiskGroup' | 'Disk'` variants. The
+`serverByNodeId` lookup is extended to a `servicesByNodeId` map that
+returns both KV and DiskDB server entries; each renders as a separate
+`Server`-typed child with a distinguishing icon (Cog for KV, HardDrive
+for DiskDB).
+
+Context menu on a `Server` node: Restart →
+`POST /api/nodes/:id/server/restart` (KV) or
+`POST /api/nodes/:id/diskdb/restart` (DiskDB, §14). Stop →
+`POST /api/nodes/:id/server/stop` (KV) or
+`POST /api/nodes/:id/diskdb/stop` (DiskDB, §14). Labeled "Stop" not
+"Delete" — it stops the process but keeps the deployment record so
+Restart/Deploy can bring it back. If no server deployed: Deploy →
+opens `DeployServerDialog` (existing for KV) or `DeployDiskdbDialog`
+(new, §14).
+
+The Restart/Stop items on the Node menu are removed — server-process
+ops belong on the Server node, not the Node. Node menu keeps only
+Ping + Delete Node (+ Deploy if no server).
+
+Edge cases:
+- Node with KV deployed but no DiskDB → only `KV-${nodeId}` child
+  renders; no `DDB-${nodeId}` node.
+- DiskDB deployed but owns zero disk-groups → `DDB-${nodeId}` renders
+  with empty children (leaf with no expand arrow).
+- KV server stopped (pid cleared) but entry persisted → still renders
+  in the tree; Restart available, health = Unknown.
+
+### 13.3 Capacity view sidebar + dialogs
+
+The Capacity view sidebar renders rack → node → disk-group → disk
+(no server nodes — infrastructure is visible in Physical). Disk
+lifecycle dialogs (Add Disk Group, Add Disk, Remove, Move, Set Status)
+are only accessible here.
+
+Sidebar tree for Capacity mode:
+- Rack → Node → DiskGroup → Disk, fetched from
+  `GET /api/nodes/:id/disk-groups` + `.../disks`.
+- `TreeNode.type` variants `'DiskGroup' | 'Disk'` (from §13.2).
+- Disk rows show two status columns: "Group-0" (from
+  `HardwareClient.get_disk` via
+  `GET /api/nodes/:id/disk-groups/:dg_id/disks/:disk_id`) and
+  "Runtime" (from `QueryCapacityStats` via `/api/diskdb/usage`).
+  Both use the existing `toUiHealth`-style mapping over `HwStatus`.
+
+Context menus (Capacity branch):
+- Node: Add Disk Group → `AddDiskGroupDialog`.
+- DiskGroup: Add Disk → `AddDiskDialog` (batch, §13.4); Remove Disk
+  Group; Set Status.
+- Disk: Remove Disk; Move Disk; Set Disk Status.
+
+Dialogs (follow `AddNodeDialog`/`ConfirmDeleteDialog` patterns):
+- `AddDiskGroupDialog` — id, name. Calls
+  `POST /api/nodes/:id/disk-groups`.
+- `AddDiskDialog` — batch (§13.4). Calls
+  `POST /api/nodes/:id/disk-groups/:dg_id/disks/batch`.
+- `RemoveDiskDialog` / `RemoveDiskGroupDialog` — confirm + cascade
+  warning. Calls `DELETE .../disks/:id` / `DELETE .../disk-groups/:id`.
+- `MoveDiskDialog` — target rack/node/disk-group. Calls
+  `PUT .../disks/:id/move`.
+- `SetDiskStatusDialog` — `HwStatus` enum dropdown. Calls
+  `PUT /api/disks/:id/status` (§15).
+
+### 13.4 Batch Add Disk
+
+A batch endpoint for atomic all-or-nothing disk creation:
+
+```rust
+pub struct AddDiskBatchBody {
+    disks: Vec<AddDiskItem>,
+}
+pub struct AddDiskItem {
+    disk_id: String,
+    disk_type: String,
+    capacity_bytes: u64,
+    zone_size_bytes: u64,
+    unit_size_bytes: u32,
+}
+```
+
+Route: `POST /api/nodes/:id/disk-groups/:dg_id/disks/batch`.
+
+- Validates all `disk_id` formats upfront; rejects the whole batch if
+  any is malformed (atomic).
+- Writes all disks to config + group-0 sysdata in one transaction;
+  if any write fails, rolls back (no partial success).
+- `AddDiskDialog` UI: a row-builder where each row auto-generates a
+  UUID (editable), disk_type dropdown, capacity (default 4 TiB),
+  zone_size (default 32 GiB), unit_size (fixed 1 MiB, disabled
+  input). "Add Row" / "Remove Row" buttons. Submit sends the whole
+  batch.
+- Defaults: `capacity_bytes = 4 * 1024^4`, `zone_size_bytes = 32 *
+  1024^3`, `unit_size_bytes = 1024^2` (locked).
+
+Edge cases:
+- Batch with duplicate disk_ids → 400, whole batch rejected.
+- Group-0 sysdata write fails for disk 3 of 5 → rollback all 5, 502.
+- Empty batch → 400.
+
+## 14. DiskDB Server Deploy / Restart / Stop
+
+The Physical view's DiskDB Server node needs the same service-lifecycle
+ops as KV Server (Restart, Stop, Deploy). The deploy/restart/stop
+handlers enable `AddNodeDialog` to auto-deploy DiskDB alongside KV,
+and the Server context menu works for both types.
+
+Deployment mechanism: SSH or local fork — same as KV. No Docker. The
+`crow-diskdb` binary is spawned via `ssh::deploy_via_ssh` or
+`lifecycle::deploy_local_in_dir`, on the paired ports from
+`ports.rs` (`DISKDB_GRPC_BASE` + `DISKDB_HTTP_BASE`).
+
+New handlers mirroring the KV handlers:
+
+```rust
+pub struct DeployDiskdbBody {
+    rpc_port: u16,
+    http_port: u16,
+    #[serde(default)]
+    binary: Option<String>,
+}
+
+pub async fn http_deploy_node_diskdb(
+    State(state), Path(node_id), Json(body),
+) -> Result<(StatusCode, Json<DeployResult>), ...>
+
+pub async fn http_restart_node_diskdb(
+    State(state), Path(node_id),
+) -> Result<Json<DeployResult>, ...>
+
+pub async fn http_stop_node_diskdb(
+    State(state), Path(node_id),
+) -> Result<Json<StopResult>, ...>
+```
+
+- `http_deploy_node_diskdb` — checks no existing diskdb on the node
+  (409 if present), resolves the node, builds a `DeployRequest` with
+  `rpc_port`/`http_port` from `ServicePort::DiskdbGrpc`/`DiskdbHttp`
+  defaults (or body overrides), spawns via SSH or local fork, persists
+  a `ServerEntry` with `service_type: Diskdb`, records the pid.
+  Route: `POST /api/nodes/:id/diskdb/deploy`.
+- `http_restart_node_diskdb` — stops the tracked pid, re-deploys on
+  the same ports from the persisted entry. Route:
+  `POST /api/nodes/:id/diskdb/restart`.
+- `http_stop_node_diskdb` — stops the tracked pid, clears it, keeps
+  the entry. Route: `POST /api/nodes/:id/diskdb/stop`.
+- `ServerEntry` / `AppState` gains a `service_type` discriminator
+  (`Kv | Diskdb`) so `server_for_node` can return the right entry per
+  type. `runtime_pid` tracking is keyed by `(node_id, service_type)`.
+- `AddNodeDialog` calls `deployServer` (KV) then `deployDiskdb` (new
+  API function) after `addNode` succeeds. Both are gated by the
+  existing `enableCrowKV`-style checkbox (add `enableDiskDB`, default
+  true).
+
+Edge cases:
+- Node with KV deployed but DiskDB deploy fails → KV stays deployed;
+  the dialog reports the DiskDB failure; the operator can retry via
+  the Server context menu's Deploy.
+- DiskDB binary not found on the remote host → SSH deploy returns an
+  error; surfaced as 502.
+- Port conflict (another process on 9941/9942) → spawn fails; surfaced
+  as 502. The handler does not pre-check ports (best-effort, matches
+  KV behavior).
+
+## 15. REST Proxy for DiskDB Runtime
+
+`crow-web` proxies diskdb runtime RPCs (`QueryCapacityStats` drill-down,
+scan, recalc, compact, rebuild) via REST endpoints under
+`/api/diskdb/`. The CLI and web UI route through `crow-web` (no direct
+gRPC from the browser or CLI). `AppState` owns a `DiskdbClient` built
+from the same `ServiceRegistryClient` the console already uses:
+
+```rust
+diskdb_client: tokio::sync::RwLock<Option<DiskdbClient>>,
+```
+
+The `DiskdbClient` is lazily initialized on first diskdb REST request
+(the service registry may not be ready at console startup).
+
+Handlers:
+
+- `GET /api/diskdb/instances` — reads `read_all_diskdb_instances`
+  from the service registry directly (no gRPC fan-out). Returns
+  instance id, endpoint, `last_heartbeat_ms`, `owned_dg_ids`, and the
+  keepalive `group_usages` summaries.
+- `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` —
+  `QueryCapacityStats` drill-down (all params optional). When `dg` is
+  omitted, iterate all registered instances and merge the responses
+  for cluster-wide totals. `DiskdbClient.query_capacity_stats(0)`
+  routes to one instance only, so the merge lives in this handler.
+- `GET /api/diskdb/scan-status?dg=<id>` — `get_scan_status`.
+- `POST /api/diskdb/scan` — `trigger_scan` (optional `dg` in body).
+- `POST /api/diskdb/recalc` — `recalc_disk_usage` (optional `dg`).
+- `POST /api/diskdb/compact` — `compact_zone` (disk_id + optional
+  zone_indices; empty = all zones).
+- `POST /api/diskdb/rebuild` — `rebuild_zone_bitmap` (disk_id +
+  optional zone_index; absent = all zones — handler loops over the
+  disk's zones if zone_index is absent).
+- `PUT /api/disks/:disk_id/status` — set a disk's `HwStatus` via
+  `HardwareClient.set_disk_status`. Needed by the Set-Status dialog;
+  no such endpoint existed before (only add/remove/move).
+
+`GET /api/diskdb/usage` with no `dg` iterates
+`read_all_diskdb_instances`, calls `query_capacity_stats` per
+instance, merges `DiskGroupInfo` entries by id (summing
+capacity/busy/free). A dead instance yields a degraded indicator,
+not a failed page — its contribution is skipped with a warning.
+
+`PUT /api/disks/:disk_id/status` resolves the disk's rack/node/dg
+from config, then calls `hw.set_disk_status`. 404 if the disk is
+not in config.
+
+Edge cases:
+- Cluster overview with a dead instance → merged response excludes
+  it; the `/instances` endpoint still lists it (with stale heartbeat)
+  so the UI can show the degraded card.
+- Zone drill-down → bitmap is omitted at disk level (proto contract);
+  the UI issues the zone-level query separately.
+- Scan already running → `trigger_scan` returns `scan_in_progress:
+  true`; handler passes it through (no error).
+
+## 16. Capacity Panel (Canvas Visualization)
+
+The Capacity view center panel renders capacity visualization that
+scales to thousands of zones per disk and tens of thousands of blocks
+per zone. Canvas with offscreen double-buffering handles 84×84 zone
+grids and 181×181 bitmap grids without flicker. DOM/SVG rendering at
+that scale causes layout thrash and jank.
+
+`CapacityPanel.tsx` renders when `viewMode === Capacity`. The panel
+content depends on the selected entity (from `SelectionContext`):
+
+- **Rack / Node selected** — hierarchical capacity summary. Rack →
+  Node → DiskGroup rows, each with capacity/busy/free bars. Disk
+  counts shown as an array icon + count (not per-disk boxes — too
+  many). Data from `GET /api/diskdb/usage` (cluster merge).
+- **DiskGroup selected** — per-disk boxes. Each disk is a box with a
+  busy% gradient fill (green → amber → red, red = busy) + label.
+  Data from `GET /api/diskdb/usage?dg=<id>`.
+- **Disk selected** — zone grid. Each zone is a box in a square grid
+  (side = ceil(sqrt(zone_count))) with a green→amber→red gradient
+  based on busy%. Hover over a zone box shows a tooltip with the zone
+  id and usage percentage (from the brief per-zone entry already
+  loaded — no bitmap fetch). Click drills into the zone bitmap. A
+  "jump to zone #" input handles direct navigation (7000 zones cannot
+  be a dropdown). Data from
+  `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>` (brief per-zone
+  entries, no bitmap).
+- **Zone selected** — zone bitmap. Canvas grid of the zone's
+  `usage_bitmap` (side = ceil(sqrt(unit_count))). Busy block = red
+  filled cell, free block = green filled cell. Data from
+  `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` (full
+  bitmap, on-demand only).
+
+### 16.1 Rendering
+
+Canvas, not SVG/DOM, for all levels:
+- Offscreen canvas double-buffering: draw to an offscreen canvas,
+  then `drawImage` blit to the visible canvas in one call. The
+  visible canvas is never cleared-then-slowly-drawn (that flickers).
+- Single `requestAnimationFrame` sync redraw for grids up to 181×181
+  (32K cells) — fast enough to not flicker.
+- On data refresh (3 s poll), retain the previous frame until the
+  new one is fully drawn, then swap. No blank intermediate state.
+- No DOM reflow — the canvas is a single element; only its bitmap
+  content changes.
+
+### 16.2 Color encoding
+
+Green (free) → amber → red (busy):
+- Zone/disk boxes: gradient fill based on `busy_blocks /
+  unit_capacity` ratio. 0% = green, ~50% = amber, 100% = red.
+- Bitmap cells: binary — busy = red filled, free = green filled.
+- Redundant encoding: each zone/disk box shows a `%` text label on
+  hover (zone id + usage %) or inline so the information is not
+  color-only (color-blind friendly).
+
+### 16.3 Polling
+
+3 s refresh of the currently focused visualization:
+- The poll refetches only the data for the selected entity level
+  (rack/node → cluster merge; disk-group → dg query; disk → disk
+  query; zone → zone query).
+- On refetch, the canvas redraws via double-buffer (no flicker).
+- If the selection changes, the poll target switches immediately;
+  the old canvas is cleared on the next draw.
+
+Zone count math (for layout):
+- 200 TB disk / 32 GB zone = 6400 zones → 80×80 grid.
+- 32 GB zone / 1 MB unit = 32K units → 181×181 grid.
+
+Edge cases:
+- Disk with 0 zones (freshly added, zone load in progress) → empty
+  grid placeholder with "loading" text.
+- Zone with `used_count == unit_capacity` → all cells red; reported
+  as-is.
+- `usage_bitmap` shorter than `unit_capacity` (last zone rounded) →
+  pad with free (green) cells.
+- Poll response slower than 3 s → keep previous frame; next poll
+  catches up. No spinner overlay (would flicker).
+
+## 17. Console-Shared DiskDB Client + CLI
+
+### 17.1 Console-shared client
+
+`ConsoleClient` in `crow-console-shared` is the typed REST client used
+by both the web UI (via `api.ts` wrappers) and `crow-cli`. It has
+diskdb runtime methods + serde model types so the CLI and UI share one
+deserialization path.
+
+```rust
+impl ConsoleClient {
+    pub async fn list_diskdb_instances(&self) -> Result<Vec<DiskdbInstanceInfo>>
+    pub async fn query_diskdb_usage(&self, dg: Option<u64>, disk: Option<String>, zone: Option<u32>) -> Result<UsageResponse>
+    pub async fn get_scan_status(&self, dg: Option<u64>) -> Result<ScanSummary>
+    pub async fn trigger_scan(&self, dg: Option<u64>) -> Result<ScanSummary>
+    pub async fn recalc(&self, dg: Option<u64>) -> Result<RecalcResult>
+    pub async fn compact(&self, disk_id: &str, zones: Option<Vec<u32>>) -> Result<CompactionResult>
+    pub async fn rebuild(&self, disk_id: &str, zone: Option<u32>) -> Result<RebuildResult>
+    pub async fn set_disk_status(&self, disk_id: &str, status: HwStatus) -> Result<()>
+}
+```
+
+Serde model types (mirrors of the proto responses):
+`DiskdbInstanceInfo`, `DiskGroupUsageSummary`, `DiskGroupUsage`,
+`DiskUsage`, `ZoneUsage`, `ScanSummary`, `RecalcResult`,
+`CompactionResult`, `RebuildResult`, `UsageResponse`.
+
+### 17.2 CLI subcommands
+
+Runtime queries (usage/zones/scan/recalc/compact/rebuild) are
+reachable from the command line via `crow diskdb` subcommands.
+Lifecycle stays in `crow disk` / `crow disk-group`; `diskdb` is
+runtime queries only.
+
+```
+crow diskdb status                          — /api/diskdb/instances
+crow diskdb usage [--dg <id>] [--disk <id>] [--zone <zi>]
+crow diskdb scan [--dg <id>]                — trigger
+crow diskdb scan-status [--dg <id>]
+crow diskdb recalc [--dg <id>]
+crow diskdb compact <disk_id> [--zones <zi,...>]
+crow diskdb rebuild <disk_id> [--zone <zi>]
+```
+
+All route through `ConsoleClient` → `crow-web` → `DiskdbClient` →
+gRPC; no direct talk to `crow-diskdb`.
