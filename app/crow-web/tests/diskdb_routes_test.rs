@@ -21,8 +21,7 @@ async fn spawn_web() -> SocketAddr {
     let addr_bind = SocketAddr::from(([127, 0, 0, 1], 0));
     let listener = tokio::net::TcpListener::bind(addr_bind).await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = manifest_dir.join("target").join("test-tmp").join(format!(
+    let dir = std::env::temp_dir().join(format!(
         "crow-web-diskdb-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

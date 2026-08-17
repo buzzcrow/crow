@@ -8,10 +8,13 @@
 //! the storage format can evolve without touching call sites.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crow_protocol::{NodeId, RackId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::cluster::DiskGroupId;
 use crate::error::{Error, Result};
@@ -141,7 +144,8 @@ impl ConsoleConfigEngine for TomlFileEngine {
             std::fs::create_dir_all(parent).map_err(Error::Io)?;
         }
         let body = config.to_toml_string()?;
-        let tmp = self.path.with_extension("toml.tmp");
+        let seq = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = self.path.with_extension(format!("toml.tmp.{seq}"));
         std::fs::write(&tmp, body).map_err(Error::Io)?;
         std::fs::rename(&tmp, &self.path).map_err(Error::Io)?;
         Ok(())
