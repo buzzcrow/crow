@@ -16,27 +16,27 @@ For test strategy, layer scope, and coverage details, see [`design/kv/design-cro
 
 ## Suite Timing
 
-Measured on 2026-08-17 (warm build, macOS) and 2026-08-15 (warm build, Linux, build 3m13s).
+Measured on 2026-08-17 (warm build, macOS) and 2026-08-17 (warm build, Linux, build 1m32s).
 macOS times are wall-clock `time pixi run test-*` with build + test binaries cached.
 Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 387 | 20.1 s | 21.0 s |
-| `test-tree-ffi` | 30 | 13.5 s | 81.1 s |
-| `test-common` | 56 | 21.9 s | 22.5 s |
-| `test-protocol` | 89 | 12.2 s | 15.3 s |
-| `test-kv-core` | 560 | 43.2 s | 61.7 s |
-| `test-kv-client` | 49 | 23.4 s | 33.7 s |
-| `test-diskdb-client` | 6 | 13.9 s | 22.8 s |
-| `test-chunkdb-client` | 15 | 13.8 s | 6.8 s |
-| `test-kv-server` | 69 | 53.0 s | 54.1 s |
-| `test-diskdb` | 127 | 42.8 s | 10.6 s |
-| `test-chunkdb` | 76 | 27.8 s | 25.0 s |
-| `test-console-shared` | 62 | 39.2 s | 46.4 s |
-| `test-console-cli` | 16 | 69.4 s | 68.8 s |
-| `test-console-server` | 61 | 50.7 s | 34.1 s |
-| `test-console-ui` | 75 | 165.7 s | 134.7 s |
+| `test-tree-ct` | 395 | 20.1 s | 23.0 s |
+| `test-tree-ffi` | 30 | 13.5 s | 8.2 s |
+| `test-common` | 56 | 21.9 s | 18.8 s |
+| `test-protocol` | 89 | 12.2 s | 8.7 s |
+| `test-kv-core` | 560 | 43.2 s | 41.6 s |
+| `test-kv-client` | 49 | 23.4 s | 12.7 s |
+| `test-diskdb-client` | 6 | 13.9 s | 8.8 s |
+| `test-chunkdb-client` | 15 | 13.8 s | 8.2 s |
+| `test-kv-server` | 69 | 53.0 s | 31.6 s |
+| `test-diskdb` | 127 | 42.8 s | 16.6 s |
+| `test-chunkdb` | 76 | 27.8 s | 13.8 s |
+| `test-console-shared` | 62 | 39.2 s | 17.7 s |
+| `test-console-cli` | 16 | 69.4 s | 48.8 s |
+| `test-console-server` | 61 | 50.7 s | 46.6 s |
+| `test-console-ui` | 75 | 165.7 s | 179.6 s |
 
 ---
 

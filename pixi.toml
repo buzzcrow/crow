@@ -104,7 +104,7 @@ test-chunkdb-client = { cmd = "cargo test -p crow-chunkdb-client --all-targets",
 test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets", depends-on = ["build"] }
 test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
 test-console-server = { cmd = "cargo test -p crow-web --all-targets", depends-on = ["build"] }
-test-console-ui = { cmd = "cargo build -p crow-kv-server && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
+test-console-ui = { cmd = "cargo build -p crow-kv-server -p crow-diskdb && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
 # Full workspace test suite, grouped by domain. clean-env only runs at start
 # and before the console block (server-spawning tests with the heaviest
 # process/log footprint); non-spawning and self-cleaning tests run back-to-back.
@@ -190,9 +190,11 @@ find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -pr
   -o -type d -name mutants.out -print -exec rm -rf {} \; 2>/dev/null || true
 
 # Per-crate runtime dirs — globs are safe (names do not appear in src/).
+# Exclude app/ — tracked config templates live in app/*/conf/ (e.g.
+# app/crow-diskdb/conf/crow_diskdb_config.toml) and must not be deleted.
 echo "[clean] waldata/ctdata/conf runtime dirs"
 find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -prune \
-  -o -type d \( -name waldata -o -name ctdata -o -name conf \) ! -path "*/src/*" \
+  -o -type d \( -name waldata -o -name ctdata -o -name conf \) ! -path "*/src/*" ! -path "./app/*" \
   -print -exec rm -rf {} \; 2>/dev/null || true
 
 # ── OS junk ──
