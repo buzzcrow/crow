@@ -19,14 +19,13 @@ use std::time::Duration;
 
 use common::cluster::{wait_for_disks_ready, KvCluster};
 use crow_diskdb::ddb_config::{CompactionConfig, KeepAliveConfig};
-use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::liveness::keepalive::KeepAlive;
 use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::model::zone::DdbZone;
 use crow_diskdb::recovery::compaction::CompactionEngine;
 use crow_diskdb::recovery::ZoneLoader;
-use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
+use crow_kv_client::{GetOutcome, HardwareClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
 use crow_protocol::key::BinaryKey;
@@ -48,8 +47,8 @@ fn make_disk_id(high: u64, low: u64) -> DiskId {
     DiskId { high, low }
 }
 
-fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
-    ChunkId { high, mid, low }
+fn make_chunk_id(high: u64, low: u64) -> ChunkId {
+    ChunkId { high, low }
 }
 
 async fn seed_hardware(hw: &HardwareClient) {
@@ -120,24 +119,6 @@ async fn seed_hardware(hw: &HardwareClient) {
         .expect("set bind");
 }
 
-fn make_ddb_kv_client(endpoint: &str) -> DdbKvClient {
-    let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
-    kv.seed_leader(STORE_ID, DATA_GROUP_ID, endpoint.to_string());
-    DdbKvClient::new(kv)
-}
-
-fn make_hardware_client(endpoint: &str) -> HardwareClient {
-    let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
-    kv.seed_leader(0, 0, endpoint.to_string());
-    HardwareClient::new(kv)
-}
-
-fn make_service_registry_client(endpoint: &str) -> ServiceRegistryClient {
-    let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
-    kv.seed_leader(0, 0, endpoint.to_string());
-    ServiceRegistryClient::new(kv)
-}
-
 /// Find the crow-kv-server binary (mirrors the cluster module's logic).
 fn crow_kv_server_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
@@ -170,15 +151,15 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     // 1. Start cluster + seed hardware.
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     // 2. First tick — populates in-memory state + writes baseline
     //    ZoneValues.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
@@ -199,8 +180,8 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     // 3. Allocate 3 blocks (anti-affinity spreads across 3 disks),
     //    free 1 of them. After this, 2 blocks remain busy.
-    let owner_chunk = make_chunk_id(0, 0, 42);
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let owner_chunk = make_chunk_id(0, 42);
+    let alloc_kv = cluster.make_ddb_kv_client();
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segments = alloc::allocate_blocks(
         &dg,
@@ -219,7 +200,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     assert_eq!(segments.len(), 3);
 
     // Free the first 1.
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
         .await
         .expect("free 1");
@@ -233,9 +214,9 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     drop(dg);
     drop(container);
     let container2 = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc2 = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw3 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc2 = cluster.make_service_registry_client();
+    let hw3 = cluster.make_hardware_client();
+    let dg_kv2 = cluster.make_ddb_kv_client();
     let keepalive_cfg2 = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
@@ -256,7 +237,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     assert_eq!(bind, bind2);
 
     // 5. Run strategy 1 recovery on each zone of each disk.
-    let recovery_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let recovery_kv = Arc::new(cluster.make_ddb_kv_client());
     let recovery = ZoneLoader::new(Arc::clone(&recovery_kv), 4);
 
     let disks = dg2.disks.read().unwrap().clone();
@@ -406,14 +387,14 @@ async fn recovery_strategy2_journal_replay() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     // 1. First tick — populates state + writes baseline ZoneValues.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
         miss_threshold: 3,
@@ -433,8 +414,8 @@ async fn recovery_strategy2_journal_replay() {
     let bind = *dg.bind.read().unwrap();
 
     // 2. Allocate 3 blocks, free 1. 2 remain busy.
-    let owner_chunk = make_chunk_id(0, 0, 42);
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let owner_chunk = make_chunk_id(0, 42);
+    let alloc_kv = cluster.make_ddb_kv_client();
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segments = alloc::allocate_blocks(
         &dg,
@@ -450,7 +431,7 @@ async fn recovery_strategy2_journal_replay() {
     )
     .await
     .expect("allocate 3");
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_blocks(&dg, &segments[0..1], &free_kv, false)
         .await
         .expect("free 1");
@@ -460,9 +441,9 @@ async fn recovery_strategy2_journal_replay() {
     drop(dg);
     drop(container);
     let container2 = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc2 = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw3 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc2 = cluster.make_service_registry_client();
+    let hw3 = cluster.make_hardware_client();
+    let dg_kv2 = cluster.make_ddb_kv_client();
     let keepalive2 = KeepAlive::new(
         hw3,
         svc2,
@@ -491,7 +472,7 @@ async fn recovery_strategy2_journal_replay() {
             .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
             .collect()
     };
-    let recovery_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let recovery_kv = Arc::new(cluster.make_ddb_kv_client());
     let recovery = ZoneLoader::new(Arc::clone(&recovery_kv), 4);
     let recovered_dg = recovery
         .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind2, &disks, 4)
@@ -575,7 +556,7 @@ async fn recovery_strategy2_journal_replay() {
         let zones = freed_disk.zones.read().unwrap();
         Arc::clone(&zones[freed_zone_idx as usize])
     };
-    let compaction_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let compaction_kv = cluster.make_ddb_kv_client();
     let engine = CompactionEngine::new(Arc::new(compaction_kv), CompactionConfig::default());
     let compaction_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     engine
@@ -629,14 +610,14 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     // 1. First tick — populates state + writes baseline ZoneValues.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
     let keepalive = KeepAlive::new(
         hw2,
         svc,
@@ -660,13 +641,13 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     let bind = *dg.bind.read().unwrap();
 
     // 2. Allocate 1 block, then free it. This creates 1 free record.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = cluster.make_ddb_kv_client();
     let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
         .await
         .expect("allocate");
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_block(&dg, &segment, &free_kv, false)
         .await
         .expect("free");
@@ -693,7 +674,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
         zone_index: zone_idx,
         unit_offset: segment.unit_offset,
     };
-    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv = cluster.make_ddb_kv_client();
     let free_before = verify_kv
         .kv()
         .get(
@@ -711,7 +692,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     );
 
     // 4. Run compaction on the zone.
-    let compaction_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let compaction_kv = Arc::new(cluster.make_ddb_kv_client());
     let compaction = CompactionEngine::new(compaction_kv, CompactionConfig::default());
     let compaction_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     compaction
@@ -720,7 +701,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
         .expect("compaction should succeed");
 
     // 5. Verify the free record is deleted after compaction.
-    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv2 = cluster.make_ddb_kv_client();
     let free_after = verify_kv2
         .kv()
         .get(
@@ -745,7 +726,7 @@ async fn compaction_compact_zone_writes_snapshot_and_deletes_free_records() {
     );
 
     // 7. Verify a ZoneValue snapshot exists (compaction writes one).
-    let verify_kv3 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv3 = cluster.make_ddb_kv_client();
     let snapshot = verify_kv3
         .get_zone_value(bind, &disk_id, zone_idx)
         .await
@@ -775,14 +756,14 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     // 1. First tick — populates state + writes baseline ZoneValues.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
     let keepalive = KeepAlive::new(
         hw2,
         svc,
@@ -807,15 +788,15 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
 
     // 2. Allocate block A at offset 0, then free it. This creates a
     // free record with freed_ts = T1.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = cluster.make_ddb_kv_client();
     let seg_a = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
         .await
         .expect("allocate A");
     let disk_id = seg_a.disk_id.unwrap();
     let zone_idx = seg_a.zone_index;
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_block(&dg, &seg_a, &free_kv, false)
         .await
         .expect("free A");
@@ -842,7 +823,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
         zone_index: zone_idx,
         unit_offset: seg_a.unit_offset,
     };
-    let check_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let check_kv = cluster.make_ddb_kv_client();
     let GetOutcome::Found {
         value: free_val_bytes,
         ..
@@ -872,7 +853,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     zone.compact_ts
         .store(freed_ts_a, std::sync::atomic::Ordering::Release);
     let zv = zone.to_zone_value();
-    let put_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let put_kv = cluster.make_ddb_kv_client();
     put_kv
         .put_zone(bind, &disk_id, zone_idx, &zv)
         .await
@@ -903,7 +884,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     let _ = zone.usage_bits.range_clear(offset_a, 1);
     zone.used_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     let zv2 = zone.to_zone_value();
-    let put_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let put_kv2 = cluster.make_ddb_kv_client();
     put_kv2
         .put_zone(bind, &disk_id, zone_idx, &zv2)
         .await
@@ -918,8 +899,9 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
         owner_chunk: Some(owner_chunk),
         unit_size: UNIT_SIZE_BYTES,
         state: crow_protocol::diskdb::rpc::BlockState::Ok as i32,
+        commit_state: crow_protocol::diskdb::rpc::CommitState::Committed as i32,
     };
-    let busy_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let busy_kv = cluster.make_ddb_kv_client();
     busy_kv
         .persist_busy(bind, &disk_id, zone_idx, seg_a.unit_offset, &busy_val)
         .await
@@ -928,7 +910,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
     // 5. Run compaction. The orphaned free record (freed_ts = T1) is
     // <= compact_ts (= T1) → stale → dropped (NOT range_clear). The
     // bit stays SET (block B is busy). No double-free.
-    let compaction_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let compaction_kv = Arc::new(cluster.make_ddb_kv_client());
     let compaction = CompactionEngine::new(compaction_kv, CompactionConfig::default());
     let compaction_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     compaction
@@ -949,7 +931,7 @@ async fn compaction_watermark_prevents_double_free_after_crashed_compaction() {
 
     // 7. Verify: the orphaned free record is deleted (compaction
     // deletes all scanned free records, stale or new).
-    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv = cluster.make_ddb_kv_client();
     let free_after = verify_kv
         .kv()
         .get(
@@ -982,14 +964,14 @@ async fn recovery_persist_only_is_idempotent() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     // 1. First tick — populates state + writes baseline ZoneValues.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
     let keepalive = KeepAlive::new(
         hw2,
         svc,
@@ -1014,9 +996,9 @@ async fn recovery_persist_only_is_idempotent() {
 
     // 2. Allocate 3 blocks, then free 1. This creates a mix of busy
     // and free records on disk.
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = cluster.make_ddb_kv_client();
     let mut segments = Vec::new();
     for _ in 0..3 {
         let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
@@ -1024,7 +1006,7 @@ async fn recovery_persist_only_is_idempotent() {
             .expect("allocate");
         segments.push(seg);
     }
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_block(&dg, &segments[0], &free_kv, false)
         .await
         .expect("free");
@@ -1039,7 +1021,7 @@ async fn recovery_persist_only_is_idempotent() {
     };
 
     // 4. First load — load_disk_group from KV state.
-    let recovery_kv1 = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let recovery_kv1 = Arc::new(cluster.make_ddb_kv_client());
     let recovery1 = ZoneLoader::new(Arc::clone(&recovery_kv1), 4);
     let dg1 = recovery1
         .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
@@ -1064,7 +1046,7 @@ async fn recovery_persist_only_is_idempotent() {
     }
 
     // 6. Second recovery — same KV state, new recovery engine.
-    let recovery_kv2 = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let recovery_kv2 = Arc::new(cluster.make_ddb_kv_client());
     let recovery2 = ZoneLoader::new(Arc::clone(&recovery_kv2), 4);
     let dg2 = recovery2
         .load_disk_group(DG_ID, NODE_ID, RACK_ID, bind, &disk_values, 4)
@@ -1134,15 +1116,15 @@ async fn preparatory_thread_produces_ready_zones() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     // 1. First tick — populates state + writes baseline ZoneValues.
     // Use zone_rotate_count = 2 so only 2 of 4 zones are active.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
     let keepalive = KeepAlive::new(
         hw2,
         svc,
@@ -1167,10 +1149,10 @@ async fn preparatory_thread_produces_ready_zones() {
     // 2. Churn: allocate + free 10 blocks across the disk-group.
     // This creates uncompacted free records on non-active zones
     // (rotation spreads allocations across zones).
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = cluster.make_ddb_kv_client();
+    let free_kv = cluster.make_ddb_kv_client();
     let mut freed_segments = Vec::new();
     for _ in 0..10 {
         let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
@@ -1204,7 +1186,7 @@ async fn preparatory_thread_produces_ready_zones() {
 
     // 4. Run the preparatory cycle — this compacts non-active zones
     // and marks them compacted_ready.
-    let prep_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let prep_kv = Arc::new(cluster.make_ddb_kv_client());
     let prep =
         crow_diskdb::recovery::compaction::PreparatoryThread::new(prep_kv, CompactionConfig::default());
     let prep_metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();

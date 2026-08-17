@@ -11,10 +11,28 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R85** — Bump this line in the same commit when adding a new item.
+**Next R number: R104** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
+  migration — Area: chunkdb / kv — Implement the full
+  `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
+  instance range ownership. Dual-serve reads during cutover, new-owner-only
+  writes, background metadata verification, graceful client redirect.
+  Distinct from R102: R103 transfers which chunkdb instance serves a hash
+  range; R102 rebinds which paxos group stores a disk-group's data. Both
+  reuse the common `BindingStrategy` framework
+  (`doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5).
+- **[R102](R102-diskdb-dynamic-binding-migration.md)** — diskdb dynamic
+  disk-group binding migration — Area: diskdb / kv — Reuse the common
+  `BindingStrategy` framework
+  (`doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5) to
+  dynamically rebind diskdb disk-groups to paxos groups, replacing the
+  operator-manual `BindMapValue` write with automatic monitoring +
+  rebinding. Monitor detects instance join/leave, rebalances disk-group
+  assignments, migrates data during rebinding.
+- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv — Add `expected_revision` to `KvSetRequest` for optimistic concurrency; leader checks key revision before propose (lease-protected). Defense-in-depth for the chunkdb per-chunk lock (`doc/design/chunkdb/design-crow-chunkdb.md` §10); enables cross-instance CAS on `put_chunk` if range ownership is ever bypassed.
 - **[R77](R77-diskdb-console-cli.md)** — diskdb console + CLI
   integration — Area: diskdb / console — `/api/diskdb` REST proxy +
   `crow diskdb` CLI subcommands for runtime queries (usage/zones/scan/
@@ -73,7 +91,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### Medium Priority
 
-**Complexity — Medium:**
 - **[R83](R83-chunkdb-complete-recovery-flow.md)** — chunkdb
   complete recovery flow (real data recovery + speed control) —
   Area: chunkdb / diskdb / diskio — diskdb's recovery is disk-layer

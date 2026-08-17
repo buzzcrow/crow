@@ -15,6 +15,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crow_diskdb::ddb_kv_client::DdbKvClient;
+use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use serde_json::Value;
 
 // ── process management ──────────────────────────────────────────
@@ -84,7 +86,7 @@ pub struct KvNode {
 }
 
 impl KvNode {
-    fn base_url(&self) -> &str {
+    pub fn base_url(&self) -> &str {
         self.handle.base_url()
     }
 }
@@ -225,6 +227,10 @@ pub struct KvCluster {
     pub nodes: Vec<KvNode>,
     pub group0_leader_endpoint: String,
     pub group1_leader_endpoint: String,
+    /// HTTP management API endpoints for all nodes — used as
+    /// `mgmt_seeds` so client topology refresh can recover from a
+    /// stale leader hint.
+    pub mgmt_endpoints: Vec<String>,
 }
 
 impl KvCluster {
@@ -249,11 +255,39 @@ impl KvCluster {
         // Wait for leader election on both groups.
         let group0_leader_endpoint = leader_endpoint(&nodes, 0).await;
         let group1_leader_endpoint = leader_endpoint(&nodes, 1).await;
+        let mgmt_endpoints = nodes.iter().map(|n| n.base_url().to_string()).collect();
         Self {
             nodes,
             group0_leader_endpoint,
             group1_leader_endpoint,
+            mgmt_endpoints,
         }
+    }
+
+    /// Build a `DdbKvClient` seeded with the group-1 leader endpoint.
+    /// Uses `mgmt_endpoints` for topology refresh so the client can
+    /// recover if the leader changes.
+    #[must_use]
+    pub fn make_ddb_kv_client(&self) -> DdbKvClient {
+        let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
+        kv.seed_leader(0, 1, self.group1_leader_endpoint.clone());
+        DdbKvClient::new(kv)
+    }
+
+    /// Build a `HardwareClient` seeded with the group-0 leader endpoint.
+    #[must_use]
+    pub fn make_hardware_client(&self) -> HardwareClient {
+        let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
+        kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
+        HardwareClient::new(kv)
+    }
+
+    /// Build a `ServiceRegistryClient` seeded with the group-0 leader.
+    #[must_use]
+    pub fn make_service_registry_client(&self) -> ServiceRegistryClient {
+        let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
+        kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
+        ServiceRegistryClient::new(kv)
     }
 }
 

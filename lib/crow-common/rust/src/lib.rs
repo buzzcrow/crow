@@ -18,6 +18,8 @@
 //!   `load_from_file`, `watch` (file watcher), `log_diff`.
 
 pub mod config;
+pub mod ec;
+pub mod ec_isal;
 pub mod logging;
 pub mod metrics;
 pub mod report;

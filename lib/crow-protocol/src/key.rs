@@ -19,6 +19,7 @@
 //! Binary key layouts are frozen once shipped. New key kinds are added
 //! with a new type tag; existing layouts are never changed.
 
+pub mod chunkdb;
 pub mod common;
 pub mod diskdb;
 pub mod encoding;
@@ -27,6 +28,7 @@ pub mod kv_cluster;
 #[cfg(test)]
 mod key_tests;
 
+pub use chunkdb::{ChunkdbRangeBindingKey, ChunkdbRangeMigrationKey};
 pub use common::{NodeKey, RackKey};
 pub use diskdb::{
     BindMapKey, BusyBlockKey, DiskGroupKey, DiskGroupUsageKey, DiskKey, FreeBlockKey, InstanceKey,

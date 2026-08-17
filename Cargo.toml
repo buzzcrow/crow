@@ -8,6 +8,8 @@ members = [
     "app/crow-kv-server",
     "app/crow-diskdb",
     "lib/crow-diskdb-client",
+    "app/crow-chunkdb",
+    "lib/crow-chunkdb-client",
     "lib/crow-console-shared",
     "app/crow-web",
     "app/crow-cli",

@@ -306,3 +306,29 @@ impl ServiceRegistryClient {
         self.read_all_instances("kv-server").await
     }
 }
+
+// ── chunkdb convenience wrappers ────────────────────────────────
+
+impl ServiceRegistryClient {
+    /// Register a chunkdb instance. chunkdb is stateless (design §3.6),
+    /// so the only extra field is the gRPC endpoint; the binding
+    /// monitor (`BindingMonitor` with `ChunkdbRangeStrategy`) reads
+    /// these entries to compute the range binding table.
+    pub async fn register_chunkdb(&self, instance_id: InstanceId, grpc_endpoint: &str) -> Result<()> {
+        let extra = ServiceExtra {
+            diskdb: None,
+            kv_server: None,
+        };
+        self.register("chunkdb", instance_id, grpc_endpoint, &extra).await
+    }
+
+    /// Heartbeat a chunkdb instance (same as register — full overwrite).
+    pub async fn heartbeat_chunkdb(&self, instance_id: InstanceId, grpc_endpoint: &str) -> Result<()> {
+        self.register_chunkdb(instance_id, grpc_endpoint).await
+    }
+
+    /// Read all live chunkdb instances.
+    pub async fn read_all_chunkdb_instances(&self) -> Result<Vec<(InstanceId, InstanceValue)>> {
+        self.read_all_instances("chunkdb").await
+    }
+}

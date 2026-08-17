@@ -195,15 +195,23 @@ async fn maintenance_loop_uses_configured_tick_interval() {
 
     group.start_engine_maintenance_loop().await;
     // Use a real timer (no paused time) since spawn_blocking uses real
-    // OS threads that don't respect tokio's virtual clock. Wait long
-    // enough for at least one 5ms tick + spawn_blocking completion.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(
-        wal.snapshot_slot(),
-        15,
-        "the periodic loop should have run a maintenance pass using the configured tick"
-    );
+    // OS threads that don't respect tokio's virtual clock. Poll until
+    // the loop's first pass persists the snapshot rather than guessing a
+    // fixed delay — under heavy parallel test load the spawn_blocking
+    // thread may not complete within a naive 50 ms budget.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if wal.snapshot_slot() == 15 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the periodic loop should have run a maintenance pass using the configured tick \
+             (snapshot_slot still {} after 2 s)",
+            wal.snapshot_slot(),
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

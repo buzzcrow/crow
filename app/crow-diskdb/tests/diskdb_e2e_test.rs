@@ -19,7 +19,7 @@ use crow_diskdb::ddb_kv_client::DdbKvClient;
 use crow_diskdb::liveness::keepalive::KeepAlive;
 use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
-use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
+use crow_kv_client::{GetOutcome, HardwareClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::diskdb_service_server::DiskdbService as DiskdbServiceTrait;
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -44,8 +44,8 @@ fn make_disk_id(high: u64, low: u64) -> DiskId {
     DiskId { high, low }
 }
 
-fn make_chunk_id(high: u64, mid: u64, low: u64) -> ChunkId {
-    ChunkId { high, mid, low }
+fn make_chunk_id(high: u64, low: u64) -> ChunkId {
+    ChunkId { high, low }
 }
 
 /// Point-lookup a key in the data group, returning the value bytes
@@ -149,28 +149,6 @@ async fn seed_hardware(hw: &HardwareClient) {
         .expect("set bind");
 }
 
-/// Build a `DdbKvClient` seeded with the leader endpoint for
-/// `(store_id, group_id)`.
-fn make_ddb_kv_client(endpoint: &str) -> DdbKvClient {
-    let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
-    kv.seed_leader(STORE_ID, DATA_GROUP_ID, endpoint.to_string());
-    DdbKvClient::new(kv)
-}
-
-/// Build a `HardwareClient` seeded with the group-0 leader endpoint.
-fn make_hardware_client(endpoint: &str) -> HardwareClient {
-    let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
-    kv.seed_leader(0, 0, endpoint.to_string());
-    HardwareClient::new(kv)
-}
-
-/// Build a `ServiceRegistryClient` seeded with the group-0 leader.
-fn make_service_registry_client(endpoint: &str) -> ServiceRegistryClient {
-    let kv = CrowkvClient::new(ClientConfig::new(vec![endpoint.to_string()]));
-    kv.seed_leader(0, 0, endpoint.to_string());
-    ServiceRegistryClient::new(kv)
-}
-
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn diskdb_e2e_allocate_free() {
@@ -188,15 +166,15 @@ async fn diskdb_e2e_allocate_free() {
     );
 
     // 2. Seed hardware metadata into group 0.
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
     eprintln!("hardware metadata seeded");
 
     // 3. Build diskdb in-process.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
 
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
@@ -239,8 +217,8 @@ async fn diskdb_e2e_allocate_free() {
     assert_eq!(zone_count, ZONE_COUNT, "expected {ZONE_COUNT} zones per disk");
 
     // 7. Allocate one block.
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let alloc_kv = cluster.make_ddb_kv_client();
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
     let segment = alloc::allocate_block(
         &dg,
@@ -268,7 +246,7 @@ async fn diskdb_e2e_allocate_free() {
         unit_offset: segment.unit_offset,
     };
     let busy_bytes = busy_key.to_bytes();
-    let kv_client = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let kv_client = cluster.make_ddb_kv_client();
     let busy_val = kv_get(&kv_client, &busy_bytes).await;
     assert!(busy_val.is_some(), "busy record should exist in kv");
     let busy_record: crow_protocol::diskdb::rpc::BusyBlockValue =
@@ -278,7 +256,7 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("BusyBlockValue record verified in kv");
 
     // 9. Free the block.
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_block(&dg, &segment, &free_kv, false)
         .await
         .expect("free should succeed");
@@ -292,7 +270,7 @@ async fn diskdb_e2e_allocate_free() {
         unit_offset: segment.unit_offset,
     };
     let free_bytes = free_key.to_bytes();
-    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv2 = cluster.make_ddb_kv_client();
     let free_val = kv_get(&verify_kv2, &free_bytes).await;
     assert!(free_val.is_some(), "free record should exist in kv");
     let free_record: crow_protocol::diskdb::rpc::FreeBlockValue =
@@ -306,7 +284,7 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("FreeBlockValue record verified, BusyBlockKey gone");
 
     // 11. Allocate multiple blocks and verify.
-    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv2 = cluster.make_ddb_kv_client();
     let segments = alloc::allocate_blocks(
         &dg,
         1,   // unit_count
@@ -325,14 +303,14 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("allocated 3 blocks");
 
     // 12. Free all 3 in one batch.
-    let free_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv2 = cluster.make_ddb_kv_client();
     alloc::free_blocks(&dg, &segments, &free_kv2, false)
         .await
         .expect("free 3 blocks should succeed");
     eprintln!("freed 3 blocks in batch");
 
     // 13. Verify all 3 busy keys are gone and 3 free keys exist.
-    let verify_kv3 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv3 = cluster.make_ddb_kv_client();
     for seg in &segments {
         let bk = BusyBlockKey {
             disk_id: make_disk_id(0, 1),
@@ -374,13 +352,13 @@ async fn diskdb_e2e_validate_owner_on_free() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
 
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
@@ -402,15 +380,15 @@ async fn diskdb_e2e_validate_owner_on_free() {
         .expect("disk-group should be in container");
 
     // Allocate a block.
-    let owner_chunk = make_chunk_id(0, 0, 100);
+    let owner_chunk = make_chunk_id(0, 100);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = cluster.make_ddb_kv_client();
     let segment = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
         .await
         .expect("allocate should succeed");
 
     // 1. Free with validate_owner_on_free=true and matching owner → success.
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_block(&dg, &segment, &free_kv, true)
         .await
         .expect("free with matching owner should succeed");
@@ -421,7 +399,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         zone_index: segment.zone_index,
         unit_offset: segment.unit_offset,
     };
-    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv = cluster.make_ddb_kv_client();
     let free_val = kv_get(&verify_kv, &free_key.to_bytes()).await;
     assert!(
         free_val.is_some(),
@@ -430,7 +408,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
 
     // 2. Allocate again, then free with validate_owner_on_free=true but
     //    a WRONG owner → OwnerMismatch, no bitmap clear.
-    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv2 = cluster.make_ddb_kv_client();
     let segment2 = alloc::allocate_block(
         &dg,
         1,
@@ -444,11 +422,11 @@ async fn diskdb_e2e_validate_owner_on_free() {
     .await
     .expect("allocate should succeed");
 
-    let wrong_owner = make_chunk_id(0, 0, 999);
+    let wrong_owner = make_chunk_id(0, 999);
     let mut wrong_segment = segment2;
     wrong_segment.owner_chunk = Some(wrong_owner);
 
-    let free_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv2 = cluster.make_ddb_kv_client();
     let result = alloc::free_block(&dg, &wrong_segment, &free_kv2, true).await;
     assert!(
         matches!(result, Err(alloc::FreeError::OwnerMismatch { .. })),
@@ -462,7 +440,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         zone_index: segment2.zone_index,
         unit_offset: segment2.unit_offset,
     };
-    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv2 = cluster.make_ddb_kv_client();
     let busy_val = kv_get(&verify_kv2, &busy_key.to_bytes()).await;
     assert!(
         busy_val.is_some(),
@@ -470,7 +448,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     );
 
     // 3. Free the block with the correct owner (cleanup).
-    let free_kv3 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv3 = cluster.make_ddb_kv_client();
     alloc::free_block(&dg, &segment2, &free_kv3, true)
         .await
         .expect("free with matching owner should succeed");
@@ -483,7 +461,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         unit_count: 1,
         owner_chunk: Some(owner_chunk),
     };
-    let free_kv4 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv4 = cluster.make_ddb_kv_client();
     let result = alloc::free_block(&dg, &fake_segment, &free_kv4, true).await;
     assert!(
         matches!(result, Err(alloc::FreeError::NotBusy { .. })),
@@ -515,13 +493,13 @@ async fn diskdb_e2e_allocate_all_free_all() {
     );
 
     // Seed hardware + sync.
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
 
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),
@@ -544,7 +522,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
 
     let total_cap = 3 * 4 * 128u64; // 3 disks × 4 zones × 128 units
     let total_cap_bytes = total_cap * u64::from(UNIT_SIZE_BYTES);
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
 
     // Helper: verify the busy + free == capacity invariant on a
@@ -601,7 +579,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
     // (plural) enforces anti-affinity (excludes used disks), so it
     // can only allocate up to disk_count per call.
     let mut all_segments: Vec<crow_protocol::diskdb::rpc::Segment> = Vec::new();
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = cluster.make_ddb_kv_client();
     while let Ok(seg) = alloc::allocate_block(
         &dg,
         1, // unit_count
@@ -630,7 +608,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
     assert_eq!(usage.free_bytes, 0);
 
     // Sample-verify a few BusyBlockValue records in KV (first, middle, last).
-    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv = cluster.make_ddb_kv_client();
     let sample_indices = [0usize, all_segments.len() / 2, all_segments.len() - 1];
     for &idx in &sample_indices {
         let seg = &all_segments[idx];
@@ -652,7 +630,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
 
     // ── Phase 2: Free ALL space ───────────────────────────────────
     // Batch-free 100 at a time, checking the invariant periodically.
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     let mut freed_count = 0usize;
     for chunk in all_segments.chunks(100) {
         alloc::free_blocks(&dg, chunk, &free_kv, false)
@@ -674,7 +652,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
     assert_eq!(usage.free_bytes, 0);
 
     // Sample-verify: FreeBlockValue exists + BusyBlockKey is gone.
-    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv2 = cluster.make_ddb_kv_client();
     for &idx in &sample_indices {
         let seg = &all_segments[idx];
         let disk_id = seg.disk_id.expect("segment has disk_id");
@@ -712,7 +690,7 @@ async fn diskdb_e2e_allocate_all_free_all() {
     // ── Phase 3: Persist-only — no space reclaimable without compaction
     // The bitmap still shows all blocks busy. Allocation must fail
     // (NoSpace). Compaction (tested separately) is required to reclaim.
-    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv2 = cluster.make_ddb_kv_client();
     let result = alloc::allocate_block(
         &dg,
         1,
@@ -749,14 +727,14 @@ async fn diskdb_e2e_compact_zone_rpc() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     // 1. First tick — populates state + writes baseline ZoneValues.
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
     let keepalive = KeepAlive::new(
         hw2,
         svc,
@@ -781,9 +759,9 @@ async fn diskdb_e2e_compact_zone_rpc() {
 
     // 2. Allocate 4 blocks (one at a time — allocate_blocks enforces
     // anti-affinity across disks, but we only have 3 disks).
-    let owner_chunk = make_chunk_id(0, 0, 42);
+    let owner_chunk = make_chunk_id(0, 42);
     let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
-    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv = cluster.make_ddb_kv_client();
     let mut segments = Vec::new();
     for _ in 0..4 {
         let seg = alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4, &metrics)
@@ -794,7 +772,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
     assert_eq!(segments.len(), 4);
 
     // 3. Free 2 blocks — persist-only: bitmap stays set.
-    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let free_kv = cluster.make_ddb_kv_client();
     alloc::free_blocks(&dg, &segments[0..2], &free_kv, false)
         .await
         .expect("free 2");
@@ -826,7 +804,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
     // the case where freed and busy blocks are in different zones.
     // Set lifecycle to Up so the mutating-RPC gate passes.
     container.set_lifecycle_phase(crow_diskdb::liveness::lifecycle::StartupPhase::Up);
-    let compact_kv = Arc::new(make_ddb_kv_client(&cluster.group1_leader_endpoint));
+    let compact_kv = Arc::new(cluster.make_ddb_kv_client());
     let storage = crow_diskdb::ddb_config::StorageDefaults::default();
     let recovery = Arc::new(crow_diskdb::recovery::ZoneLoader::new(Arc::clone(&compact_kv), 4));
     let recalc = Arc::new(crow_diskdb::metrics::RecalcEngine::new(
@@ -885,7 +863,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
     }
 
     // 7. Verify FreeBlockKey records are deleted from KV.
-    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let verify_kv = cluster.make_ddb_kv_client();
     for seg in &segments[0..2] {
         let free_key = FreeBlockKey {
             disk_id,
@@ -901,7 +879,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
     }
 
     // 8. Verify space is now reclaimable — allocate 2 more blocks.
-    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let alloc_kv2 = cluster.make_ddb_kv_client();
     let mut new_segments = Vec::new();
     for _ in 0..2 {
         let seg = alloc::allocate_block(
@@ -939,13 +917,13 @@ async fn diskdb_e2e_suspect_rediscovery() {
     }
 
     let cluster = KvCluster::start().await;
-    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    let hw = cluster.make_hardware_client();
     seed_hardware(&hw).await;
 
     let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
-    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
-    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
-    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let svc = cluster.make_service_registry_client();
+    let hw2 = cluster.make_hardware_client();
+    let dg_kv = cluster.make_ddb_kv_client();
 
     let keepalive_cfg = KeepAliveConfig {
         interval: Duration::from_secs(10),

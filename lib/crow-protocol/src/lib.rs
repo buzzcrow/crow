@@ -72,6 +72,12 @@ pub use diskdb_type_util::{
 pub mod common_type;
 pub use common_type::{DiskGroupId, GroupId, InstanceId, NodeId, RackId, ReplicaId, StoreId};
 
+pub mod chunk_id;
+pub use chunk_id::{
+    generate as generate_chunk_id, is_zero as is_zero_chunk, ChunkIdParts, CHUNK_TYPE_BTREE_PAGE,
+    CHUNK_TYPE_PAGE_INDEX, CHUNK_TYPE_REPO, CHUNK_TYPE_WAL,
+};
+
 pub mod key;
 pub use key::{
     BinaryKey, BindMapKey, BusyBlockKey, DiskGroupKey, DiskKey, FreeBlockKey, InstanceKey, KeyError,
@@ -96,5 +102,6 @@ pub use bitmap::{create_usage_bitmap, UsageBitmap};
 
 pub mod ports;
 pub use ports::{
-    ServicePort, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
+    ServicePort, CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE,
+    KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
 };

@@ -8,6 +8,7 @@
 //! The binary entry (`main.rs`) imports from this lib via
 //! `use crow_kv_server::{cli, mgmt, startup, store_registry};`.
 
+pub mod binding_monitor_wiring;
 pub mod cli;
 pub mod engine_collector;
 pub mod keepalive;

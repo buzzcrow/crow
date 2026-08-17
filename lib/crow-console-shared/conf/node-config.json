@@ -1,23 +1,4 @@
 {
   "version": 0,
-  "stores": [
-    {
-      "store_id": 5,
-      "groups": [
-        {
-          "group_id": 60,
-          "replica_id": 600,
-          "members": [
-            {
-              "replica_id": 600,
-              "endpoint": "0.0.0.0:27720",
-              "voting": true
-            }
-          ],
-          "membership_epoch": 7,
-          "term": 1
-        }
-      ]
-    }
-  ]
+  "stores": []
 }

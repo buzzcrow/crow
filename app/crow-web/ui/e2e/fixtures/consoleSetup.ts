@@ -12,9 +12,16 @@ export const DEFAULT_SERVER_BINARY =
 
 // Monotonic port counter for E2E tests. Tests run sequentially (workers: 1),
 // so a counter is safe — each test cleans up its own servers before the
-// next test starts. Starts high to avoid clashing with OS-assigned ports.
-let nextPort = 30000 + (process.pid % 10000);
+// next test starts. Stays below the Linux ephemeral port range
+// (32768–60999) so the kernel never hands these ports to outgoing
+// connections, which would cause "Address already in use" bind errors.
+const PORT_BASE = 30000;
+const PORT_CEILING = 32768;
+let nextPort = PORT_BASE;
 export function freePort(): number {
+  if (nextPort >= PORT_CEILING) {
+    throw new Error(`freePort: exhausted ${PORT_CEILING - PORT_BASE} ports; raise PORT_CEILING above the ephemeral range`);
+  }
   return nextPort++;
 }
 

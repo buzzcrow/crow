@@ -1,6 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let proto_dir = "src/proto";
 
@@ -68,6 +69,24 @@ fn main() {
         .type_attribute("BindMapValue", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ServiceExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("DiskdbExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // chunkdb range binding sysdata types (serde for JSON storage in group 0).
+        .type_attribute(
+            "ChunkdbRangeBindingValue",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "ChunkdbRangeMigrationValue",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute("RangeStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute(
+            "ChunkdbMigrationState",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "NotMyRangeHint",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .type_attribute(
             "DiskGroupUsageSummary",
             "#[derive(serde::Serialize, serde::Deserialize)]",
@@ -82,6 +101,7 @@ fn main() {
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
         .type_attribute("BlockState", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("CommitState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ErrorCode", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Recovery scan progress (bincode storage on data groups).
         .type_attribute(
@@ -96,6 +116,7 @@ fn main() {
         .type_attribute("ECState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ChunkState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("StripType", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("ChunkType", "#[derive(serde::Serialize, serde::Deserialize)]")
         // chunkdb message types — serde for MirrorStrip and EcStrip
         // (flat message types). ChunkStrip and Chunk contain a oneof
         // (Strip) which prost nests in a submodule; serde on the

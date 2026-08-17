@@ -44,6 +44,8 @@ jobs:
       run: pixi run test-kv-client
     - name: Run diskdb-client tests
       run: pixi run test-diskdb-client
+    - name: Run chunkdb-client tests
+      run: pixi run test-chunkdb-client
 
   ServerTests:
     runs-on: ubuntu-latest
@@ -65,6 +67,8 @@ jobs:
       run: pixi run test-kv-server
     - name: Run diskdb tests
       run: pixi run test-diskdb
+    - name: Run chunkdb tests
+      run: pixi run test-chunkdb
     - name: Run console-shared tests
       run: pixi run test-console-shared
     - name: Run CLI tests

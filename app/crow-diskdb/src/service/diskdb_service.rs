@@ -14,12 +14,12 @@ use crow_protocol::diskdb::rpc::diskdb_service_server::{
     DiskdbService as DiskdbServiceTrait, DiskdbServiceServer,
 };
 use crow_protocol::diskdb::rpc::{
-    AllocateBlocksRequest, AllocateResponse, CompactZoneRequest, CompactZoneResponse, DiskGroupInfo,
-    DiskGroupRecalcResult, DiskInfo, FreeBlocksRequest, FreeResponse, GetDiskGroupInfoRequest,
-    GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse, GetScanStatusRequest,
-    GetScanStatusResponse, QueryCapacityStatsRequest, QueryCapacityStatsResponse, RebuildZoneBitmapRequest,
-    RebuildZoneBitmapResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse, ScanSummary,
-    TriggerScanRequest, TriggerScanResponse, ZoneCompactionResult, ZoneRecalcResult,
+    AllocateBlocksRequest, AllocateResponse, CommitBlocksRequest, CommitBlocksResponse, CompactZoneRequest,
+    CompactZoneResponse, DiskGroupInfo, DiskGroupRecalcResult, DiskInfo, FreeBlocksRequest, FreeResponse,
+    GetDiskGroupInfoRequest, GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse,
+    GetScanStatusRequest, GetScanStatusResponse, QueryCapacityStatsRequest, QueryCapacityStatsResponse,
+    RebuildZoneBitmapRequest, RebuildZoneBitmapResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse,
+    ScanSummary, TriggerScanRequest, TriggerScanResponse, ZoneCompactionResult, ZoneRecalcResult,
     ZoneUsage as ProtoZoneUsage,
 };
 use crow_protocol::diskdb_type_util::DiskIdExt;
@@ -304,6 +304,73 @@ impl DiskdbServiceTrait for DiskdbService {
         self.metrics.free_total.inc();
         self.metrics.free_rpc_latency.observe(elapsed_ns(rpc_start));
         Ok(Response::new(FreeResponse { freed_count }))
+    }
+
+    async fn commit_blocks(
+        &self,
+        req: Request<CommitBlocksRequest>,
+    ) -> Result<Response<CommitBlocksResponse>, Status> {
+        let req = req.into_inner();
+
+        if req.segments.is_empty() {
+            return Ok(Response::new(CommitBlocksResponse { committed_count: 0 }));
+        }
+
+        // Check lifecycle phase — mutating RPCs require Up.
+        let phase = self.container.lifecycle_phase();
+        if !phase.allows_mutating_rpcs() {
+            return Err(Status::unavailable(format!(
+                "diskdb not ready: phase={}",
+                phase.as_str()
+            )));
+        }
+
+        // Find the disk-group that owns the first segment's disk.
+        let first_disk_id = req.segments[0]
+            .disk_id
+            .ok_or_else(|| Status::invalid_argument("segment.disk_id required"))?;
+
+        let dg = {
+            let dg_ids = self.container.disk_group_ids();
+            let mut found = None;
+            for dg_id in dg_ids {
+                if let Some(n) = self.container.get_disk_group(dg_id) {
+                    let owns = {
+                        let disks = n.disks.read().unwrap();
+                        disks.iter().any(|d| d.disk_id == first_disk_id)
+                    };
+                    if owns {
+                        found = Some(n);
+                        break;
+                    }
+                }
+            }
+            found
+        }
+        .ok_or_else(|| {
+            Status::permission_denied(format!(
+                "disk {} not owned by this instance",
+                first_disk_id.to_display_string()
+            ))
+        })?;
+
+        let committed = alloc::commit_blocks(&dg, &req.segments, &self.kv)
+            .await
+            .map_err(|e| match e {
+                crate::model::alloc::FreeError::NotBusy { .. } => {
+                    Status::not_found(format!("commit failed: {e}"))
+                }
+                crate::model::alloc::FreeError::Kv(_) => {
+                    Status::internal(format!("commit persist failed: {e}"))
+                }
+                crate::model::alloc::FreeError::OwnerMismatch { .. } => {
+                    Status::permission_denied(format!("commit failed: {e}"))
+                }
+            })?;
+
+        Ok(Response::new(CommitBlocksResponse {
+            committed_count: committed,
+        }))
     }
 
     #[allow(clippy::too_many_lines)]

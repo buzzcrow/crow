@@ -139,7 +139,7 @@ pub fn is_zero_owner(bv: &BusyBlockValue) -> bool {
 /// Check if a `ChunkId` is all-zeros.
 #[cfg_attr(not(feature = "test-util"), allow(dead_code))]
 pub fn is_zero_chunk(c: &ChunkId) -> bool {
-    c.high == 0 && c.mid == 0 && c.low == 0
+    c.high == 0 && c.low == 0
 }
 
 /// Scan one zone's records, returning `(zone_value, corrupt_busy_keys,

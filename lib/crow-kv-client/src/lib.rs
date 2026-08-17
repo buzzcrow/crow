@@ -17,6 +17,8 @@
 //! `crow-console` is expected to depend on this crate rather than rolling
 //! its own gRPC client.
 
+mod binding_framework;
+mod chunkdb_binding_strategy;
 mod client;
 mod client_admin;
 mod client_retry;
@@ -26,11 +28,16 @@ mod hardware;
 mod kv_cluster;
 mod metrics;
 mod pool;
+mod range_binding;
 mod service_registry;
 mod space_usage;
 mod topology;
 mod watch_notify;
 
+pub use binding_framework::{BindingMonitor, BindingStrategy, MonitorTickResult};
+pub use chunkdb_binding_strategy::{
+    compute_sub_range_assignment, ChunkdbRangeStrategy, DEFAULT_SUB_RANGE_COUNT,
+};
 pub use client::{
     new_client_id, BatchOp, CrowkvClient, GetOutcome, JournalOp, JournalScanOutcome, ScanOutcome,
     WriteOutcome,
@@ -40,6 +47,7 @@ pub use error::{Error, Result};
 pub use hardware::HardwareClient;
 pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
+pub use range_binding::{ChunkdbRangeBinding, RangeBindingClient, RangeRouteError, RouteWithFallback};
 pub use service_registry::ServiceRegistryClient;
 pub use space_usage::{ClusterUsage, NodeUsage, RackUsage, SpaceUsageClient};
 pub use watch_notify::{WatchNotify, WatchNotifyClient, WatchSubscription};
