@@ -60,7 +60,9 @@ impl ChunkdbClientError {
 }
 
 /// Map a gRPC status to a `ChunkdbClientError`. If the status carries
-/// a `NotMyRangeHint` detail, maps to `NotMyRange` (retryable).
+/// a `NotMyRangeHint` detail, maps to `NotMyRange` (retryable). The
+/// hint carries only the rejected bucket — the client refreshes its
+/// binding cache from group-0 and re-routes.
 pub fn from_status(status: &tonic::Status) -> ChunkdbClientError {
     let msg = status.message().to_string();
     // Check for NotMyRangeHint details on FailedPrecondition.
@@ -69,8 +71,8 @@ pub fn from_status(status: &tonic::Status) -> ChunkdbClientError {
         if !details.is_empty() {
             if let Ok(hint) = crow_protocol::chunkdb::rpc::NotMyRangeHint::decode(details) {
                 return ChunkdbClientError::NotMyRange(format!(
-                    "bucket not in owned ranges [{}, {}] → instance {} at {}",
-                    hint.range_start, hint.range_end, hint.instance_id, hint.grpc_endpoint
+                    "bucket not in owned ranges [{}]",
+                    hint.range_start
                 ));
             }
         }

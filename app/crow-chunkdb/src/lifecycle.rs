@@ -59,6 +59,8 @@ pub enum LifecycleError {
     LockBusy,
     #[error("chunk lock acquire timed out")]
     LockTimeout,
+    #[error("strip index {index} out of range (chunk has {len} strips)")]
+    StripIndexOutOfRange { index: u32, len: usize },
 }
 
 /// Lock policy — how to handle contention on a per-chunk mutex.
@@ -216,10 +218,8 @@ impl ChunkLockMap {
         for k in &keys_to_remove {
             if self.chunks.remove(k).is_some() {
                 count += 1;
+                self.metrics.record_invalidate();
             }
-        }
-        if count > 0 {
-            self.metrics.record_invalidate();
         }
         count
     }
@@ -273,6 +273,7 @@ impl ChunkLockMap {
 /// Lock is released on drop; hold time is recorded into metrics.
 pub struct ChunkGuard {
     #[allow(dead_code)]
+    // Held for Drop — releases the per-chunk lock. Never read directly.
     guard: OwnedMutexGuard<()>,
     chunk: Option<Chunk>,
     hint: CacheHint,
@@ -506,7 +507,10 @@ impl LifecycleHandler {
         };
 
         let mut chunk = match &guard {
-            Some(g) => g.chunk().expect("acquire returns chunk").clone(),
+            Some(g) => g
+                .chunk()
+                .unwrap_or_else(|| unreachable!("acquire guarantees chunk on Ok"))
+                .clone(),
             None => self.store.get_chunk(chunk_id).await?,
         };
         let current_state = ChunkState::from_proto(chunk.state);
@@ -564,7 +568,10 @@ impl LifecycleHandler {
         };
 
         let mut chunk = match &guard {
-            Some(g) => g.chunk().expect("acquire returns chunk").clone(),
+            Some(g) => g
+                .chunk()
+                .unwrap_or_else(|| unreachable!("acquire guarantees chunk on Ok"))
+                .clone(),
             None => self.store.get_chunk(chunk_id).await?,
         };
         let current_state = ChunkState::from_proto(chunk.state);
@@ -604,7 +611,10 @@ impl LifecycleHandler {
         };
 
         let mut chunk = match &guard {
-            Some(g) => g.chunk().expect("acquire returns chunk").clone(),
+            Some(g) => g
+                .chunk()
+                .unwrap_or_else(|| unreachable!("acquire guarantees chunk on Ok"))
+                .clone(),
             None => self.store.get_chunk(chunk_id).await?,
         };
         let current_state = ChunkState::from_proto(chunk.state);
@@ -632,6 +642,137 @@ impl LifecycleHandler {
             g.refresh(chunk.clone());
         }
         info!(chunk_id = ?chunk_id, "chunk deleted");
+        Ok(chunk)
+    }
+
+    /// Delete a range within a chunk (partial delete). Frees the
+    /// segments of strips whose `[chunk_offset, chunk_offset +
+    /// capacity)` range overlaps with `[offset, offset + size)`, then
+    /// removes those strips from the chunk record. The chunk must be
+    /// Active.
+    pub async fn delete_chunk_range(
+        &self,
+        chunk_id: &ChunkId,
+        offset: u32,
+        size: u32,
+    ) -> Result<(), LifecycleError> {
+        self.check_range(chunk_id)?;
+
+        let mut guard = if let Some(locks) = &self.locks {
+            Some(
+                locks
+                    .acquire(chunk_id, &self.store, &LockPolicy::default(), CacheHint::Cache)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        let mut chunk = match &guard {
+            Some(g) => g
+                .chunk()
+                .unwrap_or_else(|| unreachable!("acquire guarantees chunk on Ok"))
+                .clone(),
+            None => self.store.get_chunk(chunk_id).await?,
+        };
+        let current_state = ChunkState::from_proto(chunk.state);
+        current_state.check_can_append()?;
+
+        let end = offset.saturating_add(size);
+        // Find strips that overlap with [offset, end).
+        let (to_remove, to_keep): (Vec<_>, Vec<_>) = chunk.strips.into_iter().partition(|s| {
+            let s_start = s.chunk_offset;
+            let s_end = s_start.saturating_add(s.capacity);
+            s_start < end && offset < s_end
+        });
+
+        // Free segments of the removed strips.
+        let all_segments: Vec<_> = to_remove.iter().flat_map(extract_segments).collect();
+        if !all_segments.is_empty() {
+            if let Err(e) = self.allocator.pool().free_blocks(all_segments).await {
+                warn!(error = %e, "delete_chunk_range: free_blocks failed (orphan segments logged)");
+            }
+        }
+
+        let removed_count = to_remove.len();
+        chunk.strips = to_keep;
+        chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();
+        self.store.put_chunk(&chunk).await?;
+
+        if let Some(ref mut g) = guard {
+            g.refresh(chunk.clone());
+        }
+        info!(chunk_id = ?chunk_id, offset, size, removed_strips = removed_count, "chunk range deleted");
+        Ok(())
+    }
+
+    /// Update a single strip within a chunk (e.g. after EC parity
+    /// computation). Replaces the strip at `strip_index` with the new
+    /// strip, freeing the old strip's segments and committing the new
+    /// strip's segments. The chunk must be Active or Sealed.
+    pub async fn update_chunk_strip(
+        &self,
+        chunk_id: &ChunkId,
+        strip_index: u32,
+        new_strip: ChunkStrip,
+    ) -> Result<Chunk, LifecycleError> {
+        self.check_range(chunk_id)?;
+
+        let mut guard = if let Some(locks) = &self.locks {
+            Some(
+                locks
+                    .acquire(chunk_id, &self.store, &LockPolicy::default(), CacheHint::Cache)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        let mut chunk = match &guard {
+            Some(g) => g
+                .chunk()
+                .unwrap_or_else(|| unreachable!("acquire guarantees chunk on Ok"))
+                .clone(),
+            None => self.store.get_chunk(chunk_id).await?,
+        };
+        let current_state = ChunkState::from_proto(chunk.state);
+        // Strip updates can happen on Active (EC encoding) or Sealed
+        // (parity rebuild after seal) chunks.
+        if current_state != ChunkState::Active && current_state != ChunkState::Sealed {
+            return Err(LifecycleError::InvalidStateTransition(StateTransitionError::new(
+                current_state,
+                "Active|Sealed",
+            )));
+        }
+
+        let idx = usize::try_from(strip_index).unwrap_or(usize::MAX);
+        if idx >= chunk.strips.len() {
+            return Err(LifecycleError::StripIndexOutOfRange {
+                index: strip_index,
+                len: chunk.strips.len(),
+            });
+        }
+
+        // Free the old strip's segments.
+        let old_segments = extract_segments(&chunk.strips[idx]);
+        if !old_segments.is_empty() {
+            if let Err(e) = self.allocator.pool().free_blocks(old_segments).await {
+                warn!(error = %e, "update_chunk_strip: free_blocks failed for old strip (orphan segments logged)");
+            }
+        }
+
+        // Commit the new strip's segments.
+        self.commit_strip_segments(std::slice::from_ref(&new_strip)).await;
+
+        // Replace the strip.
+        chunk.strips[idx] = new_strip;
+        chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();
+        self.store.put_chunk(&chunk).await?;
+
+        if let Some(ref mut g) = guard {
+            g.refresh(chunk.clone());
+        }
+        info!(chunk_id = ?chunk_id, strip_index, "chunk strip updated");
         Ok(chunk)
     }
 

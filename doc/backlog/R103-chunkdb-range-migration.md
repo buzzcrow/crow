@@ -119,4 +119,6 @@ Implement the full chunkdb range ownership migration flow (`Copying` → `Cutove
 ## Open Questions
 
 - Should `Cutover` allow writes to both instances with conflict resolution, or strictly new-owner-only?
+  → **Resolved**: writes go to new owner only; reads try new owner first, then old owner (dual-serve for reads). See `doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5.6.
 - Is metadata verification needed if chunk metadata is already in shared KV groups, or can `Copying` be skipped for crash-recovery migrations?
+  → **Resolved**: chunkdb instances are stateless (chunk metadata is in KV groups, not in the instance). There is no data copy — migration is a routing change. The `Copying` phase is replaced by `InTransition` (dual-serve reads + new-owner-only writes) with a grace period before cutover to `Stable`. See §5.6 of the range-binding design doc.

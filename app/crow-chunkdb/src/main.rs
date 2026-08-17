@@ -154,9 +154,7 @@ async fn main() {
             .with_range_guard(Arc::clone(&range_guard))
             .with_locks(Arc::clone(&lock_map)),
     );
-    let grpc_service = ChunkdbService::new(handler)
-        .with_range_guard(range_guard)
-        .into_server();
+    let grpc_service = ChunkdbService::new(handler).into_server();
 
     // Start HTTP health + metrics + cache invalidation server.
     let http_handle = tokio::spawn(run_http_server(http_listen_addr, Arc::clone(&lock_map)));

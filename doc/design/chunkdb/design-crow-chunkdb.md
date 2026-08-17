@@ -663,14 +663,15 @@ transitions. Last writer wins with validation.
 
 ## 10. Per-Chunk-ID Lifecycle Lock + Chunk Cache
 
-`LifecycleHandler`'s four mutating RPCs (allocate/append/seal/delete)
-each perform a read-modify-write cycle on a chunk record. Without
-per-chunk serialization, two concurrent `AppendChunk` RPCs on the same
-chunk ID both read the chunk, both append strips, both `put_chunk` —
-the second overwrite loses the first's strips. A per-chunk mutex
-serializes the RMW cycle. A payload cache avoids the `get_chunk` store
-round-trip on every mutating RPC (the latest chunk is known in-process
-right after the previous `put_chunk`).
+`LifecycleHandler`'s six mutating RPCs (allocate/append/seal/delete/
+delete-range/update-strip) each perform a read-modify-write cycle on a
+chunk record. Without per-chunk serialization, two concurrent
+`AppendChunk` RPCs on the same chunk ID both read the chunk, both
+append strips, both `put_chunk` — the second overwrite loses the
+first's strips. A per-chunk mutex serializes the RMW cycle. A payload
+cache avoids the `get_chunk` store round-trip on every mutating RPC
+(the latest chunk is known in-process right after the previous
+`put_chunk`).
 
 The lock and the payload have different eviction requirements (lock:
 evict only when uncontended; payload: evict freely by
@@ -836,6 +837,13 @@ mutating RPC acquires the per-chunk lock before its RMW cycle:
   deleted → `ChunkNotFound`) → free segments (`free_blocks` — inside
   the lock) → `put_chunk`, `guard.refresh(chunk)` (keeps Deleted chunk
   cached).
+- `delete_chunk_range`: `check_range` → `acquire` → state check (must
+  be Active) → partition strips by overlap with `[offset, offset+size)`
+  → free removed strips' segments → `put_chunk`, `guard.refresh(chunk)`.
+- `update_chunk_strip`: `check_range` → `acquire` → state check (must
+  be Active or Sealed — EC parity rebuild can happen after seal) →
+  validate `strip_index` → free old strip's segments → commit new
+  strip's segments → replace strip → `put_chunk`, `guard.refresh(chunk)`.
 - `query_chunk` / `list_chunks` — unchanged (no lock, no cache).
 
 ### 10.7 Error variants + service mapping

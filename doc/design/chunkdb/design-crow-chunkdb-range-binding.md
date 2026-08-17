@@ -94,16 +94,20 @@ enum RangeStatus {
 
 `chunkdb_type.proto` defines `NotMyRangeHint` — the detail message
 carried in gRPC status when a chunkdb instance receives a request for
-a chunk outside its owned range. The hint carries the owning
-sub-range's bounds + index so the client can re-route.
+a chunk outside its owned range. The server does not track other
+instances' bindings, so the hint carries only the rejected bucket (in
+`range_start`/`range_end` as a diagnostic); `instance_id`,
+`grpc_endpoint`, and `sub_range_index` are empty. The client refreshes
+its binding cache from group-0 and re-routes via
+`RangeBindingClient::refresh_and_route`.
 
 ```proto
 message NotMyRangeHint {
-  uint32 range_start   = 1;
-  uint32 range_end     = 2;
-  uint64 instance_id   = 3;
-  string grpc_endpoint = 4;
-  uint32 sub_range_index = 5;
+  uint32 range_start   = 1;  // rejected bucket (diagnostic)
+  uint32 range_end     = 2;  // rejected bucket (diagnostic)
+  uint64 instance_id   = 3;  // unused — server does not know the owner
+  string grpc_endpoint = 4;  // unused — server does not know the owner
+  uint32 sub_range_index = 5;  // unused
 }
 ```
 
@@ -247,8 +251,9 @@ pub enum RangeRouteError {
 
 The chunkdb client's `with_retry` loop (in `crow-chunkdb-client`) is
 extended: on `NotMyRange` gRPC status, the client calls
-`RangeBindingClient::refresh()` to update the binding cache, re-routes,
-and retries. This follows the `NotLeaderHint` pattern in
+`RangeBindingClient::refresh_and_route(chunk_id)` to refresh the
+binding cache from group-0 and re-route in one call, then retries.
+This follows the `NotLeaderHint` pattern in
 `crow-kv-client/src/config.rs`. `NotMyRange` is treated as transient
 (retryable) in `ChunkdbClientError::is_transient()`.
 
@@ -310,9 +315,10 @@ check is skipped. `QueryChunk` and `ListChunks` are read-only and
 bypass the guard (a stale read is acceptable).
 
 On `NotMyRange`, the service layer returns gRPC `FAILED_PRECONDITION`
-with `NotMyRangeHint` details (the owning sub-range's bounds + index,
-looked up from the guard's snapshot). `ChunkdbService` carries an
-optional `range_guard` field for hint construction.
+with a `NotMyRangeHint` detail carrying only the rejected bucket (the
+server does not track other instances' bindings, so it cannot fill the
+owning instance endpoint). The client refreshes its binding cache from
+group-0 and re-routes via `RangeBindingClient::refresh_and_route`.
 
 ### 3.3 Edge cases
 
@@ -333,9 +339,11 @@ optional `range_guard` field for hint construction.
 - `client_for_chunk(chunk_id)` — if `range_binding` is `Some`, call
   `binding.route(chunk_id)` to get the endpoint; otherwise fall back
   to `first_endpoint()`.
-- `with_retry` loop: on `NotMyRange` status, call `binding.refresh()`,
-  re-route, retry (counted against `max_retries`, like
-  `NotLeaderHint`).
+- `with_retry` loop: on `NotMyRange` status, call
+  `binding.refresh_and_route(chunk_id)` (refresh the binding cache from
+  group-0 + re-route in one call), retry (counted against `max_retries`,
+  like `NotLeaderHint`). The server only signals "not my range" — it
+  does not carry the owning instance endpoint.
 - Constructor: `with_range_binding(binding)` — enables range routing.
 
 The `with_retry` signature accepts the chunk ID for routing. Each RPC
@@ -407,14 +415,23 @@ impl BindingStrategy for ChunkdbRangeStrategy {
   `grpc_endpoint`, `status = STABLE`, `original_instance_id = 0`,
   `last_change_time_ms = now`.
 
-`write_bindings` does a full-replace: delete all existing
-`/chunkdb/range_bind/` entries, then write the new ones. This is
-idempotent — a partial write is overwritten by the next tick.
+`write_bindings` PUTs each binding (idempotent overwrite — no
+delete-all). The sub-range count is fixed, so the key set is stable;
+changed entries are overwritten in place. This avoids the non-atomic
+delete-all window that a scan + delete-per-key approach would have.
 
-For incremental rebalancing (instance join/leave with transition
-states), see R103 (chunkdb range migration). The v1 monitor does a
-full-replace; transition states are set by R103's migration flow, not
-by the monitor's recomputation.
+The monitor uses **incremental assignment** (`compute_incremental_assignment`):
+it reads the existing bindings, computes the desired assignment, and
+diffs them. Sub-ranges whose owner is unchanged keep their existing
+binding (preserving any in-progress `InTransition` state). Sub-ranges
+whose owner changed are marked `InTransition` with `original_instance_id`
+set to the old owner. When no sub-range changed, the monitor skips the
+write entirely (avoids frequent rewrites). When instances is empty, the
+existing table is preserved (not wiped).
+
+The actual migration flow (dual-serve during `InTransition`, cutover to
+`Stable`, completion) is R103. This algorithm only sets up the
+transition state; R103 drives the `InTransition → Stable` cutover.
 
 ### 5.3 Generic BindingMonitor
 
@@ -437,10 +454,12 @@ impl<S: BindingStrategy> BindingMonitor<S> {
 ```
 
 `tick` reads instances from the service registry (via
-`svc.read_all_instances(service_name)`), computes the assignment via
-the strategy, and — only when `is_leader` is `true` — writes the
-bindings to group-0. Followers compute but skip the write phase, so
-they are ready to take over immediately on leader change.
+`svc.read_all_instances(service_name)`), reads the existing bindings
+from group-0, computes the incremental assignment via the strategy
+(preserving `InTransition` state for unchanged sub-ranges), and — only
+when `is_leader` is `true` and something changed — writes the bindings
+to group-0. Followers compute but skip the write phase, so they are
+ready to take over immediately on leader change.
 
 `run` ticks periodically until the stop signal fires. The `is_leader`
 closure is called each tick.
@@ -480,12 +499,57 @@ instances to assign.
 - Instance heartbeat expiry → `read_all_instances` filters expired
   entries (TTL); the monitor only sees live instances.
 - Leader change mid-write → the partial write is overwritten by the
-  new leader's next tick (full-replace semantics).
+  new leader's next tick (PUT is idempotent; no delete-all window).
 - Monitor task crashes → detected on next server restart (no
   supervisor; `tokio::spawn` task loss is logged via the metrics
   runner's join handle collection).
 - No group-0 leader (cluster bootstrapping) → `is_leader` returns
   `false`; monitor skips ticks until a leader is elected.
+
+### 5.6 Migration flow (chunkdb)
+
+chunkdb instances are stateless (chunk metadata lives in KV groups,
+design §3.6) — migration is a **routing change**, not a data copy.
+The incremental assignment algorithm (§5.2) sets up the transition
+state; the migration flow drives it to completion.
+
+**During `InTransition`** (sub-range moved from old owner to new owner):
+
+- **Writes** (`allocate`/`append`/`seal`/`delete`) → new owner only.
+  The old owner rejects writes with `NotMyRange`; the client refreshes
+  its binding cache + re-routes (`refresh_and_route`).
+- **Reads** (`query`) → try the new owner first (it has the latest
+  writes), fall back to the old owner if the new owner is unreachable
+  or the chunk is not yet visible. This dual-serve window covers
+  clients with stale caches that still send to the old owner.
+
+**After a grace period** (all clients have refreshed caches, no more
+`NotMyRange` redirects observed): the monitor sets `status = Stable`,
+`original_instance_id = 0`, `original_endpoint = ""`. All operations
+go to the new owner. The old owner stops serving the sub-range.
+
+**No data cleanup** is needed — chunkdb instances hold no per-chunk
+state (the chunk payload cache is in-memory and evicts naturally; the
+lock map reaps idle entries). The old owner's `RangeGuard` drops the
+sub-range on its next binding refresh.
+
+The grace period + `InTransition → Stable` cutover is driven by R103
+(chunkdb range migration). The incremental algorithm (§5.2) only sets
+up the `InTransition` state; R103 monitors redirect traffic and
+finalizes the cutover.
+
+### 5.7 Migration flow (diskdb)
+
+diskdb migration is a **data copy** (zone records are physically stored
+on a KV group, keyed by `disk_id`). The flow is five steps:
+**Quiesce → Copy → Switch → Cleanup → Resume**, driven by the console
+(operator-triggered; the monitor only warns). The target disk-group/disk
+is placed in `Maintenance` mode (blocks allocates, suspends frees +
+compaction) before the copy; after the copy + bind flip, it is set back
+to `Up` and the `MigrationIntentValue` is deleted.
+
+See `doc/backlog/R102-diskdb-dynamic-binding-migration.md` §Work item 5
+for the full five-step flow + edge cases.
 
 ## 6. DiskdbClientPool Precise free_blocks Routing
 

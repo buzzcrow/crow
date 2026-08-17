@@ -183,11 +183,18 @@ impl ChunkdbClient {
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2);
                     let _ = self.refresh_endpoints().await;
-                    // On NotMyRange, refresh the binding cache so the
-                    // next attempt routes to the correct instance.
+                    // On NotMyRange, refresh the binding cache from
+                    // group-0 and re-route so the next attempt hits
+                    // the correct instance. The server only signals
+                    // "not my range" — it does not carry the owning
+                    // endpoint.
                     if matches!(err, ChunkdbClientError::NotMyRange(_)) {
                         if let Some(binding) = &self.range_binding {
-                            let _ = binding.refresh().await;
+                            if let Some(id) = chunk_id {
+                                let _ = binding.refresh_and_route(id).await;
+                            } else {
+                                let _ = binding.refresh().await;
+                            }
                         }
                     }
                 }

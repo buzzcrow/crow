@@ -92,9 +92,9 @@ pub enum RangeRouteError {
 /// must have its topology seeded with a group-0 leader endpoint.
 pub struct RangeBindingClient {
     kv: Arc<CrowkvClient>,
-    /// Cached binding table, sorted by `range_start`. Protected by a
-    /// `RwLock` — reads (routing) take a read lock, refreshes take a
-    /// write lock.
+    /// Cached binding table, sorted by `sub_range_index` (the
+    /// canonical key). Protected by a `RwLock` — reads (routing) take
+    /// a read lock, refreshes take a write lock.
     bindings: Arc<RwLock<Vec<ChunkdbRangeBinding>>>,
 }
 
@@ -158,8 +158,8 @@ impl RangeBindingClient {
                 break;
             }
         }
-        // Sort by range_start for deterministic binary-search routing.
-        new_bindings.sort_by_key(|b| b.range_start);
+        // Sort by sub_range_index — the canonical key, matching `replace`.
+        new_bindings.sort_by_key(|b| b.sub_range_index);
         *self.bindings.write() = new_bindings;
         Ok(())
     }
@@ -179,16 +179,31 @@ impl RangeBindingClient {
         self.route_bucket(bucket)
     }
 
+    /// Refresh the binding cache from group-0, then route the chunk
+    /// ID to its owning instance. Used by clients on `NotMyRange` —
+    /// the server only signals "not my range" (it does not carry the
+    /// owning instance endpoint), so the client refreshes + re-routes
+    /// in one call.
+    pub async fn refresh_and_route(
+        &self,
+        chunk_id: &ChunkId,
+    ) -> std::result::Result<ChunkdbRangeBinding, RangeRouteError> {
+        self.refresh()
+            .await
+            .map_err(|e| RangeRouteError::Refresh(e.to_string()))?;
+        let bucket = ChunkIdParts::from_proto(chunk_id).hash_to_bucket();
+        self.route_bucket(bucket)
+    }
+
     /// Route a bucket directly to its owning chunkdb instance.
-    /// Uses sub-range index for O(1) lookup when the binding table is
-    /// index-dense; falls back to linear scan for sparse tables.
+    /// Linear scan over the cached binding table — with the default
+    /// 1024 sub-ranges this is cheap; a denser layout could switch to
+    /// binary search on `range_start` later if needed.
     pub fn route_bucket(&self, bucket: u16) -> std::result::Result<ChunkdbRangeBinding, RangeRouteError> {
         let bindings = self.bindings.read();
         if bindings.is_empty() {
             return Err(RangeRouteError::NoBinding);
         }
-        // Fast path: if bindings are sorted by sub_range_index and
-        // dense, use binary search on range_start. Otherwise linear scan.
         for b in bindings.iter() {
             if b.contains(bucket) {
                 return Ok(b.clone());

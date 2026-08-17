@@ -56,8 +56,10 @@ impl BindingStrategy for ChunkdbRangeStrategy {
     }
 
     async fn write_bindings(&self, kv: &CrowkvClient, bindings: &[Self::Binding]) -> Result<()> {
-        // Delete existing bindings, then write new ones (full replace).
-        delete_all_bindings(kv).await?;
+        // PUT each binding (idempotent overwrite). No delete-all — the
+        // sub-range count is fixed, so the key set is stable; changed
+        // entries are overwritten in place. This avoids the non-atomic
+        // delete-all window.
         for b in bindings {
             let key = ChunkdbRangeBindingKey {
                 sub_range_index: b.sub_range_index,
@@ -116,40 +118,14 @@ impl BindingStrategy for ChunkdbRangeStrategy {
         }
         Ok(bindings)
     }
-}
 
-/// Delete all existing `/chunkdb/range_bind/` entries.
-async fn delete_all_bindings(kv: &CrowkvClient) -> Result<()> {
-    let prefix = ChunkdbRangeBindingKey::text_prefix_all();
-    let mut start_after: Vec<u8> = Vec::new();
-    loop {
-        let outcome = kv
-            .scan(
-                G0_STORE,
-                G0_GROUP,
-                prefix.as_bytes(),
-                &start_after,
-                &[],
-                0,
-                ReadMode::Linearizable,
-                None,
-                true,
-                None,
-            )
-            .await?;
-        for (k, _) in &outcome.items {
-            kv.delete(G0_STORE, G0_GROUP, k, None).await.map(|_| ())?;
-        }
-        if !outcome.truncated || outcome.items.is_empty() {
-            break;
-        }
-        if let Some((last_key, _)) = outcome.items.last() {
-            start_after = last_key.to_vec();
-        } else {
-            break;
-        }
+    fn compute_incremental_assignment(
+        &self,
+        current: &[Self::Binding],
+        instances: &[(u64, InstanceValue)],
+    ) -> (Vec<Self::Binding>, bool) {
+        compute_incremental_sub_range_assignment(current, instances, self.sub_range_count)
     }
-    Ok(())
 }
 
 /// Compute a uniform sub-range assignment for the given chunkdb instances.
@@ -195,6 +171,68 @@ pub fn compute_sub_range_assignment(
         });
     }
     out
+}
+
+/// Compute an incremental sub-range assignment — preserves existing
+/// `InTransition` state for unchanged sub-ranges and marks changed
+/// sub-ranges as `InTransition` with `original_instance_id` set to the
+/// old owner. Returns the new bindings + whether any sub-range changed
+/// owner. When no sub-range changed, the caller skips the write (avoids
+/// frequent rewrites). When instances is empty, keeps the existing
+/// bindings (does not wipe the table).
+///
+/// The actual migration flow (dual-serve, cutover, completion) is R103.
+/// This algorithm only sets up the transition state; R103 drives the
+/// `InTransition → Stable` cutover.
+#[must_use]
+pub fn compute_incremental_sub_range_assignment(
+    current: &[ChunkdbRangeBindingValue],
+    instances: &[(u64, InstanceValue)],
+    sub_range_count: u32,
+) -> (Vec<ChunkdbRangeBindingValue>, bool) {
+    if instances.is_empty() {
+        // No instances → keep existing bindings, don't wipe the table.
+        return (current.to_vec(), false);
+    }
+
+    let desired = compute_sub_range_assignment(instances, sub_range_count);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+
+    // Index current bindings by sub_range_index for O(1) lookup.
+    let current_map: std::collections::HashMap<u32, &ChunkdbRangeBindingValue> =
+        current.iter().map(|b| (b.sub_range_index, b)).collect();
+
+    let mut changed = false;
+    let mut out = Vec::with_capacity(desired.len());
+    for d in desired {
+        if let Some(c) = current_map.get(&d.sub_range_index) {
+            if c.instance_id == d.instance_id {
+                // Unchanged — keep existing binding (preserve InTransition).
+                out.push((*c).clone());
+            } else {
+                // Owner changed — mark InTransition with original = old owner.
+                changed = true;
+                out.push(ChunkdbRangeBindingValue {
+                    sub_range_index: d.sub_range_index,
+                    range_start: d.range_start,
+                    range_end: d.range_end,
+                    instance_id: d.instance_id,
+                    grpc_endpoint: d.grpc_endpoint.clone(),
+                    original_instance_id: c.instance_id,
+                    original_endpoint: c.grpc_endpoint.clone(),
+                    status: RangeStatus::InTransition as i32,
+                    last_change_time_ms: now_ms,
+                });
+            }
+        } else {
+            // No existing binding for this sub-range — new entry.
+            changed = true;
+            out.push(d);
+        }
+    }
+    (out, changed)
 }
 
 #[cfg(test)]
@@ -285,5 +323,113 @@ mod tests {
             assert_eq!(b.original_instance_id, 0);
             assert!(b.original_endpoint.is_empty());
         }
+    }
+
+    // ── incremental assignment tests ───────────────────────────────
+
+    #[test]
+    fn incremental_no_change_returns_unchanged() {
+        let instances = vec![instance(1, "http://a:1"), instance(2, "http://b:1")];
+        let current = compute_sub_range_assignment(&instances, 8);
+        let (result, changed) = compute_incremental_sub_range_assignment(&current, &instances, 8);
+        assert!(!changed, "no instance change → should not write");
+        assert_eq!(result.len(), 8);
+        // All bindings preserved as-is (Stable, no original_instance).
+        for b in &result {
+            assert_eq!(b.status, RangeStatus::Stable as i32);
+            assert_eq!(b.original_instance_id, 0);
+        }
+    }
+
+    #[test]
+    fn incremental_instance_join_marks_changed_ranges() {
+        // Start with 1 instance owning all 8 sub-ranges.
+        let initial = vec![instance(1, "http://a:1")];
+        let current = compute_sub_range_assignment(&initial, 8);
+
+        // Instance 2 joins → half the sub-ranges move to instance 2.
+        let after = vec![instance(1, "http://a:1"), instance(2, "http://b:1")];
+        let (result, changed) = compute_incremental_sub_range_assignment(&current, &after, 8);
+        assert!(changed, "instance join → should write");
+
+        // Sub-ranges 0-3 stay with instance 1 (unchanged → Stable).
+        for b in &result[..4] {
+            assert_eq!(b.instance_id, 1);
+            assert_eq!(b.status, RangeStatus::Stable as i32);
+            assert_eq!(b.original_instance_id, 0);
+        }
+        // Sub-ranges 4-7 move to instance 2 (changed → InTransition).
+        for b in &result[4..] {
+            assert_eq!(b.instance_id, 2);
+            assert_eq!(b.status, RangeStatus::InTransition as i32);
+            assert_eq!(b.original_instance_id, 1);
+            assert_eq!(b.original_endpoint, "http://a:1");
+        }
+    }
+
+    #[test]
+    fn incremental_instance_leave_marks_changed_ranges() {
+        // Start with 2 instances.
+        let initial = vec![instance(1, "http://a:1"), instance(2, "http://b:1")];
+        let current = compute_sub_range_assignment(&initial, 8);
+
+        // Instance 2 leaves → all sub-ranges go to instance 1.
+        let after = vec![instance(1, "http://a:1")];
+        let (result, changed) = compute_incremental_sub_range_assignment(&current, &after, 8);
+        assert!(changed, "instance leave → should write");
+
+        // Sub-ranges 0-3 were already instance 1 (unchanged → Stable).
+        for b in &result[..4] {
+            assert_eq!(b.instance_id, 1);
+            assert_eq!(b.status, RangeStatus::Stable as i32);
+        }
+        // Sub-ranges 4-7 move from instance 2 → instance 1 (InTransition).
+        for b in &result[4..] {
+            assert_eq!(b.instance_id, 1);
+            assert_eq!(b.status, RangeStatus::InTransition as i32);
+            assert_eq!(b.original_instance_id, 2);
+            assert_eq!(b.original_endpoint, "http://b:1");
+        }
+    }
+
+    #[test]
+    fn incremental_empty_instances_keeps_existing() {
+        let initial = vec![instance(1, "http://a:1")];
+        let current = compute_sub_range_assignment(&initial, 8);
+        let (result, changed) = compute_incremental_sub_range_assignment(&current, &[], 8);
+        assert!(!changed, "empty instances → should not wipe table");
+        assert_eq!(result.len(), 8, "existing bindings preserved");
+        for b in &result {
+            assert_eq!(b.instance_id, 1);
+        }
+    }
+
+    #[test]
+    fn incremental_empty_current_all_new() {
+        let instances = vec![instance(1, "http://a:1")];
+        let (result, changed) = compute_incremental_sub_range_assignment(&[], &instances, 8);
+        assert!(changed, "empty current → all new entries");
+        assert_eq!(result.len(), 8);
+        for b in &result {
+            assert_eq!(b.status, RangeStatus::Stable as i32);
+            assert_eq!(b.original_instance_id, 0);
+        }
+    }
+
+    #[test]
+    fn incremental_preserves_in_transition_for_unchanged() {
+        // Current has a sub-range already InTransition (from a previous tick).
+        let mut current = compute_sub_range_assignment(&[instance(1, "http://a:1")], 8);
+        current[3].status = RangeStatus::InTransition as i32;
+        current[3].original_instance_id = 99;
+        current[3].original_endpoint = "http://old:1".to_string();
+
+        // Same instance set → no change, InTransition preserved.
+        let instances = vec![instance(1, "http://a:1")];
+        let (result, changed) = compute_incremental_sub_range_assignment(&current, &instances, 8);
+        assert!(!changed);
+        assert_eq!(result[3].status, RangeStatus::InTransition as i32);
+        assert_eq!(result[3].original_instance_id, 99);
+        assert_eq!(result[3].original_endpoint, "http://old:1");
     }
 }

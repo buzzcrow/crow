@@ -264,3 +264,145 @@ async fn chunkdb_cache_hit_on_second_query() {
     }
     eprintln!("cache hit on second query verified");
 }
+
+#[tokio::test]
+async fn chunkdb_lock_serializes_concurrent_seal() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && common::cluster::crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+    let cluster = KvCluster::start().await;
+    let hw = cluster.make_hardware_client();
+    seed_hardware(&hw).await;
+    let _diskdb = DiskdbServer::start(&cluster).await;
+    let harness = ChunkdbHarness::start(&cluster).await;
+
+    // Allocate a chunk (Active).
+    let chunk = harness
+        .handler
+        .allocate_chunk(None, 1, 1, StripType::Mirror, 0, 0, 3, ChunkType::Repo)
+        .await
+        .expect("allocate_chunk");
+    let chunk_id = *chunk.id.as_ref().expect("chunk has id");
+
+    // Two concurrent seals on the same chunk — the lock serializes
+    // them: exactly one succeeds (Sealed), the other sees Sealed
+    // state and fails with InvalidStateTransition.
+    let h1 = Arc::clone(&harness.handler);
+    let h2 = Arc::clone(&harness.handler);
+    let id1 = chunk_id;
+    let id2 = chunk_id;
+    let t1 = tokio::spawn(async move { h1.seal_chunk(&id1, 100).await });
+    let t2 = tokio::spawn(async move { h2.seal_chunk(&id2, 200).await });
+    let (r1, r2) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        (t1.await.expect("task 1"), t2.await.expect("task 2"))
+    })
+    .await
+    .expect("no deadlock — both seals completed within 10s");
+
+    let ok_count = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(ok_count, 1, "exactly one seal should succeed, got {ok_count}");
+    let sealed = if let Ok(c) = &r1 { c } else { r2.as_ref().unwrap() };
+    assert_eq!(sealed.state, ChunkState::Sealed as i32);
+    eprintln!("concurrent seal serialized: one Ok, one Err (InvalidStateTransition)");
+}
+
+#[tokio::test]
+async fn chunkdb_lock_serializes_concurrent_delete() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && common::cluster::crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+    let cluster = KvCluster::start().await;
+    let hw = cluster.make_hardware_client();
+    seed_hardware(&hw).await;
+    let _diskdb = DiskdbServer::start(&cluster).await;
+    let harness = ChunkdbHarness::start(&cluster).await;
+
+    // Allocate a chunk (Active).
+    let chunk = harness
+        .handler
+        .allocate_chunk(None, 1, 1, StripType::Mirror, 0, 0, 3, ChunkType::Repo)
+        .await
+        .expect("allocate_chunk");
+    let chunk_id = *chunk.id.as_ref().expect("chunk has id");
+
+    // Two concurrent deletes on the same chunk — the lock serializes
+    // them: exactly one succeeds (Deleted), the other sees Deleted
+    // state and returns ChunkNotFound.
+    let h1 = Arc::clone(&harness.handler);
+    let h2 = Arc::clone(&harness.handler);
+    let id1 = chunk_id;
+    let id2 = chunk_id;
+    let t1 = tokio::spawn(async move { h1.delete_chunk(&id1).await });
+    let t2 = tokio::spawn(async move { h2.delete_chunk(&id2).await });
+    let (r1, r2) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        (t1.await.expect("task 1"), t2.await.expect("task 2"))
+    })
+    .await
+    .expect("no deadlock — both deletes completed within 10s");
+
+    let ok_count = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(ok_count, 1, "exactly one delete should succeed, got {ok_count}");
+    let deleted = if let Ok(c) = &r1 { c } else { r2.as_ref().unwrap() };
+    assert_eq!(deleted.state, ChunkState::Deleted as i32);
+    eprintln!("concurrent delete serialized: one Ok, one Err (ChunkNotFound)");
+}
+
+#[tokio::test]
+async fn chunkdb_lock_serializes_concurrent_append_delete() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && common::cluster::crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+    let cluster = KvCluster::start().await;
+    let hw = cluster.make_hardware_client();
+    seed_hardware(&hw).await;
+    let _diskdb = DiskdbServer::start(&cluster).await;
+    let harness = ChunkdbHarness::start(&cluster).await;
+
+    // Allocate a chunk (Active).
+    let chunk = harness
+        .handler
+        .allocate_chunk(None, 1, 1, StripType::Mirror, 0, 0, 3, ChunkType::Repo)
+        .await
+        .expect("allocate_chunk");
+    let chunk_id = *chunk.id.as_ref().expect("chunk has id");
+
+    // Concurrent append + delete on the same chunk — the lock
+    // serializes them. Delete always wins (Active → Deleted). If
+    // delete runs first, append sees Deleted → InvalidStateTransition.
+    // If append runs first, append succeeds then delete → Deleted.
+    // Invariant: delete always succeeds; final state is Deleted.
+    let h1 = Arc::clone(&harness.handler);
+    let h2 = Arc::clone(&harness.handler);
+    let id1 = chunk_id;
+    let id2 = chunk_id;
+    let t1 = tokio::spawn(async move { h1.append_chunk(&id1, 1, StripType::Mirror, 0, 0, 3, 1).await });
+    let t2 = tokio::spawn(async move { h2.delete_chunk(&id2).await });
+    let (append_res, delete_res) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        (t1.await.expect("append task"), t2.await.expect("delete task"))
+    })
+    .await
+    .expect("no deadlock — both completed within 10s");
+
+    let deleted = delete_res.expect("delete always succeeds on Active chunk");
+    assert_eq!(deleted.state, ChunkState::Deleted as i32);
+    // Append may succeed (if it ran first) or fail with
+    // InvalidStateTransition (if delete ran first) — both are valid.
+    match &append_res {
+        Ok(c) => assert_eq!(
+            c.state,
+            ChunkState::Active as i32,
+            "append ran first → returns Active chunk (delete runs after)"
+        ),
+        Err(LifecycleError::InvalidStateTransition(_)) => {
+            eprintln!("delete ran first → append rejected (InvalidStateTransition)");
+        }
+        Err(e) => panic!("append failed with unexpected error: {e:?}"),
+    }
+    // Final state from the store must be Deleted.
+    let final_chunk = harness.handler.query_chunk(&chunk_id).await.expect("query final");
+    assert_eq!(final_chunk.state, ChunkState::Deleted as i32);
+    eprintln!("concurrent append+delete serialized: final state Deleted");
+}

@@ -21,6 +21,8 @@ pub struct LifecycleMetricsSnapshot {
     pub cache_size: u64,
     pub reap_idle_count: u64,
     pub reap_idle_entries_removed: u64,
+    /// Number of cache entries invalidated (one increment per chunk
+    /// removed, by both `invalidate_chunk` and `invalidate_range`).
     pub invalidate_count: u64,
     pub lock_wait_count: u64,
     pub lock_wait_p50_us: u64,

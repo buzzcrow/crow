@@ -19,65 +19,35 @@ use crow_protocol::chunkdb::rpc::{
 };
 
 use crate::lifecycle::{LifecycleError, LifecycleHandler};
-use crate::range_guard::RangeGuard;
 
 /// chunkdb gRPC service.
 pub struct ChunkdbService {
     handler: Arc<LifecycleHandler>,
-    /// Optional range guard — used to build `NotMyRangeHint` details
-    /// when rejecting out-of-range requests.
-    range_guard: Option<Arc<RangeGuard>>,
 }
 
 impl ChunkdbService {
     #[must_use]
     pub fn new(handler: Arc<LifecycleHandler>) -> Self {
-        Self {
-            handler,
-            range_guard: None,
-        }
-    }
-
-    /// Attach a range guard for `NotMyRangeHint` detail construction.
-    #[must_use]
-    pub fn with_range_guard(mut self, guard: Arc<RangeGuard>) -> Self {
-        self.range_guard = Some(guard);
-        self
+        Self { handler }
     }
 
     pub fn into_server(self) -> ChunkdbServiceServer<Self> {
         ChunkdbServiceServer::new(self)
     }
 
-    /// Build a `NotMyRange` gRPC status. When a range guard is
-    /// attached, includes the owning range as `NotMyRangeHint`
-    /// details so the client can re-route.
-    fn not_my_range_status(&self, bucket: u16) -> Status {
-        let hint = self
-            .range_guard
-            .as_ref()
-            .and_then(|guard| {
-                guard
-                    .snapshot()
-                    .into_iter()
-                    .find(|r| bucket >= r.start && bucket <= r.end)
-            })
-            .map_or_else(
-                || NotMyRangeHint {
-                    range_start: 0,
-                    range_end: 0,
-                    instance_id: 0,
-                    grpc_endpoint: String::new(),
-                    sub_range_index: 0,
-                },
-                |r| NotMyRangeHint {
-                    range_start: u32::from(r.start),
-                    range_end: u32::from(r.end),
-                    instance_id: 0,
-                    grpc_endpoint: String::new(),
-                    sub_range_index: r.sub_range_index,
-                },
-            );
+    /// Build a `NotMyRange` gRPC status. The server does not track
+    /// other instances' bindings, so the hint carries only the bucket
+    /// (in `range_start`) as a diagnostic signal — the client refreshes
+    /// its binding cache from group-0 and re-routes. See
+    /// `RangeBindingClient::refresh_and_route`.
+    fn not_my_range_status(bucket: u16) -> Status {
+        let hint = NotMyRangeHint {
+            range_start: u32::from(bucket),
+            range_end: u32::from(bucket),
+            instance_id: 0,
+            grpc_endpoint: String::new(),
+            sub_range_index: 0,
+        };
         let details = prost::Message::encode_to_vec(&hint);
         Status::with_details(
             tonic::Code::FailedPrecondition,
@@ -100,6 +70,7 @@ fn map_error(e: &LifecycleError) -> Status {
         LifecycleError::NotMyRange { bucket: _ } => Status::failed_precondition(e.to_string()),
         LifecycleError::LockBusy => Status::unavailable(e.to_string()),
         LifecycleError::LockTimeout => Status::unavailable(e.to_string()),
+        LifecycleError::StripIndexOutOfRange { .. } => Status::invalid_argument(e.to_string()),
     }
 }
 
@@ -128,7 +99,7 @@ impl ChunkdbServiceTrait for ChunkdbService {
             )
             .await
             .map_err(|e| match &e {
-                LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+                LifecycleError::NotMyRange { bucket } => Self::not_my_range_status(*bucket),
                 _ => map_error(&e),
             })?;
         Ok(Response::new(AllocateChunkResponse { chunk: Some(chunk) }))
@@ -157,7 +128,7 @@ impl ChunkdbServiceTrait for ChunkdbService {
             )
             .await
             .map_err(|e| match &e {
-                LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+                LifecycleError::NotMyRange { bucket } => Self::not_my_range_status(*bucket),
                 _ => map_error(&e),
             })?;
         Ok(Response::new(AppendChunkResponse { chunk: Some(chunk) }))
@@ -192,7 +163,7 @@ impl ChunkdbServiceTrait for ChunkdbService {
             .seal_chunk(&chunk_id, req.seal_length)
             .await
             .map_err(|e| match &e {
-                LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+                LifecycleError::NotMyRange { bucket } => Self::not_my_range_status(*bucket),
                 _ => map_error(&e),
             })?;
         Ok(Response::new(SealChunkResponse { chunk: Some(chunk) }))
@@ -207,7 +178,7 @@ impl ChunkdbServiceTrait for ChunkdbService {
             .chunk_id
             .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
         let chunk = self.handler.delete_chunk(&chunk_id).await.map_err(|e| match &e {
-            LifecycleError::NotMyRange { bucket } => self.not_my_range_status(*bucket),
+            LifecycleError::NotMyRange { bucket } => Self::not_my_range_status(*bucket),
             _ => map_error(&e),
         })?;
         Ok(Response::new(DeleteChunkResponse { chunk: Some(chunk) }))
@@ -215,16 +186,42 @@ impl ChunkdbServiceTrait for ChunkdbService {
 
     async fn delete_chunk_range(
         &self,
-        _req: Request<DeleteChunkRangeRequest>,
+        req: Request<DeleteChunkRangeRequest>,
     ) -> Result<Response<DeleteChunkRangeResponse>, Status> {
-        Err(Status::unimplemented("delete_chunk_range not yet implemented"))
+        let req = req.into_inner();
+        let chunk_id = req
+            .chunk_id
+            .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
+        self.handler
+            .delete_chunk_range(&chunk_id, req.chunk_offset, req.chunk_size)
+            .await
+            .map_err(|e| match &e {
+                LifecycleError::NotMyRange { bucket } => Self::not_my_range_status(*bucket),
+                _ => map_error(&e),
+            })?;
+        Ok(Response::new(DeleteChunkRangeResponse {}))
     }
 
     async fn update_chunk_strip(
         &self,
-        _req: Request<UpdateChunkStripRequest>,
+        req: Request<UpdateChunkStripRequest>,
     ) -> Result<Response<UpdateChunkStripResponse>, Status> {
-        Err(Status::unimplemented("update_chunk_strip not yet implemented"))
+        let req = req.into_inner();
+        let chunk_id = req
+            .chunk_id
+            .ok_or_else(|| Status::invalid_argument("missing chunk_id"))?;
+        let strip = req
+            .strip
+            .ok_or_else(|| Status::invalid_argument("missing strip"))?;
+        let chunk = self
+            .handler
+            .update_chunk_strip(&chunk_id, req.strip_index, strip)
+            .await
+            .map_err(|e| match &e {
+                LifecycleError::NotMyRange { bucket } => Self::not_my_range_status(*bucket),
+                _ => map_error(&e),
+            })?;
+        Ok(Response::new(UpdateChunkStripResponse { chunk: Some(chunk) }))
     }
 
     async fn list_chunks(

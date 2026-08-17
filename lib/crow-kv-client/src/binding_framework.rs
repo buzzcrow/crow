@@ -33,6 +33,24 @@ pub trait BindingStrategy: Send + Sync {
         &self,
         kv: &CrowkvClient,
     ) -> impl std::future::Future<Output = Result<Vec<Self::Binding>>> + Send;
+
+    /// Compute an incremental assignment, preserving transition state
+    /// for unchanged entries and marking changed ones. Returns the new
+    /// bindings + whether any entry changed owner. Default: full-replace
+    /// (always "changed"). Strategies that support incremental override
+    /// this to avoid frequent rewrites + preserve `InTransition` state.
+    fn compute_incremental_assignment(
+        &self,
+        current: &[Self::Binding],
+        instances: &[(u64, InstanceValue)],
+    ) -> (Vec<Self::Binding>, bool)
+    where
+        Self::Binding: Clone,
+    {
+        // Default: full-replace, always changed.
+        let _ = current;
+        (self.compute_assignment(instances), true)
+    }
 }
 
 /// Generic binding monitor — periodically reads instances from the
@@ -68,22 +86,36 @@ impl<S: BindingStrategy> BindingMonitor<S> {
 
     /// One monitoring tick: read instances, compute assignment, write
     /// to group-0. When `is_leader` is false, computes but does NOT
-    /// write (follower mode).
+    /// write (follower mode). Uses incremental assignment when the
+    /// strategy supports it — reads existing bindings, computes the
+    /// diff, and writes only when an owner changed (avoids frequent
+    /// rewrites + preserves `InTransition` state).
     ///
     /// # Errors
     /// Returns an error if the service registry read or group-0 write fails.
-    pub async fn tick(&self, is_leader: bool) -> Result<MonitorTickResult> {
+    pub async fn tick(&self, is_leader: bool) -> Result<MonitorTickResult>
+    where
+        S::Binding: Clone,
+    {
         let instances = self.svc.read_all_instances(self.service_name).await?;
-        let bindings = self.strategy.compute_assignment(&instances);
         let instance_count = instances.len();
-        let binding_count = bindings.len();
-        if is_leader {
-            self.strategy.write_bindings(&self.kv, &bindings).await?;
-        }
+        let (bindings, changed) = if is_leader {
+            // Read existing bindings + compute incremental diff.
+            let current = self.strategy.read_bindings(&self.kv).await.unwrap_or_default();
+            let (new_bindings, changed) = self.strategy.compute_incremental_assignment(&current, &instances);
+            if changed {
+                self.strategy.write_bindings(&self.kv, &new_bindings).await?;
+            }
+            (new_bindings, changed)
+        } else {
+            // Follower: compute only, skip write.
+            let current = self.strategy.read_bindings(&self.kv).await.unwrap_or_default();
+            self.strategy.compute_incremental_assignment(&current, &instances)
+        };
         Ok(MonitorTickResult {
             instance_count,
-            binding_count,
-            wrote: is_leader,
+            binding_count: bindings.len(),
+            wrote: is_leader && changed,
         })
     }
 
@@ -92,7 +124,9 @@ impl<S: BindingStrategy> BindingMonitor<S> {
         self,
         mut stop: tokio::sync::watch::Receiver<bool>,
         is_leader: impl Fn() -> bool + Send + 'static,
-    ) {
+    ) where
+        S::Binding: Clone,
+    {
         let mut interval = tokio::time::interval(self.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
