@@ -661,7 +661,9 @@ test.describe('capacity · diskdb', () => {
 
       // Stop via context menu.
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
+      const stopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/stop'));
       await page.getByRole('menuitem', { name: /stop diskdb/i }).click();
+      await stopResponse;
 
       // After stop, the node should show Deploy DiskDB again (not Restart/Stop).
       // Reload to ensure the UI's allServers state is refreshed.

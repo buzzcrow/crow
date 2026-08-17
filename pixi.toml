@@ -104,7 +104,7 @@ test-chunkdb-client = { cmd = "cargo test -p crow-chunkdb-client --all-targets",
 test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets", depends-on = ["build"] }
 test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
 test-console-server = { cmd = "cargo test -p crow-web --all-targets", depends-on = ["build"] }
-test-console-ui = { cmd = "cargo build -p crow-kv-server && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
+test-console-ui = { cmd = "cargo build -p crow-kv-server -p crow-diskdb && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
 # Full workspace test suite, grouped by domain. clean-env only runs at start
 # and before the console block (server-spawning tests with the heaviest
 # process/log footprint); non-spawning and self-cleaning tests run back-to-back.
