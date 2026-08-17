@@ -58,3 +58,7 @@ path = "tests/lifecycle_cli_test.rs"
 [[test]]
 name = "mgmt_cli_test"
 path = "tests/mgmt_cli_test.rs"
+
+[[test]]
+name = "diskdb_cli_test"
+path = "tests/diskdb_cli_test.rs"
