@@ -4,7 +4,7 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
 import { ViewMode } from '../types';
 
-export type EntityType = 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica';
+export type EntityType = 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'DiskGroup' | 'Disk';
 
 /**
  * The single selected entity. `parentIds` carries the ancestor chain in

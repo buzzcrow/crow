@@ -1,12 +1,20 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+// Per-service port bases. Ports are generated dynamically from these
+// bases (offset by the node-id suffix, then incremented past collisions
+// against ports already assigned in the console config). The bases are
+// dev defaults; production should override via a deployment config story.
+export const KV_SERVER_REST_PORT_BASE = 19910;
+export const KV_SERVER_RPC_PORT_BASE = 19920;
+export const DISKDB_RPC_PORT_BASE = 29920;
+
 const DIGIT_SUFFIX = /(\d+)$/;
 
 interface ServerPortSource {
   id?: string | number;
-  mgmt_port?: number | null;
-  grpc_port?: number | null;
+  rest_port?: number | null;
+  rpc_port?: number | null;
   process?: {
     mgmt_url: string;
     grpc_url: string;
@@ -107,32 +115,57 @@ function preferredPortStart(base: number, nodeId: number): number {
 export function deployPortDefaultsForNode(
   servers: ServerPortSource[],
   nodeId: number,
-  mgmtStart = 19910,
-  grpcStart = 19920,
-  extraUsedMgmtPorts: number[] = [],
-  extraUsedGrpcPorts: number[] = [],
-): { defaultMgmtPort: string; defaultGrpcPort: string } {
-  const usedMgmtPorts: number[] = [...extraUsedMgmtPorts];
-  const usedGrpcPorts: number[] = [...extraUsedGrpcPorts];
+  restStart = KV_SERVER_REST_PORT_BASE,
+  rpcStart = KV_SERVER_RPC_PORT_BASE,
+  extraUsedRestPorts: number[] = [],
+  extraUsedRpcPorts: number[] = [],
+): { defaultRestPort: string; defaultRpcPort: string } {
+  const usedRestPorts: number[] = [...extraUsedRestPorts];
+  const usedRpcPorts: number[] = [...extraUsedRpcPorts];
 
   for (const server of servers) {
     const mgmt =
-      server.mgmt_port ??
+      server.rest_port ??
       (server.process?.mgmt_url ? extractPort(server.process.mgmt_url) : null) ??
       (server.server?.mgmt_url ? extractPort(server.server.mgmt_url) : null);
     const grpc =
-      server.grpc_port ??
+      server.rpc_port ??
       (server.process?.grpc_url ? extractPort(server.process.grpc_url) : null) ??
       (server.server?.grpc_url ? extractPort(server.server.grpc_url) : null);
-    if (mgmt) usedMgmtPorts.push(mgmt);
-    if (grpc) usedGrpcPorts.push(grpc);
+    if (mgmt) usedRestPorts.push(mgmt);
+    if (grpc) usedRpcPorts.push(grpc);
   }
 
-  const defaultMgmtPort = nextAvailablePort(usedMgmtPorts, preferredPortStart(mgmtStart, nodeId));
-  const defaultGrpcPort = nextAvailablePort(
-    [...usedGrpcPorts, Number(defaultMgmtPort)],
-    preferredPortStart(grpcStart, nodeId),
+  const defaultRestPort = nextAvailablePort(usedRestPorts, preferredPortStart(restStart, nodeId));
+  const defaultRpcPort = nextAvailablePort(
+    [...usedRpcPorts, Number(defaultRestPort)],
+    preferredPortStart(rpcStart, nodeId),
   );
 
-  return { defaultMgmtPort, defaultGrpcPort };
+  return { defaultRestPort, defaultRpcPort };
+}
+
+interface DiskdbPortSource {
+  grpc_endpoint?: string | null;
+}
+
+/**
+ * Pick a dynamic diskdb gRPC port for a node: offset the base by the
+ * node-id suffix, then increment past ports already assigned to other
+ * diskdb instances (extracted from their `grpc_endpoint`) and any
+ * extra remembered ports. Mirrors `deployPortDefaultsForNode` so diskdb
+ * deploy gets the same collision-avoidance as kv-server deploy.
+ */
+export function diskdbPortDefaultsForNode(
+  instances: DiskdbPortSource[],
+  nodeId: number,
+  rpcStart = DISKDB_RPC_PORT_BASE,
+  extraUsedRpcPorts: number[] = [],
+): string {
+  const usedRpcPorts: number[] = [...extraUsedRpcPorts];
+  for (const inst of instances) {
+    const port = extractPort(inst.grpc_endpoint);
+    if (port) usedRpcPorts.push(port);
+  }
+  return nextAvailablePort(usedRpcPorts, preferredPortStart(rpcStart, nodeId));
 }

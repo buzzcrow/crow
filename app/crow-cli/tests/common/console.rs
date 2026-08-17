@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crow_console_shared::clients::http::ServerClient;
 use crow_console_shared::cluster::NodeHealth;
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{self, crow_kv_server_bin, DeployRequest};
 use crow_console_shared::monitor::{legacy_topology_to_node_stores, NodeRecord};
 use crow_console_shared::ConsoleConfig;
@@ -108,11 +108,11 @@ pub async fn spawn_upstream() -> Option<Upstream> {
     std::fs::create_dir_all(&workspace).ok()?;
     std::fs::create_dir_all(workspace.join("bin")).ok()?;
     std::fs::create_dir_all(workspace.join("log")).ok()?;
-    let (mgmt_port, grpc_port) = pick_two_distinct_free_ports();
+    let (rest_port, rpc_port) = pick_two_distinct_free_ports();
     let req = DeployRequest {
         server_id: "1".into(),
-        mgmt_port,
-        grpc_port,
+        rest_port,
+        rpc_port,
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
@@ -147,12 +147,13 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
-        mgmt_port: None,
-        grpc_port: None,
+        rest_port: None,
+        rpc_port: None,
         auto_start: true,
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

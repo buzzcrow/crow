@@ -18,9 +18,9 @@ pub enum ServerVerb {
         #[arg(long)]
         node: String,
         #[arg(long)]
-        mgmt_port: u16,
+        rest_port: u16,
         #[arg(long)]
-        grpc_port: u16,
+        rpc_port: u16,
         /// Override `CROW_KV_SERVER_BIN` for this deploy.
         #[arg(long)]
         binary: Option<String>,
@@ -46,11 +46,11 @@ pub async fn run_server_verb(cli: &Cli, verb: ServerVerb) -> ExitCode {
     match verb {
         ServerVerb::Deploy {
             node,
-            mgmt_port,
-            grpc_port,
+            rest_port,
+            rpc_port,
             binary,
         } => match node.parse::<NodeId>() {
-            Ok(nid) => server_deploy(cli, nid, mgmt_port, grpc_port, binary).await,
+            Ok(nid) => server_deploy(cli, nid, rest_port, rpc_port, binary).await,
             Err(e) => {
                 eprintln!("error: invalid node id {node:?}: {e}");
                 ExitCode::from(1)
@@ -118,8 +118,8 @@ async fn server_list(cli: &Cli) -> ExitCode {
 async fn server_deploy(
     cli: &Cli,
     node_id: NodeId,
-    mgmt_port: u16,
-    grpc_port: u16,
+    rest_port: u16,
+    rpc_port: u16,
     binary: Option<String>,
 ) -> ExitCode {
     let client = match console_client(cli) {
@@ -127,8 +127,8 @@ async fn server_deploy(
         Err(c) => return c,
     };
     let body = DeployNodeServerBody {
-        mgmt_port,
-        grpc_port,
+        rest_port,
+        rpc_port,
         binary,
         ..Default::default()
     };

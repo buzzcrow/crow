@@ -21,7 +21,11 @@ export function ViewModeProvider({ children, initialViewMode }: ViewModeProvider
   const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode ?? ViewMode.Physical);
 
   const toggleViewMode = () => {
-    setViewMode(prev => prev === ViewMode.Physical ? ViewMode.Logical : ViewMode.Physical);
+    setViewMode(prev => {
+      if (prev === ViewMode.Physical) return ViewMode.Logical;
+      if (prev === ViewMode.Logical) return ViewMode.Capacity;
+      return ViewMode.Physical;
+    });
   };
 
   return (

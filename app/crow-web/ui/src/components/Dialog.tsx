@@ -167,7 +167,7 @@ export function Dialog({
       <div
         ref={containerRef}
         className={cn(
-          'tw-w-full tw-bg-panel tw-border tw-border-border tw-rounded-lg tw-shadow-2xl tw-animate-scale-in tw-flex tw-flex-col tw-overflow-hidden',
+          'tw-w-full tw-max-h-[85vh] tw-bg-panel tw-border tw-border-border tw-rounded-lg tw-shadow-2xl tw-animate-scale-in tw-flex tw-flex-col tw-overflow-hidden',
           sizeClasses[size],
           className
         )}

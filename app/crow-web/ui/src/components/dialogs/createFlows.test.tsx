@@ -12,8 +12,8 @@ import { AddGroupDialog } from './AddGroupDialog';
 import { AddReplicaDialog } from './AddReplicaDialog';
 import { DeployServerDialog } from './DeployServerDialog';
 import { NodeHealth, ProcState } from '../../types';
-import type { Node, Rack, CrowKVServerView, StoreView } from '../../types';
-import { deployPortDefaultsForNode } from './defaults';
+import type { Node, Rack, CrowKVServerView, EnrichedStoreView } from '../../types';
+import { deployPortDefaultsForNode, diskdbPortDefaultsForNode } from './defaults';
 
 /**
  * These tests pin down the exact request bodies the SPA must send for the
@@ -79,11 +79,11 @@ const mockServers: CrowKVServerView[] = [
       health: NodeHealth.Up,
       last_seen_ms: Date.now(),
     },
-    mgmt_port: 19910,
-    grpc_port: 19920,
+    rest_port: 19910,
+    rpc_port: 19920,
   },
 ];
-const mockStores: StoreView[] = [
+const mockStores: EnrichedStoreView[] = [
   { store_id: '7', nodes: [1, 2], groups: [] },
 ];
 
@@ -202,13 +202,15 @@ describe('Add Node dialog', () => {
         onClose={() => {}}
         racks={[mockRack]}
         defaultRackId="1"
-        defaultMgmtPort="19911"
-        defaultGrpcPort="19921"
+        defaultRestPort="19911"
+        defaultRpcPort="19921"
       />,
       { wrapper },
     );
 
     expect((screen.getByLabelText('Enable Crow Storage on this node') as HTMLInputElement).checked).toBe(true);
+    // Disable DiskDB — this test focuses on the Crow Storage deploy flow.
+    fireEvent.click(screen.getByLabelText('Enable DiskDB on this node'));
     fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
@@ -228,7 +230,7 @@ describe('Add Node dialog', () => {
     expect(captured[1]).toMatchObject({
       url: '/api/nodes/1/server/deploy',
       method: 'POST',
-      body: { mgmt_port: 19911, grpc_port: 19921 },
+      body: { rest_port: 19911, rpc_port: 19921 },
     });
   });
 });
@@ -238,15 +240,15 @@ describe('Deploy Server dialog', () => {
     installFetchMock({ node_id: 1, pid: 1234, mgmt_url: 'x', grpc_url: 'y' });
     render(<DeployServerDialog isOpen onClose={() => {}} nodeId={1} />, { wrapper });
 
-    fireEvent.change(screen.getByLabelText('Management Port'), { target: { value: '19911' } });
-    fireEvent.change(screen.getByLabelText('gRPC Port'), { target: { value: '19921' } });
+    fireEvent.change(screen.getByLabelText('REST Port'), { target: { value: '19911' } });
+    fireEvent.change(screen.getByLabelText('RPC Port'), { target: { value: '19921' } });
     fireEvent.click(screen.getByRole('button', { name: /deploy/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0]).toMatchObject({
       url: '/api/nodes/1/server/deploy',
       method: 'POST',
-      body: { mgmt_port: 19911, grpc_port: 19921 },
+      body: { rest_port: 19911, rpc_port: 19921 },
     });
     expect(captured[0].body.binary).toBeUndefined();
   });
@@ -258,8 +260,8 @@ describe('Deploy Server dialog', () => {
         isOpen
         onClose={() => {}}
         nodeId={1}
-        defaultMgmtPort="19915"
-        defaultGrpcPort="19925"
+        defaultRestPort="19915"
+        defaultRpcPort="19925"
       />,
       { wrapper },
     );
@@ -267,7 +269,7 @@ describe('Deploy Server dialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /deploy/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
-    expect(captured[0].body).toEqual({ mgmt_port: 19915, grpc_port: 19925 });
+    expect(captured[0].body).toEqual({ rest_port: 19915, rpc_port: 19925 });
   });
 
   it('increments ports only when the same node already uses them', () => {
@@ -285,7 +287,7 @@ describe('Deploy Server dialog', () => {
       1,
     );
 
-    expect(defaults).toEqual({ defaultMgmtPort: '19911', defaultGrpcPort: '19921' });
+    expect(defaults).toEqual({ defaultRestPort: '19911', defaultRpcPort: '19921' });
   });
 
   it('increments globally when a different node already uses the base ports', () => {
@@ -299,19 +301,38 @@ describe('Deploy Server dialog', () => {
       1,
     );
 
-    expect(defaults).toEqual({ defaultMgmtPort: '19911', defaultGrpcPort: '19921' });
+    expect(defaults).toEqual({ defaultRestPort: '19911', defaultRpcPort: '19921' });
   });
 
   it('derives defaults from the node id suffix before checking collisions', () => {
     const defaults = deployPortDefaultsForNode([], 2, 19910, 19920);
 
-    expect(defaults).toEqual({ defaultMgmtPort: '19912', defaultGrpcPort: '19922' });
+    expect(defaults).toEqual({ defaultRestPort: '19912', defaultRpcPort: '19922' });
   });
 
   it('can increment from remembered same-node ports even after the server is gone', () => {
     const defaults = deployPortDefaultsForNode([], 1, 19910, 19920, [19910], [19920]);
 
-    expect(defaults).toEqual({ defaultMgmtPort: '19911', defaultGrpcPort: '19921' });
+    expect(defaults).toEqual({ defaultRestPort: '19911', defaultRpcPort: '19921' });
+  });
+});
+
+describe('diskdbPortDefaultsForNode', () => {
+  it('returns the base port when no instances or remembered ports collide', () => {
+    expect(diskdbPortDefaultsForNode([], 1)).toBe('29921');
+  });
+
+  it('derives defaults from the node id suffix before checking collisions', () => {
+    expect(diskdbPortDefaultsForNode([], 2)).toBe('29922');
+  });
+
+  it('increments past ports already assigned to other diskdb instances', () => {
+    const instances = [{ grpc_endpoint: 'http://127.0.0.1:29921' }];
+    expect(diskdbPortDefaultsForNode(instances, 1)).toBe('29922');
+  });
+
+  it('increments past remembered ports even when no instances exist', () => {
+    expect(diskdbPortDefaultsForNode([], 1, undefined, [29921])).toBe('29922');
   });
 });
 
@@ -388,8 +409,8 @@ describe('Add Store dialog', () => {
           health: NodeHealth.Down,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 29910,
-        grpc_port: 29920,
+        rest_port: 29910,
+        rpc_port: 29920,
       },
     ];
 
@@ -417,8 +438,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 29910,
-        grpc_port: 29920,
+        rest_port: 29910,
+        rpc_port: 29920,
       },
     ];
     render(
@@ -480,8 +501,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 29910,
-        grpc_port: 29920,
+        rest_port: 29910,
+        rpc_port: 29920,
       },
     ];
 
@@ -514,8 +535,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 19910,
-        grpc_port: 19920,
+        rest_port: 19910,
+        rpc_port: 19920,
       },
       {
         id: 'KV-n2',
@@ -529,8 +550,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 29910,
-        grpc_port: 29920,
+        rest_port: 29910,
+        rpc_port: 29920,
       },
       {
         id: 'KV-n3',
@@ -544,8 +565,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 39910,
-        grpc_port: 39920,
+        rest_port: 39910,
+        rpc_port: 39920,
       },
       {
         id: 'KV-n4',
@@ -559,8 +580,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 49910,
-        grpc_port: 49920,
+        rest_port: 49910,
+        rpc_port: 49920,
       },
     ];
 
@@ -597,8 +618,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 29910,
-        grpc_port: 29920,
+        rest_port: 29910,
+        rpc_port: 29920,
       },
     ];
 
@@ -621,7 +642,7 @@ describe('Add Group dialog', () => {
   });
 
   it('excludes unavailable store owners', () => {
-    const allStores: StoreView[] = [{ store_id: '7', nodes: [1, 2], groups: [] }];
+    const allStores: EnrichedStoreView[] = [{ store_id: '7', nodes: [1, 2], groups: [] }];
     const unavailableN2: CrowKVServerView[] = [
       ...mockServers,
       {
@@ -636,8 +657,8 @@ describe('Add Group dialog', () => {
           health: NodeHealth.Down,
           last_seen_ms: Date.now(),
         },
-        mgmt_port: 29910,
-        grpc_port: 29920,
+        rest_port: 29910,
+        rpc_port: 29920,
       },
     ];
 
@@ -740,6 +761,8 @@ describe('end-to-end create flow', () => {
       <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="1" />,
       { wrapper },
     );
+    // Disable DiskDB — this flow tests Crow Storage, not DiskDB deploy.
+    fireEvent.click(screen.getByLabelText('Enable DiskDB on this node'));
     fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));

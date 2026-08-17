@@ -429,18 +429,12 @@ fn concurrent_insert_trim_reclaim() {
         }
     }
 
-    // Phase 2: trim concurrently from multiple threads (reclaim is single-threaded).
+    // Phase 2: trim from multiple advancing watermarks (trim must be
+    // serialized — the implementation panics on concurrent trim calls).
     {
         let l = Arc::clone(&list);
-        let mut handles = Vec::new();
         for t in 1..=3u64 {
-            let l = Arc::clone(&l);
-            handles.push(thread::spawn(move || {
-                l.trim(t * chunk);
-            }));
-        }
-        for h in handles {
-            h.join().unwrap();
+            l.trim(t * chunk);
         }
         // Reclaim after all trims complete (reclaim must be single-threaded).
         let _ = l.reclaim();

@@ -9,10 +9,13 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::cluster::{DiskGroupId, NodeHealth, NodeId, ProcState, RackId, ServerProcess};
-use crow_console_shared::config::{DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{
+    DiskEntry, DiskGroupEntry, NodeEntry, RackEntry, ServerEntry, ServiceType,
+};
 use crow_console_shared::expand::RecursiveDepth;
 use crow_console_shared::monitor::NodeRecord;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::Duration;
 
 fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
@@ -235,10 +238,16 @@ pub async fn http_remove_node(
         let cfg = state.config.read().unwrap();
         cfg.node(id).map(|n| n.rack_id)
     };
+    // Cascade-stop the server process and drop its deployment record +
+    // topology before removing the node, so a direct DELETE /api/nodes/:id
+    // does not orphan a running crow-kv-server. No-op when no server is
+    // deployed (e.g. the UI already called DELETE .../server first).
+    stop_and_remove_server_for_node(&state, id).await;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_node(id).map_err(map_config_err)?;
     }
+    state.monitor_cache.drop_node(&id).await;
     state.persist().map_err(map_persist_err)?;
 
     // Cascade-remove group-0 sysdata (node + child disk-groups + disks).
@@ -523,6 +532,8 @@ pub struct ServerSummary {
     pub pid: Option<u32>,
     /// Latest health from the monitor cache (`unknown` until probed).
     pub health: NodeHealth,
+    /// Service type: "kv" (crow-kv-server) or "diskdb".
+    pub service_type: String,
 }
 
 /// `GET /api/servers`. Cluster-wide list of deployed servers, one row
@@ -549,6 +560,11 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
                 grpc_url: s.grpc_url.clone(),
                 pid,
                 health,
+                service_type: match s.service_type {
+                    crow_console_shared::config::ServiceType::Kv => "kv",
+                    crow_console_shared::config::ServiceType::Diskdb => "diskdb",
+                }
+                .to_string(),
             }
         })
         .collect();
@@ -557,8 +573,8 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
 
 #[derive(Debug, Deserialize)]
 pub struct DeployNodeServerBody {
-    mgmt_port: u16,
-    grpc_port: u16,
+    rest_port: u16,
+    rpc_port: u16,
     #[serde(default)]
     binary: Option<String>,
     #[serde(default)]
@@ -662,8 +678,8 @@ pub async fn http_deploy_node_server(
 
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port: body.mgmt_port,
-        grpc_port: body.grpc_port,
+        rest_port: body.rest_port,
+        rpc_port: body.rpc_port,
         election_profile: body
             .election_profile
             .clone()
@@ -700,8 +716,8 @@ pub async fn http_deploy_node_server(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
-        mgmt_port: Some(body.mgmt_port),
-        grpc_port: Some(body.grpc_port),
+        rest_port: Some(body.rest_port),
+        rpc_port: Some(body.rpc_port),
         auto_start: true,
         binary: body.binary.clone(),
         election_profile: body
@@ -709,6 +725,7 @@ pub async fn http_deploy_node_server(
             .clone()
             .or_else(|| std::env::var("CROW_KV_SERVER_ELECTION_PROFILE").ok()),
         pid: None,
+        service_type: ServiceType::Kv,
     };
     state.set_runtime_pid(node_id, deployed.pid);
     {
@@ -775,14 +792,18 @@ pub async fn http_restart_node_server(
     // Extract ports from the persisted URLs. The deploy path stamped
     // them in originally as host:port; if either fails to parse we
     // surface a 500 since that's a console-state-corruption case.
-    let mgmt_port = port_of(&entry.url)
+    let rest_port = crate::mgmt::port_of(&entry.url)
         .ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
-    let grpc_port = entry.grpc_url.as_deref().and_then(port_of).ok_or_else(|| {
-        err_500(format!(
-            "server entry has malformed grpc_url: {:?}",
-            entry.grpc_url
-        ))
-    })?;
+    let rpc_port = entry
+        .grpc_url
+        .as_deref()
+        .and_then(crate::mgmt::port_of)
+        .ok_or_else(|| {
+            err_500(format!(
+                "server entry has malformed grpc_url: {:?}",
+                entry.grpc_url
+            ))
+        })?;
 
     if let Some(pid) = state.runtime_pid(node_id) {
         let _sent = match &node {
@@ -798,8 +819,8 @@ pub async fn http_restart_node_server(
 
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port,
-        grpc_port,
+        rest_port,
+        rpc_port,
         election_profile: entry
             .election_profile
             .clone()
@@ -826,12 +847,13 @@ pub async fn http_restart_node_server(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
-        mgmt_port: entry.mgmt_port,
-        grpc_port: entry.grpc_port,
+        rest_port: entry.rest_port,
+        rpc_port: entry.rpc_port,
         auto_start: entry.auto_start,
         binary: entry.binary.clone(),
         election_profile: entry.election_profile.clone(),
         pid: None,
+        service_type: entry.service_type,
     };
     state.set_runtime_pid(node_id, deployed.pid);
     {
@@ -853,22 +875,9 @@ pub async fn http_restart_node_server(
     }))
 }
 
-/// Parse `port` out of a URL like `http://host:9910` or `host:9910`.
-/// Returns `None` on any shape we don't recognise.
-fn port_of(url: &str) -> Option<u16> {
-    // Strip scheme if present.
-    let stripped = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
-    let host_port = stripped.split('/').next().unwrap_or(stripped);
-    let port_str = host_port.rsplit(':').next()?;
-    port_str.parse::<u16>().ok()
-}
-
 #[derive(Debug, Serialize)]
 pub struct StopResult {
-    sent: bool,
+    pub sent: bool,
 }
 
 /// `POST /api/nodes/:node_id/server/stop`. Stop the server on this node
@@ -914,6 +923,47 @@ pub async fn http_stop_node_server(
     Ok(Json(StopResult { sent }))
 }
 
+/// Stop the server process deployed on `node_id` (best-effort) and remove
+/// its deployment record + topology from config. Returns `true` if a
+/// server was deployed (and is now removed), `false` if no server was
+/// deployed on the node. Does NOT persist — the caller persists. Does NOT
+/// remove the node itself. Used by both `DELETE /api/nodes/:id/server`
+/// and the node-delete cascade so a direct `DELETE /api/nodes/:id` does
+/// not orphan a running crow-kv-server.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool {
+    use crow_console_shared::lifecycle;
+
+    let node = {
+        let cfg = state.config.read().unwrap();
+        if cfg.server_for_node(node_id).is_none() {
+            return false;
+        }
+        cfg.node(node_id).cloned()
+    };
+    if let Some(pid) = state.runtime_pid(node_id) {
+        let _ = match node {
+            Some(n) if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(&n, pid)
+                .await
+                .unwrap_or(false),
+            _ => matches!(
+                tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
+                Ok(Ok(true))
+            ),
+        };
+    }
+    {
+        let mut cfg = state.config.write().unwrap();
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.purge_node_topology(node_id);
+    }
+    state.clear_runtime_pid(node_id);
+    state.monitor_cache.drop_node(&node_id).await;
+    true
+}
+
 /// `DELETE /api/nodes/:node_id/server`. Stop and remove the deployment
 /// record. Returns 204 on success, 404 if no server is deployed.
 ///
@@ -926,39 +976,14 @@ pub async fn http_delete_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    use crow_console_shared::lifecycle;
-
-    let node = {
-        let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
-        cfg.node(node_id).cloned()
-    };
-    if let Some(pid) = state.runtime_pid(node_id) {
-        let _ = match node {
-            Some(n) if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(&n, pid)
-                .await
-                .unwrap_or(false),
-            _ => {
-                matches!(
-                    tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
-                    Ok(Ok(true))
-                )
-            }
-        };
+    if !stop_and_remove_server_for_node(&state, node_id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("no server deployed on node {node_id}"),
+            }),
+        ));
     }
-    {
-        let mut cfg = state.config.write().unwrap();
-        let _ = cfg.remove_server_for_node(node_id);
-        cfg.purge_node_topology(node_id);
-    }
-    state.clear_runtime_pid(node_id);
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1376,6 +1401,104 @@ pub struct AddDiskBody {
     unit_size_bytes: u32,
 }
 
+/// Validate a single disk-add input, producing the `DiskEntry`, proto
+/// `DiskId`, and `DiskValue` for group-0 sysdata sync. Shared by
+/// `http_add_disk` and `http_add_disks_batch` so both paths reject
+/// bad inputs before any config mutation or persist.
+fn validate_disk_input(
+    body: &AddDiskBody,
+    dg_id: DiskGroupId,
+    rack_id: RackId,
+    node_id: NodeId,
+) -> Result<
+    (
+        DiskEntry,
+        crow_protocol::common::DiskId,
+        crow_protocol::diskdb::rpc::DiskValue,
+    ),
+    (StatusCode, Json<ErrorBody>),
+> {
+    let disk_id_proto =
+        match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
+            Ok(id) => id,
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: format!("invalid disk_id format for {}: {e}", body.disk_id),
+                    }),
+                ));
+            }
+        };
+    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!(
+                    "disk {}: unit_size_bytes and zone_size_bytes must be non-zero",
+                    body.disk_id
+                ),
+            }),
+        ));
+    }
+    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!(
+                    "disk {}: zone_size_bytes must be a multiple of unit_size_bytes",
+                    body.disk_id
+                ),
+            }),
+        ));
+    }
+    if body.capacity_bytes < body.zone_size_bytes {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("disk {}: capacity_bytes must be >= zone_size_bytes", body.disk_id),
+            }),
+        ));
+    }
+    let unit_size = u64::from(body.unit_size_bytes);
+    let capacity_units = body.capacity_bytes / unit_size;
+    let zone_size_units = body.zone_size_bytes / unit_size;
+    let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
+    let disk_type_proto = match body.disk_type.as_str() {
+        "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
+        "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
+        "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
+        "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("disk {}: unknown disk_type: {other}", body.disk_id),
+                }),
+            ));
+        }
+    };
+    let entry = DiskEntry {
+        disk_id: body.disk_id.clone(),
+        disk_group_id: dg_id,
+        rack_id,
+        node_id,
+        disk_type: body.disk_type.clone(),
+        capacity_bytes: body.capacity_bytes,
+        zone_size_bytes: body.zone_size_bytes,
+        unit_size_bytes: body.unit_size_bytes,
+    };
+    let value = crow_protocol::diskdb::rpc::DiskValue {
+        status: crow_protocol::common::HwStatus::Up as i32,
+        disk_type: disk_type_proto,
+        capacity_units,
+        zone_size_units,
+        unit_size_bytes: body.unit_size_bytes,
+        zone_count,
+    };
+    Ok((entry, disk_id_proto, value))
+}
+
 /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
 ///
 /// # Panics
@@ -1464,55 +1587,8 @@ pub async fn http_add_disk(
                 )
             })?
     };
-    // Validate the disk_id format before mutating config or syncing
-    // group 0 — a malformed id can never be routed by diskdb.
-    let disk_id_proto = match <crow_protocol::common::DiskId as crow_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("invalid disk_id format: {e}"),
-                }),
-            ));
-        }
-    };
-    // The unit/zone sizes determine the disk's zone layout in diskdb —
-    // reject degenerate values instead of writing a zero-zone disk.
-    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "unit_size_bytes and zone_size_bytes must be non-zero".to_string(),
-            }),
-        ));
-    }
-    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "zone_size_bytes must be a multiple of unit_size_bytes".to_string(),
-            }),
-        ));
-    }
-    if body.capacity_bytes < body.zone_size_bytes {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "capacity_bytes must be >= zone_size_bytes".to_string(),
-            }),
-        ));
-    }
-    let entry = DiskEntry {
-        disk_id: body.disk_id,
-        disk_group_id: dg_id,
-        rack_id,
-        node_id,
-        disk_type: body.disk_type,
-        capacity_bytes: body.capacity_bytes,
-        zone_size_bytes: body.zone_size_bytes,
-        unit_size_bytes: body.unit_size_bytes,
-    };
+    // Validate all inputs before mutating config or syncing group 0.
+    let (entry, disk_id_proto, value) = validate_disk_input(&body, dg_id, rack_id, node_id)?;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_disk(entry.clone()).map_err(map_config_err)?;
@@ -1521,40 +1597,116 @@ pub async fn http_add_disk(
 
     // Sync group-0 sysdata. Best-effort.
     if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let unit_size = u64::from(entry.unit_size_bytes);
-        let capacity_units = entry.capacity_bytes / unit_size;
-        let zone_size_units = entry.zone_size_bytes / unit_size;
-        // The diskdb server derives its zone list from this field —
-        // zone count = capacity / zone size (last zone may be smaller,
-        // per design §8).
-        let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
-        let value = crow_protocol::diskdb::rpc::DiskValue {
-            status: crow_protocol::common::HwStatus::Up as i32,
-            disk_type: match entry.disk_type.as_str() {
-                "Hdd" | "BLOCK_HDD" => crow_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
-                "Ssd" | "BLOCK_SSD" => crow_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
-                "ZONE_SSD" => crow_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
-                "SMR_HDD" => crow_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
-                other => {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorBody {
-                            error: format!("unknown disk_type: {other}"),
-                        }),
-                    ));
-                }
-            },
-            capacity_units,
-            zone_size_units,
-            unit_size_bytes: entry.unit_size_bytes,
-            zone_count,
-        };
         if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id_proto, &value).await {
             tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
         }
     }
 
     Ok((StatusCode::CREATED, Json(entry)))
+}
+
+/// `POST /api/nodes/:node_id/disk-groups/:dg_id/disks/batch` —
+/// add multiple disks in one request (R77). Validates all inputs
+/// and checks for duplicates (against config and within the batch)
+/// before mutating config; best-effort sysdata sync per disk.
+/// Atomic all-or-nothing on the config mutation: if any `add_disk`
+/// fails, the ones already added are rolled back.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `404` if the disk-group doesn't exist, `400` on the
+/// first invalid disk input, `409` on a duplicate `disk_id` (in
+/// config or within the batch).
+pub async fn http_add_disks_batch(
+    State(state): State<AppState>,
+    Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
+    Json(body): Json<AddDisksBatchBody>,
+) -> Result<(StatusCode, Json<AddDisksBatchResult>), (StatusCode, Json<ErrorBody>)> {
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.disk_groups
+            .iter()
+            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
+            .map(|dg| dg.rack_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("disk-group {dg_id} not found on node {node_id}"),
+                    }),
+                )
+            })?
+    };
+
+    // Validate all inputs and check for duplicates before any mutation.
+    let mut validated: Vec<(
+        DiskEntry,
+        crow_protocol::common::DiskId,
+        crow_protocol::diskdb::rpc::DiskValue,
+    )> = Vec::with_capacity(body.disks.len());
+    let mut seen_ids: HashSet<String> = HashSet::with_capacity(body.disks.len());
+    for d in &body.disks {
+        if !seen_ids.insert(d.disk_id.clone()) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: format!("duplicate disk_id within batch: {}", d.disk_id),
+                }),
+            ));
+        }
+        validated.push(validate_disk_input(d, dg_id, rack_id, node_id)?);
+    }
+
+    // Mutate config: add all disks. Roll back on any failure so the
+    // in-memory config stays consistent with the (un-persisted) state.
+    let mut added: Vec<DiskEntry> = Vec::with_capacity(validated.len());
+    {
+        let mut cfg = state.config.write().unwrap();
+        for (entry, _, _) in &validated {
+            if let Err(e) = cfg.add_disk(entry.clone()).map_err(map_config_err) {
+                // Roll back already-added disks.
+                for a in &added {
+                    let _ = cfg.remove_disk(&a.disk_id);
+                }
+                return Err(e);
+            }
+            added.push(entry.clone());
+        }
+    }
+    state.persist().map_err(map_persist_err)?;
+
+    // Best-effort sysdata sync per disk.
+    let mut sysdata_errors: Vec<String> = Vec::new();
+    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+        for (entry, disk_id_proto, value) in &validated {
+            if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, disk_id_proto, value).await {
+                let msg = format!("disk {}: sysdata sync failed: {e}", entry.disk_id);
+                tracing::warn!(disk_id = %entry.disk_id, error = %e, "batch sysdata sync: add_disk failed");
+                sysdata_errors.push(msg);
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AddDisksBatchResult {
+            added,
+            sysdata_errors,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddDisksBatchBody {
+    pub disks: Vec<AddDiskBody>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddDisksBatchResult {
+    pub added: Vec<DiskEntry>,
+    pub sysdata_errors: Vec<String>,
 }
 
 /// `DELETE /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.

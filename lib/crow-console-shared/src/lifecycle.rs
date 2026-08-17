@@ -26,8 +26,8 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Default)]
 pub struct DeployRequest {
     pub server_id: String,
-    pub mgmt_port: u16,
-    pub grpc_port: u16,
+    pub rest_port: u16,
+    pub rpc_port: u16,
     /// Optional override of the binary path. Defaults via
     /// `crow_kv_server_bin()` resolution: `$CROW_KV_SERVER_BIN` →
     /// `$PATH` → `target/{debug,release}/crow-kv-server` next to the
@@ -144,7 +144,7 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
 /// config fields are `#[serde(default)]`, so an empty file loads defaults.
 /// In a workspace deploy the file lives at `<dir>/conf/crow_kv_server_config.toml`
 /// (matching the server's default `config_root`); otherwise a unique file
-/// under the system temp dir keyed by `mgmt_port`.
+/// under the system temp dir keyed by `rest_port`.
 fn resolve_config_path(req: &DeployRequest, workspace_dir: Option<&std::path::Path>) -> Result<PathBuf> {
     if let Some(config) = &req.config {
         return Ok(config.clone());
@@ -155,7 +155,7 @@ fn resolve_config_path(req: &DeployRequest, workspace_dir: Option<&std::path::Pa
             std::fs::create_dir_all(&conf).map_err(Error::Io)?;
             conf.join("crow_kv_server_config.toml")
         }
-        None => std::env::temp_dir().join(format!("crow-kv-server-deploy-{}.toml", req.mgmt_port)),
+        None => std::env::temp_dir().join(format!("crow-kv-server-deploy-{}.toml", req.rest_port)),
     };
     std::fs::write(
         &path,
@@ -171,16 +171,16 @@ async fn deploy_local_in_workspace(
     workspace_dir: Option<&std::path::Path>,
     extra_args: &[String],
 ) -> Result<DeployedServer> {
-    if req.mgmt_port == 0 || req.grpc_port == 0 {
+    if req.rest_port == 0 || req.rpc_port == 0 {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "mgmt_port and grpc_port must be non-zero".into(),
+            message: "rest_port and rpc_port must be non-zero".into(),
         });
     }
-    if req.mgmt_port == req.grpc_port {
+    if req.rest_port == req.rpc_port {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "mgmt_port and grpc_port must differ".into(),
+            message: "rest_port and rpc_port must differ".into(),
         });
     }
 
@@ -199,8 +199,8 @@ async fn deploy_local_in_workspace(
 
     let config_path = resolve_config_path(req, workspace_dir)?;
 
-    let mgmt_url = format!("http://{}:{}", node.host, req.mgmt_port);
-    let grpc_url = format!("http://{}:{}", node.host, req.grpc_port);
+    let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
+    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--config")
@@ -208,9 +208,9 @@ async fn deploy_local_in_workspace(
         .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
-        .arg(req.mgmt_port.to_string())
+        .arg(req.rest_port.to_string())
         .arg("--ports")
-        .arg(req.grpc_port.to_string())
+        .arg(req.rpc_port.to_string())
         .arg("--election-profile")
         .arg(
             req.election_profile
@@ -274,7 +274,7 @@ async fn deploy_local_in_workspace(
     // this function returns. The pid is the user's tracking handle.
     std::mem::forget(child);
 
-    wait_for_ready(&mgmt_url, Duration::from_secs(3)).await?;
+    wait_for_ready(&mgmt_url, Duration::from_secs(10)).await?;
 
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
@@ -368,8 +368,8 @@ pub(crate) fn remote_start_command(req: &DeployRequest, server_bin: &str) -> Str
         "nohup {bin}{config_arg} --management-addr 127.0.0.1 --management-port {mp} --ports {gp} \
          >/tmp/crow-kv-server.{mp}.out 2>/tmp/crow-kv-server.{mp}.err </dev/null & echo $!",
         bin = server_bin,
-        mp = req.mgmt_port,
-        gp = req.grpc_port,
+        mp = req.rest_port,
+        gp = req.rpc_port,
     )
 }
 
@@ -384,6 +384,34 @@ async fn wait_for_ready(mgmt_url: &str, timeout: Duration) -> Result<()> {
     }
     Err(Error::UpstreamRpc {
         node_id: mgmt_url.to_string(),
+        status: "did not become healthy within timeout".into(),
+    })
+}
+
+/// Poll `GET /health` until it returns HTTP 200, without requiring
+/// the response body to match `HealthResponse`. Used for diskdb,
+/// whose `/health` endpoint returns a different JSON shape
+/// (`{"phase":"up","degraded":true,"ready":true}`).
+async fn wait_for_http_ok(url: &str, timeout: Duration) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| Error::UpstreamRpc {
+            node_id: url.to_string(),
+            status: format!("client build failed: {e}"),
+        })?;
+    let health_url = format!("{url}/health");
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(Error::UpstreamRpc {
+        node_id: url.to_string(),
         status: "did not become healthy within timeout".into(),
     })
 }
@@ -515,4 +543,208 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
         }
     }
     None
+}
+
+// ── DiskDB deploy (R77) ───────────────────────────────────────────
+
+/// Inputs for a diskdb deploy (R77). The binary and config file are
+/// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
+/// and `<workspace>/conf/crow_diskdb_config.toml`); the deploy only
+/// needs the gRPC port to override `--listen-addr`. The HTTP port is
+/// read from the config file for readiness checking.
+#[derive(Debug, Clone, Default)]
+pub struct DiskdbDeployRequest {
+    pub server_id: String,
+    pub rpc_port: u16,
+    /// KV-server management URLs for group-0 discovery. If non-empty,
+    /// the auto-generated config uses these instead of the default port.
+    pub kv_server_mgmt_seeds: Vec<String>,
+}
+
+/// Resolve the path to the `crow-diskdb` binary.
+///
+/// Search order:
+/// 1. `$CROW_DISKDB_BIN`.
+/// 2. A sibling named `crow-diskdb` next to the current executable.
+/// 3. `crow-diskdb` on `$PATH`.
+#[must_use]
+pub fn crow_diskdb_bin() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CROW_DISKDB_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let mut p = dir.to_path_buf();
+            for _ in 0..3 {
+                let candidate = p.join("crow-diskdb");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                if !p.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(path) = find_in_path(std::ffi::OsStr::new("crow-diskdb")) {
+        return Some(path);
+    }
+    warn!("crow-diskdb binary not found via env, sibling, or $PATH");
+    None
+}
+
+/// Resolve the `--config` path for a diskdb deploy. Uses the
+/// pre-copied config at `<workspace>/conf/crow_diskdb_config.toml`.
+/// Falls back to a minimal auto-generated config with all required
+/// sections if the file is missing. The auto-generated config sets
+/// `http_listen_addr` to `0.0.0.0:{rpc_port + 1}` so each instance
+/// gets a unique HTTP port. When `kv_server_mgmt_seeds` is non-empty,
+/// the config is always (re)written so the diskdb can discover group-0
+/// on the actual kv-server management port.
+fn resolve_diskdb_config_path(
+    workspace_dir: &std::path::Path,
+    rpc_port: u16,
+    kv_server_mgmt_seeds: &[String],
+) -> Result<PathBuf> {
+    let conf = workspace_dir.join("conf");
+    std::fs::create_dir_all(&conf).map_err(Error::Io)?;
+    let path = conf.join("crow_diskdb_config.toml");
+    if path.exists() && kv_server_mgmt_seeds.is_empty() {
+        return Ok(path);
+    }
+    let http_port = rpc_port.saturating_add(1);
+    let seeds = if kv_server_mgmt_seeds.is_empty() {
+        format!("\"http://127.0.0.1:{}\"", crow_protocol::KV_SERVER_MGMT_BASE)
+    } else {
+        kv_server_mgmt_seeds
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // Minimal valid config — only [server] is required; all other
+    // sections default via `#[serde(default)]` on `DdbConfig` fields
+    // (values match `DdbConfig::default()`).
+    let config = format!(
+        "[server]\n\
+         listen_addr = \"0.0.0.0:{rpc_port}\"\n\
+         http_listen_addr = \"0.0.0.0:{http_port}\"\n\
+         kv_server_mgmt_seeds = [{seeds}]\n",
+    );
+    std::fs::write(&path, config).map_err(Error::Io)?;
+    Ok(path)
+}
+
+/// Minimal shape for extracting `server.http_listen_addr` from a
+/// diskdb config TOML file.
+#[derive(serde::Deserialize)]
+struct DiskdbConfigHttpAddr {
+    server: Option<DiskdbConfigServerSection>,
+}
+
+#[derive(serde::Deserialize)]
+struct DiskdbConfigServerSection {
+    http_listen_addr: Option<String>,
+}
+
+/// Extract the HTTP listen address from a diskdb config TOML file.
+/// Returns `None` if the file cannot be parsed or the field is absent.
+fn http_listen_addr_from_config(config_path: &std::path::Path) -> Option<String> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("diskdb config read failed {config_path:?}: {e}");
+            return None;
+        }
+    };
+    let parsed: DiskdbConfigHttpAddr = match toml::from_str(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("diskdb config parse failed {config_path:?}: {e}");
+            return None;
+        }
+    };
+    parsed.server?.http_listen_addr
+}
+
+/// Spawn `crow-diskdb` locally. The binary and config file are
+/// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
+/// and `<workspace>/conf/crow_diskdb_config.toml`). The deploy only
+/// overrides `--listen-addr` with the gRPC port; the HTTP port comes
+/// from the config file.
+///
+/// # Errors
+/// Returns `Error::Validation` for bad inputs and `Error::Io` for
+/// spawn or readiness failures.
+pub async fn deploy_diskdb_local(
+    req: &DiskdbDeployRequest,
+    node: &NodeEntry,
+    workspace_dir: &std::path::Path,
+) -> Result<DeployedServer> {
+    if req.rpc_port == 0 {
+        return Err(Error::Validation {
+            field: "port".into(),
+            message: "rpc_port must be non-zero".into(),
+        });
+    }
+
+    // Use the pre-copied binary in the workspace bin/ dir, falling
+    // back to a PATH/env search if not yet staged.
+    let staged = workspace_dir.join("bin").join("crow-diskdb");
+    let launch_binary = if staged.exists() {
+        staged
+    } else {
+        let binary = crow_diskdb_bin().ok_or_else(|| Error::Validation {
+            field: "binary".into(),
+            message: "could not locate crow-diskdb binary; set $CROW_DISKDB_BIN".into(),
+        })?;
+        stage_server_binary(&binary, workspace_dir)?
+    };
+
+    let config_path = resolve_diskdb_config_path(workspace_dir, req.rpc_port, &req.kv_server_mgmt_seeds)?;
+    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+
+    // Read the HTTP listen address from the config file for readiness
+    // checking. If absent, the diskdb binary uses its default HTTP
+    // port (DISKDB_HTTP_BASE = 9942). Replace 0.0.0.0 with the node
+    // host so the readiness check can actually connect.
+    let http_addr = http_listen_addr_from_config(&config_path);
+    let mgmt_url = match &http_addr {
+        Some(addr) if addr.starts_with("http") => addr.replace("0.0.0.0", &node.host),
+        Some(addr) => format!("http://{}", addr.replace("0.0.0.0", &node.host)),
+        None => format!("http://{}:{}", node.host, crow_protocol::DISKDB_HTTP_BASE),
+    };
+
+    let mut cmd = Command::new(&launch_binary);
+    cmd.arg("--config").arg(&config_path);
+    cmd.arg("--listen-addr")
+        .arg(format!("{}:{}", node.host, req.rpc_port));
+    cmd.kill_on_drop(false);
+    let log_dir = workspace_dir.join("log");
+    let tmp_path = log_dir.join("crow-diskdb.stdout.log");
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&tmp_path)
+        .map_err(Error::Io)?;
+    cmd.current_dir(workspace_dir);
+    cmd.stdout(Stdio::from(out.try_clone().map_err(Error::Io)?));
+    cmd.stderr(Stdio::from(out));
+    let child = cmd.spawn().map_err(Error::Io)?;
+    let pid = child.id().ok_or_else(|| Error::Validation {
+        field: "pid".into(),
+        message: "spawned child has no pid".into(),
+    })?;
+    let from = log_dir.join("crow-diskdb.stdout.log");
+    let to = log_dir.join(format!("crow-diskdb-{pid}.out.log"));
+    let _ = std::fs::rename(&from, &to);
+    // Detach: drop the Child handle so the process is not killed.
+    std::mem::forget(child);
+    wait_for_http_ok(&mgmt_url, Duration::from_secs(15)).await?;
+    Ok(DeployedServer {
+        server_id: req.server_id.clone(),
+        mgmt_url,
+        grpc_url,
+        pid,
+    })
 }

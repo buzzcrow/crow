@@ -41,6 +41,7 @@ const G0_GROUP: u64 = 0;
 /// All methods target store 0, group 0. The wrapped `CrowkvClient`
 /// must have its topology seeded with a group-0 leader endpoint
 /// (via `seed_leader(0, 0, endpoint)` or `/topology` discovery).
+#[derive(Clone)]
 pub struct HardwareClient {
     kv: Arc<CrowkvClient>,
 }

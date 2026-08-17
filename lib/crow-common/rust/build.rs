@@ -9,11 +9,12 @@
 //! of `.pixi`) so no system pkg-config is needed.
 
 fn main() {
-    // The pixi env lives at the workspace root, two levels up from this
-    // crate (lib/crow-common/rust → workspace root).
+    // The pixi env lives at the workspace root, three levels up from this
+    // crate (lib/crow-common/rust → lib/crow-common → lib → workspace root).
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let workspace_root = std::path::Path::new(&manifest_dir)
         .parent()
+        .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .expect("workspace root");
 

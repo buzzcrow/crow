@@ -23,7 +23,9 @@ use crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient;
 use crow_protocol::diskdb::rpc::{
     AllocateBlocksRequest, AllocateResponse, CompactZoneRequest, CompactZoneResponse, FreeBlocksRequest,
     FreeResponse, GetDiskGroupInfoRequest, GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse,
-    QueryCapacityStatsRequest, QueryCapacityStatsResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse,
+    GetScanStatusRequest, GetScanStatusResponse, QueryCapacityStatsRequest, QueryCapacityStatsResponse,
+    RebuildZoneBitmapRequest, RebuildZoneBitmapResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse,
+    TriggerScanRequest, TriggerScanResponse,
 };
 use crow_protocol::DiskGroupId;
 
@@ -46,6 +48,7 @@ impl Default for RetryConfig {
 }
 
 /// Client for CROW diskdb gRPC operations.
+#[derive(Clone)]
 pub struct DiskdbClient {
     svc: ServiceRegistryClient,
     /// `disk_group_id -> grpc_endpoint` cache.
@@ -324,6 +327,66 @@ impl DiskdbClient {
         .await
     }
 
+    /// Trigger a scan on all owned groups (or one group if `dg_id` is
+    /// set). Returns the last `ScanSummary` + `scan_in_progress`. If a
+    /// scan is already running the server returns `scan_in_progress:
+    /// true` (no error, no stacking). Admin/debug call; transient
+    /// `Unavailable` is retried per `RetryConfig`.
+    ///
+    /// # Errors
+    /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
+    pub async fn trigger_scan(&self, dg_id: Option<DiskGroupId>) -> Result<TriggerScanResponse> {
+        let dg_id = match dg_id {
+            Some(id) => id,
+            None => self.first_cached_dg()?,
+        };
+        self.with_retry(dg_id, |mut client| {
+            let req = TriggerScanRequest {};
+            async move { client.trigger_scan(req).await }
+        })
+        .await
+    }
+
+    /// Get the last scan summary + `has_run` flag. `has_run` is false
+    /// if no scan has completed yet (the summary is empty in that
+    /// case). Admin/debug call; transient `Unavailable` is retried.
+    ///
+    /// # Errors
+    /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
+    pub async fn get_scan_status(&self, dg_id: Option<DiskGroupId>) -> Result<GetScanStatusResponse> {
+        let dg_id = match dg_id {
+            Some(id) => id,
+            None => self.first_cached_dg()?,
+        };
+        self.with_retry(dg_id, |mut client| {
+            let req = GetScanStatusRequest {};
+            async move { client.get_scan_status(req).await }
+        })
+        .await
+    }
+
+    /// Rebuild one zone's bitmap on a disk (admin/debug). Routes via
+    /// `dg_for_disk` so the call lands on the owning diskdb instance.
+    /// `zone_index = u32::MAX` means all zones on the disk.
+    ///
+    /// # Errors
+    /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors (including unknown disk).
+    pub async fn rebuild_zone_bitmap(
+        &self,
+        disk_id: DiskId,
+        zone_index: u32,
+    ) -> Result<RebuildZoneBitmapResponse> {
+        let dg_id = self.dg_for_disk(disk_id).await?;
+        self.with_retry(dg_id, |mut client| {
+            let req = RebuildZoneBitmapRequest {
+                disk_id: Some(disk_id),
+                zone_index,
+            };
+            async move { client.rebuild_zone_bitmap(req).await }
+        })
+        .await
+    }
+
     /// Return the first cached disk-group id, or `Unreachable` if the
     /// cache is empty.
     fn first_cached_dg(&self) -> Result<DiskGroupId> {
@@ -456,5 +519,33 @@ mod tests {
         let s = tonic::Status::not_found("missing");
         let e = map_status(&s);
         assert!(matches!(e, DiskdbClientError::Rpc(_)));
+    }
+
+    fn fresh_client() -> DiskdbClient {
+        let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+        let svc = crow_kv_client::ServiceRegistryClient::new(kv);
+        DiskdbClient::new(svc)
+    }
+
+    #[tokio::test]
+    async fn trigger_scan_empty_cache_returns_unreachable() {
+        let client = fresh_client();
+        let err = client.trigger_scan(None).await.unwrap_err();
+        assert!(matches!(err, DiskdbClientError::Unreachable(_)));
+    }
+
+    #[tokio::test]
+    async fn get_scan_status_empty_cache_returns_unreachable() {
+        let client = fresh_client();
+        let err = client.get_scan_status(None).await.unwrap_err();
+        assert!(matches!(err, DiskdbClientError::Unreachable(_)));
+    }
+
+    #[tokio::test]
+    async fn rebuild_zone_bitmap_unknown_disk_returns_unreachable() {
+        let client = fresh_client();
+        let disk_id = DiskId { high: 0, low: 1 };
+        let err = client.rebuild_zone_bitmap(disk_id, 0).await.unwrap_err();
+        assert!(matches!(err, DiskdbClientError::Unreachable(_)));
     }
 }

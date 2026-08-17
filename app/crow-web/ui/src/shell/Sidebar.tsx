@@ -6,14 +6,15 @@ import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Co
 import { useViewMode } from '../contexts/ViewModeContext';
 import { Tree, TreeNode } from '../components/Tree';
 import { Button } from '../components/ui/Button';
-import { ViewMode, Rack, StoreView, NodeStore, CrowKVServerView, NodeHealth } from '../types';
+import { ViewMode, Rack, EnrichedStoreView, NodeStore, CrowKVServerView, NodeHealth, DiskdbInstanceInfo, CapacityUsageResponse } from '../types';
 import { crowKvServerByNodeId } from '../data/crowKvServers';
-import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole } from '../utils/entityDisplay';
+import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole, hwStatusToUiHealth } from '../utils/entityDisplay';
+import type { NodeDiskGroups } from '../data/useCapacityTree';
 
 interface SidebarProps {
   racks?: Rack[];
   servers?: CrowKVServerView[];
-  stores?: StoreView[];
+  stores?: EnrichedStoreView[];
   nodeStores?: Record<string, NodeStore[]>;
   nodeHealthById?: Record<string, NodeHealth>;
   loading?: boolean;
@@ -23,6 +24,11 @@ interface SidebarProps {
   onNodeClick?: (node: TreeNode) => void;
   onNodeContextMenu?: (node: TreeNode, event: React.MouseEvent) => void;
   onAdd?: () => void;
+  // Capacity view props (R77)
+  diskdbInstances?: DiskdbInstanceInfo[];
+  capacityUsage?: CapacityUsageResponse | null;
+  nodeDiskGroups?: Record<number, NodeDiskGroups>;
+  diskdbNodeIds?: Set<number>;
 }
 
 export function Sidebar({
@@ -38,6 +44,10 @@ export function Sidebar({
   onNodeClick,
   onNodeContextMenu,
   onAdd,
+  diskdbInstances = [],
+  capacityUsage = null,
+  nodeDiskGroups = {},
+  diskdbNodeIds,
 }: SidebarProps) {
   const { viewMode } = useViewMode();
   const [filterQuery, setFilterQuery] = useState('');
@@ -127,6 +137,119 @@ export function Sidebar({
               }),
             });
           }
+          // DiskDB server sub-tree (read-only disk-group → disk).
+          if (diskdbNodeIds?.has(nodeId)) {
+            const ndg = nodeDiskGroups[nodeId];
+            const dgChildren: TreeNode[] = (ndg?.diskGroups || []).map((dg) => ({
+              id: `PDG-${nodeId}-${dg.id}`,
+              rawId: dg.id,
+              label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+              type: 'DiskGroup' as const,
+              icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+              parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
+              children: (ndg?.disksByDg[dg.id] || []).map((d) => ({
+                id: `PD-${nodeId}-${dg.id}-${d.disk_id}`,
+                rawId: d.disk_id,
+                label: d.disk_id.slice(0, 12) + '…',
+                type: 'Disk' as const,
+                icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                parentIds: {
+                  rack_id: rack.id,
+                  node_id: nodeId,
+                  disk_group_id: dg.id,
+                  disk_id: d.disk_id,
+                },
+              })),
+            }));
+            children.push({
+              id: `DDB-${nodeId}`,
+              rawId: `${nodeId}-ddb`,
+              label: `DDB-${nodeId}`,
+              type: 'Server',
+              icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+              parentIds: { rack_id: rack.id, node_id: nodeId, service_type: 'Diskdb' },
+              children: dgChildren.length ? dgChildren : undefined,
+            });
+          }
+          return {
+            id: `N-${nodeId}`,
+            rawId: nodeId,
+            label: nodeLabel(String(nodeId)),
+            type: 'Node' as const,
+            icon: <Monitor className="tw-h-4 tw-w-4 tw-text-muted" />,
+            health: toUiHealth(nodeHealthById[String(nodeId)]),
+            parentIds: { rack_id: rack.id },
+            children: children.length ? children : undefined,
+          };
+        }),
+      }));
+    }
+
+    if (viewMode === ViewMode.Capacity) {
+      // Capacity tree: rack → node → disk-group → disk.
+      if (racks.length === 0) return [];
+
+      const diskdbNodeSet = diskdbNodeIds ?? new Set(diskdbInstances.map((i) => i.instance_id));
+      void diskdbNodeSet;
+
+      // Build lookup maps from capacity usage for status badges.
+      const dgStatusByKey = new Map<string, number>();
+      const diskStatusById = new Map<string, number>();
+      const diskZoneCountById = new Map<string, number>();
+      if (capacityUsage?.disk_groups) {
+        for (const dg of capacityUsage.disk_groups) {
+          dgStatusByKey.set(`${dg.rack_id}:${dg.node_id}:${dg.disk_group_id}`, dg.status);
+          for (const disk of dg.disks || []) {
+            diskStatusById.set(disk.disk_id, disk.status);
+            diskZoneCountById.set(disk.disk_id, disk.zone_count);
+          }
+        }
+      }
+
+      return racks.map((rack) => ({
+        id: `R-${rack.id}`,
+        rawId: rack.id,
+        label: rack.name ? `${rackLabel(String(rack.id))} (${rack.name})` : rackLabel(String(rack.id)),
+        type: 'Rack' as const,
+        icon: <FolderTree className="tw-h-4 tw-w-4 tw-text-muted" />,
+        children: (rack.nodes || []).map((entry) => {
+          const nodeId: number = entry.id;
+          const ndg = nodeDiskGroups[nodeId];
+          const diskGroups = ndg?.diskGroups || [];
+          const children: TreeNode[] = [];
+
+          // Disk-group → disk children.
+          for (const dg of diskGroups) {
+            const disks = ndg?.disksByDg[dg.id] || [];
+            const dgStatus = dgStatusByKey.get(`${rack.id}:${nodeId}:${dg.id}`);
+            children.push({
+              id: `CDG-${nodeId}-${dg.id}`,
+              rawId: dg.id,
+              label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+              type: 'DiskGroup' as const,
+              icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+              health: dgStatus != null ? hwStatusToUiHealth(dgStatus) : undefined,
+              parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
+              children: disks.map((d) => {
+                const diskStatus = diskStatusById.get(d.disk_id);
+                return {
+                  id: `CD-${nodeId}-${dg.id}-${d.disk_id}`,
+                  rawId: d.disk_id,
+                  label: d.disk_id.slice(0, 12) + '…',
+                  type: 'Disk' as const,
+                  icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                  health: diskStatus != null ? hwStatusToUiHealth(diskStatus) : undefined,
+                  parentIds: {
+                    rack_id: rack.id,
+                    node_id: nodeId,
+                    disk_group_id: dg.id,
+                    disk_id: d.disk_id,
+                  },
+                };
+              }),
+            });
+          }
+
           return {
             id: `N-${nodeId}`,
             rawId: nodeId,
@@ -149,16 +272,16 @@ export function Sidebar({
         label: store.name ? `${storeLabel(sid)} (${store.name})` : storeLabel(sid),
         type: 'Store',
         icon: <Database className="tw-h-4 tw-w-4 tw-text-muted" />,
-        children: (store.groups || []).map((group: any) => {
+        children: (store.groups || []).map((group) => {
           const gid = String(group.group_id);
-          const replicas: any[] = Array.isArray(group.replicas) ? group.replicas : [];
+          const replicas = group.replicas;
           return {
             id: `G-${sid}-${gid}`,
             rawId: gid,
             label: groupLabel(gid),
             type: 'Group' as const,
             icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
-            health: toUiHealth(group.health || group.state),
+            health: toUiHealth(group.state),
             parentIds: { store_id: sid },
             children: replicas.map((r) => ({
               id: `LR-${sid}-${gid}-${r.replica_id}`,
@@ -174,7 +297,7 @@ export function Sidebar({
         }),
       };
     });
-  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks]);
+  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks, diskdbInstances, capacityUsage, nodeDiskGroups, diskdbNodeIds]);
 
   const filtered = useMemo(() => {
     if (!filterQuery.trim()) return treeNodes;
@@ -217,9 +340,9 @@ export function Sidebar({
 
       <div className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-border-b tw-border-border">
         <h3 className="tw-text-xs tw-font-semibold tw-text-muted tw-uppercase tw-tracking-wider">
-          {viewMode === ViewMode.Physical ? 'Infrastructure' : 'Cluster'}
+          {viewMode === ViewMode.Physical ? 'Infrastructure' : viewMode === ViewMode.Logical ? 'KV Cluster' : 'Capacity'}
         </h3>
-        {!readonly && onAdd && (
+        {!readonly && onAdd && viewMode !== ViewMode.Capacity && (
           viewMode === ViewMode.Logical && !clusterInitialized ? (
             <Button
               variant="secondary"
@@ -236,7 +359,7 @@ export function Sidebar({
               variant="ghost"
               size="sm"
               onClick={onAdd}
-              aria-label={viewMode === ViewMode.Physical ? 'Add Rack' : 'Add Store'}
+              aria-label={viewMode === ViewMode.Logical ? 'Add Store' : 'Add Rack'}
               className="tw-h-7 tw-px-2"
             >
               <Plus className="tw-h-3.5 tw-w-3.5" />
@@ -265,18 +388,20 @@ export function Sidebar({
             ? 'No matching items'
             : viewMode === ViewMode.Physical
               ? 'No racks registered'
-              : clusterInitialized
-                ? 'No stores yet'
-                : (
-                  <div className="tw-space-y-3">
-                    <div>Cluster not initialized.</div>
-                    {!readonly && (
-                      <Button size="sm" onClick={onAdd} leftIcon={<Rocket className="tw-h-3.5 tw-w-3.5" />}>
-                        Initialize Cluster
-                      </Button>
-                    )}
-                  </div>
-                )}
+              : viewMode === ViewMode.Capacity
+                ? 'No racks registered'
+                : clusterInitialized
+                  ? 'No stores yet'
+                  : (
+                    <div className="tw-space-y-3">
+                      <div>Cluster not initialized.</div>
+                      {!readonly && (
+                        <Button size="sm" onClick={onAdd} leftIcon={<Rocket className="tw-h-3.5 tw-w-3.5" />}>
+                          Initialize Cluster
+                        </Button>
+                      )}
+                    </div>
+                  )}
         </div>
       )}
     </aside>

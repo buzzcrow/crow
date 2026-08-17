@@ -231,16 +231,16 @@ async fn ensure_server_running(
     if !server.auto_start {
         return Ok(());
     }
-    let mgmt_port = server
-        .mgmt_port
-        .ok_or_else(|| format!("server {} missing persisted mgmt_port", server.id))?;
-    let grpc_port = server
-        .grpc_port
-        .ok_or_else(|| format!("server {} missing persisted grpc_port", server.id))?;
+    let rest_port = server
+        .rest_port
+        .ok_or_else(|| format!("server {} missing persisted rest_port", server.id))?;
+    let rpc_port = server
+        .rpc_port
+        .ok_or_else(|| format!("server {} missing persisted rpc_port", server.id))?;
     let req = DeployRequest {
         server_id: server.id.clone(),
-        mgmt_port,
-        grpc_port,
+        rest_port,
+        rpc_port,
         election_profile: server.election_profile.clone(),
         binary: server.binary.clone().map(std::path::PathBuf::from),
         ..Default::default()

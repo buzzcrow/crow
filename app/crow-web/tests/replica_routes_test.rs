@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use crow_console_shared::clients::http::ServerClient;
 use crow_console_shared::cluster::NodeHealth;
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{self, crow_kv_server_bin, DeployRequest};
 use crow_console_shared::monitor::{legacy_topology_to_node_stores, NodeRecord};
 use crow_console_shared::ConsoleConfig;
@@ -90,8 +90,8 @@ async fn spawn_upstream(node_id: u64, workspace: &std::path::Path) -> Option<Ups
     };
     let req = DeployRequest {
         server_id: node_id.to_string(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
+        rest_port: pick_free_port(),
+        rpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
@@ -135,12 +135,13 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
             url: u.mgmt_url.clone(),
             node_id: Some(u.node_id),
             grpc_url: Some(u.grpc_url.clone()),
-            mgmt_port: None,
-            grpc_port: None,
+            rest_port: None,
+            rpc_port: None,
             auto_start: true,
             binary: None,
             election_profile: None,
             pid: Some(u.pid),
+            service_type: ServiceType::Kv,
         })
         .unwrap();
     }

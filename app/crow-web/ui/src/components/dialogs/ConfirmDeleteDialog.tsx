@@ -17,6 +17,8 @@ export interface ConfirmDeleteDialogProps {
   onDelete: () => void | Promise<void>;
   /** Optional success message override. */
   successMessage?: string;
+  /** Optional cascade warning shown above the destructive alert. */
+  cascadeWarning?: string;
 }
 
 /**
@@ -29,6 +31,7 @@ export function ConfirmDeleteDialog({
   resourceId,
   onDelete,
   successMessage,
+  cascadeWarning,
 }: ConfirmDeleteDialogProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { success, error } = useToast();
@@ -58,6 +61,15 @@ export function ConfirmDeleteDialog({
       confirmLoading={isLoading}
       destructive
     >
+      {cascadeWarning && (
+        <div
+          className="tw-flex tw-items-start tw-gap-2 tw-p-3 tw-rounded-md tw-bg-amber-500/10 tw-border tw-border-amber-500/30 tw-text-amber-600 dark:tw-text-amber-400"
+          role="status"
+        >
+          <AlertTriangle className="tw-h-4 tw-w-4 tw-flex-shrink-0 tw-mt-0.5" aria-hidden="true" />
+          <div className="tw-text-xs">{cascadeWarning}</div>
+        </div>
+      )}
       <div
         className="tw-flex tw-items-start tw-gap-2 tw-p-3 tw-rounded-md tw-bg-failed/10 tw-border tw-border-failed/30 tw-text-failed"
         role="alert"

@@ -1,16 +1,18 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { useState } from 'react';
+import { useState, lazy, Suspense } from 'react';
 import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { cn } from '../utils/cn';
-import { ViewMode, Node, StoreView, CrowKVServerView, ElectionState, ReadState } from '../types';
+import { ViewMode, Node, EnrichedStoreView, CrowKVServerView, ElectionState, ReadState, ReplicaRole } from '../types';
 import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
 import { useMetricsPoll, buildMetricsFetcher } from '../utils/useMetricsPoll';
 import { MetricsRegion, ElectionStateRegion, ReadStateRegion } from '../components/MetricsRegion';
+
+const KvPanel = lazy(() => import('../panels/KvPanel').then((m) => ({ default: m.KvPanel })));
 
 type TabId = 'details' | 'activity';
 
@@ -38,7 +40,7 @@ interface InspectorProps {
   modules?: Record<string, boolean>;
   nodes?: Node[];
   servers?: CrowKVServerView[];
-  stores?: StoreView[];
+  stores?: EnrichedStoreView[];
   width?: number;
 }
 
@@ -46,7 +48,7 @@ interface InspectorProps {
  * Right-side inspector. Reacts to SelectionContext: Details + Activity for any
  * selection.
  */
-export function Inspector({ readonly: _readonly, modules: _modules, nodes = [], servers = [], stores = [], width = 320 }: InspectorProps) {
+export function Inspector({ readonly, modules: _modules, nodes = [], servers = [], stores = [], width = 320 }: InspectorProps) {
   const { selectedEntity, clearSelection, selectEntity } = useSelection();
   const { setViewMode } = useViewMode();
   const [activeTab, setActiveTab] = useState<TabId>('details');
@@ -81,7 +83,7 @@ export function Inspector({ readonly: _readonly, modules: _modules, nodes = [], 
 
       <div className="tw-flex-1 tw-overflow-y-auto">
         {activeTab === 'details' && (
-          <DetailsTab entity={selectedEntity} nodes={nodes} servers={servers} stores={stores} selectEntity={selectEntity} setViewMode={setViewMode} />
+          <DetailsTab entity={selectedEntity} nodes={nodes} servers={servers} stores={stores} selectEntity={selectEntity} setViewMode={setViewMode} readonly={readonly} />
         )}
         {activeTab === 'activity' && <ActivityLog />}
       </div>
@@ -123,12 +125,13 @@ interface DetailsTabProps {
   entity: SelectedEntity;
   nodes: Node[];
   servers: CrowKVServerView[];
-  stores: StoreView[];
+  stores: EnrichedStoreView[];
   selectEntity: (e: SelectedEntity | null) => void;
   setViewMode: (m: ViewMode) => void;
+  readonly?: boolean;
 }
 
-function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode }: DetailsTabProps) {
+function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode, readonly }: DetailsTabProps) {
   const displayType = entity.type === 'Server' ? 'Crow Storage' : entity.type;
   const displayId = displayEntityId(entity);
   const serverNodeId = entity.type === 'Node' ? entity.id : entity.parentIds?.node_id;
@@ -138,35 +141,33 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
       : entity.type === 'Node'
         ? servers.find((item) => item.node_id === Number(entity.id))
         : undefined;
-  const mgmtPort = server?.mgmt_port ?? null;
-  const grpcPort = server?.grpc_port ?? null;
+  const restPort = server?.rest_port ?? null;
+  const rpcPort = server?.rpc_port ?? null;
 
   // Logical Replica: dig the full ReplicaView (role/state/engine_healthy/
-  // crowtree_stats) out of `stores`, whose `groups[].replicas` carry it
-  // even though StoreView's declared type is summary-only (the runtime
-  // object is enriched -- same `as any` pattern used by buildFlow.ts/
-  // Sidebar.tsx for the same reason).
+  // crowtree_stats) out of `stores`. `stores` is `EnrichedStoreView[]`,
+  // so `groups[].replicas` is typed `ReplicaView[]` — no cast needed.
   const replica =
     entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
-      ? (stores as any[])
+      ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
-          ?.groups?.find((g: any) => String(g.group_id) === entity.parentIds?.group_id)
-          ?.replicas?.find((r: any) => String(r.replica_id) === entity.id)
+          ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
+          ?.replicas.find((r) => String(r.replica_id) === entity.id)
       : undefined;
 
   // Logical Group: dig the full GroupView (read_state) out of `stores`.
   const groupView =
     entity.type === 'Group' && entity.viewMode === ViewMode.Logical
-      ? (stores as any[])
+      ? stores
           .find((s) => String(s.store_id) === entity.parentIds?.store_id)
-          ?.groups?.find((g: any) => String(g.group_id) === entity.id)
+          ?.groups.find((g) => String(g.group_id) === entity.id)
       : entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
-        ? (stores as any[])
+        ? stores
             .find((s) => String(s.store_id) === entity.parentIds?.store_id)
-            ?.groups?.find((g: any) => String(g.group_id) === entity.parentIds?.group_id)
+            ?.groups.find((g) => String(g.group_id) === entity.parentIds?.group_id)
         : undefined;
 
-  const electionState: ElectionState | undefined = replica?.election ?? groupView?.replicas?.find((r: any) => r.role === 'leader')?.election;
+  const electionState: ElectionState | undefined = replica?.election ?? groupView?.replicas.find((r) => r.role === ReplicaRole.Leader)?.election;
   const readState: ReadState | undefined = groupView?.read_state;
 
   // Metrics poll: build a fetcher for the current entity type.
@@ -187,8 +188,8 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
     { label: 'Type', value: displayType },
     { label: 'ID', value: displayId },
     ...(entity.name && entity.type !== 'Server' ? [{ label: 'Name', value: entity.name }] : []),
-    ...(mgmtPort ? [{ label: 'Management Port', value: String(mgmtPort) }] : []),
-    ...(grpcPort ? [{ label: 'gRPC Port', value: String(grpcPort) }] : []),
+    ...(restPort ? [{ label: 'REST Port', value: String(restPort) }] : []),
+    ...(rpcPort ? [{ label: 'RPC Port', value: String(rpcPort) }] : []),
     ...Object.entries(entity.parentIds || {})
       .filter(([, v]) => v)
       .map(([k, v]) => ({ label: `Parent: ${k}`, value: String(v) })),
@@ -243,6 +244,15 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
       {electionState && <ElectionStateRegion state={electionState} />}
       {readState && <ReadStateRegion state={readState} />}
       <MetricsRegion data={metricsData} />
+
+      {entity.type === 'Group' && parentStoreId && (
+        <div className="tw-space-y-1">
+          <div className="tw-text-[10px] tw-uppercase tw-tracking-wider tw-text-muted">KV</div>
+          <Suspense fallback={null}>
+            <KvPanel storeId={parentStoreId} groupId={entity.id} readonly={readonly} />
+          </Suspense>
+        </div>
+      )}
     </div>
   );
 }
@@ -258,7 +268,7 @@ function bufferPoolHitRate(hits: number, misses: number): string {
 function buildCrossJump(
   entity: SelectedEntity,
   nodes: Node[],
-  stores: StoreView[],
+  stores: EnrichedStoreView[],
   selectEntity: (e: SelectedEntity | null) => void,
   setViewMode: (m: ViewMode) => void,
 ): { label: string; go: () => void } | null {

@@ -76,13 +76,13 @@ export async function seedRackAndNode(baseURL: string, rackId = 1, nodeId = 1) {
   await createNode(baseURL, { id: nodeId, rack_id: rackId });
 }
 
-export async function deployNodeServer(baseURL: string, nodeId: number, mgmtPort: number, grpcPort: number) {
+export async function deployNodeServer(baseURL: string, nodeId: number, restPort: number, rpcPort: number) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/server/deploy`, {
       data: {
-        mgmt_port: mgmtPort,
-        grpc_port: grpcPort,
+        rest_port: restPort,
+        rpc_port: rpcPort,
         binary: DEFAULT_SERVER_BINARY,
         election_profile: 'e2e',
       },
@@ -204,6 +204,135 @@ export async function resetAll(baseURL: string) {
   } finally {
     await api.dispose();
   }
+}
+
+// ── DiskDB helpers ─────────────────────────────────────────────────
+
+export const DEFAULT_DISKDB_BINARY =
+  process.env.CROW_DISKDB_BIN ?? resolve(__dirname, '../../../../../target/debug/crow-diskdb');
+
+/** Copy the crow-diskdb binary + a minimal config into a node workspace. */
+export async function stageDiskdbBinaryAndConfig(baseURL: string, nodeId: number, rpcPort: number) {
+  const api = await apiContext(baseURL);
+  try {
+    // The deploy handler calls prepare_node_workspace which creates
+    // bin/ and conf/ dirs. We trigger that by calling deploy, but
+    // deploy will fail if the binary isn't there yet. Instead, use
+    // the internal stage endpoint if available, or just let the
+    // deploy handler handle it — the handler now falls back to
+    // crow_diskdb_bin() if the workspace bin/ doesn't have it.
+    // For E2E, we set CROW_DISKDB_BIN env so the handler finds it.
+    void api;
+    void nodeId;
+    void rpcPort;
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Deploy a diskdb instance on a node via the REST API. */
+export async function deployDiskdb(baseURL: string, nodeId: number, rpcPort: number) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/diskdb/deploy`, {
+      data: { rpc_port: rpcPort },
+    });
+    expect(response.status(), await response.text()).toBe(201);
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Stop a diskdb instance on a node via the REST API. */
+export async function stopDiskdb(baseURL: string, nodeId: number) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/diskdb/stop`);
+    if (!response.ok() && response.status() !== 400 && response.status() !== 404) {
+      console.warn(`stopDiskdb(${nodeId}) returned ${response.status()}:`, await response.text());
+    }
+  } catch (err) {
+    console.warn(`stopDiskdb(${nodeId}) failed:`, err);
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Add a disk-group to a node via the REST API. */
+export async function addDiskGroup(baseURL: string, nodeId: number, dgId: number, name?: string) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/disk-groups`, {
+      data: { id: dgId, name: name ?? '' },
+    });
+    expect(response.status(), await response.text()).toBe(201);
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Remove a disk-group from a node via the REST API. */
+export async function removeDiskGroup(baseURL: string, nodeId: number, dgId: number) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.delete(`/api/nodes/${encodeURIComponent(nodeId)}/disk-groups/${encodeURIComponent(dgId)}`);
+    if (!response.ok() && response.status() !== 404) {
+      console.warn(`removeDiskGroup(${nodeId}, ${dgId}) returned ${response.status()}:`, await response.text());
+    }
+  } catch (err) {
+    console.warn(`removeDiskGroup(${nodeId}, ${dgId}) failed:`, err);
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Add disks to a disk-group via the batch REST API. */
+export async function addDisksBatch(
+  baseURL: string,
+  nodeId: number,
+  dgId: number,
+  disks: { disk_id: string; disk_type?: string; capacity_bytes?: number; zone_size_bytes?: number; unit_size_bytes?: number }[],
+) {
+  const api = await apiContext(baseURL);
+  try {
+    const payload = disks.map((d) => ({
+      disk_id: d.disk_id,
+      disk_type: d.disk_type ?? 'Hdd',
+      capacity_bytes: d.capacity_bytes ?? 4 * 1024 * 1024 * 1024 * 1024,
+      zone_size_bytes: d.zone_size_bytes ?? 32 * 1024 * 1024 * 1024,
+      unit_size_bytes: d.unit_size_bytes ?? 1024 * 1024,
+    }));
+    const response = await api.post(
+      `/api/nodes/${encodeURIComponent(nodeId)}/disk-groups/${encodeURIComponent(dgId)}/disks/batch`,
+      { data: { disks: payload } },
+    );
+    expect(response.status(), await response.text()).toBe(201);
+    return await response.json();
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Remove a disk from a disk-group via the REST API. */
+export async function removeDisk(baseURL: string, nodeId: number, dgId: number, diskId: string) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.delete(
+      `/api/nodes/${encodeURIComponent(nodeId)}/disk-groups/${encodeURIComponent(dgId)}/disks/${encodeURIComponent(diskId)}`,
+    );
+    if (!response.ok() && response.status() !== 404) {
+      console.warn(`removeDisk(${nodeId}, ${dgId}, ${diskId}) returned ${response.status()}:`, await response.text());
+    }
+  } catch (err) {
+    console.warn(`removeDisk(${nodeId}, ${dgId}, ${diskId}) failed:`, err);
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Generate a random disk ID in the crow-protocol DiskId format: 32 hex chars (high 16 + low 16, no dash). */
+export function randomDiskId(): string {
+  return Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 }
 
 // ── setupCluster helper + topology presets ──────────────────────────

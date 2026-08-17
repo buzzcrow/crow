@@ -42,6 +42,8 @@ References (other projects, not ports):
 - [14. Configuration](#14-configuration)
 - [15. Implementation Scope](#15-implementation-scope)
 - [16. References](#16-references)
+- [17. DiskdbClient Scanner / Rebuild Wrappers](#17-diskdbclient-scanner--rebuild-wrappers)
+- [18. Group-0 Status Write-Back: Init → Offline](#18-group-0-status-write-back-init--offline)
 
 ## 1. Overview
 
@@ -846,3 +848,72 @@ the diskdb component area.
 - CROW console design: `doc/design/console/design-crow-console.md`
 - Reference (another project): `/cjdata/cpp/aioss/server/diskdb/doc/design.md`
 - Zone allocator reference: `/cpp/buzz-cpp/src/app/buzz-disk-db`
+
+---
+
+## 17. DiskdbClient Scanner / Rebuild Wrappers
+
+`DiskdbClient` wraps allocate/free/query/recalc/compact and also the
+scanner RPCs (`TriggerScan`, `GetScanStatus`) and
+`RebuildZoneBitmap`. The proto + server handlers exist; the client
+wrappers make them reachable from the REST proxy and CLI.
+
+```rust
+use crow_protocol::diskdb::rpc::{
+    TriggerScanRequest, TriggerScanResponse,
+    GetScanStatusRequest, GetScanStatusResponse,
+    RebuildZoneBitmapRequest, RebuildZoneBitmapResponse,
+};
+
+impl DiskdbClient {
+    /// Trigger a scan on all owned groups (or one group if `dg_id`
+    /// is set). Returns the last `ScanSummary` + `scan_in_progress`.
+    pub async fn trigger_scan(&self, dg_id: Option<DiskGroupId>)
+        -> Result<TriggerScanResponse>
+
+    /// Get the last scan summary + `has_run` flag.
+    pub async fn get_scan_status(&self, dg_id: Option<DiskGroupId>)
+        -> Result<GetScanStatusResponse>
+
+    /// Rebuild one zone's bitmap on a disk. Routes via `dg_for_disk`.
+    pub async fn rebuild_zone_bitmap(
+        &self, disk_id: DiskId, zone_index: u32,
+    ) -> Result<RebuildZoneBitmapResponse>
+}
+```
+
+- `trigger_scan` / `get_scan_status` route to `first_cached_dg()`
+  when `dg_id` is `None` (mirrors `recalc_disk_usage`); otherwise
+  route to the specified dg. Both go through `with_retry`.
+- `rebuild_zone_bitmap` routes via `dg_for_disk(disk_id)` (mirrors
+  `compact_zone`), then `with_retry`.
+- All three are admin/debug calls; transient `Unavailable` is retried
+  per `RetryConfig`; `NotFound` (unknown disk/zone) is returned
+  immediately.
+
+Edge cases:
+- `trigger_scan` while a scan is running → server returns
+  `scan_in_progress: true`; client returns the response as-is (no
+  error, no stacking).
+- `rebuild_zone_bitmap` on unknown disk → `dg_for_disk` returns
+  `Unreachable`; surfaced to the caller.
+- Empty endpoint cache → `first_cached_dg()` returns `Unreachable`;
+  caller sees "no cached endpoints; call refresh_endpoints".
+
+## 18. Group-0 Status Write-Back: Init → Offline
+
+`background_zone_load` transitions `Init → Offline` when zone loading
+fails for all strategies (`all_ok = false`) without writing back to
+group 0. The function is a `tokio::spawn`'d background task that does
+not receive `HardwareClient`. Consequence: group 0 still says `Up`,
+the next sync tick reads `Up` → `recover_disk_to_up` → the disk
+becomes `Up` with broken zones.
+
+The fix:
+- `HardwareClient` is `Clone` (it wraps `Arc<CrowkvClient>`).
+- `hw` is passed into `background_zone_load`; on `all_ok = false`,
+  `write_back_disk_status(rack_id, node_id, dg_id, &disk_id, Offline)`
+  is called before the `Init → Offline` transition.
+- A disk whose zone load fails ends up `Offline` in both group 0 and
+  the runtime state machine, and stays `Offline` across sync ticks
+  (no flip-flop to `Up`).

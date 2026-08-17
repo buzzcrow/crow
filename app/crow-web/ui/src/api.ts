@@ -13,6 +13,14 @@ import type {
   GroupView,
   ReplicaView,
   MetricsResponse,
+  DiskdbInstanceInfo,
+  CapacityUsageResponse,
+  ScanStatusResponse,
+  RecalcResultResponse,
+  CompactResultResponse,
+  RebuildResultResponse,
+  DiskdbDeployResult,
+  StopResult,
 } from './types';
 
 /**
@@ -361,7 +369,7 @@ export async function pingNode(nodeId: number, options?: RequestOptions): Promis
  */
 export async function deployServer(
   nodeId: number,
-  req: { mgmt_port: number; grpc_port: number; binary?: string },
+  req: { rest_port: number; rpc_port: number; binary?: string },
   options?: RequestOptions
 ): Promise<ServerProcess> {
   const body = JSON.stringify(req);
@@ -859,4 +867,299 @@ export async function getStoreMetrics(
 ): Promise<MetricsResponse> {
   const url = `/api/stores/${encodeURIComponent(storeId)}/metrics${qs({ prefix })}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+// ── Disk / DiskDB API (R77) ───────────────────────────────────────
+
+export interface AddDiskRequest {
+  disk_id: string;
+  disk_type: string;
+  capacity_bytes: number;
+  zone_size_bytes: number;
+  unit_size_bytes: number;
+}
+
+export interface AddDisksBatchRequest {
+  disks: AddDiskRequest[];
+}
+
+export interface AddDisksBatchResult {
+  added: any[];
+  sysdata_errors: string[];
+}
+
+export interface DeployDiskdbRequest {
+  rpc_port: number;
+}
+
+/** `GET /api/diskdb/instances` — list all diskdb instances. */
+export async function listDiskdbInstances(options?: RequestOptions): Promise<DiskdbInstanceInfo[]> {
+  return jsonOrThrow(await fetchWithOptions('/api/diskdb/instances', { ...options, method: 'GET' }));
+}
+
+/** `GET /api/diskdb/usage` — capacity usage drill-down. */
+export async function getDiskdbUsage(
+  dg?: number,
+  disk?: string,
+  zone?: number,
+  options?: RequestOptions,
+): Promise<CapacityUsageResponse> {
+  const params: Record<string, string> = {};
+  if (dg !== undefined) params.dg = String(dg);
+  if (disk !== undefined) params.disk = disk;
+  if (zone !== undefined) params.zone = String(zone);
+  const url = `/api/diskdb/usage${qs(params)}`;
+  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+/** `GET /api/diskdb/scan-status` — get scan status. */
+export async function getDiskdbScanStatus(dg?: number, options?: RequestOptions): Promise<ScanStatusResponse> {
+  const url = `/api/diskdb/scan-status${qs({ dg })}`;
+  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+/** `POST /api/diskdb/scan` — trigger a scan. */
+export async function triggerDiskdbScan(dg?: number, options?: RequestOptions): Promise<ScanStatusResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/scan', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dg: dg ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/diskdb/recalc` — recalculate disk usage. */
+export async function recalcDiskdbUsage(dg?: number, options?: RequestOptions): Promise<RecalcResultResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/recalc', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dg: dg ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/diskdb/compact` — compact zones on a disk. */
+export async function compactDiskdbZones(
+  diskId: string,
+  zoneIndices?: number[],
+  options?: RequestOptions,
+): Promise<CompactResultResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/compact', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disk_id: diskId, zone_indices: zoneIndices ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/diskdb/rebuild` — rebuild zone bitmap(s) on a disk. */
+export async function rebuildDiskdbZoneBitmap(
+  diskId: string,
+  zoneIndices?: number[] | null,
+  options?: RequestOptions,
+): Promise<RebuildResultResponse> {
+  return jsonOrThrow(
+    await fetchWithOptions('/api/diskdb/rebuild', {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disk_id: diskId, zone_indices: zoneIndices ?? null }),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `PUT /api/disks/:disk_id/status` — set a disk's hardware status. */
+export async function setDiskStatus(diskId: string, status: string, options?: RequestOptions): Promise<void> {
+  const resp = await fetchWithOptions(`/api/disks/${encodeURIComponent(diskId)}/status`, {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`PUT /api/disks/${diskId}/status: HTTP ${resp.status}: ${body}`);
+  }
+}
+
+/** `PUT /api/disk-groups/:rack_id/:node_id/:dg_id/status` — set a disk-group's hardware status. */
+export async function setDiskGroupStatus(
+  rackId: number,
+  nodeId: number,
+  dgId: number,
+  status: string,
+  options?: RequestOptions,
+): Promise<void> {
+  const resp = await fetchWithOptions(`/api/disk-groups/${rackId}/${nodeId}/${dgId}/status`, {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`PUT /api/disk-groups/${rackId}/${nodeId}/${dgId}/status: HTTP ${resp.status}: ${body}`);
+  }
+}
+
+/** `POST /api/nodes/:id/diskdb/deploy` — deploy diskdb on a node. */
+export async function deployDiskdb(nodeId: number, req: DeployDiskdbRequest, options?: RequestOptions): Promise<DiskdbDeployResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb/deploy`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/nodes/:id/diskdb/restart` — restart diskdb on a node. */
+export async function restartDiskdb(nodeId: number, options?: RequestOptions): Promise<DiskdbDeployResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb/restart`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/nodes/:id/diskdb/stop` — stop diskdb on a node. */
+export async function stopDiskdb(nodeId: number, options?: RequestOptions): Promise<StopResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb/stop`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `DELETE /api/nodes/:id/diskdb` — stop and remove diskdb deployment record. */
+export async function removeDiskdb(nodeId: number, options?: RequestOptions): Promise<void> {
+  await jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/diskdb`, {
+      ...options,
+      method: 'DELETE',
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `POST /api/nodes/:id/disk-groups/:dg_id/disks/batch` — batch add disks. */
+export async function addDisksBatch(
+  nodeId: number,
+  dgId: number,
+  req: AddDisksBatchRequest,
+  options?: RequestOptions,
+): Promise<AddDisksBatchResult> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${nodeId}/disk-groups/${dgId}/disks/batch`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `GET /api/nodes/:id/disk-groups` — list disk-groups on a node. */
+export async function listNodeDiskGroups(nodeId: number, options?: RequestOptions): Promise<import('./types').DiskGroupEntry[]> {
+  return jsonOrThrow(await fetchWithOptions(`/api/nodes/${encodeURIComponent(nodeId)}/disk-groups`, { ...options, method: 'GET' }));
+}
+
+/** `GET /api/nodes/:id/disk-groups/:dg_id/disks` — list disks in a disk-group. */
+export async function listDisksInGroup(nodeId: number, dgId: number, options?: RequestOptions): Promise<import('./types').DiskEntry[]> {
+  return jsonOrThrow(await fetchWithOptions(`/api/nodes/${encodeURIComponent(nodeId)}/disk-groups/${encodeURIComponent(dgId)}/disks`, { ...options, method: 'GET' }));
+}
+
+/** `POST /api/nodes/:id/disk-groups` — add a disk-group to a node. */
+export async function addDiskGroup(nodeId: number, body: { id: number; name?: string }, options?: RequestOptions): Promise<import('./types').DiskGroupEntry> {
+  return jsonOrThrow(
+    await fetchWithOptions(`/api/nodes/${encodeURIComponent(nodeId)}/disk-groups`, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      skipDeduplication: true,
+    }),
+  );
+}
+
+/** `DELETE /api/nodes/:id/disk-groups/:dg_id` — remove a disk-group. */
+export async function removeDiskGroup(nodeId: number, dgId: number, options?: RequestOptions): Promise<void> {
+  const resp = await fetchWithOptions(`/api/nodes/${encodeURIComponent(nodeId)}/disk-groups/${encodeURIComponent(dgId)}`, {
+    ...options,
+    method: 'DELETE',
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`DELETE disk-group: HTTP ${resp.status}: ${body}`);
+  }
+}
+
+/** `DELETE /api/nodes/:id/disk-groups/:dg_id/disks/:disk_id` — remove a disk. */
+export async function removeDisk(nodeId: number, dgId: number, diskId: string, options?: RequestOptions): Promise<void> {
+  const resp = await fetchWithOptions(`/api/nodes/${encodeURIComponent(nodeId)}/disk-groups/${encodeURIComponent(dgId)}/disks/${encodeURIComponent(diskId)}`, {
+    ...options,
+    method: 'DELETE',
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`DELETE disk: HTTP ${resp.status}: ${body}`);
+  }
+}
+
+/** `POST /api/disks/:disk_id/move` — move a disk to a new disk-group. */
+export async function moveDisk(
+  diskId: string,
+  body: { new_rack_id: number; new_node_id: number; new_disk_group_id: number },
+  options?: RequestOptions,
+): Promise<void> {
+  const resp = await fetchWithOptions(`/api/disks/${encodeURIComponent(diskId)}/move`, {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`POST move disk: HTTP ${resp.status}: ${text}`);
+  }
+}
+
+/** `GET /api/servers` — list all deployed server entries. */
+export interface ServerSummary {
+  node_id?: number;
+  mgmt_url: string;
+  grpc_url?: string;
+  pid?: number;
+  health: string;
+  service_type: string;
+}
+
+export async function listServers(options?: RequestOptions): Promise<ServerSummary[]> {
+  return jsonOrThrow(await fetchWithOptions('/api/servers', { ...options, method: 'GET' }));
 }

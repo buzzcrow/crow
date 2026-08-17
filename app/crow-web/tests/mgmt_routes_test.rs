@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{self, crow_kv_server_bin, stop_pid_with_timeout, DeployRequest};
 use crow_console_shared::ConsoleConfig;
 use crow_web::{router, AppState};
@@ -62,8 +62,8 @@ async fn spawn_upstream() -> Option<Upstream> {
     };
     let req = DeployRequest {
         server_id: "n1".to_string(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
+        rest_port: pick_free_port(),
+        rpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
@@ -103,12 +103,13 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
-        mgmt_port: None,
-        grpc_port: None,
+        rest_port: None,
+        rpc_port: None,
         auto_start: true,
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

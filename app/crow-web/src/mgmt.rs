@@ -192,6 +192,19 @@ fn strip_scheme(s: String) -> String {
     }
 }
 
+/// Parse `port` out of a URL like `http://host:9910` or `host:9910`.
+/// Returns `None` on any shape we don't recognise.
+#[must_use]
+pub(crate) fn port_of(url: &str) -> Option<u16> {
+    let stripped = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let host_port = stripped.split('/').next().unwrap_or(stripped);
+    let port_str = host_port.rsplit(':').next()?;
+    port_str.parse::<u16>().ok()
+}
+
 fn remap_zero_host(addr: &str) -> String {
     addr.strip_prefix("0.0.0.0:")
         .map_or_else(|| addr.to_string(), |port| format!("127.0.0.1:{port}"))

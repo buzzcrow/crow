@@ -19,6 +19,9 @@ use crow_console_shared::{
 /// to `config_path` when present.
 ///
 /// `openapi_cache` is a per-node TTL cache for the `OpenAPI` JSON proxy.
+///
+/// `diskdb_client` is lazily initialized on the first `/api/diskdb/*`
+/// request (the service registry may not be ready at console startup).
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<ConsoleConfig>>,
@@ -27,6 +30,7 @@ pub struct AppState {
     pub openapi_cache: Arc<std::sync::Mutex<HashMap<u64, (serde_json::Value, std::time::Instant)>>>,
     pub monitor_cache: Arc<MonitorCache>,
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    pub diskdb_client: Arc<tokio::sync::RwLock<Option<crow_diskdb_client::DiskdbClient>>>,
 }
 
 impl Default for AppState {
@@ -74,6 +78,7 @@ impl AppState {
             openapi_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             monitor_cache: Arc::new(MonitorCache::new()),
             runtime_pids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            diskdb_client: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -120,6 +125,42 @@ impl AppState {
     /// Panics if the `Mutex` is poisoned.
     pub fn clear_runtime_pid(&self, node_id: impl std::fmt::Display) {
         self.runtime_pids.lock().unwrap().remove(&node_id.to_string());
+    }
+
+    /// Get the runtime PID for a diskdb instance on a node (R77).
+    /// Keyed separately from kv-server PIDs.
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    #[must_use]
+    pub fn diskdb_runtime_pid(&self, node_id: impl std::fmt::Display) -> Option<u32> {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .get(&format!("diskdb-{node_id}"))
+            .copied()
+    }
+
+    /// Set the runtime PID for a diskdb instance on a node (R77).
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    pub fn set_diskdb_runtime_pid(&self, node_id: impl std::fmt::Display, pid: u32) {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .insert(format!("diskdb-{node_id}"), pid);
+    }
+
+    /// Clear the runtime PID for a diskdb instance on a node (R77).
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    pub fn clear_diskdb_runtime_pid(&self, node_id: impl std::fmt::Display) {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .remove(&format!("diskdb-{node_id}"));
     }
 
     #[must_use]

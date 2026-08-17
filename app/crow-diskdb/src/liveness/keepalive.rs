@@ -911,6 +911,7 @@ impl KeepAlive {
             let kv = Arc::new(kv.clone());
             let cas_retry_metric = self.cas_retry_metric.clone();
             let disk_value_owned = *disk_value;
+            let hw = self.hw.clone();
             tokio::spawn(async move {
                 Self::background_zone_load(
                     bind,
@@ -922,6 +923,7 @@ impl KeepAlive {
                     status_machine,
                     dg,
                     disk,
+                    hw,
                 )
                 .await;
             });
@@ -963,6 +965,7 @@ impl KeepAlive {
         status_machine: HwStateMachine,
         dg: Arc<DdbDiskGroup>,
         disk: Arc<DdbDisk>,
+        hw: HardwareClient,
     ) {
         let zone_count = disk_value.zone_count;
         let zone_size_units = disk_value.zone_size_units;
@@ -1091,6 +1094,22 @@ impl KeepAlive {
             );
             HwStatus::Offline
         };
+        // R77: write back Offline to group 0 before the local
+        // transition so the next sync tick sees Offline (not Up) —
+        // prevents the recover_disk_to_up loop on zone-load failure.
+        if final_status == HwStatus::Offline {
+            if let Err(e) = hw
+                .set_disk_status(dg.rack_id, dg.node_id, dg.disk_group_id, &disk_id, final_status)
+                .await
+            {
+                warn!(
+                    disk = ?disk_id,
+                    status = ?final_status,
+                    error = %e,
+                    "init-state load: write-back Offline failed (best-effort; local transition proceeds)"
+                );
+            }
+        }
         if let Err(e) = status_machine.transition_disk(&disk, final_status) {
             warn!(disk = ?disk_id, error = %e, "init-state load: Init → final_status failed");
         }

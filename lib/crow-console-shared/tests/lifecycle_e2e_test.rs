@@ -61,12 +61,12 @@ async fn deploy_local_and_observe_topology() {
     .unwrap();
 
     let node = cfg.node(1).unwrap().clone();
-    let (mgmt_port, grpc_port) = pick_two_free_ports();
+    let (rest_port, rpc_port) = pick_two_free_ports();
 
     let req = DeployRequest {
         server_id: "s1".into(),
-        mgmt_port,
-        grpc_port,
+        rest_port,
+        rpc_port,
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
@@ -85,12 +85,13 @@ async fn deploy_local_and_observe_topology() {
         url: deployed.mgmt_url.clone(),
         node_id: Some(1),
         grpc_url: Some(deployed.grpc_url.clone()),
-        mgmt_port: Some(mgmt_port),
-        grpc_port: Some(grpc_port),
+        rest_port: Some(rest_port),
+        rpc_port: Some(rpc_port),
         auto_start: true,
         binary: None,
         election_profile: Some("e2e".into()),
         pid: None,
+        service_type: crow_console_shared::config::ServiceType::Kv,
     })
     .unwrap();
 

@@ -233,8 +233,8 @@ impl BenchFixture {
                 .map_err(|e| upstream_err(&node_id.to_string(), "add_node", &e))?;
 
             let mut body = DeployNodeServerBody {
-                mgmt_port: unique_test_port(),
-                grpc_port: unique_test_port(),
+                rest_port: unique_test_port(),
+                rpc_port: unique_test_port(),
                 election_profile: Some("e2e".into()),
                 metrics_interval: Some(metrics_interval),
                 max_inflight: Some(max_inflight),

@@ -290,8 +290,8 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
         &client,
         &format!("{base}/api/nodes/1/server/deploy"),
         json!({
-            "mgmt_port": pick_free_port(),
-            "grpc_port": pick_free_port(),
+            "rest_port": pick_free_port(),
+            "rpc_port": pick_free_port(),
             "binary": bin.to_string_lossy().to_string(),
             "election_profile": "test",
         }),
@@ -304,8 +304,8 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
         &client,
         &format!("{base}/api/nodes/10/server/deploy"),
         json!({
-            "mgmt_port": pick_free_port(),
-            "grpc_port": pick_free_port(),
+            "rest_port": pick_free_port(),
+            "rpc_port": pick_free_port(),
             "binary": bin.to_string_lossy().to_string(),
             "election_profile": "test",
         }),
@@ -359,14 +359,14 @@ async fn deploy_then_stop_local_server() {
     assert_eq!(s.as_u16(), 201);
 
     // Deploy a server via node-addressed route.
-    let mgmt_port = pick_free_port();
-    let grpc_port = pick_free_port();
+    let rest_port = pick_free_port();
+    let rpc_port = pick_free_port();
     let (s, v) = json_post(
         &client,
         &format!("{base}/api/nodes/1/server/deploy"),
         json!({
-            "mgmt_port": mgmt_port,
-            "grpc_port": grpc_port,
+            "rest_port": rest_port,
+            "rpc_port": rpc_port,
             "binary": bin.to_string_lossy().to_string(),
             "election_profile": "test",
         }),
@@ -385,7 +385,7 @@ async fn deploy_then_stop_local_server() {
     // GET /api/nodes/:id/server confirms deployment.
     let (s, v) = json_get(&client, &format!("{base}/api/nodes/1/server")).await;
     assert!(s.is_success(), "get server: {s} {v}");
-    assert_eq!(v["url"], format!("http://127.0.0.1:{mgmt_port}"));
+    assert_eq!(v["url"], format!("http://127.0.0.1:{rest_port}"));
 
     // GET /api/nodes/:id — node detail shows has_server=true.
     let (_, v) = json_get(&client, &format!("{base}/api/nodes/1")).await;
@@ -396,8 +396,8 @@ async fn deploy_then_stop_local_server() {
         &client,
         &format!("{base}/api/nodes/1/server/deploy"),
         json!({
-            "mgmt_port": pick_free_port(),
-            "grpc_port": pick_free_port(),
+            "rest_port": pick_free_port(),
+            "rpc_port": pick_free_port(),
             "binary": bin.to_string_lossy().to_string(),
             "election_profile": "test",
         }),
@@ -447,14 +447,14 @@ async fn deploy_then_restart_local_server() {
     .await;
     assert_eq!(s.as_u16(), 201);
 
-    let mgmt_port = pick_free_port();
-    let grpc_port = pick_free_port();
+    let rest_port = pick_free_port();
+    let rpc_port = pick_free_port();
     let (s, v) = json_post(
         &client,
         &format!("{base}/api/nodes/1/server/deploy"),
         json!({
-            "mgmt_port": mgmt_port,
-            "grpc_port": grpc_port,
+            "rest_port": rest_port,
+            "rpc_port": rpc_port,
             "binary": bin.to_string_lossy().to_string(),
             "election_profile": "test",
         }),
@@ -474,7 +474,7 @@ async fn deploy_then_restart_local_server() {
     assert_ne!(new_pid, old_pid, "restart should replace the process");
     assert_eq!(
         v["mgmt_url"],
-        format!("http://127.0.0.1:{mgmt_port}"),
+        format!("http://127.0.0.1:{rest_port}"),
         "restart reuses recorded ports"
     );
 

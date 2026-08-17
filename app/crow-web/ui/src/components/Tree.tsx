@@ -14,7 +14,7 @@ export interface TreeNode {
   /** Unprefixed backend id (e.g. `r1`, `7`). API calls must use this. */
   rawId?: string | number;
   label: string;
-  type: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica';
+  type: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'DiskGroup' | 'Disk';
   icon?: React.ReactNode;
   children?: TreeNode[];
   health?: 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';

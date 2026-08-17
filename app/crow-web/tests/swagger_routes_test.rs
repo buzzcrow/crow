@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::routing::get;
-use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{self, crow_kv_server_bin, DeployRequest};
 use crow_console_shared::ConsoleConfig;
 use crow_web::{router, AppState};
@@ -40,8 +40,8 @@ async fn spawn_upstream() -> Option<Upstream> {
     };
     let req = DeployRequest {
         server_id: "n1".to_string(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
+        rest_port: pick_free_port(),
+        rpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
@@ -78,12 +78,13 @@ async fn spawn_web_with_node(upstream: &Upstream) -> SocketAddr {
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
-        mgmt_port: None,
-        grpc_port: None,
+        rest_port: None,
+        rpc_port: None,
         auto_start: true,
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -265,12 +266,13 @@ async fn openapi_proxy_cache_is_per_node() {
         url: format!("http://{n1}"),
         node_id: Some(1),
         grpc_url: None,
-        mgmt_port: None,
-        grpc_port: None,
+        rest_port: None,
+        rpc_port: None,
         auto_start: false,
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     cfg.add_server(ServerEntry {
@@ -278,12 +280,13 @@ async fn openapi_proxy_cache_is_per_node() {
         url: format!("http://{n2}"),
         node_id: Some(2),
         grpc_url: None,
-        mgmt_port: None,
-        grpc_port: None,
+        rest_port: None,
+        rpc_port: None,
         auto_start: false,
         binary: None,
         election_profile: None,
         pid: None,
+        service_type: ServiceType::Kv,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

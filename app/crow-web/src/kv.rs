@@ -229,7 +229,7 @@ async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
 }
 
 /// `crow-kv-server` management-API base URLs (`ServerEntry::url`, e.g.
-/// `http://host:mgmt_port`) for every node hosting a replica of `(sid,
+/// `http://host:rest_port`) for every node hosting a replica of `(sid,
 /// gid)`. This is [`CrowkvClient`]'s discovery input (`GET /topology` on
 /// each seed): any one reachable replica's own `/topology` response
 /// carries the real leader's endpoint via its `remotes` list, so seeding

@@ -97,8 +97,8 @@ export function usePhysicalTree({
       const serverNodeIds = new Set<number>();
       for (const n of nodeList) if (n.server) serverNodeIds.add(n.id);
       for (const rack of Array.isArray(racksData) ? racksData : []) {
-        for (const entry of ((rack as any).nodes as any[]) || []) {
-          if (typeof entry === 'object' && (entry.has_server || entry.server)) {
+        for (const entry of rack.nodes || []) {
+          if (entry.has_server || entry.server) {
             serverNodeIds.add(entry.id);
           }
         }

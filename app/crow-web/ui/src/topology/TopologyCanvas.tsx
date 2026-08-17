@@ -16,7 +16,7 @@ import { ScanSearch } from 'lucide-react';
 import 'reactflow/dist/style.css';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
-import { Rack, Node as NodeEntity, StoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth } from '../types';
+import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth } from '../types';
 import { buildFlowForViewMode, FlowNodeData } from './buildFlow';
 import { layoutTree } from './layout';
 import { CrowKVNode } from './CrowKVNode';
@@ -34,9 +34,10 @@ interface TopologyCanvasProps {
   racks: Rack[];
   nodes: NodeEntity[];
   servers: CrowKVServerView[];
-  stores: StoreView[];
+  stores: EnrichedStoreView[];
   nodeStores?: Record<string, NodeStore[]>;
   nodeHealthById?: Record<string, NodeHealth>;
+  diskdbNodeIds?: Set<number>;
   refreshToken?: number;
   focusRequest?: { targetId: string; subtree: boolean; nonce: number } | null;
   /** Right-click on a canvas node. */
@@ -75,7 +76,7 @@ export function TopologyCanvas(props: TopologyCanvasProps) {
  * be highlighted on the canvas. */
 function selectedNodeId(entity: SelectedEntity): string | null {
   const p = entity.parentIds || {};
-  if (entity.viewMode === ViewMode.Physical) {
+  if (entity.viewMode === ViewMode.Physical || entity.viewMode === ViewMode.Capacity) {
     switch (entity.type) {
       case 'Rack': return `R-${entity.id}`;
       case 'Node': return `N-${entity.id}`;
@@ -98,7 +99,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
   }
 }
 
-function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
+function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
   const { viewMode } = useViewMode();
   const { selectedEntity, selectEntity } = useSelection();
   const { fitView, setViewport, setCenter, getZoom, getNodes } = useReactFlow();
@@ -107,11 +108,20 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   const fittedOnceRef = useRef<Partial<Record<ViewMode, boolean>>>({});
   const lastRefreshTokenRef = useRef<number | undefined>(refreshToken);
   const lastFocusNonceRef = useRef<number | undefined>(undefined);
+  const lastViewModeRef = useRef<ViewMode | undefined>(undefined);
   const nodeIdsKeyRef = useRef<Partial<Record<ViewMode, string>>>({});
+  // Tracks the last (viewMode, nodeIds, refreshToken) triple that triggered
+  // a fit/restore. Polls return new array references for the same data, which
+  // would otherwise re-run the effect every cycle and fight user panning.
+  const lastActionKeyRef = useRef<string | undefined>(undefined);
+  // rAF id for the pending fit, tracked outside the effect cleanup so
+  // poll updates (which re-run the effect with a new positioned.nodes
+  // reference but the same action key) don't cancel an in-flight fit.
+  const fitRafIdRef = useRef<number | undefined>(undefined);
 
   const { nodes: rawNodes, edges } = useMemo(
-    () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById),
-    [viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById],
+    () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds),
+    [viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds],
   );
 
   const positioned = useMemo(() => layoutTree(rawNodes, edges), [rawNodes, edges]);
@@ -125,6 +135,17 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   }, [refreshToken]);
 
   useEffect(() => {
+    // On view-mode switch, always fit to window — don't restore a stale
+    // saved viewport from a previous visit to this mode.
+    const viewModeChanged = lastViewModeRef.current !== viewMode;
+    if (viewModeChanged) {
+      lastViewModeRef.current = viewMode;
+      viewportsRef.current[viewMode] = undefined;
+      fittedOnceRef.current[viewMode] = false;
+      // Reset the action-key guard so the fit actually runs instead of
+      // short-circuiting on the stale key from the previous visit.
+      lastActionKeyRef.current = undefined;
+    }
     if (positioned.nodes.length === 0 || !nodesInitialized) {
       fittedOnceRef.current[viewMode] = false;
       return;
@@ -132,6 +153,18 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     // Re-fit when the set of node IDs changes (nodes added/removed),
     // whether from a mutation or a poll update — not just on manual refresh.
     const nodeIdsKey = positioned.nodes.map((n) => n.id).sort().join(',');
+    // Only act on meaningful changes: view-mode switch, node-set change, or
+    // manual refresh. Polls return new array references for the same data;
+    // without this guard the effect re-runs every cycle and the
+    // setViewport(savedViewport) call below fights an in-progress pan drag.
+    const actionKey = `${viewMode}:${nodeIdsKey}:${refreshToken ?? ''}`;
+    if (actionKey === lastActionKeyRef.current) return;
+    // Action key changed — cancel any pending rAF from the previous action.
+    if (fitRafIdRef.current != null) {
+      cancelAnimationFrame(fitRafIdRef.current);
+      fitRafIdRef.current = undefined;
+    }
+    lastActionKeyRef.current = actionKey;
     if (nodeIdsKey !== nodeIdsKeyRef.current[viewMode]) {
       nodeIdsKeyRef.current[viewMode] = nodeIdsKey;
       viewportsRef.current[viewMode] = undefined;
@@ -140,25 +173,25 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     // Retry fit across frames until ReactFlow has measured every node's
     // dimensions — newly added nodes lack width/height on the first frame,
     // so a single rAF fitView would ignore them and never re-fit.
-    let rafId: number;
     const tryFit = () => {
       const savedViewport = viewportsRef.current[viewMode];
       if (savedViewport) {
         void setViewport(savedViewport, { duration: 250 });
+        fitRafIdRef.current = undefined;
         return;
       }
       if (!fittedOnceRef.current[viewMode]) {
         const storeNodes = getNodes();
         if (storeNodes.some((n) => !n.width || !n.height)) {
-          rafId = requestAnimationFrame(tryFit);
+          fitRafIdRef.current = requestAnimationFrame(tryFit);
           return;
         }
         void fitView({ padding: 0.1, duration: 250, includeHiddenNodes: true });
         fittedOnceRef.current[viewMode] = true;
       }
+      fitRafIdRef.current = undefined;
     };
-    rafId = requestAnimationFrame(tryFit);
-    return () => cancelAnimationFrame(rafId);
+    fitRafIdRef.current = requestAnimationFrame(tryFit);
   }, [fitView, getNodes, nodesInitialized, positioned.nodes, setViewport, viewMode, refreshToken]);
 
   const selId = selectedEntity ? selectedNodeId(selectedEntity) : null;
@@ -231,28 +264,28 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     [onEntityContextMenu, selectEntity, viewMode],
   );
 
-  if (decoratedNodes.length === 0) {
-    return (
-      <div className="tw-w-full tw-h-full tw-flex tw-items-center tw-justify-center tw-text-muted tw-text-sm tw-bg-bg">
-        {viewMode === ViewMode.Physical
-          ? 'No racks registered. Add a rack to get started.'
-          : 'No stores yet. Switch to a deployed node and add a store.'}
-      </div>
-    );
-  }
-
   return (
     <div className="tw-relative tw-w-full tw-h-full tw-bg-bg tw-overflow-hidden">
-      <div className="tw-absolute tw-top-3 tw-right-3 tw-z-10">
+      <div className="tw-absolute tw-top-3 tw-right-3 tw-z-20">
         <Button
           variant="secondary"
           size="sm"
           leftIcon={<ScanSearch className="tw-h-3.5 tw-w-3.5" />}
           onClick={handleFitAll}
+          data-testid="fit-all-btn"
         >
           Fit All
         </Button>
       </div>
+      {decoratedNodes.length === 0 ? (
+        <div className="tw-w-full tw-h-full tw-flex tw-items-center tw-justify-center tw-text-muted tw-text-sm">
+          {viewMode === ViewMode.Physical
+            ? 'No racks registered. Add a rack to get started.'
+            : viewMode === ViewMode.Capacity
+              ? 'No racks registered. Add a rack to get started.'
+              : 'No stores yet. Switch to a deployed node and add a store.'}
+        </div>
+      ) : (
       <ReactFlow
         nodes={decoratedNodes}
         edges={positioned.edges}
@@ -270,6 +303,7 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       >
         <Background gap={24} color="#2e3440" />
       </ReactFlow>
+      )}
     </div>
   );
 }

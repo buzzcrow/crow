@@ -79,8 +79,8 @@ pub struct MoveDiskBody {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeployNodeServerBody {
-    pub mgmt_port: u16,
-    pub grpc_port: u16,
+    pub rest_port: u16,
+    pub rpc_port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,7 +260,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_rack(&self, rack_id: RackId) -> Result<()> {
-        self.delete_path(&format!("/api/racks/{rack_id}")).await
+        self.delete_no_response(&format!("/api/racks/{rack_id}")).await
     }
 
     // ── Physical: node lifecycle ───────────────────────────────────
@@ -293,7 +293,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_node(&self, node_id: NodeId) -> Result<()> {
-        self.delete_path(&format!("/api/nodes/{node_id}")).await
+        self.delete_no_response(&format!("/api/nodes/{node_id}")).await
     }
 
     /// `POST /api/nodes/:node_id/ping`.
@@ -333,7 +333,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_disk_group(&self, node_id: NodeId, dg_id: DiskGroupId) -> Result<()> {
-        self.delete_path(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}"))
+        self.delete_no_response(&format!("/api/nodes/{node_id}/disk-groups/{dg_id}"))
             .await
     }
 
@@ -371,7 +371,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_disk(&self, node_id: NodeId, dg_id: DiskGroupId, disk_id: &str) -> Result<()> {
-        self.delete_path(&format!(
+        self.delete_no_response(&format!(
             "/api/nodes/{node_id}/disk-groups/{dg_id}/disks/{disk_id}"
         ))
         .await
@@ -489,7 +489,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_store(&self, sid: u64) -> Result<()> {
-        self.delete_path(&format!("/api/stores/{sid}")).await
+        self.delete_no_response(&format!("/api/stores/{sid}")).await
     }
 
     // ── Logical group plane ────────────────────────────────────────
@@ -533,7 +533,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_group(&self, sid: u64, gid: u64) -> Result<()> {
-        self.delete_path(&format!("/api/stores/{sid}/groups/{gid}")).await
+        self.delete_no_response(&format!("/api/stores/{sid}/groups/{gid}"))
+            .await
     }
 
     // ── Logical replica plane ──────────────────────────────────────
@@ -570,7 +571,7 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
-        self.delete_path(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
+        self.delete_no_response(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
             .await
     }
 
@@ -657,7 +658,7 @@ impl ConsoleClient {
     // wraps the call (web handler / CLI main), otherwise we generate
     // one inline so unit tests still produce well-formed log records.
 
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
@@ -690,7 +691,7 @@ impl ConsoleClient {
         self.decode(resp, path).await
     }
 
-    async fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(
+    pub(crate) async fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
@@ -728,7 +729,7 @@ impl ConsoleClient {
         self.decode(resp, path).await
     }
 
-    async fn delete_path(&self, path: &str) -> Result<()> {
+    pub(crate) async fn delete_no_response(&self, path: &str) -> Result<()> {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
@@ -761,6 +762,46 @@ impl ConsoleClient {
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(self.rpc_err(format!("DELETE {path}: HTTP {status}: {body}")));
+        }
+        Ok(())
+    }
+
+    /// PUT a JSON body and discard the response body (for 204
+    /// responses). Used by `PUT /api/disks/:id/status`.
+    pub(crate) async fn put_json_no_response<B: Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let url = format!("{}{path}", self.base_url);
+        let cid = crate::corr_id::current_or_new();
+        let started = std::time::Instant::now();
+        let resp = self
+            .inner
+            .put(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "PUT",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("PUT {path}: {e}"))
+            })?;
+        let status = resp.status();
+        crate::ops_log::append_http(
+            &cid,
+            "PUT",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(self.rpc_err(format!("PUT {path}: HTTP {status}: {body}")));
         }
         Ok(())
     }

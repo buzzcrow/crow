@@ -38,6 +38,21 @@ export function toUiHealth(value?: string | null): UiHealth {
   return 'Unknown';
 }
 
+// HwStatus enum values from common_type.proto:
+// 0=Init, 1=Up, 2=Maintenance, 3=Suspect, 4=Missing, 5=Bad, 6=Offline
+export function hwStatusToUiHealth(status: number): UiHealth {
+  switch (status) {
+    case 1: return 'Healthy';
+    case 0: return 'Unknown';
+    case 2: return 'Degraded';
+    case 3: return 'Degraded';
+    case 4: return 'Failed';
+    case 5: return 'Failed';
+    case 6: return 'Failed';
+    default: return 'Unknown';
+  }
+}
+
 export function toUiRole(value?: string | null): UiRole {
   const raw = normalize(value);
   if (raw === 'leader') return 'Leader';
