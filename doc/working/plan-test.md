@@ -3,6 +3,8 @@
 
 # CROW Test Task Backlog
 
+<!-- DO NOT DELETE THIS FILE — it is a persistent backlog, not a per-task draft. -->
+
 **Override:** This file is **persistent** — it is not deleted after the
 requirement (R9) is complete. Only completed tasks are removed; the file
 itself remains as the ongoing test task backlog. This overrides the
@@ -15,26 +17,27 @@ For test strategy, layer scope, and coverage details, see [`design/kv/design-cro
 ## Suite Timing
 
 Measured on 2026-08-14 (warm build, macOS) and 2026-08-15 (warm build, Linux, build 3m13s).
+Test counts re-verified 2026-08-17 after the chunkdb task merge.
 macOS times are wall-clock `time pixi run test-*` with build + test binaries cached.
 Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 395 | 14.9 s | 21.0 s |
+| `test-tree-ct` | 387 | 14.9 s | 21.0 s |
 | `test-tree-ffi` | 30 | 5.5 s | 81.1 s |
-| `test-common` | 61 | 30.6 s | 22.5 s |
-| `test-protocol` | 77 | 12.2 s | 15.3 s |
+| `test-common` | 56 | 30.6 s | 22.5 s |
+| `test-protocol` | 89 | 12.2 s | 15.3 s |
 | `test-kv-core` | 560 | 17.9 s | 61.7 s |
-| `test-kv-client` | 28 | 6.0 s | 33.7 s |
-| `test-diskdb-client` | 3 | 6.2 s | 22.8 s |
+| `test-kv-client` | 49 | 6.0 s | 33.7 s |
+| `test-diskdb-client` | 6 | 6.2 s | 22.8 s |
 | `test-chunkdb-client` | 15 | — | 6.8 s |
 | `test-kv-server` | 69 | 44.9 s | 54.1 s |
 | `test-diskdb` | 127 | 22.1 s | 10.6 s |
-| `test-chunkdb` | 44 | — | 25.0 s |
-| `test-console-shared` | 51 | 15.5 s | 46.4 s |
-| `test-console-cli` | 13 | 46.2 s | 68.8 s |
-| `test-console-server` | 53 | 41.4 s | 34.1 s |
-| `test-console-ui` | 80 | 165.8 s | 134.7 s |
+| `test-chunkdb` | 76 | — | 25.0 s |
+| `test-console-shared` | 62 | 15.5 s | 46.4 s |
+| `test-console-cli` | 16 | 46.2 s | 68.8 s |
+| `test-console-server` | 61 | 41.4 s | 34.1 s |
+| `test-console-ui` | 75 | 165.8 s | 134.7 s |
 
 ---
 

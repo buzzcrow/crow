@@ -3,6 +3,7 @@
 
 //! Config validation + `load_from_file` tests.
 
+use crow_common::config::BaseConfig;
 use crow_diskdb::ddb_config::{validate, DdbConfig};
 
 #[test]
