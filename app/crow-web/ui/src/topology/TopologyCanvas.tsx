@@ -114,6 +114,10 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   // a fit/restore. Polls return new array references for the same data, which
   // would otherwise re-run the effect every cycle and fight user panning.
   const lastActionKeyRef = useRef<string | undefined>(undefined);
+  // rAF id for the pending fit, tracked outside the effect cleanup so
+  // poll updates (which re-run the effect with a new positioned.nodes
+  // reference but the same action key) don't cancel an in-flight fit.
+  const fitRafIdRef = useRef<number | undefined>(undefined);
 
   const { nodes: rawNodes, edges } = useMemo(
     () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds),
@@ -155,6 +159,11 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     // setViewport(savedViewport) call below fights an in-progress pan drag.
     const actionKey = `${viewMode}:${nodeIdsKey}:${refreshToken ?? ''}`;
     if (actionKey === lastActionKeyRef.current) return;
+    // Action key changed — cancel any pending rAF from the previous action.
+    if (fitRafIdRef.current != null) {
+      cancelAnimationFrame(fitRafIdRef.current);
+      fitRafIdRef.current = undefined;
+    }
     lastActionKeyRef.current = actionKey;
     if (nodeIdsKey !== nodeIdsKeyRef.current[viewMode]) {
       nodeIdsKeyRef.current[viewMode] = nodeIdsKey;
@@ -164,25 +173,25 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     // Retry fit across frames until ReactFlow has measured every node's
     // dimensions — newly added nodes lack width/height on the first frame,
     // so a single rAF fitView would ignore them and never re-fit.
-    let rafId: number;
     const tryFit = () => {
       const savedViewport = viewportsRef.current[viewMode];
       if (savedViewport) {
         void setViewport(savedViewport, { duration: 250 });
+        fitRafIdRef.current = undefined;
         return;
       }
       if (!fittedOnceRef.current[viewMode]) {
         const storeNodes = getNodes();
         if (storeNodes.some((n) => !n.width || !n.height)) {
-          rafId = requestAnimationFrame(tryFit);
+          fitRafIdRef.current = requestAnimationFrame(tryFit);
           return;
         }
         void fitView({ padding: 0.1, duration: 250, includeHiddenNodes: true });
         fittedOnceRef.current[viewMode] = true;
       }
+      fitRafIdRef.current = undefined;
     };
-    rafId = requestAnimationFrame(tryFit);
-    return () => cancelAnimationFrame(rafId);
+    fitRafIdRef.current = requestAnimationFrame(tryFit);
   }, [fitView, getNodes, nodesInitialized, positioned.nodes, setViewport, viewMode, refreshToken]);
 
   const selId = selectedEntity ? selectedNodeId(selectedEntity) : null;

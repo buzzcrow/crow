@@ -330,10 +330,9 @@ export async function removeDisk(baseURL: string, nodeId: number, dgId: number, 
   }
 }
 
-/** Generate a random disk ID in the crow-protocol format: 16 hex chars + dash + 16 hex chars. */
+/** Generate a random disk ID in the crow-protocol DiskId format: 32 hex chars (high 16 + low 16, no dash). */
 export function randomDiskId(): string {
-  const hex16 = () => Array.from({ length: 16 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
-  return `${hex16()}-${hex16()}`;
+  return Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 }
 
 // ── setupCluster helper + topology presets ──────────────────────────

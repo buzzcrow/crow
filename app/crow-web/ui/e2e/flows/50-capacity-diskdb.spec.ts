@@ -14,39 +14,54 @@ import {
   removeDisk,
   randomDiskId,
   stopDiskdb,
+  deployNodeServer,
+  clusterInit,
+  waitForLeader,
 } from '../fixtures/consoleSetup';
 
 const DISKDB_RACK = 501;
 const DISKDB_NODE = 501;
-const DISKDB_DG = 501;
-
-async function cleanupDiskdb(baseURL: string) {
-  const api = await apiContext(baseURL);
-  try {
-    await api.delete(`/api/nodes/${DISKDB_NODE}/diskdb`);
-  } catch {
-    // best-effort
-  }
-  await api.dispose();
-  await stopDiskdb(baseURL, DISKDB_NODE);
-  await apiRemoveDiskGroup(baseURL, DISKDB_NODE, DISKDB_DG);
-}
 
 /**
  * All Capacity / DiskDB flows share ONE rack + node (and, for the final
  * lifecycle test, ONE diskdb deploy). diskdb deploy is the dominant setup
  * cost, so the deploy → restart → stop lifecycle runs last.
+ *
+ * A kv-server is deployed on the same node and the cluster is initialized
+ * so that group-0 sysdata operations (set_disk_group_status, etc.) work
+ * against the real backend instead of mocks.
  */
 test.describe('capacity · diskdb', () => {
   test.beforeAll(async () => {
     const baseURL = consoleBaseURL();
+    // Full cluster reset to clear any stale group-0 sysdata (e.g.
+    // service registry entries from a previous diskdb deploy). This
+    // stops all servers, cleans workspace dirs, and wipes config.
+    const resetApi = await apiContext(baseURL);
+    try {
+      await resetApi.post('/internal/reset').catch(() => {});
+    } finally {
+      await resetApi.dispose();
+    }
+
     await createRack(baseURL, { id: DISKDB_RACK, name: 'Rack 501' });
     await createNode(baseURL, { id: DISKDB_NODE, rack_id: DISKDB_RACK });
+    // Deploy a kv-server on the node and init the cluster so group-0
+    // sysdata operations (set_disk_group_status, set_disk_status) work
+    // against the real backend.
+    await deployNodeServer(baseURL, DISKDB_NODE, freePort(), freePort());
+    await clusterInit(baseURL, [DISKDB_NODE]);
+    // Wait for group-0 to be visible in the monitor cache (store 0,
+    // group 0 with an elected leader). clusterInit refreshes the cache,
+    // but in the full suite the refresh may lag behind the server's
+    // readiness — poll until build_hardware_client can resolve an endpoint.
+    await waitForLeader(baseURL, 0, 0, 15_000);
   });
 
-  test.afterAll(async () => {
-    await cleanupDiskdb(consoleBaseURL());
-  });
+  // No afterAll — the beforeAll reset of the next test file (or the
+  // next run's beforeAll) cleans up all state. An afterAll here would
+  // stop the kv-server between tests, breaking group-0 ops for later
+  // tests in this file.
 
   test('capacity tree, node context menu, and Deploy DiskDB dialog', async ({ page }) => {
     await page.goto('/');
@@ -276,6 +291,7 @@ test.describe('capacity · diskdb', () => {
   });
 
   test('disk maintenance operations, set-status, and health badges', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
     const rackId = DISKDB_RACK;
     const nodeId = DISKDB_NODE;
     const dg545 = 545;
@@ -294,6 +310,11 @@ test.describe('capacity · diskdb', () => {
     const disk552 = randomDiskId();
     const disk553 = randomDiskId();
 
+    // The kv-server deployed in beforeAll + clusterInit makes group-0
+    // available for set-status operations (real backend). Recalc/scan/
+    // usage remain mocked because disk-group-to-instance ownership
+    // assignment is R72 (not yet implemented).
+
     await apiAddDiskGroup(baseURL!, nodeId, dg545, 'test-dg-545');
     await addDisksBatch(baseURL!, nodeId, dg545, [{ disk_id: disk545 }]);
     await apiAddDiskGroup(baseURL!, nodeId, dg546, 'test-dg-546');
@@ -307,61 +328,10 @@ test.describe('capacity · diskdb', () => {
     await addDisksBatch(baseURL!, nodeId, dg551, [{ disk_id: disk551 }]);
     await apiAddDiskGroup(baseURL!, nodeId, dg552, 'test-dg-552');
     await addDisksBatch(baseURL!, nodeId, dg552, [{ disk_id: disk552 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg553, 'test-dg-553');
+    await addDisksBatch(baseURL!, nodeId, dg553, [{ disk_id: disk553 }]);
 
     try {
-      // --- Mock-based section: the status/recalc/scan/usage endpoints
-      // below are intercepted with page.route and fulfilled with canned
-      // responses. This verifies the UI handles those response shapes
-      // correctly, NOT that the diskdb backend performs the operations.
-      // Real-backend coverage of compact/rebuild/scan is a known gap. ---
-      // Intercept the disk-group status PUT and fulfill with 204.
-      const dgStatusRequest = page.waitForRequest(
-        (req) => req.method() === 'PUT' && req.url().includes(`/api/disk-groups/${rackId}/${nodeId}/${dg548}/status`),
-        { timeout: 10_000 },
-      ).then(async (req) => {
-        expect(req.postDataJSON()).toEqual({ status: 'Down' });
-      });
-      await page.route(`**/api/disk-groups/${rackId}/${nodeId}/${dg548}/status`, (route) => {
-        route.fulfill({ status: 204 });
-      });
-
-      // Intercept the disk status PUT.
-      const diskStatusRequest = page.waitForRequest(
-        (req) => req.method() === 'PUT' && req.url().includes(`/api/disks/${encodeURIComponent(disk549)}/status`),
-        { timeout: 10_000 },
-      ).then(async (req) => {
-        expect(req.postDataJSON()).toEqual({ status: 'Down' });
-      });
-      await page.route(`**/api/disks/${encodeURIComponent(disk549)}/status`, (route) => {
-        route.fulfill({ status: 204 });
-      });
-
-      // Intercept the recalc POST.
-      const recalcRequest = page.waitForRequest(
-        (req) => req.method() === 'POST' && req.url().includes('/api/diskdb/recalc'),
-        { timeout: 10_000 },
-      ).then(async (req) => {
-        expect(req.postDataJSON()).toEqual({ dg: dg551 });
-      });
-      await page.route('**/api/diskdb/recalc', (route) => {
-        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [] }) });
-      });
-
-      // Intercept the scan POST.
-      const scanRequest = page.waitForRequest(
-        (req) => req.method() === 'POST' && req.url().includes('/api/diskdb/scan'),
-        { timeout: 10_000 },
-      ).then(async (req) => {
-        expect(req.postDataJSON()).toEqual({ dg: dg552 });
-      });
-      await page.route('**/api/diskdb/scan', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ summary: null, has_run: false, scan_in_progress: true }),
-        });
-      });
-
       await page.goto('/');
       await page.getByRole('button', { name: 'Capacity' }).click();
 
@@ -454,17 +424,26 @@ test.describe('capacity · diskdb', () => {
 
       await page.keyboard.press('Escape');
 
-      // --- Set Disk Group Down via context menu calls the status API ---
+      // --- Set Disk Group Down via context menu hits the real backend ---
 
-      // Right-click disk-group → Set Disk Group Down.
+      // Refresh the monitor cache by polling group-0 — in the full
+      // suite the kv-server may have been temporarily unreachable from
+      // earlier sysdata sync retries, and the cache entry may be stale.
+      await waitForLeader(baseURL!, 0, 0, 15_000);
+
+      // Right-click disk-group → Set Disk Group Down. The real API
+      // writes to group-0 via HardwareClient and returns 204.
       await expect(aside.getByText(/DG-548/, { exact: true })).toBeVisible({ timeout: 5_000 });
       await aside.getByText(/DG-548/, { exact: true }).click({ button: 'right' });
+      const dgStatusResponse = page.waitForResponse(
+        (r: any) => r.request().method() === 'PUT' && r.url().includes(`/api/disk-groups/${rackId}/${nodeId}/${dg548}/status`),
+        { timeout: 10_000 },
+      );
       await page.getByRole('menuitem', { name: /set disk group down/i }).click();
+      const dgResp = await dgStatusResponse;
+      expect(dgResp.status()).toBe(204);
 
-      // Verify the API call was made with correct payload.
-      await dgStatusRequest;
-
-      // --- Set Disk Down via context menu calls the status API ---
+      // --- Set Disk Down via context menu hits the real backend ---
 
       const expandDg549 = aside.getByRole('treeitem').filter({ hasText: /DG-549/ }).locator('button[aria-label="Expand"]');
       if (await expandDg549.count() > 0) await expandDg549.click();
@@ -473,12 +452,22 @@ test.describe('capacity · diskdb', () => {
       const disk549Label = aside.getByText(disk549.slice(0, 12), { exact: false });
       await expect(disk549Label).toBeVisible({ timeout: 5_000 });
       await disk549Label.first().click({ button: 'right' });
+      const diskStatusResponse = page.waitForResponse(
+        (r: any) => r.request().method() === 'PUT' && r.url().includes(`/api/disks/${encodeURIComponent(disk549)}/status`),
+        { timeout: 10_000 },
+      );
       await page.getByRole('menuitem', { name: /set disk down/i }).click();
+      const diskResp = await diskStatusResponse;
+      expect(diskResp.status()).toBe(204);
 
-      // Verify the API call was made with correct payload.
-      await diskStatusRequest;
+      // --- Recalc Usage via disk context menu (mocked: requires
+      // diskdb disk-group ownership assignment, which is R72) ---
 
-      // --- Recalc Usage via disk context menu calls the recalc API ---
+      // Recalc/scan/usage proxy to a running diskdb that owns the
+      // disk-group. Disk-group-to-instance assignment is R72 (not yet
+      // implemented), so the diskdb never takes ownership and the
+      // real endpoints return "no diskdb instance owns dg <id>".
+      // These mocks verify the UI handles the response shapes correctly.
 
       const expandDg551 = aside.getByRole('treeitem').filter({ hasText: /DG-551/ }).locator('button[aria-label="Expand"]');
       if (await expandDg551.count() > 0) await expandDg551.click();
@@ -487,12 +476,18 @@ test.describe('capacity · diskdb', () => {
       const disk551Label = aside.getByText(disk551.slice(0, 12), { exact: false });
       await expect(disk551Label).toBeVisible({ timeout: 5_000 });
       await disk551Label.first().click({ button: 'right' });
+      const recalcResponse = page.waitForResponse(
+        (r: any) => r.request().method() === 'POST' && r.url().includes('/api/diskdb/recalc'),
+        { timeout: 10_000 },
+      );
+      await page.route('**/api/diskdb/recalc', (route) => {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [] }) });
+      });
       await page.getByRole('menuitem', { name: /recalc usage/i }).click();
+      const recalcResp = await recalcResponse;
+      expect(recalcResp.ok(), await recalcResp.text()).toBeTruthy();
 
-      // Verify the API call was made with the disk's dg_id.
-      await recalcRequest;
-
-      // --- Trigger Consistency Scan via disk context menu calls the scan API ---
+      // --- Trigger Consistency Scan via disk context menu (mocked) ---
 
       const expandDg552 = aside.getByRole('treeitem').filter({ hasText: /DG-552/ }).locator('button[aria-label="Expand"]');
       if (await expandDg552.count() > 0) await expandDg552.click();
@@ -501,17 +496,23 @@ test.describe('capacity · diskdb', () => {
       const disk552Label = aside.getByText(disk552.slice(0, 12), { exact: false });
       await expect(disk552Label).toBeVisible({ timeout: 5_000 });
       await disk552Label.first().click({ button: 'right' });
+      const scanResponse = page.waitForResponse(
+        (r: any) => r.request().method() === 'POST' && r.url().includes('/api/diskdb/scan'),
+        { timeout: 10_000 },
+      );
+      await page.route('**/api/diskdb/scan', (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ summary: null, has_run: false, scan_in_progress: true }),
+        });
+      });
       await page.getByRole('menuitem', { name: /trigger consistency scan/i }).click();
+      const scanResp = await scanResponse;
+      expect(scanResp.ok(), await scanResp.text()).toBeTruthy();
 
-      // Verify the API call was made with the disk's dg_id.
-      await scanRequest;
-
-      // --- sidebar shows health badges for disk-group and disk when usage data is available ---
-
-      // The usage API is mocked from here on (page.route below), so this
-      // section runs last and reloads the page to pick the mock up.
-      await apiAddDiskGroup(baseURL!, nodeId, dg553, 'test-dg-553');
-      await addDisksBatch(baseURL!, nodeId, dg553, [{ disk_id: disk553 }]);
+      // --- sidebar shows health badges for disk-group and disk when
+      // usage data is available (mocked: requires R72 ownership) ---
 
       // Mock the usage API to return status data.
       await page.route('**/api/diskdb/usage', (route) => {
@@ -598,6 +599,7 @@ test.describe('capacity · diskdb', () => {
   });
 
   test('full deploy flow: deploy diskdb via UI, restart, stop via context menu', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
     const nodeId = DISKDB_NODE;
     const rpcPort = freePort();
 
@@ -642,6 +644,14 @@ test.describe('capacity · diskdb', () => {
 
       // --- restart/stop menu items, then stop via context menu ---
 
+      // Reload the page to ensure the UI's allServers state is refreshed
+      // with the new diskdb server entry. The deploy dialog's onSuccess
+      // callback triggers handleRefresh, but the right-click may race
+      // with the async refresh.
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+
       // Right-click the node — should now show Restart/Stop DiskDB (not Deploy).
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
       await expect(page.getByRole('menuitem', { name: /restart diskdb/i })).toBeVisible();
@@ -654,6 +664,10 @@ test.describe('capacity · diskdb', () => {
       await page.getByRole('menuitem', { name: /stop diskdb/i }).click();
 
       // After stop, the node should show Deploy DiskDB again (not Restart/Stop).
+      // Reload to ensure the UI's allServers state is refreshed.
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
       await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toBeVisible();
       await page.keyboard.press('Escape');

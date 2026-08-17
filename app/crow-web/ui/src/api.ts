@@ -1131,6 +1131,25 @@ export async function removeDisk(nodeId: number, dgId: number, diskId: string, o
   }
 }
 
+/** `POST /api/disks/:disk_id/move` — move a disk to a new disk-group. */
+export async function moveDisk(
+  diskId: string,
+  body: { new_rack_id: number; new_node_id: number; new_disk_group_id: number },
+  options?: RequestOptions,
+): Promise<void> {
+  const resp = await fetchWithOptions(`/api/disks/${encodeURIComponent(diskId)}/move`, {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`POST move disk: HTTP ${resp.status}: ${text}`);
+  }
+}
+
 /** `GET /api/servers` — list all deployed server entries. */
 export interface ServerSummary {
   node_id?: number;

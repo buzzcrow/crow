@@ -247,6 +247,7 @@ pub async fn http_remove_node(
         let mut cfg = state.config.write().unwrap();
         cfg.remove_node(id).map_err(map_config_err)?;
     }
+    state.monitor_cache.drop_node(&id).await;
     state.persist().map_err(map_persist_err)?;
 
     // Cascade-remove group-0 sysdata (node + child disk-groups + disks).
@@ -959,6 +960,7 @@ async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool
         cfg.purge_node_topology(node_id);
     }
     state.clear_runtime_pid(node_id);
+    state.monitor_cache.drop_node(&node_id).await;
     true
 }
 

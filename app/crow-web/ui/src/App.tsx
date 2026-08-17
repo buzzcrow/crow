@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Suspense, useState, useCallback, useMemo, lazy, useEffect } from 'react';
-import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes } from 'lucide-react';
+import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, Move } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
 import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
@@ -25,6 +25,7 @@ import {
   AddReplicaDialog,
   AddDiskGroupDialog,
   AddDiskDialog,
+  MoveDiskDialog,
   DeployServerDialog,
   DeployDiskdbDialog,
   ConfirmDeleteDialog,
@@ -68,6 +69,7 @@ const TopologyCanvas = lazy(() =>
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
 const SwaggerPanel = lazy(() => import('./panels/SwaggerPanel').then((m) => ({ default: m.SwaggerPanel })));
 const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
+const CapacityPanel = lazy(() => import('./panels/CapacityPanel').then((m) => ({ default: m.CapacityPanel })));
 
 export interface CrowConsoleProps {
   /** API prefix for all backend calls (default "/api"). */
@@ -117,9 +119,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     addReplica?: { storeId: string; groupId: string };
     addDiskGroup?: { nodeId: number };
     addDisk?: { nodeId: number; dgId: number };
+    moveDisk?: { diskId: string; rackId: number; nodeId: number; dgId: number };
     deployServer?: { nodeId: number };
     deployDiskdb?: { nodeId: number } | null;
-    delete?: { type: string; id: string | number; onDelete: () => Promise<void> };
+    delete?: { type: string; id: string | number; onDelete: () => Promise<void>; cascadeWarning?: string };
     initCluster?: boolean;
     compactZones?: { diskId: string; zoneCount?: number };
     rebuildBitmap?: { diskId: string; zoneCount?: number };
@@ -141,7 +144,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
-  const { instances: diskdbInstances, usage: capacityUsage, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
+  const { instances: diskdbInstances, usage: capacityUsage, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
     enabled: viewMode === ViewMode.Capacity,
     pollIntervalActive: 5000,
     pollIntervalInactive: 30000,
@@ -253,8 +256,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   );
 
   const requestDelete = useCallback(
-    (type: string, id: string | number, onDelete: () => Promise<void>) => {
-      setDialog((d) => ({ ...d, delete: { type, id, onDelete } }));
+    (type: string, id: string | number, onDelete: () => Promise<void>, cascadeWarning?: string) => {
+      setDialog((d) => ({ ...d, delete: { type, id, onDelete, cascadeWarning } }));
     },
     [],
   );
@@ -341,30 +344,56 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             }),
           });
         } else if (t.type === 'Server') {
-          // CrowKV service context menu: restart, stop, delete.
+          // Server context menu: dispatch on service_type (KV vs DiskDB).
           const nodeId = Number(p.node_id);
-          items.push({
-            id: 'restart',
-            label: 'Restart Crow Storage',
-            icon: <RotateCw className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Restart Crow Storage', t.label || t.id, () => restartServer(nodeId)),
-          });
-          items.push({
-            id: 'stop',
-            label: 'Stop Crow Storage',
-            icon: <Square className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Stop Crow Storage', t.label || t.id, () => stopServer(nodeId)),
-          });
-          items.push({ id: 's1', separator: true });
-          items.push({
-            id: 'del-service',
-            label: 'Delete Crow Storage',
-            icon: <Trash2 className="tw-h-4 tw-w-4" />,
-            destructive: true,
-            onSelect: () => requestDelete('Crow Storage', t.label || t.id, async () => {
-              await runMutation('Delete Crow Storage', t.label || t.id, () => removeServer(nodeId));
-            }),
-          });
+          if (p.service_type === 'Diskdb') {
+            items.push({
+              id: 'ddb-restart',
+              label: 'Restart DiskDB',
+              icon: <RotateCw className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(nodeId)),
+            });
+            items.push({
+              id: 'ddb-stop',
+              label: 'Stop DiskDB',
+              icon: <Square className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(nodeId)),
+            });
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-ddb',
+              label: 'Delete DiskDB',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => requestDelete('DiskDB', t.label || t.id, async () => {
+                await runMutation('Delete DiskDB', t.label || t.id, () => removeDiskdb(nodeId));
+              }),
+            });
+          } else {
+            // CrowKV service context menu: restart, stop, delete.
+            items.push({
+              id: 'restart',
+              label: 'Restart Crow Storage',
+              icon: <RotateCw className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Restart Crow Storage', t.label || t.id, () => restartServer(nodeId)),
+            });
+            items.push({
+              id: 'stop',
+              label: 'Stop Crow Storage',
+              icon: <Square className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Stop Crow Storage', t.label || t.id, () => stopServer(nodeId)),
+            });
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-service',
+              label: 'Delete Crow Storage',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => requestDelete('Crow Storage', t.label || t.id, async () => {
+                await runMutation('Delete Crow Storage', t.label || t.id, () => removeServer(nodeId));
+              }),
+            });
+          }
         }
       } else if (capacityActive) {
         // Capacity view context menus: rack, node, diskdb instance, disk-group, disk.
@@ -429,7 +458,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               });
             }),
           });
-        } else if (t.type === 'Group') {
+        } else if (t.type === 'DiskGroup') {
           // disk-group — logical container: add disk, set status, delete
           const dgId = Number(t.rawId);
           const dgNodeId = Number(p.node_id);
@@ -451,7 +480,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             id: 'dg-set-down',
             label: 'Set Disk Group Down',
             icon: <Square className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Set Disk Group Down', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Down')),
+            onSelect: () => runMutation('Set Disk Group Down', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Offline')),
           });
           items.push({ id: 's2', separator: true });
           items.push({
@@ -461,9 +490,9 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             destructive: true,
             onSelect: () => requestDelete('Disk Group', dgId, async () => {
               await runMutation('Delete Disk Group', t.label || t.id, () => removeDiskGroup(dgNodeId, dgId));
-            }),
+            }, 'All disks in this disk group will also be removed.'),
           });
-        } else if (t.type === 'Replica') {
+        } else if (t.type === 'Disk') {
           // disk — all operations: compact, rebuild, consistency scan,
           // recalc usage, set status, delete
           const diskId = String(p.disk_id || t.rawId || t.id);
@@ -505,7 +534,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             id: 'disk-set-down',
             label: 'Set Disk Down',
             icon: <Square className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Set Disk Down', t.label || t.id, () => setDiskStatus(diskId, 'Down')),
+            onSelect: () => runMutation('Set Disk Down', t.label || t.id, () => setDiskStatus(diskId, 'Offline')),
           });
           items.push({
             id: 'disk-set-up',
@@ -515,13 +544,19 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           });
           items.push({ id: 's3', separator: true });
           items.push({
+            id: 'move-disk',
+            label: 'Move Disk',
+            icon: <Move className="tw-h-4 tw-w-4" />,
+            onSelect: () => setDialog((d) => ({ ...d, moveDisk: { diskId, rackId: Number(p.rack_id), nodeId: diskNodeId, dgId: diskDgId } })),
+          });
+          items.push({
             id: 'del-disk',
             label: 'Delete Disk',
             icon: <Trash2 className="tw-h-4 tw-w-4" />,
             destructive: true,
             onSelect: () => requestDelete('Disk', diskId, async () => {
               await runMutation('Delete Disk', t.label || t.id, () => removeDisk(diskNodeId, diskDgId, diskId));
-            }),
+            }, 'All zones on this disk will be lost.'),
           });
         }
       } else {
@@ -822,6 +857,15 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
           ) : centerPanel === 'kv' && kvEnabled ? (
             <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
+          ) : capacityActive ? (
+            <CapacityPanel
+              instances={diskdbInstances}
+              usage={capacityUsage}
+              scanStatus={capacityScanStatus}
+              loading={capLoading}
+              readonly={readonly}
+              onRefresh={refreshCapacity}
+            />
           ) : (
             <TopologyCanvas
               racks={racks}
@@ -942,6 +986,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           resourceType={dialog.delete.type}
           resourceId={String(dialog.delete.id)}
           onDelete={dialog.delete.onDelete}
+          cascadeWarning={dialog.delete.cascadeWarning}
         />
       )}
       {dialog.addDiskGroup && (
@@ -959,6 +1004,21 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           onClose={closeDialogs}
           nodeId={dialog.addDisk.nodeId}
           dgId={dialog.addDisk.dgId}
+          onSuccess={handleRefresh}
+        />
+      )}
+      {dialog.moveDisk && (
+        <MoveDiskDialog
+          isOpen
+          onClose={closeDialogs}
+          diskId={dialog.moveDisk.diskId}
+          currentRackId={dialog.moveDisk.rackId}
+          currentNodeId={dialog.moveDisk.nodeId}
+          currentDgId={dialog.moveDisk.dgId}
+          racks={racks}
+          diskGroupsByNode={Object.fromEntries(
+            Object.entries(nodeDiskGroups).map(([k, v]) => [Number(k), v.diskGroups])
+          )}
           onSuccess={handleRefresh}
         />
       )}

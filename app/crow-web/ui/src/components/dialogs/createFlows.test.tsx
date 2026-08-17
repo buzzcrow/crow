@@ -209,6 +209,8 @@ describe('Add Node dialog', () => {
     );
 
     expect((screen.getByLabelText('Enable Crow Storage on this node') as HTMLInputElement).checked).toBe(true);
+    // Disable DiskDB — this test focuses on the Crow Storage deploy flow.
+    fireEvent.click(screen.getByLabelText('Enable DiskDB on this node'));
     fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
@@ -759,6 +761,8 @@ describe('end-to-end create flow', () => {
       <AddNodeDialog isOpen onClose={() => {}} racks={[mockRack]} defaultRackId="1" />,
       { wrapper },
     );
+    // Disable DiskDB — this flow tests Crow Storage, not DiskDB deploy.
+    fireEvent.click(screen.getByLabelText('Enable DiskDB on this node'));
     fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));

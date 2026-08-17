@@ -556,6 +556,9 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
 pub struct DiskdbDeployRequest {
     pub server_id: String,
     pub rpc_port: u16,
+    /// KV-server management URLs for group-0 discovery. If non-empty,
+    /// the auto-generated config uses these instead of the default port.
+    pub kv_server_mgmt_seeds: Vec<String>,
 }
 
 /// Resolve the path to the `crow-diskdb` binary.
@@ -595,15 +598,30 @@ pub fn crow_diskdb_bin() -> Option<PathBuf> {
 /// Falls back to a minimal auto-generated config with all required
 /// sections if the file is missing. The auto-generated config sets
 /// `http_listen_addr` to `0.0.0.0:{rpc_port + 1}` so each instance
-/// gets a unique HTTP port.
-fn resolve_diskdb_config_path(workspace_dir: &std::path::Path, rpc_port: u16) -> Result<PathBuf> {
+/// gets a unique HTTP port. When `kv_server_mgmt_seeds` is non-empty,
+/// the config is always (re)written so the diskdb can discover group-0
+/// on the actual kv-server management port.
+fn resolve_diskdb_config_path(
+    workspace_dir: &std::path::Path,
+    rpc_port: u16,
+    kv_server_mgmt_seeds: &[String],
+) -> Result<PathBuf> {
     let conf = workspace_dir.join("conf");
     std::fs::create_dir_all(&conf).map_err(Error::Io)?;
     let path = conf.join("crow_diskdb_config.toml");
-    if path.exists() {
+    if path.exists() && kv_server_mgmt_seeds.is_empty() {
         return Ok(path);
     }
     let http_port = rpc_port.saturating_add(1);
+    let seeds = if kv_server_mgmt_seeds.is_empty() {
+        format!("\"http://127.0.0.1:{}\"", crow_protocol::KV_SERVER_MGMT_BASE)
+    } else {
+        kv_server_mgmt_seeds
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     // Minimal valid config — only [server] is required; all other
     // sections default via `#[serde(default)]` on `DdbConfig` fields
     // (values match `DdbConfig::default()`).
@@ -611,8 +629,7 @@ fn resolve_diskdb_config_path(workspace_dir: &std::path::Path, rpc_port: u16) ->
         "[server]\n\
          listen_addr = \"0.0.0.0:{rpc_port}\"\n\
          http_listen_addr = \"0.0.0.0:{http_port}\"\n\
-         kv_server_mgmt_seeds = [\"http://127.0.0.1:{}\"]\n",
-        crow_protocol::KV_SERVER_MGMT_BASE,
+         kv_server_mgmt_seeds = [{seeds}]\n",
     );
     std::fs::write(&path, config).map_err(Error::Io)?;
     Ok(path)
@@ -684,7 +701,7 @@ pub async fn deploy_diskdb_local(
         stage_server_binary(&binary, workspace_dir)?
     };
 
-    let config_path = resolve_diskdb_config_path(workspace_dir, req.rpc_port)?;
+    let config_path = resolve_diskdb_config_path(workspace_dir, req.rpc_port, &req.kv_server_mgmt_seeds)?;
     let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     // Read the HTTP listen address from the config file for readiness

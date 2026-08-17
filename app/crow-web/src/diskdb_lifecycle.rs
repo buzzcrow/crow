@@ -68,9 +68,22 @@ pub async fn http_deploy_diskdb(
         })?
     };
 
+    // Look up the kv-server management URL(s) on this node so the
+    // diskdb can discover group-0. If no kv-server is deployed, the
+    // diskdb will fall back to the default seed port.
+    let kv_server_mgmt_seeds: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.servers
+            .iter()
+            .filter(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
+            .map(|s| s.url.clone())
+            .collect()
+    };
+
     let req = DiskdbDeployRequest {
         server_id: format!("diskdb-{node_id}"),
         rpc_port: body.rpc_port,
+        kv_server_mgmt_seeds,
     };
 
     let workspace_dir = state
@@ -172,9 +185,21 @@ pub async fn http_restart_diskdb(
             .map_err(|e| err_500(format!("stop_pid (diskdb restart): {e}")))?;
     }
 
+    // Look up the kv-server management URL(s) on this node so the
+    // diskdb can discover group-0 after restart.
+    let kv_server_mgmt_seeds: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.servers
+            .iter()
+            .filter(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
+            .map(|s| s.url.clone())
+            .collect()
+    };
+
     let req = DiskdbDeployRequest {
         server_id: format!("diskdb-{node_id}"),
         rpc_port,
+        kv_server_mgmt_seeds,
     };
     let workspace_dir = state
         .prepare_node_workspace(node_id)

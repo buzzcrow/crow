@@ -69,28 +69,42 @@ ai-todo: need add e2e test for these components and function
 
 ### Capacity test mocks API responses
 
-`50-capacity-diskdb.spec.ts` uses `page.route()` to mock 5 endpoints:
-disk-group status PUT (line 319), disk status PUT (line 330), diskdb
-recalc (line 341), diskdb scan (line 352), and diskdb usage (line 512).
-The compact/rebuild/scan/refresh flow is tested against these mocks,
-not the real backend. This means:
+`50-capacity-diskdb.spec.ts` now uses real backend for set-status
+operations (disk-group status PUT, disk status PUT) via a deployed
+kv-server + cluster init in `beforeAll`. The recalc/scan/usage
+endpoints remain mocked because they proxy to a running diskdb that
+must own the disk-group — disk-group-to-instance ownership assignment
+is R72 (not yet implemented), so the diskdb never takes ownership and
+the real endpoints return "no diskdb instance owns dg <id>".
 
-- Real backend timing issues (e.g. disk state not updated synchronously
-  after compact) are hidden.
-- The test verifies the UI handles the mocked response correctly, not
-  that the backend actually performs the operation.
+The compact/rebuild dialog flows (zone input validation, dialog open/
+close) are UI-interaction tests that don't need a real backend.
 
-This is acceptable for UI-interaction testing; the mock-based sections
-are marked with comments in the test file. A companion test against the
-real backend (even a smoke-level one) would close the gap.
+- Real backend timing issues for set-status are now covered.
+- Recalc/scan/usage mock-based sections are marked with comments in the
+  test file explaining the R72 dependency.
+- A companion test against the real backend for recalc/scan/usage can
+  be added once R72 ownership assignment is implemented.
 
-ai-todo: avoid mock-based test, start real service and inject real data. We need every design function works correct on UI and tack by e2e test. 
+Also fixed: the UI was sending `"Down"` as the status value, but the
+backend's `parse_hw_status` only accepts `Offline` (not `Down`). Fixed
+to send `"Offline"` in `App.tsx`.
+
+Also fixed: `randomDiskId()` was generating `16hex-16hex` (33 chars
+with dash), but the backend's `parse_disk_id` expects 32 hex chars
+without a dash. Fixed to generate 32 contiguous hex chars.
+
+Also fixed: `deploy_diskdb_local` generated the config with the default
+kv-server management port (9910) instead of the actual deployed
+kv-server's port. Added `kv_server_mgmt_seeds` field to
+`DiskdbDeployRequest` so the deploy handler passes the real kv-server
+management URL(s) for the node.
 
 ## Recommendation order
 
 1. Add a direct `CapacityPanel` E2E (empty/error/loading states).
 2. Decide on `NotLeaderHint` retry in `api.ts` after confirming the KV
    ops request path.
-3. Add a real-backend smoke test for capacity compact/rebuild (companion
-   to the mock-based test in 50).
+3. Add real-backend coverage for recalc/scan/usage once R72 (disk-group
+   ownership assignment) is implemented.
 4. Split `App.tsx` and `app/crow-web/src/lifecycle.rs`.

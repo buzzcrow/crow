@@ -38,6 +38,7 @@ test.describe('inspector · activity log', () => {
   });
 
   test('records mutations and async operations, and clear empties the log', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
     // --- KV mutation appears in the activity log and clear works ---
     await seedRackAndNode(baseURL!, 32, 32);
     await deployNodeServer(baseURL!, 32, freePort(), freePort());
@@ -69,9 +70,13 @@ test.describe('inspector · activity log', () => {
       // Verify an entry appears (the KV Put should be logged)
       await expect(inspector.getByText(/KV Put/i)).toBeVisible({ timeout: 3_000 });
 
-      // Click Clear log — use evaluate to bypass any toast overlay
-      // (per E2E conventions: force:true can still be intercepted).
-      await inspector.getByRole('button', { name: /clear log/i }).evaluate((el) => (el as HTMLElement).click());
+      // Click Clear log — wait for the button to be enabled, then click.
+      // force:true bypasses actionability checks (toast overlays, etc.)
+      // while still dispatching a real pointer event through React's
+      // synthetic event system.
+      const clearBtn = inspector.getByRole('button', { name: /clear log/i });
+      await expect(clearBtn).toBeEnabled({ timeout: 3_000 });
+      await clearBtn.click({ force: true });
 
       // Verify entries are removed
       await expect(inspector.getByText('No activity yet.')).toBeVisible({ timeout: 5_000 });

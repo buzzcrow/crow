@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Server, HardDrive, Boxes, Activity, RotateCw, Loader2, RefreshCw } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
 import { useActivity } from '../contexts/ActivityContext';
@@ -18,7 +18,12 @@ import type {
   ScanStatusResponse,
   DiskGroupInfoDto,
   DiskInfoDto,
+  ZoneUsageDto,
 } from '../types';
+import { ZoneGrid } from './ZoneGrid';
+import { ZoneBitmap } from './ZoneBitmap';
+import { ScannerPanel } from './ScannerPanel';
+import { RecalcPanel } from './RecalcPanel';
 
 interface CapacityPanelProps {
   instances: DiskdbInstanceInfo[];
@@ -73,6 +78,19 @@ export function CapacityPanel({
   const { log } = useActivity();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [expandedDg, setExpandedDg] = useState<number | null>(null);
+  const refreshRef = useRef(onRefresh);
+
+  // Keep ref in sync without re-triggering the poll effect.
+  useEffect(() => { refreshRef.current = onRefresh; }, [onRefresh]);
+
+  // 3s poll for the focused view data (5.7). Retains previous data
+  // until new data arrives — no flicker because React only re-renders
+  // when the parent passes new props.
+  useEffect(() => {
+    if (loading) return;
+    const id = setInterval(() => { void refreshRef.current?.(); }, 3000);
+    return () => clearInterval(id);
+  }, [loading]);
 
   const usageByDgId = useMemo(() => {
     const m = new Map<number, DiskGroupInfoDto>();
@@ -216,46 +234,13 @@ export function CapacityPanel({
         </div>
       </div>
 
-      {/* Scan status */}
-      {scanStatus && (
-        <div className="tw-bg-panel tw-rounded-lg tw-p-4">
-          <div className="tw-flex tw-items-center tw-justify-between tw-mb-2">
-            <h3 className="tw-text-sm tw-font-semibold tw-text-text">Scan Status</h3>
-            {!readonly && (
-              <button
-                onClick={() => handleScan(undefined)}
-                disabled={actionLoading === 'scan-all'}
-                className="tw-flex tw-items-center tw-gap-1 tw-px-3 tw-py-1 tw-text-xs tw-bg-accent tw-text-white tw-rounded-md disabled:tw-opacity-50"
-              >
-                {actionLoading === 'scan-all' ? (
-                  <Loader2 className="tw-h-3 tw-w-3 tw-animate-spin" />
-                ) : (
-                  <Activity className="tw-h-3 tw-w-3" />
-                )}
-                Trigger Scan
-              </button>
-            )}
-          </div>
-          <div className="tw-grid tw-grid-cols-4 tw-gap-3 tw-text-sm">
-            <div>
-              <span className="tw-text-muted">Has run:</span> {String(scanStatus.has_run)}
-            </div>
-            <div>
-              <span className="tw-text-muted">In progress:</span> {String(scanStatus.scan_in_progress)}
-            </div>
-            {scanStatus.summary && (
-              <>
-                <div>
-                  <span className="tw-text-muted">Zones scanned:</span> {scanStatus.summary.zones_scanned}
-                </div>
-                <div>
-                  <span className="tw-text-muted">Leak status:</span> {scanStatus.summary.leak_status}
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
+      {/* Scanner panel (5.8) */}
+      <ScannerPanel
+        scanStatus={scanStatus}
+        readonly={readonly}
+        actionLoading={actionLoading}
+        onScan={() => handleScan(undefined)}
+      />
 
       {/* Per-instance detail */}
       {instances.map((inst) => (
@@ -324,6 +309,8 @@ function DiskGroupRow({
   const cap = dgUsage?.capacity_bytes ?? 0;
   const busy = dgUsage?.busy_bytes ?? 0;
   const pct = busyPct(cap, busy);
+  const [expandedDisk, setExpandedDisk] = useState<string | null>(null);
+  const [selectedZone, setSelectedZone] = useState<ZoneUsageDto | null>(null);
 
   return (
     <div className="tw-border tw-border-border tw-rounded-md tw-overflow-hidden">
@@ -350,9 +337,29 @@ function DiskGroupRow({
       </div>
 
       {isExpanded && (
-        <div className="tw-border-t tw-border-border tw-p-3 tw-space-y-2">
+        <div className="tw-border-t tw-border-border tw-p-3 tw-space-y-3">
+          {/* Per-disk colored boxes (5.4) */}
+          {(dgUsage?.disks || []).length > 0 && (
+            <div className="tw-flex tw-gap-1 tw-flex-wrap">
+              {(dgUsage?.disks || []).map((d) => {
+                const dpct = busyPct(d.capacity_bytes, d.busy_bytes);
+                const color = dpct < 30 ? '#22c55e' : dpct < 60 ? '#eab308' : dpct < 85 ? '#f97316' : '#ef4444';
+                return (
+                  <div
+                    key={d.disk_id}
+                    className="tw-w-8 tw-h-8 tw-rounded tw-flex tw-items-center tw-justify-center tw-text-xs tw-text-white tw-font-medium"
+                    style={{ backgroundColor: color }}
+                    title={`${d.disk_id.slice(0, 12)}… · ${dpct}% busy`}
+                  >
+                    {dpct}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {/* Actions */}
           {!readonly && (
-            <div className="tw-flex tw-gap-2 tw-mb-2">
+            <div className="tw-flex tw-gap-2">
               <button
                 onClick={onScan}
                 disabled={actionLoading === `scan-${dgId}`}
@@ -371,6 +378,9 @@ function DiskGroupRow({
               </button>
             </div>
           )}
+          {/* RecalcPanel (5.9) */}
+          <RecalcPanel dgId={dgId} readonly={readonly} />
+          {/* Per-disk rows with zone grid expansion */}
           {(dgUsage?.disks || []).map((d) => (
             <DiskRow
               key={d.disk_id}
@@ -380,6 +390,13 @@ function DiskGroupRow({
               onCompact={onCompact}
               onRebuild={onRebuild}
               onSetStatus={onSetStatus}
+              isExpanded={expandedDisk === d.disk_id}
+              onToggle={() => {
+                setExpandedDisk(expandedDisk === d.disk_id ? null : d.disk_id);
+                setSelectedZone(null);
+              }}
+              selectedZone={selectedZone}
+              onZoneClick={setSelectedZone}
             />
           ))}
           {(!dgUsage?.disks || dgUsage.disks.length === 0) && (
@@ -398,6 +415,10 @@ interface DiskRowProps {
   onCompact: (diskId: string) => void;
   onRebuild: (diskId: string) => void;
   onSetStatus: (diskId: string, status: string) => void;
+  isExpanded: boolean;
+  onToggle: () => void;
+  selectedZone: ZoneUsageDto | null;
+  onZoneClick: (zone: ZoneUsageDto) => void;
 }
 
 function DiskRow({
@@ -407,58 +428,92 @@ function DiskRow({
   onCompact,
   onRebuild,
   onSetStatus,
+  isExpanded,
+  onToggle,
+  selectedZone,
+  onZoneClick,
 }: DiskRowProps) {
   const pct = busyPct(disk.capacity_bytes, disk.busy_bytes);
   return (
-    <div className="tw-flex tw-items-center tw-justify-between tw-py-2 tw-px-2 tw-rounded hover:tw-bg-bg/30">
-      <div className="tw-flex tw-items-center tw-gap-2 tw-flex-1 tw-min-w-0">
-        <HardDrive className="tw-h-4 tw-w-4 tw-text-muted tw-shrink-0" />
-        <div className="tw-min-w-0">
-          <div className="tw-text-sm tw-text-text tw-truncate">{disk.disk_id}</div>
-          <div className="tw-text-xs tw-text-muted">
-            {diskTypeLabel(disk.disk_type)} · {hwStatusLabel(disk.status)} · {disk.zone_count} zones · {formatBytes(disk.capacity_bytes)}
+    <div className="tw-border tw-border-border/50 tw-rounded">
+      <div
+        className="tw-flex tw-items-center tw-justify-between tw-py-2 tw-px-2 tw-rounded hover:tw-bg-bg/30 tw-cursor-pointer"
+        onClick={onToggle}
+      >
+        <div className="tw-flex tw-items-center tw-gap-2 tw-flex-1 tw-min-w-0">
+          <HardDrive className="tw-h-4 tw-w-4 tw-text-muted tw-shrink-0" />
+          <div className="tw-min-w-0">
+            <div className="tw-text-sm tw-text-text tw-truncate">{disk.disk_id}</div>
+            <div className="tw-text-xs tw-text-muted">
+              {diskTypeLabel(disk.disk_type)} · {hwStatusLabel(disk.status)} · {disk.zone_count} zones · {formatBytes(disk.capacity_bytes)}
+            </div>
           </div>
         </div>
+        <div className="tw-flex tw-items-center tw-gap-2 tw-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <span className="tw-text-xs tw-text-muted tw-w-10 tw-text-right">{pct}%</span>
+          {!readonly && (
+            <div className="tw-flex tw-gap-1">
+              <button
+                onClick={() => onCompact(disk.disk_id)}
+                disabled={actionLoading?.startsWith(`compact-${disk.disk_id}`)}
+                className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
+                title="Compact zones"
+              >
+                Compact
+              </button>
+              <button
+                onClick={() => onRebuild(disk.disk_id)}
+                disabled={actionLoading?.startsWith(`rebuild-${disk.disk_id}`)}
+                className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
+                title="Rebuild zone bitmap"
+              >
+                Rebuild
+              </button>
+              <button
+                onClick={() => onSetStatus(disk.disk_id, 'Down')}
+                disabled={actionLoading?.startsWith(`setstatus-${disk.disk_id}`)}
+                className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
+                title="Set disk down"
+              >
+                Down
+              </button>
+              <button
+                onClick={() => onSetStatus(disk.disk_id, 'Up')}
+                disabled={actionLoading?.startsWith(`setstatus-${disk.disk_id}`)}
+                className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
+                title="Set disk up"
+              >
+                Up
+              </button>
+            </div>
+          )}
+        </div>
       </div>
-      <div className="tw-flex tw-items-center tw-gap-2 tw-shrink-0">
-        <span className="tw-text-xs tw-text-muted tw-w-10 tw-text-right">{pct}%</span>
-        {!readonly && (
-          <div className="tw-flex tw-gap-1">
-            <button
-              onClick={() => onCompact(disk.disk_id)}
-              disabled={actionLoading?.startsWith(`compact-${disk.disk_id}`)}
-              className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
-              title="Compact zones"
-            >
-              Compact
-            </button>
-            <button
-              onClick={() => onRebuild(disk.disk_id)}
-              disabled={actionLoading?.startsWith(`rebuild-${disk.disk_id}`)}
-              className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
-              title="Rebuild zone bitmap"
-            >
-              Rebuild
-            </button>
-            <button
-              onClick={() => onSetStatus(disk.disk_id, 'Down')}
-              disabled={actionLoading?.startsWith(`setstatus-${disk.disk_id}`)}
-              className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
-              title="Set disk down"
-            >
-              Down
-            </button>
-            <button
-              onClick={() => onSetStatus(disk.disk_id, 'Up')}
-              disabled={actionLoading?.startsWith(`setstatus-${disk.disk_id}`)}
-              className="tw-px-2 tw-py-0.5 tw-text-xs tw-bg-panel tw-border tw-border-border tw-rounded hover:tw-bg-bg disabled:tw-opacity-50"
-              title="Set disk up"
-            >
-              Up
-            </button>
-          </div>
-        )}
-      </div>
+      {isExpanded && (
+        <div className="tw-border-t tw-border-border/50 tw-p-3 tw-space-y-3">
+          {/* Zone grid (5.5) */}
+          {disk.zone_usages.length > 0 ? (
+            <div>
+              <div className="tw-text-xs tw-text-muted tw-mb-1">Zone grid ({disk.zone_usages.length} zones)</div>
+              <ZoneGrid zones={disk.zone_usages} onZoneClick={onZoneClick} />
+            </div>
+          ) : (
+            <div className="tw-text-xs tw-text-muted">No zone usage data available.</div>
+          )}
+          {/* Zone bitmap (5.6) */}
+          {selectedZone && (
+            <div>
+              <div className="tw-text-xs tw-text-muted tw-mb-1">
+                Zone {selectedZone.zone_index} bitmap ({selectedZone.busy_block_count} busy / {selectedZone.free_block_count} free blocks)
+              </div>
+              <ZoneBitmap
+                usageBitmap={selectedZone.usage_bitmap}
+                totalUnits={selectedZone.busy_block_count + selectedZone.free_block_count}
+              />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

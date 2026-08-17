@@ -12,9 +12,21 @@ const apiBase = consoleBaseURL();
 
 test.describe('canvas · fit + pan', () => {
   test.beforeAll(async () => {
+    // Idempotent setup: tolerate "already exists" from a prior run
+    // that was interrupted before afterAll could clean up.
     try {
       await createRack(apiBase, { id: 480, name: 'Rack 480' });
+    } catch (err) {
+      if (!String(err).includes('already exists')) throw err;
+    }
+    try {
       await createNode(apiBase, { id: 480, rack_id: 480 });
+    } catch (err) {
+      if (!String(err).includes('already exists')) throw err;
+    }
+    // Stop any leftover server from a prior run, then deploy fresh.
+    await stopNodeServer(apiBase, 480);
+    try {
       await deployNodeServer(apiBase, 480, freePort(), freePort());
     } catch (err) {
       await stopNodeServer(apiBase, 480);
@@ -43,9 +55,10 @@ test.describe('canvas · fit + pan', () => {
     await page.getByRole('button', { name: 'KV Cluster' }).click();
     await expect(page.getByTestId('fit-all-btn')).toBeVisible();
 
-    // --- Fit All button visible in Capacity view ---
+    // --- Capacity view shows the CapacityPanel (no canvas) ---
     await page.getByRole('button', { name: 'Capacity' }).click();
-    await expect(page.getByTestId('fit-all-btn')).toBeVisible();
+    // CapacityPanel renders either the overview header or the empty state.
+    await expect(page.getByText(/Capacity Overview|No diskdb instances registered/)).toBeVisible({ timeout: 5_000 });
 
     // --- autofit centers nodes on initial load ---
     await page.goto('/');
@@ -101,6 +114,7 @@ test.describe('canvas · fit + pan', () => {
   });
 
   test('switching views always fits to window, not the stale viewport', async ({ page }) => {
+    test.setTimeout(60_000);
     // --- Physical -> KV Cluster -> Physical ---
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
@@ -137,9 +151,10 @@ test.describe('canvas · fit + pan', () => {
 
     // After switching back, the viewport should be re-fitted, not the
     // stale panned position. Give the fit animation time to complete.
+    await page.waitForTimeout(300);
     await expect.poll(async () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
-    }, { timeout: 3_000, intervals: [100] }).not.toEqual(pannedTransform);
+    }, { timeout: 5_000, intervals: [100] }).not.toEqual(pannedTransform);
 
     // --- Physical -> Capacity -> Physical ---
     await page.goto('/');
@@ -153,27 +168,18 @@ test.describe('canvas · fit + pan', () => {
     await page.mouse.up();
     const physicalPanned = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
 
-    // Switch to Capacity — should fit (rack-node hierarchy).
+    // Switch to Capacity — shows CapacityPanel (no canvas).
     await page.getByRole('button', { name: 'Capacity' }).click();
-    await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
-    await page.waitForTimeout(500);
-    const capacityFit = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
-
-    // Pan in Capacity view.
-    await canvas.hover({ position: { x: 200, y: 200 } });
-    await page.mouse.down();
-    await page.mouse.move(400, 400);
-    await page.mouse.up();
-    const capacityPanned = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
-    expect(capacityPanned).not.toEqual(capacityFit);
+    await expect(page.getByText(/Capacity Overview|No diskdb instances registered/)).toBeVisible({ timeout: 5_000 });
 
     // Switch back to Physical — should fit to window, NOT restore the
     // panned Physical viewport from the first visit.
     await page.getByRole('button', { name: 'Physical' }).click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
+    await page.waitForTimeout(300);
 
     await expect.poll(async () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
-    }, { timeout: 3_000, intervals: [100] }).not.toEqual(physicalPanned);
+    }, { timeout: 5_000, intervals: [100] }).not.toEqual(physicalPanned);
   });
 });

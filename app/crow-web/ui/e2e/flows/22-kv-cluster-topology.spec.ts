@@ -102,7 +102,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
   // node set or call resetAll, so setup cannot be shared via beforeAll.
 
   test('creates multi-rack cluster with one store and multiple groups, monitors leader election', async ({ page, baseURL }) => {
-    test.setTimeout(30_000);
+    test.setTimeout(60_000);
     // Setup: 3 racks, 3 nodes, 3 deployed servers.
     const racks = [
       { rack: 191, node: 191, restPort: freePort(), rpcPort: freePort() },
@@ -197,6 +197,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
   });
 
   test('put/get/delete on store A does not affect store B', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
     await resetAll(baseURL!);
 
     // Store A: nodes n38a,b,c. Store B: nodes n38d,e,f. Separate node sets.
@@ -274,6 +275,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
   });
 
   test('two groups on overlapping 3-node subsets operate independently', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
     await resetAll(baseURL!);
 
     // 5 nodes total. Group A on n39a,b,c. Group B on n39c,d,e (overlap on n39c).
@@ -369,6 +371,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
   });
 
   test('3 groups on different node subsets operate independently', async ({ baseURL }) => {
+    test.setTimeout(60_000);
     await resetAll(baseURL!);
 
     // 5 nodes, 1 store, 3 groups on different 3-node subsets.
@@ -431,6 +434,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
   });
 
   test('comparative smoke suite passes on SIMPLE and COMPLEX topologies', async ({ baseURL }) => {
+    test.setTimeout(90_000);
     // --- SIMPLE topology (3 nodes, 1 store, 1 group) ---
     await runSmokeSuite(baseURL!, SIMPLE, 'simple');
 

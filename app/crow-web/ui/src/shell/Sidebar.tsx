@@ -137,6 +137,40 @@ export function Sidebar({
               }),
             });
           }
+          // DiskDB server sub-tree (read-only disk-group → disk).
+          if (diskdbNodeIds?.has(nodeId)) {
+            const ndg = nodeDiskGroups[nodeId];
+            const dgChildren: TreeNode[] = (ndg?.diskGroups || []).map((dg) => ({
+              id: `PDG-${nodeId}-${dg.id}`,
+              rawId: dg.id,
+              label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+              type: 'DiskGroup' as const,
+              icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+              parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
+              children: (ndg?.disksByDg[dg.id] || []).map((d) => ({
+                id: `PD-${nodeId}-${dg.id}-${d.disk_id}`,
+                rawId: d.disk_id,
+                label: d.disk_id.slice(0, 12) + '…',
+                type: 'Disk' as const,
+                icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                parentIds: {
+                  rack_id: rack.id,
+                  node_id: nodeId,
+                  disk_group_id: dg.id,
+                  disk_id: d.disk_id,
+                },
+              })),
+            }));
+            children.push({
+              id: `DDB-${nodeId}`,
+              rawId: `${nodeId}-ddb`,
+              label: `DDB-${nodeId}`,
+              type: 'Server',
+              icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+              parentIds: { rack_id: rack.id, node_id: nodeId, service_type: 'Diskdb' },
+              children: dgChildren.length ? dgChildren : undefined,
+            });
+          }
           return {
             id: `N-${nodeId}`,
             rawId: nodeId,
@@ -192,7 +226,7 @@ export function Sidebar({
               id: `CDG-${nodeId}-${dg.id}`,
               rawId: dg.id,
               label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
-              type: 'Group' as const,
+              type: 'DiskGroup' as const,
               icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
               health: dgStatus != null ? hwStatusToUiHealth(dgStatus) : undefined,
               parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
@@ -202,7 +236,7 @@ export function Sidebar({
                   id: `CD-${nodeId}-${dg.id}-${d.disk_id}`,
                   rawId: d.disk_id,
                   label: d.disk_id.slice(0, 12) + '…',
-                  type: 'Replica' as const,
+                  type: 'Disk' as const,
                   icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
                   health: diskStatus != null ? hwStatusToUiHealth(diskStatus) : undefined,
                   parentIds: {
