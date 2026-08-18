@@ -1,41 +1,54 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# Flatbuffer RPC Engine Library (R104)
+# CROW - Design: RPC Engine
 
-Backlog: [`doc/backlog/R104-protocol-flatbuffer-rpc.md`](../backlog/R104-protocol-flatbuffer-rpc.md)
-Root design: [`doc/design/protocol/design-crow-protocol.md`](../design/protocol/design-crow-protocol.md) §1 (Non-Goals: "No transport encoding" — R104 fills that gap).
+Depends on: [`design-crow-protocol.md`](design-crow-protocol.md) §1 (Non-Goals: "No transport encoding" — this doc fills that gap)
+Satisfies: `design-crow-protocol.md` §1 (transport encoding for the RPC layer)
 
-This draft covers the implementation design for `crow-rpc`, a reusable
-RPC library: a C++ engine (framing, I/O, connection pool, schedule) with
-a thin Rust FFI wrapper exposing an async facade to the rest of CROW.
-The engine is transport-agnostic behind a `Transport` interface with
-three implementations — epoll (Linux), kqueue (macOS), RDMA (Linux,
-ibverbs) — sharing all framing, correlation, and pooling code. The
-buffer model is a ref-counted native `Buffer` from a C++ `BufferPool`,
-allocator-agnostic (glibc / RDMA-registered / future GDS / object
-handle), designed so the diskio data path and future RDMA/GDS/S3 flows
-share one buffer abstraction.
+`crow-rpc` is a reusable RPC library: a C++ engine (framing, I/O,
+connection pool, schedule) with a thin Rust FFI wrapper exposing an async
+facade to the rest of CROW. The engine is transport-agnostic behind a
+`Transport` interface with three implementations — epoll (Linux),
+kqueue (macOS), RDMA (Linux, ibverbs) — sharing all framing,
+correlation, and pooling code. The buffer model is a ref-counted native
+`Buffer` from a C++ `BufferPool`, allocator-agnostic (glibc /
+RDMA-registered / future GDS / object handle), designed so the diskio
+data path and future RDMA/GDS/S3 flows share one buffer abstraction.
 
-Nothing is landed yet — R104 is a foundation library with no
-dependencies on prior R-items. The design draws on the author's prior
-C++ RPC library as a reference;
-the core ideas (12-byte header, control+data separation, per-connection
+The core ideas (12-byte header, control+data separation, per-connection
 writer, request/response correlation, flatbuffer schemas, ping-in-base)
-are ported, but the code is rewritten — the data structures and I/O loop
-are new, designed for the unified TCP+RDMA transport and the
-ref-counted buffer model. Architecture decisions and rationale are in
-the root design; this doc does not repeat them.
+are ported from the author's prior C++ RPC library as a reference, but
+the code is rewritten — the data structures and I/O loop are new,
+designed for the unified TCP+RDMA transport and the ref-counted buffer
+model. Architecture decisions and rationale are in the root design; this
+doc does not repeat them.
+
+## Table of Contents
+
+- [1. Buffer Model](#1-buffer-model)
+- [2. Framing Layer](#2-framing-layer)
+- [3. Transport Interface](#3-transport-interface)
+- [4. Socket Transport — epoll + kqueue](#4-socket-transport--epoll--kqueue)
+- [5. RDMA Transport](#5-rdma-transport)
+- [6. Connection Pool + Reconnect](#6-connection-pool--reconnect)
+- [7. Request/Response Correlation](#7-requestresponse-correlation)
+- [8. Schedule Subsystem](#8-schedule-subsystem)
+- [9. Server Side](#9-server-side)
+- [10. Backpressure](#10-backpressure)
+- [11. FFI — Rust Async Facade](#11-ffi--rust-async-facade)
+- [12. Flatbuffer Schema + Codegen](#12-flatbuffer-schema--codegen)
+- [13. Platform Build Matrix](#13-platform-build-matrix)
 
 ---
 
 ## 1. Buffer Model
 
-`lib/crow-rpc/cpp/include/crow-rpc/buffer.h`
+`lib/crow-rpc/include/crow-rpc/buffer.h`
 
 ### 1.1 Why
 
-R104's two use cases both need raw-byte payloads with no copy:
+The two use cases both need raw-byte payloads with no copy:
 - Consensus hot path — small control messages, high rate.
 - Diskio data path — MB-scale raw payloads, written once and sent.
 
@@ -176,7 +189,7 @@ path: EC, checksum, and RPC send each hold their own `Buffer` via
 
 ## 2. Framing Layer
 
-`lib/crow-rpc/cpp/include/crow-rpc/framing.h`
+`lib/crow-rpc/include/crow-rpc/framing.h`
 
 ### 2.1 Why
 
@@ -394,7 +407,7 @@ continues where it left off. No frame corruption, no re-read.
 
 ## 3. Transport Interface
 
-`lib/crow-rpc/cpp/include/crow-rpc/transport.h`
+`lib/crow-rpc/include/crow-rpc/transport.h`
 
 ### 3.1 Why
 
@@ -508,8 +521,8 @@ The send queue holds `OutFrame*`. The worker drains up to `BATCH_MAX`
 
 ## 4. Socket Transport — epoll + kqueue
 
-`lib/crow-rpc/cpp/include/crow-rpc/socket_transport.h`
-`lib/crow-rpc/cpp/src/socket_transport.cpp`
+`lib/crow-rpc/include/crow-rpc/socket_transport.h`
+`lib/crow-rpc/src/socket_transport.cpp`
 
 ### 4.1 Why
 
@@ -725,8 +738,8 @@ primitives.
 
 ## 5. RDMA Transport
 
-`lib/crow-rpc/cpp/include/crow-rpc/rdma_transport.h`
-`lib/crow-rpc/cpp/src/rdma_transport.cpp`
+`lib/crow-rpc/include/crow-rpc/rdma_transport.h`
+`lib/crow-rpc/src/rdma_transport.cpp`
 
 ### 5.1 Why
 
@@ -822,14 +835,14 @@ is the basis, rewritten for the new connection model.
 
 ## 6. Connection Pool + Reconnect
 
-`lib/crow-rpc/cpp/include/crow-rpc/pool.h`
+`lib/crow-rpc/include/crow-rpc/pool.h`
 
 ### 6.1 Why
 
 Callers (consensus replicas, diskio clients) talk to a fixed set of
 endpoints. They want connection reuse (no handshake per call), load
 spreading, and automatic recovery. The reference's `connection_pool` is
-a simple vector; R104 adds round-robin selection and a background
+a simple vector; this design adds round-robin selection and a background
 reconnect task.
 
 ### 6.2 ConnectionPool
@@ -889,13 +902,13 @@ not on a tokio thread — it's a C++ internal concern.
 
 ## 7. Request/Response Correlation
 
-`lib/crow-rpc/cpp/include/crow-rpc/caller.h`
+`lib/crow-rpc/include/crow-rpc/caller.h`
 
 ### 7.1 Why
 
 The caller needs a completion signal when the response arrives. The
 reader (worker thread) needs to find the right callback to invoke. The
-reference uses a hazard-pointer hashmap; R104 uses
+reference uses a hazard-pointer hashmap; this design uses
 `folly::ConcurrentHashMap<request_id, CompletionCallback>` — a
 lock-free concurrent hashmap from folly (already a pixi dependency for
 crow-tree). The consensus hot path has high TPS on request-id
@@ -963,13 +976,13 @@ arrives, `on_response` finds no entry, logs "late response", discards.
 
 ## 8. Schedule Subsystem
 
-`lib/crow-rpc/cpp/include/crow-rpc/schedule.h`
+`lib/crow-rpc/include/crow-rpc/schedule.h`
 
 ### 8.1 Why
 
 Connections need keepalive pings at a fixed interval. Reconnect needs
 delayed retries with backoff. Per-request deadlines need timeout. The
-reference uses Linux `timerfd` + a dedicated timer thread; R104 uses the
+reference uses Linux `timerfd` + a dedicated timer thread; this design uses the
 worker's timer (timerfd on Linux epoll, `EVFILT_TIMER` on macOS kqueue,
 CQ-event-based timer on RDMA). No thread-per-timer — every scheduled
 task is a callback fired by the worker's event loop.
@@ -1026,7 +1039,7 @@ queue is the only state, no thread-per-timer.
 
 ## 9. Server Side
 
-`lib/crow-rpc/cpp/include/crow-rpc/server.h`
+`lib/crow-rpc/include/crow-rpc/server.h`
 
 ### 9.1 Why
 
@@ -1101,7 +1114,7 @@ and return `nullptr` (response sent later).
 
 ## 10. Backpressure
 
-`lib/crow-rpc/cpp/include/crow-rpc/connection.h` (shared with §3)
+`lib/crow-rpc/include/crow-rpc/connection.h` (shared with §3)
 
 ### 10.1 Why
 
@@ -1152,7 +1165,7 @@ requests and awaits completions via oneshot channels.
 
 ### 11.2 C ABI
 
-`lib/crow-rpc/cpp/include/crow-rpc/c_api.h` — a stable C ABI, same
+`lib/crow-rpc/include/crow-rpc/c_api.h` — a stable C ABI, same
 pattern as `crow-tree/c_api.h`. Opaque handles, exception-free,
 `crow_rpc_status` return codes.
 
@@ -1318,10 +1331,10 @@ service-specific schemas.
 Control messages need a serialization format that is compact, zero-copy
 on read, and schema-evolvable. Flatbuffers gives all three: the receiver
 gets a `&[u8]` view into the buffer with no deserialization step. The
-reference uses flatbuffers throughout; R104 follows suit. This
+reference uses flatbuffers throughout; this design follows suit. This
 introduces a second serialization format alongside protobuf (prost) in
-the codebase — the backlog's Open Question (a) is resolved by the
-user's explicit direction to use flatbuffers for the new RPC library.
+the codebase — resolved by the user's explicit direction to use
+flatbuffers for the new RPC library.
 
 ### 12.2 Common Schemas
 
@@ -1342,8 +1355,8 @@ Ported from the reference implementation's proto schemas:
   ChunkId.
 
 Service-specific schemas (diskio, consensus) live in their own crates
-and `include` the common schemas. R104 ships only the common set; the
-diskio schema is R105's concern.
+and `include` the common schemas. This design ships only the common set;
+the diskio schema is the diskio engine's concern.
 
 ### 12.3 Codegen
 
@@ -1393,396 +1406,3 @@ pixi: add `flatbuffers` (for `flatc`) to dependencies. On Linux, add
 `libibverbs` and `librdmacm` as optional RDMA deps (or rely on
 system packages).
 
----
-
-## Scope
-
-New crate `lib/crow-rpc/` (mirrors `lib/crow-tree/` structure):
-
-C++ engine (`lib/crow-rpc/cpp/`):
-- `CMakeLists.txt` — build config, libibverbs/librdmacm probe, flatc
-  codegen, `CROW_RPC_HAVE_RDMA` gate.
-- `include/crow-rpc/buffer.h` — `Buffer`, `BufferPool`,
-  `SystemBufferPool`, `BufferType`.
-- `include/crow-rpc/framing.h` — `Header`, `Frame`, `FrameParser`,
-  `FramingError`.
-- `include/crow-rpc/transport.h` — `Transport` interface, `Connection`,
-  `OutFrame`.
-- `include/crow-rpc/socket_transport.h` — `SocketTransport` base,
-  `EpollEngine`, `KqueueEngine`.
-- `include/crow-rpc/rdma_transport.h` — `RdmaTransport`,
-  `RdmaBufferPool` (Linux + `CROW_RPC_HAVE_RDMA` only).
-- `include/crow-rpc/caller.h` — `RemoteCaller`, `CompletionCallback`.
-- `include/crow-rpc/pool.h` — `ConnectionPool`, `PoolConfig`,
-  reconnect.
-- `include/crow-rpc/schedule.h` — `ScheduledExecutor`, `TimerHandle`.
-- `include/crow-rpc/server.h` — `RpcServer`, `HandlerFn`, `offload_pool`.
-- `include/crow-rpc/c_api.h` — stable C ABI for FFI.
-- `include/crow-rpc/proto/*_generated.h` — flatc-generated headers (from
-  `crow-protocol`'s `.fbs` schemas).
-- `src/` — mirrors `include/`.
-- `tests/` — C++ unit tests (gtest), like crow-tree.
-
-Rust FFI (`lib/crow-rpc/ffi/`):
-- `Cargo.toml` — deps: `tokio` (rt, sync), `crow-protocol` (for
-  flatbuffer types), `thiserror`, `tracing`. Build-dep: `cc`.
-- `build.rs` — links C++ via CMake (like `crow-tree/ffi/build.rs`).
-- `src/lib.rs` — re-exports.
-- `src/buffer.rs` — `Buffer` (RAII handle, `ref_clone`, `Drop` =
-  release).
-- `src/pool.rs` — `BufferPool` handle.
-- `src/connection.rs` — `Connection` handle.
-- `src/caller.rs` — `RemoteCaller` (async facade, oneshot-backed
-  future), `Response`, `on_complete_cb`.
-- `src/server.rs` — `RpcServer` (async facade, handler registration).
-- `src/schedule.rs` — `ScheduledExecutor` (async facade).
-- `src/error.rs` — `RpcError`, status code mapping.
-- `src/sys.rs` — `extern "C"` declarations (bindgen or hand-written).
-
-Schemas (`lib/crow-protocol/src/proto/`):
-- `msg_type.fbs`, `ret_code.fbs`, `common_msg.fbs`, `common_type.fbs`.
-- `crow-protocol`'s `build.rs` runs `flatc --rust` and re-exports the
-  generated types.
-
-Rust integration tests (`lib/crow-rpc/ffi/tests/`):
-- `framing_test.rs`, `buffer_test.rs`, `connection_test.rs`,
-  `pool_test.rs`, `caller_test.rs`, `server_test.rs`,
-  `schedule_test.rs`.
-
-Modified files:
-- `Cargo.toml` (workspace root) — add `lib/crow-rpc` and
-  `lib/crow-rpc/ffi` to `members`; add `flatbuffers` to
-  `[workspace.dependencies]`.
-- `lib/crow-protocol/Cargo.toml` — add `flatbuffers` dependency; add
-  `.fbs` schemas to `src/proto/`; update `build.rs` to run `flatc --rust`
-  alongside the existing `tonic-build` proto codegen.
-- `pixi.toml` — add `flatbuffers` conda-forge dep (provides `flatc`);
-  on Linux, `libibverbs`/`librdmacm` for RDMA; add
-  `test-rpc = { cmd = "cargo test -p crow-rpc-ffi --all-targets", depends-on = ["build"] }`
-  task.
-- `doc/doc_index.md` — no change (working doc, not indexed).
-
----
-
-## Complexity
-
-**High.** The C++ engine is a full transport stack — epoll, kqueue,
-RDMA, buffer pool, framing, correlation, pooling, schedule, server.
-The hard parts:
-
-- **Unified `Transport` interface** — getting the abstraction right so
-  epoll, kqueue, and RDMA share framing/correlation/pooling without
-  leaking transport details into the shared code. The `SocketTransport`
-  base + `EpollEngine`/`KqueueEngine` split is the main design effort.
-- **RDMA implementation** — QP/CQ management, buffer registration, CM
-  event handling. Standard but intricate; the reference is the basis,
-  rewritten for the new interfaces.
-- **Ref-counted buffer lifecycle across FFI** — the `Buffer` refcount
-  lives in C++; Rust `Drop` calls `release`. Getting the
-  `Send`/`Drop`/refcount semantics right so no use-after-free and no
-  leak across the FFI boundary.
-- **Receive-side zero-copy (pull-based parser)** — the parser drives
-  allocation and tells the read loop where to read, directly into pool
-  buffers. The state machine must correctly handle partial reads across
-  TCP segments (resumable per-state offsets) and allocate the control
-  and data buffers at the right transition points. This is new code not
-  in the reference (which uses a push-based parser with scratch buffer).
-- **Two-direction FFI** — the `on_complete` callback runs on the C++
-  I/O thread; keeping it O(1) and ensuring the tokio runtime outlives
-  the C++ engine (shutdown order).
-- **Cross-platform (epoll + kqueue)** — two event-loop implementations
-  sharing one `SocketTransport` base. The kqueue path is standard but
-  untested in the reference (which is Linux-only).
-
-What is reused vs new: the header layout, the control+data separation,
-the msg_type/ret_code/common_msg schemas, and the ping-in-base-handler
-pattern are direct ports from the reference. The unified
-`Transport` interface, the `SocketTransport`/`EpollEngine`/
-`KqueueEngine` split, the ref-counted `Buffer`/`BufferPool` model, the
-Rust async FFI facade, and the rewritten RDMA transport are new.
-
----
-
-## Test Design
-
-### C++ Unit Tests (UT, gtest)
-
-**Buffer** (`tests/buffer_test.cpp`):
-- `alloc(1024)` → returns `Buffer*` with `capacity >= 1024`, `size == 0`,
-  `ref == 1`. Guards the alloc invariant.
-- `write(data, 512)` → `size == 512`, bytes match. Guards the
-  write-once path.
-- `ref_clone()` → two handles, `ref == 2`; `release()` one → `ref == 1`,
-  buffer not recycled; `release()` other → `ref == 0`, buffer recycled
-  to pool. Guards the refcount + recycle invariant.
-- `alloc` from a pool with one recycled buffer → reuses the recycled
-  allocation (same `data` pointer). Guards pool recycling.
-- `alloc` when pool exhausted → returns `nullptr`. Guards the
-  capacity bound.
-
-**Framing** (`tests/framing_test.cpp`):
-- Encode a frame with header + 128-byte control + 1 MB data → parse
-  yields identical header fields, control bytes, data bytes. Guards the
-  round-trip invariant.
-- Parse a header with wrong magic → `FramingError::BadMagic`. Guards
-  protocol alignment.
-- Feed the parser 10 bytes, then 10 bytes (header split) → reassembles
-  into a valid header. Guards partial-read handling.
-- Parse a control-only frame (`data_size == 0`) → `Frame` with
-  `data == nullptr`. Guards the control-only path.
-- Parse a header with `data_size` exceeding `max_data_size` (4 MB) →
-  `FramingError::DataTooLarge`. Guards the allocation-bomb defense.
-  `max_data_size` → `FramingError::DataTooLarge`. Guards the
-  allocation-bomb defense.
-
-**Schedule** (`tests/schedule_test.cpp`):
-- `schedule_recurring(10ms, counter)` run for ~1s → counter is 100 ± 5.
-  Guards the periodic timing invariant.
-- `schedule_task(50ms, flag)` → flag set exactly once after ≥ 50ms, not
-  before. Guards the one-shot invariant.
-- 1000 concurrent `schedule_task(100ms, ...)` → thread count of the
-  process does not increase (all on worker thread). Guards the
-  no-thread-per-timer invariant.
-
-### Rust Integration Tests (E2E, via FFI)
-
-All use an in-process echo `RpcServer` on `127.0.0.1:0` (ephemeral
-port).
-
-**Connection + writer** (`tests/connection_test.rs`):
-- Two concurrent `call()` on the same connection → both responses
-  received, no interleaving. Guards the multi-producer queue + reader
-  correlation.
-- Push 10 frames rapidly → server receives all 10 in order. Guards the
-  writer batching + partial-write resume.
-- Kill the server mid-call → `call()` returns `ConnectionError` within
-  1 second. Guards the fail-fast-on-drop invariant.
-- Send a 1 MB data payload via `call()` → server receives control + 1
-  MB data intact. Guards the large-payload scatter-gather path.
-- Server returns a 1 MB data payload → caller receives `Buffer` of
-  correct size; verify the `Buffer`'s data pointer is the same address
-  the kernel wrote into (zero-copy receive: the pool buffer *is* the
-  receive buffer, no scratch copy). Guards the pull-based parser's
-  zero-copy receive invariant.
-- `call_one_way()` → returns immediately, server receives the message.
-  Guards the one-way path.
-
-**Buffer across consumers** (`tests/buffer_test.rs`):
-- Allocate a `Buffer`, `ref_clone` for 3 consumers (EC, checksum, RPC
-  send), drop all 3 → buffer recycled to pool (next `alloc` reuses it).
-  Guards the multi-consumer refcount lifecycle.
-
-**Pool + reconnect** (`tests/pool_test.rs`):
-- Pool with 3 connections, 6 sequential `call()`s → connections hit in
-  round-robin order 1,2,3,1,2,3. Guards round-robin selection.
-- Drop the server, restart it → reconnect task restores the connection
-  → subsequent `call()`s succeed. Guards the reconnect path.
-- Per-request timeout 100ms on a handler that sleeps 500ms →
-  `TimeoutError` at ~100ms. Guards the timeout invariant.
-- `BackpressureMode::Reject` with queue capacity 2, push 3 frames
-  rapidly → 3rd `call()` returns `BackpressureError`. Guards the
-  backpressure bound.
-
-**Server** (`tests/server_test.rs`):
-- Send a frame with unregistered `msg_type` → server responds with
-  `UnknownMessage`, `ret_code = HaveNotSupport`. Connection stays open;
-  next valid call succeeds. Guards the unknown-type fallback.
-- Handler throws → server sends error response (`ret_code = Error`),
-  connection stays open. Guards the handler-exception isolation.
-- Ping request → ping response with matching `id`. Guards the common
-  handler.
-
-**Test commands**: `pixi run test-rpc` (Rust FFI integration tests),
-`ctest --test-dir lib/crow-rpc/cpp/build` (C++ unit tests),
-`pixi run cargo fmt --all -- --check`,
-`pixi run cargo clippy --all-targets -- -D warnings`,
-`clang-format --dry-run --Werror` (changed `.cpp`/`.h`),
-`tree-lint` (clang-tidy, changed C++).
-
----
-
-## Module Structure
-
-```
-lib/crow-rpc/
-├── CMakeLists.txt                 # C++ engine build, flatc codegen (from crow-protocol .fbs), RDMA gate
-├── cpp/
-│   ├── CMakeLists.txt
-│   ├── include/crow-rpc/
-│   │   ├── buffer.h               # Buffer, BufferPool, BufferType, refcount, ibv_mr
-│   │   ├── framing.h              # Header, Frame, FrameParser, FramingError
-│   │   ├── transport.h            # Transport interface, Connection, OutFrame
-│   │   ├── socket_transport.h     # SocketTransport base, EpollEngine, KqueueEngine
-│   │   ├── rdma_transport.h       # RdmaTransport, RdmaBufferPool (Linux+RDMA)
-│   │   ├── caller.h               # RemoteCaller, CompletionCallback, folly::ConcurrentHashMap
-│   │   ├── pool.h                 # ConnectionPool, reconnect
-│   │   ├── schedule.h             # ScheduledExecutor, TimerHandle
-│   │   ├── server.h               # RpcServer, HandlerFn, offload_pool
-│   │   ├── c_api.h                # stable C ABI for FFI
-│   │   └── proto/                 # flatc-generated headers (build artifacts)
-│   ├── src/                       # mirrors include/
-│   └── tests/                     # C++ unit tests (gtest)
-├── ffi/                           # Rust FFI wrapper (like crow-tree/ffi)
-│   ├── Cargo.toml                 # deps: tokio, crow-protocol, thiserror, tracing
-│   ├── build.rs                   # links C++ via CMake
-│   ├── src/
-│   │   ├── lib.rs                 # re-exports
-│   │   ├── buffer.rs              # Buffer (RAII, ref_clone, Drop=release)
-│   │   ├── pool.rs                # BufferPool handle
-│   │   ├── connection.rs          # Connection handle
-│   │   ├── caller.rs              # RemoteCaller (async, oneshot-backed)
-│   │   ├── server.rs              # RpcServer (async facade)
-│   │   ├── schedule.rs            # ScheduledExecutor (async facade)
-│   │   ├── error.rs               # RpcError, status mapping
-│   │   └── sys.rs                 # extern "C" declarations
-│   └── tests/                     # Rust integration tests (via FFI)
-
-lib/crow-protocol/src/proto/       # flatbuffer schemas (single home for all proto types)
-├── msg_type.fbs                   # FBMsgType enum
-├── ret_code.fbs                   # FBRetCode enum
-├── common_msg.fbs                 # ping request/response, unknown message
-└── common_type.fbs                # FBInt128, FBInt192
-```
-
----
-
-## Config Extensions
-
-`ConnectionConfig` (C++):
-- `send_queue_capacity: uint32_t` — send queue bound (default 256).
-- `backpressure_mode: BackpressureMode` — `Reject` or `Await` (default
-  `Reject`).
-- `max_data_size: uint32_t` — max data payload per frame (default 4 MB).
-- `recv_buf_size: uint32_t` — receive scratch buffer (default 64 KB).
-
-`PoolConfig` (C++):
-- `request_timeout: Duration` — per-request deadline (default 5 s).
-- `retry_count: uint32_t` — retries on `ConnectionError` (default 2).
-- `reconnect_initial_delay: Duration` — first backoff (default 100 ms).
-- `reconnect_max_delay: Duration` — backoff cap (default 10 s).
-- `reconnect_max_retries: uint32_t` — retries before unhealthy (default
-  0 = infinite).
-
-`ServerConfig` (C++):
-- `max_connections: uint32_t` — accept limit (default 1024).
-- `max_data_size: uint32_t` — same as `ConnectionConfig`.
-- `offload_pool_threads: uint32_t` — offload thread pool size (default
-  4).
-
-`BufferPoolConfig` (C++):
-- `default_capacity: uint32_t` — default buffer capacity (default 1 MB).
-- `max_buffers: uint32_t` — pool capacity (default 1024).
-
-All configs have a `validate()` method; invalid configs are rejected at
-construction. No changes to existing CROW config files — `crow-rpc` is a
-library; server/client crates that use it (R32, R105) add their own
-config sections.
-
----
-
-## Server Wiring
-
-`crow-rpc` is a library, not a binary. It plugs into a server (e.g. the
-future diskio server, R105) as:
-
-a. Construct `BufferPool` (glibc for TCP, RDMA-registered for RDMA).
-b. Construct `Transport` (`TcpTransport` / `RdmaTransport`).
-c. Construct `RpcServer(transport, resolver, pool)` — registers the
-   common ping handler.
-d. `server.register_handler(msg_type, handler)` for each service RPC.
-e. `server.listen(addr)` → `server.start()` — acceptor + worker threads
-   run. The caller's `main` spawns this and joins on shutdown.
-f. On shutdown: `server.stop()` → `transport.shutdown()` →
-   `pool.destroy()`.
-
-On the client side (e.g. the future diskio client):
-a. Construct `BufferPool` + `Transport` + `ConnectionPool`.
-b. `pool.get_for(endpoint)` → `Connection`.
-c. `caller.call(conn, control_buf, data_buf).await` → `Response`.
-d. The pool manages connections, reconnect, timeout internally.
-
-No changes to `crow-kv-server` or `crow-diskdb` startup in R104 — those
-integrations are R32 and R105 respectively. R104 delivers the library +
-its own test suite.
-
----
-
-## Impact on Other Requirements
-
-The `Buffer`-from-pool model (not `bytes::Bytes`) affects downstream
-requirements that will use `crow-rpc`:
-
-- **R105 (diskio engine)** — the diskio write/read RPCs must accept
-  `Buffer*` for the data payload, not `Bytes`. The chunk writer gets a
-  `Buffer` from the RPC pool, writes the strip data into it, calls
-  `diskio_write(control, data_buf)`. The data lands in the I/O buffer
-  without a copy because the RPC pool buffer *is* the I/O buffer (or is
-  RDMA-registered for direct disk I/O). R105's design doc must reflect
-  this.
-- **R94 / R106 (chunk writers)** — the chunk writer's strip data flows
-  through `Buffer`: EC computation reads the buffer, checksum reads the
-  buffer, RPC send consumes the buffer. Each holds a `ref_clone`; the
-  buffer recycles when all drop. R94/R106 must design around this
-  multi-consumer buffer lifecycle.
-- **R32 (KV consensus hot path)** — the consensus control messages are
-  small (no data payload); `call(control_buf, nullptr)` is the pattern.
-  The migration from gRPC to `crow-rpc` changes the transport, not the
-  consensus logic. R32's design doc must reflect the `crow-rpc` API.
-
-These requirements are not modified by R104. After R104 implementation
-is complete and the design is confirmed, a follow-up task will be
-created to update each impacted requirement's backlog doc / design
-draft to reference the `Buffer`-from-pool model and the `crow-rpc` API.
-R104 establishes the buffer abstraction; the follow-up task propagates
-it to the consumers.
-
----
-
-## Open Questions
-
-None open. All design decisions resolved (see Decisions below).
-
-## Decisions
-
-1. **12-byte header with `data_size` in header.** The header carries
-   `data_size: u32` directly, making the parser fully self-contained —
-   no `DataSizeResolver` indirection, no schema dependency in the
-   framing layer. The header is 12 bytes
-   `[magic:2][msg_type:2][msg_size:2][data_size:4][msg_offset:1][flags:1]`,
-   down from the reference's 20 bytes. Removed from the reference:
-   `create_ms` (redundant with `rpc_create_nano` in the control
-   message), `padding` (no longer needed), magic reduced 4→2 bytes,
-   `msg_offset` reduced 2→1 byte. Added: `data_size`, `flags` (one-way,
-   compression, priority bits).
-
-2. **RDMA implemented in R104, testing deferred.** RDMA code lands in
-   R104 alongside TCP, behind the unified `Transport` interface. This
-   avoids design issues that arise when bolting RDMA onto a TCP-only
-   implementation later — the `Transport`/`Connection`/`Buffer`/parser
-   interfaces are designed for both from the start, and RDMA code
-   validates that the abstractions hold. Full RDMA testing is deferred
-   until RNIC hardware is available; the `RdmaTransport` code is gated
-   behind `CROW_RPC_HAVE_RDMA` and unit-tested via mocks where possible.
-   TCP is tested on both Linux (epoll) and macOS (kqueue).
-
-3. **Receive-side zero-copy in v1.** The parser uses a pull-based API
-   (§2.4) — `next_read_target()` tells the read loop where to read,
-   directly into pool-allocated `Buffer`s. No scratch buffer, no copy on
-   the receive side. This unifies the TCP and RDMA receive paths (RDMA
-   pre-posts recv WRs into the same pool buffers). No design blocking
-   issue — the parser API change is contained in `framing.h`/
-   `framing.cpp`, and the read loop (§4.5) is a straightforward
-   `target = next_read_target() → read → advance` cycle.
-
-4. **kqueue testing coverage.** The kqueue engine is new (the reference
-   is Linux-only). macOS dev machines provide the test platform. The
-   integration tests run on both Linux (epoll) and macOS (kqueue) via
-   pixi. If kqueue-specific bugs surface, they're caught by the same
-   E2E tests that run on epoll. No separate kqueue test suite — the
-   shared `SocketTransport` base means the test surface is shared.
-
-5. **Impact on other requirements — follow-up task after R104 impl.**
-   After R104 implementation is complete and the design is confirmed, a
-   follow-up task will be created to update R105, R94/R106, and R32 to
-   reference the `Buffer`-from-pool model and the `crow-rpc` API. R104
-   does not modify those requirements.

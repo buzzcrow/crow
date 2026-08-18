@@ -93,19 +93,9 @@ complexity, and dependency. Before implementation, follow the
 
 ### Data Path (diskio + chunk object writers + read flow)
 
-Dependency order: R104 → R105 → R93 → R94 → R106, R107. R32 depends
-on R104 but is in a separate area (KV consensus).
+Dependency order: R105 → R93 → R94 → R106, R107. R32 depends
+on the RPC library but is in a separate area (KV consensus).
 
-- **[R104](R104-protocol-flatbuffer-rpc.md)** — Flatbuffer RPC engine
-  library — Area: protocol — Reusable Rust RPC crate (`crow-rpc`)
-  with 20-byte header + flatbuffer control message + raw data
-  payload framing, per-connection lock-free MPSC writer queue with
-  `writev` batching, schedule subsystem (timer wheel for
-  delayed/recurring tasks), connection pool with automatic reconnect
-  + backpressure. No h2, no HTTP, no per-stream state. Foundation
-  for both the KV consensus hot path (R32) and the diskio engine
-  (R105). Reference: the reference's RPC engine (framing, schedule, epoll
-  transport).
 - **[R105](R105-diskio-disk-io-engine.md)** — Disk IO engine — Area:
   diskio — Per-node disk IO server (`crow-diskio`) using io_uring on
   Linux (SQE/CQE for read/write/fsync, no `spawn_blocking`) with
@@ -191,13 +181,13 @@ on R104 but is in a separate area (KV consensus).
   rebuild. Triggered on move via watch/notify (R78) with a periodic
   safety net. Blocked on the chunkdb server component (unlanded) and
   R81 Part 2.
-- **[R32](R32-kv-custom-rust-rpc.md)** — KV consensus hot path → R104
-  RPC — Area: kv / RPC — Migrate the internal replica-to-replica
-  Paxos path from gRPC/tonic to the R104 flatbuffer RPC library
-  (`crow-rpc`). Recovers the ~17% h2-lock throughput loss at 2T:1C
+- **[R32](R32-kv-custom-rust-rpc.md)** — KV consensus hot path →
+  `crow-rpc` — Area: kv / RPC — Migrate the internal replica-to-replica
+  Paxos path from gRPC/tonic to the `crow-rpc` flatbuffer RPC library.
+  Recovers the ~17% h2-lock throughput loss at 2T:1C
   (measured in `kv-read-flow-analysis.md`). Protocol semantics
   preserved (same request/response shapes, `NotLeaderHint`, error
-  codes); only the transport changes. Depends on R104 (RPC lib).
+  codes); only the transport changes. Depends on `crow-rpc` (RPC lib).
   Management API stays on Axum/HTTP. Reference: the reference's RPC engine.
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB

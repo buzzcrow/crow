@@ -855,6 +855,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "crow-rpc-ffi"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tokio",
+]
+
+[[package]]
 name = "crow-tree-ffi"
 version = "0.1.0"
 dependencies = [

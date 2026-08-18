@@ -87,3 +87,8 @@ that keeps one source of truth across crates.
   aliases, re-export/alias pattern, optional `utoipa` schema derives,
   the orphan rule for local conversions, the module architecture, and
   the consumer pattern.
+- [`design-crow-protocol-rpc.md`](design-crow-protocol-rpc.md) — RPC
+  engine: the `crow-rpc` C++ engine (buffer model, framing, transport
+  interface, epoll/kqueue/RDMA transports, connection pool, request
+  correlation, schedule, server, backpressure) and the Rust FFI async
+  facade. Fills the "No transport encoding" gap in §1.
