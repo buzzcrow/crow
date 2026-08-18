@@ -3,9 +3,9 @@
 
 import React from 'react';
 import { cn } from '../../utils/cn';
-import { CheckCircle2, AlertTriangle, XCircle, HelpCircle, Crown, Users } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, XCircle, HelpCircle, Crown, Users, Wrench, EyeOff, PowerOff } from 'lucide-react';
 import { ReplicaRole, ReplicaState, GroupHealth, NodeHealth } from '../../types';
-import { toDisplayState, toUiHealth, toUiRole } from '../../utils/entityDisplay';
+import { toDisplayState, toUiHealth, toUiRole, hwStatusLabel, HwStatusName } from '../../utils/entityDisplay';
 
 type BadgeVariant = 'default' | 'secondary' | 'outline' | 'health' | 'role';
 type BadgeSize = 'sm' | 'md' | 'lg';
@@ -123,6 +123,35 @@ export function RoleBadge({ role, size = 'sm', compact = false }: { role: Replic
   return (
     <Badge variant="role" role={normalizedRole} size={size} compact={compact} title={normalizedRole}>
       {toDisplayState(normalizedRole)}
+    </Badge>
+  );
+}
+
+const hwStatusColors: Record<HwStatusName, string> = {
+  Init: 'tw-bg-gray-500/10 tw-text-gray-500 tw-border tw-border-gray-500/30',
+  Up: 'tw-bg-green-500/10 tw-text-green-500 tw-border tw-border-green-500/30',
+  Maintenance: 'tw-bg-blue-500/10 tw-text-blue-500 tw-border tw-border-blue-500/30',
+  Suspect: 'tw-bg-yellow-500/10 tw-text-yellow-500 tw-border tw-border-yellow-500/30',
+  Missing: 'tw-bg-orange-500/10 tw-text-orange-500 tw-border tw-border-orange-500/30',
+  Bad: 'tw-bg-red-500/10 tw-text-red-500 tw-border tw-border-red-500/30',
+  Offline: 'tw-bg-gray-600/10 tw-text-gray-600 tw-border tw-border-gray-600/30',
+};
+
+const hwStatusIcons: Record<HwStatusName, React.ReactNode> = {
+  Init: <HelpCircle className="tw-h-3.5 tw-w-3.5" />,
+  Up: <CheckCircle2 className="tw-h-3.5 tw-w-3.5" />,
+  Maintenance: <Wrench className="tw-h-3.5 tw-w-3.5" />,
+  Suspect: <AlertTriangle className="tw-h-3.5 tw-w-3.5" />,
+  Missing: <EyeOff className="tw-h-3.5 tw-w-3.5" />,
+  Bad: <XCircle className="tw-h-3.5 tw-w-3.5" />,
+  Offline: <PowerOff className="tw-h-3.5 tw-w-3.5" />,
+};
+
+export function HwStatusBadge({ status, size = 'sm', compact = false }: { status: number; size?: BadgeSize; compact?: boolean }) {
+  const label = hwStatusLabel(status);
+  return (
+    <Badge variant="default" size={size} compact={compact} className={hwStatusColors[label]} icon={hwStatusIcons[label]} title={label}>
+      {label}
     </Badge>
   );
 }

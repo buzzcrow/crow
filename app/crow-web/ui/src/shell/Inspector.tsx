@@ -1,12 +1,13 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { useState, lazy, Suspense } from 'react';
+import { useState, useMemo, lazy, Suspense } from 'react';
 import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { cn } from '../utils/cn';
-import { ViewMode, Node, EnrichedStoreView, CrowKVServerView, ElectionState, ReadState, ReplicaRole } from '../types';
+import { ViewMode, Node, Rack, EnrichedStoreView, CrowKVServerView, CapacityUsageResponse, ElectionState, ReadState, ReplicaRole } from '../types';
+import { DEFAULT_DC_NAME } from '../data/defaultDatacenter';
 import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
 import { useMetricsPoll, buildMetricsFetcher } from '../utils/useMetricsPoll';
@@ -16,8 +17,17 @@ const KvPanel = lazy(() => import('../panels/KvPanel').then((m) => ({ default: m
 
 type TabId = 'details' | 'activity';
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
 function displayEntityId(entity: SelectedEntity): string {
   switch (entity.type) {
+    case 'Datacenter':
+      return DEFAULT_DC_NAME;
     case 'Rack':
       return rackLabel(entity.id);
     case 'Node':
@@ -39,8 +49,10 @@ interface InspectorProps {
   readonly?: boolean;
   modules?: Record<string, boolean>;
   nodes?: Node[];
+  racks?: Rack[];
   servers?: CrowKVServerView[];
   stores?: EnrichedStoreView[];
+  capacityUsage?: CapacityUsageResponse | null;
   width?: number;
 }
 
@@ -48,14 +60,16 @@ interface InspectorProps {
  * Right-side inspector. Reacts to SelectionContext: Details + Activity for any
  * selection.
  */
-export function Inspector({ readonly, modules: _modules, nodes = [], servers = [], stores = [], width = 320 }: InspectorProps) {
+export function Inspector({ readonly, modules: _modules, nodes = [], racks = [], servers = [], stores = [], capacityUsage = null, width = 320 }: InspectorProps) {
   const { selectedEntity, clearSelection, selectEntity } = useSelection();
   const { setViewMode } = useViewMode();
   const [activeTab, setActiveTab] = useState<TabId>('details');
 
   if (!selectedEntity) return null;
 
-  const displayType = selectedEntity.type === 'Server' ? 'Crow Storage' : selectedEntity.type;
+  const displayType = selectedEntity.type === 'Server'
+    ? (selectedEntity.serviceType === 'diskdb' ? 'DiskDB' : 'KV')
+    : selectedEntity.type;
   const displayName = selectedEntity.name || displayEntityId(selectedEntity);
 
   return (
@@ -83,7 +97,7 @@ export function Inspector({ readonly, modules: _modules, nodes = [], servers = [
 
       <div className="tw-flex-1 tw-overflow-y-auto">
         {activeTab === 'details' && (
-          <DetailsTab entity={selectedEntity} nodes={nodes} servers={servers} stores={stores} selectEntity={selectEntity} setViewMode={setViewMode} readonly={readonly} />
+          <DetailsTab entity={selectedEntity} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} selectEntity={selectEntity} setViewMode={setViewMode} readonly={readonly} />
         )}
         {activeTab === 'activity' && <ActivityLog />}
       </div>
@@ -124,15 +138,19 @@ function Tab({
 interface DetailsTabProps {
   entity: SelectedEntity;
   nodes: Node[];
+  racks: Rack[];
   servers: CrowKVServerView[];
   stores: EnrichedStoreView[];
+  capacityUsage: CapacityUsageResponse | null;
   selectEntity: (e: SelectedEntity | null) => void;
   setViewMode: (m: ViewMode) => void;
   readonly?: boolean;
 }
 
-function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode, readonly }: DetailsTabProps) {
-  const displayType = entity.type === 'Server' ? 'Crow Storage' : entity.type;
+function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, selectEntity, setViewMode, readonly }: DetailsTabProps) {
+  const displayType = entity.type === 'Server'
+    ? (entity.serviceType === 'diskdb' ? 'DiskDB' : 'KV')
+    : entity.type;
   const displayId = displayEntityId(entity);
   const serverNodeId = entity.type === 'Node' ? entity.id : entity.parentIds?.node_id;
   const server =
@@ -170,6 +188,21 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode,
   const electionState: ElectionState | undefined = replica?.election ?? groupView?.replicas.find((r) => r.role === ReplicaRole.Leader)?.election;
   const readState: ReadState | undefined = groupView?.read_state;
 
+  // Datacenter: cluster-wide capacity totals (one DC → totals ARE cluster
+  // totals). Only shown in Capacity view where capacityUsage is fetched.
+  const dcTotals = useMemo(() => {
+    if (entity.type !== 'Datacenter' || entity.viewMode !== ViewMode.Capacity) return null;
+    const dgs = capacityUsage?.disk_groups || [];
+    return dgs.reduce(
+      (acc, g) => ({
+        capacity: acc.capacity + g.capacity_bytes,
+        busy: acc.busy + g.busy_bytes,
+        free: acc.free + g.free_bytes,
+      }),
+      { capacity: 0, busy: 0, free: 0 },
+    );
+  }, [entity.type, entity.viewMode, capacityUsage]);
+
   // Metrics poll: build a fetcher for the current entity type.
   const parentStoreId = entity.parentIds?.store_id != null ? String(entity.parentIds.store_id) : undefined;
   const parentGroupId = entity.parentIds?.group_id != null ? String(entity.parentIds.group_id) : undefined;
@@ -187,11 +220,19 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode,
   const fields: { label: string; value: string }[] = [
     { label: 'Type', value: displayType },
     { label: 'ID', value: displayId },
-    ...(entity.name && entity.type !== 'Server' ? [{ label: 'Name', value: entity.name }] : []),
+    ...(entity.name && entity.type !== 'Server' && entity.type !== 'Disk' ? [{ label: 'Name', value: entity.name }] : []),
+    ...(entity.type === 'Datacenter' ? [{ label: 'Rack Count', value: String(racks.length) }] : []),
+    ...(dcTotals
+      ? [
+          { label: 'Total Capacity', value: formatBytes(dcTotals.capacity) },
+          { label: 'Used', value: formatBytes(dcTotals.busy) },
+          { label: 'Free', value: formatBytes(dcTotals.free) },
+        ]
+      : []),
     ...(restPort ? [{ label: 'REST Port', value: String(restPort) }] : []),
     ...(rpcPort ? [{ label: 'RPC Port', value: String(rpcPort) }] : []),
     ...Object.entries(entity.parentIds || {})
-      .filter(([, v]) => v)
+      .filter(([k, v]) => v && k !== 'disk_id')
       .map(([k, v]) => ({ label: `Parent: ${k}`, value: String(v) })),
     ...(replica && typeof replica.engine_healthy === 'boolean'
       ? [{ label: 'Engine Healthy', value: replica.engine_healthy ? 'Yes' : 'No' }]

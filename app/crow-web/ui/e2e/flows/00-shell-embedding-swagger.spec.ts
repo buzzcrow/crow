@@ -28,7 +28,9 @@ test.describe('shell · embedding + swagger', () => {
 
     await page.goto('/');
 
-    await expect(page.getByRole('alert')).toContainText('Backend unreachable', { timeout: 3_000 });
+    // Scope to the banner alert — a toast (also role=alert) may appear
+    // concurrently with "Failed to load server list:" text.
+    await expect(page.getByRole('alert').filter({ hasText: 'Backend unreachable' })).toBeVisible({ timeout: 3_000 });
   });
 
   test('swagger panel renders inline and re-targets the node selection', async ({ page, baseURL }) => {

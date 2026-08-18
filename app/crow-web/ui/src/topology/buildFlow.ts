@@ -5,6 +5,7 @@ import { Node, Edge, MarkerType } from 'reactflow';
 import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth, ReplicaState } from '../types';
 import type { SelectedEntity } from '../contexts/SelectionContext';
 import { crowKvServerByNodeId } from '../data/crowKvServers';
+import { DEFAULT_DC_ID, DEFAULT_DC_NAME } from '../data/defaultDatacenter';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toDisplayState, toUiReplicaRole } from '../utils/entityDisplay';
 
 /**
@@ -13,7 +14,7 @@ import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel
  * drives the deterministic layout in `layout.ts`.
  */
 export interface FlowNodeData {
-  kind: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
+  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
   label: string;
   sublabel?: string;
   health?: string;
@@ -29,6 +30,23 @@ export interface FlowNodeData {
 
 function mkNode(id: string, data: FlowNodeData): Node {
   return { id, type: 'crowKv', position: { x: 0, y: 0 }, data };
+}
+
+/** Fixed UI-only datacenter root node id shared by all three builders. */
+const DC_NODE_ID = `DC-${DEFAULT_DC_ID}`;
+
+/** Push the fixed datacenter root at layer 0; returns the node + edge list seed. */
+function pushDatacenterRoot(flowNodes: Node[], sublabel: string): { dcId: string } {
+  flowNodes.push(
+    mkNode(DC_NODE_ID, {
+      kind: 'Datacenter',
+      label: DEFAULT_DC_NAME,
+      sublabel,
+      layer: 0,
+      entity: { type: 'Datacenter', id: DEFAULT_DC_ID, name: DEFAULT_DC_NAME },
+    }),
+  );
+  return { dcId: DC_NODE_ID };
 }
 
 function physicalGroupHealth(group: NodeStore['groups'][number]): string {
@@ -80,6 +98,7 @@ export function buildPhysicalFlow(
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
   const serverByNodeId = crowKvServerByNodeId(servers);
+  const dcId = racks.length > 0 ? pushDatacenterRoot(flowNodes, `${racks.length} rack(s)`).dcId : null;
 
   for (const rack of racks) {
     flowNodes.push(
@@ -87,10 +106,11 @@ export function buildPhysicalFlow(
         kind: 'Rack',
         label: rackLabel(String(rack.id)),
         sublabel: `${rack.nodes?.length ?? 0} node(s)`,
-        layer: 0,
+        layer: 1,
         entity: { type: 'Rack', id: String(rack.id), name: rack.name },
       }),
     );
+    if (dcId) flowEdges.push({ id: `e-${dcId}-R-${rack.id}`, source: dcId, target: `R-${rack.id}`, type: 'smoothstep' });
   }
 
   for (const node of nodes) {
@@ -101,7 +121,7 @@ export function buildPhysicalFlow(
         label: nodeLabel(String(node.id)),
         sublabel: node.host,
         health: nodeHealthById[node.id],
-        layer: 1,
+        layer: 2,
         entity: { type: 'Node', id: String(node.id), parentIds: { rack_id: node.rack_id } },
       }),
     );
@@ -116,8 +136,8 @@ export function buildPhysicalFlow(
         label: serverLabel(String(node.id)),
         sublabel: toDisplayState(server.process.state),
         health: server.process.health,
-        layer: 2,
-        entity: { type: 'Server', id: server.id, parentIds: { rack_id: node.rack_id, node_id: node.id } },
+        layer: 3,
+        entity: { type: 'Server', id: server.id, parentIds: { rack_id: node.rack_id, node_id: node.id }, serviceType: 'kv' },
       }),
     );
     flowEdges.push({ id: `e-N-${node.id}-KV`, source: `N-${node.id}`, target: serverNodeId, type: 'smoothstep' });
@@ -130,7 +150,7 @@ export function buildPhysicalFlow(
           kind: 'Store',
           label: storeLabel(sid),
           sublabel: `${store.groups?.length ?? 0} group(s)`,
-          layer: 3,
+          layer: 4,
           entity: { type: 'Store', id: sid, parentIds: { rack_id: node.rack_id, node_id: node.id } },
         }),
       );
@@ -146,7 +166,7 @@ export function buildPhysicalFlow(
             label: groupLabel(gid),
             sublabel: leaderRid ? `leader ${leaderRid}` : `${group.remotes?.length ?? 0} peer(s)`,
             health: physicalGroupHealth(group),
-            layer: 4,
+            layer: 5,
             entity: { type: 'Group', id: gid, parentIds: { rack_id: node.rack_id, node_id: node.id, store_id: sid } },
           }),
         );
@@ -163,7 +183,7 @@ export function buildPhysicalFlow(
             health: local.state,
             role: local.role,
             leader: leaderRid === String(local.replica_id),
-            layer: 5,
+            layer: 6,
             entity: {
               type: 'Replica',
               id: String(local.replica_id),
@@ -182,7 +202,7 @@ export function buildPhysicalFlow(
               label: remoteReplicaLabel(remote.replica_id),
               sublabel: nodeLabel(String(remote.node_id)),
               reachable: remote.reachable,
-              layer: 5,
+              layer: 6,
               entity: {
                 type: 'Replica',
                 id: String(remote.replica_id),
@@ -220,18 +240,21 @@ export function buildPhysicalFlow(
 export function buildLogicalFlow(stores: EnrichedStoreView[]): { nodes: Node[]; edges: Edge[] } {
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
+  const dcId = stores.length > 0 ? pushDatacenterRoot(flowNodes, `${stores.length} store(s)`).dcId : null;
 
   for (const store of stores) {
     const sid = String(store.store_id);
+    const storeNodeId = `S-${sid}`;
     flowNodes.push(
-      mkNode(`S-${sid}`, {
+      mkNode(storeNodeId, {
         kind: 'Store',
         label: store.name ? `${storeLabel(sid)} (${store.name})` : storeLabel(sid),
         sublabel: `${store.groups?.length ?? 0} group(s)`,
-        layer: 0,
+        layer: 1,
         entity: { type: 'Store', id: sid, name: store.name },
       }),
     );
+    if (dcId) flowEdges.push({ id: `e-${dcId}-${storeNodeId}`, source: dcId, target: storeNodeId, type: 'smoothstep' });
 
     for (const group of store.groups || []) {
       const gid = String(group.group_id);
@@ -243,7 +266,7 @@ export function buildLogicalFlow(stores: EnrichedStoreView[]): { nodes: Node[]; 
           label: groupLabel(gid),
           sublabel: leader ? `leader ${leader}` : `${replicas.length} replica(s)`,
           health: group.state,
-          layer: 1,
+          layer: 2,
           entity: { type: 'Group', id: gid, parentIds: { store_id: sid } },
         }),
       );
@@ -265,7 +288,7 @@ export function buildLogicalFlow(stores: EnrichedStoreView[]): { nodes: Node[]; 
             sublabel: r.node_id ? nodeLabel(String(r.node_id)) : undefined,
             health: r.state,
             role: toUiReplicaRole(String(r.role), String(r.state)),
-            layer: 2,
+            layer: 3,
             entity: {
               type: 'Replica',
               id: rid,
@@ -303,6 +326,7 @@ export function buildCapacityFlow(
 ): { nodes: Node[]; edges: Edge[] } {
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
+  const dcId = racks.length > 0 ? pushDatacenterRoot(flowNodes, `${racks.length} rack(s)`).dcId : null;
 
   for (const rack of racks) {
     flowNodes.push(
@@ -310,10 +334,11 @@ export function buildCapacityFlow(
         kind: 'Rack',
         label: rackLabel(String(rack.id)),
         sublabel: `${rack.nodes?.length ?? 0} node(s)`,
-        layer: 0,
+        layer: 1,
         entity: { type: 'Rack', id: String(rack.id), name: rack.name },
       }),
     );
+    if (dcId) flowEdges.push({ id: `e-${dcId}-R-${rack.id}`, source: dcId, target: `R-${rack.id}`, type: 'smoothstep' });
   }
 
   for (const node of nodes) {
@@ -324,7 +349,7 @@ export function buildCapacityFlow(
         label: nodeLabel(String(node.id)),
         sublabel: hasDiskdb ? 'DiskDB active' : node.host,
         health: nodeHealthById[node.id],
-        layer: 1,
+        layer: 2,
         entity: { type: 'Node', id: String(node.id), parentIds: { rack_id: node.rack_id } },
       }),
     );

@@ -3,12 +3,12 @@
 
 import { memo } from 'react';
 import { Handle, NodeProps, Position } from 'reactflow';
-import { FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Crown, AlertTriangle } from 'lucide-react';
+import { FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Crown, AlertTriangle, Building2 } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { toUiHealth } from '../utils/entityDisplay';
 
 interface CrowKVNodeData {
-  kind: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
+  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
   label: string;
   sublabel?: string;
   health?: string;
@@ -22,6 +22,7 @@ interface CrowKVNodeData {
 }
 
 const iconForKind: Record<CrowKVNodeData['kind'], typeof FolderTree> = {
+  Datacenter: Building2,
   Rack: FolderTree,
   Node: Monitor,
   Server: Cog,
@@ -33,6 +34,7 @@ const iconForKind: Record<CrowKVNodeData['kind'], typeof FolderTree> = {
 };
 
 const accentForKind: Record<CrowKVNodeData['kind'], string> = {
+  Datacenter: 'tw-text-accent',
   Rack: 'tw-text-accent',
   Node: 'tw-text-accent2',
   Server: 'tw-text-accent',
@@ -44,6 +46,7 @@ const accentForKind: Record<CrowKVNodeData['kind'], string> = {
 };
 
 const surfaceForKind: Record<CrowKVNodeData['kind'], string> = {
+  Datacenter: 'tw-bg-panel tw-border-border',
   Rack: 'tw-bg-panel tw-border-border',
   Node: 'tw-bg-panel tw-border-border',
   Server: 'tw-bg-accent2/10 tw-border-accent2/30',

@@ -20,8 +20,10 @@ import type {
   DiskInfoDto,
   ZoneUsageDto,
 } from '../types';
+import type { SelectedEntity } from '../contexts/SelectionContext';
 import { ZoneGrid } from './ZoneGrid';
 import { ZoneBitmap } from './ZoneBitmap';
+import { hwStatusLabel as sharedHwStatusLabel } from '../utils/entityDisplay';
 import { ScannerPanel } from './ScannerPanel';
 import { RecalcPanel } from './RecalcPanel';
 
@@ -32,6 +34,7 @@ interface CapacityPanelProps {
   loading?: boolean;
   readonly?: boolean;
   onRefresh?: () => Promise<void>;
+  selectedEntity?: SelectedEntity | null;
 }
 
 function formatBytes(bytes: number): string {
@@ -57,13 +60,7 @@ function diskTypeLabel(t: number): string {
 }
 
 function hwStatusLabel(s: number): string {
-  switch (s) {
-    case 0: return 'Unknown';
-    case 1: return 'Up';
-    case 2: return 'Down';
-    case 3: return 'Offline';
-    default: return `status:${s}`;
-  }
+  return sharedHwStatusLabel(s);
 }
 
 export function CapacityPanel({
@@ -73,11 +70,13 @@ export function CapacityPanel({
   loading,
   readonly,
   onRefresh,
+  selectedEntity,
 }: CapacityPanelProps) {
   const { success, error } = useToast();
   const { log } = useActivity();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [expandedDg, setExpandedDg] = useState<number | null>(null);
+  const [expandedDiskId, setExpandedDiskId] = useState<string | null>(null);
   const refreshRef = useRef(onRefresh);
 
   // Keep ref in sync without re-triggering the poll effect.
@@ -92,6 +91,20 @@ export function CapacityPanel({
     return () => clearInterval(id);
   }, [loading]);
 
+  // Auto-expand DG and disk when selected from the sidebar.
+  useEffect(() => {
+    if (!selectedEntity) return;
+    if (selectedEntity.type === 'DiskGroup') {
+      const dgId = Number(selectedEntity.parentIds?.disk_group_id ?? selectedEntity.id);
+      setExpandedDg(dgId);
+    } else if (selectedEntity.type === 'Disk') {
+      const dgId = Number(selectedEntity.parentIds?.disk_group_id);
+      const diskId = String(selectedEntity.parentIds?.disk_id ?? selectedEntity.id);
+      if (dgId) setExpandedDg(dgId);
+      setExpandedDiskId(diskId);
+    }
+  }, [selectedEntity]);
+
   const usageByDgId = useMemo(() => {
     const m = new Map<number, DiskGroupInfoDto>();
     for (const g of usage?.disk_groups || []) {
@@ -100,17 +113,54 @@ export function CapacityPanel({
     return m;
   }, [usage]);
 
+  // Filter disk-groups based on the selected layer (rack/node/DG/disk).
+  // When a rack or node is selected, only show DGs matching that
+  // rack/node, and the totals reflect the filtered set.
+  const filteredDgs = useMemo(() => {
+    const allDgs = usage?.disk_groups || [];
+    if (!selectedEntity) return allDgs;
+    if (selectedEntity.type === 'Rack') {
+      const rackId = Number(selectedEntity.id);
+      return allDgs.filter((g) => g.rack_id === rackId);
+    }
+    if (selectedEntity.type === 'Node') {
+      const nodeId = Number(selectedEntity.id);
+      return allDgs.filter((g) => g.node_id === nodeId);
+    }
+    if (selectedEntity.type === 'DiskGroup') {
+      const dgId = Number(selectedEntity.parentIds?.disk_group_id ?? selectedEntity.id);
+      return allDgs.filter((g) => g.disk_group_id === dgId);
+    }
+    if (selectedEntity.type === 'Disk') {
+      const dgId = Number(selectedEntity.parentIds?.disk_group_id);
+      return allDgs.filter((g) => g.disk_group_id === dgId);
+    }
+    return allDgs;
+  }, [usage, selectedEntity]);
+
   const totalCapacity = useMemo(() => {
-    return (usage?.disk_groups || []).reduce((sum, g) => sum + g.capacity_bytes, 0);
-  }, [usage]);
+    return filteredDgs.reduce((sum, g) => sum + g.capacity_bytes, 0);
+  }, [filteredDgs]);
 
   const totalBusy = useMemo(() => {
-    return (usage?.disk_groups || []).reduce((sum, g) => sum + g.busy_bytes, 0);
-  }, [usage]);
+    return filteredDgs.reduce((sum, g) => sum + g.busy_bytes, 0);
+  }, [filteredDgs]);
 
   const totalFree = useMemo(() => {
-    return (usage?.disk_groups || []).reduce((sum, g) => sum + g.free_bytes, 0);
-  }, [usage]);
+    return filteredDgs.reduce((sum, g) => sum + g.free_bytes, 0);
+  }, [filteredDgs]);
+
+  // Build a summary title based on the selected layer.
+  const scopeLabel = useMemo(() => {
+    if (!selectedEntity) return 'Cluster';
+    switch (selectedEntity.type) {
+      case 'Rack': return `Rack ${selectedEntity.id}`;
+      case 'Node': return `Node ${selectedEntity.id}`;
+      case 'DiskGroup': return `DG-${selectedEntity.parentIds?.disk_group_id ?? selectedEntity.id}`;
+      case 'Disk': return `Disk ${String(selectedEntity.parentIds?.disk_id ?? selectedEntity.id).slice(0, 12)}…`;
+      default: return 'Cluster';
+    }
+  }, [selectedEntity]);
 
   const runAction = useCallback(async (
     actionId: string,
@@ -202,9 +252,9 @@ export function CapacityPanel({
       {/* Summary header */}
       <div className="tw-flex tw-items-center tw-justify-between">
         <div>
-          <h2 className="tw-text-xl tw-font-semibold tw-text-text">Capacity Overview</h2>
+          <h2 className="tw-text-xl tw-font-semibold tw-text-text">Capacity — {scopeLabel}</h2>
           <p className="tw-text-sm tw-text-muted tw-mt-1">
-            {instances.length} instance(s) · {usage?.disk_groups.length || 0} disk-group(s)
+            {instances.length} instance(s) · {filteredDgs.length} disk-group(s)
           </p>
         </div>
         <button
@@ -253,7 +303,7 @@ export function CapacityPanel({
             <span className="tw-text-xs tw-text-muted">{inst.grpc_endpoint}</span>
           </div>
 
-          {(inst.owned_dg_ids || []).map((dgId) => {
+          {(inst.owned_dg_ids || []).filter((dgId) => filteredDgs.some((g) => g.disk_group_id === dgId)).map((dgId) => {
             const dgUsage = usageByDgId.get(dgId);
             const isExpanded = expandedDg === dgId;
             return (
@@ -270,6 +320,8 @@ export function CapacityPanel({
                 onCompact={handleCompact}
                 onRebuild={handleRebuild}
                 onSetStatus={handleSetStatus}
+                expandedDiskId={expandedDiskId}
+                onDiskExpand={setExpandedDiskId}
               />
             );
           })}
@@ -291,6 +343,8 @@ interface DiskGroupRowProps {
   onCompact: (diskId: string) => void;
   onRebuild: (diskId: string) => void;
   onSetStatus: (diskId: string, status: string) => void;
+  expandedDiskId?: string | null;
+  onDiskExpand?: (diskId: string | null) => void;
 }
 
 function DiskGroupRow({
@@ -305,12 +359,18 @@ function DiskGroupRow({
   onCompact,
   onRebuild,
   onSetStatus,
+  expandedDiskId,
+  onDiskExpand,
 }: DiskGroupRowProps) {
   const cap = dgUsage?.capacity_bytes ?? 0;
   const busy = dgUsage?.busy_bytes ?? 0;
   const pct = busyPct(cap, busy);
-  const [expandedDisk, setExpandedDisk] = useState<string | null>(null);
+  const [localExpandedDisk, setLocalExpandedDisk] = useState<string | null>(null);
   const [selectedZone, setSelectedZone] = useState<ZoneUsageDto | null>(null);
+
+  // Use controlled expandedDiskId if provided, otherwise local state.
+  const expandedDisk = expandedDiskId !== undefined ? expandedDiskId : localExpandedDisk;
+  const setExpandedDisk = onDiskExpand ?? setLocalExpandedDisk;
 
   return (
     <div className="tw-border tw-border-border tw-rounded-md tw-overflow-hidden">

@@ -290,7 +290,15 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       const p = t.parentIds || {};
 
       if (physicalActive) {
-        if (t.type === 'Rack' && modules?.nodes !== false) {
+        if (t.type === 'Datacenter') {
+          // The default DC is immutable — only Add Rack is offered.
+          items.push({
+            id: 'add-rack',
+            label: 'Add Rack',
+            icon: <Plus className="tw-h-4 tw-w-4" />,
+            onSelect: () => setDialog((d) => ({ ...d, addRack: true })),
+          });
+        } else if (t.type === 'Rack' && modules?.nodes !== false) {
           const rackId = Number(t.rawId);
           items.push({
             id: 'add-node',
@@ -353,9 +361,9 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             }),
           });
         } else if (t.type === 'Server') {
-          // Server context menu: dispatch on service_type (KV vs DiskDB).
+          // Server context menu: dispatch on serviceType (KV vs DiskDB).
           const nodeId = Number(p.node_id);
-          if (p.service_type === 'Diskdb') {
+          if (t.serviceType === 'diskdb') {
             items.push({
               id: 'ddb-restart',
               label: 'Restart DiskDB',
@@ -403,170 +411,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               }),
             });
           }
-        }
-      } else if (capacityActive) {
-        // Capacity view context menus: rack, node, diskdb instance, disk-group, disk.
-        if (t.type === 'Rack' && modules?.nodes !== false) {
-          const rackId = Number(t.rawId);
-          items.push({
-            id: 'add-node',
-            label: 'Add Node',
-            icon: <Server className="tw-h-4 tw-w-4" />,
-            onSelect: () => setDialog((d) => ({ ...d, addNode: { rackId } })),
-          });
-          items.push({ id: 's1', separator: true });
-          items.push({
-            id: 'del-rack',
-            label: 'Delete Rack',
-            icon: <Trash2 className="tw-h-4 tw-w-4" />,
-            destructive: true,
-            onSelect: () => requestDelete('Rack', rackId, async () => { await runMutation('Delete Rack', `Rack ${rackId}`, () => removeRack(rackId)); }),
-          });
-        } else if (t.type === 'Node') {
-          const nodeId = Number(t.rawId ?? t.id);
-          const hasDiskdb = diskdbNodeIds.has(nodeId);
-          // Add Disk Group is always available on a node.
-          items.push({
-            id: 'add-dg',
-            label: 'Add Disk Group',
-            icon: <Boxes className="tw-h-4 tw-w-4" />,
-            onSelect: () => setDialog((d) => ({ ...d, addDiskGroup: { nodeId } })),
-          });
-          items.push({ id: 's1', separator: true });
-          if (!hasDiskdb) {
-            items.push({
-              id: 'ddb-deploy',
-              label: 'Deploy DiskDB',
-              icon: <HardDrive className="tw-h-4 tw-w-4" />,
-              onSelect: () => setDialog((d) => ({ ...d, deployDiskdb: { nodeId } })),
-            });
-          } else {
-            items.push({
-              id: 'ddb-restart',
-              label: 'Restart DiskDB',
-              icon: <RotateCw className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(nodeId)),
-            });
-            items.push({
-              id: 'ddb-stop',
-              label: 'Stop DiskDB',
-              icon: <Square className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(nodeId)),
-            });
-          }
-          items.push({ id: 's2', separator: true });
-          items.push({
-            id: 'del-node',
-            label: 'Delete Node',
-            icon: <Trash2 className="tw-h-4 tw-w-4" />,
-            destructive: true,
-            onSelect: () => requestDelete('Node', nodeId, async () => {
-              await runMutation('Delete Node', t.label || t.id, async () => {
-                if (hasDiskdb) await removeDiskdb(nodeId);
-                await removeNode(nodeId);
-              });
-            }),
-          });
-        } else if (t.type === 'DiskGroup') {
-          // disk-group — logical container: add disk, set status, delete
-          const dgId = Number(t.rawId);
-          const dgNodeId = Number(p.node_id);
-          const dgRackId = Number(p.rack_id);
-          items.push({
-            id: 'add-disk',
-            label: 'Add Disk',
-            icon: <HardDrive className="tw-h-4 tw-w-4" />,
-            onSelect: () => setDialog((d) => ({ ...d, addDisk: { nodeId: dgNodeId, dgId } })),
-          });
-          items.push({ id: 's1', separator: true });
-          items.push({
-            id: 'dg-set-up',
-            label: 'Set Disk Group Up',
-            icon: <Activity className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Set Disk Group Up', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Up')),
-          });
-          items.push({
-            id: 'dg-set-down',
-            label: 'Set Disk Group Down',
-            icon: <Square className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Set Disk Group Down', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Offline')),
-          });
-          items.push({ id: 's2', separator: true });
-          items.push({
-            id: 'del-dg',
-            label: 'Delete Disk Group',
-            icon: <Trash2 className="tw-h-4 tw-w-4" />,
-            destructive: true,
-            onSelect: () => requestDelete('Disk Group', dgId, async () => {
-              await runMutation('Delete Disk Group', t.label || t.id, () => removeDiskGroup(dgNodeId, dgId));
-            }, 'All disks in this disk group will also be removed.'),
-          });
-        } else if (t.type === 'Disk') {
-          // disk — all operations: compact, rebuild, consistency scan,
-          // recalc usage, set status, delete
-          const diskId = String(p.disk_id || t.rawId || t.id);
-          const diskNodeId = Number(p.node_id);
-          const diskDgId = Number(p.disk_group_id);
-          // Look up zone count from capacity usage data.
-          let diskZoneCount: number | undefined;
-          for (const dg of capacityUsage?.disk_groups || []) {
-            const found = (dg.disks || []).find((d) => d.disk_id === diskId);
-            if (found) { diskZoneCount = found.zone_count; break; }
-          }
-          items.push({
-            id: 'ddb-compact',
-            label: 'Compact Zones',
-            icon: <Database className="tw-h-4 tw-w-4" />,
-            onSelect: () => setDialog((d) => ({ ...d, compactZones: { diskId, zoneCount: diskZoneCount } })),
-          });
-          items.push({
-            id: 'ddb-rebuild',
-            label: 'Rebuild Bitmap',
-            icon: <RotateCw className="tw-h-4 tw-w-4" />,
-            onSelect: () => setDialog((d) => ({ ...d, rebuildBitmap: { diskId, zoneCount: diskZoneCount } })),
-          });
-          items.push({ id: 's1', separator: true });
-          items.push({
-            id: 'ddb-scan',
-            label: 'Trigger Consistency Scan',
-            icon: <Activity className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Trigger Consistency Scan', t.label || t.id, () => triggerDiskdbScan(diskDgId)),
-          });
-          items.push({
-            id: 'ddb-recalc',
-            label: 'Recalc Usage',
-            icon: <RotateCw className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Recalc Usage', t.label || t.id, () => recalcDiskdbUsage(diskDgId)),
-          });
-          items.push({ id: 's2', separator: true });
-          items.push({
-            id: 'disk-set-down',
-            label: 'Set Disk Down',
-            icon: <Square className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Set Disk Down', t.label || t.id, () => setDiskStatus(diskId, 'Offline')),
-          });
-          items.push({
-            id: 'disk-set-up',
-            label: 'Set Disk Up',
-            icon: <Activity className="tw-h-4 tw-w-4" />,
-            onSelect: () => runMutation('Set Disk Up', t.label || t.id, () => setDiskStatus(diskId, 'Up')),
-          });
-          items.push({ id: 's3', separator: true });
-          items.push({
-            id: 'move-disk',
-            label: 'Move Disk',
-            icon: <Move className="tw-h-4 tw-w-4" />,
-            onSelect: () => setDialog((d) => ({ ...d, moveDisk: { diskId, rackId: Number(p.rack_id), nodeId: diskNodeId, dgId: diskDgId } })),
-          });
-          items.push({
-            id: 'del-disk',
-            label: 'Delete Disk',
-            icon: <Trash2 className="tw-h-4 tw-w-4" />,
-            destructive: true,
-            onSelect: () => requestDelete('Disk', diskId, async () => {
-              await runMutation('Delete Disk', t.label || t.id, () => removeDisk(diskNodeId, diskDgId, diskId));
-            }, 'All zones on this disk will be lost.'),
-          });
         }
       } else {
         if (t.type === 'Store' && modules?.groups !== false) {
@@ -635,7 +479,144 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       }
       return items;
     },
-    [readonly, physicalActive, capacityActive, modules, requestDelete, runMutation, serverNodeIds, diskdbNodeIds, capacityUsage],
+    [readonly, physicalActive, modules, requestDelete, runMutation, serverNodeIds, diskdbNodeIds],
+  );
+
+  /** Capacity view has its own menu code path — rack/node management
+   * belongs to the Physical view; here only disk-group/disk operations
+   * and DiskDB deploy are exposed. */
+  const buildCapacityMenuItems = useCallback(
+    (t: MenuTarget): MenuItemOrSeparator[] => {
+      if (readonly) return [];
+      const items: MenuItemOrSeparator[] = [];
+      const p = t.parentIds || {};
+
+      if (t.type === 'Datacenter') {
+        // The default DC is immutable — only Add Rack is offered.
+        items.push({
+          id: 'add-rack',
+          label: 'Add Rack',
+          icon: <Plus className="tw-h-4 tw-w-4" />,
+          onSelect: () => setDialog((d) => ({ ...d, addRack: true })),
+        });
+      } else if (t.type === 'Node') {
+        const nodeId = Number(t.rawId ?? t.id);
+        const hasDiskdb = diskdbNodeIds.has(nodeId);
+        items.push({
+          id: 'add-dg',
+          label: 'Add Disk Group',
+          icon: <Boxes className="tw-h-4 tw-w-4" />,
+          onSelect: () => setDialog((d) => ({ ...d, addDiskGroup: { nodeId } })),
+        });
+        if (!hasDiskdb) {
+          items.push({ id: 's1', separator: true });
+          items.push({
+            id: 'ddb-deploy',
+            label: 'Deploy DiskDB',
+            icon: <HardDrive className="tw-h-4 tw-w-4" />,
+            onSelect: () => setDialog((d) => ({ ...d, deployDiskdb: { nodeId } })),
+          });
+        }
+      } else if (t.type === 'DiskGroup') {
+        const dgId = Number(t.rawId);
+        const dgNodeId = Number(p.node_id);
+        const dgRackId = Number(p.rack_id);
+        items.push({
+          id: 'add-disk',
+          label: 'Add Disk',
+          icon: <HardDrive className="tw-h-4 tw-w-4" />,
+          onSelect: () => setDialog((d) => ({ ...d, addDisk: { nodeId: dgNodeId, dgId } })),
+        });
+        items.push({ id: 's1', separator: true });
+        items.push({
+          id: 'dg-set-up',
+          label: 'Set Disk Group Up',
+          icon: <Activity className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Set Disk Group Up', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Up')),
+        });
+        items.push({
+          id: 'dg-set-down',
+          label: 'Set Disk Group Down',
+          icon: <Square className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Set Disk Group Down', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Offline')),
+        });
+        items.push({ id: 's2', separator: true });
+        items.push({
+          id: 'del-dg',
+          label: 'Delete Disk Group',
+          icon: <Trash2 className="tw-h-4 tw-w-4" />,
+          destructive: true,
+          onSelect: () => requestDelete('Disk Group', dgId, async () => {
+            await runMutation('Delete Disk Group', t.label || t.id, () => removeDiskGroup(dgNodeId, dgId));
+          }, 'All disks in this disk group will also be removed.'),
+        });
+      } else if (t.type === 'Disk') {
+        const diskId = String(p.disk_id || t.rawId || t.id);
+        const diskNodeId = Number(p.node_id);
+        const diskDgId = Number(p.disk_group_id);
+        let diskZoneCount: number | undefined;
+        for (const dg of capacityUsage?.disk_groups || []) {
+          const found = (dg.disks || []).find((d) => d.disk_id === diskId);
+          if (found) { diskZoneCount = found.zone_count; break; }
+        }
+        items.push({
+          id: 'ddb-compact',
+          label: 'Compact Zones',
+          icon: <Database className="tw-h-4 tw-w-4" />,
+          onSelect: () => setDialog((d) => ({ ...d, compactZones: { diskId, zoneCount: diskZoneCount } })),
+        });
+        items.push({
+          id: 'ddb-rebuild',
+          label: 'Rebuild Bitmap',
+          icon: <RotateCw className="tw-h-4 tw-w-4" />,
+          onSelect: () => setDialog((d) => ({ ...d, rebuildBitmap: { diskId, zoneCount: diskZoneCount } })),
+        });
+        items.push({ id: 's1', separator: true });
+        items.push({
+          id: 'ddb-scan',
+          label: 'Trigger Consistency Scan',
+          icon: <Activity className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Trigger Consistency Scan', t.label || t.id, () => triggerDiskdbScan(diskDgId)),
+        });
+        items.push({
+          id: 'ddb-recalc',
+          label: 'Recalc Usage',
+          icon: <RotateCw className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Recalc Usage', t.label || t.id, () => recalcDiskdbUsage(diskDgId)),
+        });
+        items.push({ id: 's2', separator: true });
+        items.push({
+          id: 'disk-set-down',
+          label: 'Set Disk Down',
+          icon: <Square className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Set Disk Down', t.label || t.id, () => setDiskStatus(diskId, 'Offline')),
+        });
+        items.push({
+          id: 'disk-set-up',
+          label: 'Set Disk Up',
+          icon: <Activity className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Set Disk Up', t.label || t.id, () => setDiskStatus(diskId, 'Up')),
+        });
+        items.push({ id: 's3', separator: true });
+        items.push({
+          id: 'move-disk',
+          label: 'Move Disk',
+          icon: <Move className="tw-h-4 tw-w-4" />,
+          onSelect: () => setDialog((d) => ({ ...d, moveDisk: { diskId, rackId: Number(p.rack_id), nodeId: diskNodeId, dgId: diskDgId } })),
+        });
+        items.push({
+          id: 'del-disk',
+          label: 'Delete Disk',
+          icon: <Trash2 className="tw-h-4 tw-w-4" />,
+          destructive: true,
+          onSelect: () => requestDelete('Disk', diskId, async () => {
+            await runMutation('Delete Disk', t.label || t.id, () => removeDisk(diskNodeId, diskDgId, diskId));
+          }, 'All zones on this disk will be lost.'),
+        });
+      }
+      return items;
+    },
+    [readonly, diskdbNodeIds, capacityUsage, requestDelete, runMutation, setDialog],
   );
 
   const onTreeContextMenu = useCallback(
@@ -646,19 +627,20 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         rawId: node.rawId,
         parentIds: node.parentIds,
         label: node.label,
+        serviceType: node.serviceType,
       };
-      const items = buildMenuItems(target);
+      const items = capacityActive ? buildCapacityMenuItems(target) : buildMenuItems(target);
       if (items.length > 0) openMenu(event, items);
     },
-    [buildMenuItems, openMenu],
+    [buildMenuItems, buildCapacityMenuItems, capacityActive, openMenu],
   );
 
   const onCanvasContextMenu = useCallback(
     (target: MenuTarget, event: React.MouseEvent) => {
-      const items = buildMenuItems(target);
+      const items = capacityActive ? buildCapacityMenuItems(target) : buildMenuItems(target);
       if (items.length > 0) openMenu(event, items);
     },
-    [buildMenuItems, openMenu],
+    [buildMenuItems, buildCapacityMenuItems, capacityActive, openMenu],
   );
 
   const onTreeNodeClick = useCallback((node: TreeNode) => {
@@ -883,6 +865,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               loading={capLoading}
               readonly={readonly}
               onRefresh={refreshCapacity}
+              selectedEntity={selectedEntity}
             />
           ) : (
             <TopologyCanvas
@@ -902,7 +885,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       </main>
 
       <Suspense fallback={null}>
-        <Inspector readonly={readonly} modules={modules} nodes={nodes} servers={servers} stores={stores} width={inspectorWidth} />
+        <Inspector readonly={readonly} modules={modules} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} width={inspectorWidth} />
       </Suspense>
 
       {selectedEntity && (

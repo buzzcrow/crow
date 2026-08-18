@@ -6,7 +6,7 @@ import { ChevronRight, ChevronDown } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { useSelection } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
-import { HealthBadge, RoleBadge } from './ui/Badge';
+import { HealthBadge, RoleBadge, HwStatusBadge } from './ui/Badge';
 
 export interface TreeNode {
   /** Tree-unique id (e.g. `rack-r1`). React key + expand bookkeeping; NOT the backend id. */
@@ -14,12 +14,16 @@ export interface TreeNode {
   /** Unprefixed backend id (e.g. `r1`, `7`). API calls must use this. */
   rawId?: string | number;
   label: string;
-  type: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'DiskGroup' | 'Disk';
+  type: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'DiskGroup' | 'Disk';
   icon?: React.ReactNode;
   children?: TreeNode[];
   health?: 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
   role?: 'Leader' | 'Follower' | 'Remote';
   parentIds?: Record<string, string | number>;
+  /** Service flavor for `Server` nodes: KV vs DiskDB. */
+  serviceType?: 'kv' | 'diskdb';
+  /** HwStatus enum (0-6) for DiskGroup/Disk in Capacity view. */
+  hwStatus?: number;
 }
 
 interface TreeProps {
@@ -55,7 +59,7 @@ function TreeNodeComponent({
   const isNodeSelected = isSelected(String(entityId));
 
   const select = useCallback(() => {
-    selectEntity({ type: node.type, id: String(entityId), name: node.label, parentIds: node.parentIds, viewMode });
+    selectEntity({ type: node.type, id: String(entityId), name: node.label, parentIds: node.parentIds, viewMode, serviceType: node.serviceType });
   }, [node, entityId, selectEntity, viewMode]);
 
   const handleSelectClick = useCallback(() => {
@@ -121,6 +125,7 @@ function TreeNodeComponent({
 
         <div className="tw-flex tw-items-center tw-gap-0.5 tw-flex-shrink-0">
           {node.role && <RoleBadge role={node.role} size="sm" compact />}
+          {node.hwStatus != null && <HwStatusBadge status={node.hwStatus} size="sm" compact />}
           {node.health && <HealthBadge status={node.health} size="sm" compact />}
         </div>
       </div>

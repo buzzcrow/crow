@@ -26,6 +26,10 @@ test.describe('kv cluster · store + group CRUD', () => {
 
       await expect(aside.getByText('S-57')).toBeVisible({ timeout: 3_000 });
 
+      // The fixed datacenter root sits above stores in the Logical view.
+      await expect(aside.getByRole('treeitem').filter({ hasText: /^datacenter$/ })).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByRole('treeitem').first()).toHaveText(/datacenter/);
+
       // Add the first group via the store row context menu.
       await aside.getByText('S-57').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add group/i }).click();

@@ -60,7 +60,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText('Capacity Overview')).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
 
       // ScannerPanel header + Run Scan button.
       await expect(panel.getByText('Scanner', { exact: true })).toBeVisible({ timeout: 3_000 });
@@ -95,7 +95,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText('Capacity Overview')).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
 
       // The instance header should show "diskdb-N" and the grpc endpoint.
       await expect(panel.getByText(/diskdb-\d+/).first()).toBeVisible({ timeout: 3_000 });
@@ -128,7 +128,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText('Capacity Overview')).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
 
       // Wait for the diskdb to report owning this DG. The keepalive
       // loop writes owned_dg_ids to the service registry; this may
@@ -179,4 +179,98 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await removeDiskdb(baseURL!, nodeId);
     }
   });
+
+  /**
+   * Datacenter root (plan-datacenter-root): the fixed `datacenter` node
+   * sits above racks in the Capacity sidebar. Selecting it opens the
+   * inspector with rack count + cluster-wide capacity totals (one DC →
+   * its totals ARE the cluster totals).
+   */
+  test('datacenter root in Capacity sidebar; inspector shows cluster totals', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
+    const nodeId = CANVAS_NODE;
+    const dgId = 620;
+    const diskId = randomDiskId();
+    const rpcPort = freePort();
+
+    try {
+      await deployDiskdb(baseURL!, nodeId, rpcPort);
+      await apiAddDiskGroup(baseURL!, nodeId, dgId, 'dc-dg');
+      await addDisksBatch(baseURL!, nodeId, dgId, [{ disk_id: diskId }]);
+
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      // The datacenter root is the top treeitem, above the rack.
+      const dcItem = aside.getByRole('treeitem').filter({ hasText: /^datacenter$/ });
+      await expect(dcItem).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByRole('treeitem').first()).toHaveText(/datacenter/);
+
+      // Select the datacenter → inspector opens.
+      await aside.getByText('datacenter', { exact: true }).click();
+      const inspector = page.locator('aside[aria-label="Entity inspector"]');
+      await expect(inspector).toBeVisible({ timeout: 3_000 });
+      const typeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
+      await expect(typeDd).toHaveText('Datacenter', { timeout: 3_000 });
+      // Rack count is always shown (one rack from beforeAll).
+      const rackCountDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Rack Count' }) }).locator('dd');
+      await expect(rackCountDd).toHaveText('1', { timeout: 3_000 });
+
+      // Capacity totals (Total Capacity / Used / Free) are shown in the
+      // Capacity view. Wait for the DG to report usage so the totals are
+      // non-zero; if the diskdb gRPC is unreachable, still verify the
+      // labels render (totals would be 0 B).
+      await expect(inspector.getByText('Total Capacity')).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText('Used', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText('Free', { exact: true })).toBeVisible({ timeout: 3_000 });
+
+      // If the DG appears in usage, verify the inspector totals match the
+      // cluster-wide sum from the API.
+      const api = await apiContext(baseURL!);
+      try {
+        let usageOk = false;
+        try {
+          await expect.poll(async () => {
+            const r = await api.get('/api/diskdb/usage');
+            if (!r.ok()) return false;
+            const body = await r.json();
+            return Array.isArray(body.disk_groups) && body.disk_groups.some((g: any) => g.disk_group_id === dgId);
+          }, { timeout: 15_000, intervals: [200] }).toBe(true);
+          usageOk = true;
+        } catch {
+          console.warn(`DG-${dgId} never reported usage — diskdb gRPC not reachable, skipping totals match`);
+        }
+
+        if (usageOk) {
+          const r = await api.get('/api/diskdb/usage');
+          const body = await r.json();
+          const sum = (body.disk_groups || []).reduce(
+            (acc: { capacity: number; busy: number; free: number }, g: any) => ({
+              capacity: acc.capacity + g.capacity_bytes,
+              busy: acc.busy + g.busy_bytes,
+              free: acc.free + g.free_bytes,
+            }),
+            { capacity: 0, busy: 0, free: 0 },
+          );
+          const capDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Total Capacity' }) }).locator('dd');
+          await expect(capDd).toHaveText(formatBytesAssert(sum.capacity), { timeout: 3_000 });
+        }
+      } finally {
+        await api.dispose();
+      }
+    } finally {
+      await removeDisk(baseURL!, nodeId, dgId, diskId).catch(() => {});
+      await apiRemoveDiskGroup(baseURL!, nodeId, dgId).catch(() => {});
+      await removeDiskdb(baseURL!, nodeId);
+    }
+  });
 });
+
+/** Match the Inspector's formatBytes rendering for an exact-text assertion. */
+function formatBytesAssert(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}

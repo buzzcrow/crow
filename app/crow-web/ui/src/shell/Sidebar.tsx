@@ -2,14 +2,27 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState, useMemo } from 'react';
-import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus, Rocket } from 'lucide-react';
+import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus, Rocket, Building2 } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { Tree, TreeNode } from '../components/Tree';
 import { Button } from '../components/ui/Button';
 import { ViewMode, Rack, EnrichedStoreView, NodeStore, CrowKVServerView, NodeHealth, DiskdbInstanceInfo, CapacityUsageResponse } from '../types';
 import { crowKvServerByNodeId } from '../data/crowKvServers';
-import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole, hwStatusToUiHealth } from '../utils/entityDisplay';
+import { DEFAULT_DC_ID, DEFAULT_DC_NAME } from '../data/defaultDatacenter';
+import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole } from '../utils/entityDisplay';
 import type { NodeDiskGroups } from '../data/useCapacityTree';
+
+/** Fixed UI-only datacenter root wrapping the rack/store children. */
+function datacenterRoot(children: TreeNode[]): TreeNode {
+  return {
+    id: `DC-${DEFAULT_DC_ID}`,
+    rawId: DEFAULT_DC_ID,
+    label: DEFAULT_DC_NAME,
+    type: 'Datacenter',
+    icon: <Building2 className="tw-h-4 tw-w-4 tw-text-muted" />,
+    children,
+  };
+}
 
 interface SidebarProps {
   racks?: Rack[];
@@ -65,7 +78,8 @@ export function Sidebar({
 
   const treeNodes = useMemo<TreeNode[]>(() => {
     if (viewMode === ViewMode.Physical) {
-      return racks.map((rack) => ({
+      if (racks.length === 0) return [];
+      return [datacenterRoot(racks.map((rack) => ({
         id: `R-${rack.id}`,
         rawId: rack.id,
         label: rack.name ? `${rackLabel(String(rack.id))} (${rack.name})` : rackLabel(String(rack.id)),
@@ -85,6 +99,7 @@ export function Sidebar({
               type: 'Server',
               icon: <Cog className="tw-h-4 tw-w-4 tw-text-muted" />,
               health: toUiHealth(server?.process.health),
+              serviceType: 'kv',
               parentIds: { rack_id: rack.id, node_id: nodeId },
               children: stores.map((ns) => {
                 const sid = String(ns.store_id);
@@ -170,7 +185,8 @@ export function Sidebar({
               type: 'Server',
               icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
               health: toUiHealth(diskdbHealthById?.get(nodeId)),
-              parentIds: { rack_id: rack.id, node_id: nodeId, service_type: 'Diskdb' },
+              serviceType: 'diskdb',
+              parentIds: { rack_id: rack.id, node_id: nodeId },
               children: dgChildren.length ? dgChildren : undefined,
             });
           }
@@ -185,7 +201,7 @@ export function Sidebar({
             children: children.length ? children : undefined,
           };
         }),
-      }));
+      })))];
     }
 
     if (viewMode === ViewMode.Capacity) {
@@ -209,7 +225,7 @@ export function Sidebar({
         }
       }
 
-      return racks.map((rack) => ({
+      return [datacenterRoot(racks.map((rack) => ({
         id: `R-${rack.id}`,
         rawId: rack.id,
         label: rack.name ? `${rackLabel(String(rack.id))} (${rack.name})` : rackLabel(String(rack.id)),
@@ -231,7 +247,7 @@ export function Sidebar({
               label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
               type: 'DiskGroup' as const,
               icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
-              health: dgStatus != null ? hwStatusToUiHealth(dgStatus) : undefined,
+              hwStatus: dgStatus ?? undefined,
               parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
               children: disks.map((d) => {
                 const diskStatus = diskStatusById.get(d.disk_id);
@@ -241,7 +257,7 @@ export function Sidebar({
                   label: d.disk_id.slice(0, 12) + '…',
                   type: 'Disk' as const,
                   icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
-                  health: diskStatus != null ? hwStatusToUiHealth(diskStatus) : undefined,
+                  hwStatus: diskStatus ?? undefined,
                   parentIds: {
                     rack_id: rack.id,
                     node_id: nodeId,
@@ -264,10 +280,11 @@ export function Sidebar({
             children: children.length ? children : undefined,
           };
         }),
-      }));
+      })))];
     }
 
-    return stores.map((store) => {
+    if (stores.length === 0) return [];
+    return [datacenterRoot(stores.map((store) => {
       const sid = String(store.store_id);
       return {
         id: `S-${sid}`,
@@ -299,7 +316,7 @@ export function Sidebar({
           };
         }),
       };
-    });
+    }))];
   }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks, diskdbInstances, capacityUsage, nodeDiskGroups, diskdbNodeIds, diskdbHealthById]);
 
   const filtered = useMemo(() => {

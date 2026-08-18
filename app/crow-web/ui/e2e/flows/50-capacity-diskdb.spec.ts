@@ -1,6 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
-// Baseline: 40s (2026-08-16)
+// Baseline: 55s (2026-08-18)
 
 import { test, expect, consoleBaseURL } from '../fixtures/realBackend';
 import {
@@ -81,12 +81,28 @@ test.describe('capacity · diskdb', () => {
     await expect(aside.getByText(`N-${DISKDB_NODE}`, { exact: true })).toBeVisible({ timeout: 5_000 });
 
     // --- node context menu shows Add Disk Group + Deploy DiskDB ---
+    // Capacity view has its own menu code path: rack/node management
+    // (Add Node, Delete Rack, Delete Node, Restart/Stop DiskDB) belongs
+    // to the Physical view and must NOT appear here.
 
     // Right-click the node.
     await aside.getByText(`N-${DISKDB_NODE}`, { exact: true }).click({ button: 'right' });
 
     await expect(page.getByRole('menuitem', { name: /add disk group/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toBeVisible();
+    // Regression: Capacity view must not expose Physical-view operations.
+    await expect(page.getByRole('menuitem', { name: /add node/i })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: /delete node/i })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: /restart diskdb/i })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: /stop diskdb/i })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    // --- rack context menu: Capacity view has no rack operations ---
+    // The rack label is "R-501 (Rack 501)" so match by text fragment.
+    await aside.getByText(`R-${DISKDB_RACK}`, { exact: false }).first().click({ button: 'right' });
+    // No Add Node, no Delete Rack in Capacity view.
+    await expect(page.getByRole('menuitem', { name: /add node/i })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: /delete rack/i })).toHaveCount(0);
     await page.keyboard.press('Escape');
 
     // --- Deploy DiskDB dialog only has RPC port (no REST/binary/listen/http/config) ---
@@ -146,18 +162,36 @@ test.describe('capacity · diskdb', () => {
 
       const dgDialog = page.getByRole('dialog', { name: /add disk group/i });
       await expect(dgDialog).toBeVisible();
-      // The dialog should have a Disk Group ID field and a Name field.
-      await expect(dgDialog.getByLabel('Disk Group ID (numeric)')).toBeVisible();
+      // The dialog should have a Disk Group ID field (auto-assigned)
+      // and a Name field. The ID should be auto-suggested as the next
+      // available ID (max existing + 1). DGs 530/540/560/570 were
+      // pre-created, so the suggestion should be > 570.
+      const dgIdInput = dgDialog.getByLabel('Disk Group ID (auto-assigned)');
+      await expect(dgIdInput).toBeVisible();
       await expect(dgDialog.getByLabel('Name (optional)')).toBeVisible();
+      const suggestedId = await dgIdInput.inputValue();
+      expect(Number(suggestedId)).toBeGreaterThan(570);
 
-      // Set the disk-group ID and submit.
-      await dgDialog.getByLabel('Disk Group ID (numeric)').fill(String(dg520));
+      // Override with a specific ID and submit.
+      await dgIdInput.fill(String(dg520));
       await dgDialog.getByLabel('Name (optional)').fill('test-dg');
       const createDgBtn = dgDialog.getByRole('button', { name: /create disk group/i });
       await createDgBtn.evaluate((el) => (el as HTMLElement).click());
 
       // The disk-group should appear in the sidebar.
       await expect(aside.getByText(/test-dg.*DG-520|DG-520.*test-dg/, { exact: true })).toBeVisible({ timeout: 10_000 });
+
+      // Regression: opening the Add Disk Group dialog again should
+      // suggest an ID that does NOT reuse the just-created DG-520.
+      // The suggestion must be > 570 (max of pre-created DGs), not 520.
+      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /add disk group/i }).click();
+      const dgDialog2 = page.getByRole('dialog', { name: /add disk group/i });
+      await expect(dgDialog2).toBeVisible();
+      const suggestedId2 = await dgDialog2.getByLabel('Disk Group ID (auto-assigned)').inputValue();
+      expect(Number(suggestedId2)).toBeGreaterThan(570);
+      expect(Number(suggestedId2)).not.toBe(dg520);
+      await page.keyboard.press('Escape');
 
       // Verify via API.
       const dgApi = await apiContext(baseURL!);
@@ -203,6 +237,13 @@ test.describe('capacity · diskdb', () => {
       // The dialog should have a Disk ID field and a Type selector.
       const diskIdInput = diskDialog.getByLabel('Disk ID (UUID)');
       await expect(diskIdInput).toBeVisible();
+
+      // Disk Size unit is TiB, Zone Size unit is GiB (regression:
+      // previously GiB / MiB).
+      await expect(diskDialog.getByLabel('Disk Size (TiB)')).toBeVisible();
+      await expect(diskDialog.getByLabel('Zone Size (GiB)')).toBeVisible();
+      await expect(diskDialog.getByLabel('Disk Size (GiB)')).toHaveCount(0);
+      await expect(diskDialog.getByLabel('Zone Size (MiB)')).toHaveCount(0);
 
       // Set a known disk ID.
       await diskIdInput.fill(disk540);
@@ -302,6 +343,13 @@ test.describe('capacity · diskdb', () => {
     const dg551 = 551;
     const dg552 = 552;
     const dg553 = 553;
+    // Extra DGs for all-status badge verification (one per HwStatus).
+    const dg554 = 554; // Init (0)
+    const dg555 = 555; // Maintenance (2)
+    const dg556 = 556; // Suspect (3)
+    const dg557 = 557; // Missing (4)
+    const dg558 = 558; // Bad (5)
+    const dg559 = 559; // Offline (6)
     const disk545 = randomDiskId();
     const disk546 = randomDiskId();
     const disk547 = randomDiskId();
@@ -309,6 +357,12 @@ test.describe('capacity · diskdb', () => {
     const disk551 = randomDiskId();
     const disk552 = randomDiskId();
     const disk553 = randomDiskId();
+    const disk554 = randomDiskId();
+    const disk555 = randomDiskId();
+    const disk556 = randomDiskId();
+    const disk557 = randomDiskId();
+    const disk558 = randomDiskId();
+    const disk559 = randomDiskId();
 
     // The kv-server deployed in beforeAll + clusterInit makes group-0
     // available for set-status operations (real backend). Recalc/scan/
@@ -330,6 +384,18 @@ test.describe('capacity · diskdb', () => {
     await addDisksBatch(baseURL!, nodeId, dg552, [{ disk_id: disk552 }]);
     await apiAddDiskGroup(baseURL!, nodeId, dg553, 'test-dg-553');
     await addDisksBatch(baseURL!, nodeId, dg553, [{ disk_id: disk553 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg554, 'test-dg-554');
+    await addDisksBatch(baseURL!, nodeId, dg554, [{ disk_id: disk554 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg555, 'test-dg-555');
+    await addDisksBatch(baseURL!, nodeId, dg555, [{ disk_id: disk555 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg556, 'test-dg-556');
+    await addDisksBatch(baseURL!, nodeId, dg556, [{ disk_id: disk556 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg557, 'test-dg-557');
+    await addDisksBatch(baseURL!, nodeId, dg557, [{ disk_id: disk557 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg558, 'test-dg-558');
+    await addDisksBatch(baseURL!, nodeId, dg558, [{ disk_id: disk558 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg559, 'test-dg-559');
+    await addDisksBatch(baseURL!, nodeId, dg559, [{ disk_id: disk559 }]);
 
     try {
       await page.goto('/');
@@ -511,32 +577,44 @@ test.describe('capacity · diskdb', () => {
       const scanResp = await scanResponse;
       expect(scanResp.ok(), await scanResp.text()).toBeTruthy();
 
-      // --- sidebar shows health badges for disk-group and disk when
+      // --- sidebar shows HwStatus badges for disk-group and disk when
       // usage data is available (mocked: requires R72 ownership) ---
+      // Verify all 7 HwStatus values render with the correct title.
 
-      // Mock the usage API to return status data.
+      // Mock the usage API to return one DG per HwStatus value.
+      // HwStatus enum: 0=Init, 1=Up, 2=Maintenance, 3=Suspect,
+      // 4=Missing, 5=Bad, 6=Offline.
+      const statusCases: Array<[number, number, string, string]> = [
+        [dg553, 1, 'Up', disk553],
+        [dg554, 0, 'Init', disk554],
+        [dg555, 2, 'Maintenance', disk555],
+        [dg556, 3, 'Suspect', disk556],
+        [dg557, 4, 'Missing', disk557],
+        [dg558, 5, 'Bad', disk558],
+        [dg559, 6, 'Offline', disk559],
+      ];
       await page.route('**/api/diskdb/usage', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            disk_groups: [{
+            disk_groups: statusCases.map(([dgId, status, , diskId]) => ({
               rack_id: rackId,
               node_id: nodeId,
-              disk_group_id: dg553,
-              status: 1, // HW_STATUS_UP → Healthy
-              disk_ids: [disk553],
+              disk_group_id: dgId,
+              status,
+              disk_ids: [diskId],
               disks: [{
                 rack_id: rackId,
                 node_id: nodeId,
-                disk_group_id: dg553,
-                disk_id: disk553,
+                disk_group_id: dgId,
+                disk_id: diskId,
                 disk_type: 1,
                 capacity_units: 1000,
                 zone_size_units: 100,
                 unit_size_bytes: 4096,
                 zone_count: 10,
-                status: 1, // HW_STATUS_UP → Healthy
+                status,
                 busy_units: 100,
                 free_units: 900,
                 capacity_bytes: 4096000,
@@ -549,7 +627,7 @@ test.describe('capacity · diskdb', () => {
               busy_bytes: 409600,
               free_bytes: 3686400,
               allocatable_disk_count: 1,
-            }],
+            })),
           }),
         });
       });
@@ -564,20 +642,21 @@ test.describe('capacity · diskdb', () => {
       const expandNodeAgain = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeAgain.count() > 0) await expandNodeAgain.click();
 
-      // The disk-group should show a "Healthy" badge (compact mode:
-      // icon with title attribute, no text).
-      const dgTreeitem = aside.getByRole('treeitem').filter({ hasText: /DG-553/ });
-      await expect(dgTreeitem).toBeVisible({ timeout: 5_000 });
-      await expect(dgTreeitem.getByTitle('Healthy')).toBeVisible();
+      // Each DG and its disk should show the HwStatusBadge with the
+      // correct title (compact mode: icon only, title attribute set).
+      for (const [dgId, , label, diskId] of statusCases) {
+        const dgTreeitem = aside.getByRole('treeitem').filter({ hasText: new RegExp(`DG-${dgId}`) });
+        await expect(dgTreeitem).toBeVisible({ timeout: 5_000 });
+        await expect(dgTreeitem.getByTitle(label)).toBeVisible();
 
-      // Expand disk-group to see the disk.
-      const expandDg553 = dgTreeitem.locator('button[aria-label="Expand"]');
-      if (await expandDg553.count() > 0) await expandDg553.click();
+        // Expand disk-group to see the disk.
+        const expandDg = dgTreeitem.locator('button[aria-label="Expand"]');
+        if (await expandDg.count() > 0) await expandDg.click();
 
-      // The disk should also show a "Healthy" badge.
-      const diskTreeitem = aside.getByRole('treeitem').filter({ hasText: disk553.slice(0, 12) });
-      await expect(diskTreeitem).toBeVisible({ timeout: 5_000 });
-      await expect(diskTreeitem.getByTitle('Healthy')).toBeVisible();
+        const diskTreeitem = aside.getByRole('treeitem').filter({ hasText: diskId.slice(0, 12) });
+        await expect(diskTreeitem).toBeVisible({ timeout: 5_000 });
+        await expect(diskTreeitem.getByTitle(label)).toBeVisible();
+      }
     } finally {
       // Cleanup.
       await removeDisk(baseURL!, nodeId, dg545, disk545);
@@ -587,6 +666,12 @@ test.describe('capacity · diskdb', () => {
       await removeDisk(baseURL!, nodeId, dg551, disk551);
       await removeDisk(baseURL!, nodeId, dg552, disk552);
       await removeDisk(baseURL!, nodeId, dg553, disk553);
+      await removeDisk(baseURL!, nodeId, dg554, disk554);
+      await removeDisk(baseURL!, nodeId, dg555, disk555);
+      await removeDisk(baseURL!, nodeId, dg556, disk556);
+      await removeDisk(baseURL!, nodeId, dg557, disk557);
+      await removeDisk(baseURL!, nodeId, dg558, disk558);
+      await removeDisk(baseURL!, nodeId, dg559, disk559);
       await apiRemoveDiskGroup(baseURL!, nodeId, dg545);
       await apiRemoveDiskGroup(baseURL!, nodeId, dg546);
       await apiRemoveDiskGroup(baseURL!, nodeId, dg547);
@@ -595,6 +680,192 @@ test.describe('capacity · diskdb', () => {
       await apiRemoveDiskGroup(baseURL!, nodeId, dg551);
       await apiRemoveDiskGroup(baseURL!, nodeId, dg552);
       await apiRemoveDiskGroup(baseURL!, nodeId, dg553);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg554);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg555);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg556);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg557);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg558);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg559);
+    }
+  });
+
+  test('disk Inspector fields and CapacityPanel selection behavior', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
+    const rackId = DISKDB_RACK;
+    const nodeId = DISKDB_NODE;
+    const dg580 = 580;
+    const dg581 = 581;
+    const disk580 = randomDiskId();
+    const disk581 = randomDiskId();
+
+    await apiAddDiskGroup(baseURL!, nodeId, dg580, 'test-dg-580');
+    await addDisksBatch(baseURL!, nodeId, dg580, [{ disk_id: disk580 }]);
+    await apiAddDiskGroup(baseURL!, nodeId, dg581, 'test-dg-581');
+    await addDisksBatch(baseURL!, nodeId, dg581, [{ disk_id: disk581 }]);
+
+    try {
+      // Mock the usage API so the CapacityPanel has data to show
+      // (requires a running diskdb, which is not deployed here).
+      await page.route('**/api/diskdb/usage', (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            disk_groups: [
+              {
+                rack_id: rackId,
+                node_id: nodeId,
+                disk_group_id: dg580,
+                status: 1,
+                disk_ids: [disk580],
+                disks: [{
+                  rack_id: rackId,
+                  node_id: nodeId,
+                  disk_group_id: dg580,
+                  disk_id: disk580,
+                  disk_type: 2,
+                  capacity_units: 1000,
+                  zone_size_units: 100,
+                  unit_size_bytes: 4096,
+                  zone_count: 10,
+                  status: 1,
+                  busy_units: 100,
+                  free_units: 900,
+                  capacity_bytes: 4096000,
+                  busy_bytes: 409600,
+                  free_bytes: 3686400,
+                  active_zone_count: 5,
+                  zone_usages: Array.from({ length: 10 }, (_, i) => ({
+                    zone_index: i,
+                    busy_block_count: 10,
+                    free_block_count: 90,
+                    usage_bitmap: 'A'.repeat(20),
+                  })),
+                }],
+                capacity_bytes: 4096000,
+                busy_bytes: 409600,
+                free_bytes: 3686400,
+                allocatable_disk_count: 1,
+              },
+              {
+                rack_id: rackId,
+                node_id: nodeId,
+                disk_group_id: dg581,
+                status: 1,
+                disk_ids: [disk581],
+                disks: [{
+                  rack_id: rackId,
+                  node_id: nodeId,
+                  disk_group_id: dg581,
+                  disk_id: disk581,
+                  disk_type: 1,
+                  capacity_units: 2000,
+                  zone_size_units: 200,
+                  unit_size_bytes: 4096,
+                  zone_count: 10,
+                  status: 1,
+                  busy_units: 200,
+                  free_units: 1800,
+                  capacity_bytes: 8192000,
+                  busy_bytes: 819200,
+                  free_bytes: 7372800,
+                  active_zone_count: 5,
+                  zone_usages: [],
+                }],
+                capacity_bytes: 8192000,
+                busy_bytes: 819200,
+                free_bytes: 7372800,
+                allocatable_disk_count: 1,
+              },
+            ],
+          }),
+        });
+      });
+
+      // Mock diskdb instances so the CapacityPanel renders (it shows
+      // "No diskdb instances registered" when the list is empty).
+      await page.route('**/api/diskdb/instances', (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify([
+            {
+              instance_id: `diskdb-${nodeId}`,
+              node_id: nodeId,
+              grpc_endpoint: `http://127.0.0.1:30099`,
+              owned_dg_ids: [dg580, dg581],
+              status: 'up',
+            },
+          ]),
+        });
+      });
+
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
+      if (await expandRack.count() > 0) await expandRack.click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNode.count() > 0) await expandNode.click();
+
+      // --- CapacityPanel shows cluster-wide totals by default ---
+      const panel = page.locator('.tw-h-full.tw-overflow-auto');
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText('Capacity — Cluster')).toBeVisible();
+
+      // Total capacity = 4096000 + 8192000 = 12288000 bytes
+      await expect(panel.getByText('11.7 MB')).toBeVisible(); // 12288000 / 1024^2 ≈ 11.7 MB
+
+      // --- Click Rack in sidebar → header shows "Rack 501", totals filtered ---
+      await aside.getByText(`R-${rackId}`, { exact: false }).first().click();
+      await expect(panel.getByText(`Capacity — Rack ${rackId}`)).toBeVisible({ timeout: 3_000 });
+
+      // --- Click Node in sidebar → header shows "Node 501" ---
+      await aside.getByText(`N-${nodeId}`, { exact: true }).click();
+      await expect(panel.getByText(`Capacity — Node ${nodeId}`)).toBeVisible({ timeout: 3_000 });
+
+      // --- Click DiskGroup in sidebar → header shows "DG-580" ---
+      await expect(aside.getByText(/DG-580/, { exact: true })).toBeVisible({ timeout: 5_000 });
+      await aside.getByText(/DG-580/, { exact: true }).click();
+      await expect(panel.getByText('Capacity — DG-580')).toBeVisible({ timeout: 3_000 });
+
+      // --- Click Disk in sidebar → header shows "Disk …", zone grid appears ---
+      // Expand DG-580 to see the disk.
+      const expandDg580 = aside.getByRole('treeitem').filter({ hasText: /DG-580/ }).locator('button[aria-label="Expand"]');
+      if (await expandDg580.count() > 0) await expandDg580.click();
+
+      const disk580Label = aside.getByText(disk580.slice(0, 12), { exact: false });
+      await expect(disk580Label).toBeVisible({ timeout: 5_000 });
+      await disk580Label.first().click();
+
+      // The panel header should show the disk scope.
+      await expect(panel.getByText(/Capacity — Disk/)).toBeVisible({ timeout: 3_000 });
+
+      // The disk row should auto-expand and show the zone grid.
+      await expect(panel.getByText('Zone grid', { exact: false })).toBeVisible({ timeout: 5_000 });
+
+      // --- Disk Inspector: no Name, no Parent: disk_id ---
+      const inspector = page.getByRole('complementary', { name: 'Entity inspector' });
+      await expect(inspector).toBeVisible();
+      await expect(inspector.getByText('Type', { exact: true })).toBeVisible();
+      await expect(inspector.getByText('ID', { exact: true })).toBeVisible();
+      // Regression: Disk entities must NOT show a Name field.
+      await expect(inspector.getByText('Name', { exact: true })).toHaveCount(0);
+      // Regression: Disk entities must NOT show "Parent: disk_id"
+      // (disk_id is the entity's own ID, not a parent).
+      await expect(inspector.getByText('Parent: disk_id')).toHaveCount(0);
+      // Should show the correct parent fields.
+      await expect(inspector.getByText('Parent: rack_id')).toBeVisible();
+      await expect(inspector.getByText('Parent: node_id')).toBeVisible();
+      await expect(inspector.getByText('Parent: disk_group_id')).toBeVisible();
+    } finally {
+      // Cleanup.
+      await removeDisk(baseURL!, nodeId, dg580, disk580);
+      await removeDisk(baseURL!, nodeId, dg581, disk581);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg580);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dg581);
     }
   });
 
@@ -667,18 +938,26 @@ test.describe('capacity · diskdb', () => {
         }
       }
 
-      // --- reload, verify Restart/Stop DiskDB visible ---
+      // --- reload, verify Restart/Stop DiskDB visible in Physical view ---
+      // Capacity view no longer exposes Restart/Stop/Delete DiskDB on
+      // the node context menu — those are Physical-view operations on
+      // the DDB-{nodeId} server item.
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Physical' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
-      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
+      const expandNodeForMenu = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNodeForMenu.count() > 0) await expandNodeForMenu.first().click();
+      await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+      // Right-click DDB item → Restart/Stop/Delete DiskDB visible.
+      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
       await expect(page.getByRole('menuitem', { name: /restart diskdb/i })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /stop diskdb/i })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toHaveCount(0);
       await page.keyboard.press('Escape');
 
-      // --- restart DDB via context menu ---
-      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
+      // --- restart DDB via Physical view DDB context menu ---
+      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
       const restartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
       await page.getByRole('menuitem', { name: /restart diskdb/i }).click();
       await restartResponse;
@@ -703,8 +982,8 @@ test.describe('capacity · diskdb', () => {
         }
       }
 
-      // --- stop DDB via context menu ---
-      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
+      // --- stop DDB via Physical view DDB context menu ---
+      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
       const stopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/stop'));
       await page.getByRole('menuitem', { name: /stop diskdb/i }).click();
       await stopResponse;
@@ -752,10 +1031,14 @@ test.describe('capacity · diskdb', () => {
       await expect(kvItemAfterDdbStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
 
       // --- restart DDB after stop (verifies entry was preserved) ---
+      // Physical view: right-click DDB-{nodeId} → Restart DiskDB.
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Physical' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
-      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
+      const expandNodeForRestart = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNodeForRestart.count() > 0) await expandNodeForRestart.first().click();
+      await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
       const restartResponse2 = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
       await page.getByRole('menuitem', { name: /restart diskdb/i }).click();
       await restartResponse2;

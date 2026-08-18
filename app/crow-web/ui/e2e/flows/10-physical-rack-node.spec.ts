@@ -185,6 +185,21 @@ test.describe('physical · rack + node CRUD', () => {
         // to the health status (Healthy/Degraded/Failed/Unknown).
         const ddbItem = aside.getByRole('treeitem').filter({ hasText: `DDB-${nodeId}` });
         await expect(ddbItem.getByTitle(/Healthy|Degraded|Failed|Unknown/)).toBeVisible({ timeout: 10_000 });
+
+        // Selecting the DDB item opens the inspector. The Type field must
+        // read "DiskDB" (not "Crow Storage"), and service_type must NOT
+        // leak in as a "Parent: service_type" row — it is not a parent.
+        await aside.getByText(`DDB-${nodeId}`, { exact: true }).click();
+        const inspector = page.locator('aside[aria-label="Entity inspector"]');
+        await expect(inspector).toBeVisible({ timeout: 3_000 });
+        const ddbTypeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
+        await expect(ddbTypeDd).toHaveText('DiskDB', { timeout: 3_000 });
+        await expect(inspector.getByText(/service_type/i)).toHaveCount(0);
+
+        // Selecting the KV item shows Type = "KV".
+        await aside.getByText(`KV-${nodeId}`, { exact: true }).click();
+        const kvTypeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
+        await expect(kvTypeDd).toHaveText('KV', { timeout: 3_000 });
       } finally {
         await api.dispose();
         await stopNodeServer(baseURL!, nodeId);
@@ -270,6 +285,56 @@ test.describe('physical · rack + node CRUD', () => {
     } finally {
       await api.dispose();
       await stopNodeServer(baseURL!, 25);
+    }
+  });
+
+  /**
+   * Datacenter root (plan-datacenter-root): a fixed UI-only `datacenter`
+   * node sits above racks in the Physical sidebar and topology canvas.
+   * Right-clicking it offers only Add Rack (the default DC is immutable).
+   */
+  test('datacenter root wraps racks; Add Rack from datacenter context menu', async ({ page, baseURL }) => {
+    await createRack(baseURL!, { id: 60, name: 'Rack Sixty' });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Physical' }).click();
+    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+
+    // The datacenter root is the top treeitem, above the rack.
+    const dcItem = aside.getByRole('treeitem').filter({ hasText: /^datacenter$/ });
+    await expect(dcItem).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByRole('treeitem').first()).toHaveText(/datacenter/);
+
+    // The rack appears as the datacenter's child.
+    await expect(aside.getByText('R-60 (Rack Sixty)')).toBeVisible({ timeout: 3_000 });
+
+    // The topology canvas also renders the datacenter node at layer 0.
+    await expect(page.locator('.react-flow__node').filter({ hasText: 'datacenter' })).toBeVisible({ timeout: 5_000 });
+
+    // Right-click the datacenter → Add Rack (the only menu item).
+    await aside.getByText('datacenter', { exact: true }).click({ button: 'right' });
+    await page.getByRole('menuitem', { name: /add rack/i }).click();
+
+    await expect(page.getByRole('dialog', { name: 'Add Rack' })).toBeVisible();
+    await page.getByLabel('Rack ID').fill('61');
+    await page.getByLabel('Name (optional)').fill('Rack Sixty-One');
+    await page.getByRole('button', { name: /create rack/i }).click();
+
+    // The new rack appears as another child of the datacenter.
+    await expect(aside.getByText('R-61 (Rack Sixty-One)')).toBeVisible({ timeout: 3_000 });
+
+    const api = await apiContext(baseURL!);
+    try {
+      const response = await api.get('/api/racks');
+      expect(response.ok(), await response.text()).toBeTruthy();
+      const racks = await response.json();
+      expect(racks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 61, name: 'Rack Sixty-One' }),
+        ]),
+      );
+    } finally {
+      await api.dispose();
     }
   });
 

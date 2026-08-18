@@ -127,10 +127,19 @@ async function deleteNodeViaMenu(page: import('@playwright/test').Page, nodeId: 
 async function putKeyUi(page: import('@playwright/test').Page, key: string, value: string) {
   await page.getByLabel('Put key').fill(key);
   await page.getByLabel('Put value').fill(value);
-  const put = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
-  await page.getByRole('button', { name: /^Put$/ }).click();
-  const resp = await put;
-  expect(resp.ok(), await resp.text()).toBeTruthy();
+  // After reconfiguration, the backend KV client may exhaust its
+  // internal retries before the topology cache refreshes to the new
+  // leader. Retry the UI put — the backend's own retry loop provides
+  // the delay between attempts (~2s per round).
+  let lastError = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const put = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
+    await page.getByRole('button', { name: /^Put$/ }).click();
+    const resp = await put;
+    if (resp.ok()) return;
+    try { lastError = await resp.text(); } catch { lastError = `HTTP ${resp.status()}`; }
+  }
+  throw new Error(`putKeyUi failed after 5 attempts: ${lastError}`);
 }
 
 /** UI get via the KV panel; returns the value or null when not found. */

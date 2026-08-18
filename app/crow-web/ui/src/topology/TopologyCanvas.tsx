@@ -17,6 +17,7 @@ import 'reactflow/dist/style.css';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth } from '../types';
+import { DEFAULT_DC_ID } from '../data/defaultDatacenter';
 import { buildFlowForViewMode, FlowNodeData } from './buildFlow';
 import { layoutTree } from './layout';
 import { CrowKVNode } from './CrowKVNode';
@@ -28,6 +29,8 @@ export interface MenuTarget {
   rawId?: string | number;
   parentIds?: Record<string, string | number>;
   label?: string;
+  /** Service flavor for `Server` targets: KV vs DiskDB. */
+  serviceType?: 'kv' | 'diskdb';
 }
 
 interface TopologyCanvasProps {
@@ -78,6 +81,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
   const p = entity.parentIds || {};
   if (entity.viewMode === ViewMode.Physical || entity.viewMode === ViewMode.Capacity) {
     switch (entity.type) {
+      case 'Datacenter': return `DC-${DEFAULT_DC_ID}`;
       case 'Rack': return `R-${entity.id}`;
       case 'Node': return `N-${entity.id}`;
       case 'Server': return p.node_id ? `KV-${p.node_id}` : null;
@@ -91,6 +95,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
     }
   }
   switch (entity.type) {
+    case 'Datacenter': return `DC-${DEFAULT_DC_ID}`;
     case 'Store': return `S-${entity.id}`;
     case 'Group': return p.store_id ? `G-${p.store_id}-${entity.id}` : null;
     case 'Replica':
@@ -257,7 +262,7 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       if (!data.entity) return;
       selectEntity({ ...data.entity, viewMode });
       onEntityContextMenu?.(
-        { type: data.entity.type, id: data.entity.id, parentIds: data.entity.parentIds, label: data.label },
+        { type: data.entity.type, id: data.entity.id, parentIds: data.entity.parentIds, label: data.label, serviceType: data.entity.serviceType },
         e,
       );
     },
