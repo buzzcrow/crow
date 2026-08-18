@@ -82,8 +82,9 @@ The leaf primitives every other module depends on. No I/O yet.
   data_size>max, one-way flag). All 12 pass. Files:
   `lib/crow-rpc/tests/buffer_test.cpp`,
   `lib/crow-rpc/tests/framing_test.cpp`.
-- [ ] **1.8 Commit Phase 1**. Verify `pixi run test-rpc-ct` +
-  `pixi run test-protocol` pass. Commit.
+- [x] **1.8 Commit Phase 1**. `pixi run test-rpc-ct` (12/12 pass) +
+  `pixi run test-protocol` (92/92 pass) + pre-commit (fmt + clippy) green.
+  Committed as `7a92478`.
 
 ---
 
@@ -91,41 +92,46 @@ The leaf primitives every other module depends on. No I/O yet.
 
 The TCP I/O stack. Shared `SocketTransport` base + engine subclasses.
 
-- [ ] **2.1 Transport interface + Connection + OutFrame (C++)**.
-  `transport.h`: `class Transport` (submit, register_buffer, run_loop,
-  shutdown), `class Connection` (id, name, is_open, enqueue_send, close,
-  on_frame, user_data, transport_handle, send_queue, parser, pending map),
-  `struct OutFrame` (request_id, header, control, data). Connection is
-  transport-agnostic; only `transport_handle` is type-erased. Files:
-  `lib/crow-rpc/cpp/include/crow-rpc/transport.h`,
-  `lib/crow-rpc/cpp/src/connection.cpp`.
-- [ ] **2.2 SocketTransport base (C++)**. `socket_transport.h`/`.cpp`:
+- [x] **2.1 Transport interface + Connection + OutFrame (C++)**.
+  `transport.h`: `class Transport` (submit, register_buffer, shutdown),
+  `class Connection` (id, name, is_open, enqueue_send, drain_send_queue,
+  close, on_frame, on_frame/on_close callbacks, user_data,
+  transport_handle, parser, pool), `struct OutFrame` (request_id, header,
+  control, data). Connection is transport-agnostic; only
+  `transport_handle` is type-erased. Files:
+  `lib/crow-rpc/include/crow-rpc/transport.h`,
+  `lib/crow-rpc/src/connection.cpp`.
+- [x] **2.2 SocketTransport base (C++)**. `socket_transport.h`/`.cpp`:
   `class SocketTransport : public Transport` with shared `on_readable`
   (read→parse→on_frame, zero-copy into pool buffers) and `on_writable`
-  (drain send queue → writev scatter-gather, partial-write resume via
-  `advance_iov`, release sent buffers). Protected engine primitives
-  (arm_read/arm_write/disarm_write/add_connection/remove_connection/
-  notify_worker). `BATCH_MAX = 64`. Files:
-  `lib/crow-rpc/cpp/include/crow-rpc/socket_transport.h`,
-  `lib/crow-rpc/cpp/src/socket_transport.cpp`.
-- [ ] **2.3 Worker loop + cross-thread submit**. Worker thread structure:
-  init engine, register notify_fd + timer_fd, event loop
-  (accept / notify drain / timer / readable / writable / error). notify_fd
-  for cross-thread submit (Rust→C++ push→wake). Writable armed only when
-  send queue non-empty. Files: `lib/crow-rpc/cpp/include/crow-rpc/worker.h`,
-  `lib/crow-rpc/cpp/src/worker.cpp`.
-- [ ] **2.4 EpollEngine (Linux)**. `epoll_engine.h`/`.cpp`: `epoll_create1`,
+  (drain send queue → writev scatter-gather, partial-write re-queue,
+  release sent buffers). `SocketEngine` abstract interface isolates
+  platform event-dispatch primitives. `BATCH_MAX = 64`. Files:
+  `lib/crow-rpc/include/crow-rpc/socket_transport.h`,
+  `lib/crow-rpc/src/socket_transport.cpp`.
+- [x] **2.3 Worker loop + cross-thread submit**. `Worker` class: owns one
+  `SocketEngine`, runs the event loop (accept / notify drain / timer /
+  readable / writable / error). Cross-thread submit via pending_submits_
+  + notify_worker (eventfd/EVFILT_USER). Writable armed on-demand.
+  Files: `lib/crow-rpc/include/crow-rpc/socket_transport.h` (Worker class),
+  `lib/crow-rpc/src/socket_transport.cpp` (Worker methods).
+- [x] **2.4 EpollEngine (Linux)**. `epoll_engine.h`/`.cpp`: `epoll_create1`,
   level-triggered `EPOLLIN`/`EPOLLOUT` MOD, `epoll_wait`, eventfd notify,
-  timerfd timer. `#ifdef __linux__`. Files:
-  `lib/crow-rpc/cpp/include/crow-rpc/epoll_engine.h`,
-  `lib/crow-rpc/cpp/src/epoll_engine.cpp`.
-- [ ] **2.5 KqueueEngine (macOS)**. `kqueue_engine.h`/`.cpp`: `kqueue`,
+  timerfd timer. Gated by `CMAKE_SYSTEM_NAME == Linux` in CMakeLists.
+  Files: `lib/crow-rpc/include/crow-rpc/epoll_engine.h`,
+  `lib/crow-rpc/src/epoll_engine.cpp`.
+- [x] **2.5 KqueueEngine (macOS)**. `kqueue_engine.h`/`.cpp`: `kqueue`,
   `EVFILT_READ` level-triggered, `EVFILT_WRITE` edge-triggered
-  (`EV_CLEAR`), `EVFILT_USER` notify (pipe fallback), `EVFILT_TIMER`.
-  `#ifdef __APPLE__`. Files:
-  `lib/crow-rpc/cpp/include/crow-rpc/kqueue_engine.h`,
-  `lib/crow-rpc/cpp/src/kqueue_engine.cpp`.
-- [ ] **2.6 Commit Phase 2**. Build both platforms. Commit.
+  (`EV_CLEAR`), `EVFILT_USER` notify, `EVFILT_TIMER` (NOTE_USECONDS).
+  Gated by `CMAKE_SYSTEM_NAME == Darwin` in CMakeLists. Files:
+  `lib/crow-rpc/include/crow-rpc/kqueue_engine.h`,
+  `lib/crow-rpc/src/kqueue_engine.cpp`.
+- [x] **2.6 Transport loopback tests**. `transport_test.cpp`: TCP
+  loopback send+receive (12-byte header + 16-byte control), connection
+  close callback on EOF. 2 tests, both pass. Files:
+  `lib/crow-rpc/tests/transport_test.cpp`.
+- [ ] **2.7 Commit Phase 2**. `pixi run test-rpc-ct` (14/14 pass) +
+  clang-format clean. Commit.
 
 ---
 

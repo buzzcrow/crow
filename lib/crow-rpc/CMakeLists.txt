@@ -67,6 +67,13 @@ if(NOT CROW_RPC_HAVE_RDMA)
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rdma_transport.cpp
   )
 endif()
+# epoll_engine is Linux-only; kqueue_engine is macOS-only.
+if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+  list(REMOVE_ITEM CROW_RPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/epoll_engine.cpp)
+endif()
+if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
+  list(REMOVE_ITEM CROW_RPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/kqueue_engine.cpp)
+endif()
 add_library(crow-rpc STATIC ${CROW_RPC_SRC})
 target_include_directories(crow-rpc
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
