@@ -8,7 +8,7 @@ import { cn } from '../utils/cn';
 import { toUiHealth } from '../utils/entityDisplay';
 
 interface CrowKVNodeData {
-  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
+  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica' | 'DiskGroup';
   label: string;
   sublabel?: string;
   health?: string;
@@ -31,6 +31,7 @@ const iconForKind: Record<CrowKVNodeData['kind'], typeof FolderTree> = {
   Replica: HardDrive,
   LocalReplica: HardDrive,
   RemoteReplica: RadioTower,
+  DiskGroup: Boxes,
 };
 
 const accentForKind: Record<CrowKVNodeData['kind'], string> = {
@@ -43,6 +44,7 @@ const accentForKind: Record<CrowKVNodeData['kind'], string> = {
   Replica: 'tw-text-healthy',
   LocalReplica: 'tw-text-healthy',
   RemoteReplica: 'tw-text-remote',
+  DiskGroup: 'tw-text-accent',
 };
 
 const surfaceForKind: Record<CrowKVNodeData['kind'], string> = {
@@ -55,6 +57,7 @@ const surfaceForKind: Record<CrowKVNodeData['kind'], string> = {
   Replica: 'tw-bg-healthy/10 tw-border-healthy/30',
   LocalReplica: 'tw-bg-healthy/10 tw-border-healthy/30',
   RemoteReplica: 'tw-bg-remote/10 tw-border-remote/30',
+  DiskGroup: 'tw-bg-accent/10 tw-border-accent/30',
 };
 
 /**

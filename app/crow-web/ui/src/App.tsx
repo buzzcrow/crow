@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { Suspense, useState, useCallback, useMemo, lazy, useEffect } from 'react';
+import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef } from 'react';
 import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, Move } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
 import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
@@ -26,6 +26,7 @@ import {
   AddDiskGroupDialog,
   AddDiskDialog,
   MoveDiskDialog,
+  AssignDiskGroupDialog,
   DeployServerDialog,
   DeployDiskdbDialog,
   ConfirmDeleteDialog,
@@ -120,6 +121,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     addDiskGroup?: { nodeId: number };
     addDisk?: { nodeId: number; dgId: number };
     moveDisk?: { diskId: string; rackId: number; nodeId: number; dgId: number };
+    assignDiskGroup?: { rackId: number; nodeId: number; dgId: number; dgName?: string };
     deployServer?: { nodeId: number };
     deployDiskdb?: { nodeId: number } | null;
     delete?: { type: string; id: string | number; onDelete: () => Promise<void>; cascadeWarning?: string };
@@ -144,8 +146,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
-  const { instances: diskdbInstances, usage: capacityUsage, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
-    enabled: viewMode === ViewMode.Capacity,
+  const { instances: diskdbInstances, usage: capacityUsage, hardwareCapacity, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
+    enabled: viewMode === ViewMode.Capacity || viewMode === ViewMode.Physical,
     pollIntervalActive: 5000,
     pollIntervalInactive: 30000,
   });
@@ -155,12 +157,20 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const servers = useMemo(() => buildCrowKVServers(nodes, racks), [nodes, racks]);
   const serverNodeIds = useMemo(() => crowKvServerNodeIds(servers), [servers]);
   const [allServers, setAllServers] = useState<import('./api').ServerSummary[]>([]);
+  const serverErrorShownRef = useRef(false);
   const refreshAllServers = useCallback(async () => {
     try {
       setAllServers(await listServers());
+      serverErrorShownRef.current = false;
     } catch (err) {
       setAllServers([]);
-      error(`Failed to load server list: ${err instanceof Error ? err.message : 'backend unreachable'}`);
+      // Only show the toast once per failure streak — polling retries
+      // every few seconds and would otherwise flood the UI with
+      // identical "backend unreachable" toasts.
+      if (!serverErrorShownRef.current) {
+        serverErrorShownRef.current = true;
+        error(`Failed to load server list: ${err instanceof Error ? err.message : 'backend unreachable'}`);
+      }
     }
   }, [error]);
   useEffect(() => {
@@ -199,10 +209,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     setRefreshing(true);
     try {
       await Promise.all([refreshPhysical(), refreshLogical(), refreshCapacity()]);
-      if (capacityActive) {
+      if (capacityActive || physicalActive) {
         await Promise.all([fetchNodeDiskGroups(nodes.map((n) => n.id)), refreshAllServers()]);
-      } else if (physicalActive) {
-        await refreshAllServers();
       }
       setLastRefreshTime(new Date());
     } finally {
@@ -210,12 +218,12 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     }
   }, [refreshPhysical, refreshLogical, refreshCapacity, capacityActive, physicalActive, fetchNodeDiskGroups, nodes, refreshAllServers]);
 
-  // Fetch node disk-groups when the Capacity view is active.
+  // Fetch node disk-groups when the Capacity or Physical view is active.
   useEffect(() => {
-    if (capacityActive && nodes.length > 0) {
+    if ((capacityActive || physicalActive) && nodes.length > 0) {
       fetchNodeDiskGroups(nodes.map((n) => n.id));
     }
-  }, [capacityActive, nodes, fetchNodeDiskGroups]);
+  }, [capacityActive, physicalActive, nodes, fetchNodeDiskGroups]);
 
   // After cluster init succeeds, refresh the tree so the system group
   // appears. Init only bootstraps store 0 / group 0; store creation is
@@ -542,6 +550,13 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         });
         items.push({ id: 's2', separator: true });
         items.push({
+          id: 'assign-dg',
+          label: 'Assign to DiskDB',
+          icon: <Server className="tw-h-4 tw-w-4" />,
+          onSelect: () => setDialog((d) => ({ ...d, assignDiskGroup: { rackId: dgRackId, nodeId: dgNodeId, dgId, dgName: t.label } })),
+        });
+        items.push({ id: 's3', separator: true });
+        items.push({
           id: 'del-dg',
           label: 'Delete Disk Group',
           icon: <Trash2 className="tw-h-4 tw-w-4" />,
@@ -861,6 +876,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             <CapacityPanel
               instances={diskdbInstances}
               usage={capacityUsage}
+              hardwareCapacity={hardwareCapacity}
               scanStatus={capacityScanStatus}
               loading={capLoading}
               readonly={readonly}
@@ -876,6 +892,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               nodeStores={nodeStores}
               nodeHealthById={nodeHealthById}
               diskdbNodeIds={diskdbNodeIds}
+              diskdbInstances={diskdbInstances}
               refreshToken={lastRefreshTime.getTime()}
               focusRequest={canvasFocusRequest}
               onEntityContextMenu={onCanvasContextMenu}
@@ -885,7 +902,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       </main>
 
       <Suspense fallback={null}>
-        <Inspector readonly={readonly} modules={modules} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} width={inspectorWidth} />
+        <Inspector readonly={readonly} modules={modules} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} width={inspectorWidth} />
       </Suspense>
 
       {selectedEntity && (
@@ -1021,6 +1038,19 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           diskGroupsByNode={Object.fromEntries(
             Object.entries(nodeDiskGroups).map(([k, v]) => [Number(k), v.diskGroups])
           )}
+          onSuccess={handleRefresh}
+        />
+      )}
+      {dialog.assignDiskGroup && (
+        <AssignDiskGroupDialog
+          isOpen
+          onClose={closeDialogs}
+          rackId={dialog.assignDiskGroup.rackId}
+          nodeId={dialog.assignDiskGroup.nodeId}
+          dgId={dialog.assignDiskGroup.dgId}
+          dgName={dialog.assignDiskGroup.dgName}
+          instances={diskdbInstances}
+          stores={stores}
           onSuccess={handleRefresh}
         />
       )}

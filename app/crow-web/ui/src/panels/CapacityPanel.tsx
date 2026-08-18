@@ -15,6 +15,7 @@ import {
 import type {
   DiskdbInstanceInfo,
   CapacityUsageResponse,
+  HardwareCapacitySummary,
   ScanStatusResponse,
   DiskGroupInfoDto,
   DiskInfoDto,
@@ -30,6 +31,7 @@ import { RecalcPanel } from './RecalcPanel';
 interface CapacityPanelProps {
   instances: DiskdbInstanceInfo[];
   usage: CapacityUsageResponse | null;
+  hardwareCapacity?: HardwareCapacitySummary | null;
   scanStatus: ScanStatusResponse | null;
   loading?: boolean;
   readonly?: boolean;
@@ -66,6 +68,7 @@ function hwStatusLabel(s: number): string {
 export function CapacityPanel({
   instances,
   usage,
+  hardwareCapacity,
   scanStatus,
   loading,
   readonly,
@@ -114,10 +117,25 @@ export function CapacityPanel({
   }, [usage]);
 
   // Filter disk-groups based on the selected layer (rack/node/DG/disk).
-  // When a rack or node is selected, only show DGs matching that
-  // rack/node, and the totals reflect the filtered set.
+  // Uses hardwareCapacity (group-0 sysdata) for the DG list and
+  // capacity; falls back to usage (diskdb) if hardwareCapacity is
+  // not yet loaded.
   const filteredDgs = useMemo(() => {
-    const allDgs = usage?.disk_groups || [];
+    const hwDgs = hardwareCapacity?.disk_groups || [];
+    const allDgs = hwDgs.length > 0
+      ? hwDgs.map((g) => ({
+          rack_id: g.rack_id,
+          node_id: g.node_id,
+          disk_group_id: g.disk_group_id,
+          status: g.status,
+          disk_ids: g.disks.map((d) => d.disk_id),
+          disks: [],
+          capacity_bytes: g.capacity_bytes,
+          busy_bytes: 0,
+          free_bytes: g.capacity_bytes,
+          allocatable_disk_count: 0,
+        } as DiskGroupInfoDto))
+      : (usage?.disk_groups || []);
     if (!selectedEntity) return allDgs;
     if (selectedEntity.type === 'Rack') {
       const rackId = Number(selectedEntity.id);
@@ -136,19 +154,25 @@ export function CapacityPanel({
       return allDgs.filter((g) => g.disk_group_id === dgId);
     }
     return allDgs;
-  }, [usage, selectedEntity]);
+  }, [hardwareCapacity, usage, selectedEntity]);
 
   const totalCapacity = useMemo(() => {
     return filteredDgs.reduce((sum, g) => sum + g.capacity_bytes, 0);
   }, [filteredDgs]);
 
   const totalBusy = useMemo(() => {
-    return filteredDgs.reduce((sum, g) => sum + g.busy_bytes, 0);
-  }, [filteredDgs]);
+    // Busy/free come from diskdb usage (allocation state), not from
+    // hardware sysdata. If diskdb is not available, busy = 0.
+    const usageDgs = usage?.disk_groups || [];
+    return filteredDgs.reduce((sum, g) => {
+      const u = usageDgs.find((ud) => ud.disk_group_id === g.disk_group_id);
+      return sum + (u?.busy_bytes ?? 0);
+    }, 0);
+  }, [filteredDgs, usage]);
 
   const totalFree = useMemo(() => {
-    return filteredDgs.reduce((sum, g) => sum + g.free_bytes, 0);
-  }, [filteredDgs]);
+    return Math.max(0, totalCapacity - totalBusy);
+  }, [totalCapacity, totalBusy]);
 
   // Build a summary title based on the selected layer.
   const scopeLabel = useMemo(() => {

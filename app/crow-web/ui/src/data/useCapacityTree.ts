@@ -2,13 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { listDiskdbInstances, getDiskdbUsage, getDiskdbScanStatus, listNodeDiskGroups, listDisksInGroup } from '../api';
+import { listDiskdbInstances, getDiskdbUsage, getDiskdbScanStatus, getHardwareCapacity, listNodeDiskGroups, listDisksInGroup } from '../api';
 import type {
   DiskdbInstanceInfo,
   CapacityUsageResponse,
   ScanStatusResponse,
   DiskGroupEntry,
   DiskEntry,
+  HardwareCapacitySummary,
 } from '../types';
 
 interface UseCapacityTreeOptions {
@@ -25,6 +26,7 @@ export interface NodeDiskGroups {
 interface UseCapacityTreeResult {
   instances: DiskdbInstanceInfo[];
   usage: CapacityUsageResponse | null;
+  hardwareCapacity: HardwareCapacitySummary | null;
   scanStatus: ScanStatusResponse | null;
   loading: boolean;
   error: Error | null;
@@ -40,6 +42,7 @@ export function useCapacityTree({
 }: UseCapacityTreeOptions = {}): UseCapacityTreeResult {
   const [instances, setInstances] = useState<DiskdbInstanceInfo[]>([]);
   const [usage, setUsage] = useState<CapacityUsageResponse | null>(null);
+  const [hardwareCapacity, setHardwareCapacity] = useState<HardwareCapacitySummary | null>(null);
   const [scanStatus, setScanStatus] = useState<ScanStatusResponse | null>(null);
   const [nodeDiskGroups, setNodeDiskGroups] = useState<Record<number, NodeDiskGroups>>({});
   const [loading, setLoading] = useState(true);
@@ -56,9 +59,10 @@ export function useCapacityTree({
         setLoading(true);
       }
 
-      const [instancesResult, usageResult, scanResult] = await Promise.allSettled([
+      const [instancesResult, usageResult, hwCapResult, scanResult] = await Promise.allSettled([
         listDiskdbInstances(),
         getDiskdbUsage(),
+        getHardwareCapacity(),
         getDiskdbScanStatus(),
       ]);
 
@@ -72,6 +76,12 @@ export function useCapacityTree({
         setUsage(usageResult.value);
       } else {
         setUsage(null);
+      }
+
+      if (hwCapResult.status === 'fulfilled') {
+        setHardwareCapacity(hwCapResult.value);
+      } else {
+        setHardwareCapacity(null);
       }
 
       if (scanResult.status === 'fulfilled') {
@@ -166,6 +176,7 @@ export function useCapacityTree({
   return {
     instances,
     usage,
+    hardwareCapacity,
     scanStatus,
     loading,
     error,

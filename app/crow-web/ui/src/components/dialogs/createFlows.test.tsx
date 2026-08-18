@@ -13,7 +13,7 @@ import { AddReplicaDialog } from './AddReplicaDialog';
 import { DeployServerDialog } from './DeployServerDialog';
 import { NodeHealth, ProcState } from '../../types';
 import type { Node, Rack, CrowKVServerView, EnrichedStoreView } from '../../types';
-import { deployPortDefaultsForNode, diskdbPortDefaultsForNode } from './defaults';
+import { deployPortDefaultsForNode, diskdbPortDefaultsForNode, minUnusedId } from './defaults';
 
 /**
  * These tests pin down the exact request bodies the SPA must send for the
@@ -333,6 +333,28 @@ describe('diskdbPortDefaultsForNode', () => {
 
   it('increments past remembered ports even when no instances exist', () => {
     expect(diskdbPortDefaultsForNode([], 1, undefined, [29921])).toBe('29922');
+  });
+});
+
+describe('minUnusedId', () => {
+  it('returns min when no ids exist', () => {
+    expect(minUnusedId([], 1)).toBe('1');
+  });
+
+  it('returns min when ids do not conflict', () => {
+    expect(minUnusedId([5, 6, 7], 1)).toBe('1');
+  });
+
+  it('fills the first gap', () => {
+    expect(minUnusedId([1, 3, 4], 1)).toBe('2');
+  });
+
+  it('returns max+1 when no gaps exist', () => {
+    expect(minUnusedId([1, 2, 3], 1)).toBe('4');
+  });
+
+  it('ignores non-numeric ids', () => {
+    expect(minUnusedId(['abc', '1', '3'], 1)).toBe('2');
   });
 });
 

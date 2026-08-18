@@ -14,7 +14,7 @@ import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel
  * drives the deterministic layout in `layout.ts`.
  */
 export interface FlowNodeData {
-  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
+  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica' | 'DiskGroup';
   label: string;
   sublabel?: string;
   health?: string;
@@ -94,6 +94,8 @@ export function buildPhysicalFlow(
   servers: CrowKVServerView[],
   nodeStores: Record<string, NodeStore[]> = {},
   nodeHealthById: Record<string, NodeHealth> = {},
+  diskdbNodeIds: Set<number> = new Set(),
+  diskdbInstances: { instance_id: number; owned_dg_ids: number[] }[] = [],
 ): { nodes: Node[]; edges: Edge[] } {
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
@@ -226,6 +228,37 @@ export function buildPhysicalFlow(
             ...REMOTE_EDGE,
           });
         }
+      }
+    }
+
+    // DiskDB server node + owned disk-group children.
+    if (diskdbNodeIds.has(node.id)) {
+      const ddbNodeId = `DDB-${node.id}`;
+      const ddbInstance = diskdbInstances.find((i) => i.instance_id === node.id);
+      const ownedDgIds = ddbInstance?.owned_dg_ids || [];
+      flowNodes.push(
+        mkNode(ddbNodeId, {
+          kind: 'Server',
+          label: `DDB-${node.id}`,
+          sublabel: ownedDgIds.length > 0 ? `${ownedDgIds.length} DG(s)` : 'no DGs',
+          layer: 3,
+          entity: { type: 'Server', id: `DDB-${node.id}`, parentIds: { rack_id: node.rack_id, node_id: node.id }, serviceType: 'diskdb' },
+        }),
+      );
+      flowEdges.push({ id: `e-N-${node.id}-DDB`, source: `N-${node.id}`, target: ddbNodeId, type: 'smoothstep' });
+
+      for (const dgId of ownedDgIds) {
+        const dgNodeId = `DDBG-${node.id}-${dgId}`;
+        flowNodes.push(
+          mkNode(dgNodeId, {
+            kind: 'DiskGroup',
+            label: `DG-${dgId}`,
+            sublabel: '',
+            layer: 4,
+            entity: { type: 'DiskGroup', id: String(dgId), parentIds: { rack_id: node.rack_id, node_id: node.id, disk_group_id: dgId } },
+          }),
+        );
+        flowEdges.push({ id: `e-${ddbNodeId}-${dgNodeId}`, source: ddbNodeId, target: dgNodeId, type: 'smoothstep' });
       }
     }
   }
@@ -368,10 +401,11 @@ export function buildFlowForViewMode(
   nodeStores: Record<string, NodeStore[]> = {},
   nodeHealthById: Record<string, NodeHealth> = {},
   diskdbNodeIds: Set<number> = new Set(),
+  diskdbInstances: { instance_id: number; owned_dg_ids: number[] }[] = [],
 ): { nodes: Node[]; edges: Edge[] } {
   switch (viewMode) {
     case ViewMode.Physical:
-      return buildPhysicalFlow(racks, nodes, servers, nodeStores, nodeHealthById);
+      return buildPhysicalFlow(racks, nodes, servers, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances);
     case ViewMode.Capacity:
       return buildCapacityFlow(racks, nodes, diskdbNodeIds, nodeHealthById);
     default:

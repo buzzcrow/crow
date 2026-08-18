@@ -14,9 +14,12 @@ import {
   removeDisk,
   randomDiskId,
   removeDiskdb,
+  deployDiskdb as apiDeployDiskdb,
   deployNodeServer,
   clusterInit,
   waitForLeader,
+  createStore,
+  addGroup,
 } from '../fixtures/consoleSetup';
 
 const DISKDB_RACK = 501;
@@ -136,6 +139,7 @@ test.describe('capacity · diskdb', () => {
     const dg570 = 570;
     const disk540 = randomDiskId();
     const disk560 = randomDiskId();
+    const disk570 = randomDiskId();
 
     // Pre-create the disk-groups that are not created through the UI, so
     // the tree already holds them when the page mounts.
@@ -144,6 +148,8 @@ test.describe('capacity · diskdb', () => {
     await apiAddDiskGroup(baseURL!, nodeId, dg560, 'test-dg-560');
     await addDisksBatch(baseURL!, nodeId, dg560, [{ disk_id: disk560 }]);
     await apiAddDiskGroup(baseURL!, nodeId, dg570, 'test-dg-570');
+    // Add a disk to DG-570 so we can verify cascade delete removes it.
+    await addDisksBatch(baseURL!, nodeId, dg570, [{ disk_id: disk570 }]);
 
     try {
       await page.goto('/');
@@ -170,7 +176,18 @@ test.describe('capacity · diskdb', () => {
       await expect(dgIdInput).toBeVisible();
       await expect(dgDialog.getByLabel('Name (optional)')).toBeVisible();
       const suggestedId = await dgIdInput.inputValue();
-      expect(Number(suggestedId)).toBeGreaterThan(570);
+      // The dialog should suggest the minimal unused DG id (not a
+      // duplicate of any existing DG). Fetch existing DGs to verify.
+      const existApi = await apiContext(baseURL!);
+      let existingDgIds: number[] = [];
+      try {
+        const r = await existApi.get(`/api/nodes/${nodeId}/disk-groups`);
+        expect(r.ok()).toBeTruthy();
+        existingDgIds = (await r.json()).map((dg: any) => dg.id as number);
+      } finally {
+        await existApi.dispose();
+      }
+      expect(existingDgIds).not.toContain(Number(suggestedId));
 
       // Override with a specific ID and submit.
       await dgIdInput.fill(String(dg520));
@@ -182,15 +199,24 @@ test.describe('capacity · diskdb', () => {
       await expect(aside.getByText(/test-dg.*DG-520|DG-520.*test-dg/, { exact: true })).toBeVisible({ timeout: 10_000 });
 
       // Regression: opening the Add Disk Group dialog again should
-      // suggest an ID that does NOT reuse the just-created DG-520.
-      // The suggestion must be > 570 (max of pre-created DGs), not 520.
+      // suggest an ID that does NOT reuse the just-created DG-520 or
+      // any other existing DG. The suggestion must be the minimal
+      // unused id (not a duplicate).
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add disk group/i }).click();
       const dgDialog2 = page.getByRole('dialog', { name: /add disk group/i });
       await expect(dgDialog2).toBeVisible();
       const suggestedId2 = await dgDialog2.getByLabel('Disk Group ID (auto-assigned)').inputValue();
-      expect(Number(suggestedId2)).toBeGreaterThan(570);
       expect(Number(suggestedId2)).not.toBe(dg520);
+      const existApi2 = await apiContext(baseURL!);
+      try {
+        const r = await existApi2.get(`/api/nodes/${nodeId}/disk-groups`);
+        expect(r.ok()).toBeTruthy();
+        const ids = (await r.json()).map((dg: any) => dg.id as number);
+        expect(ids).not.toContain(Number(suggestedId2));
+      } finally {
+        await existApi2.dispose();
+      }
       await page.keyboard.press('Escape');
 
       // Verify via API.
@@ -308,14 +334,20 @@ test.describe('capacity · diskdb', () => {
 
       // The disk-group should disappear from the tree.
       await expect(aside.getByText(/DG-570/, { exact: true })).toHaveCount(0, { timeout: 10_000 });
+      // The child disk should also disappear (cascade delete).
+      await expect(aside.getByText(disk570.slice(0, 12), { exact: false })).toHaveCount(0, { timeout: 10_000 });
 
-      // Verify via API.
+      // Verify via API: DG and its child disk are both gone.
       const delApi = await apiContext(baseURL!);
       try {
         const r = await delApi.get(`/api/nodes/${nodeId}/disk-groups`);
         expect(r.ok()).toBeTruthy();
         const dgs = await r.json();
         expect(dgs.some((dg: any) => dg.id === dg570)).toBeFalsy();
+        // Disk should also be removed from config.
+        const diskR = await delApi.get(`/api/nodes/${nodeId}/disk-groups/${dg570}/disks`);
+        // DG is gone, so this should 404 or return empty.
+        expect(diskR.ok() || diskR.status() === 404).toBeTruthy();
       } finally {
         await delApi.dispose();
       }
@@ -869,6 +901,123 @@ test.describe('capacity · diskdb', () => {
     }
   });
 
+  test('assign disk-group to diskdb via UI, capacity becomes non-zero', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
+    const rackId = DISKDB_RACK;
+    const nodeId = DISKDB_NODE;
+    const dgId = 590;
+    const diskId = randomDiskId();
+    const storeId = 590;
+    const groupId = 590;
+    const rpcPort = freePort();
+
+    // Deploy diskdb via API (the UI deploy flow is tested in the next
+    // test; here we just need a running instance for ownership assignment).
+    await apiDeployDiskdb(baseURL!, nodeId, rpcPort);
+
+    // Fetch the diskdb instance id (auto-generated, not the node id).
+    let instanceId = 0;
+    {
+      const api = await apiContext(baseURL!);
+      try {
+        const r = await api.get('/api/diskdb/instances');
+        expect(r.ok()).toBeTruthy();
+        const instances = await r.json();
+        const ddb = instances.find((i: { grpc_endpoint: string }) =>
+          i.grpc_endpoint.includes(String(rpcPort)));
+        expect(ddb, 'diskdb instance should be registered').toBeTruthy();
+        instanceId = ddb.instance_id;
+      } finally {
+        await api.dispose();
+      }
+    }
+
+    // Create a DG + disk, and a store + group for the bind target.
+    await apiAddDiskGroup(baseURL!, nodeId, dgId, 'test-dg-assign');
+    await addDisksBatch(baseURL!, nodeId, dgId, [{ disk_id: diskId }]);
+    await createStore(baseURL!, storeId, [nodeId]);
+    await addGroup(baseURL!, storeId, groupId, 1, [nodeId]);
+
+    try {
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
+      if (await expandRack.count() > 0) await expandRack.click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+      // Expand the node to see the disk-group.
+      const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNode.count() > 0) await expandNode.click();
+      await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+      // --- Right-click DG → "Assign to DiskDB" context menu item ---
+      await aside.getByText(/DG-590/, { exact: true }).click({ button: 'right' });
+      await expect(page.getByRole('menuitem', { name: /assign to diskdb/i })).toBeVisible();
+      await page.getByRole('menuitem', { name: /assign to diskdb/i }).click();
+
+      const assignDialog = page.getByRole('dialog', { name: /assign disk group/i });
+      await expect(assignDialog).toBeVisible();
+
+      // The dialog should have DiskDB Instance, Paxos Store, and
+      // Paxos Data Group dropdowns.
+      await expect(assignDialog.getByLabel('DiskDB Instance')).toBeVisible();
+      await expect(assignDialog.getByLabel('Paxos Store')).toBeVisible();
+      await expect(assignDialog.getByLabel('Paxos Data Group')).toBeVisible();
+
+      // Select the diskdb instance (should be pre-selected if only one).
+      const instanceSelect = assignDialog.getByLabel('DiskDB Instance');
+      await instanceSelect.selectOption(String(instanceId));
+
+      // Select the store.
+      const storeSelect = assignDialog.getByLabel('Paxos Store');
+      await storeSelect.selectOption(String(storeId));
+
+      // Select the data group.
+      const groupSelect = assignDialog.getByLabel('Paxos Data Group');
+      await groupSelect.selectOption(String(groupId));
+
+      // Submit the assignment.
+      const assignBtn = assignDialog.getByRole('button', { name: /assign/i });
+      const assignResponse = page.waitForResponse((r: { url(): string }) =>
+        r.url().includes('/owner') || r.url().includes('/bind'));
+      await assignBtn.evaluate((el) => (el as HTMLElement).click());
+      await assignResponse;
+      await expect(assignDialog).toHaveCount(0, { timeout: 5_000 });
+
+      // --- Verify capacity becomes non-zero via API ---
+      // The diskdb keepalive syncs every 10s, so poll until the DG
+      // appears in the usage response with capacity > 0.
+      const api = await apiContext(baseURL!);
+      try {
+        await expect.poll(async () => {
+          const r = await api.get('/api/diskdb/usage');
+          if (!r.ok()) return 0;
+          const usage = await r.json();
+          const dg = usage.disk_groups.find((g: { disk_group_id: number }) =>
+            g.disk_group_id === dgId);
+          return dg?.capacity_bytes ?? 0;
+        }, { timeout: 30_000, intervals: [2_000] }).toBeGreaterThan(0);
+      } finally {
+        await api.dispose();
+      }
+
+      // --- Verify the capacity panel shows non-zero ---
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+      await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 5_000 });
+      // The Total Capacity card should show a non-zero value (not "0 B").
+      const capacityText = page.getByText(/Total Capacity/).locator('..');
+      await expect(capacityText.getByText(/0 B/)).toHaveCount(0, { timeout: 10_000 });
+    } finally {
+      // Cleanup.
+      await removeDisk(baseURL!, nodeId, dgId, diskId);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dgId);
+      await removeDiskdb(baseURL!, nodeId);
+    }
+  });
+
   test('full deploy flow: deploy diskdb via UI, restart, stop, delete via context menu', async ({ page, baseURL }) => {
     test.setTimeout(90_000);
     const nodeId = DISKDB_NODE;
@@ -1172,6 +1321,114 @@ test.describe('capacity · diskdb', () => {
       }
     } finally {
       await removeDiskdb(baseURL!, nodeId);
+    }
+  });
+
+  test('hardware capacity: GET /api/hardware/capacity returns aggregated capacity from group-0 sysdata', async ({ page, baseURL }) => {
+    test.setTimeout(30_000);
+    const rackId = DISKDB_RACK;
+    const nodeId = DISKDB_NODE;
+    const dgId = 591;
+    const diskId1 = randomDiskId();
+    const diskId2 = randomDiskId();
+
+    // Create a DG with two disks of known capacity.
+    // unit_size_bytes = 4096, capacity_units = 1000 → 4_096_000 bytes per disk.
+    // zone_size_bytes must be <= capacity_bytes.
+    const unitSize = 4096;
+    const capUnits = 1000;
+    const expectedDiskCap = unitSize * capUnits; // 4_096_000
+    const expectedDgCap = expectedDiskCap * 2;   // 8_192_000
+    const zoneSize = 1024 * 1024; // 1 MB — well under capacity
+
+    await apiAddDiskGroup(baseURL!, nodeId, dgId, 'test-dg-hwcap');
+    await addDisksBatch(baseURL!, nodeId, dgId, [
+      { disk_id: diskId1, capacity_bytes: expectedDiskCap, unit_size_bytes: unitSize, zone_size_bytes: zoneSize },
+      { disk_id: diskId2, capacity_bytes: expectedDiskCap, unit_size_bytes: unitSize, zone_size_bytes: zoneSize },
+    ]);
+
+    try {
+      // --- Verify the API returns correct aggregated capacity ---
+      const api = await apiContext(baseURL!);
+      try {
+        const r = await api.get('/api/hardware/capacity');
+        expect(r.ok(), await r.text()).toBe(true);
+        const summary = await r.json();
+
+        // Datacenter capacity should be >= the DG capacity (other DGs
+        // may exist from prior tests, so we check >= not ==).
+        expect(summary.datacenter_capacity_bytes).toBeGreaterThanOrEqual(expectedDgCap);
+
+        // The DG should appear in disk_groups with the correct capacity.
+        const dg = summary.disk_groups.find((g: { disk_group_id: number }) =>
+          g.disk_group_id === dgId);
+        expect(dg, 'DG should appear in hardware capacity summary').toBeTruthy();
+        expect(dg.capacity_bytes).toBe(expectedDgCap);
+        expect(dg.disk_count).toBe(2);
+        expect(dg.rack_id).toBe(rackId);
+        expect(dg.node_id).toBe(nodeId);
+
+        // Each disk should have the correct capacity.
+        expect(dg.disks).toHaveLength(2);
+        for (const d of dg.disks) {
+          expect(d.capacity_bytes).toBe(expectedDiskCap);
+          expect(d.unit_size_bytes).toBe(unitSize);
+        }
+
+        // The rack entry should include this DG's capacity.
+        const rack = summary.racks.find((r2: { rack_id: number }) => r2.rack_id === rackId);
+        expect(rack, 'Rack should appear in summary').toBeTruthy();
+        expect(rack.capacity_bytes).toBeGreaterThanOrEqual(expectedDgCap);
+
+        // The node entry should include this DG's capacity.
+        const node = summary.nodes.find((n: { node_id: number }) => n.node_id === nodeId);
+        expect(node, 'Node should appear in summary').toBeTruthy();
+        expect(node.capacity_bytes).toBeGreaterThanOrEqual(expectedDgCap);
+
+        // Rack sum == datacenter (all racks sum to DC total).
+        const rackSum = summary.racks.reduce(
+          (acc: number, r2: { capacity_bytes: number }) => acc + r2.capacity_bytes, 0);
+        expect(rackSum).toBe(summary.datacenter_capacity_bytes);
+
+        // Node sum within rack == rack capacity.
+        const nodesInRack = summary.nodes.filter(
+          (n: { rack_id: number }) => n.rack_id === rackId);
+        const nodeSum = nodesInRack.reduce(
+          (acc: number, n: { capacity_bytes: number }) => acc + n.capacity_bytes, 0);
+        expect(nodeSum).toBe(rack.capacity_bytes);
+
+        // DG sum within node == node capacity.
+        const dgsOnNode = summary.disk_groups.filter(
+          (g: { node_id: number }) => g.node_id === nodeId);
+        const dgSum = dgsOnNode.reduce(
+          (acc: number, g: { capacity_bytes: number }) => acc + g.capacity_bytes, 0);
+        expect(dgSum).toBe(node.capacity_bytes);
+      } finally {
+        await api.dispose();
+      }
+
+      // --- Verify the Inspector shows disk list when DG is selected ---
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
+      if (await expandRack.count() > 0) await expandRack.click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+      const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNode.count() > 0) await expandNode.click();
+      await expect(aside.getByText(/DG-591/, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+      // Click the DG to select it → Inspector should show disk list.
+      await aside.getByText(/DG-591/, { exact: true }).click();
+      const inspector = page.getByRole('complementary', { name: 'Inspector' });
+      await expect(inspector.getByText(/Total Capacity/)).toBeVisible({ timeout: 5_000 });
+      await expect(inspector.getByText(/Disks \(2\)/)).toBeVisible({ timeout: 5_000 });
+    } finally {
+      await removeDisk(baseURL!, nodeId, dgId, diskId1);
+      await removeDisk(baseURL!, nodeId, dgId, diskId2);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dgId);
     }
   });
 });

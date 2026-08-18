@@ -6,7 +6,7 @@ import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { cn } from '../utils/cn';
-import { ViewMode, Node, Rack, EnrichedStoreView, CrowKVServerView, CapacityUsageResponse, ElectionState, ReadState, ReplicaRole } from '../types';
+import { ViewMode, Node, Rack, EnrichedStoreView, CrowKVServerView, CapacityUsageResponse, DiskdbInstanceInfo, HardwareCapacitySummary, ElectionState, ReadState, ReplicaRole } from '../types';
 import { DEFAULT_DC_NAME } from '../data/defaultDatacenter';
 import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
@@ -53,6 +53,8 @@ interface InspectorProps {
   servers?: CrowKVServerView[];
   stores?: EnrichedStoreView[];
   capacityUsage?: CapacityUsageResponse | null;
+  hardwareCapacity?: HardwareCapacitySummary | null;
+  diskdbInstances?: DiskdbInstanceInfo[];
   width?: number;
 }
 
@@ -60,7 +62,7 @@ interface InspectorProps {
  * Right-side inspector. Reacts to SelectionContext: Details + Activity for any
  * selection.
  */
-export function Inspector({ readonly, modules: _modules, nodes = [], racks = [], servers = [], stores = [], capacityUsage = null, width = 320 }: InspectorProps) {
+export function Inspector({ readonly, modules: _modules, nodes = [], racks = [], servers = [], stores = [], capacityUsage = null, hardwareCapacity = null, diskdbInstances = [], width = 320 }: InspectorProps) {
   const { selectedEntity, clearSelection, selectEntity } = useSelection();
   const { setViewMode } = useViewMode();
   const [activeTab, setActiveTab] = useState<TabId>('details');
@@ -97,7 +99,7 @@ export function Inspector({ readonly, modules: _modules, nodes = [], racks = [],
 
       <div className="tw-flex-1 tw-overflow-y-auto">
         {activeTab === 'details' && (
-          <DetailsTab entity={selectedEntity} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} selectEntity={selectEntity} setViewMode={setViewMode} readonly={readonly} />
+          <DetailsTab entity={selectedEntity} nodes={nodes} racks={racks} servers={servers} stores={stores} capacityUsage={capacityUsage} hardwareCapacity={hardwareCapacity} diskdbInstances={diskdbInstances} selectEntity={selectEntity} setViewMode={setViewMode} readonly={readonly} />
         )}
         {activeTab === 'activity' && <ActivityLog />}
       </div>
@@ -142,12 +144,14 @@ interface DetailsTabProps {
   servers: CrowKVServerView[];
   stores: EnrichedStoreView[];
   capacityUsage: CapacityUsageResponse | null;
+  hardwareCapacity: HardwareCapacitySummary | null;
+  diskdbInstances: DiskdbInstanceInfo[];
   selectEntity: (e: SelectedEntity | null) => void;
   setViewMode: (m: ViewMode) => void;
   readonly?: boolean;
 }
 
-function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, selectEntity, setViewMode, readonly }: DetailsTabProps) {
+function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, hardwareCapacity, diskdbInstances, selectEntity, setViewMode, readonly }: DetailsTabProps) {
   const displayType = entity.type === 'Server'
     ? (entity.serviceType === 'diskdb' ? 'DiskDB' : 'KV')
     : entity.type;
@@ -188,20 +192,74 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, sele
   const electionState: ElectionState | undefined = replica?.election ?? groupView?.replicas.find((r) => r.role === ReplicaRole.Leader)?.election;
   const readState: ReadState | undefined = groupView?.read_state;
 
-  // Datacenter: cluster-wide capacity totals (one DC → totals ARE cluster
-  // totals). Only shown in Capacity view where capacityUsage is fetched.
-  const dcTotals = useMemo(() => {
-    if (entity.type !== 'Datacenter' || entity.viewMode !== ViewMode.Capacity) return null;
-    const dgs = capacityUsage?.disk_groups || [];
-    return dgs.reduce(
-      (acc, g) => ({
-        capacity: acc.capacity + g.capacity_bytes,
-        busy: acc.busy + g.busy_bytes,
-        free: acc.free + g.free_bytes,
-      }),
-      { capacity: 0, busy: 0, free: 0 },
-    );
-  }, [entity.type, entity.viewMode, capacityUsage]);
+  // Capacity totals for the selected entity.
+  // Uses hardwareCapacity (from group-0 sysdata) which is available
+  // without diskdb ownership/binding. Falls back to capacityUsage
+  // (from diskdb) for busy/free when available.
+  // Works in both Capacity and Physical views for DiskGroup/Disk.
+  const capacityTotals = useMemo(() => {
+    const hwDgs = hardwareCapacity?.disk_groups || [];
+    if (hwDgs.length === 0) return null;
+
+    // In Physical view, only show capacity for DiskGroup and Disk
+    // (rack/node/datacenter capacity is a Capacity-view concept).
+    if (entity.viewMode === ViewMode.Physical && entity.type !== 'DiskGroup' && entity.type !== 'Disk') return null;
+
+    let dgs = hwDgs;
+    if (entity.type === 'Datacenter') {
+      dgs = hwDgs;
+    } else if (entity.type === 'Rack') {
+      const rackId = Number(entity.id);
+      dgs = hwDgs.filter((g) => g.rack_id === rackId);
+    } else if (entity.type === 'Node') {
+      const nodeId = Number(entity.id);
+      dgs = hwDgs.filter((g) => g.node_id === nodeId);
+    } else if (entity.type === 'DiskGroup') {
+      const dgId = Number(entity.parentIds?.disk_group_id ?? entity.id);
+      dgs = hwDgs.filter((g) => g.disk_group_id === dgId);
+    } else if (entity.type === 'Disk') {
+      const dgId = Number(entity.parentIds?.disk_group_id);
+      const diskId = String(entity.parentIds?.disk_id ?? entity.id);
+      const dg = hwDgs.find((g) => g.disk_group_id === dgId);
+      const disk = dg?.disks.find((d) => d.disk_id === diskId);
+      if (disk) {
+        const usageDg = capacityUsage?.disk_groups.find((g) => g.disk_group_id === dgId);
+        const usageDisk = usageDg?.disks.find((d) => d.disk_id === diskId);
+        return {
+          capacity: disk.capacity_bytes,
+          busy: usageDisk?.busy_bytes ?? 0,
+          free: usageDisk?.free_bytes ?? disk.capacity_bytes,
+        };
+      }
+      return null;
+    } else {
+      return null;
+    }
+    const capacity = dgs.reduce((sum, g) => sum + g.capacity_bytes, 0);
+    const usageDgs = capacityUsage?.disk_groups || [];
+    const busy = dgs.reduce((sum, g) => {
+      const u = usageDgs.find((ud) => ud.disk_group_id === g.disk_group_id);
+      return sum + (u?.busy_bytes ?? 0);
+    }, 0);
+    return { capacity, busy, free: capacity - busy };
+  }, [entity.type, entity.viewMode, entity.id, entity.parentIds, hardwareCapacity, capacityUsage]);
+
+  // Disk list for the selected DiskGroup (from hardwareCapacity sysdata).
+  // Works in both Physical and Capacity views.
+  const dgDisks = useMemo(() => {
+    if (entity.type !== 'DiskGroup') return null;
+    const dgId = Number(entity.parentIds?.disk_group_id ?? entity.id);
+    const dg = hardwareCapacity?.disk_groups.find((g) => g.disk_group_id === dgId);
+    return dg?.disks || [];
+  }, [entity.type, entity.parentIds, entity.id, hardwareCapacity]);
+
+  // Ownership info for DiskGroup: which diskdb instance owns this DG.
+  const dgOwnerInstanceId = useMemo(() => {
+    if (entity.type !== 'DiskGroup') return undefined;
+    const dgId = Number(entity.parentIds?.disk_group_id ?? entity.id);
+    const owner = diskdbInstances.find((inst) => inst.owned_dg_ids.includes(dgId));
+    return owner?.instance_id;
+  }, [entity.type, entity.parentIds, entity.id, diskdbInstances]);
 
   // Metrics poll: build a fetcher for the current entity type.
   const parentStoreId = entity.parentIds?.store_id != null ? String(entity.parentIds.store_id) : undefined;
@@ -222,13 +280,18 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, sele
     { label: 'ID', value: displayId },
     ...(entity.name && entity.type !== 'Server' && entity.type !== 'Disk' ? [{ label: 'Name', value: entity.name }] : []),
     ...(entity.type === 'Datacenter' ? [{ label: 'Rack Count', value: String(racks.length) }] : []),
-    ...(dcTotals
+    ...(capacityTotals
       ? [
-          { label: 'Total Capacity', value: formatBytes(dcTotals.capacity) },
-          { label: 'Used', value: formatBytes(dcTotals.busy) },
-          { label: 'Free', value: formatBytes(dcTotals.free) },
+          { label: 'Total Capacity', value: formatBytes(capacityTotals.capacity) },
+          { label: 'Used', value: formatBytes(capacityTotals.busy) },
+          { label: 'Free', value: formatBytes(capacityTotals.free) },
         ]
       : []),
+    ...(dgOwnerInstanceId !== undefined
+      ? [{ label: 'Owner Instance', value: `diskdb-${dgOwnerInstanceId}` }]
+      : entity.type === 'DiskGroup'
+        ? [{ label: 'Owner Instance', value: 'unassigned' }]
+        : []),
     ...(restPort ? [{ label: 'REST Port', value: String(restPort) }] : []),
     ...(rpcPort ? [{ label: 'RPC Port', value: String(rpcPort) }] : []),
     ...Object.entries(entity.parentIds || {})
@@ -271,6 +334,32 @@ function DetailsTab({ entity, nodes, racks, servers, stores, capacityUsage, sele
           </div>
         ))}
       </dl>
+
+      {dgDisks && dgDisks.length > 0 && (
+        <div className="tw-space-y-1">
+          <div className="tw-text-[10px] tw-uppercase tw-tracking-wider tw-text-muted">Disks ({dgDisks.length})</div>
+          <div className="tw-border tw-border-border tw-rounded-md tw-overflow-hidden">
+            <table className="tw-w-full tw-text-xs">
+              <thead>
+                <tr className="tw-bg-bg tw-text-muted">
+                  <th className="tw-text-left tw-px-2 tw-py-1">Disk ID</th>
+                  <th className="tw-text-right tw-px-2 tw-py-1">Capacity</th>
+                  <th className="tw-text-right tw-px-2 tw-py-1">Zones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dgDisks.map((d) => (
+                  <tr key={d.disk_id} className="tw-border-t tw-border-border">
+                    <td className="tw-px-2 tw-py-1 tw-font-mono tw-text-text">{d.disk_id.slice(0, 12)}…</td>
+                    <td className="tw-px-2 tw-py-1 tw-text-right tw-font-mono tw-text-text">{formatBytes(d.capacity_bytes)}</td>
+                    <td className="tw-px-2 tw-py-1 tw-text-right tw-font-mono tw-text-text">{d.zone_count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {crossJump && (
         <button

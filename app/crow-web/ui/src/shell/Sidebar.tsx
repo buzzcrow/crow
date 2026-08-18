@@ -154,29 +154,24 @@ export function Sidebar({
               }),
             });
           }
-          // DiskDB server sub-tree (read-only disk-group → disk).
+          // DiskDB server sub-tree: show only owned DGs (no disks).
           if (diskdbNodeIds?.has(nodeId)) {
             const ndg = nodeDiskGroups[nodeId];
-            const dgChildren: TreeNode[] = (ndg?.diskGroups || []).map((dg) => ({
+            // Find the diskdb instance on this node to get owned_dg_ids.
+            const ddbInstance = diskdbInstances.find((i) => i.instance_id === nodeId);
+            const ownedDgIds = new Set(ddbInstance?.owned_dg_ids || []);
+            const allDgs = ndg?.diskGroups || [];
+            // Show only owned DGs; if no ownership info yet, show all.
+            const ownedDgs = ownedDgIds.size > 0
+              ? allDgs.filter((dg) => ownedDgIds.has(dg.id))
+              : allDgs;
+            const dgChildren: TreeNode[] = ownedDgs.map((dg) => ({
               id: `PDG-${nodeId}-${dg.id}`,
               rawId: dg.id,
               label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
               type: 'DiskGroup' as const,
               icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
               parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
-              children: (ndg?.disksByDg[dg.id] || []).map((d) => ({
-                id: `PD-${nodeId}-${dg.id}-${d.disk_id}`,
-                rawId: d.disk_id,
-                label: d.disk_id.slice(0, 12) + '…',
-                type: 'Disk' as const,
-                icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
-                parentIds: {
-                  rack_id: rack.id,
-                  node_id: nodeId,
-                  disk_group_id: dg.id,
-                  disk_id: d.disk_id,
-                },
-              })),
             }));
             children.push({
               id: `DDB-${nodeId}`,

@@ -377,6 +377,34 @@ export function randomDiskId(): string {
   return Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 }
 
+/** Assign a disk-group to a diskdb instance + bind it to a paxos data group. */
+export async function assignDiskGroup(
+  baseURL: string,
+  rackId: number,
+  nodeId: number,
+  dgId: number,
+  instanceId: number,
+  storeId: number,
+  groupId: number,
+) {
+  const api = await apiContext(baseURL);
+  try {
+    const leaseMs = Date.now() + 3_600_000;
+    const ownerResp = await api.put(
+      `/api/disk-groups/${rackId}/${nodeId}/${dgId}/owner`,
+      { data: { instance_id: instanceId, lease_expiry_ms: leaseMs } },
+    );
+    expect(ownerResp.ok(), await ownerResp.text()).toBeTruthy();
+    const bindResp = await api.put(
+      `/api/disk-groups/${rackId}/${nodeId}/${dgId}/bind`,
+      { data: { store_id: storeId, group_id: groupId } },
+    );
+    expect(bindResp.ok(), await bindResp.text()).toBeTruthy();
+  } finally {
+    await api.dispose();
+  }
+}
+
 // ── setupCluster helper + topology presets ──────────────────────────
 
 export interface TopologyDescriptor {

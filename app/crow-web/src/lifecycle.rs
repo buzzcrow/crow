@@ -1173,6 +1173,24 @@ pub async fn http_internal_reset(
                 tracing::warn!(store_id = sid, error = %e, "reset: remove_store from sysdata failed");
             }
         }
+        // Unregister all diskdb instances from the service registry
+        // so stale endpoints don't cause continuous gRPC errors after
+        // reset. The TTL-based expiry would eventually drop them, but
+        // explicit unregister is immediate and avoids the 15s window.
+        let svc = crow_kv_client::ServiceRegistryClient::from_shared(hw.shared_kv());
+        match svc.read_all_diskdb_instances().await {
+            Ok(instances) => {
+                for (instance_id, _) in &instances {
+                    if let Err(e) = svc.unregister("diskdb", *instance_id).await {
+                        tracing::warn!(instance_id, error = %e, "reset: unregister diskdb failed");
+                    }
+                }
+                tracing::info!("reset: unregistered {} diskdb instances", instances.len());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reset: read_all_diskdb_instances failed; skipping unregister");
+            }
+        }
         tracing::info!(
             "reset: group-0 sysdata cleanup complete for {} racks",
             rack_ids.len()
@@ -1293,6 +1311,12 @@ pub async fn http_internal_reset(
         for rid in &rack_ids {
             let _ = cfg.remove_rack(rid.parse().unwrap());
         }
+        // Clear disk-groups and disks from config — the rack/node
+        // cascade above removed them from group-0 sysdata, but the
+        // config file still carries the stale entries from before
+        // the reset. Without this, a restart reloads stale DGs/disks.
+        cfg.disk_groups.clear();
+        cfg.disks.clear();
     }
 
     // 4. Clear caches and workspace directories.
@@ -1321,6 +1345,11 @@ pub struct AddDiskGroupBody {
 
 /// `GET /api/nodes/:node_id/disk-groups`.
 ///
+/// When group-0 is available, reads the authoritative disk-group list
+/// from group-0 sysdata (the source of truth). Falls back to the
+/// console config file only when group-0 is not reachable. The config
+/// `name` field is merged in as metadata where available.
+///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
 ///
@@ -1330,8 +1359,12 @@ pub async fn http_list_node_disk_groups(
     State(state): State<AppState>,
     Path(node_id): Path<NodeId>,
 ) -> Result<Json<Vec<DiskGroupEntry>>, (StatusCode, Json<ErrorBody>)> {
-    let cfg = state.config.read().unwrap();
-    if !cfg.nodes.iter().any(|n| n.id == node_id) {
+    let (rack_id, node_exists) = {
+        let cfg = state.config.read().unwrap();
+        let rack = cfg.nodes.iter().find(|n| n.id == node_id);
+        (rack.map(|n| n.rack_id), cfg.nodes.iter().any(|n| n.id == node_id))
+    };
+    if !node_exists {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -1339,6 +1372,43 @@ pub async fn http_list_node_disk_groups(
             }),
         ));
     }
+    // Try group-0 first (authoritative source of truth), but only if
+    // the cluster is initialized — avoids logging warnings on every
+    // poll when group-0 doesn't exist yet.
+    if crate::mgmt::group0_available(&state).await {
+        if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+            if let Some(rack_id) = rack_id {
+                match hw.list_disk_groups_on_node(rack_id, node_id).await {
+                    Ok(g0_dgs) => {
+                        // Merge config names as metadata where available.
+                        let name_map: std::collections::HashMap<DiskGroupId, String> = {
+                            let cfg = state.config.read().unwrap();
+                            cfg.disk_groups
+                                .iter()
+                                .filter(|dg| dg.node_id == node_id)
+                                .map(|dg| (dg.id, dg.name.clone()))
+                                .collect()
+                        };
+                        let entries: Vec<DiskGroupEntry> = g0_dgs
+                            .into_iter()
+                            .map(|dg| DiskGroupEntry {
+                                id: dg.dg_id,
+                                rack_id: dg.rack_id,
+                                node_id: dg.node_id,
+                                name: name_map.get(&dg.dg_id).cloned().unwrap_or_default(),
+                            })
+                            .collect();
+                        return Ok(Json(entries));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, node_id, "list_node_disk_groups: group-0 query failed; falling back to config");
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: read from console config.
+    let cfg = state.config.read().unwrap();
     Ok(Json(
         cfg.disk_groups
             .iter()
@@ -1420,9 +1490,80 @@ pub async fn http_add_node_disk_group(
         if let Err(e) = hw.add_disk_group(rack_id, node_id, entry.id, &value).await {
             tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: add_disk_group failed");
         }
+
+        // Auto-assign ownership: pick the diskdb instance with the
+        // fewest owned DGs and write the ownership entry to group-0.
+        // This ensures new DGs are immediately visible to a diskdb
+        // keepalive sync without manual assignment via the UI.
+        if let Err(e) = auto_assign_owner(&hw, rack_id, node_id, entry.id).await {
+            tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: auto-assign owner failed");
+        }
     }
 
     Ok((StatusCode::CREATED, Json(entry)))
+}
+
+/// Pick the diskdb instance with the fewest owned DGs from a list of
+/// live instance IDs and the current ownership map. Ties are broken by
+/// lowest `instance_id`. Returns `None` if `instance_ids` is empty.
+///
+/// Pure function — no I/O — so it can be unit-tested without a live
+/// group-0 connection.
+fn pick_least_loaded_instance(
+    instance_ids: &[u64],
+    owners: &[crow_protocol::sysdata::DiskdbOwnerEntry],
+) -> Option<u64> {
+    if instance_ids.is_empty() {
+        return None;
+    }
+    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for o in owners {
+        *counts.entry(o.instance_id).or_default() += 1;
+    }
+    instance_ids
+        .iter()
+        .map(|id| (*id, counts.get(id).copied().unwrap_or(0)))
+        .min_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
+        .map(|(id, _)| id)
+}
+
+/// Auto-assign a newly created disk-group to the diskdb instance with
+/// the fewest owned DGs. Reads the service registry for live diskdb
+/// instances and the current ownership map, counts DGs per instance,
+/// picks the one with the lowest count, and writes the ownership entry
+/// to group-0. Does nothing (returns Ok) if no diskdb instances are
+/// registered.
+async fn auto_assign_owner(
+    hw: &crow_kv_client::HardwareClient,
+    rack_id: RackId,
+    node_id: NodeId,
+    dg_id: DiskGroupId,
+) -> Result<(), String> {
+    let svc = crow_kv_client::ServiceRegistryClient::from_shared(hw.shared_kv());
+    let instances = svc
+        .read_all_diskdb_instances()
+        .await
+        .map_err(|e| format!("read_all_diskdb_instances: {e}"))?;
+    if instances.is_empty() {
+        tracing::info!(dg_id, "auto-assign: no diskdb instances registered; skipping");
+        return Ok(());
+    }
+    let owners = hw.list_owners().await.map_err(|e| format!("list_owners: {e}"))?;
+    let instance_ids: Vec<u64> = instances.iter().map(|(id, _)| *id).collect();
+    let Some(instance_id) = pick_least_loaded_instance(&instance_ids, &owners) else {
+        return Ok(());
+    };
+    // Lease = 1 hour from now (the diskdb keepalive will refresh it).
+    #[allow(clippy::cast_possible_truncation)]
+    let lease_expiry_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+        + 3_600_000;
+    hw.set_owner(rack_id, node_id, dg_id, instance_id, lease_expiry_ms)
+        .await
+        .map_err(|e| format!("set_owner: {e}"))?;
+    tracing::info!(dg_id, instance_id, "auto-assign: assigned DG to diskdb instance");
+    Ok(())
 }
 
 /// `DELETE /api/nodes/:node_id/disk-groups/:dg_id`.
@@ -1436,21 +1577,32 @@ pub async fn http_remove_node_disk_group(
     State(state): State<AppState>,
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Capture rack_id before removing.
-    let rack_id = {
+    // Capture rack_id + child disk ids before removing.
+    let (rack_id, disk_ids): (Option<RackId>, Vec<String>) = {
         let cfg = state.config.read().unwrap();
-        cfg.disk_groups
+        let rack_id = cfg
+            .disk_groups
             .iter()
             .find(|dg| dg.node_id == node_id && dg.id == dg_id)
-            .map(|dg| dg.rack_id)
+            .map(|dg| dg.rack_id);
+        let disk_ids = cfg
+            .disks_in_group(dg_id)
+            .iter()
+            .map(|d| d.disk_id.clone())
+            .collect();
+        (rack_id, disk_ids)
     };
     {
         let mut cfg = state.config.write().unwrap();
+        // Cascade-remove child disks first, then the disk-group.
+        for disk_id in &disk_ids {
+            cfg.remove_disk(disk_id).map_err(map_config_err)?;
+        }
         cfg.remove_disk_group(dg_id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
 
-    // Cascade-remove group-0 sysdata.
+    // Cascade-remove group-0 sysdata (handles child disks + DG).
     if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
         if let Err(e) = hw.remove_disk_group_cascade(rack_id, node_id, dg_id).await {
             tracing::warn!(disk_group_id = dg_id, error = %e, "sysdata sync: remove_disk_group_cascade failed");
@@ -1571,6 +1723,10 @@ fn validate_disk_input(
 
 /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
 ///
+/// When group-0 is available, reads the authoritative disk list from
+/// group-0 sysdata. Falls back to the console config file only when
+/// group-0 is not reachable.
+///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
 ///
@@ -1580,6 +1736,46 @@ pub async fn http_list_disks_in_group(
     State(state): State<AppState>,
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
 ) -> Result<Json<Vec<DiskEntry>>, (StatusCode, Json<ErrorBody>)> {
+    // Resolve rack_id from config (needed for the group-0 key path).
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.nodes.iter().find(|n| n.id == node_id).map(|n| n.rack_id)
+    };
+    // Try group-0 first (authoritative source of truth), but only if
+    // the cluster is initialized.
+    if crate::mgmt::group0_available(&state).await {
+        if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+            if let Some(rack_id) = rack_id {
+                match hw.list_disks_in_group(rack_id, node_id, dg_id).await {
+                    Ok(g0_disks) => {
+                        let entries: Vec<DiskEntry> = g0_disks
+                            .into_iter()
+                            .map(|(disk_id, val)| {
+                                let unit_size = u64::from(val.unit_size_bytes);
+                                DiskEntry {
+                                    disk_id: crow_protocol::diskdb_type_util::DiskIdExt::to_display_string(
+                                        &disk_id,
+                                    ),
+                                    disk_group_id: dg_id,
+                                    rack_id,
+                                    node_id,
+                                    disk_type: disk_type_proto_to_str(val.disk_type),
+                                    capacity_bytes: val.capacity_units * unit_size,
+                                    zone_size_bytes: val.zone_size_units * unit_size,
+                                    unit_size_bytes: val.unit_size_bytes,
+                                }
+                            })
+                            .collect();
+                        return Ok(Json(entries));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, node_id, dg_id, "list_disks_in_group: group-0 query failed; falling back to config");
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: read from console config.
     let cfg = state.config.read().unwrap();
     if !cfg
         .disk_groups
@@ -1600,6 +1796,18 @@ pub async fn http_list_disks_in_group(
             .cloned()
             .collect(),
     ))
+}
+
+/// Map a proto `DiskType` i32 to the console string representation.
+fn disk_type_proto_to_str(disk_type: i32) -> String {
+    match disk_type {
+        0 => "Hdd",
+        1 => "Ssd",
+        2 => "ZONE_SSD",
+        3 => "SMR_HDD",
+        _ => "Unknown",
+    }
+    .to_string()
 }
 
 /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks/:disk_id`.
@@ -2183,4 +2391,65 @@ async fn copy_disk_records(
     }
 
     total_copied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_least_loaded_instance;
+    use crow_protocol::common_type::{DiskGroupId, NodeId, RackId};
+    use crow_protocol::sysdata::DiskdbOwnerEntry;
+
+    fn owner(rack: RackId, node: NodeId, dg: DiskGroupId, inst: u64) -> DiskdbOwnerEntry {
+        DiskdbOwnerEntry {
+            rack_id: rack,
+            node_id: node,
+            dg_id: dg,
+            instance_id: inst,
+            lease_expiry_ms: 0,
+        }
+    }
+
+    #[test]
+    fn pick_returns_none_for_empty_instances() {
+        assert_eq!(pick_least_loaded_instance(&[], &[]), None);
+    }
+
+    #[test]
+    fn pick_assigns_to_only_instance() {
+        assert_eq!(pick_least_loaded_instance(&[1], &[]), Some(1));
+    }
+
+    #[test]
+    fn pick_assigns_to_least_loaded() {
+        // Instance 1 owns 2 DGs, instance 2 owns 0 → pick 2.
+        let owners = vec![owner(1, 1, 1, 1), owner(1, 1, 2, 1)];
+        assert_eq!(pick_least_loaded_instance(&[1, 2], &owners), Some(2));
+    }
+
+    #[test]
+    fn pick_breaks_tie_by_lowest_instance_id() {
+        // Both own 1 DG → pick lower instance_id.
+        let owners = vec![owner(1, 1, 1, 1), owner(1, 1, 2, 2)];
+        assert_eq!(pick_least_loaded_instance(&[1, 2], &owners), Some(1));
+    }
+
+    #[test]
+    fn pick_ignores_owners_for_unknown_instances() {
+        // Instance 3 owns DGs but is not in the live instance list.
+        let owners = vec![owner(1, 1, 1, 3), owner(1, 1, 2, 3)];
+        assert_eq!(pick_least_loaded_instance(&[1, 2], &owners), Some(1));
+    }
+
+    #[test]
+    fn pick_counts_correctly_with_mixed_owners() {
+        // Instance 1: 1 DG, instance 2: 2 DGs, instance 3: 1 DG.
+        // Tie between 1 and 3 (both 1) → pick 1 (lower id).
+        let owners = vec![
+            owner(1, 1, 1, 1),
+            owner(1, 1, 2, 2),
+            owner(1, 1, 3, 2),
+            owner(1, 1, 4, 3),
+        ];
+        assert_eq!(pick_least_loaded_instance(&[1, 2, 3], &owners), Some(1));
+    }
 }

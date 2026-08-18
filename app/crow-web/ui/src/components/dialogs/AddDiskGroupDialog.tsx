@@ -6,7 +6,7 @@ import { Dialog } from '../Dialog';
 import { Input } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
 import { addDiskGroup, listNodeDiskGroups } from '../../api';
-import { nextNumericId } from './defaults';
+import { minUnusedId } from './defaults';
 
 export interface AddDiskGroupDialogProps {
   isOpen: boolean;
@@ -42,14 +42,14 @@ export function AddDiskGroupDialog({
     listNodeDiskGroups(nodeId)
       .then((dgs) => {
         const ids = dgs.map((dg) => dg.id);
-        setDgId(nextNumericId([...existingDgIds, ...ids], 1));
+        setDgId(minUnusedId([...existingDgIds, ...ids], 1));
       })
       .catch(() => {
-        setDgId(nextNumericId(existingDgIds, 1));
+        setDgId(minUnusedId(existingDgIds, 1));
       });
   }, [isOpen, nodeId, existingDgIds]);
 
-  const defaultDgId = useMemo(() => nextNumericId(existingDgIds, 1), [existingDgIds]);
+  const defaultDgId = useMemo(() => minUnusedId(existingDgIds, 1), [existingDgIds]);
 
   // Fallback: if the fetch hasn't completed yet, use the polled default.
   useEffect(() => {
