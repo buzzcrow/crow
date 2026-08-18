@@ -29,6 +29,7 @@ interface SidebarProps {
   capacityUsage?: CapacityUsageResponse | null;
   nodeDiskGroups?: Record<number, NodeDiskGroups>;
   diskdbNodeIds?: Set<number>;
+  diskdbHealthById?: Map<number, string>;
 }
 
 export function Sidebar({
@@ -48,6 +49,7 @@ export function Sidebar({
   capacityUsage = null,
   nodeDiskGroups = {},
   diskdbNodeIds,
+  diskdbHealthById,
 }: SidebarProps) {
   const { viewMode } = useViewMode();
   const [filterQuery, setFilterQuery] = useState('');
@@ -167,6 +169,7 @@ export function Sidebar({
               label: `DDB-${nodeId}`,
               type: 'Server',
               icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+              health: toUiHealth(diskdbHealthById?.get(nodeId)),
               parentIds: { rack_id: rack.id, node_id: nodeId, service_type: 'Diskdb' },
               children: dgChildren.length ? dgChildren : undefined,
             });
@@ -297,7 +300,7 @@ export function Sidebar({
         }),
       };
     });
-  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks, diskdbInstances, capacityUsage, nodeDiskGroups, diskdbNodeIds]);
+  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks, diskdbInstances, capacityUsage, nodeDiskGroups, diskdbNodeIds, diskdbHealthById]);
 
   const filtered = useMemo(() => {
     if (!filterQuery.trim()) return treeNodes;

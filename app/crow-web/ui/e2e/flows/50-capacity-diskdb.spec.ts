@@ -13,7 +13,7 @@ import {
   addDisksBatch,
   removeDisk,
   randomDiskId,
-  stopDiskdb,
+  removeDiskdb,
   deployNodeServer,
   clusterInit,
   waitForLeader,
@@ -598,12 +598,36 @@ test.describe('capacity · diskdb', () => {
     }
   });
 
-  test('full deploy flow: deploy diskdb via UI, restart, stop via context menu', async ({ page, baseURL }) => {
-    test.setTimeout(60_000);
+  test('full deploy flow: deploy diskdb via UI, restart, stop, delete via context menu', async ({ page, baseURL }) => {
+    test.setTimeout(90_000);
     const nodeId = DISKDB_NODE;
     const rpcPort = freePort();
 
+    // Helper: fetch /api/servers and return {kv, ddb} entries for this node.
+    async function fetchBothServices(api: import('@playwright/test').APIRequestContext) {
+      const r = await api.get('/api/servers');
+      const servers = await r.json();
+      return {
+        kv: servers.find((s: { node_id?: number; service_type: string }) =>
+          s.node_id === nodeId && s.service_type === 'kv'),
+        ddb: servers.find((s: { node_id?: number; service_type: string }) =>
+          s.node_id === nodeId && s.service_type === 'diskdb'),
+      };
+    }
+
     try {
+      // --- precondition: KV is already deployed (beforeAll) — verify it exists ---
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          const { kv } = await fetchBothServices(api);
+          expect(kv, 'KV should be deployed before DDB lifecycle test').toBeTruthy();
+          expect(kv.pid, 'KV should have a live PID').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
+      }
+
       await page.goto('/');
       await page.getByRole('button', { name: 'Capacity' }).click();
 
@@ -614,67 +638,257 @@ test.describe('capacity · diskdb', () => {
 
       // --- deploy diskdb via node context menu (UI Deploy button) ---
 
-      // Right-click the node → Deploy DiskDB.
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /deploy diskdb/i }).click();
 
       const dialog = page.getByRole('dialog', { name: /deploy diskdb/i });
       await expect(dialog).toBeVisible();
-
-      // Fill in the RPC port and click Deploy.
       await dialog.getByLabel('RPC Port (gRPC)').fill(String(rpcPort));
       await dialog.getByRole('button', { name: /deploy/i }).click();
-
-      // The dialog should close.
       await expect(dialog).toHaveCount(0, { timeout: 5_000 });
 
-      // Verify via API that a diskdb server entry exists for this node.
-      const api = await apiContext(baseURL!);
-      try {
-        await expect.poll(async () => {
-          const r = await api.get('/api/servers');
-          if (!r.ok()) return false;
-          const servers = await r.json();
-          return servers.some((s: { node_id?: number; service_type: string }) =>
-            s.node_id === nodeId && s.service_type === 'diskdb');
-        }, { timeout: 10_000, intervals: [100] }).toBe(true);
-      } finally {
-        await api.dispose();
+      // Verify DDB deployed + KV unaffected (KV still has its entry + PID).
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const { ddb } = await fetchBothServices(api);
+            return ddb?.pid != null && ddb.pid > 0;
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+          // KV must still exist with its PID — deploy DDB must NOT
+          // affect KV. Regression: server_for_node didn't filter by
+          // service_type, so DDB deploy could shadow KV.
+          const { kv } = await fetchBothServices(api);
+          expect(kv, 'KV entry must still exist after DDB deploy').toBeTruthy();
+          expect(kv.pid, 'KV PID must be unchanged after DDB deploy').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
       }
 
-      // --- restart/stop menu items, then stop via context menu ---
-
-      // Reload the page to ensure the UI's allServers state is refreshed
-      // with the new diskdb server entry. The deploy dialog's onSuccess
-      // callback triggers handleRefresh, but the right-click may race
-      // with the async refresh.
+      // --- reload, verify Restart/Stop DiskDB visible ---
       await page.goto('/');
       await page.getByRole('button', { name: 'Capacity' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
-
-      // Right-click the node — should now show Restart/Stop DiskDB (not Deploy).
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
       await expect(page.getByRole('menuitem', { name: /restart diskdb/i })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /stop diskdb/i })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toHaveCount(0);
       await page.keyboard.press('Escape');
 
-      // Stop via context menu.
+      // --- restart DDB via context menu ---
+      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
+      const restartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
+      await page.getByRole('menuitem', { name: /restart diskdb/i }).click();
+      await restartResponse;
+
+      // Verify DDB restarted + KV unaffected.
+      // Regression: http_restart_diskdb called remove_server_for_node
+      // (no service_type filter) which removed the KV entry instead of
+      // the old DDB entry.
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const { ddb } = await fetchBothServices(api);
+            return ddb?.pid != null && ddb.pid > 0;
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+          const { kv } = await fetchBothServices(api);
+          expect(kv, 'KV entry must still exist after DDB restart').toBeTruthy();
+          expect(kv.pid, 'KV PID must be unchanged after DDB restart').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
+      }
+
+      // --- stop DDB via context menu ---
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
       const stopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/stop'));
       await page.getByRole('menuitem', { name: /stop diskdb/i }).click();
       await stopResponse;
 
-      // After stop, the node should show Deploy DiskDB again (not Restart/Stop).
-      // Reload to ensure the UI's allServers state is refreshed.
+      // After stop: DDB entry preserved (stop ≠ delete), DDB PID gone.
+      // KV must be unaffected.
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const { ddb } = await fetchBothServices(api);
+            return ddb != null && (ddb.pid == null || ddb.pid === 0);
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+          const { ddb, kv } = await fetchBothServices(api);
+          expect(ddb, 'DDB entry must be preserved after stop').toBeTruthy();
+          expect(kv, 'KV entry must still exist after DDB stop').toBeTruthy();
+          expect(kv.pid, 'KV PID must be unchanged after DDB stop').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
+      }
+
+      // DDB health badge should drop from Healthy after stop.
+      // Regression: DDB stop didn't update monitor_cache, so the badge
+      // stayed green even after the process was killed.
+      // Note: HealthBadge renders in compact mode (icon only, no text),
+      // so we assert on the title attribute, not text content.
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Physical' }).click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      const expandNodeForDdb = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNodeForDdb.count() > 0) await expandNodeForDdb.first().click();
+      await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      const ddbItem = aside.getByRole('treeitem').filter({ hasText: `DDB-${nodeId}` });
+      await expect(ddbItem.getByTitle('Healthy')).toHaveCount(0, { timeout: 10_000 });
+
+      // KV health badge must stay Healthy after DDB stop.
+      // Regression: http_stop_diskdb called monitor_cache.mark_down
+      // unconditionally, and KV health is derived from the same shared
+      // node record, so the KV badge flipped to Down even though the KV
+      // process was still running.
+      await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      const kvItemAfterDdbStop = aside.getByRole('treeitem').filter({ hasText: `KV-${nodeId}` });
+      await expect(kvItemAfterDdbStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
+
+      // --- restart DDB after stop (verifies entry was preserved) ---
       await page.goto('/');
       await page.getByRole('button', { name: 'Capacity' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
-      await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toBeVisible();
-      await page.keyboard.press('Escape');
+      const restartResponse2 = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
+      await page.getByRole('menuitem', { name: /restart diskdb/i }).click();
+      await restartResponse2;
+
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const { ddb } = await fetchBothServices(api);
+            return ddb?.pid != null && ddb.pid > 0;
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+          const { kv } = await fetchBothServices(api);
+          expect(kv, 'KV entry must still exist after DDB restart-from-stop').toBeTruthy();
+          expect(kv.pid, 'KV PID must be unchanged after DDB restart-from-stop').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
+      }
+
+      // --- stop KV via Physical view context menu, verify DDB unaffected ---
+      // Regression: http_stop_node_server dropped the shared monitor_cache
+      // entry, making DDB health go Unknown. Also, server_for_node could
+      // find DDB instead of KV.
+      await page.getByRole('button', { name: 'Physical' }).click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNode.count() > 0) await expandNode.first().click();
+      await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+      // Right-click KV → Stop Crow Storage.
+      await aside.getByText(`KV-${nodeId}`, { exact: true }).click({ button: 'right' });
+      const kvStopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/server/stop'));
+      await page.getByRole('menuitem', { name: /stop crow storage/i }).click();
+      await kvStopResponse;
+
+      // KV PID should be gone; DDB entry + PID must be unaffected.
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const { kv } = await fetchBothServices(api);
+            return kv != null && (kv.pid == null || kv.pid === 0);
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+          const { ddb } = await fetchBothServices(api);
+          expect(ddb, 'DDB entry must still exist after KV stop').toBeTruthy();
+          expect(ddb.pid, 'DDB PID must be unchanged after KV stop').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
+      }
+
+      // KV health badge should drop from Healthy after stop.
+      // Regression: pingNode always returned ok:true for local nodes,
+      // and monitor_cache was never updated on stop, so the badge
+      // stayed green even after the process was killed.
+      // Note: HealthBadge renders in compact mode (icon only, no text),
+      // so we assert on the title attribute, not text content.
+      const kvItem = aside.getByRole('treeitem').filter({ hasText: `KV-${nodeId}` });
+      await expect(kvItem.getByTitle('Healthy')).toHaveCount(0, { timeout: 10_000 });
+
+      // DDB health badge must stay Healthy after KV stop.
+      // Regression: http_stop_node_server called monitor_cache.mark_down
+      // unconditionally, and DDB health was derived from the same shared
+      // node record (which refresh_node_cache flips to Down by probing the
+      // now-stopped KV), so the DDB badge dropped even though the DDB
+      // process was still running.
+      const ddbItemAfterKvStop = aside.getByRole('treeitem').filter({ hasText: `DDB-${nodeId}` });
+      await expect(ddbItemAfterKvStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
+
+      // --- restart KV, verify DDB unaffected ---
+      await aside.getByText(`KV-${nodeId}`, { exact: true }).click({ button: 'right' });
+      const kvRestartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/server/restart'));
+      await page.getByRole('menuitem', { name: /restart crow storage/i }).click();
+      await kvRestartResponse;
+
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const { kv } = await fetchBothServices(api);
+            return kv?.pid != null && kv.pid > 0;
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+          const { ddb } = await fetchBothServices(api);
+          expect(ddb, 'DDB entry must still exist after KV restart').toBeTruthy();
+          expect(ddb.pid, 'DDB PID must be unchanged after KV restart').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
+      }
+
+      // KV health badge should return to Healthy after restart.
+      // Regression: restart didn't call refresh_node_cache, so the
+      // monitor_cache stayed stale and the badge never updated.
+      // Note: HealthBadge renders in compact mode (icon only, no text),
+      // so we assert on the title attribute, not text content.
+      await expect(kvItem.getByTitle('Healthy')).toBeVisible({ timeout: 20_000 });
+
+      // --- delete DiskDB via Physical-view context menu (confirm dialog) ---
+      await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /delete diskdb/i }).click();
+
+      const deleteDialog = page.getByRole('dialog', { name: /delete diskdb/i });
+      await expect(deleteDialog).toBeVisible();
+      const confirmBtn = deleteDialog.getByRole('button', { name: /delete diskdb/i });
+      await confirmBtn.evaluate((el) => (el as HTMLElement).click());
+
+      // DDB gone, KV must still exist.
+      // Regression: delete DDB appeared to delete both because the
+      // restart bug had already removed the KV entry.
+      await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toHaveCount(0, { timeout: 10_000 });
+      await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible();
+
+      {
+        const api = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const { ddb } = await fetchBothServices(api);
+            return ddb == null;
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+          const { kv } = await fetchBothServices(api);
+          expect(kv, 'KV entry must still exist after DDB delete').toBeTruthy();
+          expect(kv.pid, 'KV PID must be unchanged after DDB delete').toBeGreaterThan(0);
+        } finally {
+          await api.dispose();
+        }
+      }
     } finally {
-      await stopDiskdb(baseURL!, nodeId);
+      await removeDiskdb(baseURL!, nodeId);
     }
   });
 });

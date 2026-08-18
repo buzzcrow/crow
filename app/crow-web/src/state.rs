@@ -127,6 +127,27 @@ impl AppState {
         self.runtime_pids.lock().unwrap().remove(&node_id.to_string());
     }
 
+    /// Snapshot of all tracked KV server PIDs, keyed by node id.
+    /// Excludes DDB PIDs (keyed as `diskdb-{node_id}`).
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    #[must_use]
+    pub fn kv_pid_snapshot(&self) -> std::collections::HashMap<u64, u32> {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, v)| {
+                if k.starts_with("diskdb-") {
+                    None
+                } else {
+                    k.parse::<u64>().ok().map(|n| (n, *v))
+                }
+            })
+            .collect()
+    }
+
     /// Get the runtime PID for a diskdb instance on a node (R77).
     /// Keyed separately from kv-server PIDs.
     ///

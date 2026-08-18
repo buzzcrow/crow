@@ -40,6 +40,33 @@ export async function apiContext(baseURL: string) {
   return request.newContext({ baseURL });
 }
 
+// Debug helper: dump API state to console.log. Use before writing
+// assertions on dynamic state (health, PID, server presence) to
+// verify field names and values. Remove once assertions pass.
+//
+//   await dumpApiState(baseURL!, nodeId);
+export async function dumpApiState(baseURL: string, nodeId?: number) {
+  const api = await apiContext(baseURL);
+  try {
+    const racks = await (await api.get('/api/racks?recursive=3')).json();
+    for (const rack of racks.items || []) {
+      for (const n of rack.nodes || []) {
+        if (nodeId == null || n.id === nodeId) {
+          console.log(`DEBUG racks: node ${n.id} has_server=${n.has_server} server=${JSON.stringify(n.server)}`);
+        }
+      }
+    }
+    const servers = await (await api.get('/api/servers')).json();
+    for (const s of servers) {
+      if (nodeId == null || s.node_id === nodeId) {
+        console.log(`DEBUG servers: node ${s.node_id} service_type=${s.service_type} health=${s.health} pid=${s.pid}`);
+      }
+    }
+  } finally {
+    await api.dispose();
+  }
+}
+
 export async function createRack(baseURL: string, rack: TestRack) {
   const api = await apiContext(baseURL);
   try {
@@ -253,6 +280,21 @@ export async function stopDiskdb(baseURL: string, nodeId: number) {
     }
   } catch (err) {
     console.warn(`stopDiskdb(${nodeId}) failed:`, err);
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Stop and remove a diskdb instance on a node via the REST API (DELETE). */
+export async function removeDiskdb(baseURL: string, nodeId: number) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.delete(`/api/nodes/${encodeURIComponent(nodeId)}/diskdb`);
+    if (!response.ok() && response.status() !== 404) {
+      console.warn(`removeDiskdb(${nodeId}) returned ${response.status()}:`, await response.text());
+    }
+  } catch (err) {
+    console.warn(`removeDiskdb(${nodeId}) failed:`, err);
   } finally {
     await api.dispose();
   }

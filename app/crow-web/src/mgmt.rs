@@ -120,7 +120,7 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: NodeId) {
         cfg.server_for_node(node_id).map(|s| s.url.clone())
     };
     if let Some(url) = url {
-        if let Ok(client) = ServerClient::new(url) {
+        if let Ok(client) = ServerClient::new(&url) {
             match client.topology().await {
                 Ok(stores) => {
                     let rec = crow_console_shared::monitor::NodeRecord {

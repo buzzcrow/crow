@@ -43,6 +43,13 @@ fn live_server_process_with_pid(
     let mut proc = live_server_process(entry, rec);
     if let Some(node_id) = entry.node_id {
         proc.pid = state.runtime_pid(node_id.to_string());
+        // Override health to Down if no PID is tracked — the process
+        // was stopped or the console restarted. The monitor cache may
+        // be stale (no background polling to update it).
+        if proc.pid.is_none() {
+            proc.health = NodeHealth::Down;
+            proc.state = ProcState::Failed;
+        }
     }
     proc
 }
@@ -90,7 +97,8 @@ pub async fn http_list_racks(
     }
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let pids = state.kv_pid_snapshot();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
     let limit = depth.effective();
     let racks: Vec<_> = cfg.racks.iter().map(|r| builder.build_rack(r, limit)).collect();
     let trunc = builder.into_truncation();
@@ -368,7 +376,8 @@ pub async fn http_get_rack(
             )
         })?
         .clone();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let pids = state.kv_pid_snapshot();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
     let view = builder.build_rack(&rack, depth.effective());
     let trunc = builder.into_truncation();
     let mut body = serde_json::to_value(&view).expect("serialize rack view");
@@ -427,7 +436,8 @@ pub async fn http_list_rack_nodes(
         .filter(|n| n.rack_id == rack_id_num)
         .cloned()
         .collect();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let pids = state.kv_pid_snapshot();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
     let limit = depth.effective();
     let views: Vec<_> = nodes.iter().map(|n| builder.build_node(n, limit)).collect();
     let trunc = builder.into_truncation();
@@ -549,11 +559,30 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
         .servers
         .iter()
         .map(|s| {
-            let health = s
-                .node_id
-                .and_then(|n| snap.get(&n))
-                .map_or(NodeHealth::Unknown, |rec| rec.health);
-            let pid = s.node_id.and_then(|n| state.runtime_pid(n.to_string()));
+            let pid = if s.service_type == ServiceType::Diskdb {
+                s.node_id.and_then(|n| state.diskdb_runtime_pid(n.to_string()))
+            } else {
+                s.node_id.and_then(|n| state.runtime_pid(n.to_string()))
+            };
+            // KV health comes from the monitor cache (probed via the KV
+            // server's /topology), overridden to Down when no PID is
+            // tracked. DDB has no topology probe, so its health is derived
+            // from PID presence alone — the shared node record reflects KV
+            // health and must not flip the DDB badge when KV is stopped or
+            // restarted while DDB keeps running.
+            let health = if s.service_type == ServiceType::Diskdb {
+                if pid.is_some() {
+                    NodeHealth::Up
+                } else {
+                    NodeHealth::Down
+                }
+            } else if pid.is_some() {
+                s.node_id
+                    .and_then(|n| snap.get(&n))
+                    .map_or(NodeHealth::Unknown, |rec| rec.health)
+            } else {
+                NodeHealth::Down
+            };
             ServerSummary {
                 node_id: s.node_id,
                 mgmt_url: s.url.clone(),
@@ -762,6 +791,7 @@ pub async fn http_deploy_node_server(
 /// # Errors
 /// Returns `404` if no server is registered for this node, `502` if
 /// the SSH/local restart cycle fails.
+#[allow(clippy::too_many_lines)]
 pub async fn http_restart_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
@@ -866,6 +896,23 @@ pub async fn http_restart_node_server(
     crate::mgmt::restore_persisted_topology_for_node(&state, node_id)
         .await
         .map_err(|e| err_502(format!("restore topology after restart: {e}")))?;
+    // Refresh the monitor cache so health badges reflect the restarted
+    // server. The process may not be listening yet, so retry a few
+    // times with short delays until the probe succeeds.
+    crate::mgmt::refresh_node_cache(&state, node_id).await;
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            crate::mgmt::refresh_node_cache(&state_clone, node_id).await;
+            let snap = state_clone.monitor_cache.snapshot().await;
+            if let Some(rec) = snap.get(&node_id) {
+                if rec.health == NodeHealth::Up {
+                    break;
+                }
+            }
+        }
+    });
 
     Ok(Json(DeployResult {
         node_id,
@@ -919,7 +966,16 @@ pub async fn http_stop_node_server(
             .map_err(|e| err_500(format!("stop_pid: {e}")))?,
     };
     state.clear_runtime_pid(node_id);
-    state.monitor_cache.drop_node(&node_id).await;
+    // Only mark the shared node record Down when no DDB instance is still
+    // running on this node. The record is shared between KV and DDB; an
+    // unconditional mark_down would flip the node-level badge (and any
+    // DDB health derived from the record) even though DDB is unaffected.
+    // The KV badge already drops via the no-pid override in
+    // build_server_process / http_list_servers, and DDB health in
+    // http_list_servers is derived from the DDB pid alone.
+    if state.diskdb_runtime_pid(node_id).is_none() {
+        state.monitor_cache.mark_down(node_id, "server stopped").await;
+    }
     Ok(Json(StopResult { sent }))
 }
 
@@ -1180,7 +1236,7 @@ pub async fn http_internal_reset(
     };
 
     for nid in &node_ids {
-        // Stop the server process if a PID is tracked.
+        // Stop the KV server process if a PID is tracked.
         if let Some(pid) = state.runtime_pid(nid) {
             let ssh = state
                 .config
@@ -1202,10 +1258,24 @@ pub async fn http_internal_reset(
             state.clear_runtime_pid(nid);
         }
 
-        // Remove the server entry + purge topology from config.
+        // Stop the DDB process if a PID is tracked.
+        if let Some(pid) = state.diskdb_runtime_pid(nid) {
+            let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await;
+            state.clear_diskdb_runtime_pid(nid);
+        }
+
+        // Remove all server entries + purge topology from config.
         {
             let mut cfg = state.config.write().unwrap();
             let _ = cfg.remove_server_for_node(*nid);
+            // Also remove any DDB entry for this node.
+            let pos = cfg
+                .servers
+                .iter()
+                .position(|s| s.node_id == Some(*nid) && s.service_type == ServiceType::Diskdb);
+            if let Some(p) = pos {
+                cfg.servers.remove(p);
+            }
             cfg.purge_node_topology(*nid);
             let _ = cfg.remove_node(*nid);
         }

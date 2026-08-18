@@ -164,14 +164,21 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     }
   }, [error]);
   useEffect(() => {
-    if (capacityActive) {
+    if (physicalActive || capacityActive) {
       refreshAllServers();
     }
-  }, [capacityActive, diskdbInstances, refreshAllServers]);
+  }, [physicalActive, capacityActive, diskdbInstances, refreshAllServers]);
   const diskdbNodeIds = useMemo(
     () => new Set(allServers.filter((s) => s.service_type === 'diskdb' && s.node_id != null).map((s) => s.node_id!)),
     [allServers],
   );
+  const diskdbHealthById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const s of allServers) {
+      if (s.service_type === 'diskdb' && s.node_id != null) m.set(s.node_id, s.health);
+    }
+    return m;
+  }, [allServers]);
   // Cluster is initialized once the system store (store 0) exists.
   const clusterInitialized = useMemo(
     () => stores.some((s) => String(s.store_id) === '0'),
@@ -194,12 +201,14 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       await Promise.all([refreshPhysical(), refreshLogical(), refreshCapacity()]);
       if (capacityActive) {
         await Promise.all([fetchNodeDiskGroups(nodes.map((n) => n.id)), refreshAllServers()]);
+      } else if (physicalActive) {
+        await refreshAllServers();
       }
       setLastRefreshTime(new Date());
     } finally {
       setRefreshing(false);
     }
-  }, [refreshPhysical, refreshLogical, refreshCapacity, capacityActive, fetchNodeDiskGroups, nodes, refreshAllServers]);
+  }, [refreshPhysical, refreshLogical, refreshCapacity, capacityActive, physicalActive, fetchNodeDiskGroups, nodes, refreshAllServers]);
 
   // Fetch node disk-groups when the Capacity view is active.
   useEffect(() => {
@@ -702,16 +711,24 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const addNodeDeployDefaults = useMemo(
     () => {
       const nextNodeId = Number(nextIdFromSuffix(nodeIds, 1));
-      return deployPortDefaultsForNode(
-        servers,
-        nextNodeId,
-        19910,
-        19920,
-        rememberedDeployPorts.mgmt,
-        rememberedDeployPorts.grpc,
-      );
+      return {
+        ...deployPortDefaultsForNode(
+          servers,
+          nextNodeId,
+          19910,
+          19920,
+          rememberedDeployPorts.mgmt,
+          rememberedDeployPorts.grpc,
+        ),
+        defaultDiskdbRpcPort: diskdbPortDefaultsForNode(
+          diskdbInstances,
+          nextNodeId,
+          undefined,
+          rememberedDeployPorts.diskdbRpc,
+        ),
+      };
     },
-    [nodeIds, rememberedDeployPorts, servers],
+    [nodeIds, rememberedDeployPorts, servers, diskdbInstances],
   );
 
   const deployDiskdbDefaults = useMemo(() => {
@@ -836,6 +853,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         capacityUsage={capacityUsage}
         nodeDiskGroups={nodeDiskGroups}
         diskdbNodeIds={diskdbNodeIds}
+        diskdbHealthById={diskdbHealthById}
       />
 
       <div
@@ -914,6 +932,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           existingNodeIds={nodeIds.map(String)}
           defaultRestPort={addNodeDeployDefaults.defaultRestPort}
           defaultRpcPort={addNodeDeployDefaults.defaultRpcPort}
+          defaultDiskdbRpcPort={addNodeDeployDefaults.defaultDiskdbRpcPort}
           onCreatedRackId={(rackId) => setLastUsedRackId(Number(rackId))}
           onSuccess={handleRefresh}
         />

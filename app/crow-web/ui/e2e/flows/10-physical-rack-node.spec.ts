@@ -3,7 +3,7 @@
 // Baseline: 10s (2026-08-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createNode, createRack, createStore, deployNodeServer, freePort, resetAll, seedRackAndNode, stopDiskdb, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, createNode, createRack, createStore, deployNodeServer, freePort, removeDiskdb, resetAll, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('physical · rack + node CRUD', () => {
   test('renders the SPA shell against a real empty backend', async ({ page }) => {
@@ -125,9 +125,18 @@ test.describe('physical · rack + node CRUD', () => {
       await expect(page.getByLabel('Enable DiskDB on this node')).toBeChecked();
 
       // Fill in unique ports for KV (REST + RPC) and DiskDB (RPC).
+      // The DiskDB RPC Port field should be pre-filled with an
+      // auto-incremented value (not the hardcoded 29920 base) —
+      // regression: previously always 29920, causing port collisions
+      // when creating multiple nodes with DiskDB.
+      const diskdbPortInput = page.getByTestId('diskdb-rpc-port');
+      const preFilledDiskdbPort = await diskdbPortInput.inputValue();
+      expect(preFilledDiskdbPort).toMatch(/^\d+$/);
+      expect(preFilledDiskdbPort).not.toBe('29920');
+
       await page.getByLabel('REST Port').fill(String(restPort));
-      await page.getByLabel('RPC Port', { exact: true }).fill(String(rpcPort));
-      await page.getByLabel('DiskDB RPC Port').fill(String(diskdbRpcPort));
+      await page.getByTestId('kv-rpc-port').fill(String(rpcPort));
+      await page.getByTestId('diskdb-rpc-port').fill(String(diskdbRpcPort));
 
       await expect(page.getByRole('button', { name: /create node/i })).toBeEnabled();
       await page.getByRole('button', { name: /create node/i }).click();
@@ -163,10 +172,23 @@ test.describe('physical · rack + node CRUD', () => {
           return servers.some((s: { node_id?: number; service_type: string }) =>
             s.node_id === nodeId && s.service_type === 'diskdb');
         }, { timeout: 10_000, intervals: [100] }).toBe(true);
+
+        // The DiskDB server should appear as a DDB-{nodeId} item under
+        // N-{nodeId} in the Physical view tree (mirrors KV-{nodeId}).
+        // Expand the node first so its children are rendered.
+        const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+        if (await expandNode.count() > 0) await expandNode.first().click();
+        await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 10_000 });
+
+        // The DDB item should have a health badge (regression: previously
+        // no health icon). The badge renders with a title attribute set
+        // to the health status (Healthy/Degraded/Failed/Unknown).
+        const ddbItem = aside.getByRole('treeitem').filter({ hasText: `DDB-${nodeId}` });
+        await expect(ddbItem.getByTitle(/Healthy|Degraded|Failed|Unknown/)).toBeVisible({ timeout: 10_000 });
       } finally {
         await api.dispose();
         await stopNodeServer(baseURL!, nodeId);
-        await stopDiskdb(baseURL!, nodeId);
+        await removeDiskdb(baseURL!, nodeId);
       }
     }
   });

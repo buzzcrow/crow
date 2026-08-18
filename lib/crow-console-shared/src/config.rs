@@ -739,18 +739,20 @@ impl ConsoleConfig {
     /// Look up the server deployed on a given node.
     #[must_use]
     pub fn server_for_node(&self, node_id: NodeId) -> Option<&ServerEntry> {
-        self.servers.iter().find(|s| s.node_id == Some(node_id))
+        self.servers
+            .iter()
+            .find(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
     }
 
-    /// Remove the server entry deployed on a given node.
+    /// Remove the KV server entry deployed on a given node.
     ///
     /// # Errors
-    /// `Error::NotFound` if no server is deployed on this node.
+    /// `Error::NotFound` if no KV server is deployed on this node.
     pub fn remove_server_for_node(&mut self, node_id: NodeId) -> Result<ServerEntry> {
         let pos = self
             .servers
             .iter()
-            .position(|s| s.node_id == Some(node_id))
+            .position(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
             .ok_or_else(|| Error::NotFound {
                 kind: "server".into(),
                 id: format!("no server on node {node_id}"),

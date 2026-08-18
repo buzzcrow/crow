@@ -13,7 +13,7 @@ import {
   addDisksBatch,
   removeDisk,
   randomDiskId,
-  stopDiskdb,
+  removeDiskdb,
   deployDiskdb,
   deployNodeServer,
   clusterInit,
@@ -79,7 +79,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
         return btn.isEnabled();
       }, { timeout: 10_000, intervals: [100] }).toBe(true);
     } finally {
-      await stopDiskdb(baseURL!, nodeId);
+      await removeDiskdb(baseURL!, nodeId);
     }
   });
 
@@ -108,7 +108,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       // Refresh button.
       await expect(panel.getByRole('button', { name: 'Refresh' })).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopDiskdb(baseURL!, nodeId);
+      await removeDiskdb(baseURL!, nodeId);
     }
   });
 
@@ -176,7 +176,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
     } finally {
       await removeDisk(baseURL!, nodeId, dgId, diskId).catch(() => {});
       await apiRemoveDiskGroup(baseURL!, nodeId, dgId).catch(() => {});
-      await stopDiskdb(baseURL!, nodeId);
+      await removeDiskdb(baseURL!, nodeId);
     }
   });
 });
