@@ -379,13 +379,8 @@ pub struct UsageQuery {
 }
 
 fn parse_disk_id(s: &str) -> Option<crow_protocol::common::DiskId> {
-    if s.len() == 32 {
-        let high = u64::from_str_radix(&s[..16], 16).ok()?;
-        let low = u64::from_str_radix(&s[16..], 16).ok()?;
-        Some(crow_protocol::common::DiskId { high, low })
-    } else {
-        None
-    }
+    use crow_protocol::diskdb_type_util::DiskIdExt;
+    crow_protocol::common::DiskId::from_display_string(s).ok()
 }
 
 /// `GET /api/diskdb/scan-status?dg=<id>` — `GetScanStatus`.
@@ -833,5 +828,32 @@ fn parse_hw_status(s: &str) -> Option<HwStatus> {
         "BAD" | "HW_STATUS_BAD" => Some(HwStatus::Bad),
         "OFFLINE" | "HW_STATUS_OFFLINE" => Some(HwStatus::Offline),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_disk_id;
+
+    #[test]
+    fn parse_disk_id_accepts_dashed_format() {
+        // Display format: {high:016x}-{low:016x}
+        let id = parse_disk_id("31e27c300686a353-1110eceecf0013c9").unwrap();
+        assert_eq!(id.high, 0x31e2_7c30_0686_a353);
+        assert_eq!(id.low, 0x1110_ecee_cf00_13c9);
+    }
+
+    #[test]
+    fn parse_disk_id_accepts_bare_hex_format() {
+        let id = parse_disk_id("31e27c300686a3531110eceecf0013c9").unwrap();
+        assert_eq!(id.high, 0x31e2_7c30_0686_a353);
+        assert_eq!(id.low, 0x1110_ecee_cf00_13c9);
+    }
+
+    #[test]
+    fn parse_disk_id_rejects_garbage() {
+        assert!(parse_disk_id("not-a-disk-id").is_none());
+        assert!(parse_disk_id("").is_none());
+        assert!(parse_disk_id("xyz").is_none());
     }
 }

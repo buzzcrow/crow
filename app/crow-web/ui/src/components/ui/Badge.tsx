@@ -128,23 +128,33 @@ export function RoleBadge({ role, size = 'sm', compact = false }: { role: Replic
 }
 
 const hwStatusColors: Record<HwStatusName, string> = {
-  Init: 'tw-bg-gray-500/10 tw-text-gray-500 tw-border tw-border-gray-500/30',
+  Init: 'tw-bg-white/10 tw-text-white tw-border tw-border-white/30',
   Up: 'tw-bg-green-500/10 tw-text-green-500 tw-border tw-border-green-500/30',
-  Maintenance: 'tw-bg-blue-500/10 tw-text-blue-500 tw-border tw-border-blue-500/30',
+  Maintenance: 'tw-bg-yellow-500/10 tw-text-yellow-500 tw-border tw-border-yellow-500/30',
   Suspect: 'tw-bg-yellow-500/10 tw-text-yellow-500 tw-border tw-border-yellow-500/30',
-  Missing: 'tw-bg-orange-500/10 tw-text-orange-500 tw-border tw-border-orange-500/30',
+  Missing: 'tw-bg-red-500/10 tw-text-red-500 tw-border tw-border-red-500/30',
   Bad: 'tw-bg-red-500/10 tw-text-red-500 tw-border tw-border-red-500/30',
-  Offline: 'tw-bg-gray-600/10 tw-text-gray-600 tw-border tw-border-gray-600/30',
+  Offline: 'tw-bg-red-500/10 tw-text-red-500 tw-border tw-border-red-500/30',
+};
+
+const hwStatusIconColors: Record<HwStatusName, string> = {
+  Init: 'tw-text-white',
+  Up: 'tw-text-green-500',
+  Maintenance: 'tw-text-yellow-500',
+  Suspect: 'tw-text-yellow-500',
+  Missing: 'tw-text-red-500',
+  Bad: 'tw-text-red-500',
+  Offline: 'tw-text-red-500',
 };
 
 const hwStatusIcons: Record<HwStatusName, React.ReactNode> = {
-  Init: <HelpCircle className="tw-h-3.5 tw-w-3.5" />,
-  Up: <CheckCircle2 className="tw-h-3.5 tw-w-3.5" />,
-  Maintenance: <Wrench className="tw-h-3.5 tw-w-3.5" />,
-  Suspect: <AlertTriangle className="tw-h-3.5 tw-w-3.5" />,
-  Missing: <EyeOff className="tw-h-3.5 tw-w-3.5" />,
-  Bad: <XCircle className="tw-h-3.5 tw-w-3.5" />,
-  Offline: <PowerOff className="tw-h-3.5 tw-w-3.5" />,
+  Init: <HelpCircle className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Init)} />,
+  Up: <CheckCircle2 className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Up)} />,
+  Maintenance: <Wrench className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Maintenance)} />,
+  Suspect: <AlertTriangle className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Suspect)} />,
+  Missing: <EyeOff className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Missing)} />,
+  Bad: <XCircle className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Bad)} />,
+  Offline: <PowerOff className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Offline)} />,
 };
 
 export function HwStatusBadge({ status, size = 'sm', compact = false }: { status: number; size?: BadgeSize; compact?: boolean }) {

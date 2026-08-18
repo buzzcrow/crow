@@ -156,23 +156,53 @@ export function CapacityPanel({
     return allDgs;
   }, [hardwareCapacity, usage, selectedEntity]);
 
+  // When a single disk is selected, show only that disk's capacity.
+  const selectedDiskCap = useMemo(() => {
+    if (selectedEntity?.type !== 'Disk') return null;
+    const dgId = Number(selectedEntity.parentIds?.disk_group_id);
+    const diskId = String(selectedEntity.parentIds?.disk_id ?? selectedEntity.id);
+    const hwDg = hardwareCapacity?.disk_groups.find((g) => g.disk_group_id === dgId);
+    const hwDisk = hwDg?.disks.find((d) => d.disk_id === diskId);
+    if (hwDisk) {
+      const usageDg = usage?.disk_groups.find((g) => g.disk_group_id === dgId);
+      const usageDisk = usageDg?.disks.find((d) => d.disk_id === diskId);
+      return {
+        capacity: hwDisk.capacity_bytes,
+        busy: usageDisk?.busy_bytes ?? 0,
+        free: usageDisk?.free_bytes ?? hwDisk.capacity_bytes,
+      };
+    }
+    // Fall back to diskdb usage if hardware sysdata not loaded.
+    const usageDg = usage?.disk_groups.find((g) => g.disk_group_id === dgId);
+    const usageDisk = usageDg?.disks.find((d) => d.disk_id === diskId);
+    if (usageDisk) {
+      return {
+        capacity: usageDisk.capacity_bytes,
+        busy: usageDisk.busy_bytes,
+        free: usageDisk.free_bytes,
+      };
+    }
+    return null;
+  }, [selectedEntity, hardwareCapacity, usage]);
+
   const totalCapacity = useMemo(() => {
+    if (selectedDiskCap) return selectedDiskCap.capacity;
     return filteredDgs.reduce((sum, g) => sum + g.capacity_bytes, 0);
-  }, [filteredDgs]);
+  }, [filteredDgs, selectedDiskCap]);
 
   const totalBusy = useMemo(() => {
-    // Busy/free come from diskdb usage (allocation state), not from
-    // hardware sysdata. If diskdb is not available, busy = 0.
+    if (selectedDiskCap) return selectedDiskCap.busy;
     const usageDgs = usage?.disk_groups || [];
     return filteredDgs.reduce((sum, g) => {
       const u = usageDgs.find((ud) => ud.disk_group_id === g.disk_group_id);
       return sum + (u?.busy_bytes ?? 0);
     }, 0);
-  }, [filteredDgs, usage]);
+  }, [filteredDgs, usage, selectedDiskCap]);
 
   const totalFree = useMemo(() => {
+    if (selectedDiskCap) return selectedDiskCap.free;
     return Math.max(0, totalCapacity - totalBusy);
-  }, [totalCapacity, totalBusy]);
+  }, [totalCapacity, totalBusy, selectedDiskCap]);
 
   // Build a summary title based on the selected layer.
   const scopeLabel = useMemo(() => {

@@ -522,39 +522,42 @@ test.describe('capacity · diskdb', () => {
 
       await page.keyboard.press('Escape');
 
-      // --- Set Disk Group Down via context menu hits the real backend ---
+      // --- Change DG status to Offline via context menu submenu ---
 
       // Refresh the monitor cache by polling group-0 — in the full
       // suite the kv-server may have been temporarily unreachable from
       // earlier sysdata sync retries, and the cache entry may be stale.
       await waitForLeader(baseURL!, 0, 0, 15_000);
 
-      // Right-click disk-group → Set Disk Group Down. The real API
+      // Right-click disk-group → Change Status → Offline. The real API
       // writes to group-0 via HardwareClient and returns 204.
       await expect(aside.getByText(/DG-548/, { exact: true })).toBeVisible({ timeout: 5_000 });
       await aside.getByText(/DG-548/, { exact: true }).click({ button: 'right' });
+      // Open the "Change Status" submenu.
+      await page.getByRole('menuitem', { name: /change status/i }).click();
       const dgStatusResponse = page.waitForResponse(
         (r: any) => r.request().method() === 'PUT' && r.url().includes(`/api/disk-groups/${rackId}/${nodeId}/${dg548}/status`),
         { timeout: 10_000 },
       );
-      await page.getByRole('menuitem', { name: /set disk group down/i }).click();
+      await page.getByRole('menuitem', { name: /^Offline$/ }).click();
       const dgResp = await dgStatusResponse;
       expect(dgResp.status()).toBe(204);
 
-      // --- Set Disk Down via context menu hits the real backend ---
+      // --- Change Disk status to Offline via context menu submenu ---
 
       const expandDg549 = aside.getByRole('treeitem').filter({ hasText: /DG-549/ }).locator('button[aria-label="Expand"]');
       if (await expandDg549.count() > 0) await expandDg549.click();
 
-      // Right-click disk → Set Disk Down.
+      // Right-click disk → Change Status → Offline.
       const disk549Label = aside.getByText(disk549.slice(0, 12), { exact: false });
       await expect(disk549Label).toBeVisible({ timeout: 5_000 });
       await disk549Label.first().click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /change status/i }).click();
       const diskStatusResponse = page.waitForResponse(
         (r: any) => r.request().method() === 'PUT' && r.url().includes(`/api/disks/${encodeURIComponent(disk549)}/status`),
         { timeout: 10_000 },
       );
-      await page.getByRole('menuitem', { name: /set disk down/i }).click();
+      await page.getByRole('menuitem', { name: /^Offline$/ }).click();
       const diskResp = await diskStatusResponse;
       expect(diskResp.status()).toBe(204);
 
@@ -1428,6 +1431,77 @@ test.describe('capacity · diskdb', () => {
     } finally {
       await removeDisk(baseURL!, nodeId, dgId, diskId1);
       await removeDisk(baseURL!, nodeId, dgId, diskId2);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dgId);
+    }
+  });
+
+  test('change disk status via API works with dashed disk_id format', async ({ baseURL }) => {
+    test.setTimeout(30_000);
+    const nodeId = DISKDB_NODE;
+    const dgId = 592;
+    const diskId = randomDiskId();
+
+    await apiAddDiskGroup(baseURL!, nodeId, dgId, 'test-dg-disk-status');
+    await addDisksBatch(baseURL!, nodeId, dgId, [{ disk_id: diskId }]);
+
+    try {
+      // The disk_id is stored in display format "high-low" (with dash).
+      // The old parse_disk_id only accepted bare 32-char hex (no dash),
+      // causing HTTP 400. The fix uses DiskIdExt::from_display_string
+      // which accepts both formats.
+      const api = await apiContext(baseURL!);
+      try {
+        // Set status to Suspect — this exercises the parse_disk_id fix.
+        const r = await api.put(`/api/disks/${encodeURIComponent(diskId)}/status`, {
+          data: { status: 'Suspect' },
+        });
+        expect(r.status(), await r.text().catch(() => '')).toBe(204);
+
+        // Set status to Up — verify all statuses work.
+        const r2 = await api.put(`/api/disks/${encodeURIComponent(diskId)}/status`, {
+          data: { status: 'Up' },
+        });
+        expect(r2.status(), await r2.text().catch(() => '')).toBe(204);
+
+        // Set status to Offline.
+        const r3 = await api.put(`/api/disks/${encodeURIComponent(diskId)}/status`, {
+          data: { status: 'Offline' },
+        });
+        expect(r3.status(), await r3.text().catch(() => '')).toBe(204);
+      } finally {
+        await api.dispose();
+      }
+    } finally {
+      await removeDisk(baseURL!, nodeId, dgId, diskId);
+      await apiRemoveDiskGroup(baseURL!, nodeId, dgId);
+    }
+  });
+
+  test('DGs remain visible in Physical view after web server restart (no diskdb running)', async ({ page, baseURL }) => {
+    test.setTimeout(30_000);
+    const rackId = DISKDB_RACK;
+    const nodeId = DISKDB_NODE;
+    const dgId = 593;
+
+    await apiAddDiskGroup(baseURL!, nodeId, dgId, 'test-dg-persist');
+
+    try {
+      // No diskdb is deployed on this node, so the DG should still
+      // appear under the node in the Physical view.
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Physical' }).click();
+
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
+      if (await expandRack.count() > 0) await expandRack.click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+
+      const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNode.count() > 0) await expandNode.click();
+
+      // DG should be visible even without a running diskdb.
+      await expect(aside.getByText(/DG-593/, { exact: true })).toBeVisible({ timeout: 5_000 });
+    } finally {
       await apiRemoveDiskGroup(baseURL!, nodeId, dgId);
     }
   });

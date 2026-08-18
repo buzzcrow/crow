@@ -1,8 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef } from 'react';
-import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, Move } from 'lucide-react';
+import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef, type ReactNode } from 'react';
+import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, Move, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
 import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
@@ -62,7 +62,7 @@ import {
 import { deployPortDefaultsForNode, diskdbPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
 import { buildCrowKVServers, crowKvServerNodeIds } from './data/crowKvServers';
 import { isCrowKVServerAvailable } from './data/crowKvServers';
-import { toUiHealth } from './utils/entityDisplay';
+import { toUiHealth, HW_STATUS_NAMES } from './utils/entityDisplay';
 
 const TopologyCanvas = lazy(() =>
   import('./topology/TopologyCanvas').then((m) => ({ default: m.TopologyCanvas })),
@@ -290,6 +290,30 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     }));
   }, [runMutation]);
 
+  // Status icons for the "Change Status" submenu.
+  const statusIcons: Record<string, ReactNode> = {
+    Init: <HelpCircle className="tw-h-4 tw-w-4" />,
+    Up: <CheckCircle2 className="tw-h-4 tw-w-4" />,
+    Maintenance: <Wrench className="tw-h-4 tw-w-4" />,
+    Suspect: <AlertTriangle className="tw-h-4 tw-w-4" />,
+    Missing: <EyeOff className="tw-h-4 tw-w-4" />,
+    Bad: <XCircle className="tw-h-4 tw-w-4" />,
+    Offline: <PowerOff className="tw-h-4 tw-w-4" />,
+  };
+
+  /** Build the "Change Status" submenu items for a DG or Disk. */
+  const buildStatusSubmenu = useCallback(
+    (onSet: (status: string) => Promise<void>): MenuItemOrSeparator[] => {
+      return HW_STATUS_NAMES.map((name) => ({
+        id: `status-${name.toLowerCase()}`,
+        label: name,
+        icon: statusIcons[name],
+        onSelect: () => onSet(name),
+      }));
+    },
+    [statusIcons],
+  );
+
   /** Build per-layer context menu items for a normalized target. */
   const buildMenuItems = useCallback(
     (t: MenuTarget): MenuItemOrSeparator[] => {
@@ -487,7 +511,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       }
       return items;
     },
-    [readonly, physicalActive, modules, requestDelete, runMutation, serverNodeIds, diskdbNodeIds],
+    [readonly, physicalActive, modules, requestDelete, runMutation, serverNodeIds, diskdbNodeIds, buildStatusSubmenu],
   );
 
   /** Capacity view has its own menu code path — rack/node management
@@ -537,16 +561,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         });
         items.push({ id: 's1', separator: true });
         items.push({
-          id: 'dg-set-up',
-          label: 'Set Disk Group Up',
+          id: 'dg-change-status',
+          label: 'Change Status',
           icon: <Activity className="tw-h-4 tw-w-4" />,
-          onSelect: () => runMutation('Set Disk Group Up', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Up')),
-        });
-        items.push({
-          id: 'dg-set-down',
-          label: 'Set Disk Group Down',
-          icon: <Square className="tw-h-4 tw-w-4" />,
-          onSelect: () => runMutation('Set Disk Group Down', t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, 'Offline')),
+          submenu: buildStatusSubmenu((status) => runMutation(`Set DG ${status}`, t.label || t.id, () => setDiskGroupStatus(dgRackId, dgNodeId, dgId, status))),
         });
         items.push({ id: 's2', separator: true });
         items.push({
@@ -601,16 +619,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         });
         items.push({ id: 's2', separator: true });
         items.push({
-          id: 'disk-set-down',
-          label: 'Set Disk Down',
-          icon: <Square className="tw-h-4 tw-w-4" />,
-          onSelect: () => runMutation('Set Disk Down', t.label || t.id, () => setDiskStatus(diskId, 'Offline')),
-        });
-        items.push({
-          id: 'disk-set-up',
-          label: 'Set Disk Up',
+          id: 'disk-change-status',
+          label: 'Change Status',
           icon: <Activity className="tw-h-4 tw-w-4" />,
-          onSelect: () => runMutation('Set Disk Up', t.label || t.id, () => setDiskStatus(diskId, 'Up')),
+          submenu: buildStatusSubmenu((status) => runMutation(`Set Disk ${status}`, t.label || t.id, () => setDiskStatus(diskId, status))),
         });
         items.push({ id: 's3', separator: true });
         items.push({
@@ -631,7 +643,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       }
       return items;
     },
-    [readonly, diskdbNodeIds, capacityUsage, requestDelete, runMutation, setDialog],
+    [readonly, diskdbNodeIds, capacityUsage, requestDelete, runMutation, setDialog, buildStatusSubmenu],
   );
 
   const onTreeContextMenu = useCallback(
@@ -848,6 +860,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         onAdd={handleAdd}
         diskdbInstances={diskdbInstances}
         capacityUsage={capacityUsage}
+        hardwareCapacity={hardwareCapacity}
         nodeDiskGroups={nodeDiskGroups}
         diskdbNodeIds={diskdbNodeIds}
         diskdbHealthById={diskdbHealthById}
@@ -1013,7 +1026,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           isOpen
           onClose={closeDialogs}
           nodeId={dialog.addDiskGroup.nodeId}
-          existingDgIds={(nodeDiskGroups[dialog.addDiskGroup.nodeId]?.diskGroups || []).map((dg) => dg.id)}
+          existingDgIds={[
+            ...(nodeDiskGroups[dialog.addDiskGroup.nodeId]?.diskGroups || []).map((dg) => dg.id),
+            ...(hardwareCapacity?.disk_groups || []).map((g) => g.disk_group_id),
+          ]}
           onSuccess={handleRefresh}
         />
       )}
