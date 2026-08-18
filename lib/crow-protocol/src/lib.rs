@@ -63,6 +63,89 @@ pub mod diskio {
     }
 }
 
+// ── Flatbuffer control-message schemas (crow-rpc, R104) ──
+// `common_msg_generated` is built with `flatc --gen-all` so it inlines
+// `ret_code.fbs` (FBRetCode) into one self-contained file. `msg_type` and
+// `common_type` are standalone. Each is a top-level private module; the
+// `fb` module re-exports the nested `crow::rpc::proto` namespace as a flat
+// surface. The generated code is full of `unsafe` (flatbuffers runtime
+// accessors), so each module opts out of the workspace `unsafe_code =
+// "deny"` lint.
+mod msg_type_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/msg_type_generated.rs"));
+}
+mod common_type_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/common_type_generated.rs"));
+}
+mod common_msg_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/common_msg_generated.rs"));
+}
+
+/// Flatbuffer control-message types for the crow-rpc library (R104).
+///
+/// Re-exports the generated `crow::rpc::proto` namespace: `FBMsgType`,
+/// `FBRetCode`, the common messages (`ConnectionPingRequest`,
+/// `ConnectionPingResponse`, `UnknownMessage`), and the inline struct
+/// (`FBInt128`).
+pub mod fb {
+    pub use crate::common_msg_generated::crow::rpc::proto::{
+        ConnectionPingRequest, ConnectionPingResponse, FBRetCode, UnknownMessage,
+    };
+    pub use crate::common_type_generated::crow::rpc::proto::FBInt128;
+    pub use crate::msg_type_generated::crow::rpc::proto::FBMsgType;
+}
+
+#[cfg(test)]
+mod fb_tests {
+    use super::fb::{FBInt128, FBMsgType, FBRetCode};
+
+    #[test]
+    fn msg_type_common_range() {
+        // flatbuffers 25.x generates enums as newtype structs with
+        // associated consts; compare via the const + inner i16 field.
+        assert_eq!(FBMsgType::EUnknownRequest.0, 0);
+        assert_eq!(FBMsgType::EUnknownResponse.0, 1);
+        assert_eq!(FBMsgType::EConnectionPingRequest.0, 2);
+        assert_eq!(FBMsgType::EConnectionPingResponse.0, 3);
+    }
+
+    #[test]
+    fn ret_code_common_subset() {
+        assert_eq!(FBRetCode::Success.0, 0);
+        assert_eq!(FBRetCode::Error.0, 1);
+        assert_eq!(FBRetCode::HaveNotSupport.0, 2);
+    }
+
+    #[test]
+    fn inline_struct_sizes() {
+        assert_eq!(std::mem::size_of::<FBInt128>(), 16);
+    }
+}
+
 pub mod diskdb_type_util;
 pub use diskdb_type_util::{
     disk_id, effective_status, DiskIdExt, HwStatusExt, RecoveryScanProgressValueExt, ZoneAllocationStateExt,

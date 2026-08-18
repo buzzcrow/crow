@@ -24,6 +24,9 @@ clang-format = ">=19.0.0"
 clang-tools = "*"
 folly = "*"
 isa-l = "*"
+# Flatbuffer schema compiler + runtime headers for crow-rpc (R104) and
+# crow-protocol's .fbs codegen. Provides `flatc` and flatbuffers/cpp headers.
+flatbuffers = "*"
 # Rust toolchain (crow-kv)
 rust = ">=1.96"
 protobuf = "*"
@@ -48,6 +51,11 @@ snappy = ">=1.2.2,<2"
 # builds; see lib/crow-tree/CMakeLists.txt's CROW_TREE_HAVE_LIBURING gate).
 [target.linux-64.dependencies]
 liburing = "*"
+# RDMA transport for crow-rpc (R104 Phase 5), gated behind
+# CROW_RPC_HAVE_RDMA in lib/crow-rpc/CMakeLists.txt. No macOS RNICs, so
+# these stay Linux-only (mirrors the liburing per-platform pattern).
+# rdma-core provides both libibverbs and librdmacm.
+rdma-core = "*"
 
 [tasks]
 
@@ -63,13 +71,13 @@ cargo install --locked inferno || echo "Warning: inferno install failed"
 '
 '''
 tree-fmt = '''
-find lib/crow-tree/src lib/crow-tree/include lib/crow-tree/tests lib/crow-tree/bench lib/crow-common/cpp -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
+find lib/crow-tree/src lib/crow-tree/include lib/crow-tree/tests lib/crow-tree/bench lib/crow-common/cpp lib/crow-rpc/src lib/crow-rpc/include lib/crow-rpc/tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
 '''
 tree-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"
 rs-lint = "cargo clippy --all-targets -- -D warnings"
 ts-lint = { cmd = "cd app/crow-web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-deps"] }
-build = { cmd = "cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-tree/build -j && cargo build --release && cd app/crow-web/ui && npm run build", depends-on = ["install-deps"] }
+build = { cmd = "cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-tree/build -j && cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-rpc/build -j && cargo build --release && cd app/crow-web/ui && npm run build", depends-on = ["install-deps"] }
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
@@ -91,6 +99,7 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 # ── Test ─────────────────────────────────────────────────────────
 clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
 test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
+test-rpc-ct = { cmd = "ctest --test-dir lib/crow-rpc/build --output-on-failure", depends-on = ["build"] }
 test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
 test-common = { cmd = "cargo test -p crow-common --all-targets", depends-on = ["build"] }
 test-protocol = { cmd = "cargo test -p crow-protocol --all-targets", depends-on = ["build"] }

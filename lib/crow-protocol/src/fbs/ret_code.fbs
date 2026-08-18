@@ -1,0 +1,12 @@
+namespace crow.rpc.proto;
+
+// Return codes carried in control-message responses. The framing layer
+// treats the code as opaque; the handler interprets it.
+//
+// R104 ships only the common codes. Service-specific codes (disk block,
+// chunk, disk io, AIO, SPDK) belong to their service schemas, not here.
+enum FBRetCode : int16 {
+    Success = 0,
+    Error = 1,
+    HaveNotSupport = 2,
+}
