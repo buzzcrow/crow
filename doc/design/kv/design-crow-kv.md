@@ -50,8 +50,8 @@ higher throughput than Raft's strictly sequential log.
 
 **Design philosophy:** "Raft for everything that doesn't matter for
 performance, Multi-Paxos for the one thing that does." Leader election,
-leases, snapshot install, log replay — Raft patterns, well-understood.
-The hot path — parallel slot writes — is where Multi-Paxos diverges.
+leases, snapshot install, log replay are well-understood Raft patterns.
+The hot path, parallel slot writes, is where Multi-Paxos diverges.
 Blind operations only (`Put`, `Delete`); out-of-order apply is safe
 because no operation reads before writing.
 
@@ -91,7 +91,7 @@ them separate cleanly decouples consensus from election.
 
 ### 3.3 System group (Group 0) for topology metadata
 
-A designated Paxos group — **system group (store 0, group 0)** —
+A designated Paxos group, the **system group (store 0, group 0)**,
 stores the full cluster topology as regular KV entries. Since it is a
 Paxos group, the topology is replicated, consistent, and HA by the same
 mechanism that protects user data. No external coordinator needed.
@@ -116,8 +116,8 @@ Full design: [`design-crow-kv-group0.md`](design-crow-kv-group0.md) (sysdata sch
 ### 3.4 Explicit group_id on every RPC
 
 `crow-kv` performs no key-to-group mapping. An application built on top
-is free to implement `hash(key) % num_groups` or any other policy —
-that policy is layered on top of, not inside, the core library.
+is free to implement `hash(key) % num_groups` or any other policy.
+That policy is layered on top of, not inside, the core library.
 
 ### 3.5 Lease-based leader reads (default)
 
@@ -151,13 +151,13 @@ RPC layer and config schema reserve hooks for TLS from day one.
 
 ### 3.10 Unified `CROWConfig`
 
-All cluster tunables — WAL, election, paxos, server, and the per-group
+All cluster tunables, including WAL, election, paxos, server, and the per-group
 internal flags (`force_classic`, `wal_early_ack`,
-`async_engine_apply`) — live in one `CROWConfig` struct with `serde`
+`async_engine_apply`), live in one `CROWConfig` struct with `serde`
 derives, loaded from a JSON config file (CLI args override individual
 fields). `PxGroup` holds a single `config: CROWConfig` field as the
 source of truth; individual setters (`set_force_classic`,
-`set_wal_early_ack`, etc.) delegate into `self.config.*` for surgical
+`set_wal_early_ack`) delegate into `self.config.*` for surgical
 single-field overrides without rebuilding the whole struct. The
 `mgmt_api` rebuild path carries the config as one unit via
 `set_from_config(group.config())` instead of per-flag blocks.
@@ -214,7 +214,7 @@ single-field overrides without rebuilding the whole struct. The
   ~`1/N`.
 
 **Range reads (Scan):** same two modes. Linearizable scan waits for
-the leader's own contiguous applied frontier — this is the one
+the leader's own contiguous applied frontier. This is the one
 latency cost of parallel slots.
 
 Full read-flow details: `design-crow-kv-leader-election.md`,
@@ -321,7 +321,7 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
     `read_endpoint_fallback` on `NotLeader` redirect. Per-endpoint
     statistics live in a `DashMap<String, Arc<EndpointStats>>` keyed by
     endpoint string; entries are created lazily and never evicted
-    (stale entries are harmless — zero in-flight, zero RTT, never
+    (stale entries are harmless: zero in-flight, zero RTT, never
     selected).
 - **Retry** — on timeout or `NotLeader`, client retries with backoff.
   `NotLeader` with hint → follow hint immediately.
@@ -339,11 +339,11 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
   reached, using the last
   returned key as the next page's `start_after`. On redirect or
   transport error, pagination restarts from the beginning with the
-  (possibly new) endpoint. The byte budget is server-internal — not
-  on the wire — so `KvScanRequest` and the `kv_store::kv_scan` trait
+  (possibly new) endpoint. The byte budget is server-internal, not
+  on the wire, so `KvScanRequest` and the `kv_store::kv_scan` trait
   are unchanged. The former `ScanStream` server-streaming RPC (which
-  was "fake streaming" — materialized the full result, then chunked
-  it) has been deleted; the unary + pagination path is strictly
+  was "fake streaming": it materialized the full result, then chunked
+  it) has been deleted. The unary + pagination path is strictly
   simpler and provably bounded.
 - **Idempotency** — `(client_id, seq)` dedup, persisted into the
   PxLogEntry stream (survives leader change). Per-client retention of

@@ -48,7 +48,7 @@ accessors. Every higher-level aggregation (disk, disk-group, query
 handler, keepalive piggyback, reporting-loop gauges) bottoms out at the
 zone, so the accessors live here. CROW reuses freed space immediately
 via bitmap scan (no append-only `allocate_pos`, §3.4/§8), so
-`free = capacity - busy` — there is no separate free cursor to read.
+`free = capacity - busy`. There is no separate free cursor to read.
 
 ```rust
 /// Busy block units (live `used_count`).
@@ -177,7 +177,7 @@ Edge cases:
 
 §11 calls for per-disk event counters (allocate/free count + bytes) on
 the hot path. The capacity/busy/free **gauges** are derived from the
-bitmap on the reporting tick (single source of truth) — maintaining
+bitmap on the reporting tick (single source of truth). Maintaining
 parallel capacity atomics would drift from the bitmap. So the per-disk
 hot-path struct holds **only** period/total event counters; gauges are
 computed in the reporting loop (§7).
@@ -234,7 +234,7 @@ during `disk_add_init` (keepalive) and `recover_disk_group` (recovery).
 `None` in tests that don't care. The allocate/free paths in
 `model/alloc.rs` call
 `disk.metrics.as_ref().map(|m| m.record_allocate(range.unit_count, unit_size))`
-after the Phase 1 CAS succeeds (before Phase 2 persist — the counter
+after the Phase 1 CAS succeeds (before Phase 2 persist. The counter
 reflects a durable-bound allocation; on Phase 2 failure the bitmap
 rolls back but the counter over-counts by one, which is acceptable for a
 best-effort event counter and avoids a second hot-path branch on the
@@ -252,7 +252,7 @@ Edge cases:
 ## 4. QueryCapacityStats handler
 
 `QueryCapacityStats` is the operator/console drill-down surface for live
-per-disk/per-zone usage — the authoritative counterpart to the
+per-disk/per-zone usage, the authoritative counterpart to the
 kv-client's stale cluster-wide view. The request carries two drill-down
 fields (`disk_id`, `zone_index`) to select three query shapes without
 three separate RPCs.
@@ -262,7 +262,7 @@ and `optional uint32 zone_index = 3` (0 = not set). `DiskInfo`/
 `DiskGroupInfo` gain usage fields + `repeated ZoneUsage zone_usages`.
 `ZoneUsage` message added.
 
-The handler in `service/diskdb_service.rs` is read-only — allowed in any
+The handler in `service/diskdb_service.rs` is read-only, allowed in any
 lifecycle phase (like `GetDiskGroupInfo`); it does **not** check
 `allows_mutating_rpcs` or `is_degraded`.
 
@@ -287,7 +287,7 @@ lifecycle phase (like `GetDiskGroupInfo`); it does **not** check
 is `None`. The proto field is `optional crow.common.DiskId disk_id` so
 "not set" = `None`; a real disk with all-zero id is pathological and
 rejected at disk-add time. `zone_index == 0` is ambiguous (zone 0 is
-valid) — so the disk-level shape is selected by `disk_id` being set
+valid), so the disk-level shape is selected by `disk_id` being set
 **and** `zone_index` being absent. Use proto3 `optional` on `zone_index`
 (field presence) so "not set" is distinguishable from 0. (proto3 scalar
 presence requires `optional` keyword; prost generates `Option<u32>`.)
@@ -305,7 +305,7 @@ Edge cases:
 
 ## 5. Recalculation path
 
-§11 requires "accurate statistics with a recalculation path" — replay
+§11 requires "accurate statistics with a recalculation path": replay
 the journal into a **separate** bitmap and compare against the live
 `DdbZone` to detect drift. This is the exact-verification counterpart to
 the best-effort-consistent gauges. The background scanner (§12 of the
@@ -361,7 +361,7 @@ concurrency via a semaphore, matching `recover_disk_group`), aggregate.
 `container.disk_group_ids()`, call `recalc_disk_group` per owned group.
 
 The `RecalcDiskUsage` admin RPC (§9) delegates to `RecalcEngine`; the
-handler lives in `service/diskdb_service.rs` (mutating RPC — requires
+handler lives in `service/diskdb_service.rs` (mutating RPC, requires
 `allows_mutating_rpcs`, since recalc does KV reads/journal scans and is
 an admin operation, not a read-only query).
 
@@ -630,7 +630,7 @@ Edge cases:
 ## 11. diskdb-client — full client library
 
 `crow-diskdb-client` is the primary client surface for all diskdb gRPC
-operations — allocate/free/query with retry + endpoint caching,
+operations (allocate/free/query with retry + endpoint caching),
 mirroring `crow-kv-client`'s pattern. Without it, callers must use raw
 gRPC stubs and do endpoint discovery manually.
 
@@ -795,7 +795,7 @@ lib/crow-diskdb-client/tests/
 ## Server Wiring
 
 1. `main.rs`: build `DiskdbMetrics::register(&mut metrics_registry)`
-   (extended set) — already constructed; the §11 handles are now
+   (extended set), already constructed; the §11 handles are now
    populated.
 2. Construct `RecalcEngine::new(Arc::clone(&dg_kv), Arc::clone(&container))`;
    pass `Arc<RecalcEngine>` + `Arc<DiskdbMetrics>` into

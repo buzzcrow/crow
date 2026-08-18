@@ -92,15 +92,15 @@ JSON-encoded. See §3 for the key/value schema.
 ### 2.2 `crow-kv-server` mgmt API is internal
 
 The kv-server HTTP management API (lifecycle endpoints: `add_store`,
-`add_group`, `add_remote_replicas`, `step_down`, `system_init`, etc.)
-stays in kv-server — these create/destroy actual `PxKvStore`/`PxGroup`
+`add_group`, `add_remote_replicas`, `step_down`, `system_init`)
+stays in kv-server. These create/destroy actual `PxKvStore`/`PxGroup`
 objects with WALs and election drivers, which cannot move to a client.
 But the API is now **internal**: only `crow-kv-client`'s
 `KVClusterAdmin` calls it. All other code (`crow-web`, `crow-cli`)
 goes through `KVClusterAdmin`.
 
 Removed from kv-server: `POST /topology/finalize`,
-`GET /topology/ready` — persistent topology-record management moves
+`GET /topology/ready`. Persistent topology-record management moves
 to `KVClusterMetaClient` / `HardwareClient` in `crow-kv-client`.
 
 Retained in kv-server (internal): lifecycle endpoints, `GET /topology`
@@ -109,9 +109,9 @@ Retained in kv-server (internal): lifecycle endpoints, `GET /topology`
 ### 2.3 Unified key concept with two encodings
 
 CROW keys use a single key concept (struct + fields) with two encoding
-traits — `BinaryKey` (binary, for data groups) and `TextKey`
-(text-path, for group 0). The encoding protocol — rules, frozen
-layouts, evolution policy — is defined in
+traits: `BinaryKey` (binary, for data groups) and `TextKey`
+(text-path, for group 0). The encoding protocol (rules, frozen
+layouts, evolution policy) is defined in
 [`design-crow-protocol-key.md`](../protocol/design-crow-protocol-key.md) §5. Group 0
 uses text keys + JSON values; the full group-0 key/value schema is in
 §3 below.
@@ -119,12 +119,12 @@ uses text keys + JSON values; the full group-0 key/value schema is in
 ### 2.4 All cross-component protocol types live in `crow-protocol`
 
 `crow-protocol` is the single home for all cross-component protocol
-types — data structures, RPC messages, key types, and HTTP mgmt API
+types: data structures, RPC messages, key types, and HTTP mgmt API
 contracts. When `ServerClient`'s mgmt methods are absorbed into
 `KVClusterAdmin`, the
 HTTP request/response types (`AddStoreRequest`, `AddGroupRequest`,
 `RemoteReplicaInfo`, `StepDownRequest`, `StoreSummary`,
-`TopologyResponse`, etc.) move to `crow-protocol` under a new `mgmt`
+`TopologyResponse`) move to `crow-protocol` under a new `mgmt`
 module.
 
 ### 2.5 ID types defined in `crow-protocol`
@@ -135,10 +135,10 @@ diskdb, chunkdb). No crate uses `String` for an ID that is
 fundamentally numeric. ID aliases are defined **once** in
 `crow-protocol` (`RackId`, `NodeId`, `DiskGroupId`, `StoreId`,
 `GroupId`, `ReplicaId`, `InstanceId`) and imported by every other
-crate — no per-crate redefinition. Console config
+crate, with no per-crate redefinition. Console config
 (`crow-console-shared`) widens every rack-id and node-id reference to
 `RackId`/`NodeId` (not just `RackEntry.id`/`NodeEntry.id`/
-`NodeEntry.rack_id` — also `ServerEntry.node_id`, `StoreEntry.nodes`,
+`NodeEntry.rack_id`, also `ServerEntry.node_id`, `StoreEntry.nodes`,
 `ReplicaEntry.node_id`, and the persisted BTreeMap keys). The
 console-side `ServerEntry.id` label stays `String` (it is a console
 handle, not a numeric cluster ID).
@@ -150,7 +150,7 @@ handle, not a numeric cluster ID).
 - **`NodeId`** — `u64`. Console config today uses `String` for
   `NodeEntry.id`; the values are numeric strings. Console config
   schema changes to `u64`.
-- **`DiskGroupId`** — `u64`. (This is a widening — see §3.5.)
+- **`DiskGroupId`** — `u64`. (This is a widening; see §3.5.)
 - **`StoreId`** — `u64`. Already u64 in kv-server and console config.
 - **`GroupId`** — `u64`. Already u64 in kv-server and console config.
 - **`ReplicaId`** — `u64`. Already u64 in kv-server and console config.
@@ -179,7 +179,7 @@ chunkdb, future services) are **guests** on the platform. They
 register themselves in group 0 under `/srv/<service>/<instance_id>`
 and heartbeat periodically. Other components discover them by
 scanning group 0. This works because the service is not the host of
-group 0 — it's a client.
+group 0. It's a client.
 
 **Pull model (infrastructure health):** The console (crow-web) polls
 kv-server nodes via `GET /health` and `GET /topology` to observe
@@ -201,17 +201,17 @@ itself." This is not actually harmful:
 
 - **Group 0 is replicated.** If one node hosting a group-0 replica
   goes down, the remaining replicas maintain quorum. The down node's
-  heartbeat expires — which is the desired behavior.
+  heartbeat expires, which is the desired behavior.
 - **kv-server is already a client of group 0.** `KVClusterMetaClient`
   writes topology records to group 0; `KVClusterAdmin` delegates to
   it. A heartbeat is just another client write.
 - **If ALL group-0 replicas are down, the cluster is down.** Heartbeats
-  don't matter in that scenario — no component can read group 0
+  don't matter in that scenario. No component can read group 0
   anyway.
 - **A node hosting group 0 also hosts other groups.** When it goes
   down, its heartbeat expires (visibility), and each of its groups
   elects a new leader independently (Paxos failover). The heartbeat
-  doesn't trigger failover — it provides visibility into which nodes
+  doesn't trigger failover; it provides visibility into which nodes
   are alive and what they host.
 
 The keep-alive pattern for kv-server:
@@ -232,11 +232,11 @@ discover live kv-server instances and their health. This complements
 the pull model — push provides self-registration and discovery; pull
 provides detailed runtime state.
 
-**What about the group-0 leader writing its own heartbeat?** If the
+**The group-0 leader writing its own heartbeat is fine.** If the
 group-0 leader is also a kv-server instance (which it usually is), it
 writes its heartbeat to group 0 locally (as a blind put to its own
 group). This is no more circular than a kv-server instance writing
-user data to a group it hosts — it's a normal client write that goes
+user data to a group it hosts. It's a normal client write that goes
 through the Paxos consensus path.
 
 ### 2.8 Hardware admin via kv-client (no admin gRPC service)
@@ -247,13 +247,13 @@ through `HardwareClient` in `crow-kv-client`, invoked by the console
 (`crow-web` / `crow-cli`). There is **no `DiskdbAdminService` gRPC
 surface**: the previous `diskdb_sys_service.proto` /
 `diskdb_sys_op.proto` admin RPCs (`AddRack`, `SetDiskStatus`,
-`FetchHardware`, `Keepalive`, …) are removed — `FetchHardware` is
+`FetchHardware`, `Keepalive`) are removed. `FetchHardware` is
 replaced by `HardwareClient` prefix scans, `Keepalive` by
 `ServiceRegistryClient.heartbeat`, and the add/remove/status ops by
 `HardwareClient` methods. The diskdb server serves only
 `DiskdbService` (allocate/free; stubbed `Unimplemented`) and
 reads hardware state from group 0 via `HardwareClient` in its sync
-loop — it does not own or serve hardware admin.
+loop. It does not own or serve hardware admin.
 
 ---
 
@@ -299,7 +299,7 @@ namespace choice) is in
 All group-0 values are JSON-encoded (`serde_json::to_vec` /
 `serde_json::from_slice`). Value types live in `crow-protocol` (the
 single home for cross-component data structures) and are used by
-`crow-kv-client` directly — no per-crate redefinition:
+`crow-kv-client` directly, with no per-crate redefinition:
 
 - **Existing proto `*Value` types** (`RackValue`, `NodeValue`,
   `DiskGroupValue`, `DiskValue`, `HwStatus`, `DiskId`) — used directly.
@@ -340,7 +340,7 @@ Key structs (`DiskGroupKey`, `DiskKey`, `OwnerMapKey`,
 `BindMapKey`) use `u32` for `disk_group_id`. The proto type
 `NodeValue` also uses `u32` for `disk_group_ids` (`repeated uint32`)
 and `last_used_dg_id` (`uint32`). (`DiskGroupValue` has no
-`disk_group_id` field — the id is in the key.) This requirement
+`disk_group_id` field; the id is in the key.) This requirement
 widens `DiskGroupId` to `u64` for consistency with all other integer
 IDs and to remove the artificial 4-billion limit. The `NodeValue`
 proto fields change from `uint32` to `uint64`; the key struct fields
@@ -353,11 +353,10 @@ diskdb is greenfield.
 
 ### 3.6 `dc_id` removal
 
-The schema drops `dc_id` from `RackKey { dc_id, rack_id }`, `RackInfo`,
-`NodeInfo`, and `NodeValue.dc_id` (v1 ships flat — no DC layer). The
-text-path schema has no `dc_id` (`/hw/rack/<rack_id>`). The schema drops
-`dc_id` from `RackKey` (struct + binary layout), `RackInfo`,
-`NodeInfo`, and `NodeValue.dc_id`. The binary `RackKey` layout changes
+The schema drops `dc_id` from `RackKey { dc_id, rack_id }` (struct +
+binary layout), `RackInfo`, `NodeInfo`, and `NodeValue.dc_id` (v1
+ships flat, no DC layer). The text-path schema has no `dc_id`
+(`/hw/rack/<rack_id>`). The binary `RackKey` layout changes
 accordingly (greenfield).
 
 ---
@@ -370,7 +369,7 @@ Every long-running service instance registers itself in group 0
 under `/srv/<service>/<instance_id>` and heartbeats periodically.
 `ServiceRegistryClient` in `crow-kv-client` is **generic across
 services** (diskdb and kv-server now; chunkdb and future services
-later) — it takes a `service` name that selects the path namespace
+later). It takes a `service` name that selects the path namespace
 (`/srv/diskdb/`, `/srv/kv-server/`, …) and the value shape. The API:
 
 - `register(service, instance_id, value: &InstanceValue) -> Result<()>`
@@ -404,8 +403,8 @@ kv-server wrappers delegate to the generic methods.
 
 A service instance is considered live if its `last_heartbeat_ms` is
 within a configurable TTL (default: 3× heartbeat interval). Readers
-filter expired entries when scanning. There is no active eviction —
-expired entries are ignored and eventually overwritten or deleted on
+filter expired entries when scanning. There is no active eviction.
+Expired entries are ignored and eventually overwritten or deleted on
 clean shutdown.
 
 ---
@@ -424,7 +423,7 @@ authoritative: `http_cluster_init` writes hardware records via
 
 The old schema had a `/topology/ready` flag key indicating group 0
 is authoritative. The text-path schema has no equivalent. v1 does
-not need it — diskdb's sync loop treats an empty group 0 as "nothing
+not need it. diskdb's sync loop treats an empty group 0 as "nothing
 assigned yet" and retries. If a readiness signal is needed later,
 add a derived condition (e.g. "group 0 has ≥1 `/hw/node/` key").
 
@@ -432,7 +431,7 @@ add a derived condition (e.g. "group 0 has ≥1 `/hw/node/` key").
 
 diskdb is greenfield (no production diskdb). The
 old `/topology/...` records are replaced by `/hw/...` and
-`/kv/...`. Treat as greenfield — require a fresh cluster init. Old
+`/kv/...`. Treat as greenfield: require a fresh cluster init. Old
 `/topology/...` keys are orphaned harmlessly.
 
 ### 5.4 Leader readiness before writing
@@ -441,7 +440,7 @@ old `/topology/...` records are replaced by `/hw/...` and
 group-0 leader. `http_cluster_init` can only write sysdata after a
 group-0 leader is elected and reachable. For single-node init this
 is immediate (self-elect). For multi-node, the init flow must wait
-on leader election before writing — add a readiness poll if the
+on leader election before writing. Add a readiness poll if the
 existing flow doesn't already wait.
 
 ---

@@ -66,7 +66,7 @@ Edge cases:
 - `node_config_store` not available (test env) → skip silently.
 - Tenure cancellation race: `PxKvStore::remove_group` cancels the
   token synchronously; running tasks hold `Arc<PxGroup>` until they
-  notice the cancel. Dir deletion while a task is mid-write is safe —
+  notice the cancel. Dir deletion while a task is mid-write is safe;
   the task writes to a file handle it already opened; deleting the dir
   removes the directory entry but the file remains until the handle
   closes.
@@ -88,7 +88,7 @@ Edge cases: same as group cleanup.
 
 `KvStoreRegistry` has `config: CrowKVConfig` which holds
 `config_root: PathBuf`. The handler builds a
-`NodeConfigStore::new(&config.config_root)` on each call (cheap —
+`NodeConfigStore::new(&config.config_root)` on each call (cheap:
 just a path join). No need to store a long-lived `NodeConfigStore` in
 the registry; the handler is a cold path.
 
@@ -96,7 +96,7 @@ the registry; the handler is a cold path.
 
 ### 2.1 Why
 
-`TopologyCache::merge` only inserts into `leaders` and `replicas` —
+`TopologyCache::merge` only inserts into `leaders` and `replicas`;
 never evicts. A removed group's stale leader endpoint self-heals via
 `NotLeaderHint`, but the stale entry lingers. `write_slot_highwater`
 is the critical case: a stale `min_slot` high-watermark does NOT
@@ -113,12 +113,12 @@ a. Before the insert loop, collect the set of `(store_id, group_id)`
    present in the fresh `body` into a `HashSet<(u64, u64)>`.
 b. After the insert loop, remove entries from `leaders` and
    `replicas` whose key is not in the fresh set.
-c. The eviction is best-effort — if `merge` is called with a partial
+c. The eviction is best-effort; if `merge` is called with a partial
    topology, this would evict valid entries. Mitigation:
    `fetch_and_merge` fetches from a single seed and gets the full
    topology body. If the seed returns a partial view, the eviction
    would temporarily drop entries that reappear on the next refresh.
-   Acceptable — the stale leader self-heals via `NotLeaderHint`.
+   Acceptable; the stale leader self-heals via `NotLeaderHint`.
 
 Edge cases:
 - Empty body (all stores gone) → evict everything. Correct.
@@ -127,7 +127,7 @@ Edge cases:
 
 ### 2.3 write_slot_highwater eviction
 
-The `write_slot_highwater` field (renamed from `write_watermark` —
+The `write_slot_highwater` field (renamed from `write_watermark`,
 accurate: it's a paxos slot number, not a generic watermark;
 "highwater" conveys monotonic-max) lives on `CrowkvClient`, not
 `TopologyCache`. A callback from `TopologyCache::merge` to
@@ -287,7 +287,7 @@ Each add/remove handler follows the rack/node pattern: update
 ### 5.4 ConsoleClient methods
 
 `add_disk_group`, `remove_disk_group`, `list_disk_groups`, `add_disk`,
-`remove_disk`, `list_disks`, `move_disk` — thin HTTP wrappers in
+`remove_disk`, `list_disks`, `move_disk`: thin HTTP wrappers in
 `lib/crow-console-shared/src/clients/console.rs`.
 
 ### 5.5 CLI commands
@@ -304,10 +304,10 @@ Both follow the existing `rack.rs` pattern.
 
 `disk_add_init` created empty in-memory `DdbZone`s for every new
 disk, wrote baseline `ZoneValue` records, then called
-`rebuild_allocating_disks` — adding the disk to the allocating set
+`rebuild_allocating_disks`, adding the disk to the allocating set
 with empty zones. If the disk has existing KV records (ownership
 transfer, disk-group reassignment, disk move), the empty zones cause
-allocations to overwrite used blocks — silent data corruption.
+allocations to overwrite used blocks, causing silent data corruption.
 
 ### 6.2 Init-state load path
 
@@ -316,7 +316,7 @@ b. `reconcile_disks` new-disk path: create `DdbDisk` with
    `effective_status = Init` and no zones. Attach metrics. Add to
    `dg.disks`. Spawn a background zone load task.
 c. Background zone load task: for each zone index, call
-   `load_zone_inner` (strategy 2 + strategy 1 fallback — same as
+   `load_zone_inner` (strategy 2 + strategy 1 fallback, same as
    `ZoneLoader::load_disk_group`). When all zones loaded:
    - Transition `Init → disk_value.status` via
      `HwStateMachine::transition_disk`. The target status comes from
@@ -335,7 +335,7 @@ d. On load failure (strategy 2 + strategy 1 both fail for any zone):
 `run_zone_load` uses `ZoneLoader::load_disk_group` which creates
 disks with `DdbDisk::new` (defaults to `Init`). The startup path
 keeps its deferred-background design: the initial keepalive tick
-creates Init disks (no IO, no zones — fast), `run_zone_load` loads
+creates Init disks (no IO, no zones: fast), `run_zone_load` loads
 zones in the background, and the server transitions to `Up` when all
 disks are `Up`. `load_disk_group` transitions `Init → Up` after all
 zones are loaded for each disk.
@@ -358,7 +358,7 @@ c. `Up`, `Suspect`, `Missing` → miss-count → `Missing` → `Bad` +
 Edge cases:
 - Disk in `Maintenance` absent from sync but not actually moved (sync
   glitch) → removed from memory, reappears on next sync as a new Init
-  disk, reloads zones. Correct — the disk's records are on the bind,
+  disk, reloads zones. Correct; the disk's records are on the bind,
   reload is safe.
 - Disk in `Offline` absent from sync → same as Maintenance. Correct.
 
@@ -369,7 +369,7 @@ Edge cases:
 A physical disk needs to move from
 `(old_rack, old_node, old_dg)` to `(new_rack, new_node, new_dg)`,
 keeping `DiskId` unchanged, without a full recovery scan. The disk's
-records (zone/busy/free) are keyed by `DiskId` only — a literal
+records (zone/busy/free) are keyed by `DiskId` only, so a literal
 key-value copy from the old bind to the new bind suffices.
 
 ### 7.2 Move handler
@@ -403,7 +403,7 @@ Edge cases:
 - Copy fails mid-way → the disk is in Maintenance at the old
   placement, records partially copied to the new bind. Operator can
   retry the move or abort. The partial copy on the new bind is
-  harmless — orphaned records overwritten on retry or cleaned up if
+  harmless; orphaned records overwritten on retry or cleaned up if
   the new bind's disk-group is removed.
 - No bind exists for the new disk-group → handler returns 409. The
   operator must create the bind via a separate API before the move.

@@ -111,7 +111,7 @@ proceeding to tier-specific assertions:
    - Small value (1 byte)
    - Empty value (`""`)
 
-   Performance is not asserted here — correctness only. A put that takes
+   Performance is not asserted here; correctness only. A put that takes
    5 s but returns `ok=true` and is readable via get is a pass. Performance
    tuning is tracked separately (see Benchmark row in the binary map above
    and [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md)).
@@ -119,7 +119,7 @@ proceeding to tier-specific assertions:
    KV operations are gRPC only (no REST API for KV). Tests use
    `CrowkvClient` (deployment/UI layers) or `PxKvStore` public API
    directly (group/store layers). The console mgmt API layer verifies
-   topology management via REST but does not perform KV operations — KV
+   topology management via REST but does not perform KV operations; KV
    correctness is delegated to the deployment or UI E2E layer.
 
 **Leader change & reconfig rule:** every tiered layer (Group, Store,
@@ -134,7 +134,7 @@ Deployment, UI E2E) that creates a multi-replica cluster must cover:
 2. **Reconfig — add replica:** add a new replica to a running group with
    existing data, verify the new replica catches up (data visible via scan
    or get on the new node) within bounded timeout. Since tests write few
-   keys, catch-up should complete in seconds — slow catch-up is a bug.
+   keys, catch-up should complete in seconds. Slow catch-up is a bug.
 
 3. **Reconfig — remove replica:** remove a non-leader replica from a running
    group, verify the group continues to accept KV operations (quorum
@@ -142,7 +142,7 @@ Deployment, UI E2E) that creates a multi-replica cluster must cover:
 
 4. **Reconfig — remove leader:** remove or stop the leader's replica, verify
    a new leader is elected within bounded timeout, verify KV operations
-   resume. This is the most operationally sensitive scenario — the test must
+   resume. This is the most operationally sensitive scenario; the test must
    not block indefinitely waiting for election.
 
 ## 5. Layer Scope
@@ -162,7 +162,7 @@ lowest broken layer. Detailed per-layer coverage checklists live in
   single-threaded ops, concurrent stress, reclamation watermark
   interactions with long-lived read guards.
 - **Replica** — Single `PxLocalReplica` with no peers: acceptor + learner +
-  WAL + slot integration — prepare/accept with WAL persistence, dedup,
+  WAL + slot integration: prepare/accept with WAL persistence, dedup,
   snapshot install, WAL replay ordering.
 - **Group** — `PxGroup` with 1 local + N remote replicas over real loopback
   gRPC (no mocks): full Paxos rounds, leader election, KV through the

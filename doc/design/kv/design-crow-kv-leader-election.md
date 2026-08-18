@@ -174,7 +174,7 @@ Every heartbeat carries:
 
 Followers respond with their own `term`, `success` (false if the follower's term is higher), `contiguous_chosen`, `last_chosen_term`, `contiguous_applied`, `highest_seen_slot`, and `durable_snapshot_slot`. The leader uses these to:
 
-- Detect a stale leader's continued existence (if any response carries a higher term, the leader steps down — §8).
+- Detect a stale leader's continued existence (if any response carries a higher term, the leader steps down (§8)).
 - Maintain peer state (used by replicator and gap detection).
 - Refresh the safe-slot computation.
 
@@ -182,13 +182,13 @@ Followers respond with their own `term`, `success` (false if the follower's term
 
 When a follower's `contiguous_applied` lags behind the leader's `committed_safe_slot`, the heartbeat round drives catch-up in two phases:
 
-- **Phase 1 — `BatchChosenNotice` (value-less).** The leader sends a single fire-and-forget `BatchChosenNotification` frame over the `LearnerStream` covering `[follower_applied+1, catchup_end]`, carrying only `(start_slot, end_slot, term, leader_id)` — no per-slot payload. The follower checks its local acceptor for each slot in the range: present slots advance the chosen frontier via `update_chosen_frontier`; missing slots remain gaps. This lets the follower's apply loop start processing present slots immediately, without waiting for the full-accept round-trip.
+- **Phase 1 — `BatchChosenNotice` (value-less).** The leader sends a single fire-and-forget `BatchChosenNotification` frame over the `LearnerStream` covering `[follower_applied+1, catchup_end]`, carrying only `(start_slot, end_slot, term, leader_id)`, no per-slot payload. The follower checks its local acceptor for each slot in the range: present slots advance the chosen frontier via `update_chosen_frontier`; missing slots remain gaps. This lets the follower's apply loop start processing present slots immediately, without waiting for the full-accept round-trip.
 - **Phase 2 — full accepts.** The leader sends `send_accept` RPCs with full payloads for the same range. Slots the follower already has are re-accepted (idempotent CAS, cheap); slots the follower is missing get the real value. In steady state (no election churn) every slot is present, so Phase 1 does all the work and Phase 2 is a no-op.
 
 Engine apply is decoupled from the heartbeat handler via a **background apply loop**:
 
 - `handle_heartbeat` stores `committed_safe_slot` via `fetch_max` into `known_commit_slot` and signals `apply_notify`, then returns immediately with the current `contiguous_applied` (which may lag). The heartbeat reply is not blocked on engine apply.
-- The background apply loop (lazily spawned, cancelled on shutdown) reads `known_commit_slot`, collects entries from the acceptor, and applies them via the learner. Missing slots are skipped (skip-and-continue) so a single gap doesn't block the entire apply backlog — `contiguous_applied` stays at the gap; subsequent available slots are applied out-of-order via `advance_applied_frontier`.
+- The background apply loop (lazily spawned, cancelled on shutdown) reads `known_commit_slot`, collects entries from the acceptor, and applies them via the learner. Missing slots are skipped (skip-and-continue) so a single gap doesn't block the entire apply backlog. `contiguous_applied` stays at the gap; subsequent available slots are applied out-of-order via `advance_applied_frontier`.
 - `handle_accept_inner` (the LearnerStream accept path) also defers apply to the background loop: it advances the chosen frontier + dedup synchronously, then advances `known_commit_slot` + wakes the loop. This keeps the serial LearnerStream handler fast so it doesn't starve the tokio runtime and block heartbeat processing. Critical: `known_commit_slot` must advance (not just `contiguous_chosen`) so a replica that accepts slots as a follower and then wins an election still gets those slots applied by the background loop.
 
 ---
@@ -215,7 +215,7 @@ Each heartbeat round-trip is also a lease grant:
 
 1. Leader sends heartbeat at monotonic time `T_send`.
 2. Follower receives, records "I will not vote for any candidate before `T_recv + lease_duration`", and replies.
-3. Leader receives the response at `T_recv_reply`. The lease is valid through `T_send + lease_duration` on the leader's clock — the leader uses `T_send` (not `T_recv_reply`) as the start so that any clock skew works in its favor.
+3. Leader receives the response at `T_recv_reply`. The lease is valid through `T_send + lease_duration` on the leader's clock. The leader uses `T_send` (not `T_recv_reply`) as the start so that any clock skew works in its favor.
 4. The leader treats the lease as effective until `T_send + lease_duration - max_clock_skew`. This is conservative; it gives a safety margin equal to the assumed skew bound.
 
 With the default `heartbeat_interval = 500 ms` and `lease_duration = 9 × heartbeat_interval = 4500 ms` (see §10), the leader is essentially always within an active lease in steady state. A short network blip costs the leader its fast-read privilege but not its leadership.
@@ -263,12 +263,12 @@ The leader holds a pending-barrier batch (`PxGroup::pending_read_barrier`) for t
 
 1. The first read to arrive (the *round leader*) captures `R = contiguous_chosen`, registers the batch, and runs `run_heartbeat_round`.
 2. Reads that arrive while the round is in flight enqueue a `oneshot` waiter on the batch instead of starting their own round.
-3. When the round completes, the round leader drains the batch and resolves every waiter with the same outcome — `Ready { read_slot: R }` on quorum ack, `NotLeader` on step-down (higher term), `NoQuorum` when quorum is unreachable. A waiter whose round leader is cancelled (dropped sender) receives `NoQuorum` and retries.
+3. When the round completes, the round leader drains the batch and resolves every waiter with the same outcome: `Ready { read_slot: R }` on quorum ack, `NotLeader` on step-down (higher term), `NoQuorum` when quorum is unreachable. A waiter whose round leader is cancelled (dropped sender) receives `NoQuorum` and retries.
 4. The lease fast path is unchanged: lease-valid reads still serve immediately without queueing.
 
-The mutex over the batch serializes enqueue and drain, so no waiter is lost — a read either joins the in-flight batch or, after the leader drains, starts a fresh batch.
+The mutex over the batch serializes enqueue and drain, so no waiter is lost. A read either joins the in-flight batch or, after the leader drains, starts a fresh batch.
 
-**Correctness** is identical to the single-read procedure in §7.1. The heartbeat quorum at the leader's term confirms no higher-term election displaced this leader during the round, so every committed write is reflected in the leader's local state. The engine get returns the *latest* applied value for the key (single-version, highest-slot-wins), not a value pinned to `R`; each batched read performs its own `engine_get_bytes` after the barrier resolves and observes the freshest local state at its serve time. The shared `R` reported in the response is therefore a conservative freshness floor (the pre-round `contiguous_chosen`), never an over-estimate — a write that commits *during* the round has slot > `R` and is returned by the engine get, so late-arriving batched reads are not stale.
+**Correctness** is identical to the single-read procedure in §7.1. The heartbeat quorum at the leader's term confirms no higher-term election displaced this leader during the round, so every committed write is reflected in the leader's local state. The engine get returns the *latest* applied value for the key (single-version, highest-slot-wins), not a value pinned to `R`; each batched read performs its own `engine_get_bytes` after the barrier resolves and observes the freshest local state at its serve time. The shared `R` reported in the response is therefore a conservative freshness floor (the pre-round `contiguous_chosen`), never an over-estimate. A write that commits *during* the round has slot > `R` and is returned by the engine get, so late-arriving batched reads are not stale.
 
 **Metric.** `read.readindex_rounds.c` increments once per ReadIndex heartbeat round (by the round leader). `read.readindex_path.c` still increments once per read that takes the ReadIndex path, so for a batched burst of N reads `readindex_rounds.c == 1` and `readindex_path.c == N`; average batch size is `readindex_path.c / readindex_rounds.c`. `read.barrier.l` drops toward one RTT amortized across the batch.
 
@@ -294,7 +294,7 @@ A leader steps down (transitions to follower) on any of:
 
 On step-down:
 
-1. Cancel the per-tenure `CancellationToken` — aborts in-flight bulk Phase 1 and any tenure-bound work.
+1. Cancel the per-tenure `CancellationToken`, aborts in-flight bulk Phase 1 and any tenure-bound work.
 2. Stop heartbeats (the leader-state loop returns on step-down).
 3. Set `role = Follower`; adopt the higher term if the trigger was `HigherTerm`.
 4. Expire `LeaseState` (`become_follower` clears leader id).
@@ -332,7 +332,7 @@ Two enforcement mechanisms run in series:
 - **Term fencing:** every RPC carries `term`. Any acceptor with a higher term refuses the request and informs the sender, which steps down.
 - **Lease conservatism:** even when no fencing has happened, the leader self-expires its lease at `effective_lease = lease_duration - max_clock_skew`. If the clock-skew assumption holds, no other leader can have been elected within this window (because acceptors won't vote against the lease).
 
-If the clock-skew assumption is *violated*, lease-based reads can return stale data — this is documented and the operator can force ReadIndex for stronger guarantees.
+If the clock-skew assumption is *violated*, lease-based reads can return stale data. This is documented and the operator can force ReadIndex for stronger guarantees.
 
 ---
 

@@ -12,8 +12,8 @@ CROW `KVEngine` contract, built as a standalone C++ library (`libcrow-tree`) and
 consumed from the Rust `crow-kv` crate over a C ABI. It records the decisions
 behind that design and maps the sub-design documents. `libcrow-tree` is fully
 implemented, wired into `crow-kv` (`CrowTreeEngine`), and shipped; this document
-set is the durable record of *why* it looks the way it does, not a build plan —
-see [`todo_code.md`](../todo_code.md) for anything still open.
+set is the durable record of *why* it looks the way it does, not a build plan.
+See [`todo_code.md`](../todo_code.md) for anything still open.
 
 ## Table of Contents
 
@@ -76,10 +76,10 @@ see [`todo_code.md`](../todo_code.md) for anything still open.
   concurrent MemTable; a single Flusher merges the contiguous-applied prefix
   into the tree ("flush = the persistent write").
 
-The pagetree implementation at `/cjdata/cpp/aioss/libs/pagetree` was an
-**algorithmic reference only** during design (page layout, delta records,
-consolidation, epoch GC, bloom filters, IU alignment) — it is not linked and
-not a dependency. What crow-tree reused vs. dropped vs. simplified from it:
+The pagetree design (page layout, delta records, consolidation, epoch
+GC, bloom filters, IU alignment) was an **algorithmic reference only**
+during design. It is not linked and not a dependency. What crow-tree
+reused vs. dropped vs. simplified:
 
 | Mechanism | Decision |
 | --- | --- |
@@ -182,7 +182,7 @@ pub trait EngineView: Send + Sync {   // compare / iter_all / range read on a fi
 ### 3.1 Out-of-order apply, snapshots, and the two GCs
 
 **Out-of-order apply is required.** `learn()` applies each chosen entry to the
-engine immediately, so `apply(slot, batch)` can arrive out of slot order — e.g.
+engine immediately, so `apply(slot, batch)` can arrive out of slot order, e.g.
 slot 7 before slot 6 in the parallel-slot window. The final materialized state
 is **order-independent and idempotent** thanks to per-key highest-slot-wins.
 The **learner**, not the engine, tracks the contiguous applied frontier. So the
@@ -194,7 +194,7 @@ only ever sees ordered, contiguous, single-writer batches.
 
 **Contiguous frontier comes from the learner.** A NoOp / repair-fill slot
 carries an empty batch and leaves no MemTable entry, so crow-tree must **not**
-infer the contiguous prefix from MemTable contents — it would block forever at
+infer the contiguous prefix from MemTable contents. It would block forever at
 the gap left by a NoOp. Instead the learner passes its `contiguous_applied`
 watermark down (`ct_advance_contiguous`), and the Flusher flushes only
 MemTable entries with `slot ≤ contiguous_slot`.
@@ -205,15 +205,15 @@ flush (**secondary safety net**, default ~2 h). The size trigger keeps
 per-flush work roughly constant; the time trigger bounds how long a
 slow-write workload can leave L0 un-flushed (unbounded L0 ⇒ unbounded
 crash-recovery replay). Each flush produces a new immutable COW root tagged
-with the flushed slot = a snapshot — so `flush` *is* snapshot creation; the
+with the flushed slot = a snapshot, so `flush` *is* snapshot creation; the
 public surface is unified under snapshot terminology (`create_snapshot`).
 
 **`last_applied_slot` ownership is split.** The *learner* owns the in-memory
 applied frontier (`contiguous_applied`); the *engine* owns only the
-**durable** one — `last_applied_slot` = the highest contiguous slot whose
+**durable** one. `last_applied_slot` = the highest contiguous slot whose
 MemTable entries have been flushed and whose root is persisted
 (`last_applied_slot ≤ contiguous_applied`). A snapshot = flush + persist root;
-it needs only this single watermark plus a per-root slot tag — **not** a
+it needs only this single watermark plus a per-root slot tag, **not** a
 per-key slot index. Because the B+tree only ever holds a clean contiguous
 prefix, a snapshot is an exact point-in-time state and new-member install is
 trivial: the receiver imports the root at `S`, then replays the WAL from
@@ -244,8 +244,8 @@ The boundary is **coarse** (engine-level). The Rust `CrowTreeEngine`
 - Translates `Batch` / keys / ranges to `(ptr, len)` pairs across the C ABI.
 - Bridges async↔sync via the io_uring reactor + completion-based `ct_future`
   protocol (fast path completes synchronously with zero scheduling overhead;
-  slow path parks on `AsyncFd` until the C++ reactor signals completion) —
-  full protocol in [`design-crow-tree-engine.md §3`](design-crow-tree-engine.md#3-async-ffi-bridge).
+  slow path parks on `AsyncFd` until the C++ reactor signals completion).
+  Full protocol in [`design-crow-tree-engine.md §3`](design-crow-tree-engine.md#3-async-ffi-bridge).
 - Maps C status codes to `EngineError`.
 
 Ownership rules (enforced by convention, documented at the C API in

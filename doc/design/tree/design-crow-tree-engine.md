@@ -9,7 +9,7 @@ Satisfies: [`design-crow-tree.md`](design-crow-tree.md) §2 (in-memory engine ar
 This document specifies crow-tree's in-memory engine: the bounded 2-level
 structure (concurrent MemTable over a COW B+tree), the slot-aware value cell,
 the write path (apply → delta → consolidate → split/merge), the versioned root
-for consistent snapshots, epoch-based reclamation, and the read path — then the
+for consistent snapshots, epoch-based reclamation, and the read path. Then the
 two supporting layers that make that write/read path zero-copy: the `buffer`
 memory-ownership model, and the io_uring async FFI bridge that exposes it to
 Rust without blocking.
@@ -98,11 +98,11 @@ specified in
 this doc only needs the logical shape above.
 
 A **flush** prepends an immutable delta to each affected leaf's chain instead
-of rewriting the whole leaf. crow-tree needs only one data delta type — the
+of rewriting the whole leaf. crow-tree needs only one data delta type, the
 **batch delta**: one slot's worth of mutations targeting a single leaf,
 entries sorted by key, each carrying its own cell. A single flushed slot may
 touch several leaves; the Flusher produces one batch delta per affected leaf
-(all stamped with the same `slot` — the slot fan-out is the *common* case, not
+(all stamped with the same `slot`; the slot fan-out is the *common* case, not
 an edge case). Put and Delete are not separate delta types — a delete is a
 tombstone cell inside the batch. SMO deltas (split/merge/index-insert) appear
 only transiently during a writer-exclusive split/merge (§1.4); there is no
@@ -132,7 +132,7 @@ apply(slot, batch):
   writes to a hot key collapse in memory before ever reaching the tree.
 - `apply` drops cells already durable in L1 (`slot <= last_applied_slot`) and
   keeps the highest slot per key, so the MemTable always holds cells
-  **strictly newer** than L1 for any shared key — this is what makes the
+  **strictly newer** than L1 for any shared key. This is what makes the
   L0-first read (§1.7) correct.
 - A NoOp / empty batch still advances the contiguous frontier via
   `force_advance_slot` (the learner counts it), so the Flusher never blocks on
@@ -154,12 +154,12 @@ flush():
 ```
 
 - Every cell in a flush has `slot <= cs <= last_applied_slot`, so the
-  published `RootVersion` is an **exact point-in-time** state (§1.5) — no
+  published `RootVersion` is an **exact point-in-time** state (§1.5); no
   slot beyond the frontier ever reaches the tree. `flush` *is* snapshot
   creation *is* snapshot: the public API is unified under snapshot
   terminology (`create_snapshot` = drain + publish + **persist to disk**),
   and `snapshot_view` returns the latest pinned root rather than
-  materializing a copy. Every snapshot is durable — there is no
+  materializing a copy. Every snapshot is durable; there is no
   "in-memory-only flush." Recovery uses the latest durable snapshot's slot as
   the replay starting point.
 - The Flusher is the sole tree mutator, so mapping stores need no CAS; a
@@ -171,14 +171,14 @@ flush():
   + chain scan). A higher-slot cell always shadows a lower-slot one.
 - **Batching benefit:** hot keys collapse in the MemTable; each flush does
   one atomic store + at most one consolidation per affected leaf per flushed
-  slot — not per key. This is LSM-style write batching without global
+  slot, not per key. This is LSM-style write batching without global
   compaction.
 
 ### 1.4 Consolidation, Split, and Merge
 
 When a leaf's delta chain exceeds `max_delta_len` (default 8) or
 `max_delta_bytes` (default 256 KiB), the chain is folded into a fresh leaf
-base page: replay the chain (highest slot wins per key — the authoritative
+base page: replay the chain (highest slot wins per key, the authoritative
 point where the slot rule is enforced; tombstones are preserved, removed only
 by GC), then either build a new base page, or split/merge if the result
 crosses a size threshold.
@@ -204,8 +204,8 @@ oscillation.
 ### 1.5 Versioned Root (Consistent Snapshots)
 
 Steady-state reads use epoch pinning (§1.6) on the live chain. For
-**long-lived consistent views** — `scan` with a large result, `compare`,
-`snapshot_export`, and recovery anchoring — crow-tree maintains an immutable
+**long-lived consistent views** (`scan` with a large result, `compare`,
+`snapshot_export`, and recovery anchoring), crow-tree maintains an immutable
 **versioned root**: `{version, root_pid, last_applied_slot, refcount}`.
 
 - At `persist_snapshot` (and optionally on a cadence), the writer **freezes**
@@ -223,8 +223,8 @@ This gives true MVCC snapshots for readers/export without multi-version
 per-key storage: only whole *tree versions* are retained briefly, not
 multiple versions per key. Steady state keeps just one live version; older
 versions exist only while a long reader holds them. Snapshot export always
-pins the **current** version — exporting an arbitrary past slot is not
-supported; install-snapshot always installs the latest durable state.
+pins the **current** version; exporting an arbitrary past slot is not
+supported. Install-snapshot always installs the latest durable state.
 
 ### 1.6 Epoch-Based Reclamation
 
@@ -247,7 +247,7 @@ references, and concurrent-read performance together.
 
 **`enter()`/`exit()` are lock-free** (a single atomic store each; no mutex,
 no CAS). The writer path (`retire`/`reclaim`) keeps a mutex since there is
-only one writer (the Flusher) — no contention there. This follows the classic
+only one writer (the Flusher), so no contention there. This follows the classic
 epoch-based reclamation (EBR) design (Fraser, *Practical Lock-Freedom*, 2004;
 the same idea underlies Linux kernel RCU and Rust's `crossbeam-epoch`): a
 monotonic global epoch, per-thread local-epoch slots (cache-padded,
@@ -257,14 +257,14 @@ tick), which frees any retired entry whose epoch is below the minimum active
 participant's epoch.
 
 **Why not sharding instead?** Sharding (multiple `EpochManager` instances,
-reader hashed by thread) reduces contention but does not eliminate it — each
+reader hashed by thread) reduces contention but does not eliminate it. Each
 shard still needs a mutex, and retire/reclaim must coordinate across shards
 (take the min epoch across all of them). Lock-free EBR eliminates the mutex
 entirely on the reader path, which is strictly better, for less complexity.
 
 **Why epoch-based reclamation and not pin counts or hazard pointers?** The
 hard part of eviction/reclamation is not picking a victim; it is answering
-*"when is it safe to actually reuse a page's frame bytes?"* — readers are
+*"when is it safe to actually reuse a page's frame bytes?"* Readers are
 lock-free and read `Slice`s that point **directly into a frame**, so freeing
 or reusing memory a reader still holds a pointer into is a use-after-free.
 Three disciplines solve this:
@@ -272,28 +272,28 @@ Three disciplines solve this:
 1. **Pin counts / refcounting** (textbook buffer pool): `pin++` before
    touching a page, `pin--` after; evict only at `pin == 0`. Correct, but it
    puts an atomic RMW on a shared cacheline on **every page touch on the read
-   hot path** — a real regression versus lock-free reads.
+   hot path**, a real regression versus lock-free reads.
 2. **Hazard pointers:** a reader publishes each pointer it dereferences into
    a per-thread slot before touching it; the reclaimer scans all threads'
    slots before freeing. Lock-free and tightly memory-bounded, but the reader
    pays a publish (store + fence + re-validation) per pointer, and a
    root→…→leaf descent needs one hazard per level.
-3. **Epoch-based reclamation (EBR)** — crow-tree's choice for the sync read
+3. **Epoch-based reclamation (EBR)**, crow-tree's choice for the sync read
    hot path (`get`/`scan`/`get_view`). A reader brackets its **whole**
    operation in one `Guard`; it never publishes which pointers it holds.
    Reader cost is one enter/exit *per operation*, not per pointer. Trade-off
    vs. hazard pointers: a single stalled guard blocks *all* reclamation
-   (worst-case unbounded retained memory) — accepted because reads are short
+   (worst-case unbounded retained memory), accepted because reads are short
    (one `get`/`scan`) and there is a single writer, so the active-epoch
    window is tiny.
-4. **Per-page refcount on handoff paths** — composes with EBR as an
+4. **Per-page refcount on handoff paths**, composes with EBR as an
    orthogonal cross-thread lifetime mechanism. EBR protects the same-thread
    walk (the `Guard` is thread-bound); refcount extends page lifetime across
    threads after the walk hands off a borrowed `Slice` (`get_async` slow
    path) or a pinned snapshot (`snapshot_view` → `PinnedSnapshot`). The
    per-page `pin_state_` atomic on `PageBase` is only touched on the
    handoff paths (one `fetch_add` on pin, one `fetch_sub` on unpin), NOT on
-   the sync `get`/`scan` hot path — the §1.6 rejection of refcount ("atomic
+   the sync `get`/`scan` hot path. The §1.6 rejection of refcount ("atomic
    RMW on every page touch on the read hot path") stands for the hot path.
    The epoch deleter sets a `kRetiredBit` via `fetch_or`; if pins are
    outstanding (count > 0), the deleter defers and the last `unpin` frees.
@@ -329,12 +329,12 @@ get(key):
   into the engine: the descent targets the leaf that would contain
   `start_after` (instead of the prefix start), and the merge loop skips keys
   `<= start_after` natively, so a deep-pagination scan starts at the cursor
-  and applies the limit without over-fetching the prefix range — O(limit)
+  and applies the limit without over-fetching the prefix range. O(limit)
   FFI + decode cost instead of O(prefix range) for a page near the end of a
   large prefix.
 - **Lazy leaf resolution (`LeafChainCursor`).** A leaf chain is *never*
-  materialized for a scan. Every chain input is already key-sorted — each
-  `BatchDelta`'s entries, and the terminal `LeafBase`'s main frame slots —
+  materialized for a scan. Every chain input is already key-sorted: each
+  `BatchDelta`'s entries, and the terminal `LeafBase`'s main frame slots,
   except the in-frame delta overlay, which is bounded by `max_inframe_delta`
   and pre-sorted once at cursor setup. The cursor merges those `k` streams
   (`k <= max_delta_len + 2`) by linear min-key selection over the stream
@@ -342,7 +342,7 @@ get(key):
   entry costs O(k) and a `limit`-bounded scan never touches the rest of the
   leaf. On an equal slot the winner is the stream visited earliest in chain
   order (deltas head→tail, then the base's main entries, then its in-frame
-  overlay) — the same resolution order a whole-chain fold would apply.
+  overlay), the same resolution order a whole-chain fold would apply.
   `seek()` binary-searches each stream, so the descent leaf's entries before
   `start_after` / `prefix` are skipped rather than stepped over. Keys and
   cells come out as Slices borrowed from the chain's own storage and are
@@ -353,7 +353,7 @@ get(key):
 - **Zero-copy value returns.** An **L1** hit returns a *borrowed* `buffer`
   pointing into the resident leaf frame (valid only for the guard's
   lifetime, §2.2). An **L0** hit also returns a *borrowed* `buffer`
-  pointing directly into the MemTable's skip-list node cell version — the
+  pointing directly into the MemTable's skip-list node cell version. The
   epoch guard keeps the node alive past any concurrent overwrite/drain,
   exactly as it keeps an L1 frame resident. An overflow value (assembled
   from multiple pages, no single frame to borrow) is materialized into an
@@ -399,7 +399,7 @@ the same EBR scheme as L1, closing the gap that previously forced
 **Structure.** Each skip-list node holds a `next[]` tower of
 `std::atomic<Node*>`, an atomic `CellVersion*` pointer, a logical-deleted
 flag, and the key bytes inline in the node's tail allocation (RocksDB
-`InlineSkipList` style — one allocation, no `std::string` header). Height
+`InlineSkipList` style: one allocation, no `std::string` header). Height
 is drawn at insert (p=0.25, max 12). Keys are immutable for a node's
 lifetime; only the cell version pointer is mutable, which makes the read
 path a pure atomic load.
@@ -408,7 +408,7 @@ path a pure atomic load.
 `[header][value]` or split `kExternal` raw value) + slot + flags. Overwrite
 publishes a new `CellVersion*` with a release store, then
 `epoch_.retire(old_version)`. A reader that loaded the old pointer under
-its guard keeps it alive — no use-after-free. This is the key difference
+its guard keeps it alive, no use-after-free. This is the key difference
 from the previous in-place overwrite.
 
 **Write path.** Writers are serialized by a write spinlock (replacing the
@@ -418,7 +418,7 @@ the node in bottom-up with release stores. Erase (`drain_up_to`) sets
 `deleted`, unlinks the tower, then epoch-retires the node and cell version.
 `reset()` epoch-retires every node. `upsert_external` always tags the
 buffer as `kExternal` (split cell) since it stores the raw value without
-the 9-byte header — the header is reconstructed from `slot`/`flags` at
+the 9-byte header. The header is reconstructed from `slot`/`flags` at
 read time.
 
 **Read path.** `MemTable::cursor(start_after)` returns a cursor seeded by
@@ -428,16 +428,16 @@ skipped. The scan's `L0Cursor` is a skip-list cursor; the merge loop is
 otherwise unchanged (min-key select, highest-slot-wins on collision, early
 stop past prefix). Cell materialization runs only for entries that reach
 the output: O(limit), not O(N_l0). The `upper_bound` skip pass and its
-`scan_l0_skip_l` metric are deleted — the cursor seeks directly.
+`scan_l0_skip_l` metric are deleted; the cursor seeks directly.
 `get_view()` and `try_get_view_no_load()` borrow the value directly from
-the `CellVersion` — no `std::string` staging, no second copy.
+the `CellVersion`, no `std::string` staging, no second copy.
 
 **Counters.** `bytes_`, `min_slot_`, `max_slot_`, `count()`, and `empty()`
 are relaxed atomics maintained by the writer (read by
 `maybe_freeze_active`'s thresholds and diagnostics).
 
 **`snapshot()` retained.** `iter_all`, `compare`, and `snapshot_export`
-need every entry — O(N) is correct there. `snapshot()` is a cursor walk;
+need every entry, O(N) is correct there. `snapshot()` is a cursor walk;
 the point of L0 is that it is no longer on the scan or get path.
 
 ### 1.10 Scan Path Perf Baseline
@@ -459,7 +459,7 @@ pre-populated keys):
 
 - **§1.7 O(limit) deep-pagination claim: confirmed.** Deep pagination
   (`start_after` near end, limit=10) is 1.7x slower than from-start
-  (7084us vs 4236us) — the O(log N) B+tree descent to a deeper leaf,
+  (7084us vs 4236us): the O(log N) B+tree descent to a deeper leaf,
   not O(prefix) over-fetch. If the engine over-fetched the prefix,
   deep pagination would cost ~1.75s (the full-100k number), not 7ms.
   The over-fetch proxy ratio is 1.7x; the etcd-style "fetch all then
@@ -477,7 +477,7 @@ pre-populated keys):
   large-payload scans.
 - **Value-size anomaly (resolved)**: 1KiB values scanned 3.8x faster
   than 64B despite returning 16x more data. The L0-snapshot hypothesis
-  was refuted by per-step measurement — `l0_snapshot` is 0us in
+  was refuted by per-step measurement: `l0_snapshot` is 0us in
   production (the maintenance loop drains L0 before measurement), and
   even a full 100k-entry 64B snapshot is only ~120us against a ~3900us
   scan. The real cause was eager whole-leaf resolution: `l1_resolve`
@@ -486,7 +486,7 @@ pre-populated keys):
   regardless of `limit`. 64B values pack ~640 entries per 64 KiB leaf
   vs ~58 for 1KiB, so the dense-leaf case paid ~11x more per leaf.
   The lazy `LeafChainCursor` (§1.7) makes per-leaf cost O(limit):
-  microbench 100k keys, limit=1000, L1-only — 64B 1183us → 19.9us,
+  microbench 100k keys, limit=1000, L1-only: 64B 1183us → 19.9us,
   1KiB 476us → 32.2us; limit=10 at 64B 1163us → 0.4us. Cost now tracks
   bytes returned rather than entries per leaf, so 64B is cheaper than
   1KiB, as expected.
@@ -510,7 +510,7 @@ copy does.
 Future gaps (not measured by the baseline): high-concurrency
 read-mode split (MinSlot vs Linearizable at > 1T:1C), and reverse scan
 (forward-only today). The L0 snapshot copy (O(N_l0) per scan) was closed
-by the L0 path — see §1.9.
+by the L0 path; see §1.9.
 
 ---
 
@@ -522,7 +522,7 @@ draining into a vector, and the frame builder writing into the frame. **Goal:
 allocate key/value memory once, at the earliest point (the Rust/C API
 boundary), then move it down to the MemTable and into the B+tree without
 copying.** The only unavoidable copy is the final placement into the slotted
-frame layout — that copy *is* page construction, not a redundant one. On the
+frame layout. That copy *is* page construction, not a redundant one. On the
 read side, `get`/`scan` hand back a **borrowed** view into the resident frame
 instead of a freshly-allocated `std::string`; the caller copies only if it
 needs to outlive the read guard.
@@ -544,7 +544,7 @@ guard). Design rules:
   cell is one contiguous buffer with no second allocation or copy.
 - **Small-buffer optimization (SBO) — required, not optional.** An owned
   `buffer` whose total length fits `kInlineCap` (24 B) stores its bytes
-  **inline**, with no heap allocation — mirroring `std::string`'s SSO. This is
+  **inline**, with no heap allocation, mirroring `std::string`'s SSO. This is
   a *correctness-for-performance* rule: without it, replacing `std::string`
   (which inlines ~15 B) with `buffer` on the write path would *regress* the
   common small-key/small-value case by forcing a `malloc` where there was
@@ -552,17 +552,17 @@ guard). Design rules:
 - **Allocator seam.** `alloc()` routes owned allocations larger than
   `kInlineCap` through a single internal allocator hook (today: glibc
   `malloc`); a size-classed pool or RDMA-pinned allocator could slot in here
-  later with no call-site changes — see [`todo_code.md`](../todo_code.md) for
+  later with no call-site changes. See [`todo_code.md`](../todo_code.md) for
   why that hasn't been done speculatively.
 - **MemTable = `absl::btree_map<std::string, cell_entry>`.** The KEY stays
   `std::string`, the VALUE is a `cell_entry{slot, flags, cell}`. The
-  `cell` buffer is either **contiguous** (`kOwned`, full `[header][value]`
-  — used by snapshot import and the direct C API) or **split** (`kExternal`,
-  value-only borrowed from a Rust `Bytes` — the zero-copy consensus apply
+  `cell` buffer is either **contiguous** (`kOwned`, full `[header][value]`,
+  used by snapshot import and the direct C API) or **split** (`kExternal`,
+  value-only borrowed from a Rust `Bytes`, the zero-copy consensus apply
   path). The contiguous form is materialized at the API boundary
   (`get`/`drain`/`snapshot`). **Why the key is not a `buffer`:** a B-tree stores
   `pair<const Key, Value>` and *relocates* slots on node split/merge, which
-  requires moving the `const` key — a move-only `buffer` key falls back to
+  requires moving the `const` key. A move-only `buffer` key falls back to
   its deleted copy ctor and fails to compile. `std::string`'s SSO already
   inlines small keys, so it is the correct key type; `buffer`'s SBO gives
   the same inline benefit on the value side plus the borrowed read path.
@@ -601,14 +601,14 @@ Read: get(key):
   from the Paxos payload `Bytes` via `kExternal` buffers; the `memcpy` is
   deferred to flush (off the critical path). The total value-copy count is
   2 (materialization at flush + frame construction), both on the Flusher
-  thread — none on the apply thread.
+  thread, none on the apply thread.
 - **L1 reads are zero-copy:** the returned `buffer` borrows the cell's value
   bytes directly from the resident frame. **The epoch guard alone keeps the
-  frame resident** — eviction does not free a page's frame directly, it
+  frame resident.** Eviction does not free a page's frame directly, it
   re-tags the mapping slot unloaded and epoch-retires the page, whose
   destructor (which releases the frame) only runs after the epoch reclaims
   it. A reader holding a guard therefore keeps the page alive, so the frame
-  stays pinned and the buffer pool's CLOCK sweep skips it — no separate pin
+  stays pinned and the buffer pool's CLOCK sweep skips it; no separate pin
   needs to be bundled into the returned handle.
 - **Caller contract:** a borrowed `buffer` is valid only while the caller
   holds the read guard. To retain a value past the guard, the caller calls
@@ -664,10 +664,10 @@ so the payload allocation survives until every borrowing buffer is released.
 ### 2.4 Zero-Copy Apply: Split-Cell External Buffers
 
 **Design challenge.** The consensus apply path receives value bytes as
-`Bytes` slices into the packed Paxos payload — a single refcounted
+`Bytes` slices into the packed Paxos payload, a single refcounted
 allocation shared by all ops in the batch. The contiguous-cell apply path
 (Option A/B) calls `encode_cell_buf`, which performs a value `memcpy`
-(64 KiB for a large value) on the apply thread — the dominant per-op cost
+(64 KiB for a large value) on the apply thread, the dominant per-op cost
 for large values. The goal is to eliminate this copy for the consensus
 apply path without changing the contiguous cell representation downstream.
 
@@ -681,7 +681,7 @@ at apply time) is not adjacent to them.
 
 **Design.** Split the cell **only while it lives in the MemTable**;
 materialize the contiguous form at the memtable API boundary
-(`get`/`drain_up_to`/`snapshot`) — points where a copy already exists, all
+(`get`/`drain_up_to`/`snapshot`), points where a copy already exists, all
 off the apply critical path. Everything downstream (flush, delta, frame,
 `leaf_entry`, `CellView`, snapshot I/O) sees contiguous cells unchanged.
 
@@ -719,7 +719,7 @@ Wrapping every synchronous C++ engine call in `tokio::task::spawn_blocking`
 has two problems: (1) every `get`/`apply`/`scan` hops through Tokio's blocking
 thread pool, and the ~5–10 μs scheduling overhead is significant relative to
 a μs-level in-memory operation; (2) a high-performance engine must not block
-async workers or rely on large thread pools for I/O — `spawn_blocking` is a
+async workers or rely on large thread pools for I/O. `spawn_blocking` is a
 workaround for synchronous I/O, not a long-term architecture.
 
 **Design principle: completion-based async I/O via io_uring. No blocking, no
@@ -727,14 +727,14 @@ thread pools, no C++ coroutine dependency.**
 
 - **C++ coroutine (`co_await`) is not used.** It would add compiler/runtime
   surface and lifetime complexity at the C ABI without improving the kernel
-  I/O path — the boundary still needs an opaque handle Rust can poll, so
+  I/O path. The boundary still needs an opaque handle Rust can poll, so
   exposing coroutine state machines across FFI is the wrong abstraction.
 - **Folly futures are not used.** They bring a large dependency stack and an
   executor model that duplicates Tokio on the Rust side; crow-tree only needs
   a small completion object plus a notification fd.
 - **epoll is only the readiness fallback.** io_uring handles disk/block I/O;
   `eventfd` handles C++→Rust wakeup, and Tokio already integrates that fd via
-  `AsyncFd` (epoll internally) — no separate epoll reactor for storage I/O.
+  `AsyncFd` (epoll internally), so no separate epoll reactor for storage I/O.
 
 ### 3.2 Architecture
 
@@ -759,8 +759,8 @@ One reactor per `Crowtree` instance, on a dedicated C++ thread: it calls
 `io_uring_enter` (blocking until a CQE arrives or a timeout fires), peeks
 CQEs, dispatches each completion callback, then writes to its `eventfd` to
 wake the Rust side. The Rust side wraps that `eventfd` in Tokio's `AsyncFd`;
-a `ct_future` handle carries the pending state, result, and — for the fast
-path — an `EpochManager::Guard` keeping the frame resident (§3.4).
+a `ct_future` handle carries the pending state, result, and (for the fast
+path) an `EpochManager::Guard` keeping the frame resident (§3.4).
 
 ### 3.3 Fast Path vs Slow Path
 
@@ -776,7 +776,7 @@ The C++ engine determines the path internally: if the operation can complete
 without I/O, it fills the future synchronously (`state = kDone`) and returns;
 otherwise it submits SQE(s) to the reactor (`state = kPending`) and the
 reactor completes the future when I/O finishes. A `CtFuture`'s first
-`poll()` on the fast path resolves immediately — zero scheduling overhead,
+`poll()` on the fast path resolves immediately, zero scheduling overhead,
 no thread switch; on the slow path it registers a waker on `AsyncFd` and
 resolves on the next reactor-driven wakeup.
 
@@ -786,7 +786,7 @@ resolves on the next reactor-driven wakeup.
   `EpochManager::Guard` that keeps the frame resident;
   `ct_future_poll` returns a `ct_buf` pointing directly into the frame
   bytes (borrowed, not owned). `AsyncCrowtree::try_get_pinned` wraps
-  this in a `PinnedValue` — a `!Send` RAII type that holds the
+  this in a `PinnedValue`, a `!Send` RAII type that holds the
   `ct_future` handle so the epoch guard stays alive until `PinnedValue`
   is dropped. `PinnedValue::as_bytes()` borrows directly from the C++
   frame with no `copy_buf` allocation. The `KVEngine::get_bytes` trait
@@ -808,9 +808,9 @@ resolves on the next reactor-driven wakeup.
   `try_get_pinned` accept `&[u8]` instead of `Vec<u8>`, since
   `ct_get_async` copies the key internally into a
   `std::shared_ptr<std::string>`. The Rust-side `key.to_vec()` is
-  eliminated — no C++ changes required.
+  eliminated, no C++ changes required.
 - **True zero-copy:** `PinnedValue::into_bytes()` creates a `Bytes`
-  via `Bytes::from_owner` backed by the C++ frame — no copy. The
+  via `Bytes::from_owner` backed by the C++ frame, no copy. The
   `ct_future` handle (and its page refcount pins) is held by the `Bytes`
   owner; when the last `Bytes` ref clone is dropped on any thread, the
   owner's `Drop` runs, which drops the `PinnedValue`, which calls
@@ -834,7 +834,7 @@ resolves on the next reactor-driven wakeup.
 > **Merged from `design-crow-kv-async-kvengine.md` (2026-07).**
 > **Status:** implemented (landed 2026-07-09).
 > This section records the design of the Rust-side `KVEngine` trait's async
-> shape (`KVFuture<T>`) and why it looks the way it does — kept as the
+> shape (`KVFuture<T>`) and why it looks the way it does, kept as the
 > rationale record for a decision that is easy to get wrong (the naive
 > `async-trait` conversion), not as a live plan.
 
@@ -845,9 +845,9 @@ runtime via a CLI flag (`--kv-engine {memory,crow-tree}`). Its `get`/`scan`/
 `apply` need an async-capable return type so that a genuine I/O path
 (crow-tree demand-load miss, served by the io_uring reactor, §3 "Async FFI
 Bridge") can suspend instead of blocking a Tokio worker thread on a
-synchronous `pread` — the exact anti-pattern the reactor exists to avoid at
-the C++/FFI layer, which would otherwise resurface immediately one layer up
-in Rust.
+synchronous `pread`. That is the exact anti-pattern the reactor exists to
+avoid at the C++/FFI layer, which would otherwise resurface immediately one
+layer up in Rust.
 
 ### 4.2 The Central Tension: `dyn KVEngine` vs. `async fn` in Traits
 
@@ -856,8 +856,8 @@ that with runtime engine selection:
 
 | Option | Cost |
 | --- | --- |
-| **(a) `async-trait` crate** | Boxes every async call into a `Pin<Box<dyn Future>>` via macro — one heap allocation **per call, including the fast in-memory path with no I/O**. Undoes the reactor's "fast path costs nothing" property one layer up. |
-| **(b) Generic `PxLearner<E: KVEngine>`** | Zero overhead, but `E` would need to propagate through `PxLocalReplica`, `PxGroup`, `PxKvStore`, and `DashMap<GroupId, PxGroup>` — too invasive for an engine chosen at runtime. |
+| **(a) `async-trait` crate** | Boxes every async call into a `Pin<Box<dyn Future>>` via macro, one heap allocation **per call, including the fast in-memory path with no I/O**. Undoes the reactor's "fast path costs nothing" property one layer up. |
+| **(b) Generic `PxLearner<E: KVEngine>`** | Zero overhead, but `E` would need to propagate through `PxLocalReplica`, `PxGroup`, `PxKvStore`, and `DashMap<GroupId, PxGroup>`, too invasive for an engine chosen at runtime. |
 | **(c) Hybrid fast-path/slow-path future (chosen)** | Plain (non-`async`) `fn`s return a small custom future enum that resolves immediately (no allocation) for the fast path and only boxes a real future for the rare slow (I/O) path. Fully `dyn`-compatible; mirrors the exact fast/slow split the C++ layer already makes. |
 
 ### 4.3 `KVFuture<T>` and the Trait Shape
@@ -885,20 +885,20 @@ pub trait KVEngine: Send + Sync {
 }
 ```
 
-`Ready` costs nothing beyond the enum tag + inline value — no allocation, no
+`Ready` costs nothing beyond the enum tag + inline value, no allocation, no
 `Pin<Box<..>>`. `InMemKV` always returns `Ready`. `CrowTreeEngine::get`
 (`lib/crow-kv/src/kv/crow_tree_engine.rs`) does the same fast-path check the C++
 layer does first, via `crow_tree_ffi::AsyncCrowtree::try_get`; on a resident
 hit/miss it returns `Ready` at zero extra cost, and only on a genuine
 demand-load miss does it construct `Pending`, wrapping the reactor-driven
 future `try_get` already builds. `CrowTreeEngine::scan`/`apply` always
-resolve `Ready` today (no async `scan`/`apply` C API exists yet — an honest
+resolve `Ready` today (no async `scan`/`apply` C API exists yet, an honest
 gap, not an oversight; see `CrowTreeEngine`'s doc comment).
 
 ### 4.4 Caller-Side Wiring
 
 `Learner::learn` is a native `async fn` (mirroring `Acceptor`'s existing
-`async fn accept`/`prepare` convention — neither trait is ever used as
+`async fn accept`/`prepare` convention; neither trait is ever used as
 `dyn`, so native `async fn` is safe for both). `PxLearner::apply_entry`/
 `engine_get`/`engine_scan` are `async fn` and `.await` the `KVFuture`
 directly. `PxLocalReplica::learn_chosen`/`apply_committed_up_to` and

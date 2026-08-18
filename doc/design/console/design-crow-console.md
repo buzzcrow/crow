@@ -130,7 +130,7 @@ direction from which the cluster is observed.
 Rooted at **Rack → Node → Server → PxStore → PxGroup → {LocalReplica,
 RemoteReplica…}**. Every entity below `Node` is described from that
 node's vantage point. A `PxGroup` has exactly one local replica plus
-N−1 remote-replica proxies — this mirrors the `crow-kv-server` internal
+N−1 remote-replica proxies. This mirrors the `crow-kv-server` internal
 data structure, which is why this view is also the "debugging view":
 the API surfaces the remote-list explicitly so an operator can spot
 bugs where a node failed to register all of its peers.
@@ -222,16 +222,16 @@ long-running monitor task that owns the live cache:
 
 ### 4.3 Persistent Cluster Config
 
-**Problem**: The TOML config file is a single point of failure — losing
+**Problem**: The TOML config file is a single point of failure. Losing
 the console host loses the full topology. Per-node server config is also
 not persisted independently; a node restart relies on the console to
 re-push topology.
 
-**Solution**: A designated Paxos group — **system group (store 0,
-group 0)** — stores the full cluster topology as regular KV entries.
-Since it is a Paxos group, the topology is replicated, consistent, and
-HA by the same mechanism that protects user data. No external
-coordinator needed. This is the standard industry pattern (closest
+**Solution**: A designated Paxos group, **system group (store 0,
+group 0)**, stores the full cluster topology as regular KV entries.
+Since it is a Paxos group, the topology is replicated and HA by the
+same mechanism that protects user data. No external coordinator
+needed. This is the standard industry pattern (closest
 analog: CockroachDB system ranges).
 
 - **Two-phase bootstrap**:
@@ -239,9 +239,9 @@ analog: CockroachDB system ranges).
   - Phase 2: `HardwareClient` writes hardware hierarchy (racks, nodes)
     and `KVClusterMetaClient` writes KV-cluster topology (stores,
     groups, replicas) into group 0 via text-path keys with JSON
-    values. No readiness flag — diskdb's sync loop treats empty group 0
+    values. No readiness flag. diskdb's sync loop treats empty group 0
     as "nothing assigned yet" and retries.
-  - Console restart: two-way fallback — group 0 missing → TOML mode;
+  - Console restart: two-way fallback. Group 0 missing → TOML mode;
     group 0 exists → group 0 authoritative.
 
 - **Group-0 sysdata schema** (text-path keys, JSON values):
@@ -320,7 +320,7 @@ Binary resolution: `$CROW_KV_SERVER_BIN` → sibling of current executable →
 `$PATH` lookup for `crow-kv-server`.
 
 (Future: scp the binary to the remote host on first deploy and render
-a config template. Not yet implemented — the SSH path assumes the
+a config template. Not yet implemented. The SSH path assumes the
 binary is already present on the remote host.)
 
 `server deploy`, `server restart`, and `server stop` address a node. There is no separate
@@ -345,14 +345,14 @@ defined in §3, and every route lives under exactly one of them.
 
 **R2. Logical reads aggregate; physical reads are per-node.**
 The same store, observed through the two trees, returns different
-shapes — aggregated `StoreView` vs. that node's local `NodeStore`.
+shapes: aggregated `StoreView` vs. that node's local `NodeStore`.
 This is how the operator inspects "is the cluster consistent?" vs.
 "what does this one node think it has?".
 
 **R3. Logical writes orchestrate; physical writes act on one node.**
 A logical write declares *intent*; the web backend fans out per-node
 calls in `shared` and rolls back on partial failure. A physical write
-is the low-level primitive — it touches exactly that node, never fans
+is the low-level primitive. It touches exactly that node, never fans
 out. Logical writes are implemented on top of physical primitives.
 
 **R4. No `server_id` namespace.**
@@ -466,11 +466,11 @@ Split responsibility:
   `/api/nodes/:node_id/openapi.json` so the SPA can inspect a specific
   server's API without CORS issues.
 
-**Why not host the bundle on `crow-kv-server`?** It would force every
-server to ship Swagger UI even when not needed, and would require the
-SPA to load assets from the upstream's URL, conflicting with the
-embeddability rule that no upstream `host:port` ever appears in the
-browser.
+**The bundle is not hosted on `crow-kv-server`.** Hosting it there
+would force every server to ship Swagger UI even when not needed, and
+would require the SPA to load assets from the upstream's URL,
+conflicting with the embeddability rule that no upstream `host:port`
+ever appears in the browser.
 
 ## 9. Error Model and Operation Logging
 
@@ -484,7 +484,7 @@ browser.
 ## 10. Observability
 
 - `tracing` everywhere; `--vv` switches CLI to debug.
-- Web backend exposes `/healthz`. **`/metrics` is deferred** — the Rust
+- Web backend exposes `/healthz`. **`/metrics` is deferred**. The Rust
   Prometheus story has multiple competing crates; we will pick one when
   broader observability work for `crow-kv-server` begins.
 - All console-issued operations attach a correlation id propagated as

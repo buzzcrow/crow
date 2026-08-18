@@ -31,7 +31,7 @@ This document defines the wire-serialization contract for all node-to-node and c
    (`LearnerStream`) keyed by `(group_id, peer_node_id)`. Steady-state
    `Heartbeat` traffic moves over a **dedicated unary gRPC channel**
    (separate TCP connection) so liveness messages are never blocked
-   behind data on the `LearnerStream` — see §3. One-shot messages
+   behind data on the `LearnerStream` (see §3). One-shot messages
    (`Prepare`, `PreVote`, `RequestVote`, `StepDown`) remain unary RPCs on
    the control channel.
 2. **Frame multiplexing.** Each `LearnerStreamRequest` / `LearnerStreamResponse` is a protobuf `oneof` frame. New steady-state message types add new oneof arms without changing existing field numbers.
@@ -44,17 +44,17 @@ This document defines the wire-serialization contract for all node-to-node and c
 ## 2. Message Surface
 
 The wire protocol defines four classic Paxos messages (P1 M2):
-`Prepare`, `Promise`, `Accept`, `Accepted` — sufficient to run a full
+`Prepare`, `Promise`, `Accept`, `Accepted`, sufficient to run a full
 classic Paxos round across a real network boundary. Election messages
 (`Heartbeat`, `RequestVote`, `PreVote`, `StepDown`) and the
 `LearnerStream` / `ChosenNotification` frames are added in P1 M3;
 snapshot and client RPCs land in P4.
 
-Key reusable sub-message: `AcceptedValue` — carries `(slot, round,
+Key reusable sub-message: `AcceptedValue` carries `(slot, round,
 leader_id, term, payload)`. Used in `Accept` requests and `Promise`
 responses for classic Paxos value-recovery. The `payload` is opaque
 bytes in P1 M2; `kind` discrimination (empty = `NoOp`, non-empty =
-`Write`) is not a protobuf field — `ConfigChange` and
+`Write`) is not a protobuf field. `ConfigChange` and
 `DedupCheckpoint` kinds are designed but not yet implemented.
 
 The full protobuf definitions are in `lib/crow-kv/src/rpc/proto/`; this
@@ -104,19 +104,19 @@ promised not to vote. Code analysis shows this hazard does not hold:
   lockout cannot cause an accept to be rejected.
 - The only coupling is `current_term`, and the term fence
   (`req.term < local_term → TermStale`) handles all cross-term
-  reordering correctly — a stale-term accept being rejected is
+  reordering correctly. A stale-term accept being rejected is
   correct behavior (the old leader lost leadership).
 - Same-term reordering is harmless: heartbeat and accept mutate
   independent state.
 
-The `term` **is** the epoch mechanism — no new timestamp or epoch
+The `term` **is** the epoch mechanism; no new timestamp or epoch
 field is needed to make separate connections safe.
 
 **What stays unary:** `Prepare` (one-shot Phase-1, no ordering need
 with steady-state traffic), `PreVote` / `RequestVote` (election probe
-/ real vote — must not be queued behind `Accept`s), `StepDown` (admin
-primitive — must cut through immediately), `Heartbeat` (steady-state
-liveness — must not be blocked behind data).
+/ real vote, must not be queued behind `Accept`s), `StepDown` (admin
+primitive, must cut through immediately), `Heartbeat` (steady-state
+liveness, must not be blocked behind data).
 
 ---
 
@@ -132,7 +132,7 @@ liveness — must not be blocked behind data).
 The unary `Accept` RPC is kept alongside `LearnerStream` for callers
 that need a one-shot path. In practice, steady-state `Accept` traffic
 flows through `LearnerStream`. The unary `Heartbeat` RPC is used for
-steady-state heartbeats over a dedicated channel (§3) — the
+steady-state heartbeats over a dedicated channel (§3). The
 `LearnerStream` no longer carries heartbeat frames in steady state,
 though the server-side bidi handler still accepts them for backward
 compatibility during rolling upgrades.
@@ -183,7 +183,7 @@ pipelining described in `design-crow-kv-slot.md` §5:
 do not wait for all replies. A `FuturesUnordered` (local + each remote,
 tagged with `(voting, kind)`) is drained via `StreamExt::next`; the
 phase returns as soon as `accepted >= quorum` AND the local reply has
-been folded (the W6 invariant — `Chosen`/`Proceed` is never returned
+been folded (the W6 invariant: `Chosen`/`Proceed` is never returned
 before the local WAL persist / CAS reply is counted). The
 still-pending futures are moved into a detached drain task that
 continues folding for side effects only: a late `TermStale` triggers
@@ -194,8 +194,8 @@ honors `tenure_cancel` so a step-down aborts the drain.
 
 In a 3-node group (quorum = local + 1), the proposal latency is the
 quorum-th-fastest reply, not `max(all peers)`. A slow but connected
-follower no longer drags every write. Failure detection is preserved
-— it just moves off the latency path.
+follower no longer drags every write. Failure detection is preserved.
+It just moves off the latency path.
 
 ### 6.2 RPC Deadline
 
@@ -320,8 +320,8 @@ The client `BatchOp` type (`lib/crow-kv-client/src/client.rs`) also uses
 and the per-retry `items.clone()` are both O(1) per item.
 
 The server-side `encode_kv_batch_items` (`px_kv_store.rs`) still
-flattens `KvBatchItem` fields into a `Vec<u8>` consensus payload —
-that copy remains (eliminating it requires changing the consensus
+flattens `KvBatchItem` fields into a `Vec<u8>` consensus payload.
+That copy remains (eliminating it requires changing the consensus
 payload contract, out of scope).
 
 **Alternatives considered**:

@@ -8,11 +8,6 @@ defines **what diskdb is**, **why key choices were made**, and **how the
 component is structured**. Field-level details live in the proto files
 and Rust source; this doc covers decisions and architecture only.
 
-References (other projects, not ports):
-- `/cjdata/cpp/aioss/server/diskdb/doc/design.md` — overall design.
-- `/cpp/buzz-cpp/src/app/buzz-disk-db` — zone allocator algorithm
-  (bitmap-scan, per-bit CAS, zone rotation).
-
 ---
 
 ## Table of Contents
@@ -51,7 +46,7 @@ diskdb is a **distributed disk-block allocator** that runs on top of
 CROW's KV cluster. It is a **lightweight, stateless server**: a diskdb
 instance takes ownership of some disk-groups, manages the disks and
 space inside them, and persists all durable state to CROW KV. It holds
-no state that cannot be reconstructed from KV — on crash or restart it
+no state that cannot be reconstructed from KV. On crash or restart it
 rebuids in-memory structures from the KV records and group-0 metadata.
 
 Multiple diskdb instances run across a cluster, each managing a subset
@@ -63,7 +58,7 @@ reclaims freed space). All state changes are durably persisted to CROW
 KV before being acknowledged to callers.
 
 diskdb **allocates** blocks; it does **not** perform data I/O. Callers
-(a future object store, chunk service, etc.) write to the allocated
+(a future object store, chunk service) write to the allocated
 blocks themselves and tell diskdb when they are done (`active_zone`).
 
 **Language:** Rust. **Runtime:** tokio (async everywhere).
@@ -137,18 +132,18 @@ rehashing the whole keyspace.
 as the allocation routing unit. Allocate is scoped to one disk-group;
 multi-block uses one `batch_write` on that group's bound paxos data
 group; atomic within the group. No cross-group multi-block allocate in
-v1 — the caller issues separate `AllocateBlocks` calls per group if
+v1. The caller issues separate `AllocateBlocks` calls per group if
 needed. The caller (or a future placement service) picks the
 disk-group.
 
 ### 3.3 No CAS needed; exclusive ownership
 
 Each disk-group is owned by exactly one diskdb instance at a time (map
-in group 0). A zone in a disk-group therefore has a single writer — no
+in group 0). A zone in a disk-group therefore has a single writer, so no
 KV-level CAS is required. A blind `Put` of the zone record is enough.
 In-memory concurrency within one instance is handled by **per-bit CAS**
 on the usage bitmap (`compare_exchange` on 64-bit words), not a
-zone-level lock — multiple threads can allocate from the same zone
+zone-level lock. Multiple threads can allocate from the same zone
 concurrently. The `ZoneAllocationState` enum is a **derived** field
 for reporting (Active/Available/Full based on `used_count`), not a CAS
 state machine.
@@ -156,11 +151,11 @@ state machine.
 ### 3.4 Records are the source of truth; bitmap is derived
 
 For each allocate or free, diskdb **cannot** update the full zone
-bitmap in KV — that would be a large write for the paxos group on every
+bitmap in KV, as that would be a large write for the paxos group on every
 block. Instead, each allocate writes a small **`BusyBlockValue`** at
 the `BusyBlockKey`, and each free writes a **`FreeBlockValue`** at the
 `FreeBlockKey` (and deletes the `BusyBlockKey` in the same
-`batch_write`). The bitmap is **derived** from the records — never
+`batch_write`). The bitmap is **derived** from the records, never
 written directly as a full bitmap on the hot path. The free path is
 **persist-only**: the bitmap is not touched on free (the bit stays set,
 `used_count` is not decremented); compaction is the sole mechanism for
@@ -198,7 +193,7 @@ into the crow-common registry at reporting intervals.
 
 Proto types (`DiskId`, `ChunkId`, `Segment`, `HwStatus`, `DiskType`,
 `ZoneAllocationState`, value types) are defined in `crow_protocol`
-and used directly in Rust — no field duplication. Extension traits add
+and used directly in Rust, with no field duplication. Extension traits add
 domain methods. Internal types (metas, bitmap, CRC logic) are Rust
 structs not exposed via gRPC.
 
@@ -206,7 +201,7 @@ structs not exposed via gRPC.
 encoding defined in `doc/design/protocol/design-crow-protocol-key.md` (flat
 per-kind Rust structs, two-byte `magic | type_tag` header, big-endian
 fixed-width fields). Protobuf-serialized `*Key` messages are never
-used as KV key bytes — the tag bytes break prefix scans. RPC
+used as KV key bytes. The tag bytes break prefix scans. RPC
 responses/requests use `**Info` proto messages that flatten key and
 value fields into one message; see §5 and zone-management §6.
 
@@ -296,7 +291,7 @@ components with protocol surfaces reserved):
 
 Key protocol decisions: integer IDs throughout (no string UUIDs);
 `DiskId` is globally unique (no `node_id`/`disk_group_id` in `Segment`
-or record keys — `disk_group_id` is in the `AllocateBlocks` request for
+or record keys. `disk_group_id` is in the `AllocateBlocks` request for
 routing only); `Segment.owner_chunk` (192-bit `ChunkId`) replaces the
 former `tag`; all sizes are unit-based; errors are returned via gRPC
 status codes with `ErrorInfo` details (`error_code.proto`), not
@@ -387,15 +382,15 @@ Rack (rack_id, u64) → Node (node_id, u64) → Disk-Group (dg_id, u64)  [logica
 diskdb's second major component. The zone is the unit of allocation:
 each disk is divided into zones, and each zone has a bitmap-scan
 allocator with per-bit CAS (lock-free allocate). The free path is
-**persist-only** — the bitmap is not touched on free; compaction is the
+**persist-only**: the bitmap is not touched on free; compaction is the
 sole bit-clearer. Zone rotation (compaction-before-rotation with a
 preparatory thread) ensures the allocator always sees accurate free
 space in active zones. Crash recovery uses three strategies: full scan
 rebuild, journal scan replay, and compaction.
 
-Detailed design — record model, allocation algorithm, free path,
+Detailed design (record model, allocation algorithm, free path,
 compaction, rotation, crash recovery, zone-level concurrency, and
-invariants — lives in
+invariants) lives in
 [`design-crow-diskdb-zone-management.md`](design-crow-diskdb-zone-management.md).
 
 ## 8. Disk Status Management
@@ -404,7 +399,7 @@ invariants — lives in
 
 Shared enum `HwStatus`: `Init`, `Up`, `Maintenance`, `Suspect`,
 `Missing`, `Bad`, `Offline` (ordered by severity). Effective status =
-`max(node, group, disk)` — a three-level check (node + disk-group +
+`max(node, group, disk)`, a three-level check (node + disk-group +
 disk). The reference impl checks two levels (node + disk); CROW adds
 the disk-group layer, which is new. Allocations require effective `Up`;
 frees allow `Up`, `Maintenance`, or `Suspect`.
@@ -474,8 +469,8 @@ diskdb's first major component:
 the group-0 leader and subscribes to the prefixes it cares about
 (`/hw/dg_owner/`, `/hw/dg_bind/`, `/hw/disk/`); the leader pushes
 hw-status-change and ownership-change notifications over that stream.
-No separate notify-endpoint registration is needed for notify delivery
-— the `grpc_endpoint` arg of `heartbeat_diskdb` is the diskdb gRPC
+No separate notify-endpoint registration is needed for notify delivery.
+The `grpc_endpoint` arg of `heartbeat_diskdb` is the diskdb gRPC
 service address for service-registry discovery (so clients can route
 `allocate_blocks`), already populated from `config.server.listen_addr`.
 This replaces polling for status changes as the primary
@@ -486,10 +481,10 @@ trigger, client, diskdb handler, configuration) lives in
 
 ## 9. Space Metrics
 
-diskdb's third major component. Detailed design — usage accessors,
+diskdb's third major component. Detailed design (usage accessors,
 `QueryCapacityStats` handler, per-disk counters, keepalive piggyback,
 recalc verifier, reporting loop, proto, kv-client aggregation, and the
-full `crow-diskdb-client` library — lives in
+full `crow-diskdb-client` library) lives in
 [`design-crow-diskdb-space-metrics.md`](design-crow-diskdb-space-metrics.md).
 This section carries the architecture and the metric categories.
 
@@ -587,17 +582,17 @@ persist round-trip.
 Latency metrics use `LatencyHistogram` (percentile precision) for hot
 paths (allocate/free bitmap scan, KV persist) and `LatencySummary`
 (count + sum + max + avg) for cold paths (sync, compaction, zone
-rotate) — matching crow-kv's convention. Gauges are derived snapshots
+rotate), matching crow-kv's convention. Gauges are derived snapshots
 updated on the reporting interval, not hot-path writes. `degraded` and
 `last_sync_age_secs` are the key health indicators for alerting.
 
 ## 10. Background Scanner
 
-The scanner is a periodic consistency check — it detects and reports
+The scanner is a periodic consistency check. It detects and reports
 live-state drift, catches record corruption early, and gives operators
 visibility into cluster health during uptime. It is **not** a safety
 mechanism (the free path is persist-only, zone-management §6, and the bitmap is a
-conservative over-estimate — freed blocks stay busy until compaction);
+conservative over-estimate; freed blocks stay busy until compaction);
 it is an operational health mechanism for early corruption detection,
 defense-in-depth against unknown bugs or hardware errors, and operator
 visibility.
@@ -763,20 +758,18 @@ All public and inter-module APIs are `async`. Runtime is `tokio`
 
 ## 13. Non-Gaps (Good Fits with CROW)
 
-These reference assumptions map cleanly onto CROW and need no design
+These design assumptions map cleanly onto CROW and need no design
 work, just implementation:
 
-- **Durability model**: aioss "metadb is sole durable store, no local
-  WAL" → CROW "crow-kv WAL is sole durable log." diskdb's blind writes
-  become durable via crow-kv's WAL flush. Identical model.
-- **Consensus semantics**: aioss metadb = Raft; CROW = Multi-Paxos with
-  parallel slots. For diskdb's usage (blind writes of zone records),
-  both behave identically; parallel slots may even improve allocation
-  throughput. No change needed.
+- **Durability model**: crow-kv's WAL is the sole durable log. diskdb's
+  blind writes become durable via crow-kv's WAL flush.
+- **Consensus semantics**: Multi-Paxos with parallel slots. For diskdb's
+  usage (blind writes of zone records), parallel slots may even improve
+  allocation throughput. No change needed.
 - **Blind-ops persistence**: diskdb persists via blind Puts (no
   read-modify-write) — matches crow's blind-ops-only model exactly
   (§3.3).
-- **Async runtime**: both use tokio multi-threaded; diskdb's two-phase
+- **Async runtime**: tokio multi-threaded; diskdb's two-phase
   async allocation (sync bitmap-scan claim + async KV persist) maps
   directly.
 
@@ -846,8 +839,6 @@ the diskdb component area.
 - CROW WAL design: `doc/design/kv/design-crow-kv-wal.md`
 - CROW metrics design: `doc/design/kv/design-crow-kv-observability.md`
 - CROW console design: `doc/design/console/design-crow-console.md`
-- Reference (another project): `/cjdata/cpp/aioss/server/diskdb/doc/design.md`
-- Zone allocator reference: `/cpp/buzz-cpp/src/app/buzz-disk-db`
 
 ---
 

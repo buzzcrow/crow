@@ -118,7 +118,7 @@ Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 | mixed_1k | 1000 | | mixed | lin | 991 | 1007 | 1222 | 0 |
 | minslot_1k | 1000 | | 64 | minslot | 4293 | 232 | 262 | 0 |
 
-`mixed_1k` uses `--value-size-mix 64:70,1024:20,16384:10` — 70% 64B,
+`mixed_1k` uses `--value-size-mix 64:70,1024:20,16384:10`: 70% 64B,
 20% 1KiB, 10% 16KiB values, deterministically assigned by key id. At
 991 scans/s it sits between the old `valuesize_1KiB` (1492) and
 `valuesize_16KiB` (74), reflecting the weighted average of the three
@@ -137,12 +137,12 @@ replication backpressure issue seen at 100% 16KiB).
 | minslot_32t | 1000 | 64 | minslot | 32:32 | 38256 | 830 | 2028 | 0 |
 
 Linearizable scales well up to 16T (4339 → 30799, 7.1x) then saturates
-at 32T (37840) — the leader read barrier becomes the bottleneck.
+at 32T (37840): the leader read barrier becomes the bottleneck.
 MinSlot shows a clear advantage:
-- **16T:16C**: +7.2% throughput (33015 vs 30799) — distributed read
+- **16T:16C**: +7.2% throughput (33015 vs 30799), distributed read
   serving across 3 replicas scales better than single-leader.
 - **32T:32C**: throughput saturates for both (+1.1%), but MinSlot's
-  p99 is 44% better (2028us vs 3600us) — load distribution keeps tail
+  p99 is 44% better (2028us vs 3600us). Load distribution keeps tail
   latency low even when throughput is capped by the engine.
 
 ### Linux results — 2026-08-10 (post-R67)
@@ -182,7 +182,7 @@ Linux is ~3.5x slower than macOS on single-thread bounded scans
 running under a slower single-core memory subsystem. Multi-thread
 scaling: 16T reaches 21247 scans/s, and 32T saturates at ~28k scans/s
 with p99 down to 2408 us for linearizable. MinSlot still does **not**
-show the throughput advantage seen on macOS — linearizable is faster at
+show the throughput advantage seen on macOS; linearizable is faster at
 4T and 16T on Linux. At 32T MinSlot edges ahead (28613 vs 27922, +2.5%)
 with p99 7.6% better (2226 vs 2408 us). The MinSlot advantage appears
 platform-dependent and may relate to the different cache hierarchy and
@@ -190,8 +190,8 @@ inter-core latency of x86_64 vs arm64.
 
 The `largeval_16k` config (100k × 16KiB = 1.6 GB values) is the R67
 regression sentinel: 35 scans/s with 0 errors post-fix (was 653-8111
-errors before the `spawn_blocking` fix). The low throughput is expected
-— each scan returns up to 1000 × 16KiB = 16 MB of data, and the
+errors before the `spawn_blocking` fix). The low throughput is expected;
+each scan returns up to 1000 × 16KiB = 16 MB of data, and the
 snapshot/flush/GC path now runs on blocking threads without stalling
 the election driver.
 
@@ -242,7 +242,7 @@ Four changes drove the improvement:
   drove the multi-thread throughput gains (32T: ~23k → ~28k scans/s)
   and the large-scan single-thread gains. Two small-bounded configs
   show a slight regression: `bounded_1k` -7% throughput (but p99
-  -13%) and `deep_pag_10` -9% throughput (p99 flat) — both verified
+  -13%) and `deep_pag_10` -9% throughput (p99 flat), both verified
   across 5 runs, consistent, and within acceptable noise for the
   per-scan fast path. The fast-path dispatch adds a small constant
   per-scan cost that slightly slows the small-scan path where
@@ -261,23 +261,23 @@ Two changes drove the 20-140x improvement on bounded scans:
 
 - **R48 (lazy `LeafChainCursor`)**: the old `resolve_chain_sorted`
   rebuilt each touched leaf's entire live entry set into a `std::map`
-  per scan — O(entries-per-leaf × log), not O(limit). 64B packs
+  per scan, O(entries-per-leaf × log), not O(limit). 64B packs
   ~640 entries per 64KiB leaf vs ~58 for 1 KiB, so each leaf resolve
   was far more expensive for 64B (this caused the 1 KiB anomaly where
   1 KiB was 3.8x faster than 64B despite returning 16x more data). The
   lazy cursor merges delta chain + base frame on demand, binary-searches
-  on seek, and emits only the entries the scan returns — cost tracks
+  on seek, and emits only the entries the scan returns. Cost tracks
   `limit`, not leaf fullness. Post-fix: 64B is 2.9x faster than 1 KiB
   (cost tracks bytes returned, not entries per leaf).
 - **R50 (epoch-protected MemTable)**: `MemTable::snapshot()` deep-copied
-  every live L0 entry on every scan — O(N_l0) regardless of limit.
+  every live L0 entry on every scan, O(N_l0) regardless of limit.
   Under concurrent write+scan this dominated scan time (82-94% per the
   Gate 2 microbench). Replaced with a `ConcurrentSkipList` (inline keys,
-  versioned cell pointers, epoch-deferred reclamation) — readers
+  versioned cell pointers, epoch-deferred reclamation). Readers
   traverse L0 lock-free under their existing epoch guard with zero copy;
   the cursor seeks directly and materializes only O(limit) entries.
 
-Deep pagination is flat (equal to from-start) — O(limit) confirmed.
+Deep pagination is flat (equal to from-start); O(limit) confirmed.
 
 ---
 
@@ -298,27 +298,27 @@ noted.
   +7.2% throughput advantage at 16T:16C (33015 vs 30799 scans/s) and
   44% better p99 at 32T:32C (2028us vs 3600us) on macOS. The throughput
   advantage peaks around 16T then both modes saturate near ~38k
-  scans/s at 32T on macOS — the crow-tree engine (C++ merge loop over L0
+  scans/s at 32T on macOS. The crow-tree engine (C++ merge loop over L0
   skip-list + L1 B+tree cursor) becomes the bottleneck, not the read
   barrier. On Linux (2026-08-09, post-R58) the 32T saturation point
   moved up to ~28k scans/s (was ~23k on 2026-08-06) with p99 down 37%
   for linearizable (2364 vs 3732 us), but the engine remains the
-  bottleneck — both modes still saturate with near-identical throughput
+  bottleneck: both modes still saturate with near-identical throughput
   at 32T. No code change needed for the read-mode split itself;
   profiling the engine bottleneck is the open work.
 - **[R60](../../backlog/R60-tree-scan-sibling-leaf-readahead.md) —
   No sibling-leaf readahead on cold scans**: the sync path
   demand-loads each leaf inline; the async path resolves one pending
   page per reactor round trip (`scan_async_attempt`). A scan knows its
-  next leaf (`right_sibling`) before finishing the current one —
-  issuing the next read ahead of the merge loop would overlap I/O with
+  next leaf (`right_sibling`) before finishing the current one.
+  Issuing the next read ahead of the merge loop would overlap I/O with
   merging on cold ranges.
 - **R67 — 16 KiB scan errors on Linux** — **Done (2026-08-10).** RCA:
   maintenance-loop `persist_snapshot` / `flush` / `collect_garbage`
   held the C++ `write_mutex_` and blocked the async runtime, starving
   the election driver (300-600ms timeout) when snapshots took 0.6-2.2s
   for 100k × 16KiB values (1.6 GB). Fix: all three calls now run via
-  `tokio::task::spawn_blocking` (single code path — no fire-and-forget,
+  `tokio::task::spawn_blocking` (single code path, no fire-and-forget,
   no in-flight guard); the election driver runs on a separate tokio
   task and is no longer blocked. `PxLearner.engine` changed from
   `Box<dyn KVEngine>` to `Arc<dyn KVEngine>` so the handle clones into

@@ -6,7 +6,7 @@
 Depends on: [`design-crow-console.md`](design-crow-console.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §15.4.6
 Satisfies: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §15.4.6
 
-This document covers the **frontend SPA design decisions only** —
+This document covers the **frontend SPA design decisions only**:
 what we chose and why. Requirements (the *what*) live in
 `../kv/design-crow-kv.md`; backend API contracts live in `design-crow-console.md`.
 
@@ -61,7 +61,7 @@ what we chose and why. Requirements (the *what*) live in
   existing codebase; no framework migration.
 - **React Flow for topology** — slim usage only (custom nodes, pan, click
   select). Deliberately no minimap, zoom toolbar, layout selector, or edge
-  labels — the canvas is a navigation aid, not an analytics surface.
+  labels. The canvas is a navigation aid, not an analytics surface.
 - **React Context for state** — view-mode, selection, toasts, activity.
   No Redux; the state surface is small enough that Context + local hooks
   suffice.
@@ -100,11 +100,11 @@ Capacity / KV) selects which hierarchy every pane renders.
   wheel zooms (React Flow default), click selects. Selection is shared
   with the sidebar and inspector via `SelectionContext`. No floating
   toolbar.
-- **Center panel**: one of three modes, toggled from the header —
+- **Center panel**: one of three modes, toggled from the header:
   Topology canvas (default), Swagger panel, or KV Operator panel. The
   KV and Swagger toggles are mutually exclusive with the topology view;
   selecting one replaces the canvas.
-- **Inspector** (~320px, collapsible): tabs scoped to the selection —
+- **Inspector** (~320px, collapsible): tabs scoped to the selection:
   Details and Activity only. KV operations have moved to the center KV
   Operator panel (§6.1).
 
@@ -131,7 +131,7 @@ Single dark theme via CSS variables under `.crow-console` (existing
 tokens in `src/index.css`). Status colors: `--healthy`, `--degraded`,
 `--failed`, `--unknown`, plus `--remote` for remote-replica accent.
 
-Status is never color-only — every status row also carries a glyph
+Status is never color-only. Every status row also carries a glyph
 (✓ / ! / ✕ / ?). Leader replicas carry a crown badge. Remote replicas use
 a dashed border + `--remote` accent so peer-list mis-wirings are visible.
 
@@ -142,7 +142,7 @@ Animations are minimal (selection/hover transitions); honor
 
 One layout at a time, chosen by view-mode. Layout is computed by a small
 deterministic tree-layout pass in `topology/layout.ts` (columns by depth,
-rows by sibling index) — no dagre, no force simulation, no user-selectable
+rows by sibling index). No dagre, no force simulation, no user-selectable
 layouts.
 
 ### 5.1 Physical layout
@@ -220,7 +220,7 @@ scan API takes only prefix + limit (no `start_after`). Rather than
 modifying C++ immediately, `CrowTreeEngine` over-fetches with the
 original prefix, then filters out keys ≤ `start_after` in Rust before
 applying the limit. This is inefficient when `start_after` is deep into
-a large prefix range — a follow-up can push `start_after` into the C++
+a large prefix range. A follow-up can push `start_after` into the C++
 engine. When `start_after` is empty, the fast path is identical to the
 old behavior.
 
@@ -274,7 +274,7 @@ UI primitives), and `contexts/` (ViewMode, Selection, Toast, Activity).
 modules respectively.
 
 **Deleted from v1**: CommandPalette, favorites, fuzzy search, export
-utils, bulk action dialog, metrics history, theme context — none are
+utils, bulk action dialog, metrics history, theme context. None are
 needed for the lean surface.
 
 ## 11. Accessibility
@@ -303,7 +303,7 @@ single responsibility: Physical handles infrastructure + service
 management, Capacity handles disk-group/disk lifecycle + capacity
 visualization, and KV handles KV data-plane operations. Disk lifecycle
 actions (Add Disk Group, Add Disk) do not belong on the Physical view's
-Node context menu — they are capacity concerns, not infrastructure
+Node context menu. They are capacity concerns, not infrastructure
 concerns. Splitting them into a dedicated Capacity view also lets the
 Capacity center panel render capacity visualization without competing
 with the topology canvas.
@@ -356,12 +356,12 @@ Context menu on a `Server` node: Restart →
 `POST /api/nodes/:id/diskdb/restart` (DiskDB, §14). Stop →
 `POST /api/nodes/:id/server/stop` (KV) or
 `POST /api/nodes/:id/diskdb/stop` (DiskDB, §14). Labeled "Stop" not
-"Delete" — it stops the process but keeps the deployment record so
+"Delete". It stops the process but keeps the deployment record so
 Restart/Deploy can bring it back. If no server deployed: Deploy →
 opens `DeployServerDialog` (existing for KV) or `DeployDiskdbDialog`
 (new, §14).
 
-The Restart/Stop items on the Node menu are removed — server-process
+The Restart/Stop items on the Node menu are removed. Server-process
 ops belong on the Server node, not the Node. Node menu keeps only
 Ping + Delete Node (+ Deploy if no server).
 
@@ -376,7 +376,7 @@ Edge cases:
 ### 13.3 Capacity view sidebar + dialogs
 
 The Capacity view sidebar renders rack → node → disk-group → disk
-(no server nodes — infrastructure is visible in Physical). Disk
+(no server nodes; infrastructure is visible in Physical). Disk
 lifecycle dialogs (Add Disk Group, Add Disk, Remove, Move, Set Status)
 are only accessible here.
 
@@ -451,7 +451,7 @@ ops as KV Server (Restart, Stop, Deploy). The deploy/restart/stop
 handlers enable `AddNodeDialog` to auto-deploy DiskDB alongside KV,
 and the Server context menu works for both types.
 
-Deployment mechanism: SSH or local fork — same as KV. No Docker. The
+Deployment mechanism: SSH or local fork, same as KV. No Docker. The
 `crow-diskdb` binary is spawned via `ssh::deploy_via_ssh` or
 `lifecycle::deploy_local_in_dir`, on the paired ports from
 `ports.rs` (`DISKDB_GRPC_BASE` + `DISKDB_HTTP_BASE`).
@@ -550,7 +550,7 @@ Handlers:
 `read_all_diskdb_instances`, calls `query_capacity_stats` per
 instance, merges `DiskGroupInfo` entries by id (summing
 capacity/busy/free). A dead instance yields a degraded indicator,
-not a failed page — its contribution is skipped with a warning.
+not a failed page. Its contribution is skipped with a warning.
 
 `PUT /api/disks/:disk_id/status` resolves the disk's rack/node/dg
 from config, then calls `hw.set_disk_status`. 404 if the disk is
@@ -608,7 +608,7 @@ Canvas, not SVG/DOM, for all levels:
   (32K cells) — fast enough to not flicker.
 - On data refresh (3 s poll), retain the previous frame until the
   new one is fully drawn, then swap. No blank intermediate state.
-- No DOM reflow — the canvas is a single element; only its bitmap
+- No DOM reflow. The canvas is a single element; only its bitmap
   content changes.
 
 ### 16.2 Color encoding

@@ -287,12 +287,12 @@ tr:hover td { background: var(--code-bg); }
   </aside>
   <main class="content">
 <h1 id="crow-user-guide">CROW User Guide</h1>
-<p>CROW is a storage platform — a foundation layer for building storage</p>
-<p>systems where you own the hot path all the way down to the metal. Its</p>
-<p>first component is <strong>crow-kv</strong>, a distributed key-value cluster built</p>
-<p>on Multi-Paxos. This guide covers crow-kv operations: starting a</p>
-<p>cluster, performing basic KV operations, managing topology, and</p>
-<p>running upgrades.</p>
+<p>CROW is a high-performance distributed storage platform, a foundation</p>
+<p>layer for building storage systems where you own the hot path all the</p>
+<p>way down to the metal. The foundation is <strong>crow-kv</strong>, a distributed</p>
+<p>key-value cluster built on multi-group Multi-Paxos. This guide covers</p>
+<p>crow-kv operations: starting a cluster, performing basic KV operations,</p>
+<p>managing topology, and running upgrades.</p>
 <p>crow-kv provides three interfaces for cluster management and data</p>
 <p>access:</p>
 <ul>
@@ -351,7 +351,7 @@ PORT=9920           # crow-web service port</code></pre>
 <h3 id="11-register-the-physical-topology">1.1 Register the physical topology</h3>
 <p>Create a rack, add nodes, and deploy a server on each node. The</p>
 <p><code>deploy</code> command starts <code>crow-kv-server</code> on the target node (via SSH</p>
-<p>if <code>ssh_user</code> is set, or as a local subprocess otherwise) — no manual</p>
+<p>if <code>ssh_user</code> is set, or as a local subprocess otherwise). No manual</p>
 <p>start needed.</p>
 <div class="tab-group">
 <div class="tab-bar">
@@ -396,9 +396,10 @@ crow-cli cluster init --nodes n1,n2,n3</code></pre></div>
   -d '{"nodes":["n1","n2","n3"]}'</code></pre></div>
 </div>
 <p>This creates store 0 and group 0 on each selected node, wires remotes</p>
-<p>for multi-node, and automatically finalizes the cutover (sets the</p>
-<p><code>/topology/ready</code> flag in group 0). After initialization, data</p>
-<p>store/group creation is unblocked.</p>
+<p>for multi-node, persists topology in console config, and writes</p>
+<p>hardware hierarchy + KV-cluster topology into group 0 via</p>
+<p><code>HardwareClient</code> + <code>KVClusterMetaClient</code> (text-path keys, JSON</p>
+<p>values). After initialization, data store/group creation is unblocked.</p>
 <p>For a single-node dev cluster, pass one node:</p>
 <pre><code class="bash">crow-cli cluster init --nodes n1</code></pre>
 <h3 id="13-create-a-store-and-group">1.3 Create a store and group</h3>
@@ -484,7 +485,7 @@ crow-cli kv get --store-id 3 --group-id 3 --key user:1
 # Delete
 crow-cli kv delete --store-id 3 --group-id 3 --key user:1
 
-# Prefix scan
+# Prefix scan (list mode — fast, latest values, S3-list semantics)
 crow-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/kv/put" \
   -H 'Content-Type: application/json' \
@@ -500,6 +501,76 @@ curl "http://$IP:$PORT/api/stores/3/groups/3/kv/scan?prefix=user:&amp;limit=100"
 </div>
 <p>The Web UI KV Operator panel provides the same operations with a</p>
 <p>store/group selector, paginated scan, and inline editing.</p>
+<h3 id="21-scan-modes">2.1 Scan modes</h3>
+<p>CROW provides two range-read modes for different use cases:</p>
+<ul>
+<li><strong>List scan</strong> (<code>kv scan</code>) — the default scan. Fast, always returns the</li>
+</ul>
+<p>  latest value per key at each page's read point. S3-list semantics:</p>
+<p>  each page is independently consistent, but a key can vanish (deleted</p>
+<p>  between pages) or a value can drift (overwritten between pages) within</p>
+<p>  a single logical scan. No server-side state beyond the per-page read</p>
+<p>  barrier. Use for interactive listing, key discovery, and the KV</p>
+<p>  Operator UI.</p>
+<ul>
+<li><strong>Snapshot scan</strong> (<code>snapshot create</code> + <code>snapshot scan</code>) —</li>
+</ul>
+<p>  point-in-time-consistent. Pins a frozen view of the keyspace at a</p>
+<p>  specific slot; every page is served from the same frozen view. No key</p>
+<p>  vanishes, no value drifts, no phantom keys appear. Use for backup,</p>
+<p>  analytics, and any consumer that needs a consistent point-in-time</p>
+<p>  view. See §2.2 below.</p>
+<h3 id="22-snapshot-versioning">2.2 Snapshot versioning</h3>
+<p>A snapshot scan pins a point-in-time view of the keyspace. Creating a</p>
+<p>snapshot flushes the in-memory write buffer (L0) into the durable tree</p>
+<p>(L1), then pins L1 at the current applied slot. The snapshot is a frozen,</p>
+<p>immutable view. Iterating it is pure array traversal with no concurrency</p>
+<p>concerns. Each snapshot has a server-side handle with a lease (default 5</p>
+<p>minutes); the handle is reaped if the client disconnects, preventing</p>
+<p>unbounded pin retention.</p>
+<p><strong>Create a snapshot:</strong></p>
+<pre><code class="bash">crow-cli snapshot create --store-id 3 --group-id 3
+# Returns: snapshot_handle=42, at_slot=12345</code></pre>
+<p><strong>List active snapshots:</strong></p>
+<pre><code class="bash">crow-cli snapshot list --store-id 3 --group-id 3
+# Returns: handle, at_slot, lease_remaining for each active snapshot</code></pre>
+<p><strong>Scan a snapshot (paginated, same prefix/start_after/limit as list scan):</strong></p>
+<pre><code class="bash"># First page
+crow-cli snapshot scan --store-id 3 --group-id 3 \
+  --handle 42 --prefix user: --limit 100
+
+# Next page (start_after = last key from previous page)
+crow-cli snapshot scan --store-id 3 --group-id 3 \
+  --handle 42 --prefix user: --limit 100 \
+  --start-after user:50</code></pre>
+<p><strong>Release a snapshot (free the pinned pages):</strong></p>
+<pre><code class="bash">crow-cli snapshot release --store-id 3 --group-id 3 --handle 42</code></pre>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code># Create
+curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/snapshots"
+
+# List
+curl "http://$IP:$PORT/api/stores/3/groups/3/snapshots"
+
+# Scan
+curl "http://$IP:$PORT/api/stores/3/groups/3/snapshots/42/scan?prefix=user:&amp;limit=100"
+
+# Release
+curl -X DELETE "http://$IP:$PORT/api/stores/3/groups/3/snapshots/42"</code></pre></div>
+</div>
+<p><strong>GC and snapshots</strong>: the engine's garbage collector reclaims tombstones</p>
+<p>and stale versions with <code>slot &lt;= gc_watermark</code>. Active snapshots protect</p>
+<p>their pinned pages via refcount — GC never frees a page a live snapshot</p>
+<p>still references. Once a snapshot is released (or its lease expires), the</p>
+<p>next GC sweep can reclaim those pages. The GC watermark can be advanced</p>
+<p>explicitly via the management API to control retention:</p>
+<pre><code class="bash"># Advance GC watermark (data with slot &lt;= watermark becomes reclaimable)
+curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/gc-watermark" \
+  -H 'Content-Type: application/json' \
+  -d '{"slot":12000}'</code></pre>
 <hr>
 <h2 id="3-cluster-management">3. Cluster Management</h2>
 <h3 id="31-check-cluster-health">3.1 Check cluster health</h3>
@@ -558,8 +629,8 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <li>Provision the new machine with the same node ID, management port,</li>
 <p>   and gRPC port.</p>
 <li>Deploy the server via the service. The server auto-loads its</li>
-<p>   store/group configuration from <code>conf/node-config.json</code> on startup —</p>
-<p>   no <code>--stores</code>/<code>--groups</code> CLI args needed for normal restart:</p>
+<p>   store/group configuration from <code>conf/node-config.json</code> on startup.</p>
+<p>   No <code>--stores</code>/<code>--groups</code> CLI args needed for normal restart:</p>
 <div class="tab-group">
 <div class="tab-bar">
 <button class="tab-btn active" data-tab="0">cli</button>
@@ -696,7 +767,11 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <li><strong><code>crow-cli kv put --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt; --value &lt;v&gt;</code></strong></li>
 <li><strong><code>crow-cli kv get --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
 <li><strong><code>crow-cli kv delete --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
-<li><strong><code>crow-cli kv scan --store-id &lt;s&gt; --group-id &lt;g&gt; --prefix &lt;p&gt; [--limit &lt;n&gt;]</code></strong></li>
+<li><strong><code>crow-cli kv scan --store-id &lt;s&gt; --group-id &lt;g&gt; --prefix &lt;p&gt; [--limit &lt;n&gt;]</code></strong> — list scan (fast, latest values, S3-list semantics)</li>
+<li><strong><code>crow-cli snapshot create --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong> — pin a point-in-time snapshot</li>
+<li><strong><code>crow-cli snapshot list --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong> — list active snapshots</li>
+<li><strong><code>crow-cli snapshot scan --store-id &lt;s&gt; --group-id &lt;g&gt; --handle &lt;h&gt; --prefix &lt;p&gt; [--limit &lt;n&gt;] [--start-after &lt;k&gt;]</code></strong> — scan a pinned snapshot</li>
+<li><strong><code>crow-cli snapshot release --store-id &lt;s&gt; --group-id &lt;g&gt; --handle &lt;h&gt;</code></strong> — release a snapshot</li>
 </ul>
 </div>
 <div class="tab-panel tab-panel-content" data-panel="1"><h4 id="cluster-lifecycle">Cluster lifecycle</h4>
@@ -758,22 +833,35 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <tr><td>Get</td><td><code>GET /api/stores/{sid}/groups/{gid}/kv/get?key=...</code></td></tr>
 <tr><td>Put</td><td><code>POST /api/stores/{sid}/groups/{gid}/kv/put</code></td></tr>
 <tr><td>Delete</td><td><code>POST /api/stores/{sid}/groups/{gid}/kv/delete</code></td></tr>
-<tr><td>Scan</td><td><code>GET /api/stores/{sid}/groups/{gid}/kv/scan?prefix=...&amp;limit=N</code></td></tr>
+<tr><td>Scan (list mode)</td><td><code>GET /api/stores/{sid}/groups/{gid}/kv/scan?prefix=...&amp;limit=N</code></td></tr>
+<tr><td>Create snapshot</td><td><code>POST /api/stores/{sid}/groups/{gid}/snapshots</code></td></tr>
+<tr><td>List snapshots</td><td><code>GET /api/stores/{sid}/groups/{gid}/snapshots</code></td></tr>
+<tr><td>Snapshot scan</td><td><code>GET /api/stores/{sid}/groups/{gid}/snapshots/{handle}/scan?prefix=...&amp;limit=N&amp;start_after=...</code></td></tr>
+<tr><td>Release snapshot</td><td><code>DELETE /api/stores/{sid}/groups/{gid}/snapshots/{handle}</code></td></tr>
+<tr><td>Set GC watermark</td><td><code>POST /api/stores/{sid}/groups/{gid}/gc-watermark</code></td></tr>
 </tbody>
 </table>
-<h4 id="server-management-per-node">Server management (per-node)</h4>
+<h4 id="server-management-per-node-internal">Server management (per-node, internal)</h4>
 <table>
 <thead>
 <tr><th>Operation</th><th>Endpoint</th></tr>
 </thead>
 <tbody>
 <tr><td>System init (bootstrap group 0)</td><td><code>POST /system/init</code></td></tr>
-<tr><td>Topology finalize (cutover)</td><td><code>POST /topology/finalize</code></td></tr>
-<tr><td>Check topology ready</td><td><code>GET /topology/ready</code></td></tr>
+<tr><td>Add store</td><td><code>POST /stores</code></td></tr>
+<tr><td>Remove store</td><td><code>DELETE /stores/{sid}</code></td></tr>
+<tr><td>Add group</td><td><code>POST /stores/{sid}/groups</code></td></tr>
+<tr><td>Remove group</td><td><code>DELETE /stores/{sid}/groups/{gid}</code></td></tr>
+<tr><td>Add remote replicas</td><td><code>POST /stores/{sid}/groups/{gid}/remotes</code></td></tr>
+<tr><td>Step down leader</td><td><code>POST /stores/{sid}/groups/{gid}/step-down</code></td></tr>
+<tr><td>Export topology</td><td><code>GET /topology</code></td></tr>
+<tr><td>Health check</td><td><code>GET /health</code></td></tr>
+<tr><td>Metrics</td><td><code>GET /metrics</code></td></tr>
 </tbody>
 </table>
-<p>These endpoints are on the <code>crow-kv-server</code> management API (not the</p>
-<p>console web API). The console's <code>POST /api/cluster/init</code> orchestrates</p>
+<p>These endpoints are on the <code>crow-kv-server</code> management API (internal,</p>
+<p>only called by <code>crow-kv-client</code>'s <code>KVClusterAdmin</code>). The console's</p>
+<p><code>POST /api/cluster/init</code> orchestrates</p>
 <p><code>/system/init</code> across nodes and auto-finalizes.</p>
 </div>
 </div>

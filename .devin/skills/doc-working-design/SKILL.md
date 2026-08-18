@@ -48,7 +48,7 @@ link back to the backlog doc instead.
   modified files; group by crate if the change spans crates. The reviewer's
   map of the diff.
 - **Complexity** — `High` / `Medium` / `Low` + 2–4 sentences: what is
-  genuinely hard, what is new vs reused from aioss, the main implementation
+  genuinely hard, what is new vs reused, the main implementation
   challenges. Do not restate the solution.
 - **Test Design** — designed from the backlog doc's Acceptance criteria.
   Two layers:

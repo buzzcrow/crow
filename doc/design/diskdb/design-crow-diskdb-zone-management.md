@@ -66,7 +66,7 @@ algorithms, record layouts, and coordination rules. Reused surfaces
 
 This doc covers everything zone-level: the in-memory zone allocator
 (bitmap-scan with per-bit CAS), the durable record model (busy/free/
-snapshot records), the free path (persist-only — bitmap untouched on
+snapshot records), the free path (persist-only, bitmap untouched on
 free), compaction (the sole bit-clearer), zone rotation (compaction-
 before-rotation with a preparatory thread), crash recovery (three
 strategies), and the zone-level concurrency model (lock-free allocate,
@@ -79,11 +79,11 @@ docs reference this one for zone-level behavior.
 
 ## 2. Zone as a Logical Concept
 
-Not all zones on a disk must be the same size — the last zone may be
+Not all zones on a disk must be the same size. The last zone may be
 smaller (disk capacity is rarely an exact multiple of the zone size).
 Zone is a **logical concept** defined for easier implementation; it can
 later adopt to native zoned-namespace SSD or SMR HDD zone APIs, but
-currently no such devices are targeted — the zone is a rough mapping.
+currently no such devices are targeted. The zone is a rough mapping.
 
 **Word alignment rule:** each zone's `unit_capacity` must be a multiple
 of 64 (the 64-bit bitmap word size). All zones except the last have
@@ -91,7 +91,7 @@ of 64 (the 64-bit bitmap word size). All zones except the last have
 `unit_capacity = remaining_capacity / unit_size`, rounded down to a
 multiple of 64; the sub-64-unit tail (at most 63 units) is unallocated.
 Only the last zone may have a different size; all other zones on a disk
-are uniform. No bitmap masking, no padding bits — each zone's bitmap is
+are uniform. No bitmap masking, no padding bits. Each zone's bitmap is
 sized to its own `unit_capacity`, which is word-aligned.
 
 ## 3. Record Model
@@ -207,7 +207,7 @@ large (full bitmap), and frees are random across all zones and disks,
 so a per-free `ZoneValue` write is too expensive. Instead, each free
 writes a small `FreeBlockValue` and deletes the `BusyBlockKey` in one
 `batch_write`; later, compaction lists the free records for a zone (a
-prefix scan — the free records of one zone are contiguous in the
+prefix scan (the free records of one zone are contiguous in the
 crow-tree page, so this is efficient), merges them into the `ZoneValue`
 bitmap (clear the freed bits), writes the updated `ZoneValue` once, and
 deletes the free records in one `batch_write`.
@@ -219,7 +219,7 @@ three complementary strategies (§6).
 **lexicographic key order** (= `unit_offset` order), not slot order.
 `min_slot` on the crow-kv scan request is a read-freshness floor, not a
 record-slot filter. Strategy 1 works without slot ordering because the
-busy record's existence is the indicator — a block is busy iff its
+busy record's existence is the indicator: a block is busy iff its
 `BusyBlockKey` exists (not the write order). Strategy 2 requires the
 `JournalScan` extension to get slot-ordered replay.
 
@@ -251,11 +251,11 @@ Bitmap-scan with per-bit CAS (no zone-level lock):
    set in this attempt and continue scanning.
 5. On success: update `last_pos_64`, increment `used_count`, return
    `AllocatedRange { unit_offset, unit_count }`. No zone-level state
-   change — other threads can allocate concurrently.
+   change. Other threads can allocate concurrently.
 
 ### Disk-level allocate (sync) — rotating active-zone-set
 
-1. Load the current `ActiveZoneContext` (RCU read — `Arc` clone, no
+1. Load the current `ActiveZoneContext` (RCU read, `Arc` clone, no
    lock held). This is a small set of `zone_rotate_count` zones.
 2. Round-robin over the active set via `pos_v_zone_ctx.fetch_add(1)`.
 3. Call `zone.allocate(unit_count)` on each zone. On success, return.
@@ -270,13 +270,13 @@ Bitmap-scan with per-bit CAS (no zone-level lock):
 ### Round-robin across disks within the named disk-group (sync)
 
 The `AllocateBlocks` request carries `disk_group_id` (root §3.2);
-allocate is scoped to one disk-group — diskdb never round-robins across
+allocate is scoped to one disk-group. diskdb never round-robins across
 disk-groups. Within that named disk-group, an `AtomicU64` iterator
 (`pos_v_disk_ctx`) round-robins across disks: each allocation increments
 and selects `iterator % num_disks` from the `AllocateDiskContext` (RCU
 context of allocatable disks within the named disk-group). Multi-block:
 `fetch_add(count)` distributes across disks within the group.
-`exclude_disks` (anti-affinity, per-disk — skip a disk that just failed)
+`exclude_disks` (anti-affinity, per-disk, skip a disk that just failed)
 is applied within the named disk-group. Multi-block uses one
 `batch_write` on the disk-group's bound paxos data group; atomic within
 the group. No cross-group multi-block allocate in v1.
@@ -284,12 +284,12 @@ the group. No cross-group multi-block allocate in v1.
 ### Two-phase async allocation
 
 1. **Phase 1 (sync)**: bitmap-scan allocate (nanoseconds). Bits are set
-   in `usage_bits` via per-bit CAS. No zone-level lock — other threads
+   in `usage_bits` via per-bit CAS. No zone-level lock. Other threads
    can allocate concurrently.
 2. **Phase 2 (async)**: `.await` on crow-kv `batch_write` that Puts
    the `BusyBlockValue` at `BusyBlockKey { disk_id, zone_idx,
    unit_offset }` **and** Deletes any prior `FreeBlockKey` for the same
-   offset (re-allocate clears the stale free marker — §3 Record model).
+   offset (re-allocate clears the stale free marker, §3 Record model).
    On success: return `Segment`. On failure:
    `zone.rollback_allocate(unit_offset, unit_count)` (clear the bits
    that were set in Phase 1), return error.
@@ -302,7 +302,7 @@ data group (one async round-trip per group).
 
 The free path is **persist-only**: delete `BusyBlockKey` + put
 `FreeBlockValue` in one `batch_write`. The in-memory bitmap is **not**
-touched — the bit stays set, `used_count` is not decremented. The block
+touched. The bit stays set, `used_count` is not decremented. The block
 is freed on disk but still shows busy in memory until compaction clears
 the bit (§5). This is the data-safety principle: the bitmap is a
 conservative over-estimate that never shows freed space as available
@@ -310,14 +310,14 @@ until compaction reconciles it from records.
 
 The free path increments `uncompacted_free_record_count` (an atomic
 counter per zone) so compaction knows there is work to do. No `FreeBatch`,
-no timer, no background flush loop — the free is a single durable
+no timer, no background flush loop. The free is a single durable
 operation, and the bitmap reconciliation is deferred to compaction.
 
 Free steps:
 1. **Phase 0 (optional)**: when `validate_owner_on_free` is `true`, read
    the `BusyBlockValue` from the data group and validate `owner_chunk`
    before persisting. Rejects on `NotBusy` or `OwnerMismatch`. When
-   `false` (default), no KV read — `owner_chunk` comes from the
+   `false` (default), no KV read. `owner_chunk` comes from the
    `Segment` (§8 Free-side lookup structures).
 2. **Phase 1 (persist)**: one `batch_write` (Delete `BusyBlockKey` + Put
    `FreeBlockValue` at `FreeBlockKey`). The `FreeBlockValue` carries
@@ -330,15 +330,15 @@ Free steps:
 
 Persist-before-bitmap-clear is not needed here because the bitmap is
 never cleared on free. The persist is the entire free operation. If the
-persist fails, the block is still busy on both disk and memory — the
+persist fails, the block is still busy on both disk and memory. The
 caller can retry safely. If the persist succeeds, the block is free on
 disk; the in-memory bitmap still shows it busy (conservative over-
 estimate) until compaction reconciles.
 
 Free batching (grouping many frees into one `batch_write` per flush,
-triggered by batch size — no timer) is an optimization for high-free-
+triggered by batch size, no timer) is an optimization for high-free-
 throughput workloads, tracked as a future optimization. With persist-only
-free, batching does not change the bitmap contract — the bitmap is never
+free, batching does not change the bitmap contract. The bitmap is never
 touched on free, regardless of batching.
 
 **`rollback_allocate` — allocate-only bitmap clear:** the
@@ -357,21 +357,21 @@ avoids bias toward low-index zones.
 
 ### Compaction-on-rotation
 
-Before a zone enters the active set, it **must be compacted** — freed
+Before a zone enters the active set, it **must be compacted**: freed
 bits cleared, `used_count` recomputed, snapshot written, free records
 deleted. This ensures the allocator sees accurate free space in active
 zones. Without compaction, a rotated-in zone would have stale set bits
 for freed-but-not-compacted blocks, and the allocator would skip them
 (appearing fuller than it is).
 
-Compaction runs on **non-active zones only** — no concurrent allocate.
+Compaction runs on **non-active zones only**, no concurrent allocate.
 The zone-level lock (§8) ensures compaction, scanner, and health checks
 do not conflict with each other on the same zone.
 
 ### Preparatory thread
 
 A separate background thread pre-compacts the next batch of
-`zone_rotate_count` zones in advance, so rotation is instant — the next
+`zone_rotate_count` zones in advance, so rotation is instant. The next
 active set is already compacted and ready to publish via RCU. The
 preparatory thread runs continuously:
 
@@ -391,7 +391,7 @@ thread then starts building the next ready set.
 not finished pre-compacting (e.g., on startup, or under heavy churn
 where zones exhaust faster than compaction can keep up), rotation falls
 back to **synchronous compaction**: compact the next batch inline, then
-publish. This is slower but correct — the allocator waits for
+publish. This is slower but correct. The allocator waits for
 compaction to finish before allocating from the new zones.
 
 ### Periodic compaction fallback
@@ -420,19 +420,19 @@ before the next compaction.
 2. **Partition free records by watermark:**
    - **Stale** (`freed_ts <= compact_ts`): already merged into the
      bitmap by a prior compaction (or a crashed compaction that wrote
-     the snapshot but didn't finish the delete). These are dropped —
-     their bits are already clear in the bitmap. Do NOT `range_clear`
+     the snapshot but didn't finish the delete). These are dropped.
+     Their bits are already clear in the bitmap. Do NOT `range_clear`
      them again (the block may have been re-allocated since; clearing
      would corrupt a live allocation).
    - **New** (`freed_ts > compact_ts`): not yet merged. These need
      `range_clear` to clear their bits.
 3. **Acquire zone-level lock**, merge only the **new** free records
-   into the in-memory bitmap (`range_clear` per new free record — clear
+   into the in-memory bitmap (`range_clear` per new free record, clear
    the freed bits), recompute `used_count = popcount`. Re-read
    `zone.compact_ts` under the lock (the step-1 read was unlocked and
    may be stale if another compaction ran in between). Compute
    `new_compact_ts = max(zone.compact_ts, max(freed_ts of all new free
-   records))` — the max with the current `compact_ts` prevents
+   records))`. The max with the current `compact_ts` prevents
    regression when the step-1 read was stale (range_clear on
    already-cleared bits is a no-op, but a regressed `compact_ts` would
    violate the watermark invariant). If there are no new free records,
@@ -443,7 +443,7 @@ before the next compaction.
    CRC32 checksum. Update `snapshot_slot` and `compact_ts` on the zone.
 6. **One atomic `batch_write`**: Put the new `ZoneValue` + Delete all
    scanned free records (both stale and new). This is a single
-   `batch_write` on the bound data group — atomic via crow-kv paxos.
+   `batch_write` on the bound data group, atomic via crow-kv paxos.
    The snapshot and the free-record deletion succeed or fail together;
    there is no window where the snapshot is written but the free
    records survive (the race that caused double-free in the two-op
@@ -463,7 +463,7 @@ snapshot, then delete free records):
 - F1's `FreeBlockKey` is orphaned. The bitmap has F1's bit clear.
 - F1's block is re-allocated (new `BusyBlockValue`, bit set again).
 - Next compaction scans [F1 (`freed_ts=100`)]. Without the watermark,
-  it would `range_clear` F1's bit — **corrupting the new allocation**
+  it would `range_clear` F1's bit, **corrupting the new allocation**
   (double-free).
 
 With the watermark:
@@ -475,9 +475,9 @@ With the watermark:
 **Worst case:** if the watermark logic incorrectly classifies a new
 free as stale (e.g., clock skew causes `freed_ts <= compact_ts` for a
 genuinely new free), the free record is dropped without clearing the
-bit. The block stays busy in the bitmap — **wasted space, no data loss**
+bit. The block stays busy in the bitmap, **wasted space, no data loss**
 (conservative over-estimate, I1). The background scanner (§9) detects
-this drift (bit set, no `BusyBlockKey`, no `FreeBlockKey` — real
+this drift (bit set, no `BusyBlockKey`, no `FreeBlockKey`, real
 ghost-busy) and can correct it. This is the data-safety principle: fail
 conservative (keep busy), never free a block that might have data.
 
@@ -514,9 +514,9 @@ maintenance. All three belong in the design, each in its role.
 Scan all live `BusyBlockKey`s for a zone and rebuild the bitmap from
 scratch. No snapshot needed. For each offset: if a `BusyBlockKey`
 exists, the bit is set (busy); otherwise the bit is clear (free). No
-slot ordering needed — the busy record's existence is the indicator.
+slot ordering needed. The busy record's existence is the indicator.
 (`FreeBlockKey`s carry `previous_owner` audit info but are not needed
-for state determination.) **Not in the common code flow** — provided
+for state determination.) **Not in the common code flow**, provided
 as an on-demand operation via the `RebuildZoneBitmap` RPC and API, used
 for consistency checks (verify the in-memory bitmap matches the
 records) or a full rebuild (e.g. after corruption, or when no
@@ -529,7 +529,7 @@ many zones, but correct and always available.
 Load the `ZoneValue` snapshot, then replay only the operations (Put /
 Delete) written after `snapshot_slot`, in slot order, and apply them to
 the snapshot bitmap. One scan per disk-group (or per disk) covers all
-its zones — batch recovery, low overhead. **Requires a `JournalScan`
+its zones, batch recovery, low overhead. **Requires a `JournalScan`
 crow-kv RPC** (slot-range + key-prefix filter, returns ops in slot
 order). This is the sole crow-kv extension diskdb needs. Fast because
 compaction (strategy 3) keeps the uncompacted record set small.
@@ -540,7 +540,7 @@ Periodically (or when the free-record count for a zone exceeds a
 threshold), merge free records into the `ZoneValue` bitmap and delete
 the free records in one `batch_write`. This keeps the uncompacted record
 set small, so strategy 2's replay is fast. Uses the existing `scan` +
-`batch_write` API — no crow-kv extension needed. Batch by `disk_id`
+`batch_write` API, no crow-kv extension needed. Batch by `disk_id`
 prefix: one scan covers all zones on a disk (free records of one zone
 are contiguous in the tree page). Only free records are deleted; busy
 records for live blocks are untouched (busy records for freed blocks
@@ -567,10 +567,10 @@ were already deleted on free).
 ### Crash-safety invariants
 
 The in-memory bitmap is a **conservative over-estimate** of busy
-blocks — it is never cleared on the free path. Free is persist-only
+blocks. It is never cleared on the free path. Free is persist-only
 (delete `BusyBlockKey` + put `FreeBlockValue`); the bitmap bit stays
 set until compaction clears it (§5). This means the bitmap may show a
-block as busy when it is actually freed on disk — this is intentional
+block as busy when it is actually freed on disk. This is intentional
 (data-safety principle: never show a block as free until compaction has
 confirmed it from records). The durable state is the set of
 `BusyBlockKey` / `FreeBlockKey` / `ZoneValue` records on the bound data
@@ -630,7 +630,7 @@ group. The **current-state rule** (a block is busy iff its
   but an orphaned `FreeBlockKey` survived a crashed compaction, the
   next compaction drops it via the watermark — no double-free.)
 
-The bitmap is never persisted on the allocate/free hot path — only the
+The bitmap is never persisted on the allocate/free hot path. Only the
 `ZoneValue` snapshot (written by compaction) carries a serialized
 bitmap, with `snapshot_slot` (replay start point), `compact_ts`
 (compaction watermark), and `crc32` (integrity check over
@@ -646,7 +646,7 @@ snapshot.
   the bitmap (clear the bits set in Phase 1 via
   `zone.rollback_allocate`) and return error. No record was written, so
   the record set is consistent (no ghost). `rollback_allocate` is the
-  bitmap CAS-clear, used only by allocate rollback — not by the free
+  bitmap CAS-clear, used only by allocate rollback, not by the free
   path.
 - **Free persist failure** (`batch_write` fails): the bitmap was
   never touched. Return error; the block is still busy on both disk
@@ -687,7 +687,7 @@ and returns the reconstructed `Node`.
    `KV_ERROR_JOURNAL_SCAN_GC_GAP` response falls back to strategy 1.
 4. Apply only `Put BusyBlockKey` ops in slot order: each sets the bit
    range using `BusyBlockValue.unit_count`. `Delete BusyBlockKey` ops
-   (frees) are **ignored** — the bitmap stays as a conservative over-
+   (frees) are **ignored**. The bitmap stays as a conservative over-
    estimate (persist-only recovery, consistent with the free path
    during normal operation). `Put`/`Delete FreeBlockKey` are no-ops for
    the bitmap. The free records on disk are the source of truth for
@@ -697,11 +697,11 @@ and returns the reconstructed `Node`.
    records still exist on disk.
 5. Return the rebuilt `Zone`, resetting the rotating cursor. Mark the
    zone as `compacted_ready = true` (it was just recovered from
-   records). `compact_ts` stays at `snapshot.compact_ts` — no
+   records). `compact_ts` stays at `snapshot.compact_ts`, no
    advancement needed. The free records on disk have `freed_ts >
    snapshot.compact_ts` (they were written after the snapshot), so the
    next compaction will classify them as "new" and `range_clear` their
-   bits — correct, since those blocks ARE free (no `BusyBlockKey` on
+   bits, correct, since those blocks ARE free (no `BusyBlockKey` on
    disk). Count the net free records (Put FreeBlockKey = +1, Delete
    FreeBlockKey = -1 from re-allocate) to initialize
    `uncompacted_free_record_count` so the compaction engine knows the
@@ -722,7 +722,7 @@ and returns the reconstructed `Node`.
 4. Return the rebuilt `Zone` plus derived stats. Mark the zone as
    `compacted_ready = true`.
 
-`compact_zone` (strategy 3) is the background maintenance task — see
+`compact_zone` (strategy 3) is the background maintenance task. See
 §5 Compaction algorithm.
 
 ### Recovery triggers
@@ -741,19 +741,19 @@ and returns the reconstructed `Node`.
 `ZoneAllocationState` is a **derived** enum for reporting only:
 `Active` (`used_count == 0`), `Available` (0 < `used_count` <
 `unit_capacity`), `Full` (`used_count == unit_capacity`). There is no
-CAS state machine — allocation concurrency is handled by per-bit CAS on
+CAS state machine. Allocation concurrency is handled by per-bit CAS on
 the usage bitmap. A zone is allocatable when it is Healthy (inheriting
 the disk's `HwStatus`) and `used_count < unit_capacity`.
 
 In the persist-only model, `used_count` is only decremented by
 compaction (never by free). So after a free, `used_count` still reflects
-the pre-free count — the zone may show `Full` even though it has freed
+the pre-free count. The zone may show `Full` even though it has freed
 blocks on disk. This is correct: the bitmap is a conservative over-
 estimate, and the derived state reflects the bitmap, not the durable
 records. After compaction clears the freed bits and recomputes
 `used_count`, the derived state accurately reflects the durable state.
 A zone that was `Full` before compaction may become `Available` after
-compaction — and then it is eligible for rotation back into the active
+compaction, and then it is eligible for rotation back into the active
 set.
 
 ## 8. Concurrency Model
@@ -774,7 +774,7 @@ Allocate runs only on active zones (in the `active_zone_context`).
 
 One `batch_write` (Delete `BusyBlockKey` + Put `FreeBlockValue`). No
 bitmap touch, no `used_count` decrement, no zone-level lock. Free can
-run on any zone (active or not) without coordination — it only writes
+run on any zone (active or not) without coordination. It only writes
 to the KV store and increments `uncompacted_free_record_count`. The
 bitmap is reconciled later by compaction.
 
@@ -784,7 +784,7 @@ Compaction, scanner, and health checks acquire a zone-level lock
 (`RwLock<()>` on `DdbZone`) to coordinate with each other. These
 operations run on **non-active zones only** (no concurrent allocate), so
 the lock does not contend with the allocate hot path. The lock protects
-only the in-memory bitmap mutation — it is **not** held across `.await`
+only the in-memory bitmap mutation. It is **not** held across `.await`
 on the KV client. The KV read is done before acquiring the lock, and the
 KV write is done after releasing the lock.
 
@@ -857,7 +857,7 @@ correctly across ownership transfers.
 is behind the previous owner's, the monotonic guard (init from existing
 records' `freed_ts`) keeps timestamps increasing. If the guard is
 somehow bypassed (bug), a new free could get `freed_ts <= compact_ts`
-and be misclassified as stale by compaction — the block stays busy
+and be misclassified as stale by compaction. The block stays busy
 (wasted space, no data loss, I1/I7). The scanner (§9) detects this as
 real ghost-busy drift and can correct it. This is the data-safety
 principle: fail conservative (keep busy), never free a block that

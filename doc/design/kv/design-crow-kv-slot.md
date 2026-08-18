@@ -97,7 +97,7 @@ The number of in-flight slots is capped at the **window size** (`max_inflight_pr
 
 ## 5. Pipelined Fanout
 
-As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ...)` to all followers. It does **not** wait for slot N-1, N-2, etc. to reach quorum first.
+As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ...)` to all followers. It does **not** wait for slot N-1, N-2 to reach quorum first.
 
 **Transport: per-peer bidi `LearnerStream`.** The leader uses one long-running gRPC bidi stream per `(group_id, peer_id)` pair (see [`design-crow-kv-rpc.md`](design-crow-kv-rpc.md) §3). The stream's background task maintains a `PendingMap` (`HashMap<request_id, oneshot::Sender>`). Because each `Accept` gets its own oneshot, the leader can enqueue slot N+1's `Accept` before slot N's `Accepted` response has returned.
 
@@ -107,7 +107,7 @@ As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ..
 
 **Out-of-order `Accepted` and `Chosen` notifications are fine.** A follower may respond `Accepted(N+2)` before `Accepted(N)`. Each is processed independently. A follower may receive `Chosen(N+2)` before `Chosen(N)` and apply only the parts safe to apply (per-key tracking handles this).
 
-**Zero-copy accept path.** `Acceptor::accept` and `ReplicaHandler::on_accept` take `&PxLogEntry` instead of owned `PxLogEntry`. The caller (proposer's `run_accept_phase`, gRPC `handle_accept_inner`, WAL replay) passes a reference — no clone for the acceptor call. The only clone is inside `inner_accept` for `cas_accepted`, where the slot node must own its copy. `WALRecord::from_accepted` already borrows, so the WAL encode after accept is also zero-copy. With `Bytes` payloads these clones were O(1) ref-count bumps; the signature change makes the zero-copy intent explicit and avoids redundant bumps.
+**Zero-copy accept path.** `Acceptor::accept` and `ReplicaHandler::on_accept` take `&PxLogEntry` instead of owned `PxLogEntry`. The caller (proposer's `run_accept_phase`, gRPC `handle_accept_inner`, WAL replay) passes a reference; no clone for the acceptor call. The only clone is inside `inner_accept` for `cas_accepted`, where the slot node must own its copy. `WALRecord::from_accepted` already borrows, so the WAL encode after accept is also zero-copy. With `Bytes` payloads these clones were O(1) ref-count bumps; the signature change makes the zero-copy intent explicit and avoids redundant bumps.
 
 ---
 
@@ -136,7 +136,7 @@ A peer that has never reported is treated as `0`, so the safe-slot only rises on
 
 **Propagation.** The leader includes `safe_slot` in heartbeats, write responses, read responses, and the describe-cluster RPC.
 
-`Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot — it is strictly ≥ safe-slot at all times ([§6.4 of design-crow-kv.md](design-crow-kv.md#64-scan-modes)).
+`Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot. It is strictly ≥ safe-slot at all times ([§6.4 of design-crow-kv.md](design-crow-kv.md#64-scan-modes)).
 
 ---
 
@@ -174,9 +174,9 @@ The leader-side repair in §9 closes gaps in the leader's *chosen* frontier. Fol
 
 ### 9A.1 Accept Path Stores Only
 
-A follower's `handle_accept` stores the accepted value in its acceptor and persists it to the WAL, but does **not** advance `known_commit_slot` or wake the apply loop. Accept is a storage event, not a commit event — the leader may crash before reaching quorum, in which case the accepted value may never be chosen (or may be overwritten by a higher-ballot value during new-leader recovery).
+A follower's `handle_accept` stores the accepted value in its acceptor and persists it to the WAL, but does **not** advance `known_commit_slot` or wake the apply loop. Accept is a storage event, not a commit event. The leader may crash before reaching quorum, in which case the accepted value may never be chosen (or may be overwritten by a higher-ballot value during new-leader recovery).
 
-Advancing the apply frontier on Accept would let a follower apply an un-chosen value, violating Paxos safety — the same class of bug as applying before `leaderCommit` in Raft.
+Advancing the apply frontier on Accept would let a follower apply an un-chosen value, violating Paxos safety, the same class of bug as applying before `leaderCommit` in Raft.
 
 The one exception is the new-leader transition: after a follower wins election and completes bulk Phase 1 over `[contiguous_chosen+1, ceiling]`, it advances `known_commit_slot` to its new `contiguous_chosen` and wakes the apply loop. This is safe because bulk Phase 1 has resolved (chosen or NoOp-filled) every slot in that range under the new leader's ballot.
 
@@ -184,11 +184,11 @@ The one exception is the new-leader transition: after a follower wins election a
 
 When the leader chooses a slot, it broadcasts a `ChosenNotice` carrying `(slot, term, leader_id, ballot_round)` to all followers. The follower's ChosenNotice handler:
 
-- If the follower's acceptor has an accepted value at `slot` with `ballot == chosen_ballot` → the value matches what was chosen. The follower calls `update_chosen_frontier` and wakes the apply loop. Apply can proceed out-of-order — the per-key slot tracking in §3 makes this safe (highest slot wins per key).
+- If the follower's acceptor has an accepted value at `slot` with `ballot == chosen_ballot` → the value matches what was chosen. The follower calls `update_chosen_frontier` and wakes the apply loop. Apply can proceed out-of-order; the per-key slot tracking in §3 makes this safe (highest slot wins per key).
 - If the follower's accepted ballot at `slot` is **lower** than the chosen ballot (stale) → the follower has an outdated value. It records a gap for `slot` (driven by FetchGap, §9A.3) and does not apply.
 - If the follower has no accepted value at `slot` → it records a gap and does not apply.
 
-The `ballot_round` field in the ChosenNotice proto enables this verification — without it, the follower cannot distinguish a fresh chosen value from a stale re-delivery.
+The `ballot_round` field in the ChosenNotice proto enables this verification. Without it, the follower cannot distinguish a fresh chosen value from a stale re-delivery.
 
 ### 9A.3 Follower-Driven FetchGap Catch-up
 
@@ -199,7 +199,7 @@ When a follower detects a gap (missing or stale slot in the chosen range), it se
 
 On receipt, the follower overwrites any stale accepted value with the chosen value, updates its chosen frontier, and wakes the apply loop. FetchGap is bounded by `MAX_INFLIGHT_FETCHGAP` (default 16) to avoid flooding the leader.
 
-This replaces the previous leader-driven catch-up that ran inline in `run_heartbeat_round` (up to 64 synchronous `send_accept().await` calls per lagging follower). That inline catch-up could exceed `heartbeat_interval` and trigger spurious elections. The heartbeat round is now pure liveness + lease — one RPC round-trip, no catch-up work.
+This replaces the previous leader-driven catch-up that ran inline in `run_heartbeat_round` (up to 64 synchronous `send_accept().await` calls per lagging follower). That inline catch-up could exceed `heartbeat_interval` and trigger spurious elections. The heartbeat round is now pure liveness + lease: one RPC round-trip, no catch-up work.
 
 ### 9A.4 Snapshot Fallback
 
@@ -281,7 +281,7 @@ Parallel slots interact with WAL GC through two watermarks:
 - `safe_slot` — every slot ≤ `safe_slot` is chosen and applied on every learner.
 - `snapshot_slot` — the engine state at `snapshot_slot` is durably snapshotted on at least the leader and one peer.
 
-**WAL GC rule:** discard WAL records with `slot < min(safe_slot, snapshot_slot)`. Both must advance past a slot before its WAL record can be GC'd. Repair never needs GC'd slots — every slot ≤ safe_slot is already chosen on every learner, so it cannot be a gap.
+**WAL GC rule:** discard WAL records with `slot < min(safe_slot, snapshot_slot)`. Both must advance past a slot before its WAL record can be GC'd. Repair never needs GC'd slots; every slot ≤ safe_slot is already chosen on every learner, so it cannot be a gap.
 
 Detailed further in [`design-crow-kv-wal.md`](design-crow-kv-wal.md) §4.
 
@@ -306,7 +306,7 @@ The bulk Phase-1 typically resolves open gaps in a single RTT. Steady-state gaps
 
 ## 13. Correctness Analysis for Parallel Slot Writes
 
-**Key insight:** Parallel slot writes are safe because we only support **blind operations** (`Put`, `Delete`) — no operation reads current state before writing. The final value of each key is determined solely by the highest slot that touched it.
+**Key insight:** Parallel slot writes are safe because we only support **blind operations** (`Put`, `Delete`). No operation reads current state before writing. The final value of each key is determined solely by the highest slot that touched it.
 
 - **Consensus phase (parallel):** Each `PxSlot` is an independent Paxos instance. They can be decided in any order.
 - **Apply phase (per-key slot tracking):** `PxLearner`s store `(slot, value)` per key and only accept writes where `slot > current_slot`. Regardless of apply order, the highest slot wins.
@@ -430,7 +430,7 @@ Paxos operations use `get_tail_ptr` / `get_ptr` to obtain the `AtomicPtr<PxSlotN
 
 ### 18.1 Insert (by external slot)
 
-The caller decides the exact `slot`; the list only stores the value. Slots may be non-consecutive (sparse). `insert` locates or lazily creates the chunk covering the slot, pins the chunk (`reader_refs += 1`), then CAS-installs the slot object from `null → ptr`. If another writer raced, the existing object is kept. `insert` never replaces an existing slot pointer — callers needing field-level CAS use `get_ptr` / `get_tail_ptr` directly.
+The caller decides the exact `slot`; the list only stores the value. Slots may be non-consecutive (sparse). `insert` locates or lazily creates the chunk covering the slot, pins the chunk (`reader_refs += 1`), then CAS-installs the slot object from `null → ptr`. If another writer raced, the existing object is kept. `insert` never replaces an existing slot pointer; callers needing field-level CAS use `get_ptr` / `get_tail_ptr` directly.
 
 Chunk lookup (`find_or_create_chunk`) walks the doubly-linked list to find the predecessor/successor window around the aligned chunk start, then splices a new chunk in via CAS. Sparse gaps are cheap: no chunk is allocated for empty ranges.
 
@@ -448,7 +448,7 @@ Chunk lookup (`find_or_create_chunk`) walks the doubly-linked list to find the p
 
 ### 18.5 Chunk-Level Reclamation
 
-A background `reclaim()` walks the retired list and frees chunks whose `reader_refs == 0`. **Single-caller by contract.** This is safe because `trim_slot` is advanced before chunk unlinking — only readers that pinned the chunk before trim can still hold a reference.
+A background `reclaim()` walks the retired list and frees chunks whose `reader_refs == 0`. **Single-caller by contract.** This is safe because `trim_slot` is advanced before chunk unlinking; only readers that pinned the chunk before trim can still hold a reference.
 
 **Current limitation:** there is a narrow race between "reader has observed a chunk pointer" and "reader has incremented `reader_refs`". The current manual scheme is safe under a restricted envelope (single GC caller, disciplined reclaim timing). For fully general lock-free safety, use epoch/hazard pointers or `Arc<Chunk<T>>` ownership.
 
@@ -553,8 +553,8 @@ full quorum round.
 The first op starts a 1-op slot-task **immediately** (no timer). Ops
 arriving during the round join a pending batch. On round completion,
 `coalesce_drain_after_round` checks the in-flight slot-task count
-(`occupied` — permits held) before taking the pending batch. If
-`occupied >= coalesce_drain_threshold`, the drain is skipped — the
+(`occupied`, permits held) before taking the pending batch. If
+`occupied >= coalesce_drain_threshold`, the drain is skipped; the
 `max_keys` overflow path handles high load with full batches. If
 `occupied < coalesce_drain_threshold`, the pending batch is taken and
 the next slot-task is started (if non-empty) or the coalescer goes
@@ -563,7 +563,7 @@ idle (if empty).
 At high load, drains almost never fire (many slot-tasks in flight);
 the `max_keys` overflow path produces full batches. At low load,
 drains always fire (few slot-tasks, threshold not exceeded), so there
-is no latency floor — a lone op flushes immediately. Default
+is no latency floor; a lone op flushes immediately. Default
 `coalesce_drain_threshold = 1` (see §23.5).
 
 ### 23.3 Coalescer Design
@@ -596,7 +596,7 @@ Per-group state on `PxGroup`:
 2. Dedup lookup (as before) — a hit returns the cached slot
    immediately, never enters a batch.
 3. If `coalesce_max_keys == 0` (disabled) or `self_weak` is unset:
-   call `propose_inner(payload, &[tag])` directly — bit-identical to
+   call `propose_inner(payload, &[tag])` directly; bit-identical to
    the fallback path.
 4. Else (coalescing on): `coalesce_enqueue(payload, tag)`:
    - Coalescer is `None` (idle) → create a batch with this op, start a
@@ -681,12 +681,12 @@ the group via `set_from_config` (the coalescer reads
   any replica that has it; outside the window, safe to re-propose
   (per-key highest-slot-wins makes a re-propose idempotent at the
   engine level). Identical guarantee shape as before.
-- **Per-key ordering**: unchanged — all ops in a batch share one slot;
+- **Per-key ordering**: unchanged; all ops in a batch share one slot;
   across batches, per-key highest-slot-wins applies as before.
 - **`ProposeResult::Chosen { slot }` contract**: every coalesced
   waiter receives the same slot. `ProposeResult` gains `Clone`.
 - **`coalesce_max_keys = 0`**: `propose` calls `propose_inner` with a
-  1-tag slice — the paxos loop is unchanged; the only difference is
+  1-tag slice; the paxos loop is unchanged; the only difference is
   the `&[DedupTag]` vs `(Option, Option)` plumbing, which records the
   same single dedup entry. No behavior change.
 - **Leadership**: re-checked inside `propose_inner`; a step-down
@@ -712,6 +712,6 @@ the group via `set_from_config` (the coalescer reads
 
 Drain beats Timer at high load (128: 102K vs 98K, 256: 118K vs 114K) with
 WAL counts close to Timer. At 64 threads it matches Event mode and beats
-Timer. At 32 threads it matches Event mode (no regression) — the default
+Timer. At 32 threads it matches Event mode (no regression). The default
 threshold of 1 still allows drains at low load, preserving the zero-
 latency-floor behavior.

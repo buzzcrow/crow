@@ -79,7 +79,7 @@ queried through `KVEngine::resume_from_slot()`. This replaces the former
 **Restart behavior** (`PxLocalReplica::restore_from_replay_with_engine`,
 `lib/crow-kv/src/cluster/local_replica.rs`):
 
-1. WAL replay rebuilds acceptor state (`Promised`, `Accepted`, `VoteGranted`) — Pass 1, unconditional.
+1. WAL replay rebuilds acceptor state (`Promised`, `Accepted`, `VoteGranted`), Pass 1, unconditional.
 2. The engine reports `resume_from = resume_from_slot()`: the highest slot it
    already durably reflects (always `0` for `InMemKV`; crow-tree's
    `last_applied_slot`, restored from its on-disk commit anchor, for a
@@ -87,7 +87,7 @@ queried through `KVEngine::resume_from_slot()`. This replaces the former
 3. Pass 2 `learn()`s every WAL-accepted slot in `(resume_from, highest_local]`
    into the engine, in order, and fast-forwards the learner's frontier
    (`contiguous_chosen`/`contiguous_applied`/`last_chosen_term`) directly to
-   `resume_from` via `seed_resume_frontier` — skipping the now-redundant
+   `resume_from` via `seed_resume_frontier`, skipping the now-redundant
    re-`learn()` of the already-durable prefix.
 4. Slots above the local WAL's own highest accepted slot are re-learned via
    new-leader recovery (bulk Phase 1) or steady-state heartbeat catch-up (§6
@@ -97,7 +97,7 @@ Step 3's skip is a pure **optimization**, not a correctness requirement:
 `KVEngine::apply` is idempotent (highest-slot-wins per key) and
 `update_frontier` tolerates out-of-order slots, so replaying the *entire*
 local WAL through `learn()` (`resume_from = 0`, `InMemKV`'s permanent case)
-always converges to the same correct state — it's just extra, safe, no-op
+always converges to the same correct state. It's just extra, safe, no-op
 work. `persist_snapshot()` (called periodically by the group's maintenance
 loop, `lib/crow-kv/src/cluster/group_maintenance.rs::run_pass`) is what advances
 the durable floor `resume_from_slot()` will report on the *next* restart.
@@ -123,7 +123,7 @@ Tombstones occupy space until compacted away (§7).
 
 CROW does not provide repeatable reads or time-travel queries. Snapshot reads use the `AtSlot(N)` mode by waiting for the engine's contiguous-applied to reach `N`, then reading the current single version.
 
-`Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability: slot `M` linearizes after slot `N`, so the read at "logical instant `N`" is consistent with reading at the later linearization point `M` — both are valid linearization points for a single point in real time. `AtSlot(N)` is therefore a *lower bound on freshness*, not a snapshot pin: single-version reads always reflect the latest applied value.
+`Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability: slot `M` linearizes after slot `N`, so the read at "logical instant `N`" is consistent with reading at the later linearization point `M`. Both are valid linearization points for a single point in real time. `AtSlot(N)` is therefore a *lower bound on freshness*, not a snapshot pin: single-version reads always reflect the latest applied value.
 
 If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from design-crow-kv.md §1 / §5.2](design-crow-kv.md).
 
@@ -131,7 +131,7 @@ If true historical snapshots are ever required, MVCC is a future extension. The 
 
 The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-crow-kv-slot.md`](design-crow-kv-slot.md#2-concepts-and-invariants).
 
-Implication: replays and out-of-order applies are naturally idempotent. If WAL replay tries to apply slot 7 for key `k` and `resolved_slot(k)` is already 9, the apply is a no-op for `k` — consistent with the parallel-slot semantics.
+Implication: replays and out-of-order applies are naturally idempotent. If WAL replay tries to apply slot 7 for key `k` and `resolved_slot(k)` is already 9, the apply is a no-op for `k`, consistent with the parallel-slot semantics.
 
 ---
 
@@ -163,11 +163,11 @@ In-memory engines can hold a write lock for the duration of the batch. File-base
 
 ### 4.4 Intra-batch order
 
-For a key `k` appearing multiple times in a batch (rare but legal — see [`design-crow-kv-slot.md` §13](design-crow-kv-slot.md#13-correctness-analysis-for-parallel-slot-writes)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
+For a key `k` appearing multiple times in a batch (rare but legal; see [`design-crow-kv-slot.md` §13](design-crow-kv-slot.md#13-correctness-analysis-for-parallel-slot-writes)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
 
 ### 4.5 Failure during apply
 
-`apply` either completes or returns an error. On error, the engine must leave its state unchanged (no partial apply). The learner treats engine apply errors as fatal — they indicate disk corruption or out-of-space — and fails the node out of the group.
+`apply` either completes or returns an error. On error, the engine must leave its state unchanged (no partial apply). The learner treats engine apply errors as fatal (they indicate disk corruption or out-of-space) and fails the node out of the group.
 
 ### 4.6 Zero-copy batch decode
 
@@ -179,7 +179,7 @@ would otherwise occur on every `learn_chosen` call.
 
 `Op::Put(Bytes)` and `BatchOp.key: Bytes` use `Bytes` (ref-counted,
 owned, `Send`) rather than `Vec<u8>`. The `KVEngine::apply` trait
-signature is unchanged — it still takes `&Batch`. Engine
+signature is unchanged; it still takes `&Batch`. Engine
 implementations use `Bytes::as_ref()` to obtain `&[u8]` for FFI or
 internal storage. `Cell` and `EngineDiff` remain `Vec<u8>` since they
 represent engine-internal storage, not the decode path.
@@ -207,9 +207,9 @@ in `learn` right after the synchronous `apply_entry`, so
 path.** The leader's propose path splits `learn`: the chosen-frontier
 advance and dedup record run **synchronously** (cheap atomics, before
 `propose` returns `Chosen`), and only `apply_entry` + the applied-frontier
-advance are `tokio::spawn`'d. This keeps `contiguous_chosen` current — a
+advance are `tokio::spawn`'d. This keeps `contiguous_chosen` current: a
 subsequent read's `read_slot = contiguous_chosen` reflects the
-just-chosen slot — while `contiguous_applied` lags by the spawned apply.
+just-chosen slot, while `contiguous_applied` lags by the spawned apply.
 Spawned applies can complete out of order, so the applied frontier has its
 own out-of-order drain (a `BTreeSet`), mirroring the chosen frontier's.
 
@@ -222,19 +222,19 @@ The fence closes this gap. After the leadership barrier resolves
 serving the engine get. A `Notify` on the learner is woken
 (`notify_waiters`) whenever `contiguous_applied` advances; the fence uses
 register-before-load (`notified()` created before the `Acquire` load) so a
-wake racing the load is not missed — the load observes the
+wake racing the load is not missed; the load observes the
 `Release`-stored new frontier and returns without waiting.
 
 - **Fast path** (`async_engine_apply` off, or the slot already applied): one
   `AtomicU64::load(Acquire)` + compare; no wait, no wake. With `async_engine_apply` off the
-  fence is a no-op — `contiguous_applied == contiguous_chosen` at the
+  fence is a no-op; `contiguous_applied == contiguous_chosen` at the
   instant the barrier resolves.
 - **Slow path** (`async_engine_apply` on AND a read races a just-chosen-but-not-applied
   write): the fence waits for the spawned apply. The wait is bounded by
-  apply throughput (memtable insert, µs) — exactly the latency `async_engine_apply` removed
+  apply throughput (memtable insert, µs), exactly the latency `async_engine_apply` removed
   from the write path; the fence redistributes that µs to an occasional
   read, it does not add new latency.
-- **MinSlot** is untouched — it already gates on `contiguous_applied` via
+- **MinSlot** is untouched; it already gates on `contiguous_applied` via
   the client-supplied `min_slot`.
 - **ReadIndex batching** composes: the fence runs per-read after the
   (possibly shared) barrier outcome; batched reads share the barrier's
@@ -263,7 +263,7 @@ The slot is returned because callers (the learner) need it to assemble responses
 
 Returns an iterator of live entries (no tombstones) within `range`, in key order, up to `limit` items. The iterator may be backed by a btree cursor (in crow-tree) or a sorted-tree iterator (in-memory).
 
-The iterator must reflect a consistent point-in-time view of the engine. In-memory engines use a snapshot-on-iterator-create. File engines and crow-tree use their natural snapshot or copy-on-write semantics. The point in time corresponds to "after some `apply` calls and before others" — which is always a valid linearization point given the consensus layer's slot ordering.
+The iterator must reflect a consistent point-in-time view of the engine. In-memory engines use a snapshot-on-iterator-create. File engines and crow-tree use their natural snapshot or copy-on-write semantics. The point in time corresponds to "after some `apply` calls and before others", which is always a valid linearization point given the consensus layer's slot ordering.
 
 ### 5.3 `multi_get(keys) → map<key, (slot, value)>`
 
@@ -296,7 +296,7 @@ In addition to peer transfer, the engine uses snapshot export to persist its own
 - Chunks have stable ordering and stable boundaries: the same state always produces the same byte sequence, modulo any internal pagination. This determinism is what makes resumption possible.
 - Chunk size is engine-defined; 1–4 MiB is a reasonable default.
 
-The chunk format is **engine-specific** — the in-memory tree might serialize key/value pairs in btree order; crow-tree might dump native pages directly. The snapshot module treats chunks as opaque.
+The chunk format is **engine-specific**. The in-memory tree might serialize key/value pairs in btree order; crow-tree might dump native pages directly. The snapshot module treats chunks as opaque.
 
 ### 6.3 Import
 
@@ -331,7 +331,7 @@ Tombstones and replaced values can be removed once they are no longer needed. Th
 A tombstone for key `k` placed at slot `t` may be GC'd when `t < min(snapshot_slot, safe_slot)`. Both must have advanced past `t` because:
 
 - Until `safe_slot` passes `t`, some learner might still be applying earlier slots that could resurrect `k`. (Cannot happen for blind ops, but could complicate snapshot install if the tombstone is GC'd too early.)
-- Until `snapshot_slot` passes `t`, a snapshot install must reproduce the tombstone — otherwise the receiving peer would think `k` was never deleted.
+- Until `snapshot_slot` passes `t`, a snapshot install must reproduce the tombstone. Otherwise the receiving peer would think `k` was never deleted.
 
 The conservative "both must pass" rule prevents observability holes.
 
@@ -348,7 +348,7 @@ When a key `k` is overwritten with a higher slot value, the old value is immedia
 ### 7.4 Engine-specific compaction
 
 - In-memory: tombstones are simply removed from the map.
-- crow-tree: leverages crow-tree's internal compaction. The sweeper hands crow-tree a "tombstones below slot S are safe to drop" hint and crow-tree merges that into its compaction policy.
+- crow-tree: uses crow-tree's internal compaction. The sweeper hands crow-tree a "tombstones below slot S are safe to drop" hint and crow-tree merges that into its compaction policy.
 
 ---
 
@@ -366,7 +366,7 @@ The compare is **logical**, not byte-level. Two engines may have different physi
 
 - Order: results sorted by key.
 - Tombstones: included if they differ. Two engines that both have `k` tombstoned at the same slot are equal.
-- Resolved-slot: compared exactly. Two engines with the same value for `k` but different `resolved_slot(k)` are *not* equal — this would indicate that one of them missed an apply.
+- Resolved-slot: compared exactly. Two engines with the same value for `k` but different `resolved_slot(k)` are *not* equal; this would indicate that one of them missed an apply.
 
 ### 8.3 Implementation strategy
 
@@ -394,7 +394,7 @@ Two engine implementations satisfy the surface above. Each is appropriate for a 
 
 ### 9.2 crow-tree
 
-- Backing store: the production btree library `crow-tree` — a C++ `libcrow-tree`
+- Backing store: the production btree library `crow-tree`, a C++ `libcrow-tree`
   (single-writer COW B+tree with per-leaf delta chains, epoch GC, versioned root)
   consumed from Rust over a coarse C ABI. Full design:
   [`../tree/design-crow-tree.md`](../tree/design-crow-tree.md) and its sub-docs.

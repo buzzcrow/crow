@@ -37,11 +37,11 @@ consensus WAL.
 ## 1. PageStore Abstraction
 
 crow-tree's tree logic references pages by `PID` and is unaware of the storage
-medium. A `PageStore` maps a durable page slot to bytes — it is the only part
+medium. A `PageStore` maps a durable page slot to bytes; it is the only part
 of crow-tree that does I/O, and it is page-granular and **always asynchronous**
 (`read_page`/`write_page` complete via callback/future, matching
 [`../kv/design-crow-kv-wal.md`](../kv/design-crow-kv-wal.md)).
-The upper layer always uses the async API — regardless of whether the
+The upper layer always uses the async API, regardless of whether the
 underlying platform has `io_uring` (Linux) or not (macOS/fallback). On
 Linux, `BlockAsyncPageStore` + `Reactor` submit genuine `io_uring` SQEs;
 on macOS or without liburing, the `*_async` methods fall back to
@@ -60,7 +60,7 @@ alongside the root pointer in the commit anchor (§6).
 
 ## 2. Backends
 
-There are **two** `PageStore` implementations — a text-encoded debug store
+There are **two** `PageStore` implementations: a text-encoded debug store
 and a block-device store. RDMA is **not** a separate backend: a remote page
 region is just a block device reached over the network, served by the same
 `BlockPageStore` with an RDMA medium driver.
@@ -109,7 +109,7 @@ platform-level fallback described above provides the async abstraction.
 | Mode | Behavior | Use case |
 | --- | --- | --- |
 | `FullSync` (default) | `fdatasync` after every flush | Production durability |
-| `SkipSync` | No fsync — writes are flushed by OS page cache only | Testing/benchmarks |
+| `SkipSync` | No fsync; writes are flushed by OS page cache only | Testing/benchmarks |
 | `BatchSync` | fsync once per snapshot, not per flush | Throughput-sensitive testing |
 
 On macOS, `fsync` costs ~3ms per call (stable). `SkipSync` or `BatchSync`
@@ -145,12 +145,12 @@ are rewritten, sparse blocks lose their live pages.
 
 **What gets relocated.**
 
-Only **dirty pages** are rewritten during snapshot — clean pages keep their
+Only **dirty pages** are rewritten during snapshot; clean pages keep their
 existing durable address. So a single snapshot only relocates pages modified
 since the last snapshot. Over multiple snapshots, as pages are touched and
 rewritten, sparse blocks gradually drain. For high-churn workloads, this is
 fast (most pages are dirty each snapshot). For low-churn workloads, blocks are
-aturally dense — compaction rarely needed.
+aturally dense; compaction rarely needed.
 
 **Block deletion.**
 
@@ -164,7 +164,7 @@ block.
 
 `BlockPageStore::delete_block(idx)` closes the fd, removes the `BlockExtent`
 from `extents_`, and unlinks the `.blk-{NNNN}` file. The global address space
-shrinks — future `write_at` / `read_at` calls never target the deleted block.
+shrinks; future `write_at` / `read_at` calls never target the deleted block.
 On reopen, `open_blocks()` scans the directory; the deleted file is gone and
 its index is not re-opened.
 
@@ -176,13 +176,13 @@ Identical to normal snapshot crash safety. If the process dies mid-snapshot:
 - Recovery uses the anchor's snapshot to determine which addresses are live.
 
 Block deletion is safe because it only happens after two consecutive snapshots
-confirm zero live pages — the crash fallback anchor always references the
+confirm zero live pages; the crash fallback anchor always references the
 block.
 
 **Cost.**
 
 - Zero additional I/O beyond what snapshot already does. The page would be
-  written anyway — we just choose a different destination address.
+  written anyway; we just choose a different destination address.
 - O(gaps) for per-block free ratio computation during `build_allocator()`.
 - O(live_pages) for per-block live page counting after commit.
 
@@ -190,7 +190,7 @@ block.
 
 Only applies to `BlockPageStore` in array-of-blocks mode (`open_blocks`).
 Single-medium mode (`open`, `open_mem`) and `TextPageStore` have no multiple
-blocks — `block_size()` returns 0, gap filtering is skipped, behavior is
+blocks; `block_size()` returns 0, gap filtering is skipped, behavior is
 unchanged.
 
 **Future extension — explicit compaction.**
@@ -198,7 +198,7 @@ unchanged.
 If disk space is urgent and natural drain is too slow, an explicit
 `compact_blocks()` API can force-rewrite all live pages from sparse blocks
 (not just dirty ones) in a single snapshot. This is higher I/O burst and more
-complex. Deferred — the online mechanism handles the common case.
+complex. Deferred; the online mechanism handles the common case.
 
 ### 2.1 TextPageStore — On-Disk Layout (Debug)
 
@@ -215,7 +215,7 @@ durable object. The directory layout at `{path}/{store_id}-{partition_id}/`:
   segdir.ck         # Segment directory (text, one line per DirEntry)
 ```
 
-All files use the `.ck` extension — the CROW-specific file suffix. The
+All files use the `.ck` extension, the CROW-specific file suffix. The
 filename prefix (`anchor-`, `page-`, `seg-`, `segdir`, `manifest`) distinguishes
 the type; the `.ck` suffix identifies the file as CROW-owned. Editors open
 `.ck` files as text by default.
@@ -270,7 +270,7 @@ struct BlockExtent {
 std::vector<BlockExtent> extents_;
 ```
 
-**Address space**: The global address space is linear —
+**Address space**: The global address space is linear:
 `global_off = block_idx * block_size + local_off`. `write_at(global_off, buf,
 len)` maps to `(extent_idx, local_off)`, splitting writes that cross extent
 boundaries. If `global_off + len > total_capacity`, `allocate_new_block()` is
@@ -308,7 +308,7 @@ are live (via segment directory → segment images → page addresses).
 **Sync**: `fdatasync`/`fsync` all dirty extents (tracked per-extent dirty flag).
 
 **Garbage collection**: Dead pages mark gaps in `SpaceAllocator` but block
-files are not deleted (deferred optimization — see plan Task 14, block
+files are not deleted (deferred optimization; see plan Task 14, block
 compaction design).
 
 ---
@@ -320,14 +320,14 @@ A page is a fixed-size *frame*; loading is one `read_page` into a frame with
 **no decode/copy**, and the B+tree reads, binary-searches, and compares keys
 directly on the frame bytes. Persisting is the reverse: write the frame bytes
 (optionally compressed) back. There is no separate "C++ object" form for base
-pages — leaf/inner pages become thin **views** over a frame, so the same
+pages; leaf/inner pages become thin **views** over a frame, so the same
 comparison (`memcmp`) orders keys identically in memory, on disk, and across
 nodes.
 
 ### 3.1 Frame geometry
 
 A frame is `page_bytes` long (default **16 KiB**, configurable; a multiple of
-the backend IU) — all frames in a pool are the same size, so the buffer pool
+the backend IU). All frames in a pool are the same size, so the buffer pool
 (§4) is a flat array with O(1) indexing. An entry larger than a frame's usable
 space spills to an **overflow chain**; the overflow policy is tiered:
 inline (≤ frame payload, zero-copy), small overflow (frame limit < v ≤ 1 MB,
@@ -361,7 +361,7 @@ frame (page_bytes):
 ```
 
 Inner pages hold `n+1` child PIDs (fixed array) plus `n` separator keys (same
-sorted slot-directory style, no cells) — `ChildIndexFor(key)` is an
+sorted slot-directory style, no cells). `ChildIndexFor(key)` is an
 `upper_bound` binary search over the separators, reading them directly from
 the frame.
 
@@ -370,7 +370,7 @@ reading each key directly as a `Slice` into the frame (zero copy). Insert
 appends the record at `free_hi` and splices a slot into sorted position (a
 small `memmove` of the slot array only, not the records); delete removes the
 slot (records become dead space, reclaimed by rewriting a fresh frame when
-dead space crosses a threshold — and because L1 is single-writer COW, most
+dead space crosses a threshold, and because L1 is single-writer COW, most
 leaf mutation already produces a fresh frame anyway).
 
 ### 3.3 Durability framing, alignment, compression
@@ -399,7 +399,7 @@ page, so mixed pages decode correctly regardless of the option in force when
 written. **LZ4 is a system dependency, not vendored:** `CMakeLists.txt`
 discovers a system LZ4 dev package and defines `CROW_TREE_HAVE_LZ4` when
 found; the FFI `cc`-based Rust build does not link LZ4 at all, and the
-compressor degrades to an identity codec when the library isn't linked — so
+compressor degrades to an identity codec when the library isn't linked, so
 correctness never depends on LZ4 being present, only the compression ratio
 does.
 
@@ -428,10 +428,10 @@ alike. This is the "4 GiB / 8 GiB btree cache" knob (`capacity_bytes` default
   the Flusher builds the new page in a fresh frame, atomically publishes it
   (mapping store), marks it dirty, and epoch-retires the old frame's logical
   version. The **dirty set** (frames with `dirty == true`) is what snapshot
-  walks (§6) instead of the whole tree — this is what makes snapshots
+  walks (§6) instead of the whole tree. This is what makes snapshots
   incremental (only dirty frames are written) rather than a full rewrite.
 - **Anonymous frames.** A newly built page (flush/consolidate/split/merge)
-  has no durable address yet — it is dirty and pinned-resident until
+  has no durable address yet; it is dirty and pinned-resident until
   snapshot assigns it one and clears the pin, becoming evictable. Between
   snapshots, memory is bounded by *(working set since last snapshot) +
   (resident clean cache)*; a write storm that outruns snapshot triggers an
@@ -440,7 +440,7 @@ alike. This is the "4 GiB / 8 GiB btree cache" knob (`capacity_bytes` default
 ### 4.1 Why epoch reclamation, not pin counts, governs eviction safety
 
 Picking a CLOCK victim is the easy part; the hard part is *"when is it safe
-to reuse a page's frame bytes?"* — readers are lock-free and hold `Slice`s
+to reuse a page's frame bytes?"* Readers are lock-free and hold `Slice`s
 pointing directly into a frame with no per-page refcount, so this is
 identical to the general reclamation problem already solved by
 [`design-crow-tree-engine.md §1.6`](design-crow-tree-engine.md#16-epoch-based-reclamation).
@@ -448,7 +448,7 @@ crow-tree deliberately reuses that mechanism rather than introducing a second
 one: dropping a resident page is structurally the same as a COW replace
 (`mapping.StoreUnloaded(pid, addr, len); retire(old_page)`), and the evicted
 frame is returned to the pool's free list only when the epoch reclaimer frees
-the page — i.e. after every overlapping reader guard has drained. So frame
+the page, i.e. after every overlapping reader guard has drained. So frame
 reuse is epoch-safe for free, with no extra read-path pins and no hazard
 scan. This is also why the pool's own CLOCK must never evict a base frame
 directly: the pool knows nothing about mapping slots or epochs and would
@@ -460,7 +460,7 @@ One precondition matters for correctness: re-tagging a slot `unloaded(addr,
 len)` is only valid once the page's durable bytes at `addr` equal its live
 frame exactly. A demand-loaded page already satisfies this; a freshly
 built/consolidated page does not until a snapshot assigns it an address and
-writes that exact frame — so general eviction of freshly-written pages is
+writes that exact frame, so general eviction of freshly-written pages is
 gated on the snapshot pipeline (§6) having run at least once for that page.
 
 ---
@@ -480,7 +480,7 @@ and `../kv/design-crow-kv.md §8`.
   interval, not unbounded.
 
 A crash between snapshots loses only the in-memory deltas since the last
-snapshot, which the consensus layer re-applies — the engine reports its
+snapshot, which the consensus layer re-applies. The engine reports its
 restored `last_applied_slot` so the learner knows where to resume (§6.2). A
 structural mini-journal for in-progress split/merge is unnecessary because
 SMOs are writer-exclusive and only their consolidated result is ever flushed;
@@ -504,7 +504,7 @@ apply(slot,batch)            flush (Flusher, 1/tree)         snapshot (cadence)
 
 1. **L0 → L1 (flush).** The Flusher builds a **new frame** per touched leaf
    directly from the old frame's entries merged with the batch
-   (highest-slot-wins) — no serialization step, the builder writes the final
+   (highest-slot-wins); no serialization step, the builder writes the final
    on-disk bytes directly, and the old frame is epoch-retired. This is fast
    because hot keys already collapsed in L0, so it's one frame rebuild per
    touched leaf per flush (not per key), and the rebuilt frame **is** the
@@ -514,19 +514,19 @@ apply(slot,batch)            flush (Flusher, 1/tree)         snapshot (cadence)
    `pid -> PageAddr`, fsyncs, then commits the anchor (below). Cost is
    proportional to pages dirtied since the last snapshot, not tree size.
 3. **Durability barrier ordering.** Dirty frames + directory fsync **before**
-   the commit write — a crash never exposes a commit referencing a
+   the commit write; a crash never exposes a commit referencing a
    half-written frame (CRC also guards this).
 
 **Back-pressure:** if L0 grows faster than the Flusher drains (e.g. a slow
 device), `apply` throttles once L0 crosses a high-water mark, and the buffer
-pool's dirty ratio triggers an eager snapshot — keeping memory bounded under
+pool's dirty ratio triggers an eager snapshot, keeping memory bounded under
 write storms.
 
 **Recovery** is lazy: only the commit anchor and the mapping-table directory
 (§8) are read eagerly; base pages are demand-loaded on first access, so
 restart stays fast even for large trees. A page failing CRC on first read
 indicates media corruption (the anchor that referenced it was already
-committed) — the engine fails the node out of the group, and it rejoins via
+committed). The engine fails the node out of the group, and it rejoins via
 snapshot install (§10) from a healthy peer. After recovery the learner sets
 `contiguous_applied = last_applied_slot` and resumes consensus catch-up for
 higher slots.
@@ -534,9 +534,9 @@ higher slots.
 ### 6.1 Snapshot Export / Import
 
 **Decision: export is a byte stream, with a thin "to a file" convenience
-wrapper.** The streaming form is the primitive — it feeds the network
+wrapper.** The streaming form is the primitive; it feeds the network
 snapshot-transfer service for new-member install (§10) without ever touching
-local disk; dumping to a `.ctsnap` file is just streaming into a file writer.
+local disk. Dumping to a `.ctsnap` file is just streaming into a file writer.
 The same code serves both "send to a peer" and "dump to a bin file."
 
 Two on-the-wire formats, selected at export-begin:
@@ -546,10 +546,10 @@ Two on-the-wire formats, selected at export-begin:
 | **Portable** (default) | versioned header `{magic, format, slot}`, then key-sorted `(klen,key,slot,kind,vlen,value)` tuples in fixed ≤1 MiB chunks, end marker, whole-stream CRC32C | cross-engine parity (in-mem ↔ crow-tree), durable archival; deterministic chunk boundaries ⇒ resumable |
 | **Native** | header + raw frame images + a remapped manifest | fast crow-tree→crow-tree transfer; skips tuple re-encode |
 
-The portable format is deterministic and engine-independent — an exported
+The portable format is deterministic and engine-independent; an exported
 `.ctsnap` re-imports identically on any backend/page size. The header's
 `slot` is the engine's `last_applied_slot` at export time (there is no
-`at_slot` parameter; historical snapshot export is not supported — a
+`at_slot` parameter; historical snapshot export is not supported; a
 snapshot always exports the current, latest durable state).
 
 - **Export** pins the current `RootVersion` and streams over the pinned,
@@ -564,11 +564,11 @@ snapshot always exports the current, latest durable state).
   guarantees deterministic, chunk-boundary-stable export and atomic import.
 
 The exact C ABI (`ct_snapshot_export_begin/next/end`,
-`ct_snapshot_import*`, and the rest of the surface — `ct_open`, `ct_apply`,
+`ct_snapshot_import*`, and the rest of the surface: `ct_open`, `ct_apply`,
 `ct_get`, `ct_scan`, `ct_snapshot_view`, `ct_set_gc_watermark`,
 `ct_collect_garbage`, ...) is specified in
-[`lib/crow-tree/include/lib/crow-tree/c_api.h`](../../../lib/crow-tree/include/lib/crow-tree/c_api.h)
-— that header is the single source of truth for signatures; this document
+[`lib/crow-tree/include/lib/crow-tree/c_api.h`](../../../lib/crow-tree/include/lib/crow-tree/c_api.h).
+That header is the single source of truth for signatures; this document
 only records the shape and rationale.
 
 ---
@@ -621,13 +621,13 @@ members)`.
 
 The mapping table is the B+tree's indirection layer: every structural
 reference (root, sibling, inner child) is a logical `PID`, and the table
-translates a `PID` to the page's current location — a resident in-memory
+translates a `PID` to the page's current location, a resident in-memory
 page or an unloaded durable address. It follows the Bw-Tree/LLAMA idea
 (tree links are logical PIDs so moving a page between memory and disk changes
 only one entry; page state is installed by replacing one entry) but
 simplifies it for crow-tree's constraints: **single-writer atomic store**
 instead of a multi-writer CAS (the Flusher/reclaimer is the only writer;
-readers only load), COW root versions, and no internal data WAL — so the
+readers only load), COW root versions, and no internal data WAL. So the
 durable mapping table is a **snapshoted metadata image of `PID -> PageAddr`**,
 not a second redo log.
 
@@ -643,11 +643,11 @@ not a second redo log.
 | **Tiny fixed commit anchor + a separate segment directory.** | The anchor is a small fixed A/B record (the atomic commit point); it points to a segment-directory image, so the commit stays atomic even for thousands of segments — the directory (cost ~195 KB for a 100 GB tree) decouples the possibly-large segment list from the tiny atomic anchor. |
 
 **In-memory structure:** each `PID` maps to a 64-bit **packed slot word**,
-the same encoding in memory and on disk — `0` = empty; `bit0=0` = resident
+the same encoding in memory and on disk. `0` = empty; `bit0=0` = resident
 (an in-memory pointer, never persisted); `bit0=1` = unloaded (a durable
 `(iu_index, iu_count)` descriptor). On disk a slot is only "empty" or a
 tagged unloaded descriptor, so a segment image is literally the array of
-packed words — recovery installs them with **zero decode**. `Get(pid)` is a
+packed words; recovery installs them with **zero decode**. `Get(pid)` is a
 lock-free atomic load under an epoch guard; an unloaded slot demand-loads via
 the buffer pool (§4), publishes the resident tag, and returns the frame.
 
@@ -655,7 +655,7 @@ the buffer pool (§4), publishes the resident tag, and returns the frame.
 see the page have drained: clear the slot, decrement the segment's live
 count, and if it hits zero, atomically swap the segment pointer to null and
 epoch-retire the old segment. A reader that loads a null segment or an empty
-slot treats the PID as gone and retries from the root — never wrong data.
+slot treats the PID as gone and retries from the root, never wrong data.
 
 **On-disk format** (all records are `PageStore` allocations, self-describing,
 CRC-protected): a **segment image** per dirty segment per snapshot (header +
@@ -664,7 +664,7 @@ image**, rewritten whenever any segment's generation changes, mapping
 `seg_idx -> (generation, image_addr, image_len)`; and a **commit anchor**
 (fixed size, A/B double-buffered at reserved IU 0/1) holding
 `{snapshot_seq, root_pid, last_applied_slot, next_page_id, segment_slots,
-segdir_addr/len/crc}` plus a CRC. The anchor is the commit point — its small
+segdir_addr/len/crc}` plus a CRC. The anchor is the commit point; its small
 fixed size makes the A/B swap atomic on every backend, and a snapshot always
 writes to the slot *not* named by the current highest-seq anchor, so a torn
 write never destroys the last committed one.
@@ -687,15 +687,15 @@ write the commit anchor and `flush()` again (the actual commit point), then
 clear dirty bits and schedule old-image cleanup. **Recovery** picks the
 highest-`snapshot_seq` anchor with a valid CRC, reads the segment directory
 it points to, and for each entry reads that segment's image and installs its
-packed words directly — no page bytes are read eagerly.
+packed words directly; no page bytes are read eagerly.
 
 **Old image cleanup** uses a two-generation rule: after anchor `N` commits,
 images referenced only by anchors `< N-1` are freed. This tolerates a crash
 during cleanup, since the still-referenced generation is always intact.
 
 **Concurrency invariants:** the Flusher (and the epoch reclaimer it drives)
-are the only slot writers — no CAS needed for slot stores, readers only
-atomic-load; segment install/retire is a single atomic store/CAS. Slot
+are the only slot writers; no CAS needed for slot stores, readers only
+atomic-load. Segment install/retire is a single atomic store/CAS. Slot
 clearing and segment retire happen in the epoch deleter, after all
 overlapping reader guards drain.
 
@@ -748,6 +748,6 @@ background -> engine.collect_garbage()                     // tombstones + stale
 ```
 
 These flows require no change to the learner's public contract beyond the
-async `KVEngine` surface (`design-crow-tree.md §3`); `InMemKV` implements the
+async `KVEngine` surface (`design-crow-tree.md §3`). `InMemKV` implements the
 same methods (snapshot/GC are near-no-ops in memory) so tests exercise the
 same code paths on both engines.

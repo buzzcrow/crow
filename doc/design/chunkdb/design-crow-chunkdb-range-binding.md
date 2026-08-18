@@ -58,7 +58,7 @@ and diskdb's table strategy (R102) share one monitor loop.
 
 ## 1. Instance Binding Schema
 
-A parallel binding table — bucket sub-range → chunkdb instance — is
+A parallel binding table (bucket sub-range → chunkdb instance) is
 stored in group-0 alongside the KV group binding (`BindingCache` in
 `routing.rs`). The KV group binding maps bucket ranges → KV group
 (R88); the instance binding maps bucket sub-ranges → chunkdb instance.
@@ -92,7 +92,7 @@ enum RangeStatus {
 }
 ```
 
-`chunkdb_type.proto` defines `NotMyRangeHint` — the detail message
+`chunkdb_type.proto` defines `NotMyRangeHint`, the detail message
 carried in gRPC status when a chunkdb instance receives a request for
 a chunk outside its owned range. The server does not track other
 instances' bindings, so the hint carries only the rejected bucket (in
@@ -232,7 +232,7 @@ Routing order for a bucket:
 `spawn_notifier` subscribes to the `/chunkdb/range_bind/` prefix via
 `WatchNotifyClient`. On any notify in the prefix, it calls `refresh()`
 to re-scan the binding table. This mirrors the topology notify pattern
-in `topology/notify.rs`. The notifier is optional — the client works
+in `topology/notify.rs`. The notifier is optional. The client works
 with periodic refresh alone (safety-net poller pattern). Missed
 notifies during a reconnect gap are caught by the caller's periodic
 refresh.
@@ -272,7 +272,7 @@ This follows the `NotLeaderHint` pattern in
 Each chunkdb instance rejects requests for chunks outside its owned
 sub-ranges, returning a `NotMyRange` hint so the client can re-route.
 Without enforcement, a stale client cache sends requests to the wrong
-instance, which processes them (no rejection) — violating the
+instance, which processes them (no rejection), violating the
 one-owner invariant that the per-chunk lock (R100) depends on.
 
 ### 3.1 RangeGuard
@@ -358,7 +358,7 @@ transient by `is_transient()`. `from_status` decodes the
 ## 5. Dynamic Binding Monitor
 
 The binding table is updated when chunkdb instances join or leave.
-`BindingMonitor` automates this — without it, the operator must
+`BindingMonitor` automates this. Without it, the operator must
 manually write bindings.
 
 The monitor is built on a **common `BindingStrategy` trait** so
@@ -367,7 +367,7 @@ generic monitor loop. The trait + generic monitor live in
 `crow-kv-client`; the chunkdb-specific strategy lives alongside it.
 The monitor is wired into `crow-kv-server`'s group-0 leader (not into
 `crow-chunkdb`) because it writes to group-0 and needs service-registry
-access — both are group-0 concerns.
+access. Both are group-0 concerns.
 
 ### 5.1 Common BindingStrategy trait
 
@@ -385,7 +385,7 @@ pub trait BindingStrategy: Send + Sync {
 - chunkdb: `Binding = ChunkdbRangeBindingValue` (range-based).
 - diskdb (R102): `Binding = DiskdbBinding` (table-based).
 
-Routing is not part of the trait — it lives in `RangeBindingClient`
+Routing is not part of the trait. It lives in `RangeBindingClient`
 (routing is a client concern, not a monitor concern).
 
 ### 5.2 ChunkdbRangeStrategy
@@ -415,7 +415,7 @@ impl BindingStrategy for ChunkdbRangeStrategy {
   `grpc_endpoint`, `status = STABLE`, `original_instance_id = 0`,
   `last_change_time_ms = now`.
 
-`write_bindings` PUTs each binding (idempotent overwrite — no
+`write_bindings` PUTs each binding (idempotent overwrite, no
 delete-all). The sub-range count is fixed, so the key set is stable;
 changed entries are overwritten in place. This avoids the non-atomic
 delete-all window that a scan + delete-per-key approach would have.
@@ -456,8 +456,8 @@ impl<S: BindingStrategy> BindingMonitor<S> {
 `tick` reads instances from the service registry (via
 `svc.read_all_instances(service_name)`), reads the existing bindings
 from group-0, computes the incremental assignment via the strategy
-(preserving `InTransition` state for unchanged sub-ranges), and — only
-when `is_leader` is `true` and something changed — writes the bindings
+(preserving `InTransition` state for unchanged sub-ranges), and, only
+when `is_leader` is `true` and something changed, writes the bindings
 to group-0. Followers compute but skip the write phase, so they are
 ready to take over immediately on leader change.
 
@@ -509,7 +509,7 @@ instances to assign.
 ### 5.6 Migration flow (chunkdb)
 
 chunkdb instances are stateless (chunk metadata lives in KV groups,
-design §3.6) — migration is a **routing change**, not a data copy.
+design §3.6). Migration is a **routing change**, not a data copy.
 The incremental assignment algorithm (§5.2) sets up the transition
 state; the migration flow drives it to completion.
 
@@ -528,7 +528,7 @@ state; the migration flow drives it to completion.
 `original_instance_id = 0`, `original_endpoint = ""`. All operations
 go to the new owner. The old owner stops serving the sub-range.
 
-**No data cleanup** is needed — chunkdb instances hold no per-chunk
+**No data cleanup** is needed. chunkdb instances hold no per-chunk
 state (the chunk payload cache is in-memory and evicts naturally; the
 lock map reaps idle entries). The old owner's `RangeGuard` drops the
 sub-range on its next binding refresh.
@@ -562,7 +562,7 @@ topology refresh loop.
 
 Fallback: if the reverse lookup misses (cache cold or `disk_id`
 unknown), the segments are broadcast to all channels (preserves
-correctness — the owning instance accepts the free, others reject).
+correctness; the owning instance accepts the free, others reject).
 
 ## 7. Server Wiring
 

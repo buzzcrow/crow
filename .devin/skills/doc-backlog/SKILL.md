@@ -32,8 +32,7 @@ Every `R**` doc uses exactly these sections, in this order:
     breaks without this work), root cause if any (deferred placeholder,
     missing extension).
   - **Design pointers** — reference the root design doc by `§X` anchor; never
-    paraphrase. Note the aioss analog (or "no direct aioss analog — new
-    work").
+    paraphrase.
   - **Use scenarios** — bullet list of concrete operating scenarios as short
     end-to-end narratives: who/what triggers, what the system does, expected
     outcome. Written from the operator/system perspective, not internal

@@ -44,7 +44,7 @@ Client GET(key, read_mode, min_slot?)
        [copy: value → socket buffer on gRPC serialize, unavoidable]
 ```
 
-**Copy points**: O(1) for the get path — one value copy (frame → `Bytes`
+**Copy points**: O(1) for the get path, one value copy (frame → `Bytes`
 fast path, or I/O buffer → `Bytes` slow path on demand-load); O(n)
 unavoidable for gRPC serialize/deserialize. After R6, the get path is
 fully zero-copy from C++ frame to gRPC response: `PinnedValue::into_bytes()`
@@ -121,11 +121,11 @@ fast path). Per-read cost is engine get + gRPC RTT only.
 | minslot_32t | minslot | 32:32 | 112621 | 281 | 277 | 440 | 539 | 0 |
 
 Both modes scale well from 1T to 16T (20K → 106K, 5.2x). MinSlot shows
-a clear advantage at 6T (+9.6%, 75158 vs 68560) — distributed read
+a clear advantage at 6T (+9.6%, 75158 vs 68560): distributed read
 serving across 3 replicas scales better than single-leader at low
-concurrency. At 16T the modes converge (~106K, +1.1% MinSlot) — the 3
+concurrency. At 16T the modes converge (~106K, +1.1% MinSlot); the 3
 replicas are approaching per-replica saturation. At 32T Linearizable
-pulls ahead (+5.1%, 118K vs 113K) — MinSlot saturates earlier because
+pulls ahead (+5.1%, 118K vs 113K). MinSlot saturates earlier because
 each replica is already at capacity; the leader mode still has headroom
 from the lease fast path (no round-trip).
 
@@ -185,15 +185,15 @@ dominated by gRPC RTT and engine get cost on x86_64.
 | minslot_256t | minslot | 256:32 | 215334 | — | — | 4284 | — | 0 |
 
 Linux catches up at 16T (-0% to -5%) and **overtakes macOS at 32T**
-(+22% to +23%) — the 32-thread Ryzen scales better than the 18-core M5
+(+22% to +23%): the 32-thread Ryzen scales better than the 18-core M5
 Pro at saturation. On macOS, MinSlot beats Linearizable at 6T (+9.6%)
-and 16T (+1.1%) — distributed read serving helps when the single leader
+and 16T (+1.1%); distributed read serving helps when the single leader
 is the bottleneck. On Linux this advantage **disappears**: MinSlot is
 marginally better only at 6T (+2.8%) and **slower** at 16T (-3.3%) and
 32T (-3.9%). The leader lease fast path is cheap enough on x86_64 that
 distributing reads across replicas doesn't compensate for the added
 MinSlot routing overhead (min_slot resolution, round-robin endpoint
-selection). MinSlot's benefit is platform-dependent — it helps when the
+selection). MinSlot's benefit is platform-dependent. It helps when the
 leader read barrier is the bottleneck (macOS arm64), not when the engine
 itself is the limiter (Linux x86_64).
 
@@ -202,12 +202,12 @@ Beyond 32T, Linearizable continues to scale and widen its lead:
 - **128T**: lin 205406 vs minslot 189030 (-8.0%)
 - **256T**: lin 231983 vs minslot 215334 (-7.2%)
 
-Linearizable scales 32T → 256T (144K → 232K, 1.6x) — the lease fast
+Linearizable scales 32T → 256T (144K → 232K, 1.6x). The lease fast
 path has no per-read round-trip, so the leader absorbs more concurrent
 reads. MinSlot scales 32T → 256T (139K → 215K, 1.5x) but falls further
 behind because the 3 replicas saturate earlier (each handles ~72K at
 256T vs the leader's 232K). MinSlot's p99 also degrades faster at high
-thread counts (4284us vs 2658us at 256T) — round-robin distribution
+thread counts (4284us vs 2658us at 256T): round-robin distribution
 adds tail latency under heavy contention.
 
 #### HTTP/2 connection lock sentinel
@@ -216,7 +216,7 @@ adds tail latency under heavy contention.
 |-------|------|-----|------:|------:|---:|-------:|-------:|----:|
 | minslot_6t_2to1 | minslot | 6:3 | 52228 | 73484 | -29% | 172 | 157 | 0 |
 
-6T:3C drops -0.04% vs 6T:6C on Linux (52228 vs 52252) — even less
+6T:3C drops -0.04% vs 6T:6C on Linux (52228 vs 52252), even less
 contention than macOS's -2.2%, consistent with the smaller MinSlot
 throughput advantage on Linux.
 
@@ -237,7 +237,7 @@ Zero correctness errors on Linux. Verify overhead negligible (<1%).
   connection-level userspace lock (HPACK dynamic table, frame output
   buffer, flow-control windows are shared mutable state). When N threads
   submit to one gRPC connection concurrently, they serialize on this
-  lock during frame encoding — a single-threaded userspace funnel before
+  lock during frame encoding, a single-threaded userspace funnel before
   any `write()` reaches the kernel. The 2T:1C throughput drop measured by
   the `minslot_6t_2to1` sentinel is this lock's cost. 1T:1C avoids it
   entirely (dedicated connection per thread). A custom length-prefixed
