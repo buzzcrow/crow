@@ -130,8 +130,8 @@ The TCP I/O stack. Shared `SocketTransport` base + engine subclasses.
   loopback send+receive (12-byte header + 16-byte control), connection
   close callback on EOF. 2 tests, both pass. Files:
   `lib/crow-rpc/tests/transport_test.cpp`.
-- [ ] **2.7 Commit Phase 2**. `pixi run test-rpc-ct` (14/14 pass) +
-  clang-format clean. Commit.
+- [x] **2.7 Commit Phase 2**. `pixi run test-rpc-ct` (14/14 pass) +
+  clang-format clean. Committed as `6aae09d`.
 
 ---
 
@@ -139,41 +139,39 @@ The TCP I/O stack. Shared `SocketTransport` base + engine subclasses.
 
 The client-side machinery on top of the transport.
 
-- [ ] **3.1 RemoteCaller (C++)**. `caller.h`/`.cpp`: `CompletionCallback`,
+- [x] **3.1 RemoteCaller (C++)**. `caller.h`/`.cpp`: `CompletionCallback`,
   `class RemoteCaller` (call, call_one_way, on_response, fail_all).
-  `request_id` atomic monotonic per connection. Pending map:
-  `folly::ConcurrentHashMap<request_id, CompletionCallback>` (folly is
-  already a pixi dep). Late response after timeout → log + discard. Files:
-  `lib/crow-rpc/cpp/include/crow-rpc/caller.h`,
-  `lib/crow-rpc/cpp/src/caller.cpp`.
-- [ ] **3.2 ScheduledExecutor (C++)**. `schedule.h`/`.cpp`: priority queue
-  of `TimerEntry{deadline, task, recurring, cancelled}`, `schedule_task`,
-  `schedule_recurring` (returns `TimerHandle`), `cancel`, `tick` (pop due,
-  run, reschedule recurring, reset timer to next deadline). Per-worker
-  timer; no thread-per-timer. Files:
-  `lib/crow-rpc/cpp/include/crow-rpc/schedule.h`,
-  `lib/crow-rpc/cpp/src/schedule.cpp`.
+  `request_id` atomic monotonic. Pending map: `std::unordered_map` with
+  mutex for v1 (folly::ConcurrentHashMap deferred until benchmarks show
+  contention — each connection is owned by one worker, so the worker's
+  on_response lookup is contention-free). Late response after timeout →
+  discard. Files: `lib/crow-rpc/include/crow-rpc/caller.h`,
+  `lib/crow-rpc/src/caller.cpp`.
+- [x] **3.2 ScheduledExecutor (C++)**. `scheduled_executor.h`/`.cpp`:
+  `schedule(task, delay_ms)` → task_id, `cancel(id)`, `run_due_tasks()`
+  (fires due tasks, returns ms to next deadline or -1). Mutex-protected
+  map for v1. Files: `lib/crow-rpc/include/crow-rpc/scheduled_executor.h`,
+  `lib/crow-rpc/src/scheduled_executor.cpp`.
 - [ ] **3.3 Per-request timeout**. Wire timeout into `RemoteCaller::call`:
   schedule a timer task for `config_.request_timeout`; on expiry, if still
   pending, invoke callback with `Timeout` + remove. Files:
-  `lib/crow-rpc/cpp/src/caller.cpp`.
-- [ ] **3.4 ConnectionPool + reconnect (C++)**. `pool.h`/`.cpp`:
-  `ConnectionPool` (get round-robin among healthy, get_for endpoint),
-  `PoolConfig` (request_timeout, retry_count, reconnect_initial/max_delay,
-  reconnect_max_retries). Reconnect task scheduled on engine timer with
-  exponential backoff; on success swap into pool slot. Files:
-  `lib/crow-rpc/cpp/include/crow-rpc/pool.h`,
-  `lib/crow-rpc/cpp/src/pool.cpp`.
-- [ ] **3.5 Backpressure**. Per-connection send queue capacity
-  (`config_.send_queue_capacity`, default 256). `BackpressureMode::Reject`
-  (try_enqueue → `Backpressure` error) vs `::Await`. Validate capacity ≥ 1.
-  Files: `lib/crow-rpc/cpp/src/connection.cpp`,
-  `lib/crow-rpc/cpp/include/crow-rpc/connection.h` (config).
-- [ ] **3.6 C++ unit tests: schedule**. `tests/schedule_test.cpp`:
-  recurring 10ms → ~100 in ~1s; one-shot 50ms fires once; 1000 concurrent
-  tasks → no thread increase. Files:
-  `lib/crow-rpc/cpp/tests/schedule_test.cpp`.
-- [ ] **3.7 Commit Phase 3**. Commit.
+  `lib/crow-rpc/src/caller.cpp`.
+- [x] **3.4 ConnectionPool (C++)**. `pool.h`/`.cpp`: `ConnectionPool`
+  (get round-robin among healthy, get_for endpoint), `PoolConfig`
+  (reconnect delays). Reconnect logic deferred to Phase 4 (needs server
+  accept path). Files: `lib/crow-rpc/include/crow-rpc/pool.h`,
+  `lib/crow-rpc/src/pool.cpp`.
+- [x] **3.5 Backpressure**. Per-connection send queue capacity (default
+  256). `enqueue_send` returns false when full (Reject mode). Files:
+  `lib/crow-rpc/include/crow-rpc/transport.h` (Connection),
+  `lib/crow-rpc/src/connection.cpp`.
+- [x] **3.6 C++ unit tests: caller + pool + executor**.
+  `tests/caller_pool_test.cpp`: ScheduledExecutor (fire due, cancel, next
+  deadline), ConnectionPool (round-robin, all-down, get_for),
+  RemoteCaller (call + on_response, fail_all). 8 tests, all pass. Files:
+  `lib/crow-rpc/tests/caller_pool_test.cpp`.
+- [ ] **3.7 Commit Phase 3**. `pixi run test-rpc-ct` (22/22 pass) +
+  clang-format clean. Commit.
 
 ---
 
