@@ -15,6 +15,7 @@ when a task touches a topic in its row.
 | `doc/design/diskdb/design-crow-diskdb.md` | Root diskdb design — read first for any diskdb design or architecture question. |
 | `doc/design/chunkdb/design-crow-chunkdb.md` | Root chunkdb design — read first for any chunkdb design or architecture question. |
 | `doc/design/tree/design-crow-tree.md` | Root tree design — read first for storage-engine work. |
+| `doc/design/rpc/design-crow-rpc.md` | Root RPC design — read first for `crow-rpc` engine, FFI, or transport questions. |
 | `doc/design/console/design-crow-console.md` | Root console design — read first for console work. |
 | `doc/user-manual/user-guide.md` | User guide: Web UI, CLI, REST API, quick start, cluster ops, upgrade. |
 
@@ -46,7 +47,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `SECURITY.md` | When reporting or handling a security vulnerability. |
 | `CODE_OF_CONDUCT.md` | Community behavior guidelines. |
 
-## Sub-Designs (`doc/design/{kv,tree,console,protocol,diskdb}/`)
+## Sub-Designs (`doc/design/{kv,tree,console,protocol,diskdb,rpc}/`)
 
 | Doc | Read when working on |
 | --- | --- |
@@ -69,12 +70,14 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/console/design-crow-console-ui.md` | Web UI v1: 3-pane shell, React Flow canvas, inspector, KV Operator center panel. |
 | `doc/design/protocol/design-crow-protocol-key.md` | Key encoding: flat structs, 3-byte header, `BinaryKey` + `TextKey`, frozen layouts, append-only evolution. |
 | `doc/design/protocol/design-crow-protocol-types.md` | Wire types, `u64` ID aliases, re-export pattern, `utoipa` schema derives. |
-| `doc/design/protocol/design-crow-protocol-rpc.md` | RPC engine: `crow-rpc` C++ engine (buffer, framing, transport, epoll/kqueue/RDMA, pool, correlation, schedule, server, backpressure) + Rust FFI async facade. |
 | `doc/design/chunkdb/design-crow-chunkdb.md` | chunkdb root: architecture, chunk lifecycle, per-chunk lifecycle lock + payload cache, strip types (mirror/EC), disk-group placement, EC integration, crate layout, concurrency. |
 | `doc/design/chunkdb/design-crow-chunkdb-range-binding.md` | chunkdb instance sharding: non-contiguous sub-range binding schema, `BindingStrategy` trait + `ChunkdbRangeStrategy` (incremental assignment preserving `InTransition`), `RangeBindingClient` (route + transition fallback + `refresh_and_route` on `NotMyRange`), `RangeGuard` enforcement, leader-gated `BindingMonitor` in crow-kv-server (write-on-change), `NotMyRange` reject-and-retry, migration flow (chunkdb routing-change + diskdb data-copy ref to R102), precise `free_blocks` routing. |
 | `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, disk status management, space metrics, background scanner, crate layout, concurrency. |
 | `doc/design/diskdb/design-crow-diskdb-zone-management.md` | Zone management: record model, allocation algorithm, persist-only free, compaction-on-rotation, preparatory thread, crash recovery, zone-level concurrency, invariants. |
 | `doc/design/diskdb/design-crow-diskdb-space-metrics.md` | Space metrics component: usage accessors, `QueryCapacityStats` handler, per-disk counters, recalc verifier, reporting loop, keepalive piggyback, kv-client aggregation, `crow-diskdb-client` library. |
+| `doc/design/rpc/design-crow-rpc.md` | RPC root: architecture, Non-Goals, key design decisions (native buffer, 12-byte header, transport interface, pull-based parser, per-connection writer, folly CHM, worker timer, C ABI + oneshot FFI, flatbuffers), wire format diagram, control plane (pool + reconnect, `RemoteCaller` correlation, `ScheduledExecutor`, `RpcServer` + handler offload, backpressure Reject/Await), flatbuffer schema home + build matrix, sub-design map. |
+| `doc/design/rpc/design-crow-rpc-tcp.md` | TCP transport: `SocketTransport` shared base, worker loop, scatter-gather `writev` send, zero-copy receive, `EpollEngine` (Linux, level-triggered), `KqueueEngine` (macOS, `EV_CLEAR` write). |
+| `doc/design/rpc/design-crow-rpc-rdma.md` | RDMA transport: `RdmaTransport`, CQ poll loop, `librdmacm` connection setup, pre-registered buffer pools. |
 
 ## How AI Should Use This Index
 

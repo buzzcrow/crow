@@ -63,16 +63,16 @@ endif()
 file(GLOB_RECURSE CROW_RPC_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 if(NOT CROW_RPC_HAVE_RDMA)
   list(REMOVE_ITEM CROW_RPC_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/rdma_buffer_pool.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/rdma_transport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/transport/rdma/rdma_buffer_pool.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/transport/rdma/rdma_transport.cpp
   )
 endif()
 # epoll_engine is Linux-only; kqueue_engine is macOS-only.
 if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
-  list(REMOVE_ITEM CROW_RPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/epoll_engine.cpp)
+  list(REMOVE_ITEM CROW_RPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/transport/epoll/epoll_engine.cpp)
 endif()
 if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
-  list(REMOVE_ITEM CROW_RPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/kqueue_engine.cpp)
+  list(REMOVE_ITEM CROW_RPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/transport/kqueue/kqueue_engine.cpp)
 endif()
 add_library(crow-rpc STATIC ${CROW_RPC_SRC})
 target_include_directories(crow-rpc
@@ -114,6 +114,9 @@ if(NOT CROW_RPC_HAVE_RDMA)
   list(REMOVE_ITEM CROW_RPC_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/rdma_test.cpp)
 endif()
 add_executable(crow_rpc_tests ${CROW_RPC_TEST_SRC})
-target_include_directories(crow_rpc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_include_directories(crow_rpc_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    ${CROW_RPC_PROTO_GEN_DIR}
+)
 target_link_libraries(crow_rpc_tests PRIVATE crow-rpc GTest::gtest GTest::gtest_main)
 gtest_discover_tests(crow_rpc_tests DISCOVERY_MODE PRE_TEST)

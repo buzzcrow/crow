@@ -113,7 +113,8 @@ mod common_msg_generated {
 /// (`FBInt128`).
 pub mod fb {
     pub use crate::common_msg_generated::crow::rpc::proto::{
-        ConnectionPingRequest, ConnectionPingResponse, FBRetCode, UnknownMessage,
+        ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, ConnectionPingResponseArgs,
+        FBRetCode, UnknownMessage,
     };
     pub use crate::common_type_generated::crow::rpc::proto::FBInt128;
     pub use crate::msg_type_generated::crow::rpc::proto::FBMsgType;

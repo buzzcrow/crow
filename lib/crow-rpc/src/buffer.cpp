@@ -81,10 +81,11 @@ static uint32_t bucket_capacity(uint32_t capacity)
 
 Buffer *SystemBufferPool::alloc_fresh(uint32_t capacity)
 {
-    if (outstanding_ >= max_buffers_) {
+    if (outstanding_.load(std::memory_order_relaxed) >= max_buffers_) {
         return nullptr; // pool exhausted
     }
-    ++outstanding_;
+    outstanding_.fetch_add(1, std::memory_order_relaxed);
+    total_alloc_.fetch_add(1, std::memory_order_relaxed);
 
     auto *buf     = new Buffer;
     buf->capacity = capacity;
@@ -97,7 +98,7 @@ Buffer *SystemBufferPool::alloc_fresh(uint32_t capacity)
     if (posix_memalign(&ptr, 64, capacity) != 0) {
         delete buf->ref;
         delete buf;
-        --outstanding_;
+        outstanding_.fetch_sub(1, std::memory_order_relaxed);
         return nullptr;
     }
     buf->data = static_cast<uint8_t *>(ptr);
@@ -118,6 +119,8 @@ Buffer *SystemBufferPool::alloc(uint32_t capacity)
             it->second.pop_back();
             buf->len = 0;
             buf->ref->store(1, std::memory_order_relaxed);
+            // Track as outstanding (in-use) again.
+            outstanding_.fetch_add(1, std::memory_order_relaxed);
             return buf;
         }
     }
@@ -135,7 +138,8 @@ void SystemBufferPool::recycle(Buffer *buf)
         uint32_t                    bucket = bucket_capacity(buf->capacity);
         free_list_[bucket].push_back(buf);
     }
-    --outstanding_;
+    outstanding_.fetch_sub(1, std::memory_order_relaxed);
+    total_recycle_.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace crow::rpc

@@ -49,17 +49,25 @@ class RemoteCaller
   public:
     RemoteCaller();
 
-    // Submit a request-response call. Returns the request_id, or 0 on
-    // error (submit failed — callback already invoked with the error).
-    uint64_t call(Transport *transport, Connection *conn, Buffer *control, Buffer *data, uint16_t msg_type,
-                  CompletionCallback on_complete);
+    // Submit a request-response call. The request_id is provided by the
+    // caller (it must match the id embedded in the flatbuffer control
+    // message so the server can echo it back for correlation). Returns
+    // the request_id, or 0 on error (submit failed — callback already
+    // invoked with the error).
+    uint64_t call(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
+                  uint16_t msg_type, CompletionCallback on_complete);
 
     // Submit a one-way message (no response expected, no callback).
     // Returns true on success, false on submit error.
     bool call_one_way(Transport *transport, Connection *conn, Buffer *control, Buffer *data, uint16_t msg_type);
 
-    // Called by Connection::on_frame when a response arrives.
-    // Looks up request_id, invokes callback, removes entry.
+    // Attach this caller to a connection's on_frame callback so responses
+    // are routed to on_response. Call this once per connection before
+    // sending requests through it.
+    void attach(Connection *conn);
+
+    // Called by the on_frame callback (set by attach) when a response
+    // arrives. Looks up request_id, invokes callback, removes entry.
     void on_response(uint64_t request_id, Frame *response);
 
     // Called by Connection::close to fail all pending requests.
@@ -67,6 +75,13 @@ class RemoteCaller
 
     // Number of pending requests (for diagnostics).
     size_t pending_count();
+
+    // Generate the next request_id (for callers that need to embed it
+    // in the flatbuffer control message before calling call()).
+    uint64_t next_request_id()
+    {
+        return next_request_id_.fetch_add(1, std::memory_order_relaxed);
+    }
 
   private:
     std::atomic<uint64_t> next_request_id_{1};

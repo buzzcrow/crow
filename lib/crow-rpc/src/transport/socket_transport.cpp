@@ -1,14 +1,17 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-rpc/socket_transport.h"
+#include "crow-rpc/transport/socket_transport.h"
 
 #if defined(__linux__)
-#    include "crow-rpc/epoll_engine.h"
+#    include "crow-rpc/transport/epoll/epoll_engine.h"
 #elif defined(__APPLE__)
-#    include "crow-rpc/kqueue_engine.h"
+#    include "crow-rpc/transport/kqueue/kqueue_engine.h"
 #endif
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -22,7 +25,7 @@ namespace crow::rpc
 
 // Forward declarations — defined after Worker (shared I/O logic).
 static void on_readable_impl(Connection *conn, int fd);
-static void on_writable_impl(Connection *conn, int fd);
+static bool on_writable_impl(Connection *conn, int fd);
 
 // ── Worker ────────────────────────────────────────────────────────
 
@@ -122,7 +125,16 @@ void Worker::run_loop()
                 break;
             case SocketEvent::Writable:
                 if (ev.conn != nullptr) {
-                    on_writable_impl(ev.conn, ev.fd);
+                    // Level-triggered write: disarm when queue is empty
+                    // to avoid busy-loop. on_writable_impl returns true
+                    // if the queue still has data (partial write/EAGAIN).
+                    if (on_writable_impl(ev.conn, ev.fd)) {
+                        // Still has data — filter stays armed (level-triggered).
+                    }
+                    else {
+                        // Queue empty — disarm to stop Writable events.
+                        engine_->disarm_write(ev.fd);
+                    }
                 }
                 break;
             case SocketEvent::Error:
@@ -169,26 +181,67 @@ static void on_readable_impl(Connection *conn, int fd)
     }
 }
 
-static void on_writable_impl(Connection *conn, int fd)
+static bool on_writable_impl(Connection *conn, int fd)
 {
     OutFrame *batch[BATCH_MAX];
     int       n = conn->drain_send_queue(batch, BATCH_MAX);
     if (n == 0) {
-        return;
+        return false;
     }
 
+    // Compute the total wire size of each frame (header + control + data),
+    // accounting for bytes already sent via sent_offset (partial writes).
+    ssize_t frame_total[BATCH_MAX];
+    for (int i = 0; i < n; i++) {
+        ssize_t sz = HEADER_SIZE;
+        if (batch[i]->control != nullptr)
+            sz += batch[i]->control->len;
+        if (batch[i]->data != nullptr)
+            sz += batch[i]->data->len;
+        frame_total[i] = sz;
+    }
+
+    // Build iovecs, skipping the first sent_offset bytes of each frame.
     iovec   iov[3 * BATCH_MAX];
     int     iov_count = 0;
     uint8_t header_bufs[BATCH_MAX][HEADER_SIZE];
 
     for (int i = 0; i < n; i++) {
-        serialize_header(header_bufs[i], batch[i]->header);
-        iov[iov_count++] = {header_bufs[i], HEADER_SIZE};
-        if (batch[i]->control != nullptr && batch[i]->control->len > 0) {
-            iov[iov_count++] = {batch[i]->control->data, batch[i]->control->len};
+        ssize_t off = batch[i]->sent_offset;
+        ssize_t rem = frame_total[i] - off;
+        if (rem <= 0) {
+            // Already fully sent — skip (shouldn't happen, but guard).
+            continue;
         }
+
+        // Header region: [0, HEADER_SIZE)
+        if (off < HEADER_SIZE) {
+            serialize_header(header_bufs[i], batch[i]->header);
+            iov[iov_count++] = {header_bufs[i] + off, static_cast<size_t>(HEADER_SIZE - off)};
+            off              = 0;
+        }
+        else {
+            off -= HEADER_SIZE;
+        }
+
+        // Control region: [HEADER_SIZE, HEADER_SIZE + control->len)
+        if (batch[i]->control != nullptr && batch[i]->control->len > 0) {
+            ssize_t clen = static_cast<ssize_t>(batch[i]->control->len);
+            if (off < clen) {
+                iov[iov_count++] = {batch[i]->control->data + off, static_cast<size_t>(clen - off)};
+                off              = 0;
+            }
+            else {
+                off -= clen;
+            }
+        }
+
+        // Data region: [HEADER_SIZE + control->len, total)
         if (batch[i]->data != nullptr && batch[i]->data->len > 0) {
-            iov[iov_count++] = {batch[i]->data->data, batch[i]->data->len};
+            ssize_t dlen = static_cast<ssize_t>(batch[i]->data->len);
+            if (off < dlen) {
+                iov[iov_count++] = {batch[i]->data->data + off, static_cast<size_t>(dlen - off)};
+            }
         }
     }
 
@@ -198,7 +251,7 @@ static void on_writable_impl(Connection *conn, int fd)
             for (int i = 0; i < n; i++) {
                 conn->enqueue_send(batch[i]);
             }
-            return;
+            return true; // re-arm: socket buffer full, try again later
         }
         conn->close();
         for (int i = 0; i < n; i++) {
@@ -208,30 +261,39 @@ static void on_writable_impl(Connection *conn, int fd)
                 batch[i]->data->release();
             delete batch[i];
         }
-        return;
+        return false;
     }
 
+    // Advance sent_offset by `written` bytes across the batch.
     ssize_t remaining = written;
-    for (int i = 0; i < n; i++) {
-        ssize_t frame_size = HEADER_SIZE;
-        if (batch[i]->control != nullptr)
-            frame_size += batch[i]->control->len;
-        if (batch[i]->data != nullptr)
-            frame_size += batch[i]->data->len;
+    for (int i = 0; i < n && remaining > 0; i++) {
+        ssize_t left = frame_total[i] - batch[i]->sent_offset;
+        if (remaining >= left) {
+            batch[i]->sent_offset = static_cast<uint32_t>(frame_total[i]);
+            remaining -= left;
+        }
+        else {
+            batch[i]->sent_offset += static_cast<uint32_t>(remaining);
+            remaining = 0;
+        }
+    }
 
-        if (remaining >= frame_size) {
+    // Release fully-sent frames; re-enqueue partials.
+    bool has_partial = false;
+    for (int i = 0; i < n; i++) {
+        if (batch[i]->sent_offset >= frame_total[i]) {
             if (batch[i]->control != nullptr)
                 batch[i]->control->release();
             if (batch[i]->data != nullptr)
                 batch[i]->data->release();
             delete batch[i];
-            remaining -= frame_size;
         }
         else {
             conn->enqueue_send(batch[i]);
-            remaining = 0;
+            has_partial = true;
         }
     }
+    return has_partial;
 }
 
 // ── SocketTransport ───────────────────────────────────────────────
@@ -303,6 +365,32 @@ std::shared_ptr<Connection> SocketTransport::create_connection(int fd, const std
         w->add_connection(fd, conn);
     }
     return conn;
+}
+
+std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, int port)
+{
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return nullptr;
+    }
+
+    struct sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons(static_cast<uint16_t>(port));
+    if (::inet_pton(AF_INET, addr.c_str(), &sa.sin_addr) <= 0) {
+        ::close(fd);
+        return nullptr;
+    }
+
+    if (::connect(fd, reinterpret_cast<struct sockaddr *>(&sa), sizeof(sa)) < 0) {
+        ::close(fd);
+        return nullptr;
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    return create_connection(fd, addr + ":" + std::to_string(port));
 }
 
 std::unique_ptr<SocketEngine> SocketTransport::create_engine()

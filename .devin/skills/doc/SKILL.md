@@ -20,7 +20,7 @@ triggers:
 ```
 doc_index.md                                (table of contents — the only file at doc root)
 design/
-    ├── {kv,tree,console,diskdb,protocol}/  (one subdir per component area)
+    ├── {kv,tree,console,diskdb,protocol,rpc}/  (one subdir per component area)
     │   ├── design-crow-<area>.md           (root design for that area)
     │   ├── design-crow-<area>-<topic>.md   (sub-design docs)
     │   └── kv-{read,scan,write}-flow-analysis.md  (KV only: long-lived flow analyses)

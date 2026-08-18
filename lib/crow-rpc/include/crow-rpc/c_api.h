@@ -36,6 +36,8 @@ typedef int32_t crow_rpc_status;
 // ── Buffer ────────────────────────────────────────────────────────
 crow_rpc_buffer_t crow_rpc_buffer_alloc(crow_rpc_pool_t pool, uint32_t capacity);
 void              crow_rpc_buffer_write(crow_rpc_buffer_t buf, const uint8_t *data, uint32_t len);
+const uint8_t    *crow_rpc_buffer_data(crow_rpc_buffer_t buf);
+uint32_t          crow_rpc_buffer_len(crow_rpc_buffer_t buf);
 crow_rpc_buffer_t crow_rpc_buffer_ref(crow_rpc_buffer_t buf);
 void              crow_rpc_buffer_release(crow_rpc_buffer_t buf);
 

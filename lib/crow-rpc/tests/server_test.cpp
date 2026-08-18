@@ -3,8 +3,8 @@
 
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/framing.h"
-#include "crow-rpc/server.h"
-#include "crow-rpc/socket_transport.h"
+#include "crow-rpc/server/server.h"
+#include "crow-rpc/transport/socket_transport.h"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -21,6 +21,7 @@ using crow::rpc::Buffer;
 using crow::rpc::Connection;
 using crow::rpc::Frame;
 using crow::rpc::Header;
+using crow::rpc::OutFrame;
 using crow::rpc::RpcServer;
 using crow::rpc::SystemBufferPool;
 
@@ -41,7 +42,7 @@ TEST(RpcServerTest, FullLoopbackHandlerDispatch)
         recv_msg_type = frame->header.msg_type;
         handler_called.store(true, std::memory_order_release);
         delete frame;
-        return static_cast<Frame *>(nullptr); // no response for now
+        return static_cast<OutFrame *>(nullptr); // no response for now
     });
 
     server.start();
@@ -91,7 +92,7 @@ TEST(RpcServerTest, MultipleConnections)
     server.register_handler(200, [&](Frame *frame, Connection * /*conn*/) {
         handler_count.fetch_add(1, std::memory_order_relaxed);
         delete frame;
-        return static_cast<Frame *>(nullptr);
+        return static_cast<OutFrame *>(nullptr);
     });
 
     server.start();

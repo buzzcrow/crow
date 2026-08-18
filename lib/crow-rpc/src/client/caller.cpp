@@ -1,7 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-rpc/caller.h"
+#include "crow-rpc/client/caller.h"
+
+#include "crow-rpc/server/message.h"
 
 #include <cassert>
 
@@ -28,11 +30,9 @@ OutFrame *RemoteCaller::build_frame(uint64_t request_id, Buffer *control, Buffer
     return frame;
 }
 
-uint64_t RemoteCaller::call(Transport *transport, Connection *conn, Buffer *control, Buffer *data, uint16_t msg_type,
-                            CompletionCallback on_complete)
+uint64_t RemoteCaller::call(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
+                            uint16_t msg_type, CompletionCallback on_complete)
 {
-    uint64_t request_id = next_request_id_.fetch_add(1, std::memory_order_relaxed);
-
     // Insert into pending map before submit (so on_response can find it
     // even if the response arrives before submit returns — unlikely but
     // possible on loopback).
@@ -82,6 +82,16 @@ bool RemoteCaller::call_one_way(Transport *transport, Connection *conn, Buffer *
         return false;
     }
     return true;
+}
+
+void RemoteCaller::attach(Connection *conn)
+{
+    // Set the on_frame callback to route response frames to on_response.
+    // The request_id is extracted from the flatbuffer control message.
+    conn->set_on_frame([this](Frame *frame, Connection * /*conn*/) {
+        uint64_t req_id = extract_request_id(frame->control, frame->control_len);
+        on_response(req_id, frame);
+    });
 }
 
 void RemoteCaller::on_response(uint64_t request_id, Frame *response)

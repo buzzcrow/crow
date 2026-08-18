@@ -58,6 +58,8 @@ pub type crow_rpc_on_complete = Option<
 extern "C" {
     pub fn crow_rpc_buffer_alloc(pool: crow_rpc_pool_t, capacity: u32) -> crow_rpc_buffer_t;
     pub fn crow_rpc_buffer_write(buf: crow_rpc_buffer_t, data: *const u8, len: u32);
+    pub fn crow_rpc_buffer_data(buf: crow_rpc_buffer_t) -> *const u8;
+    pub fn crow_rpc_buffer_len(buf: crow_rpc_buffer_t) -> u32;
     pub fn crow_rpc_buffer_ref(buf: crow_rpc_buffer_t) -> crow_rpc_buffer_t;
     pub fn crow_rpc_buffer_release(buf: crow_rpc_buffer_t);
 

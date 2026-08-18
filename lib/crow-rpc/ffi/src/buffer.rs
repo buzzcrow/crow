@@ -32,6 +32,19 @@ impl Buffer {
         }
     }
 
+    /// Read-only access to the buffer's data.
+    pub fn bytes(&self) -> &[u8] {
+        unsafe {
+            let ptr = sys::crow_rpc_buffer_data(self.handle);
+            let len = sys::crow_rpc_buffer_len(self.handle);
+            if ptr.is_null() || len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(ptr, len as usize)
+            }
+        }
+    }
+
     /// Take ownership of the handle (prevents Drop from releasing it).
     pub(crate) fn into_raw(mut self) -> sys::crow_rpc_buffer_t {
         let h = self.handle;

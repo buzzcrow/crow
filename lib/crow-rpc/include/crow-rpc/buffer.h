@@ -84,8 +84,10 @@ class SystemBufferPool : public BufferPool
     // Allocate a fresh Buffer + data + refcount slot (no recycle).
     Buffer *alloc_fresh(uint32_t capacity);
 
-    uint32_t max_buffers_;
-    uint32_t outstanding_ = 0; // buffers not yet recycled
+    uint32_t              max_buffers_;
+    std::atomic<uint32_t> outstanding_{0}; // in-use buffers (allocated, not recycled)
+    std::atomic<uint64_t> total_alloc_{0};
+    std::atomic<uint64_t> total_recycle_{0};
 
     // Free list keyed by capacity bucket (rounded up to next power of 2).
     std::mutex                                          mu_;

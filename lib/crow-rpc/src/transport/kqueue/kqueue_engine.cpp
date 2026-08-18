@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-rpc/kqueue_engine.h"
+#include "crow-rpc/transport/kqueue/kqueue_engine.h"
 
 #include <sys/event.h>
 #include <sys/socket.h>
@@ -81,8 +81,11 @@ void KqueueEngine::arm_read(int fd)
 
 void KqueueEngine::arm_write(int fd)
 {
+    // Level-triggered (no EV_CLEAR): fires whenever the socket is
+    // writable. We disarm via disarm_write when the send queue is empty
+    // to avoid a busy-loop.
     struct kevent change;
-    EV_SET(&change, fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, nullptr);
+    EV_SET(&change, fd, EVFILT_WRITE, EV_ADD, 0, 0, nullptr);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 

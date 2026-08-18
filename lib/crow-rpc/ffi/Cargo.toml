@@ -13,5 +13,9 @@ path = "src/lib.rs"
 [dependencies]
 tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync"] }
 
+[dev-dependencies]
+crow-protocol = { path = "../../crow-protocol" }
+flatbuffers = { workspace = true }
+
 [build-dependencies]
 cc = "1"

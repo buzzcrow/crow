@@ -3,7 +3,7 @@
 
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/framing.h"
-#include "crow-rpc/socket_transport.h"
+#include "crow-rpc/transport/socket_transport.h"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>

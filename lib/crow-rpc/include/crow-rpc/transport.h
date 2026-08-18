@@ -27,8 +27,9 @@ struct OutFrame
 {
     uint64_t request_id = 0;
     Header   header;
-    Buffer  *control = nullptr; // pool-allocated; released after send
-    Buffer  *data    = nullptr; // pool-allocated; nullptr if control-only
+    Buffer  *control     = nullptr; // pool-allocated; released after send
+    Buffer  *data        = nullptr; // pool-allocated; nullptr if control-only
+    uint32_t sent_offset = 0;       // bytes already sent (partial write tracking)
 };
 
 constexpr int BATCH_MAX = 64;
@@ -73,6 +74,13 @@ class Connection
     // Drain up to max frames from the send queue. Caller owns the returned
     // pointers (must release their buffers after send completes).
     int drain_send_queue(OutFrame **out, int max);
+
+    // Check if the send queue has pending frames (without draining).
+    bool has_pending_send() const
+    {
+        std::lock_guard<std::mutex> lock(send_mu_);
+        return !send_queue_.empty();
+    }
 
     // Close the connection, fail pending requests, signal reconnect.
     void close();
@@ -132,7 +140,7 @@ class Connection
 
     // Send queue (mutex-protected for v1; the design's lock-free MPSC is a
     // future optimization). Capacity-bounded for backpressure.
-    std::mutex             send_mu_;
+    mutable std::mutex     send_mu_;
     std::deque<OutFrame *> send_queue_;
     uint32_t               send_queue_capacity_ = 256;
 

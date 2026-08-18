@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "crow-rpc/socket_transport.h"
+#include "crow-rpc/transport/socket_transport.h"
 
 namespace crow::rpc
 {

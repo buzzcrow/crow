@@ -4,9 +4,10 @@
 #include "crow-rpc/c_api.h"
 
 #include "crow-rpc/buffer.h"
-#include "crow-rpc/caller.h"
-#include "crow-rpc/server.h"
-#include "crow-rpc/socket_transport.h"
+#include "crow-rpc/client/caller.h"
+#include "crow-rpc/server/message.h"
+#include "crow-rpc/server/server.h"
+#include "crow-rpc/transport/socket_transport.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -15,6 +16,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 
 // ── Handle wrappers ───────────────────────────────────────────────
@@ -69,6 +71,22 @@ void crow_rpc_buffer_write(crow_rpc_buffer_t buf, const uint8_t *data, uint32_t 
     buf->buf->write(data, len);
 }
 
+const uint8_t *crow_rpc_buffer_data(crow_rpc_buffer_t buf)
+{
+    if (buf == nullptr || buf->buf == nullptr) {
+        return nullptr;
+    }
+    return buf->buf->data;
+}
+
+uint32_t crow_rpc_buffer_len(crow_rpc_buffer_t buf)
+{
+    if (buf == nullptr || buf->buf == nullptr) {
+        return 0;
+    }
+    return buf->buf->len;
+}
+
 crow_rpc_buffer_t crow_rpc_buffer_ref(crow_rpc_buffer_t buf)
 {
     if (buf == nullptr || buf->buf == nullptr) {
@@ -83,7 +101,16 @@ void crow_rpc_buffer_release(crow_rpc_buffer_t buf)
     if (buf == nullptr || buf->buf == nullptr) {
         return;
     }
-    buf->buf->release();
+    // If the buffer has a refcount (pool-allocated), release via the
+    // normal path (decrement ref, recycle on 0). If ref is null
+    // (raw wrapper from a response Frame), free the data + Buffer directly.
+    if (buf->buf->ref != nullptr) {
+        buf->buf->release();
+    }
+    else {
+        std::free(buf->buf->data);
+        delete buf->buf;
+    }
     buf->buf = nullptr;
     delete buf;
 }
@@ -206,12 +233,41 @@ struct OnCompleteAdapter
         }
 
         // The response frame's control/data are raw pointers from the
-        // parser. For v1, we pass nullptr — the Rust side will handle
-        // response parsing when the full response path is wired.
+        // parser (malloc'd). Wrap them in crow_rpc_buffer_s handles for
+        // the Rust side. We create a Buffer that wraps the raw pointer
+        // without pool ownership (ref=nullptr → release is a no-op; the
+        // Frame destructor frees the underlying malloc'd memory).
         crow_rpc_buffer_t ctrl_handle = nullptr;
         crow_rpc_buffer_t data_handle = nullptr;
 
         if (response != nullptr) {
+            if (response->control != nullptr && response->control_len > 0) {
+                auto *buf     = new crow::rpc::Buffer;
+                buf->data     = response->control;
+                buf->len      = response->control_len;
+                buf->capacity = response->control_len;
+                buf->type     = crow::rpc::BufferType::System;
+                buf->pool     = nullptr;
+                buf->ref      = nullptr; // no refcount — release is no-op
+                ctrl_handle   = new crow_rpc_buffer_s{buf};
+            }
+            if (response->data != nullptr && response->data_len > 0) {
+                auto *buf     = new crow::rpc::Buffer;
+                buf->data     = response->data;
+                buf->len      = response->data_len;
+                buf->capacity = response->data_len;
+                buf->type     = crow::rpc::BufferType::System;
+                buf->pool     = nullptr;
+                buf->ref      = nullptr;
+                data_handle   = new crow_rpc_buffer_s{buf};
+            }
+            // Null the Frame's pointers so its destructor doesn't free
+            // them (the crow_rpc_buffer_s owns them now via the Buffer
+            // wrapper; the Rust side will release the Buffer, which is
+            // a no-op since ref==nullptr, and then the crow_rpc_buffer_s
+            // is freed).
+            response->control = nullptr;
+            response->data    = nullptr;
             delete response;
         }
 
@@ -239,11 +295,24 @@ crow_rpc_status crow_rpc_caller_call(crow_rpc_caller_t caller, crow_rpc_server_t
     if (data_buf != nullptr)
         data_buf->ref_clone();
 
-    uint64_t req_id =
-        caller->caller->call(server->server->transport(), conn->conn.get(), ctrl_buf, data_buf, msg_type,
+    // Attach the caller to the connection so responses are routed to
+    // on_response → callback. Idempotent (set_on_frame overwrites).
+    caller->caller->attach(conn->conn.get());
+
+    // Extract the request_id from the flatbuffer control message so
+    // the server can echo it back for correlation. All common messages
+    // have `id` as the first field (VT_ID=4).
+    uint64_t req_id = crow::rpc::extract_request_id(ctrl_buf->data, ctrl_buf->len);
+    if (req_id == 0) {
+        // Not a standard common message — generate one.
+        req_id = caller->caller->next_request_id();
+    }
+
+    uint64_t returned =
+        caller->caller->call(server->server->transport(), conn->conn.get(), req_id, ctrl_buf, data_buf, msg_type,
                              [adapter](crow::rpc::Frame *resp, crow::rpc::RpcError err) { (*adapter)(resp, err); });
 
-    if (req_id == 0) {
+    if (returned == 0) {
         return CROW_RPC_ERR_SEND_QUEUE;
     }
 
@@ -282,24 +351,9 @@ crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int
         return nullptr;
     }
 
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    auto conn = server->server->transport()->connect(addr, port);
+    if (conn == nullptr) {
         return nullptr;
     }
-
-    struct sockaddr_in sa{};
-    sa.sin_family = AF_INET;
-    sa.sin_port   = htons(static_cast<uint16_t>(port));
-    ::inet_pton(AF_INET, addr, &sa.sin_addr);
-
-    if (::connect(fd, reinterpret_cast<struct sockaddr *>(&sa), sizeof(sa)) < 0) {
-        ::close(fd);
-        return nullptr;
-    }
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-    auto conn = server->server->transport()->create_connection(fd, std::string(addr));
     return new crow_rpc_conn_s{conn};
 }

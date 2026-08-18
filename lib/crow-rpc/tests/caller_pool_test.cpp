@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "crow-rpc/buffer.h"
-#include "crow-rpc/caller.h"
+#include "crow-rpc/client/caller.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/pool.h"
 #include "crow-rpc/scheduled_executor.h"
-#include "crow-rpc/socket_transport.h"
+#include "crow-rpc/transport/socket_transport.h"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -227,8 +227,9 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
     ctrl->write(ctrl->data, 32);
 
     // Submit the call — the callback fires when on_response is called.
-    uint64_t req_id =
-        caller.call(&transport, client_conn.get(), ctrl, nullptr, 42, [&](Frame * /*response*/, RpcError err) {
+    uint64_t req_id = caller.next_request_id();
+    uint64_t returned =
+        caller.call(&transport, client_conn.get(), req_id, ctrl, nullptr, 42, [&](Frame * /*response*/, RpcError err) {
             recv_err = err;
             got_response.store(true, std::memory_order_release);
         });
@@ -236,7 +237,7 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
     // The request didn't actually go through the transport (client_conn
     // isn't registered with a worker), so we manually simulate the response
     // by calling on_response.
-    EXPECT_GT(req_id, 0u);
+    EXPECT_GT(returned, 0u);
 
     // Build a fake response frame.
     auto *resp_frame             = new Frame;

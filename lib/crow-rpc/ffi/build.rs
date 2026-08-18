@@ -64,6 +64,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .include(&include)
         .files(sources.iter().map(|p| p.as_path()).collect::<Vec<_>>());
 
+    // Generated flatbuffer headers (from CMake build dir).
+    let gen_dir = engine.join("build").join("generated");
+    if gen_dir.exists() {
+        build.include(&gen_dir);
+    }
+
     // Find flatbuffers headers via pixi env (CONDA_PREFIX or pixi's env).
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         build.include(format!("{prefix}/include"));

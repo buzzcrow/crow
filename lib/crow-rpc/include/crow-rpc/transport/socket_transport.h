@@ -169,6 +169,17 @@ class SocketTransport : public Transport
     // (server side) or the connect path (client side).
     std::shared_ptr<Connection> create_connection(int fd, const std::string &name);
 
+    // Client-side connect: create a non-blocking socket, connect to the
+    // peer, register the connection with a worker. Returns the connection
+    // (nullptr on failure). The connection can both send and receive.
+    std::shared_ptr<Connection> connect(const std::string &addr, int port);
+
+    // The buffer pool (for callers that allocate request buffers).
+    BufferPool *pool() const
+    {
+        return pool_;
+    }
+
   private:
     BufferPool                          *pool_;
     std::vector<std::unique_ptr<Worker>> workers_;

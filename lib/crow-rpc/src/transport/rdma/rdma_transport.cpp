@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-rpc/rdma_transport.h"
+#include "crow-rpc/transport/rdma/rdma_transport.h"
 
 #ifdef CROW_RPC_HAVE_RDMA
 

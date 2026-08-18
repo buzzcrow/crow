@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 namespace crow::rpc
@@ -14,7 +15,7 @@ namespace crow::rpc
 // [magic:2][msg_type:2][msg_size:2][data_size:4][msg_offset:1][flags:1]
 //
 // Little-endian, field-by-field (not memcpy of the struct — avoids
-// compiler-layout dependence). See design-flatbuffer-rpc.md §2.2 for
+// compiler-layout dependence). See design-crow-rpc.md §3 for
 // the rationale behind each field and what was removed from the
 // reference's 20-byte header.
 
@@ -35,9 +36,9 @@ struct Header
 };
 
 // A complete frame: header + control buffer + optional data buffer.
-// Ownership: control and data are pool-allocated Buffer*. The sender
-// releases them after the transport confirms the write; the receiver
-// releases them after the handler finishes.
+// Ownership: control and data are malloc'd by the parser and freed by
+// the destructor. The handler/callback that receives a Frame* must
+// delete it when done (or transfer ownership by nulling the pointers).
 struct Frame
 {
     Header   header;
@@ -45,6 +46,12 @@ struct Frame
     uint32_t control_len = 0;
     uint8_t *data        = nullptr; // raw data payload, nullptr if control-only
     uint32_t data_len    = 0;
+
+    ~Frame()
+    {
+        std::free(control);
+        std::free(data);
+    }
 };
 
 enum class FramingError {

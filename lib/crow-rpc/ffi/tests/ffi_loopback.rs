@@ -4,9 +4,13 @@
 //! Integration tests for the crow-rpc-ffi crate.
 //!
 //! These tests exercise the full FFI loopback: Rust creates a server,
-//! connects a client, and verifies the server accepts the connection.
+//! connects a client, sends a ping request, and verifies the response.
 
-use crow_rpc_ffi::{BufferPool, RpcServer};
+use crow_protocol::fb::{
+    ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, FBMsgType,
+};
+use crow_rpc_ffi::{BufferPool, RemoteCaller, RpcServer};
+use flatbuffers::FlatBufferBuilder;
 
 #[test]
 fn server_create_listen_start_stop() {
@@ -42,6 +46,135 @@ fn server_connect_to_peer() {
     // Connect to ourselves (loopback).
     let conn = server.connect("127.0.0.1", port);
     assert!(conn.is_ok(), "connect should succeed");
+
+    server.stop();
+}
+
+// ── Full ping loopback via FFI ─────────────────────────────────────
+// Build a ConnectionPingRequest flatbuffer on the Rust side, submit it
+// through the FFI, and verify the ConnectionPingResponse comes back with
+// the matching request id.
+#[tokio::test]
+async fn ping_loopback() {
+    let server = RpcServer::new(None);
+    server.listen("127.0.0.1", 0).expect("listen failed");
+    let port = server.port();
+    assert!(port > 0);
+
+    server.start();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let conn = server.connect("127.0.0.1", port).expect("connect failed");
+
+    // Build a ConnectionPingRequest flatbuffer.
+    let mut fbb = FlatBufferBuilder::new();
+    let req = ConnectionPingRequest::create(
+        &mut fbb,
+        &ConnectionPingRequestArgs {
+            id: 42,
+            rpc_create_nano: 0,
+        },
+    );
+    fbb.finish(req, None);
+    let fb_bytes = fbb.finished_data();
+
+    // Allocate a buffer from the server's internal pool and copy the
+    // flatbuffer into it. The FFI takes ownership of the buffer.
+    let pool = BufferPool::new(256);
+    let mut ctrl = pool.alloc_buffer(fb_bytes.len() as u32).expect("alloc control");
+    ctrl.write(fb_bytes);
+
+    let caller = RemoteCaller::new();
+    let future = caller
+        .call(
+            &server,
+            &conn,
+            ctrl,
+            None,
+            FBMsgType::EConnectionPingRequest.0 as u16,
+        )
+        .expect("call submit failed");
+
+    // Await the response (10s timeout).
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), future)
+        .await
+        .expect("timeout waiting for response")
+        .expect("callback dropped");
+
+    assert!(response.control.is_some(), "response should have control");
+    let ctrl_buf = response.control.unwrap();
+    let resp_bytes = ctrl_buf.bytes();
+    assert!(!resp_bytes.is_empty(), "control bytes should be non-empty");
+
+    // Parse the response as a ConnectionPingResponse and verify the id.
+    let resp = flatbuffers::root::<ConnectionPingResponse>(resp_bytes).expect("failed to parse response");
+    assert_eq!(resp.id(), 42, "response id should match request id");
+
+    server.stop();
+}
+
+// ── Ping loopback with data payload ───────────────────────────────
+// Send a ping request with 512-byte data and verify the response.
+// The built-in ping handler echoes back a ConnectionPingResponse
+// (no data), so we just verify we get a response.
+#[tokio::test]
+async fn ping_loopback_with_data() {
+    let server = RpcServer::new(None);
+    server.listen("127.0.0.1", 0).expect("listen failed");
+    let port = server.port();
+    assert!(port > 0);
+
+    server.start();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let conn = server.connect("127.0.0.1", port).expect("connect failed");
+
+    // Build a ConnectionPingRequest flatbuffer.
+    let mut fbb = FlatBufferBuilder::new();
+    let req = ConnectionPingRequest::create(
+        &mut fbb,
+        &ConnectionPingRequestArgs {
+            id: 99,
+            rpc_create_nano: 0,
+        },
+    );
+    fbb.finish(req, None);
+    let fb_bytes = fbb.finished_data();
+
+    let pool = BufferPool::new(256);
+    let mut ctrl = pool.alloc_buffer(fb_bytes.len() as u32).expect("alloc control");
+    ctrl.write(fb_bytes);
+
+    // 512-byte data payload.
+    let payload: Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+    let mut data = pool.alloc_buffer(512).expect("alloc data");
+    data.write(&payload);
+
+    let caller = RemoteCaller::new();
+    let future = caller
+        .call(
+            &server,
+            &conn,
+            ctrl,
+            Some(data),
+            FBMsgType::EConnectionPingRequest.0 as u16,
+        )
+        .expect("call submit failed");
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), future)
+        .await
+        .expect("timeout waiting for response")
+        .expect("callback dropped");
+
+    // The built-in ping handler returns a ConnectionPingResponse with
+    // no data. Verify we got a control buffer back with the right id.
+    assert!(response.control.is_some(), "response should have control");
+    let ctrl_buf = response.control.unwrap();
+    let resp_bytes = ctrl_buf.bytes();
+    assert!(!resp_bytes.is_empty(), "control bytes should be non-empty");
+
+    let resp = flatbuffers::root::<ConnectionPingResponse>(resp_bytes).expect("failed to parse response");
+    assert_eq!(resp.id(), 99, "response id should match request id");
 
     server.stop();
 }

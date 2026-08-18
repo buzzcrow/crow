@@ -14,7 +14,7 @@ triggers:
 How to write and refine `doc/design/<area>/design-crow-<area>.md` (root)
 and `doc/design/<area>/design-crow-<area>-<topic>.md` (sub-design) — the
 permanent, human-readable design record. `<area>` ∈ `kv`, `tree`,
-`console`, `diskdb`, `protocol`.
+`console`, `diskdb`, `protocol`, `rpc`.
 
 **Audience:** humans reading to understand the design, flow, and choices;
 AI reading doc + code to understand and continue the work. After each
