@@ -70,6 +70,11 @@ impl BufferPool {
         BufferPool { handle }
     }
 
+    /// Allocate a buffer from this pool.
+    pub fn alloc_buffer(&self, capacity: u32) -> Option<Buffer> {
+        Buffer::alloc(self, capacity)
+    }
+
     pub(crate) fn handle(&self) -> sys::crow_rpc_pool_t {
         self.handle
     }
