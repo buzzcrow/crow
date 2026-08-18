@@ -100,6 +100,7 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
 test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
 test-rpc-ct = { cmd = "ctest --test-dir lib/crow-rpc/build --output-on-failure", depends-on = ["build"] }
+test-rpc-ffi = { cmd = "cargo test -p crow-rpc-ffi --all-targets", depends-on = ["build"] }
 test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
 test-common = { cmd = "cargo test -p crow-common --all-targets", depends-on = ["build"] }
 test-protocol = { cmd = "cargo test -p crow-protocol --all-targets", depends-on = ["build"] }
@@ -123,6 +124,8 @@ set -e
 pixi run clean-env
 pixi run test-tree-ct
 pixi run test-tree-ffi
+pixi run test-rpc-ct
+pixi run test-rpc-ffi
 pixi run test-common
 pixi run test-protocol
 pixi run test-kv-core
