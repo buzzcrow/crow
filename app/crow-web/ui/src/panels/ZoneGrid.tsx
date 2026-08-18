@@ -3,17 +3,11 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 import type { ZoneUsageDto } from '../types';
+import { busyColor } from '../utils/capacity';
 
 interface ZoneGridProps {
   zones: ZoneUsageDto[];
   onZoneClick?: (zone: ZoneUsageDto) => void;
-}
-
-function busyColor(pct: number): string {
-  if (pct < 30) return '#22c55e';
-  if (pct < 60) return '#eab308';
-  if (pct < 85) return '#f97316';
-  return '#ef4444';
 }
 
 export function ZoneGrid({ zones, onZoneClick }: ZoneGridProps) {
@@ -73,10 +67,18 @@ export function ZoneGrid({ zones, onZoneClick }: ZoneGridProps) {
 
   const handleMouseLeave = () => setHoverZone(null);
 
-  const handleClick = () => {
-    if (hoverZone) {
-      setSelectedZone(hoverZone.index);
-      onZoneClick?.(zones[hoverZone.index]);
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const col = Math.floor((x - gap) / (cellSize + gap));
+    const row = Math.floor((y - gap) / (cellSize + gap));
+    const idx = row * gridSize + col;
+    if (idx >= 0 && idx < zones.length) {
+      setSelectedZone(idx);
+      onZoneClick?.(zones[idx]);
     }
   };
 

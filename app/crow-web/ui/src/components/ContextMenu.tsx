@@ -149,8 +149,11 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
     }
   }, [getFirstEnabledIndex]);
 
-  // Adjust position to fit in viewport
-  const adjustedPosition = useRef(position);
+  // Adjust position to fit in viewport. Re-runs when a submenu
+  // opens/closes because the menu height changes — without this,
+  // submenu items near the bottom of the viewport are pushed
+  // off-screen and become unclickable.
+  const [adjustedPosition, setAdjustedPosition] = useState(position);
   useEffect(() => {
     if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
@@ -167,9 +170,9 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         y = Math.max(0, window.innerHeight - rect.height);
       }
 
-      adjustedPosition.current = { x, y };
+      setAdjustedPosition({ x, y });
     }
-  }, [position]);
+  }, [position, openSubmenu]);
 
   return (
     <div
@@ -177,7 +180,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
       className="tw-fixed tw-z-[200] tw-bg-panel tw-border tw-border-border tw-rounded-md tw-shadow-lg tw-py-1 tw-animate-fade-in tw-min-w-[180px]"
       role="menu"
       tabIndex={-1}
-      style={{ left: adjustedPosition.current.x, top: adjustedPosition.current.y }}
+      style={{ left: adjustedPosition.x, top: adjustedPosition.y }}
     >
       {items.map((item, index) => {
         if ('separator' in item) {
