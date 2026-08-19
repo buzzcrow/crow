@@ -1,6 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#![allow(unsafe_code)]
+// FFI dispatch callback + raw pointer handoff requires unsafe.
+
 //! RPC bench target: provisions an in-process `RpcServer` with the
 //! built-in echo handler, builds `RpcClient`-backed workers that send
 //! ping requests with data payloads and verify the echo response.
@@ -12,9 +15,14 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::thread;
+
+use crossbeam_channel::{bounded, Sender};
 
 use crow_console_shared::error::{Error, Result};
-use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
+use crow_protocol::fb::{
+    ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, ConnectionPingResponseArgs,
+};
 use crow_rpc_ffi::{BufferPool, Connection, CrowRpcLatencyStats, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 
@@ -28,6 +36,105 @@ use super::{BenchClient, BenchTarget};
 /// colliding with the built-in ping handler (`EConnectionPingRequest`).
 const ECHO_MSG_TYPE: u16 = 100;
 
+/// Wrapper for a raw pointer that is `Send`. Used for the dispatch
+/// callback `user_data` (only accessed from the main bench thread).
+struct SendPtr(*mut std::ffi::c_void);
+unsafe impl Send for SendPtr {}
+
+/// The C++ dispatch callback. Called by the I/O worker with parsed frame
+/// data. Hands off to the Rust thread pool via the channel. Must be
+/// non-blocking.
+unsafe extern "C" fn dispatch_callback(
+    user_data: *mut std::ffi::c_void,
+    conn_handle: *mut std::ffi::c_void,
+    msg_type: u16,
+    control: *mut u8,
+    control_len: u32,
+    data: *mut u8,
+    data_len: u32,
+) {
+    let tx = &*(user_data as *const Sender<DispatchTask>);
+    let task = DispatchTask {
+        conn_handle,
+        _msg_type: msg_type,
+        control,
+        control_len,
+        data,
+        data_len,
+    };
+    // try_send: if the channel is full, drop the request (backpressure).
+    let _ = tx.try_send(task);
+}
+
+/// Run the echo handler on a dispatch thread pool worker. Builds the
+/// response (`ConnectionPingResponse` + echoed data) and submits it via
+/// the C++ transport.
+#[allow(clippy::needless_pass_by_value)]
+fn handle_dispatch_task(server: &RpcServer, task: DispatchTask) {
+    unsafe {
+        // Extract request_id from the control flatbuffer.
+        let req_id = if task.control_len > 0 && !task.control.is_null() {
+            let slice = std::slice::from_raw_parts(task.control, task.control_len as usize);
+            // ConnectionPingRequest has `id` as the first field (VT_ID=4).
+            // Use flatbuffers to read it.
+            flatbuffers::root::<ConnectionPingRequest>(slice).map_or(0, |r| r.id())
+        } else {
+            0
+        };
+
+        // Build the response control: ConnectionPingResponse.
+        let mut fbb = FlatBufferBuilder::new();
+        let resp = ConnectionPingResponse::create(
+            &mut fbb,
+            &ConnectionPingResponseArgs {
+                id: req_id,
+                rpc_create_nano: 0,
+                ret: crow_protocol::fb::FBRetCode::Success,
+            },
+        );
+        fbb.finish(resp, None);
+        let resp_ctrl = fbb.finished_data().to_vec();
+
+        // Echo the request data.
+        let resp_data = if task.data_len > 0 && !task.data.is_null() {
+            Some(std::slice::from_raw_parts(task.data, task.data_len as usize).to_vec())
+        } else {
+            None
+        };
+
+        // Submit the response via C++ transport.
+        let _ = server.submit_response(
+            task.conn_handle,
+            &resp_ctrl,
+            resp_data.as_deref(),
+            ECHO_MSG_TYPE,
+            req_id,
+        );
+
+        // Free the request buffers (malloc'd by C++ parser).
+        if !task.control.is_null() {
+            libc::free(task.control.cast());
+        }
+        if !task.data.is_null() {
+            libc::free(task.data.cast());
+        }
+    }
+}
+
+/// A dispatch task: the parsed frame data handed off from C++ to Rust.
+struct DispatchTask {
+    conn_handle: *mut std::ffi::c_void,
+    /// Echo handler always responds with `ECHO_MSG_TYPE`, so this is
+    /// unused — kept for future handlers that dispatch by `msg_type`.
+    _msg_type: u16,
+    control: *mut u8,
+    control_len: u32,
+    data: *mut u8,
+    data_len: u32,
+}
+
+unsafe impl Send for DispatchTask {}
+
 /// RPC bench target: in-process server + echo handler.
 pub(crate) struct RpcTarget {
     server: Option<Arc<RpcServer>>,
@@ -36,17 +143,21 @@ pub(crate) struct RpcTarget {
     /// The shared RPC client used by all workers.
     client: Option<Arc<RpcClient>>,
     /// Pool of connections shared across all worker threads.
-    /// `cfg.connections` connections are created at provision time;
-    /// workers round-robin over them via `next_conn_`. When threads >
-    /// connections, multiple threads share the same connection — this
-    /// is what enables send/recv aggregation (multiple in-flight frames
-    /// per connection, coalesced into batched read/writev).
     conns: Vec<Arc<Connection>>,
     next_conn: AtomicUsize,
     /// Global request ID counter — shared across all workers to avoid
     /// `request_id` collisions (the C API uses the flatbuffer's `id` field
     /// as the `request_id` for response correlation).
     request_id_counter: Arc<AtomicU64>,
+    /// Dispatch thread pool sender. The C++ I/O worker hands off parsed
+    /// frames to this channel; Rust worker threads run the echo handler
+    /// and submit responses. This enables pipeline parallelism (I/O
+    /// worker focuses on read/parse, handler runs in parallel).
+    dispatch_tx: Option<Sender<DispatchTask>>,
+    /// Raw pointer to the `Box<Sender>` passed to C++ as `user_data`.
+    /// Freed in cleanup to close the channel.
+    dispatch_user_data: SendPtr,
+    dispatch_threads: Vec<thread::JoinHandle<()>>,
 }
 
 impl RpcTarget {
@@ -59,6 +170,9 @@ impl RpcTarget {
             conns: Vec::new(),
             next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
+            dispatch_tx: None,
+            dispatch_user_data: SendPtr(std::ptr::null_mut()),
+            dispatch_threads: Vec::new(),
         }
     }
 }
@@ -81,11 +195,39 @@ impl BenchTarget for RpcTarget {
             return Err(Error::Config("rpc server did not bind a port".to_string()));
         }
 
-        // Register the built-in echo handler for our custom msg_type.
-        server.register_echo_handler(ECHO_MSG_TYPE);
+        // Set up the dispatch thread pool (executor model). When
+        // io_dispatch_threads > 0, the C++ I/O worker hands off parsed
+        // frames to this Rust thread pool via a channel. The pool workers
+        // run the echo handler and submit responses. This enables
+        // pipeline parallelism for non-trivial handlers. When
+        // io_dispatch_threads == 0, use the C++ inline echo handler
+        // (faster for trivial handlers like echo).
+        let num_dispatch_threads = cfg.io_dispatch_threads as usize;
+        if num_dispatch_threads > 0 {
+            let (tx, rx) = bounded::<DispatchTask>(4096);
+            let server_for_dispatch = Arc::clone(&server);
+            for _ in 0..num_dispatch_threads {
+                let rx = rx.clone();
+                let server = Arc::clone(&server_for_dispatch);
+                let handle = thread::spawn(move || {
+                    while let Ok(task) = rx.recv() {
+                        handle_dispatch_task(&server, task);
+                    }
+                });
+                self.dispatch_threads.push(handle);
+            }
+            self.dispatch_tx = Some(tx);
+
+            let dispatch_tx_ptr = self.dispatch_tx.as_ref().unwrap().clone();
+            let user_data = Box::into_raw(Box::new(dispatch_tx_ptr)).cast();
+            self.dispatch_user_data = SendPtr(user_data);
+            unsafe { server.set_dispatch_callback(Some(dispatch_callback), user_data) };
+        } else {
+            // Use the C++ inline echo handler (no dispatch overhead).
+            server.register_echo_handler(ECHO_MSG_TYPE);
+        }
 
         server.start();
-        // Give the acceptor thread time to start.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Create exactly cfg.connections connections. These are shared
@@ -191,6 +333,24 @@ impl BenchTarget for RpcTarget {
                 de_avg = avg_us(&s.dispatch_to_enq),
                 de_c = s.dispatch_to_enq.count,
             );
+        }
+        // Clear the dispatch callback (if set) so the C++ I/O worker
+        // stops calling it. Then free the Box<Sender> (user_data) which
+        // closes the channel and lets the dispatch threads exit.
+        if !self.dispatch_user_data.0.is_null() {
+            if let Some(server) = self.server.as_ref() {
+                unsafe { server.set_dispatch_callback(None, std::ptr::null_mut()) };
+            }
+            unsafe {
+                drop(Box::from_raw(
+                    self.dispatch_user_data.0.cast::<Sender<DispatchTask>>(),
+                ));
+            }
+            self.dispatch_user_data.0 = std::ptr::null_mut();
+        }
+        drop(self.dispatch_tx.take());
+        for handle in self.dispatch_threads.drain(..) {
+            let _ = handle.join();
         }
         if let Some(server) = self.server.take() {
             server.stop();

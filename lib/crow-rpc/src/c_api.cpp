@@ -452,3 +452,52 @@ void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t ms
     }
     server->server->register_handler(msg_type, echo_handler);
 }
+
+void crow_rpc_server_set_dispatch_callback(crow_rpc_server_t server, crow_rpc_dispatch_callback callback,
+                                           void *user_data)
+{
+    if (server == nullptr) {
+        return;
+    }
+    server->server->set_dispatch_callback(callback, user_data);
+}
+
+crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *conn_handle, const uint8_t *control,
+                                                uint32_t control_len, const uint8_t *data, uint32_t data_len,
+                                                uint16_t msg_type, uint64_t request_id)
+{
+    if (server == nullptr || conn_handle == nullptr) {
+        return CROW_RPC_ERR_INVALID_ARG;
+    }
+
+    auto *conn = static_cast<crow::rpc::Connection *>(conn_handle);
+    auto *pool = server->server->pool();
+
+    // Allocate response buffers from the pool and copy data.
+    crow::rpc::Buffer *resp_ctrl = nullptr;
+    if (control != nullptr && control_len > 0) {
+        resp_ctrl = pool->alloc(control_len);
+        if (resp_ctrl == nullptr) {
+            return CROW_RPC_ERR_SEND_QUEUE;
+        }
+        resp_ctrl->write(control, control_len);
+    }
+
+    crow::rpc::Buffer *resp_data = nullptr;
+    if (data != nullptr && data_len > 0) {
+        resp_data = pool->alloc(data_len);
+        if (resp_data == nullptr) {
+            if (resp_ctrl != nullptr) {
+                resp_ctrl->release();
+            }
+            return CROW_RPC_ERR_SEND_QUEUE;
+        }
+        resp_data->write(data, data_len);
+    }
+
+    auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
+    if (!server->server->transport()->submit(conn, frame)) {
+        return CROW_RPC_ERR_SEND_QUEUE;
+    }
+    return CROW_RPC_OK;
+}

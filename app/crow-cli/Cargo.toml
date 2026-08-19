@@ -37,6 +37,8 @@ thiserror = "1"
 crow-web = { path = "../crow-web" }
 axum = "0.7"
 dirs = "5"
+libc = "0.2.189"
+crossbeam-channel = "0.5.16"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

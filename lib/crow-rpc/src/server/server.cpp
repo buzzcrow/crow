@@ -144,6 +144,31 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
         stats.read_to_dispatch.record(dispatch_nano - frame->parsed_nano);
     }
 
+    // Executor model: if a dispatch callback is set, hand off the frame
+    // data to the callback (non-blocking) and return immediately. The
+    // callback takes ownership of the malloc'd control/data buffers.
+    if (dispatch_callback_ != nullptr) {
+        uint16_t msg_type    = frame->header.msg_type;
+        uint8_t *control     = frame->control;
+        uint32_t control_len = frame->control_len;
+        uint8_t *data        = frame->data;
+        uint32_t data_len    = frame->data_len;
+
+        // Transfer ownership: null the pointers so ~Frame() doesn't free.
+        frame->control = nullptr;
+        frame->data    = nullptr;
+        delete frame;
+
+        // Record dispatch latency (read → handoff).
+        if (dispatch_nano > 0) {
+            stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
+        }
+
+        dispatch_callback_(dispatch_user_data_, static_cast<void *>(conn), msg_type, control, control_len, data,
+                           data_len);
+        return;
+    }
+
     uint16_t msg_type   = frame->header.msg_type;
     bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
 

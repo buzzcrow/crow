@@ -145,6 +145,10 @@ pub(crate) struct BenchConfig {
     /// Number of C++ I/O worker threads (RPC target only). 1 = single-worker
     /// fast path; >1 = multi-worker on shared epoll/kqueue with ONESHOT.
     pub(crate) io_workers: u32,
+    /// Number of Rust dispatch thread pool threads (RPC target only).
+    /// The I/O worker hands off parsed frames to this pool; pool workers
+    /// run the handler and submit responses. 0 = use C++ inline handler.
+    pub(crate) io_dispatch_threads: u32,
 }
 
 impl BenchConfig {
@@ -180,6 +184,7 @@ impl BenchConfig {
             pipeline_depth: 1,
             target: "kv".to_string(),
             io_workers: 1,
+            io_dispatch_threads: 0,
         }
     }
 

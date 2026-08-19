@@ -125,4 +125,31 @@ extern "C" {
     pub fn crow_rpc_connect(server: crow_rpc_server_t, addr: *const c_char, port: c_int) -> crow_rpc_conn_t;
 
     pub fn crow_rpc_server_register_echo_handler(server: crow_rpc_server_t, msg_type: u16);
+
+    pub fn crow_rpc_server_set_dispatch_callback(
+        server: crow_rpc_server_t,
+        callback: Option<
+            unsafe extern "C" fn(
+                user_data: *mut c_void,
+                conn_handle: *mut c_void,
+                msg_type: u16,
+                control: *mut u8,
+                control_len: u32,
+                data: *mut u8,
+                data_len: u32,
+            ),
+        >,
+        user_data: *mut c_void,
+    );
+
+    pub fn crow_rpc_server_submit_response(
+        server: crow_rpc_server_t,
+        conn_handle: *mut c_void,
+        control: *const u8,
+        control_len: u32,
+        data: *const u8,
+        data_len: u32,
+        msg_type: u16,
+        request_id: u64,
+    ) -> crow_rpc_status;
 }

@@ -117,6 +117,34 @@ crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int
 // smoke tests without writing a C++ handler.
 void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t msg_type);
 
+// ── Dispatch callback (executor model) ────────────────────────────
+//
+// When set, the I/O worker calls this callback instead of running the
+// C++ handler inline. The callback receives the parsed frame data
+// (malloc'd control + data buffers) and the raw Connection* pointer.
+// The callback takes ownership of control and data (must free with
+// free()). The callback must be non-blocking — hand off to a thread
+// pool and return immediately. The thread pool calls
+// crow_rpc_server_submit_response to send the response.
+//
+// This enables pipeline parallelism: the I/O worker focuses on
+// read/parse, while handler execution overlaps on separate threads.
+
+typedef void (*crow_rpc_dispatch_callback)(void *user_data, void *conn_handle, uint16_t msg_type, uint8_t *control,
+                                           uint32_t control_len, uint8_t *data, uint32_t data_len);
+
+void crow_rpc_server_set_dispatch_callback(crow_rpc_server_t server, crow_rpc_dispatch_callback callback,
+                                           void *user_data);
+
+// Submit a response on a server-side connection. Allocates buffers from
+// the pool, builds an OutFrame, and calls transport->submit (enqueue +
+// try_send). Thread-safe — may be called from any thread (e.g. a Rust
+// thread pool worker). conn_handle is the raw pointer passed to the
+// dispatch callback.
+crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *conn_handle, const uint8_t *control,
+                                                uint32_t control_len, const uint8_t *data, uint32_t data_len,
+                                                uint16_t msg_type, uint64_t request_id);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

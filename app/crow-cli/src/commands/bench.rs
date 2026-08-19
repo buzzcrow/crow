@@ -61,6 +61,13 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 1)]
     pub io_workers: u32,
 
+    /// Number of Rust dispatch thread pool threads (RPC target only).
+    /// The I/O worker hands off parsed frames to this pool; pool workers
+    /// run the handler and submit responses. 0 = use C++ inline handler
+    /// (faster for trivial handlers like echo).
+    #[arg(long, default_value_t = 0)]
+    pub io_dispatch_threads: u32,
+
     #[arg(long, default_value_t = 1_000_000)]
     pub key_space: u64,
 
@@ -474,6 +481,7 @@ async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
     cfg.io_workers = args.io_workers;
+    cfg.io_dispatch_threads = args.io_dispatch_threads;
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
     // RPC target doesn't use metrics_log_path (no KV client metrics).
