@@ -52,11 +52,15 @@ run_bench() {
 echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 
 echo "=== rpc echo (value_size=64) ==="
-run_bench 1 1 "rpc_1t_1c"     # baseline: single-thread closed-loop
-run_bench 2 2 "rpc_2t_2c"     # light concurrency
-run_bench 4 4 "rpc_4t_4c"     # medium concurrency
-run_bench 8 4 "rpc_8t_4c"     # high threads, fewer connections
-run_bench 16 8 "rpc_16t_8c"   # max concurrency
+run_bench 1 1 "rpc_1t_1c"       # baseline: single-thread closed-loop
+run_bench 2 2 "rpc_2t_2c"       # light concurrency
+run_bench 4 4 "rpc_4t_4c"       # medium concurrency
+run_bench 8 4 "rpc_8t_4c"       # high threads, fewer connections
+run_bench 16 8 "rpc_16t_8c"     # high concurrency
+run_bench 64 8 "rpc_64t_8c"     # saturation: 64 threads on 8 connections
+run_bench 128 16 "rpc_128t_16c" # saturation: 128 threads on 16 connections
+run_bench 256 16 "rpc_256t_16c" # max TPS: 256 threads on 16 connections
+run_bench 512 32 "rpc_512t_32c" # beyond ceiling: latency doubles, TPS flat
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"
