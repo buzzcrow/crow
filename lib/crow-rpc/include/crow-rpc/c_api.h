@@ -81,6 +81,13 @@ void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transpor
 crow_rpc_client_t crow_rpc_client_create(void);
 void              crow_rpc_client_destroy(crow_rpc_client_t client);
 
+// Attach the client to a connection so responses are routed to the
+// client's response handler. Must be called once per connection before
+// issuing calls. Calling attach on an already-attached connection is
+// safe (idempotent) but concurrent calls from multiple threads are NOT
+// thread-safe — call it once before sharing the connection.
+void crow_rpc_client_attach(crow_rpc_client_t client, crow_rpc_conn_t conn);
+
 // Completion callback — invoked on the C++ I/O thread when the response
 // arrives or on error. Must be O(1) and non-blocking.
 typedef void (*crow_rpc_on_complete)(uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
@@ -88,7 +95,8 @@ typedef void (*crow_rpc_on_complete)(uint64_t request_id, crow_rpc_buffer_t cont
 
 // Submit a request-response call. Returns CROW_RPC_OK on success and
 // sets out_request_id. On error, returns negative status and the callback
-// is NOT invoked.
+// is NOT invoked. Thread-safe: multiple threads may call this
+// concurrently on the same connection (the send queue is mutex-protected).
 crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                      crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type,
                                      crow_rpc_on_complete on_complete, void *user_data, uint64_t *out_request_id);

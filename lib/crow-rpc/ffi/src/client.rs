@@ -28,6 +28,14 @@ impl RpcClient {
         RpcClient { handle }
     }
 
+    /// Attach the client to a connection so responses are routed to the
+    /// client's response handler. Must be called once per connection
+    /// before issuing calls. Not thread-safe — call once before sharing
+    /// the connection across threads.
+    pub fn attach(&self, conn: &Connection) {
+        unsafe { sys::crow_rpc_client_attach(self.handle, conn.handle()) };
+    }
+
     /// Submit a request-response call. Returns a future that resolves to
     /// the response or an error.
     pub fn call(

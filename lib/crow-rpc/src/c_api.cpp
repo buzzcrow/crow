@@ -307,6 +307,14 @@ struct OnCompleteAdapter
     }
 };
 
+void crow_rpc_client_attach(crow_rpc_client_t client, crow_rpc_conn_t conn)
+{
+    if (client == nullptr || conn == nullptr) {
+        return;
+    }
+    client->client->attach(conn->conn.get());
+}
+
 crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                      crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type,
                                      crow_rpc_on_complete on_complete, void *user_data, uint64_t *out_request_id)
@@ -330,9 +338,10 @@ crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t
     if (data_buf != nullptr)
         data_buf->ref_clone();
 
-    // Attach the client to the connection so responses are routed to
-    // on_response → callback. Idempotent (set_on_frame overwrites).
-    client->client->attach(conn->conn.get());
+    // NOTE: attach() must be called once before sharing the connection
+    // (via crow_rpc_client_attach). Calling it here on every call would
+    // race on the std::function assignment when multiple threads share
+    // the same connection.
 
     // Extract the request_id from the flatbuffer control message so
     // the server can echo it back for correlation. All common messages

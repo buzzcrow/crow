@@ -99,6 +99,7 @@ extern "C" {
 
     pub fn crow_rpc_client_create() -> crow_rpc_client_t;
     pub fn crow_rpc_client_destroy(client: crow_rpc_client_t);
+    pub fn crow_rpc_client_attach(client: crow_rpc_client_t, conn: crow_rpc_conn_t);
 
     pub fn crow_rpc_client_call(
         client: crow_rpc_client_t,

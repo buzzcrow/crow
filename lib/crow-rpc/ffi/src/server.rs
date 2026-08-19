@@ -128,7 +128,11 @@ impl Drop for RpcServer {
 unsafe impl Send for RpcServer {}
 unsafe impl Sync for RpcServer {}
 
-/// A connection to a peer endpoint.
+/// A connection to a peer endpoint. Cloning is cheap — it just copies
+/// the C++ handle (a raw pointer). The underlying connection is owned
+/// by the transport and is safe to share across threads (send queue
+/// is mutex-protected).
+#[derive(Clone)]
 pub struct Connection {
     handle: sys::crow_rpc_conn_t,
 }

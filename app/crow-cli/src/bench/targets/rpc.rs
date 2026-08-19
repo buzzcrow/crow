@@ -10,7 +10,7 @@
 //! path. The echo handler simply copies request data to response data,
 //! so the benchmark is purely I/O-bound.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crow_console_shared::error::{Error, Result};
@@ -35,6 +35,14 @@ pub(crate) struct RpcTarget {
     port: i32,
     /// The shared RPC client used by all workers.
     client: Option<Arc<RpcClient>>,
+    /// Pool of connections shared across all worker threads.
+    /// `cfg.connections` connections are created at provision time;
+    /// workers round-robin over them via `next_conn_`. When threads >
+    /// connections, multiple threads share the same connection — this
+    /// is what enables send/recv aggregation (multiple in-flight frames
+    /// per connection, coalesced into batched read/writev).
+    conns: Vec<Arc<Connection>>,
+    next_conn: AtomicUsize,
     /// Global request ID counter — shared across all workers to avoid
     /// `request_id` collisions (the C API uses the flatbuffer's `id` field
     /// as the `request_id` for response correlation).
@@ -48,6 +56,8 @@ impl RpcTarget {
             pool: None,
             port: 0,
             client: None,
+            conns: Vec::new(),
+            next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -78,9 +88,27 @@ impl BenchTarget for RpcTarget {
         // Give the acceptor thread time to start.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        self.client = Some(Arc::new(RpcClient::new()));
+        // Create exactly cfg.connections connections. These are shared
+        // across all worker threads — when threads > connections, multiple
+        // threads send on the same connection, creating multi-frame batches
+        // that the I/O worker can coalesce into one read/writev.
+        let client = Arc::new(RpcClient::new());
+        let mut conns = Vec::with_capacity(cfg.connections as usize);
+        for _ in 0..cfg.connections {
+            let conn = server
+                .connect("127.0.0.1", self.port)
+                .map_err(|e| Error::Config(format!("rpc connect: {e}")))?;
+            // Attach the client to the connection once, before sharing
+            // it across threads. This sets the on_frame callback that
+            // routes responses to the client's response handler.
+            client.attach(&conn);
+            conns.push(Arc::new(conn));
+        }
+
+        self.client = Some(client);
         self.pool = Some(pool);
         self.server = Some(server);
+        self.conns = conns;
         Ok(())
     }
 
@@ -98,15 +126,16 @@ impl BenchTarget for RpcTarget {
             .as_ref()
             .ok_or_else(|| Error::Config("rpc target not provisioned".to_string()))?;
 
-        // Connect to the server. Each worker gets its own connection.
-        let conn = server
-            .connect("127.0.0.1", self.port)
-            .map_err(|e| Error::Config(format!("rpc connect: {e}")))?;
+        // Round-robin assign a connection from the shared pool.
+        // Multiple workers may share the same connection — this is
+        // intentional and enables send/recv aggregation.
+        let idx = self.next_conn.fetch_add(1, Ordering::Relaxed) % self.conns.len();
+        let conn = Arc::clone(&self.conns[idx]);
 
         Ok(RpcBenchClient {
             client: Arc::clone(client),
             server: Arc::clone(server),
-            conn: Arc::new(conn),
+            conn,
             pool: Arc::clone(pool),
             request_id_counter: Arc::clone(&self.request_id_counter),
         })
@@ -168,6 +197,7 @@ impl BenchTarget for RpcTarget {
         }
         self.client = None;
         self.pool = None;
+        self.conns.clear();
     }
 
     fn supports_pipeline(&self) -> bool {
