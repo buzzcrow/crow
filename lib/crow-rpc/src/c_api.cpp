@@ -157,6 +157,31 @@ void crow_rpc_server_destroy(crow_rpc_server_t server)
     delete server;
 }
 
+static void copy_latency(crow_rpc_latency_stats_t *out, const crow::rpc::LatencyHistogram &h)
+{
+    out->count  = h.count.load(std::memory_order_relaxed);
+    out->sum_ns = h.sum_ns.load(std::memory_order_relaxed);
+    out->min_ns = h.min_ns.load(std::memory_order_relaxed);
+    out->max_ns = h.max_ns.load(std::memory_order_relaxed);
+}
+
+void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out)
+{
+    if (server == nullptr || out == nullptr) {
+        return;
+    }
+    auto *t = server->server->transport();
+    if (t == nullptr) {
+        return;
+    }
+    auto &s           = t->stats();
+    out->read_calls   = s.read_calls.load(std::memory_order_relaxed);
+    out->writev_calls = s.writev_calls.load(std::memory_order_relaxed);
+    copy_latency(&out->submit_to_writev, s.submit_to_writev);
+    copy_latency(&out->read_to_dispatch, s.read_to_dispatch);
+    copy_latency(&out->dispatch_to_enq, s.dispatch_to_enq);
+}
+
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port)
 {
     if (server == nullptr || addr == nullptr) {

@@ -17,6 +17,75 @@ namespace crow::rpc
 // Forward declaration — Worker references SocketTransport for multi-worker mode.
 class SocketTransport;
 
+// ── TransportStats: aggregation + latency counters ────────────────
+//
+// Atomic counters sampled after a bench run. Two groups:
+//   - Aggregation counts: measure coalescing (frames per syscall)
+//   - Latency histograms: measure time spent in each pipeline step
+//
+// Latency steps (nanoseconds, log2 buckets 0..30 = 1ns..1s):
+//   submit_to_writev : submit() → actual writev (request queue wait)
+//   read_to_dispatch : read() → handler entry (parse time)
+//   dispatch_to_enq  : handler entry → submit_inline (handler time)
+//   enq_to_writev    : submit_inline → actual writev (send agg wait)
+//   writev_to_read    : response writev → client read (kernel socket RTT)
+struct LatencyHistogram
+{
+    static constexpr int  NUM_BUCKETS = 31; // log2: 0..30 (1ns..~1s)
+    std::atomic<uint64_t> buckets[NUM_BUCKETS]{};
+    std::atomic<uint64_t> count{0};
+    std::atomic<uint64_t> sum_ns{0};
+    std::atomic<uint64_t> min_ns{UINT64_MAX};
+    std::atomic<uint64_t> max_ns{0};
+
+    void record(uint64_t delta_ns) noexcept
+    {
+        if (delta_ns == 0) {
+            delta_ns = 1;
+        }
+        int      bucket = 0;
+        uint64_t v      = delta_ns;
+        while (v > 1) {
+            v >>= 1;
+            bucket++;
+        }
+        if (bucket >= NUM_BUCKETS) {
+            bucket = NUM_BUCKETS - 1;
+        }
+        buckets[bucket].fetch_add(1, std::memory_order_relaxed);
+        count.fetch_add(1, std::memory_order_relaxed);
+        sum_ns.fetch_add(delta_ns, std::memory_order_relaxed);
+        // Relax min/max (not exact under contention, but good enough for profiling)
+        uint64_t cur_min = min_ns.load(std::memory_order_relaxed);
+        while (delta_ns < cur_min && !min_ns.compare_exchange_weak(cur_min, delta_ns)) {
+        }
+        uint64_t cur_max = max_ns.load(std::memory_order_relaxed);
+        while (delta_ns > cur_max && !max_ns.compare_exchange_weak(cur_max, delta_ns)) {
+        }
+    }
+
+    uint64_t avg_ns() const
+    {
+        uint64_t c = count.load(std::memory_order_relaxed);
+        return c > 0 ? sum_ns.load(std::memory_order_relaxed) / c : 0;
+    }
+};
+
+struct TransportStats
+{
+    // Syscall-level counts (not derivable from histogram .count).
+    std::atomic<uint64_t> read_calls{0};   // ::read() syscalls
+    std::atomic<uint64_t> writev_calls{0}; // ::writev() syscalls
+
+    // Latency histograms (nanoseconds). Each has .count, .sum_ns, .min, .max.
+    // Aggregation ratios:
+    //   recv_agg = read_to_dispatch.count / read_calls
+    //   send_agg = submit_to_writev.count  / writev_calls
+    LatencyHistogram submit_to_writev; // submit/submit_inline → writev (queue wait)
+    LatencyHistogram read_to_dispatch; // read() → handler entry (parse time)
+    LatencyHistogram dispatch_to_enq;  // handler entry → submit_inline (handler time)
+};
+
 // ── SocketEngine: platform-specific event loop primitives ─────────
 //
 // epoll (Linux) and kqueue (macOS) share the same event-driven loop
@@ -94,7 +163,7 @@ class Worker
 {
   public:
     // Single-worker: worker owns the engine.
-    Worker(int id, std::unique_ptr<SocketEngine> engine);
+    Worker(int id, std::unique_ptr<SocketEngine> engine, TransportStats *stats);
     // Multi-worker: worker shares the engine + submit queue.
     Worker(int id, SocketEngine *shared_engine, SocketTransport *transport);
 
@@ -124,6 +193,7 @@ class Worker
     std::unique_ptr<SocketEngine> owned_engine_;        // non-null in single-worker mode
     SocketEngine                 *engine_;              // owned (single) or shared (multi)
     SocketTransport              *transport_ = nullptr; // shared submit queue (multi)
+    TransportStats               *stats_     = nullptr; // aggregation counters
     std::thread                   thread_;
     std::atomic<bool>             running_{false};
 
@@ -215,6 +285,12 @@ class SocketTransport : public Transport
     bool shared_submit(Connection *conn, OutFrame *frame);
     void drain_shared_submits();
 
+    // Transport-level aggregation counters (sampled after a run).
+    TransportStats &stats()
+    {
+        return stats_;
+    }
+
   private:
     BufferPool                          *pool_;
     std::vector<std::unique_ptr<Worker>> workers_;
@@ -228,6 +304,9 @@ class SocketTransport : public Transport
     // Shared submit queue (multi-worker mode).
     std::mutex                                       shared_submit_mu_;
     std::vector<std::pair<Connection *, OutFrame *>> shared_pending_submits_;
+
+    // Aggregation-effect counters.
+    TransportStats stats_;
 
     friend class Worker;
 };

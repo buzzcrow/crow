@@ -4,7 +4,6 @@
 #include "crow-rpc/server/server.h"
 
 #include "crow-rpc/server/handler.h"
-#include "crow-rpc/server/message.h"
 #include "msg_type_generated.h"
 
 #include <arpa/inet.h>
@@ -14,10 +13,16 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 
 namespace crow::rpc
 {
+
+static inline uint64_t now_nano()
+{
+    return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+}
 
 RpcServer::RpcServer(BufferPool *pool, uint32_t num_workers) : pool_(pool), owns_pool_(pool == nullptr)
 {
@@ -132,6 +137,13 @@ void RpcServer::acceptor_loop()
 
 void RpcServer::dispatch(Frame *frame, Connection *conn)
 {
+    auto    &stats         = transport_->stats();
+    uint64_t dispatch_nano = 0;
+    if (frame->parsed_nano > 0) {
+        dispatch_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        stats.read_to_dispatch.record(dispatch_nano - frame->parsed_nano);
+    }
+
     uint16_t msg_type   = frame->header.msg_type;
     bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
 
@@ -149,6 +161,10 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
 
     OutFrame *response = handler(frame, conn);
     if (response != nullptr) {
+        // Record handler latency (dispatch entry → response enqueue).
+        if (dispatch_nano > 0) {
+            stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
+        }
         // Submit the response via inline path (direct enqueue + write).
         // dispatch is called from the I/O worker thread (via on_frame),
         // so we bypass the cross-thread notify queue.

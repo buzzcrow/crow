@@ -49,13 +49,14 @@ KEYSPACE=1000
 VALUE_SIZE=64
 
 run_bench() {
-    local threads="$1" conn="$2" label="$3"
-    echo ">>> $label ..."
+    local threads="$1" conn="$2" label="$3" io_workers="${4:-1}"
+    echo ">>> $label (io_workers=$io_workers) ..."
     local output
     output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
         --target rpc --workload write --duration-secs "$DURATION" \
         --threads "$threads" --connections "$conn" \
-        --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" --json 2>&1)
+        --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
+        --io-workers "$io_workers" --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
@@ -75,14 +76,23 @@ run_bench() {
 
 echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 
-echo "=== rpc echo (value_size=64) ==="
-run_bench 1 1 "rpc_1t_1c"       # baseline: single-thread closed-loop
-run_bench 8 4 "rpc_8t_4c"       # high threads, fewer connections
-run_bench 16 8 "rpc_16t_8c"     # high concurrency
-run_bench 64 8 "rpc_64t_8c"     # saturation: 64 threads on 8 connections
-run_bench 128 16 "rpc_128t_16c" # saturation: 128 threads on 16 connections
-run_bench 256 16 "rpc_256t_16c" # max TPS: 256 threads on 16 connections
-run_bench 512 32 "rpc_512t_32c" # beyond ceiling: latency doubles, TPS flat
+echo "=== rpc echo (value_size=64, io_workers=1) ==="
+run_bench 1 1 "rpc_1w_1t_1c"       1
+run_bench 8 4 "rpc_1w_8t_4c"       1
+run_bench 16 8 "rpc_1w_16t_8c"     1
+run_bench 64 8 "rpc_1w_64t_8c"     1
+run_bench 128 16 "rpc_1w_128t_16c" 1
+run_bench 256 16 "rpc_1w_256t_16c" 1
+run_bench 512 32 "rpc_1w_512t_32c" 1
+
+echo "=== rpc echo (value_size=64, io_workers=3) ==="
+run_bench 1 1 "rpc_3w_1t_1c"       3
+run_bench 8 4 "rpc_3w_8t_4c"       3
+run_bench 16 8 "rpc_3w_16t_8c"     3
+run_bench 64 8 "rpc_3w_64t_8c"     3
+run_bench 128 16 "rpc_3w_128t_16c" 3
+run_bench 256 16 "rpc_3w_256t_16c" 3
+run_bench 512 32 "rpc_3w_512t_32c" 3
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

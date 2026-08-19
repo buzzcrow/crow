@@ -54,6 +54,29 @@ void              crow_rpc_server_start(crow_rpc_server_t server);
 void              crow_rpc_server_stop(crow_rpc_server_t server);
 int               crow_rpc_server_port(crow_rpc_server_t server);
 
+// Transport-level stats: syscall counts + latency histograms.
+// Aggregation ratios:
+//   recv_agg = submit_to_writev.count / read_calls  (frames per read)
+//   send_agg = submit_to_writev.count / writev_calls (frames per writev)
+typedef struct crow_rpc_latency_stats
+{
+    uint64_t count;
+    uint64_t sum_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+} crow_rpc_latency_stats_t;
+
+typedef struct crow_rpc_transport_stats
+{
+    uint64_t                 read_calls;       // ::read() syscalls
+    uint64_t                 writev_calls;     // ::writev() syscalls
+    crow_rpc_latency_stats_t submit_to_writev; // submit → writev (queue wait)
+    crow_rpc_latency_stats_t read_to_dispatch; // read → handler (parse time)
+    crow_rpc_latency_stats_t dispatch_to_enq;  // handler → submit_inline (handler time)
+} crow_rpc_transport_stats_t;
+
+void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out);
+
 // ── Client ────────────────────────────────────────────────────────
 crow_rpc_client_t crow_rpc_client_create(void);
 void              crow_rpc_client_destroy(crow_rpc_client_t client);

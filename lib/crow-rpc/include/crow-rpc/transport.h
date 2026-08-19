@@ -30,6 +30,7 @@ struct OutFrame
     Buffer  *control     = nullptr; // pool-allocated; released after send
     Buffer  *data        = nullptr; // pool-allocated; nullptr if control-only
     uint32_t sent_offset = 0;       // bytes already sent (partial write tracking)
+    uint64_t create_nano = 0;       // steady_clock ns at submit/submit_inline
 };
 
 constexpr int BATCH_MAX = 64;

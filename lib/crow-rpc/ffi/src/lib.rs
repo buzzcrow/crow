@@ -19,3 +19,5 @@ mod sys;
 pub use buffer::{Buffer, BufferPool};
 pub use client::{CallFuture, Response, RpcClient};
 pub use server::{Connection, RpcError, RpcServer};
+
+pub use sys::{CrowRpcLatencyStats, CrowRpcTransportStats};

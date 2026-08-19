@@ -56,6 +56,37 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_port(self.handle) }
     }
 
+    /// Sample transport-level stats: syscall counts + latency histograms.
+    /// Aggregation ratios:
+    ///   recv_agg = submit_to_writev.count / read_calls  (frames per read)
+    ///   send_agg = submit_to_writev.count / writev_calls (frames per writev)
+    pub fn transport_stats(&self) -> sys::CrowRpcTransportStats {
+        let mut stats = sys::CrowRpcTransportStats {
+            read_calls: 0,
+            writev_calls: 0,
+            submit_to_writev: sys::CrowRpcLatencyStats {
+                count: 0,
+                sum_ns: 0,
+                min_ns: 0,
+                max_ns: 0,
+            },
+            read_to_dispatch: sys::CrowRpcLatencyStats {
+                count: 0,
+                sum_ns: 0,
+                min_ns: 0,
+                max_ns: 0,
+            },
+            dispatch_to_enq: sys::CrowRpcLatencyStats {
+                count: 0,
+                sum_ns: 0,
+                min_ns: 0,
+                max_ns: 0,
+            },
+        };
+        unsafe { sys::crow_rpc_server_transport_stats(self.handle, &mut stats) };
+        stats
+    }
+
     /// Connect to a peer endpoint. Returns a Connection on success.
     pub fn connect(&self, addr: &str, port: i32) -> Result<Connection, RpcError> {
         let c_addr = CString::new(addr).map_err(|_| RpcError::InvalidArg)?;

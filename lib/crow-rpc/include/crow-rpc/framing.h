@@ -46,6 +46,7 @@ struct Frame
     uint32_t control_len = 0;
     uint8_t *data        = nullptr; // raw data payload, nullptr if control-only
     uint32_t data_len    = 0;
+    uint64_t parsed_nano = 0; // steady_clock ns when parser yielded this frame
 
     ~Frame()
     {

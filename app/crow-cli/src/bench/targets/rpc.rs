@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crow_console_shared::error::{Error, Result};
 use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
-use crow_rpc_ffi::{BufferPool, Connection, RpcClient, RpcServer};
+use crow_rpc_ffi::{BufferPool, Connection, CrowRpcLatencyStats, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 
 use super::super::report::OpOutcome;
@@ -116,7 +116,53 @@ impl BenchTarget for RpcTarget {
         Ok((0, 0))
     }
 
+    #[allow(clippy::cast_precision_loss, reason = "counters fit in f64 mantissa")]
     async fn cleanup(&mut self) {
+        // Sample transport stats before stopping the server.
+        if let Some(server) = &self.server {
+            let s = server.transport_stats();
+            // submit_to_writev.count = total frames sent (request + response).
+            // read_calls = total read() syscalls (client + server).
+            // Each op = 1 request frame + 1 response frame = 2 frames,
+            // and 1 server read + 1 client read = 2 reads.
+            // So recv_agg = frames_per_read = submit_to_writev.count / read_calls.
+            // send_agg = frames_per_writev = submit_to_writev.count / writev_calls.
+            // When aggregation works, both should be > 1.0.
+            let recv_agg = if s.read_calls > 0 {
+                s.submit_to_writev.count as f64 / s.read_calls as f64
+            } else {
+                0.0
+            };
+            let send_agg = if s.writev_calls > 0 {
+                s.submit_to_writev.count as f64 / s.writev_calls as f64
+            } else {
+                0.0
+            };
+            let avg_us = |h: &CrowRpcLatencyStats| {
+                if h.count > 0 {
+                    h.sum_ns as f64 / h.count as f64 / 1000.0
+                } else {
+                    0.0
+                }
+            };
+            eprintln!(
+                "transport_stats : read_calls={rc} writev_calls={wc} \
+                 recv_agg={ra:.1}x send_agg={sa:.1}x \
+                 submit_to_writev={sw_avg:.1}us({sw_c}) \
+                 read_to_dispatch={rd_avg:.1}us({rd_c}) \
+                 dispatch_to_enq={de_avg:.1}us({de_c})",
+                rc = s.read_calls,
+                wc = s.writev_calls,
+                ra = recv_agg,
+                sa = send_agg,
+                sw_avg = avg_us(&s.submit_to_writev),
+                sw_c = s.submit_to_writev.count,
+                rd_avg = avg_us(&s.read_to_dispatch),
+                rd_c = s.read_to_dispatch.count,
+                de_avg = avg_us(&s.dispatch_to_enq),
+                de_c = s.dispatch_to_enq.count,
+            );
+        }
         if let Some(server) = self.server.take() {
             server.stop();
         }

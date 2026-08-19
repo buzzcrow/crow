@@ -18,6 +18,7 @@
 
 #include <cassert>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 
 namespace crow::rpc
@@ -25,23 +26,30 @@ namespace crow::rpc
 
 // Forward declarations — defined after Worker (shared I/O logic).
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
-                             std::vector<Connection *> &pending_writes);
-static bool on_writable_impl(Connection *conn, int fd);
+                             std::vector<Connection *> &pending_writes, TransportStats *stats);
+static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats);
+
+static inline uint64_t now_nano()
+{
+    return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+}
 
 // ── Worker ────────────────────────────────────────────────────────
 
-Worker::Worker(int id, std::unique_ptr<SocketEngine> engine)
+Worker::Worker(int id, std::unique_ptr<SocketEngine> engine, TransportStats *stats)
     : id_(id),
       owned_engine_(std::move(engine)),
       engine_(owned_engine_.get()),
-      transport_(nullptr)
+      transport_(nullptr),
+      stats_(stats)
 {
 }
 
 Worker::Worker(int id, SocketEngine *shared_engine, SocketTransport *transport)
     : id_(id),
       engine_(shared_engine),
-      transport_(transport)
+      transport_(transport),
+      stats_(&transport->stats_)
 {
 }
 
@@ -94,7 +102,7 @@ void Worker::drain_pending_submits()
     for (auto &[conn, frame] : pending) {
         if (conn->enqueue_send(frame)) {
             int fd = static_cast<int>(conn->transport_handle);
-            if (!on_writable_impl(conn, fd)) {
+            if (!on_writable_impl(conn, fd, stats_)) {
                 // All data sent — no need to arm write.
             }
             else {
@@ -135,7 +143,7 @@ void Worker::run_loop()
                 break;
             case SocketEvent::Readable:
                 if (ev.conn != nullptr) {
-                    on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_);
+                    on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_, stats_);
                     // In one-shot mode, re-arm read after processing
                     // (EV_ONESHOT consumed the event). Without this, the
                     // connection goes silent — no more read events fire.
@@ -146,7 +154,7 @@ void Worker::run_loop()
                 break;
             case SocketEvent::Writable:
                 if (ev.conn != nullptr) {
-                    if (on_writable_impl(ev.conn, ev.fd)) {
+                    if (on_writable_impl(ev.conn, ev.fd, stats_)) {
                         // Still has data — re-arm write in one-shot mode
                         // (level-triggered single-worker keeps it armed).
                         if (transport_ != nullptr) {
@@ -184,7 +192,7 @@ void Worker::run_loop()
                     continue;
                 }
                 int fd = static_cast<int>(conn->transport_handle);
-                if (!on_writable_impl(conn, fd)) {
+                if (!on_writable_impl(conn, fd, stats_)) {
                     // All data sent — no need to arm write.
                 }
                 else {
@@ -203,7 +211,7 @@ void Worker::run_loop()
 // read/write, and these do the actual I/O + parsing.
 
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
-                             std::vector<Connection *> &pending_writes)
+                             std::vector<Connection *> &pending_writes, TransportStats *stats)
 {
     auto &parser = conn->parser();
     while (true) {
@@ -212,13 +220,13 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
         // multiple frames are pending on one connection.
         ssize_t n = ::read(fd, recv_buf, recv_buf_size);
         if (n <= 0) {
-            if (n == 0) {
-                conn->close();
-            }
-            else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                 conn->close();
             }
             break;
+        }
+        if (stats != nullptr) {
+            stats->read_calls.fetch_add(1, std::memory_order_relaxed);
         }
         // feed_data copies bytes into parser buffers and yields frames.
         uint32_t consumed =
@@ -233,13 +241,13 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
                 }
                 ssize_t n2 = ::read(fd, target.ptr, target.len);
                 if (n2 <= 0) {
-                    if (n2 == 0) {
-                        conn->close();
-                    }
-                    else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                         conn->close();
                     }
                     goto done;
+                }
+                if (stats != nullptr) {
+                    stats->read_calls.fetch_add(1, std::memory_order_relaxed);
                 }
                 Frame *frame = parser.advance(static_cast<uint32_t>(n2));
                 if (frame != nullptr) {
@@ -260,13 +268,13 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
         while (target.len > 0) {
             ssize_t n2 = ::read(fd, target.ptr, target.len);
             if (n2 <= 0) {
-                if (n2 == 0) {
-                    conn->close();
-                }
-                else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                     conn->close();
                 }
                 goto done;
+            }
+            if (stats != nullptr) {
+                stats->read_calls.fetch_add(1, std::memory_order_relaxed);
             }
             Frame *frame = parser.advance(static_cast<uint32_t>(n2));
             if (frame != nullptr) {
@@ -284,12 +292,22 @@ done:
     }
 }
 
-static bool on_writable_impl(Connection *conn, int fd)
+static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats)
 {
     OutFrame *batch[BATCH_MAX];
     int       n = conn->drain_send_queue(batch, BATCH_MAX);
     if (n == 0) {
         return false;
+    }
+    if (stats != nullptr) {
+        stats->writev_calls.fetch_add(1, std::memory_order_relaxed);
+        // Record queue-wait latency for each frame (submit → writev).
+        uint64_t now = now_nano();
+        for (int i = 0; i < n; i++) {
+            if (batch[i]->create_nano > 0) {
+                stats->submit_to_writev.record(now - batch[i]->create_nano);
+            }
+        }
     }
 
     // Compute the total wire size of each frame (header + control + data),
@@ -358,10 +376,12 @@ static bool on_writable_impl(Connection *conn, int fd)
         }
         conn->close();
         for (int i = 0; i < n; i++) {
-            if (batch[i]->control != nullptr)
+            if (batch[i]->control != nullptr) {
                 batch[i]->control->release();
-            if (batch[i]->data != nullptr)
+            }
+            if (batch[i]->data != nullptr) {
                 batch[i]->data->release();
+            }
             delete batch[i];
         }
         return false;
@@ -413,7 +433,7 @@ SocketTransport::SocketTransport(uint32_t num_workers, BufferPool *pool) : pool_
         // Single-worker: each worker owns its own engine.
         auto engine = create_engine();
         engine->init();
-        auto worker = std::make_unique<Worker>(0, std::move(engine));
+        auto worker = std::make_unique<Worker>(0, std::move(engine), &stats_);
         workers_.push_back(std::move(worker));
     }
     else {
@@ -458,6 +478,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     if (workers_.empty()) {
         return false;
     }
+    frame->create_nano = now_nano();
     if (multi_worker_) {
         return shared_submit(conn, frame);
     }
@@ -493,7 +514,7 @@ void SocketTransport::drain_shared_submits()
     for (auto &[conn, frame] : pending) {
         if (conn->enqueue_send(frame)) {
             int fd = static_cast<int>(conn->transport_handle);
-            if (!on_writable_impl(conn, fd)) {
+            if (!on_writable_impl(conn, fd, &stats_)) {
                 // All data sent.
             }
             else {
@@ -505,6 +526,7 @@ void SocketTransport::drain_shared_submits()
 
 bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
 {
+    frame->create_nano = now_nano();
     // Enqueue only — the actual writev is deferred to the worker's
     // post-event flush (send aggregation). This coalesces multiple
     // responses from one read() into a single writev per connection,

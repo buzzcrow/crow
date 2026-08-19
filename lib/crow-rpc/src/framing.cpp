@@ -4,6 +4,7 @@
 #include "crow-rpc/framing.h"
 
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <new>
 
@@ -103,6 +104,7 @@ Frame *FrameParser::yield_frame()
     frame_->control_len = control_len_;
     frame_->data        = data_;
     frame_->data_len    = data_len_;
+    frame_->parsed_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 
     // Transfer ownership to the caller — clear our pointers so reset()
     // doesn't free them.
