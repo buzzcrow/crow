@@ -294,132 +294,9 @@ done:
 
 static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats)
 {
-    OutFrame *batch[BATCH_MAX];
-    int       n = conn->drain_send_queue(batch, BATCH_MAX);
-    if (n == 0) {
-        return false;
-    }
-    if (stats != nullptr) {
-        stats->writev_calls.fetch_add(1, std::memory_order_relaxed);
-        // Record queue-wait latency for each frame (submit → writev).
-        uint64_t now = now_nano();
-        for (int i = 0; i < n; i++) {
-            if (batch[i]->create_nano > 0) {
-                stats->submit_to_writev.record(now - batch[i]->create_nano);
-            }
-        }
-    }
-
-    // Compute the total wire size of each frame (header + control + data),
-    // accounting for bytes already sent via sent_offset (partial writes).
-    ssize_t frame_total[BATCH_MAX];
-    for (int i = 0; i < n; i++) {
-        ssize_t sz = HEADER_SIZE;
-        if (batch[i]->control != nullptr)
-            sz += batch[i]->control->len;
-        if (batch[i]->data != nullptr)
-            sz += batch[i]->data->len;
-        frame_total[i] = sz;
-    }
-
-    // Build iovecs, skipping the first sent_offset bytes of each frame.
-    iovec   iov[3 * BATCH_MAX];
-    int     iov_count = 0;
-    uint8_t header_bufs[BATCH_MAX][HEADER_SIZE];
-
-    for (int i = 0; i < n; i++) {
-        ssize_t off = batch[i]->sent_offset;
-        ssize_t rem = frame_total[i] - off;
-        if (rem <= 0) {
-            // Already fully sent — skip (shouldn't happen, but guard).
-            continue;
-        }
-
-        // Header region: [0, HEADER_SIZE)
-        if (off < HEADER_SIZE) {
-            serialize_header(header_bufs[i], batch[i]->header);
-            iov[iov_count++] = {header_bufs[i] + off, static_cast<size_t>(HEADER_SIZE - off)};
-            off              = 0;
-        }
-        else {
-            off -= HEADER_SIZE;
-        }
-
-        // Control region: [HEADER_SIZE, HEADER_SIZE + control->len)
-        if (batch[i]->control != nullptr && batch[i]->control->len > 0) {
-            ssize_t clen = static_cast<ssize_t>(batch[i]->control->len);
-            if (off < clen) {
-                iov[iov_count++] = {batch[i]->control->data + off, static_cast<size_t>(clen - off)};
-                off              = 0;
-            }
-            else {
-                off -= clen;
-            }
-        }
-
-        // Data region: [HEADER_SIZE + control->len, total)
-        if (batch[i]->data != nullptr && batch[i]->data->len > 0) {
-            ssize_t dlen = static_cast<ssize_t>(batch[i]->data->len);
-            if (off < dlen) {
-                iov[iov_count++] = {batch[i]->data->data + off, static_cast<size_t>(dlen - off)};
-            }
-        }
-    }
-
-    ssize_t written = ::writev(fd, iov, iov_count);
-    if (written < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            for (int i = 0; i < n; i++) {
-                conn->enqueue_send(batch[i]);
-            }
-            return true; // re-arm: socket buffer full, try again later
-        }
-        conn->close();
-        for (int i = 0; i < n; i++) {
-            if (batch[i]->control != nullptr) {
-                batch[i]->control->release();
-            }
-            if (batch[i]->data != nullptr) {
-                batch[i]->data->release();
-            }
-            delete batch[i];
-        }
-        return false;
-    }
-
-    // Advance sent_offset by `written` bytes across the batch.
-    ssize_t remaining = written;
-    for (int i = 0; i < n && remaining > 0; i++) {
-        ssize_t left = frame_total[i] - batch[i]->sent_offset;
-        if (remaining >= left) {
-            batch[i]->sent_offset = static_cast<uint32_t>(frame_total[i]);
-            remaining -= left;
-        }
-        else {
-            batch[i]->sent_offset += static_cast<uint32_t>(remaining);
-            remaining = 0;
-        }
-    }
-
-    // Release fully-sent frames; re-enqueue partials.
-    bool has_partial = false;
-    for (int i = 0; i < n; i++) {
-        if (batch[i]->sent_offset >= frame_total[i]) {
-            if (batch[i]->control != nullptr)
-                batch[i]->control->release();
-            if (batch[i]->data != nullptr)
-                batch[i]->data->release();
-            delete batch[i];
-        }
-        else {
-            conn->enqueue_send(batch[i]);
-            has_partial = true;
-        }
-    }
-    // Keep write armed if there are partials OR the drained batch was
-    // full (BATCH_MAX) — the send queue may still have more frames that
-    // need the next Writable event to be sent.
-    return has_partial || (n == BATCH_MAX);
+    // Delegate to Connection::try_send — the writev logic now lives there
+    // (shared between caller-thread submit and I/O-worker write retry).
+    return !conn->try_send(fd, stats);
 }
 
 // ── SocketTransport ───────────────────────────────────────────────
@@ -479,16 +356,20 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         return false;
     }
     frame->create_nano = now_nano();
-    if (multi_worker_) {
-        return shared_submit(conn, frame);
+    // Buzz model: enqueue to the connection's send queue, then try to
+    // writev directly on the caller's thread. The in_send_ flag serializes
+    // concurrent senders — only one does writev at a time; others just
+    // offer to the queue and return. If writev hits EAGAIN, arm write
+    // on the I/O worker for retry.
+    if (!conn->enqueue_send(frame)) {
+        return false; // backpressure or closed
     }
-    // Single-worker: push to per-worker queue + notify.
-    auto &w = workers_[0];
-    {
-        std::lock_guard<std::mutex> lock(w->submit_mu_);
-        w->pending_submits_.emplace_back(conn, frame);
+    int fd = static_cast<int>(conn->transport_handle);
+    if (!conn->try_send(fd, &stats_)) {
+        // Partial write or EAGAIN — arm write on the I/O worker.
+        auto &w = workers_[0];
+        w->engine_->arm_write(fd);
     }
-    w->engine_->notify_worker();
     return true;
 }
 

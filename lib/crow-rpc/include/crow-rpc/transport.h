@@ -18,6 +18,9 @@
 namespace crow::rpc
 {
 
+// Forward declaration — Connection::try_send records latency here.
+struct TransportStats;
+
 // ── OutFrame: a frame queued for sending ──────────────────────────
 //
 // The send queue holds OutFrame*. The worker drains up to BATCH_MAX per
@@ -75,6 +78,13 @@ class Connection
     // Drain up to max frames from the send queue. Caller owns the returned
     // pointers (must release their buffers after send completes).
     int drain_send_queue(OutFrame **out, int max);
+
+    // Try to send all queued frames via writev directly on the caller's
+    // thread (buzz model). Uses in_send_ to serialize: only one thread
+    // does writev at a time; others just offer to the queue and return.
+    // Returns true if all data was sent, false if partial/EAGAIN (the
+    // I/O worker will retry via arm_write).
+    bool try_send(int fd, TransportStats *stats);
 
     // Check if the send queue has pending frames (without draining).
     bool has_pending_send() const
@@ -144,6 +154,10 @@ class Connection
     mutable std::mutex     send_mu_;
     std::deque<OutFrame *> send_queue_;
     uint32_t               send_queue_capacity_ = 256;
+
+    // Caller-thread direct-write flag (buzz model). Only one thread
+    // does writev at a time; others just offer to the queue and return.
+    std::atomic<bool> in_send_{false};
 
     OnFrameCallback on_frame_callback_;
     OnCloseCallback on_close_callback_;
