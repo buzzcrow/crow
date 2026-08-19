@@ -10,30 +10,42 @@
 #   - Scaling: 1T:1C → 512T:8C, pipeline_depth=connections*threads
 #   - value_size=64, key_space=1000 (unused by echo, kept for CLI compat)
 #
-# 6 runs x 5s ~= 30s.
+# 10 runs x 5s ~= 50s (script configs only; doubled-thread variants
+# in the reference table below are run ad-hoc, not part of the script).
 #
-# Reference platform (2026-08-19 run): Apple M5 Pro
-# (18 cores, arm64, macOS 26/Darwin 25.5). Peak ~345K ops/s at 256T:4C.
+# Reference platform (2026-08-20 run): Apple M5 Pro
+# (18 cores, arm64, macOS 26/Darwin 25.5). Peak ~326K ops/s at 512T:8C.
 # Always record the CPU model in the doc when publishing a run —
 # absolute RPC throughput is platform-dependent.
 #
-# Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS):
-#   value_size=64, 5s, in-process echo, kqueue loopback, io_workers=1
-#   (single-worker fast path: shared connections + caller-thread
-#    in_send_ writev + send aggregation)
+# Reference results (2026-08-20, Apple M5 Pro, 18c, arm64, macOS):
+#   value_size=64, 5s, in-process echo, kqueue loopback
+#   Eng=io_engines, Wkr=io_workers_per_engine (kqueue loop threads),
+#   T=client dispatch threads, C=connections
+#   raggr=recv aggregation factor, saggr=send aggregation factor
 #
-#   T    C    ops/s     avg    p50    p99    p999   err
-#   1    1    40,124    24     24     38     68     0
-#   8    4    129,315   61     58     130    208    0
-#   64   4    270,186   235    232    396    483    0
-#   256  4    315,031   810    821    1,272  1,497  0
-#   256  8    304,771   838    787    1,399  1,665  0
-#   512  8    334,843   1,527  1,426  2,432  2,826  0
+#   Eng Wkr    T    C  ops/s      avg    p50    p99    p999   raggr  saggr  err
+#   1   1      1    1     40,696   24     23     36     67     1.0    1.0    0
+#   1   1      8    4    141,068   56     54    105    164     1.1    1.0    0
+#   1   1     64    4    274,180  232    228    398    484     3.8    2.7    0
+#   1   1    256    4    314,499  812    822  1,288  1,563     5.8    5.0    0
+#   1   1    256    8    306,664  833    781  1,412  1,721     9.3    3.5    0
+#   1   1    512    8    326,365 1,566  1,471  2,498  2,930    10.4    4.7    0
+#   2   1    256    4    301,862  845    837  1,431  2,246     3.6    5.8    0
+#   2   1    512    8    297,216 1,719  1,768  2,672  3,032     4.7    6.3    0
+#   2   1    512    4    307,579 1,662  1,625  2,884  3,260     1.3    7.1    0
+#   2   1  1,000    8    314,994 3,171  3,100  5,312  6,416     1.3    6.8    0
+#   1   2    256    4    280,242  911    897  1,997  4,460     1.8    4.8    0
+#   1   2    512    8    280,428 1,822  1,849  3,392  4,412     2.7    5.0    0
 #
-# TPS ceiling ~335K at 512T:8C. Single C++ I/O worker thread is the
-# bottleneck; beyond 256T latency increases without proportional TPS
-# gain. Multi-worker (io_workers>1) with EV_ONESHOT re-arm does NOT
-# help for loopback — the re-arm overhead exceeds parallelism benefit.
+# TPS ceiling ~326K at 512T:8C, 1 engine × 1 worker. Single kqueue
+# loop is the bottleneck; beyond 256T latency rises without proportional
+# TPS gain. Multi-engine (Eng=2) and multi-worker (Wkr=2, EV_ONESHOT
+# re-arm) both REGRESS for loopback — cross-engine handoff and re-arm
+# overhead exceed parallelism benefit. Doubling threads on 2 engines
+# (512T:4C, 1000T:8C) only inflates latency (submit_to_writev 158→285us)
+# without raising throughput. recv_agg collapses (3.6→1.3) as concurrency
+# per connection drops.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
