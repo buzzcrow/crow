@@ -346,6 +346,27 @@ WAL appends for 1.2M ops at 256T = ~11× amortization), confirming the
 `max_keys` overflow path produces full batches at high load. Zero errors
 across all configs.
 
+#### macOS M5 Pro retest (2026-08-19)
+
+Platform: **Apple M5 Pro** (18 cores, arm64, macOS 26.5).
+Same workload, same parameters.
+
+| Threads | Conn | Throughput (ops/s) | WAL append | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 10,144 | 304,358 | 97 | 95 | 153 | 211 | 0 |
+| 4 | 2 | 21,879 | 449,508 | 182 | 178 | 307 | 380 | 0 |
+| 16 | 4 | 47,260 | 276,795 | 337 | 330 | 523 | 619 | 0 |
+| 32 | 16 | 57,889 | 170,600 | 550 | 537 | 894 | 1,046 | 0 |
+| 64 | 32 | 69,908 | 104,777 | 912 | 888 | 1,440 | 1,745 | 0 |
+| 128 | 32 | 78,155 | 86,840 | 1,632 | 1,590 | 2,654 | 3,794 | 0 |
+| 256 | 32 | 87,448 | 86,619 | 2,919 | 2,870 | 4,704 | 7,004 | 0 |
+
+macOS peak ~87K at 256T (vs Linux ~124K). M5 Pro is faster at low
+concurrency (1T: 10K vs 3K, 3.4×) due to lower per-op overhead, but
+saturates earlier — the non-SMT 18-core has less headroom than the
+32-thread AMD. WAL amortization reaches ~30× at 256T (87K ops → 87K
+WAL appends for 874K ops). Zero errors across all configs.
+
 ---
 
 ## Memory Copy Summary

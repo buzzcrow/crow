@@ -195,82 +195,77 @@ caller's handles after submit.
 Scaling sweep. In-process echo server (kqueue loopback, no network),
 64-byte values, 1000 key space (unused by echo), 5-second duration,
 `io_workers=1` (single-worker fast path). Platform: **Apple M5 Pro**
-(18 cores, arm64, macOS 26/Darwin 25.5). 7 runs, zero errors across
-all configs.
+(18 cores, arm64, macOS 26/Darwin 25.5). 9 runs (6 single-worker +
+3 multi-worker comparison), zero errors across all configs.
 
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
-### Full sweep (after single-epoll + recv-buffer + send-aggregation)
+### Full sweep (after shared connections + caller-thread in_send_ writev)
 
-| Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 36,711 | 26 | 26 | 41 | 72 | 0 |
-| 8 | 4 | 32 | 114,160 | 69 | 68 | 105 | 171 | 0 |
-| 16 | 8 | 128 | 122,734 | 129 | 127 | 183 | 292 | 0 |
-| 64 | 8 | 512 | 131,314 | 486 | 482 | 608 | 992 | 0 |
-| 128 | 16 | 2048 | 129,252 | 989 | 978 | 1,261 | 1,783 | 0 |
-| 256 | 16 | 4096 | 132,341 | 1,933 | 1,906 | 2,404 | 3,380 | 0 |
-| 512 | 32 | 16384 | 130,884 | 3,912 | 3,854 | 4,636 | 5,392 | 0 |
+| io_workers | Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 1 | 40,059 | 24 | 24 | 38 | 69 | 0 |
+| 1 | 8 | 4 | 32 | 132,928 | 59 | 57 | 121 | 182 | 0 |
+| 1 | 64 | 4 | 256 | 270,315 | 235 | 232 | 397 | 494 | 0 |
+| 1 | 256 | 4 | 1024 | 322,295 | 792 | 800 | 1,272 | 1,509 | 0 |
+| 1 | 256 | 8 | 2048 | 307,294 | 831 | 781 | 1,390 | 1,660 | 0 |
+| 1 | 512 | 8 | 4096 | 331,686 | 1,541 | 1,447 | 2,514 | 2,972 | 0 |
+| 2 | 256 | 4 | 1024 | 280,496 | 910 | 900 | 1,844 | 3,154 | 0 |
+| 2 | 256 | 8 | 2048 | 268,459 | 951 | 964 | 1,748 | 2,128 | 0 |
+| 2 | 512 | 8 | 4096 | 282,172 | 1,811 | 1,844 | 3,386 | 4,660 | 0 |
 
 ### Optimization progression
 
-| Config | Baseline | +udata+direct-write+inline | +recv-buf+send-agg | Total |
-| --- | --- | --- | --- | --- |
-| 1T:1C | 33K | 37K (+12%) | 37K (0%) | +12% |
-| 8T:4C | 84K | 105K (+25%) | 114K (+9%) | +36% |
-| 16T:8C | 90K | 115K (+28%) | 123K (+7%) | +37% |
-| 64T:8C | 97K | 122K (+26%) | 131K (+7%) | +35% |
-| 128T:16C | 99K | 126K (+27%) | 129K (+2%) | +30% |
-| 256T:16C | 103K | 126K (+22%) | 132K (+5%) | +28% |
+| Config | Pre-shared-conn | +shared-conn+in_send_ | Total |
+| --- | --- | --- | --- |
+| 1T:1C | 37K | 40K | +8% |
+| 8T:4C | 114K | 133K | +17% |
+| 64T:4C | 131K | 270K | +106% |
+| 256T:4C | 132K | 322K | +144% |
+| 512T:8C | 131K | 332K | +154% |
 
-The per-worker receive buffer + send aggregation adds 5-9% on top of
-the single-epoll optimizations, with the biggest gain at 8T:4C (9%)
-where multiple frames are most likely to be pending per connection.
-1T:1C sees no gain because pipeline depth = 1 (only one frame in flight
-per connection, so each read() gets exactly one frame).
+Shared connections (multiple worker threads per connection) + the
+caller-thread `in_send_` writev model (one thread does the writev
+while others enqueue and return) dramatically improves throughput at
+high concurrency. The biggest gains are at 64T+ where multiple threads
+share connections, creating multi-frame batches that the I/O worker
+coalesces into single read/writev calls. Aggregation ratios reach
+6.0x recv and 5.5x send at 256T:4C.
 
 ### Multi-worker (EV_ONESHOT) — does not help for loopback
 
-| io_workers | TPS (ops/s) | avg (µs) | Errors |
-| --- | --- | --- | --- |
-| 1 | 126K | 1,015 | 0 |
-| 2 | 125K | 2,047 | 0 |
-| 4 | 117K | 2,194 | 0 |
-| 8 | 62K | 4,109 | 0 |
-
 Multi-worker with `EV_ONESHOT` re-arm is *worse* than single-worker for
-the in-process loopback. The re-arm overhead (1 extra `kevent` syscall
-per event) + kernel-level contention on the shared kqueue fd exceeds
-any parallelism benefit. The single I/O worker is NOT CPU-bound (78%
-idle at saturation) — the bottleneck is event queueing latency, not
+the in-process loopback — 13-18% slower across all configs (see the
+`io_workers=2` rows in the full sweep table above). The re-arm
+overhead (1 extra `kevent` syscall per event) + kernel-level contention
+on the shared kqueue fd exceeds any parallelism benefit. The single I/O
+worker is NOT CPU-bound — the bottleneck is event queueing latency, not
 compute. Multi-worker would help with real network I/O where the I/O
 thread is CPU-bound on socket operations.
 
 ### Conclusions
 
-- **Single C++ I/O worker is the serialization bottleneck** — TPS
-  plateaus at ~126K at 128T+. Beyond 128T, latency doubles (1ms →
-  2ms → 4ms avg) without TPS gain. The single worker thread's event
-  loop serializes all event processing across all connections.
-- **NOT CPU-bound — latency-bound by event queueing** — at 256T:16C,
-  CPU is 78% idle. The 78× latency increase from 1T:1C (26µs) to
-  256T:16C (2037µs) is pure queueing delay on the single I/O thread's
-  event queue, not compute.
-- **Single-epoll optimizations gave 22% TPS gain** — udata dispatch
-  (eliminate per-event mutex), direct-write on notify (eliminate
-  Writable event for requests), submit_inline for server responses
-  (eliminate Notify event for responses) reduced events per op from
-  5 to 3 on the fast path.
-- **Multi-worker (EV_ONESHOT) does not help for loopback** — the
-  re-arm overhead exceeds parallelism benefit when the I/O thread is
-  not CPU-bound. Would help with real network I/O.
-- **Value size has minimal effect** — at 256T:16C, 0B→4096B (64×
-  larger payload) only drops TPS by 16%. Flat TPS across payload sizes
-  confirms the bottleneck is event loop overhead, not data movement.
-- **Zero errors across all 7 configs** — the 2s response timeout
+- **Shared connections + caller-thread writev lifted the ceiling from
+  ~132K to ~332K** — the key insight is that the benchmark client must
+  share connections across worker threads to create multi-frame batches.
+  The `in_send_` atomic CAS model lets one thread perform the `writev`
+  while others enqueue and return, coalescing all queued frames into a
+  single syscall. Aggregation reaches 6.0x recv and 5.5x send at 256T:4C.
+- **Single C++ I/O worker is still the serialization bottleneck** — TPS
+  plateaus at ~332K at 512T:8C. Beyond 256T, latency increases (792µs →
+  1,541µs avg) without proportional TPS gain. The single worker thread's
+  event loop serializes all event processing across all connections.
+- **NOT CPU-bound — latency-bound by event queueing** — the latency
+  increase from 1T:1C (24µs) to 512T:8C (1,541µs) is pure queueing delay
+  on the single I/O thread's event queue, not compute.
+- **Multi-worker (EV_ONESHOT) does not help for loopback** — 13-18%
+  slower than single-worker. The re-arm overhead exceeds parallelism
+  benefit when the I/O thread is not CPU-bound. Would help with real
+  network I/O.
+- **Zero errors across all 9 configs** — the 2s response timeout
   never fires under normal load; the in-process loopback is reliable.
-- **Per-op latency at 1T:1C is 26µs** — this is the round-trip cost
+- **Per-op latency at 1T:1C is 24µs** — this is the round-trip cost
   of: flatbuffer build + pool alloc + FFI call + kqueue notify +
   writev + read + echo handler + writev + read + oneshot wake.
 
@@ -278,11 +273,11 @@ thread is CPU-bound on socket operations.
 
 | Target | Ceiling (ops/s) | Bottleneck | Platform |
 | --- | --- | --- | --- |
-| RPC echo (in-process, optimized) | ~126K | Single C++ I/O worker thread | M5 Pro |
-| KV write (coalesced, 3-node) | ~48K | Consensus quorum RPC | M5 Pro |
+| RPC echo (in-process, optimized) | ~332K | Single C++ I/O worker thread | M5 Pro |
+| KV write (coalesced, 3-node) | ~87K | Consensus quorum RPC | M5 Pro |
 | KV write (coalesced, 3-node) | ~124K | Consensus quorum RPC | AMD 5950X |
 
-The RPC echo ceiling is ~2.6× the KV write ceiling on the same M5 Pro
+The RPC echo ceiling is ~3.8× the KV write ceiling on the same M5 Pro
 platform — the KV path adds Paxos consensus (2-phase quorum round +
 WAL persist + engine apply) on top of the RPC transport.
 

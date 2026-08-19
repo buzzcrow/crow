@@ -100,7 +100,7 @@ serialization. The scan path is zero-copy from packed buffer to client
 
 ---
 
-## Latest Benchmark Results — 2026-08-06 (post-R48+R50)
+## Latest Benchmark Results — 2026-08-19 (post-R48+R50)
 
 **Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5.
 **Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
@@ -110,17 +110,17 @@ Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
 | Label | Limit | Start_after | Val B | Mode | scans/s | avg us | p99 us | err |
 |-------|------:|-------------|------:|------|--------:|-------:|-------:|----:|
-| bounded_10 | 10 | | 64 | lin | 19558 | 50 | 79 | 0 |
-| bounded_1k | 1000 | | 64 | lin | 4339 | 229 | 258 | 0 |
-| bounded_10k | 10000 | | 64 | lin | 518 | 1929 | 2060 | 0 |
-| full_100k | 100000 | | 64 | lin | 50 | 20216 | 20848 | 0 |
-| deep_pag_10 | 10 | k...99989 | 64 | lin | 20681 | 47 | 66 | 0 |
-| mixed_1k | 1000 | | mixed | lin | 991 | 1007 | 1222 | 0 |
-| minslot_1k | 1000 | | 64 | minslot | 4293 | 232 | 262 | 0 |
+| bounded_10 | 10 | | 64 | lin | 21320 | 46 | 73 | 0 |
+| bounded_1k | 1000 | | 64 | lin | 4708 | 211 | 239 | 0 |
+| bounded_10k | 10000 | | 64 | lin | 562 | 1777 | 1911 | 0 |
+| full_100k | 100000 | | 64 | lin | 49 | 20411 | 22864 | 0 |
+| deep_pag_10 | 10 | k...99989 | 64 | lin | 21003 | 46 | 66 | 0 |
+| mixed_1k | 1000 | | mixed | lin | 1043 | 957 | 1175 | 0 |
+| minslot_1k | 1000 | | 64 | minslot | 4721 | 211 | 241 | 0 |
 
 `mixed_1k` uses `--value-size-mix 64:70,1024:20,16384:10`: 70% 64B,
 20% 1KiB, 10% 16KiB values, deterministically assigned by key id. At
-991 scans/s it sits between the old `valuesize_1KiB` (1492) and
+1043 scans/s it sits between the old `valuesize_1KiB` (1492) and
 `valuesize_16KiB` (74), reflecting the weighted average of the three
 sizes with 0 errors (the 16KiB fraction is small enough to avoid the
 replication backpressure issue seen at 100% 16KiB).
@@ -129,28 +129,29 @@ replication backpressure issue seen at 100% 16KiB).
 
 | Label | Limit | Val B | Mode | T:C | scans/s | avg us | p99 us | err |
 |-------|------:|------:|------|-----|--------:|-------:|-------:|----:|
-| lin_4t | 1000 | 64 | lin | 4:4 | 14264 | 279 | 473 | 0 |
-| minslot_4t | 1000 | 64 | minslot | 4:4 | 14810 | 269 | 385 | 0 |
-| lin_16t | 1000 | 64 | lin | 16:16 | 30799 | 517 | 822 | 0 |
-| minslot_16t | 1000 | 64 | minslot | 16:16 | 33015 | 482 | 791 | 0 |
-| lin_32t | 1000 | 64 | lin | 32:32 | 37840 | 842 | 3600 | 0 |
-| minslot_32t | 1000 | 64 | minslot | 32:32 | 38256 | 830 | 2028 | 0 |
+| lin_4t | 1000 | 64 | lin | 4:4 | 15504 | 257 | 409 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 4:4 | 16232 | 245 | 358 | 0 |
+| lin_16t | 1000 | 64 | lin | 16:16 | 32384 | 492 | 781 | 0 |
+| minslot_16t | 1000 | 64 | minslot | 16:16 | 32217 | 495 | 816 | 0 |
+| lin_32t | 1000 | 64 | lin | 32:32 | 38859 | 820 | 2416 | 0 |
+| minslot_32t | 1000 | 64 | minslot | 32:32 | 36684 | 869 | 1416 | 0 |
 
-Linearizable scales well up to 16T (4339 → 30799, 7.1x) then saturates
-at 32T (37840): the leader read barrier becomes the bottleneck.
-MinSlot shows a clear advantage:
-- **16T:16C**: +7.2% throughput (33015 vs 30799), distributed read
+Linearizable scales well up to 16T (4708 → 32384, 6.9x) then saturates
+at 32T (38859): the leader read barrier becomes the bottleneck.
+MinSlot shows a clear advantage at 4T:
+- **4T:4C**: +4.7% throughput (16232 vs 15504), distributed read
   serving across 3 replicas scales better than single-leader.
-- **32T:32C**: throughput saturates for both (+1.1%), but MinSlot's
-  p99 is 44% better (2028us vs 3600us). Load distribution keeps tail
-  latency low even when throughput is capped by the engine.
+- **16T:16C**: modes converge (-0.5%, ~32K each).
+- **32T:32C**: Linearizable pulls ahead (+5.9% throughput), but
+  MinSlot's p99 is 41% better (1416us vs 2416us). Load distribution
+  keeps tail latency low even when throughput is capped by the engine.
 
 ### Linux results — 2026-08-10 (post-R67)
 
 **Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
 **Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
 Single-thread numbers are from one full regression run (post-R67 fix).
-macOS column is the 2026-08-06 baseline (unchanged).
+macOS column is the 2026-08-19 baseline (unchanged).
 Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
 #### Single-thread (1T:1C)

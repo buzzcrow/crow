@@ -92,7 +92,7 @@ page refcount pins keeping the frame alive until the `Bytes` is dropped.
 
 ---
 
-## Latest Benchmark Results — 2026-08-06 (macOS)
+## Latest Benchmark Results — 2026-08-19 (macOS)
 
 **Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5.
 **Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B
@@ -102,10 +102,10 @@ values. Raw TSV: `doc/working/bench-read-regression.tsv` (gitignored).
 
 | Label | Mode | ops/s | avg us | p50 us | p99 us | p999 us | err |
 |-------|------|------:|-------:|-------:|-------:|--------:|----:|
-| lin_1t | lin | 20441 | 47 | 47 | 75 | 124 | 0 |
-| minslot_1t | minslot | 20478 | 47 | 47 | 73 | 114 | 0 |
+| lin_1t | lin | 21112 | 46 | 46 | 67 | 97 | 0 |
+| minslot_1t | minslot | 21691 | 45 | 44 | 66 | 96 | 0 |
 
-At 1T:1C both modes are identical (~20.4K ops/s, 47us) — no concurrency
+At 1T:1C both modes are identical (~21K ops/s, 46us) — no concurrency
 advantage for MinSlot, and the Linearizable lease barrier is ~0 (lease
 fast path). Per-read cost is engine get + gRPC RTT only.
 
@@ -113,19 +113,19 @@ fast path). Per-read cost is engine get + gRPC RTT only.
 
 | Label | Mode | T:C | ops/s | avg us | p50 us | p99 us | p999 us | err |
 |-------|------|-----|------:|-------:|-------:|-------:|--------:|----:|
-| lin_6t | lin | 6:6 | 68560 | 86 | 81 | 173 | 217 | 0 |
-| minslot_6t | minslot | 6:6 | 75158 | 78 | 74 | 150 | 190 | 0 |
-| lin_16t | lin | 16:16 | 105613 | 149 | 143 | 254 | 305 | 0 |
-| minslot_16t | minslot | 16:16 | 106727 | 148 | 145 | 240 | 288 | 0 |
-| lin_32t | lin | 32:32 | 118390 | 267 | 261 | 428 | 528 | 0 |
-| minslot_32t | minslot | 32:32 | 112621 | 281 | 277 | 440 | 539 | 0 |
+| lin_6t | lin | 6:6 | 70668 | 84 | 79 | 163 | 206 | 0 |
+| minslot_6t | minslot | 6:6 | 77622 | 76 | 73 | 142 | 181 | 0 |
+| lin_16t | lin | 16:16 | 106399 | 148 | 142 | 251 | 298 | 0 |
+| minslot_16t | minslot | 16:16 | 107455 | 147 | 145 | 235 | 281 | 0 |
+| lin_32t | lin | 32:32 | 119473 | 265 | 260 | 418 | 512 | 0 |
+| minslot_32t | minslot | 32:32 | 113270 | 280 | 278 | 432 | 521 | 0 |
 
-Both modes scale well from 1T to 16T (20K → 106K, 5.2x). MinSlot shows
-a clear advantage at 6T (+9.6%, 75158 vs 68560): distributed read
+Both modes scale well from 1T to 16T (21K → 107K, 5.1x). MinSlot shows
+a clear advantage at 6T (+9.8%, 77622 vs 70668): distributed read
 serving across 3 replicas scales better than single-leader at low
-concurrency. At 16T the modes converge (~106K, +1.1% MinSlot); the 3
+concurrency. At 16T the modes converge (~107K, +1.0% MinSlot); the 3
 replicas are approaching per-replica saturation. At 32T Linearizable
-pulls ahead (+5.1%, 118K vs 113K). MinSlot saturates earlier because
+pulls ahead (+5.2%, 119K vs 113K). MinSlot saturates earlier because
 each replica is already at capacity; the leader mode still has headroom
 from the lease fast path (no round-trip).
 
@@ -133,9 +133,9 @@ from the lease fast path (no round-trip).
 
 | Label | Mode | T:C | ops/s | avg us | p99 us | err |
 |-------|------|-----|------:|-------:|-------:|----:|
-| minslot_6t_2to1 | minslot | 6:3 | 73484 | 80 | 157 | 0 |
+| minslot_6t_2to1 | minslot | 6:3 | 74752 | 79 | 151 | 0 |
 
-6T:3C (2:1 ratio) drops only -2.2% vs 6T:6C (73484 vs 75158). MinSlot
+6T:3C (2:1 ratio) drops only -3.7% vs 6T:6C (74752 vs 77622). MinSlot
 distributes across 3 replicas (2 connections per replica), so the h2
 connection lock contention is lower than with a single leader. The
 1T:1C pattern (dedicated connection per thread) avoids the lock
@@ -145,8 +145,8 @@ entirely and remains optimal for max throughput.
 
 | Label | Mode | T:C | ops/s | avg us | p99 us | err | corr |
 |-------|------|-----|------:|-------:|-------:|----:|-----:|
-| lin_16t_verify | lin | 16:16 | 104917 | 150 | 256 | 0 | 0 |
-| minslot_16t_verify | minslot | 16:16 | 104988 | 150 | 241 | 0 | 0 |
+| lin_16t_verify | lin | 16:16 | 105613 | 150 | 252 | 0 | 0 |
+| minslot_16t_verify | minslot | 16:16 | 106662 | 148 | 237 | 0 | 0 |
 
 Zero correctness errors across both modes. Verify overhead is negligible
 (<1% throughput impact vs non-verify 16T runs).
