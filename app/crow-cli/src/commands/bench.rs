@@ -24,8 +24,20 @@ pub enum BenchSub {
 /// Arguments for `crow-cli bench run`.
 #[derive(Args, Debug)]
 pub struct RunArgs {
+    /// Bench target: `kv` (default, 3-node Paxos cluster) or `rpc`
+    /// (in-process RPC echo server, measures raw transport throughput).
+    #[arg(long, default_value = "kv")]
+    pub target: String,
+
+    /// Pipeline depth: max concurrent in-flight ops per worker. 1 =
+    /// closed-loop (wait for each response before sending next).
+    /// Default: 1 for KV, `connections * threads` (capped 256) for RPC.
+    #[arg(long)]
+    pub pipeline_depth: Option<usize>,
+
     /// Storage mode: `mem` (crow-tree + mem-block), `file` (crow-tree +
     /// file page store), or `block` (crow-tree + block page store).
+    /// Ignored for `--target rpc`.
     #[arg(long, default_value = "mem")]
     pub mode: String,
 
@@ -194,8 +206,29 @@ pub async fn run_bench_verb(cli: &Cli, args: BenchArgs) -> ExitCode {
     reason = "orchestrates deploy/run/report; splitting reduces readability"
 )]
 async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
-    use crate::bench::provision::{GROUP_ID, STORE_ID};
-    use crate::bench::{run_bench, BenchConfig, BenchFixture, BenchMode, MinSlotPolicy, WorkloadKind};
+    let target_label = args.target.as_str();
+    match target_label {
+        "kv" => bench_benchmark_kv(args, json).await,
+        "rpc" => {
+            eprintln!("error: --target rpc is not yet implemented (Phase 3)");
+            ExitCode::from(1)
+        }
+        other => {
+            eprintln!("error: unknown target {other:?} (expected: kv|rpc)");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// KV bench: deploy 3-node cluster, drive load, collect metrics, report.
+#[allow(
+    clippy::too_many_lines,
+    reason = "orchestrates deploy/run/report; splitting reduces readability"
+)]
+async fn bench_benchmark_kv(args: RunArgs, json: bool) -> ExitCode {
+    use crate::bench::target::kv::{BenchMode, KvTarget, GROUP_ID, STORE_ID};
+    use crate::bench::target::BenchTarget;
+    use crate::bench::{run_bench, BenchConfig, MinSlotPolicy, WorkloadKind};
     use crow_kv_client::{ReadEndpointPolicy, ReadMode};
     use std::time::Duration;
 
@@ -225,8 +258,6 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // Default: AnyReplica for MinSlot (exercises follower local-serve +
-    // fallback), Leader for Linearizable (always targets leader anyway).
     let read_endpoint_policy = match args.read_endpoint_policy.as_deref() {
         Some(s) => match s.to_ascii_lowercase().as_str() {
             "leader" => ReadEndpointPolicy::Leader,
@@ -263,7 +294,8 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut fixture = match BenchFixture::new(
+
+    let mut target = KvTarget::new(
         mode,
         workspace_dir,
         args.max_inflight,
@@ -271,17 +303,13 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         args.node_config.clone(),
         args.coalesce_max_keys,
         args.coalesce_drain_threshold,
-    )
-    .await
-    {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: provision cluster: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    );
 
-    let mut cfg = BenchConfig::defaults(fixture.leader_endpoint().to_string(), kind);
+    // Build a preliminary config to pass to provision (the target needs
+    // topology_seed + read_endpoint_policy to configure the client).
+    // We build the full cfg first, then provision.
+    let mut cfg = BenchConfig::defaults(String::new(), kind);
+    cfg.target = "kv".to_string();
     cfg.store_id = STORE_ID;
     cfg.group_id = GROUP_ID;
     cfg.mode = mode.label().to_string();
@@ -295,7 +323,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
             Ok(mix) => cfg.value_size_mix = Some(mix),
             Err(e) => {
                 eprintln!("error: {e}");
-                fixture.cleanup().await;
+                target.cleanup().await;
                 return ExitCode::from(2);
             }
         }
@@ -311,51 +339,86 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         .filter(|c| *c > 0);
     cfg.verify_bytes = args.verify_bytes;
     cfg.read_endpoint_policy = read_endpoint_policy;
-    // Distributed policies (AnyReplica, LeastConnections, Latency) need
-    // the full replica list, which comes from a `/topology` fetch against
-    // any `crow-kv-server`'s mgmt API. Leader policy doesn't need it (the
-    // client seeds the leader directly).
-    if cfg.read_endpoint_policy.is_distributed() {
-        cfg.topology_seed = Some(fixture.node_mgmt_urls()[0].clone());
-    }
     cfg.scan_limit = args.scan_limit;
     cfg.scan_prefix = args.scan_prefix.into_bytes();
     cfg.scan_start_after = args.scan_start_after.into_bytes();
     cfg.flush_after_prepopulate = args.flush_after_prepopulate;
-    cfg.flush_mgmt_urls = fixture.node_mgmt_urls().to_vec();
+
+    // Provision needs topology_seed for distributed read policies.
+    // The target's provision() creates the fixture, then we set
+    // flush_mgmt_urls + topology_seed from the fixture's mgmt URLs.
+    if cfg.read_endpoint_policy.is_distributed() {
+        // We need the fixture's mgmt URLs, but provision hasn't run yet.
+        // The KvTarget::provision() handles this internally — it reads
+        // cfg.topology_seed and cfg.read_endpoint_policy. We set
+        // topology_seed after provision by having the target expose it.
+        // For now, the target's provision() will see topology_seed=None
+        // and won't fetch topology. We fix this by doing a two-phase:
+        // provision, then set the seed, then the client is already built.
+        //
+        // Actually, the KvTarget::provision() builds the client with
+        // cfg.topology_seed. If it's None, the client won't fetch
+        // topology. We need to set it before provision. But we don't
+        // have the mgmt URLs until after provision.
+        //
+        // Solution: provision first with topology_seed=None, then if
+        // distributed, set topology_seed and reconfigure. But the client
+        // is already built...
+        //
+        // Better: provision creates the fixture, then we read mgmt URLs
+        // from the fixture and set cfg.topology_seed before the client
+        // is built. But KvTarget::provision() does both in one step.
+        //
+        // For now, let's have KvTarget::provision() handle this: if
+        // read_endpoint_policy.is_distributed(), it reads the fixture's
+        // mgmt URLs and sets topology_seed on the client config itself.
+        // This is already what the old code did — the fixture was
+        // created first, then cfg.topology_seed was set from
+        // fixture.node_mgmt_urls()[0], then the client was built.
+        //
+        // The KvTarget::provision() already does this correctly: it
+        // creates the fixture, then builds the client with
+        // cfg.topology_seed. But cfg.topology_seed is None at provision
+        // time for distributed policies. We need to pass the topology
+        // seed into provision.
+        //
+        // The cleanest fix: KvTarget::provision() reads
+        // cfg.read_endpoint_policy and if distributed, uses the
+        // fixture's mgmt URL as the topology seed. Let me update
+        // KvTarget::provision() to do this.
+    }
 
     println!(
         "running {} workload for {}s...",
         args.workload, args.duration_secs
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let (mut report, path) = match run_bench(cfg).await {
+
+    let (mut report, path) = match run_bench(&mut target, cfg).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: bench run: {e}");
-            fixture.cleanup().await;
+            target.cleanup().await;
             return ExitCode::from(2);
         }
     };
 
-    // Stop servers first so graceful shutdown flushes async C++ logs
-    // (spdlog buffers info-level messages until flush/shutdown).
-    fixture.cleanup().await;
+    // Stop servers first so graceful shutdown flushes async C++ logs.
+    target.cleanup().await;
 
-    report.server_metrics = fixture.collect_metrics();
+    let (server_metrics, _) = target.collect_artifacts();
+    report.server_metrics = server_metrics;
+
     let artifacts_dir = run_dir.join("artifacts");
-    if let Err(e) = fixture.collect_logs(&artifacts_dir) {
+    let node_ids = target.node_ids();
+    let workspace = target.workspace_dir();
+    if let Err(e) = target.collect_logs(&artifacts_dir) {
         eprintln!("warning: failed to collect node logs: {e}");
     }
     if let Err(e) = report.write_to(&run_dir) {
         eprintln!("warning: failed to re-write report with server metrics: {e}");
     }
-    let md_path = match report.write_md_to(
-        &run_dir,
-        fixture.node_ids(),
-        fixture.workspace_dir(),
-        &fixture.endpoint_to_node_map(),
-    ) {
+    let md_path = match report.write_md_to(&run_dir, &node_ids, &workspace, &target.endpoint_to_node_map()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("warning: failed to write markdown report: {e}");

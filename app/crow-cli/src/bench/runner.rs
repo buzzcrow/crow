@@ -30,13 +30,13 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crow_console_shared::error::{Error, Result};
-use crow_kv_client::{ClientConfig, CrowkvClient, ReadEndpointPolicy, ReadMode};
+use crow_kv_client::{ReadEndpointPolicy, ReadMode};
 use tracing::{info, warn};
 
-use super::metrics_flusher::{spawn_metrics_flusher, spawn_progress_snapshotter};
 use super::report::{per_op_map, BenchReport, OpStats};
+use super::target::BenchTarget;
 use super::worker::{run_worker, WorkerCounters};
-use super::workload::{format_key, value_for, MinSlotPolicy, OpGen, OpKind, WorkloadKind};
+use super::workload::{MinSlotPolicy, OpGen, OpKind, WorkloadKind};
 
 /// Knobs controlling a single bench invocation.
 #[derive(Debug, Clone)]
@@ -129,17 +129,19 @@ pub(crate) struct BenchConfig {
     /// `WorkloadKind::List`. Empty = start from the beginning.
     pub(crate) scan_start_after: Vec<u8>,
     /// If `true`, after pre-population completes the runner drains L0
-    /// (`MemTable`) into L1 on every node via each `flush_mgmt_urls`
-    /// management API `POST .../flush`, then opens the measurement
-    /// window. Produces a clean L1-only scan baseline so the
-    /// `MemTable::snapshot()` `O(N_l0)` cost is removed from the
-    /// measurement. `false` (default) leaves L0 size dependent on the
-    /// pre-pop write rate / value size (the historical behavior).
+    /// (`MemTable`) into L1 on every node via each node's management
+    /// API `POST .../flush`, then opens the measurement window.
+    /// `false` (default) leaves L0 size dependent on the pre-pop write
+    /// rate / value size. The target provides the mgmt URLs via
+    /// `BenchTarget::flush_mgmt_urls()`.
     pub(crate) flush_after_prepopulate: bool,
-    /// Per-node management API URLs to hit with `POST .../flush` when
-    /// `flush_after_prepopulate` is set. Empty (default) means the flag
-    /// is a no-op even if set — the bench fixture populates this.
-    pub(crate) flush_mgmt_urls: Vec<String>,
+    /// Max concurrent in-flight ops per worker. 1 = closed-loop (wait
+    /// for each response before sending the next). >1 = pipelined via
+    /// semaphore-bounded concurrency. Default 1; RPC target defaults
+    /// to `connections * threads` (capped at 256).
+    pub(crate) pipeline_depth: usize,
+    /// Target label: "kv", "rpc", etc. Stored in the report.
+    pub(crate) target: String,
 }
 
 impl BenchConfig {
@@ -172,7 +174,8 @@ impl BenchConfig {
             scan_prefix: Vec::new(),
             scan_start_after: Vec::new(),
             flush_after_prepopulate: false,
-            flush_mgmt_urls: Vec::new(),
+            pipeline_depth: 1,
+            target: "kv".to_string(),
         }
     }
 
@@ -206,90 +209,45 @@ impl BenchConfig {
 /// Configuration errors, all-connection-failure during pool build, or
 /// I/O errors while writing the report file.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::PathBuf)> {
+pub(crate) async fn run_bench<T: BenchTarget>(
+    target: &mut T,
+    cfg: BenchConfig,
+) -> Result<(BenchReport, std::path::PathBuf)> {
     cfg.validate()?;
     info!(
-        endpoint = %cfg.endpoint,
+        target = target.label(),
         workload = ?cfg.workload,
         threads = cfg.threads,
         connections = cfg.connections,
+        pipeline_depth = cfg.pipeline_depth,
         duration_ms = u64::try_from(cfg.duration.as_millis()).unwrap_or(u64::MAX),
         "bench: starting"
     );
 
-    // Single `CrowkvClient`, seeded directly at `cfg.endpoint` (bench
-    // targets one already-known leader, no `/topology` discovery needed --
-    // an empty mgmt-seed list is fine). `pool_size_per_endpoint` reproduces
-    // the old runner's "N independent gRPC channels, round-robined" pool
-    // via the client's own per-endpoint channel pool, so every worker
-    // shares one client and its internal pool rather than owning a
-    // channel directly. When `topology_seed` is set (MinSlot benches
-    // with a distributed policy), the seed list is non-empty so the
-    // client can fetch `/topology` and learn the full replica list for
-    // distribution.
-    let mut client_config = ClientConfig::new(cfg.topology_seed.clone().map(|s| vec![s]).unwrap_or_default());
-    client_config.pool_size_per_endpoint = cfg.connections as usize;
-    client_config.read_endpoint_policy = cfg.read_endpoint_policy;
-    let client = CrowkvClient::new(client_config);
-    client.seed_leader(cfg.store_id, cfg.group_id, cfg.endpoint.clone());
-    let client = Arc::new(client);
+    // Provision the target (KV: 3-node cluster; RPC: in-process server).
+    target.provision(&cfg).await?;
 
-    // Pre-population phase: sequentially write `[0, pre_populate)` keys
-    // with deterministic values before the measurement window begins.
-    // Not measured (excluded from latency/TPS); reported separately as
-    // `pre_pop_ms` / `pre_pop_errors`. Also establishes the client's
-    // `write_slot_highwater` so `MinSlot` reads with `min_slot = auto`
-    // carry it. Retries on `NotLeader` (the client follows the hint
-    // internally, so a plain `put` retry loop suffices).
-    let (pre_pop_ms, pre_pop_errors) = match cfg.pre_populate {
-        Some(count) if count > 0 => {
-            info!(count, "bench: pre-populating key space");
-            let pop_start = Instant::now();
-            let mut errors: u64 = 0;
-            for id in 0..count {
-                let key = format_key(id);
-                let vsize = cfg
-                    .value_size_mix
-                    .as_ref()
-                    .map_or(cfg.value_size, |mix| mix.size_for(id));
-                let value = value_for(id, vsize);
-                let mut attempts = 0u32;
-                loop {
-                    attempts += 1;
-                    match client.put(cfg.store_id, cfg.group_id, &key, &value, None).await {
-                        Ok(_) => break,
-                        Err(crow_kv_client::Error::NotLeader { .. }) if attempts < 8 => {}
-                        Err(_) => {
-                            errors += 1;
-                            break;
-                        }
-                    }
-                }
-            }
-            let ms = u64::try_from(pop_start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            info!(ms, errors, "bench: pre-population done");
-            (ms, errors)
-        }
-        _ => (0, 0),
+    // Build one client per worker.
+    let mut worker_clients = Vec::with_capacity(cfg.threads as usize);
+    for _ in 0..cfg.threads {
+        worker_clients.push(target.build_client().await?);
+    }
+
+    // Pre-population phase (KV only; RPC returns (0, 0)).
+    let (pre_pop_ms, pre_pop_errors) = if let Some(first) = worker_clients.first() {
+        target.pre_populate(first, &cfg).await.unwrap_or((0, 0))
+    } else {
+        (0, 0)
     };
 
-    // Optional L0 drain: after pre-pop, force every node's engine to
-    // flush its MemTable into L1 before the measurement window opens.
-    // The leader has applied all pre-pop writes by the time the last
-    // `put` returns; followers may still be applying the learn-stream
-    // tail, so wait briefly for them to converge before flushing (flush
-    // only drains entries with slot <= contiguous_slot). A failed flush
-    // on one node is logged but does not abort the bench — it degrades
-    // the measurement's cleanliness, not its correctness.
-    if cfg.flush_after_prepopulate && !cfg.flush_mgmt_urls.is_empty() {
-        info!(
-            nodes = cfg.flush_mgmt_urls.len(),
-            "bench: draining L0 after pre-pop"
-        );
+    // Optional L0 drain (KV only — target returns empty for RPC).
+    let flush_mgmt_urls = target.flush_mgmt_urls();
+    if cfg.flush_after_prepopulate && !flush_mgmt_urls.is_empty() {
+        info!(nodes = flush_mgmt_urls.len(), "bench: draining L0 after pre-pop");
         let flush_start = Instant::now();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut failures = 0u32;
-        for url in &cfg.flush_mgmt_urls {
+        for url in &flush_mgmt_urls {
             match crow_console_shared::clients::http::ServerClient::new(url) {
                 Ok(sc) => match sc.flush(cfg.store_id, cfg.group_id).await {
                     Ok(()) => {}
@@ -313,56 +271,35 @@ pub(crate) async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::pat
     let started_at = Utc::now();
     let started_instant = Instant::now();
     let deadline = started_instant + cfg.duration;
-    // Records issued before `measure_start` are discarded by the
-    // worker. When warmup is None / zero, this collapses to
-    // `started_instant` so the first op already counts.
     let warmup_dur = cfg.warmup.unwrap_or(Duration::ZERO);
     let measure_start = started_instant + warmup_dur;
 
-    // Per-worker live counters (lock-free). The optional progress
-    // snapshotter task reads these every `progress_interval` and prints
-    // a one-line summary; workers never read each other's counters.
+    // Per-worker live counters (lock-free).
     let mut counters: Vec<Arc<WorkerCounters>> = Vec::with_capacity(cfg.threads as usize);
     for _ in 0..cfg.threads {
         counters.push(Arc::new(WorkerCounters::new()));
     }
 
     let progress_handle = match cfg.progress_interval {
-        Some(d) if !d.is_zero() => Some(spawn_progress_snapshotter(
-            d,
-            started_instant,
-            deadline,
-            counters.clone(),
-            Arc::clone(&client),
-        )),
+        Some(d) if !d.is_zero() => target.spawn_progress(d, started_instant, deadline, counters.clone()),
         _ => None,
     };
 
-    let metrics_handle = cfg.metrics_log_path.as_ref().map(|path| {
-        spawn_metrics_flusher(
-            Duration::from_secs(5),
-            started_instant,
-            deadline,
-            counters.clone(),
-            Arc::clone(&client),
-            path.clone(),
-        )
+    let metrics_handle = cfg.metrics_log_path.as_ref().and_then(|path| {
+        target.spawn_metrics_flusher(started_instant, deadline, counters.clone(), path.clone())
     });
 
     let mut handles = Vec::with_capacity(cfg.threads as usize);
     for worker_id in 0..cfg.threads {
-        let client = client.clone();
+        let client = worker_clients[worker_id as usize].clone();
         let cfg2 = cfg.clone();
         let counters = counters[worker_id as usize].clone();
         let handle = tokio::spawn(async move {
-            // Per-worker rng seed = worker_id for determinism.
             let mut gen = OpGen::new(
                 u64::from(worker_id) ^ 0x9E37_79B9_7F4A_7C15,
                 cfg2.key_space,
                 cfg2.value_size,
             );
-            // Read benches with pre-population draw read keys from the
-            // populated range so reads return `Found` (not `NotFound`).
             if let Some(count) = cfg2.pre_populate {
                 if count > 0 {
                     gen.set_read_key_space(count);
@@ -398,9 +335,6 @@ pub(crate) async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::pat
     }
 
     if let Some(h) = progress_handle {
-        // Snapshotter exits on its own once the deadline passes; await
-        // it so its final tick (if any) is flushed before we print the
-        // run summary.
         let _ = h.await;
     }
 
@@ -420,20 +354,13 @@ pub(crate) async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::pat
         total_errors as f64 / total_attempts as f64
     };
 
-    let client_metrics = client.metrics();
+    let client_metrics = target.client_metrics_snapshot();
 
     let run_id = cfg.run_id.clone().unwrap_or_else(|| {
         let ms = started_at.timestamp_millis();
         format!("bench-{ms}-{:?}", cfg.workload).to_ascii_lowercase()
     });
 
-    // Measurement window is the configured duration minus warmup.
-    // Workers stop at `deadline = started_instant + cfg.duration` and
-    // only record between `measure_start` and `deadline`, so the
-    // effective injection window is exactly `cfg.duration - warmup`.
-    // Using `actual_duration` would include post-deadline overhead
-    // (worker join, metrics flush), inflating the denominator and
-    // deflating reported TPS.
     let measure_ms = u64::try_from(cfg.duration.saturating_sub(warmup_dur).as_millis()).unwrap_or(u64::MAX);
     let warmup_ms = u64::try_from(warmup_dur.as_millis()).unwrap_or(u64::MAX);
 
@@ -445,6 +372,7 @@ pub(crate) async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::pat
         warmup_ms,
         workload: cfg.workload,
         mode: cfg.mode.clone(),
+        target: cfg.target.clone(),
         connections: cfg.connections,
         threads: cfg.threads,
         key_space: cfg.key_space,
@@ -460,9 +388,6 @@ pub(crate) async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::pat
         pre_pop_ms,
         pre_pop_errors,
         by_op: per_op_map(by_kind),
-        // Populated by `bench benchmark` (R10) after collecting each
-        // node's `log/metrics.log`; plain `bench run`/`stress` have no
-        // deployed nodes to collect from, so this stays default/empty.
         server_metrics: super::report::ServerMetrics::default(),
         client_metrics,
     };

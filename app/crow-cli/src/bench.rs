@@ -10,14 +10,13 @@
 
 pub(crate) mod metrics_flusher;
 pub(crate) mod metrics_log;
-pub(crate) mod provision;
 pub(crate) mod report;
 pub(crate) mod report_format;
 pub(crate) mod runner;
+pub(crate) mod target;
 pub(crate) mod worker;
 pub(crate) mod workload;
 
-pub(crate) use provision::{BenchFixture, BenchMode};
 pub(crate) use report::BenchReport;
 pub(crate) use runner::{run_bench, BenchConfig};
 pub(crate) use workload::{MinSlotPolicy, WorkloadKind};
