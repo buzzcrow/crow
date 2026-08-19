@@ -293,7 +293,10 @@ static bool on_writable_impl(Connection *conn, int fd)
             has_partial = true;
         }
     }
-    return has_partial;
+    // Keep write armed if there are partials OR the drained batch was
+    // full (BATCH_MAX) — the send queue may still have more frames that
+    // need the next Writable event to be sent.
+    return has_partial || (n == BATCH_MAX);
 }
 
 // ── SocketTransport ───────────────────────────────────────────────
