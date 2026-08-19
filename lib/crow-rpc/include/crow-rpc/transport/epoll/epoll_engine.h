@@ -21,6 +21,7 @@ class EpollEngine : public SocketEngine
     ~EpollEngine() override;
 
     int  init() override;
+    void set_oneshot(bool on) override;
     void add_listen_fd(int fd) override;
     void add_connection(int fd, Connection *conn) override;
     void remove_connection(int fd) override;
@@ -33,11 +34,12 @@ class EpollEngine : public SocketEngine
     void shutdown() override;
 
   private:
-    int epoll_fd_  = -1;
-    int notify_fd_ = -1; // eventfd
-    int timer_fd_  = -1; // timerfd
+    int  epoll_fd_  = -1;
+    int  notify_fd_ = -1;    // eventfd
+    int  timer_fd_  = -1;    // timerfd
+    bool oneshot_   = false; // multi-worker safety
 
-    // fd → Connection* map (for dispatching events).
+    // fd → Connection* map (only used for add/remove; wait() uses data.ptr).
     std::mutex                            conn_mu_;
     std::unordered_map<int, Connection *> connections_;
 
@@ -45,7 +47,7 @@ class EpollEngine : public SocketEngine
     std::mutex                        mask_mu_;
     std::unordered_map<int, uint32_t> fd_masks_;
 
-    void mod_fd(int fd, uint32_t events);
+    void mod_fd(int fd, uint32_t events, Connection *conn);
 };
 
 } // namespace crow::rpc

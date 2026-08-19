@@ -19,12 +19,12 @@
 namespace crow::rpc
 {
 
-RpcServer::RpcServer(BufferPool *pool) : pool_(pool), owns_pool_(pool == nullptr)
+RpcServer::RpcServer(BufferPool *pool, uint32_t num_workers) : pool_(pool), owns_pool_(pool == nullptr)
 {
     if (pool_ == nullptr) {
         pool_ = new SystemBufferPool();
     }
-    transport_ = std::make_unique<SocketTransport>(1, pool_);
+    transport_ = std::make_unique<SocketTransport>(num_workers, pool_);
 }
 
 RpcServer::~RpcServer()
@@ -149,8 +149,10 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
 
     OutFrame *response = handler(frame, conn);
     if (response != nullptr) {
-        // Submit the response back through the transport.
-        transport_->submit(conn, response);
+        // Submit the response via inline path (direct enqueue + write).
+        // dispatch is called from the I/O worker thread (via on_frame),
+        // so we bypass the cross-thread notify queue.
+        transport_->submit_inline(conn, response);
     }
 }
 

@@ -20,6 +20,7 @@ class KqueueEngine : public SocketEngine
     ~KqueueEngine() override;
 
     int  init() override;
+    void set_oneshot(bool on) override;
     void add_listen_fd(int fd) override;
     void add_connection(int fd, Connection *conn) override;
     void remove_connection(int fd) override;
@@ -32,11 +33,12 @@ class KqueueEngine : public SocketEngine
     void shutdown() override;
 
   private:
-    int kq_           = -1;
-    int notify_ident_ = -1; // EVFILT_USER ident for cross-thread notify
-    int timer_fd_     = -1; // timer ident (EVFILT_TIMER)
+    int  kq_           = -1;
+    int  notify_ident_ = -1;    // EVFILT_USER ident for cross-thread notify
+    int  timer_fd_     = -1;    // timer ident (EVFILT_TIMER)
+    bool oneshot_      = false; // multi-worker safety
 
-    // fd → Connection* map (for dispatching events).
+    // fd → Connection* map (only used for add/remove; wait() uses udata).
     std::mutex                            conn_mu_;
     std::unordered_map<int, Connection *> connections_;
 };

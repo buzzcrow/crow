@@ -14,6 +14,9 @@
 namespace crow::rpc
 {
 
+// Forward declaration — Worker references SocketTransport for multi-worker mode.
+class SocketTransport;
+
 // ── SocketEngine: platform-specific event loop primitives ─────────
 //
 // epoll (Linux) and kqueue (macOS) share the same event-driven loop
@@ -47,6 +50,11 @@ class SocketEngine
     // Initialize the engine for a worker thread. Returns 0 on success.
     virtual int init() = 0;
 
+    // Enable/disable one-shot mode for multi-worker safety. When enabled,
+    // connection fds are registered with EV_ONESHOT/EPOLLONESHOT so only
+    // one worker wakes per event; arm_read/arm_write re-arm after processing.
+    virtual void set_oneshot(bool on) = 0;
+
     // Register a listen socket (acceptor only). fd is the listening socket.
     virtual void add_listen_fd(int fd) = 0;
 
@@ -56,7 +64,7 @@ class SocketEngine
 
     // Arm/disarm read/write events. Read is always armed (level-triggered);
     // write is armed on-demand (when send queue has data) and disarmed when
-    // the queue drains.
+    // the queue drains. In one-shot mode, arm re-arms after processing.
     virtual void arm_read(int fd)     = 0;
     virtual void arm_write(int fd)    = 0;
     virtual void disarm_write(int fd) = 0;
@@ -78,14 +86,18 @@ class SocketEngine
 
 // ── Worker: one thread driving I/O for a set of connections ────────
 //
-// Each worker owns one SocketEngine and a set of connections. The worker
-// thread runs the event loop: accept (acceptor only), read → parse →
-// on_frame, write → drain send queue → writev, timer → scheduled tasks,
-// notify → drain cross-thread submit queue.
+// In single-worker mode, the worker owns its own SocketEngine. In
+// multi-worker mode, all workers share one SocketEngine (one epoll/kqueue
+// fd) and use EV_ONESHOT/EPOLLONESHOT to prevent races. The cross-thread
+// submit queue is shared on SocketTransport in multi-worker mode.
 class Worker
 {
   public:
+    // Single-worker: worker owns the engine.
     Worker(int id, std::unique_ptr<SocketEngine> engine);
+    // Multi-worker: worker shares the engine + submit queue.
+    Worker(int id, SocketEngine *shared_engine, SocketTransport *transport);
+
     ~Worker();
 
     // Start the worker thread.
@@ -97,13 +109,9 @@ class Worker
     // Add a connection to this worker (called by the acceptor).
     void add_connection(int fd, std::shared_ptr<Connection> conn);
 
-    // Cross-thread submit: push a frame to a connection's send queue and
-    // notify the worker. Returns true on success, false if backpressured.
-    bool submit(Connection *conn, OutFrame *frame);
-
     SocketEngine *engine()
     {
-        return engine_.get();
+        return engine_;
     }
 
     int id() const
@@ -113,19 +121,26 @@ class Worker
 
   private:
     int                           id_;
-    std::unique_ptr<SocketEngine> engine_;
+    std::unique_ptr<SocketEngine> owned_engine_;        // non-null in single-worker mode
+    SocketEngine                 *engine_;              // owned (single) or shared (multi)
+    SocketTransport              *transport_ = nullptr; // shared submit queue (multi)
     std::thread                   thread_;
     std::atomic<bool>             running_{false};
 
-    // Connections owned by this worker, keyed by fd.
+    // Connections (shared in multi-worker mode — any worker can process).
     std::mutex                                           conns_mu_;
     std::unordered_map<int, std::shared_ptr<Connection>> connections_;
 
-    // Cross-thread submit queue: (conn, frame) pairs waiting to be enqueued.
+    // Per-worker submit queue (single-worker mode only).
     std::mutex                                       submit_mu_;
     std::vector<std::pair<Connection *, OutFrame *>> pending_submits_;
 
+    friend class SocketTransport;
+
     void run_loop();
+
+    // Drain pending cross-thread submits and try direct write for each.
+    void drain_pending_submits();
 };
 
 // ── SocketTransport: shared I/O logic for TCP ──────────────────────
@@ -152,6 +167,11 @@ class SocketTransport : public Transport
     // Shared I/O logic (called by Worker::run_loop).
     void on_readable(Connection *conn, int fd);
     void on_writable(Connection *conn, int fd);
+
+    // Inline submit: enqueue a frame to the connection's send queue and
+    // try direct write. Called from the worker thread (e.g. server dispatch)
+    // to bypass the cross-thread notify path. Returns true if all data sent.
+    bool submit_inline(Connection *conn, OutFrame *frame);
 
     // Create a platform-specific engine (EpollEngine on Linux,
     // KqueueEngine on macOS). Factory so Worker doesn't need to know
@@ -180,11 +200,25 @@ class SocketTransport : public Transport
         return pool_;
     }
 
+    // Shared submit queue (multi-worker mode). Drained by all workers.
+    bool shared_submit(Connection *conn, OutFrame *frame);
+    void drain_shared_submits();
+
   private:
     BufferPool                          *pool_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::atomic<size_t>                  next_worker_{0};
     std::atomic<int64_t>                 next_conn_id_{1};
+
+    // Shared engine (multi-worker mode only; nullptr in single-worker).
+    std::unique_ptr<SocketEngine> shared_engine_;
+    bool                          multi_worker_ = false;
+
+    // Shared submit queue (multi-worker mode).
+    std::mutex                                       shared_submit_mu_;
+    std::vector<std::pair<Connection *, OutFrame *>> shared_pending_submits_;
+
+    friend class Worker;
 };
 
 } // namespace crow::rpc

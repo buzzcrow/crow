@@ -47,6 +47,7 @@ void            crow_rpc_pool_destroy(crow_rpc_pool_t pool);
 
 // ── Server ────────────────────────────────────────────────────────
 crow_rpc_server_t crow_rpc_server_create(crow_rpc_pool_t pool);
+crow_rpc_server_t crow_rpc_server_create_with_workers(crow_rpc_pool_t pool, uint32_t num_workers);
 void              crow_rpc_server_destroy(crow_rpc_server_t server);
 crow_rpc_status   crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port);
 void              crow_rpc_server_start(crow_rpc_server_t server);

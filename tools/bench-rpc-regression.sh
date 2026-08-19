@@ -18,19 +18,22 @@
 # absolute RPC throughput is platform-dependent.
 #
 # Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS):
-#   value_size=64, 5s, in-process echo, kqueue loopback
+#   value_size=64, 5s, in-process echo, kqueue loopback, io_workers=1
+#   (single-worker fast path: udata dispatch + direct-write + submit_inline)
 #
 #   T    C    ops/s     avg    p50    p99    p999   err
-#   1    1    32,736    29     29     50     94     0
-#   8    4    83,850    94     94     132    209    0
-#   16   8    89,994    177    175    233    398    0
-#   64   8    96,508    662    657    789    1,332  0
-#   128  16   99,301    1,288  1,275  1,532  2,344  0
-#   256  16   103,058   2,483  2,454  3,192  4,320  0
-#   512  32   103,650   4,939  4,884  5,804  6,864  0
+#   1    1    37,363    26     25     39     76     0
+#   8    4    105,483   75     74     106    169    0
+#   16   8    114,916   138    135    268    379    0
+#   64   8    122,264   522    516    720    1,045  0
+#   128  16   126,014   1,015  1,003  1,286  1,848  0
+#   256  16   125,622   2,037  1,987  3,388  4,900  0
+#   512  32   124,087   4,127  4,066  4,920  5,372  0
 #
-# TPS ceiling ~104K at 256T+. Single C++ I/O worker thread is the
-# bottleneck; beyond 256T latency doubles without TPS gain.
+# TPS ceiling ~126K at 128T+. Single C++ I/O worker thread is the
+# bottleneck; beyond 128T latency doubles without TPS gain.
+# Multi-worker (io_workers>1) with EV_ONESHOT re-arm does NOT help for
+# loopback — the re-arm overhead exceeds parallelism benefit.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved

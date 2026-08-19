@@ -22,7 +22,7 @@ namespace crow::rpc
 class RpcServer
 {
   public:
-    RpcServer(BufferPool *pool = nullptr);
+    RpcServer(BufferPool *pool = nullptr, uint32_t num_workers = 1);
     ~RpcServer();
 
     // Listen on the given address + port. Must be called before start().

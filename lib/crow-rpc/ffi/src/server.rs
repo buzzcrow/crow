@@ -16,8 +16,16 @@ impl RpcServer {
     /// Create a new server. If pool is None, the server creates its own
     /// internal pool.
     pub fn new(pool: Option<&crate::BufferPool>) -> Self {
+        Self::with_workers(pool, 1)
+    }
+
+    /// Create a new server with N I/O worker threads sharing one epoll/kqueue
+    /// instance. num_workers=1 uses the single-worker fast path (no ONESHOT
+    /// re-arm overhead). num_workers>1 enables EV_ONESHOT/EPOLLONESHOT for
+    /// multi-worker safety.
+    pub fn with_workers(pool: Option<&crate::BufferPool>, num_workers: u32) -> Self {
         let pool_handle = pool.map(|p| p.handle()).unwrap_or(ptr::null_mut());
-        let handle = unsafe { sys::crow_rpc_server_create(pool_handle) };
+        let handle = unsafe { sys::crow_rpc_server_create_with_workers(pool_handle, num_workers) };
         RpcServer { handle }
     }
 

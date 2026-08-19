@@ -142,6 +142,9 @@ pub(crate) struct BenchConfig {
     pub(crate) pipeline_depth: usize,
     /// Target label: "kv", "rpc", etc. Stored in the report.
     pub(crate) target: String,
+    /// Number of C++ I/O worker threads (RPC target only). 1 = single-worker
+    /// fast path; >1 = multi-worker on shared epoll/kqueue with ONESHOT.
+    pub(crate) io_workers: u32,
 }
 
 impl BenchConfig {
@@ -176,6 +179,7 @@ impl BenchConfig {
             flush_after_prepopulate: false,
             pipeline_depth: 1,
             target: "kv".to_string(),
+            io_workers: 1,
         }
     }
 

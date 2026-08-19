@@ -67,6 +67,7 @@ extern "C" {
     pub fn crow_rpc_pool_destroy(pool: crow_rpc_pool_t);
 
     pub fn crow_rpc_server_create(pool: crow_rpc_pool_t) -> crow_rpc_server_t;
+    pub fn crow_rpc_server_create_with_workers(pool: crow_rpc_pool_t, num_workers: u32) -> crow_rpc_server_t;
     pub fn crow_rpc_server_destroy(server: crow_rpc_server_t);
     pub fn crow_rpc_server_listen(
         server: crow_rpc_server_t,

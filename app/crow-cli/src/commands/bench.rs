@@ -55,6 +55,12 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 4)]
     pub connections: u32,
 
+    /// Number of C++ I/O worker threads sharing one epoll/kqueue instance
+    /// (RPC target only). 1 = single-worker fast path (no ONESHOT re-arm).
+    /// >1 enables EV_ONESHOT/EPOLLONESHOT for multi-worker safety.
+    #[arg(long, default_value_t = 1)]
+    pub io_workers: u32,
+
     #[arg(long, default_value_t = 1_000_000)]
     pub key_space: u64,
 
@@ -467,6 +473,7 @@ async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
     cfg.duration = Duration::from_secs(args.duration_secs);
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
+    cfg.io_workers = args.io_workers;
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
     // RPC target doesn't use metrics_log_path (no KV client metrics).

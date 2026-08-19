@@ -60,9 +60,9 @@ impl BenchTarget for RpcTarget {
         "rpc"
     }
 
-    async fn provision(&mut self, _cfg: &BenchConfig) -> Result<()> {
+    async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
         let pool = Arc::new(BufferPool::new(4096));
-        let server = Arc::new(RpcServer::new(Some(&pool)));
+        let server = Arc::new(RpcServer::with_workers(Some(&pool), cfg.io_workers));
         server
             .listen("127.0.0.1", 0)
             .map_err(|e| Error::Config(format!("rpc listen: {e}")))?;

@@ -17,6 +17,19 @@ the benchmark is purely I/O-bound.
 
 ## Echo Flow — Single Request/Response
 
+The flow below shows the optimized path (3 event-loop iterations per
+op, down from 5 in the original design). The optimizations:
+- **udata dispatch**: kqueue/epoll stores `Connection*` in udata,
+  eliminating per-event mutex + map lookup in `wait()`.
+- **Direct-write on notify**: when draining pending submits, try
+  `writev` immediately instead of arming write + waiting for a
+  Writable event. Eliminates 1 event per op (the Writable event for
+  the request).
+- **submit_inline for server responses**: the server dispatch calls
+  `submit_inline` (direct enqueue + writev) instead of `transport->
+  submit` (cross-thread notify). Eliminates 1 event per op (the
+  Notify event for the response).
+
 ```
 Rust worker (tokio task)
   → RpcBenchClient::issue_op
@@ -46,8 +59,8 @@ Rust worker (tokio task)
               → build_frame: new OutFrame { request_id, header, ctrl, data }
                 [zero-copy: OutFrame holds Buffer pointers, no copy]
               → transport->submit(conn, frame)
-                → Worker::submit: lock submit_mu_, push to pending_submits_
-                  → engine->notify_worker() (EVFILT_USER trigger)
+                → SocketTransport::submit: lock submit_mu_, push to
+                  pending_submits_ → engine->notify_worker()
                     [cross-thread: tokio worker → C++ I/O worker]
            e. crow_rpc_buffer_release(control + data)
               [decrements the ref bumped in (a), frees wrapper struct]
@@ -58,56 +71,51 @@ Rust worker (tokio task)
   ── C++ I/O worker thread (kqueue/epoll loop) ──
 
   Worker::run_loop (event loop)
-    → kevent wait → Notify event (EVFILT_USER)
-      → drain pending_submits_ (swap under submit_mu_)
-      → for each (conn, frame):
-          conn->enqueue_send(frame)  [push to connection send queue]
-          engine->arm_write(fd)      [EVFILT_WRITE add]
 
-    → kevent wait → Writable event (EVFILT_WRITE)
-      → on_writable_impl(conn, fd)
-        → drain_send_queue(batch, BATCH_MAX=64)
-        → build iovecs: [header_buf][control][data] per frame
-          [copy: serialize_header → stack header_bufs (12 bytes)]
-          [zero-copy: control + data pointers go directly to writev]
-        → writev(fd, iov, iov_count)
-          [kernel copy: user → socket buffer (unavoidable)]
-        → release fully-sent frames:
-          frame->control->release()  [decrement ref, recycle to pool]
-          frame->data->release()
-          delete frame
+  Event 1: Notify (EVFILT_USER) — drain submits + direct write
+    → kevent wait → Notify event
+      → drain_pending_submits():
+        → swap pending_submits_ under submit_mu_
+        → for each (conn, frame):
+            conn->enqueue_send(frame)
+            on_writable_impl(conn, fd)  ← DIRECT WRITE (no Writable event)
+              → drain_send_queue + build iovecs + writev
+                [kernel copy: user → socket buffer (unavoidable)]
+              → release sent frames (buffer refcount decrement)
+            if partial write: engine->arm_write(fd)  ← only on EAGAIN
 
   ── Server-side (same C++ I/O worker, same process) ──
 
-    → kevent wait → Readable event (EVFILT_READ on client conn)
+  Event 2: Readable (EVFILT_READ) — read + echo + direct write response
+    → kevent wait → Readable event (udata = Connection*, no map lookup)
       → on_readable_impl(conn, fd)
         → FrameParser::advance: parse header → alloc control → alloc data
           [copy: ::read(fd, target.ptr, target.len) → parser buffers]
-          [malloc: control + data are malloc'd by the parser]
         → conn->on_frame(frame) → RpcServer::dispatch(frame, conn)
-          → handlers_.get_handler(msg_type=100) → echo_handler
+          → echo_handler:
             → extract_request_id(request->control)
-              [zero-copy: reads flatbuffer `id` from control buffer]
             → build_ping_response(pool, req_id, 0)
               [pool alloc + memcpy: response control buffer]
-            → pool->alloc(request->data_len) + memcpy(request->data)
+            → pool->alloc + memcpy(request->data)
               [copy: request data → response data buffer]
-            → delete request (frees parser malloc'd control/data)
+            → delete request
             → return OutFrame { response_ctrl, response_data }
-          → transport->submit(conn, response)
-            [same cross-thread submit path as the request]
+          → submit_inline(conn, response)  ← NO Notify event
+            → conn->enqueue_send(response)
+            → on_writable_impl(conn, fd)  ← DIRECT WRITE response
+              → writev response frame to socket
 
   ── Response arrives back on client connection ──
 
-    → kevent wait → Readable event (EVFILT_READ on client conn)
+  Event 3: Readable (EVFILT_READ) — read response + callback
+    → kevent wait → Readable event (udata = Connection*)
       → on_readable_impl → FrameParser::advance → conn->on_frame
         → RpcClient::on_response(req_id, frame)
           → lock pending_mu_, find + erase callback for req_id
           → callback(frame, RpcError::Ok)
             → OnCompleteAdapter::operator()(frame, Ok)
               → wrap response control/data in crow_rpc_buffer_s handles
-                [zero-copy: Buffer wraps raw parser pointer, ref=nullptr
-                 (release is a no-op; Frame destructor already nulled)]
+                [zero-copy: Buffer wraps raw parser pointer, ref=nullptr]
               → crow_rpc_on_complete(req_id, ctrl_handle, data_handle,
                 CROW_RPC_OK, user_data)
                 → Rust: on_complete_cb
@@ -119,9 +127,16 @@ Rust worker (tokio task)
   ── Back on tokio worker thread ──
 
     6. CallFuture resolves → OpOutcome { ok: true }
-       [Buffer Drop: releases response control + data (no-op for
-        malloc'd parser buffers, frees the crow_rpc_buffer_s wrapper)]
+       [Buffer Drop: releases response control + data]
 ```
+
+**Events per op: 3** (down from 5 in the original design):
+1. Notify — drain submits + direct write request
+2. Readable (server) — read + echo + direct write response
+3. Readable (client) — read response + callback
+
+The original design had 5 events: Notify → Writable (request) →
+Readable (server) → Notify → Writable (response) → Readable (client).
 
 ---
 
@@ -171,69 +186,95 @@ caller's handles after submit.
 ## Benchmark Results — 2026-08-19
 
 Scaling sweep. In-process echo server (kqueue loopback, no network),
-64-byte values, 1000 key space (unused by echo), 5-second duration.
-Platform: **Apple M5 Pro** (18 cores, arm64, macOS 26/Darwin 25.5).
-7 runs, zero errors across all configs.
+64-byte values, 1000 key space (unused by echo), 5-second duration,
+`io_workers=1` (single-worker fast path). Platform: **Apple M5 Pro**
+(18 cores, arm64, macOS 26/Darwin 25.5). 7 runs, zero errors across
+all configs.
 
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
-### Full sweep
+### Full sweep (after single-epoll optimizations)
 
 | Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 32,736 | 29 | 29 | 50 | 94 | 0 |
-| 8 | 4 | 32 | 83,850 | 94 | 94 | 132 | 209 | 0 |
-| 16 | 8 | 128 | 89,994 | 177 | 175 | 233 | 398 | 0 |
-| 64 | 8 | 512 | 96,508 | 662 | 657 | 789 | 1,332 | 0 |
-| 128 | 16 | 2048 | 99,301 | 1,288 | 1,275 | 1,532 | 2,344 | 0 |
-| 256 | 16 | 4096 | 103,058 | 2,483 | 2,454 | 3,192 | 4,320 | 0 |
-| 512 | 32 | 16384 | 103,650 | 4,939 | 4,884 | 5,804 | 6,864 | 0 |
+| 1 | 1 | 1 | 37,363 | 26 | 25 | 39 | 76 | 0 |
+| 8 | 4 | 32 | 105,483 | 75 | 74 | 106 | 169 | 0 |
+| 16 | 8 | 128 | 114,916 | 138 | 135 | 268 | 379 | 0 |
+| 64 | 8 | 512 | 122,264 | 522 | 516 | 720 | 1,045 | 0 |
+| 128 | 16 | 2048 | 126,014 | 1,015 | 1,003 | 1,286 | 1,848 | 0 |
+| 256 | 16 | 4096 | 125,622 | 2,037 | 1,987 | 3,388 | 4,900 | 0 |
+| 512 | 32 | 16384 | 124,087 | 4,127 | 4,066 | 4,920 | 5,372 | 0 |
+
+### Before vs after single-epoll optimizations
+
+The optimizations (udata dispatch, direct-write on notify, submit_inline
+for server responses) lifted the ceiling from ~104K to ~126K — a 22%
+improvement. Per-op latency at 1T:1C dropped from 29µs to 26µs.
+
+| Config | Before (ops/s) | After (ops/s) | Improvement |
+| --- | --- | --- | --- |
+| 1T:1C | 33K | 37K | 12% |
+| 8T:4C | 84K | 105K | 25% |
+| 16T:8C | 90K | 115K | 28% |
+| 128T:16C | 99K | 126K | 27% |
+| 256T:16C | 103K | 126K | 22% |
+
+### Multi-worker (EV_ONESHOT) — does not help for loopback
+
+| io_workers | TPS (ops/s) | avg (µs) | Errors |
+| --- | --- | --- | --- |
+| 1 | 126K | 1,015 | 0 |
+| 2 | 125K | 2,047 | 0 |
+| 4 | 117K | 2,194 | 0 |
+| 8 | 62K | 4,109 | 0 |
+
+Multi-worker with `EV_ONESHOT` re-arm is *worse* than single-worker for
+the in-process loopback. The re-arm overhead (1 extra `kevent` syscall
+per event) + kernel-level contention on the shared kqueue fd exceeds
+any parallelism benefit. The single I/O worker is NOT CPU-bound (78%
+idle at saturation) — the bottleneck is event queueing latency, not
+compute. Multi-worker would help with real network I/O where the I/O
+thread is CPU-bound on socket operations.
 
 ### Conclusions
 
 - **Single C++ I/O worker is the serialization bottleneck** — TPS
-  plateaus at ~104K at 256T+. Beyond 256T, latency doubles (2.5ms →
-  4.9ms avg) without TPS gain. The single worker thread's event loop
-  (kqueue wait + drain submits + readv/writev + dispatch) serializes
-  all 5 event-loop iterations per op across all connections.
+  plateaus at ~126K at 128T+. Beyond 128T, latency doubles (1ms →
+  2ms → 4ms avg) without TPS gain. The single worker thread's event
+  loop serializes all event processing across all connections.
 - **NOT CPU-bound — latency-bound by event queueing** — at 256T:16C,
-  CPU is 78% idle. The machine has plenty of headroom. The 86×
-  latency increase from 1T:1C (29µs) to 256T:16C (2500µs) is pure
-  queueing delay on the single I/O thread's event queue, not compute.
-  Little's Law: 256 in-flight × 5 events/op = ~1280 events queued at
-  ~2µs/event = 2.5ms round-trip — exactly what we observe.
+  CPU is 78% idle. The 78× latency increase from 1T:1C (26µs) to
+  256T:16C (2037µs) is pure queueing delay on the single I/O thread's
+  event queue, not compute.
+- **Single-epoll optimizations gave 22% TPS gain** — udata dispatch
+  (eliminate per-event mutex), direct-write on notify (eliminate
+  Writable event for requests), submit_inline for server responses
+  (eliminate Notify event for responses) reduced events per op from
+  5 to 3 on the fast path.
+- **Multi-worker (EV_ONESHOT) does not help for loopback** — the
+  re-arm overhead exceeds parallelism benefit when the I/O thread is
+  not CPU-bound. Would help with real network I/O.
 - **Value size has minimal effect** — at 256T:16C, 0B→4096B (64×
-  larger payload) only drops TPS by 16% (114K→96K). If the bottleneck
-  were data copy/memcpy, we'd expect a steep drop. Flat TPS across
-  payload sizes confirms the bottleneck is event loop overhead, not
-  data movement.
-- **Threads scale well to 16T** — 1T→16T gives 2.8× (33K→90K). Beyond
-  16T the curve flattens (90K→104K from 16T→512T, only 1.15×).
-- **T:C ratio has minimal effect** — 128T:16C and 128T:8C both ~99K
-  (tested separately). The bottleneck is the I/O thread, not the
-  number of sockets.
+  larger payload) only drops TPS by 16%. Flat TPS across payload sizes
+  confirms the bottleneck is event loop overhead, not data movement.
 - **Zero errors across all 7 configs** — the 2s response timeout
   never fires under normal load; the in-process loopback is reliable.
-- **Per-op latency at 1T:1C is 29µs** — this is the round-trip cost
+- **Per-op latency at 1T:1C is 26µs** — this is the round-trip cost
   of: flatbuffer build + pool alloc + FFI call + kqueue notify +
-  writev + read + echo handler + writev + read + oneshot wake. The
-  kernel socket loopback adds ~10-15µs; the rest is framing + FFI +
-  flatbuffer overhead.
+  writev + read + echo handler + writev + read + oneshot wake.
 
 ### Scaling ceiling comparison
 
 | Target | Ceiling (ops/s) | Bottleneck | Platform |
 | --- | --- | --- | --- |
-| RPC echo (in-process) | ~104K | Single C++ I/O worker thread | M5 Pro |
+| RPC echo (in-process, optimized) | ~126K | Single C++ I/O worker thread | M5 Pro |
 | KV write (coalesced, 3-node) | ~48K | Consensus quorum RPC | M5 Pro |
 | KV write (coalesced, 3-node) | ~124K | Consensus quorum RPC | AMD 5950X |
 
-The RPC echo ceiling is ~2× the KV write ceiling on the same M5 Pro
+The RPC echo ceiling is ~2.6× the KV write ceiling on the same M5 Pro
 platform — the KV path adds Paxos consensus (2-phase quorum round +
-WAL persist + engine apply) on top of the RPC transport. Closing this
-gap requires either multi-worker I/O (parallel kqueue/epoll loops) or
-RDMA transport (R32, planned).
+WAL persist + engine apply) on top of the RPC transport.
 
 ---
 
@@ -259,14 +300,14 @@ Copy points are annotated inline in the flow diagram above. Summary:
 
 ## Enhancement Ideas
 
-- **Multi-worker I/O** — the single C++ I/O worker thread serializes
-  all event processing. With 78% idle CPU at saturation, adding
-  per-connection worker assignment (round-robin or hash-based) with
-  separate kqueue/epoll loops would reduce per-worker event queue
-  depth, directly cutting queueing latency and lifting TPS. The
-  transport already has a `Worker` abstraction with `get_worker()`
-  (round-robin), but only 1 worker is created (`SocketTransport(1,
-  pool_)`). 4-8 workers would likely scale TPS 3-5× on 18 cores.
+- **Multi-worker I/O (for real network, not loopback)** — the single
+  C++ I/O worker thread serializes all event processing. Multi-worker
+  with `EV_ONESHOT` is implemented (`--io-workers N`) but does not
+  help for the in-process loopback (re-arm overhead > parallelism
+  benefit when I/O thread is not CPU-bound). Would help with real
+  network I/O where the I/O thread is CPU-bound on socket operations.
+  The transport supports shared-engine multi-worker with `EV_ONESHOT`
+  re-arm, following the reference's design.
 - **RDMA transport (R32)** — bypasses the kernel socket path entirely,
   eliminating the `writev`/`read` copies and the kqueue/epoll event
   loop overhead. The reference's RDMA path achieves ~2× the TCP path.
@@ -277,4 +318,4 @@ Copy points are annotated inline in the flow diagram above. Summary:
 - **Flatbuffer reuse** — the `ConnectionPingRequest` is rebuilt per
   op (FlatBufferBuilder is fresh each time). Pre-building a template
   and patching the `id` field would save ~5µs per op (significant at
-  1T:1C where per-op cost is 29µs).
+  1T:1C where per-op cost is 26µs).

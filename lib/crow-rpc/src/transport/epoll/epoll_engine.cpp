@@ -61,12 +61,17 @@ int EpollEngine::init()
     return 0;
 }
 
-void EpollEngine::mod_fd(int fd, uint32_t events)
+void EpollEngine::set_oneshot(bool on)
+{
+    oneshot_ = on;
+}
+
+void EpollEngine::mod_fd(int fd, uint32_t events, Connection *conn)
 {
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
-    ev.events  = events;
-    ev.data.fd = fd;
+    ev.events   = events | (oneshot_ ? EPOLLONESHOT : 0);
+    ev.data.ptr = conn; // udata = Connection* for zero-lock dispatch
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
     {
         std::lock_guard<std::mutex> lock(mask_mu_);
@@ -79,7 +84,7 @@ void EpollEngine::add_listen_fd(int fd)
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     ev.events  = EPOLLIN;
-    ev.data.fd = fd;
+    ev.data.fd = fd; // listen socket: use fd (no Connection*)
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
 }
 
@@ -91,8 +96,8 @@ void EpollEngine::add_connection(int fd, Connection *conn)
     }
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
-    ev.events  = EPOLLIN; // level-triggered, read only initially
-    ev.data.fd = fd;
+    ev.events   = EPOLLIN | (oneshot_ ? EPOLLONESHOT : 0);
+    ev.data.ptr = conn; // udata = Connection* for zero-lock dispatch
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
     {
         std::lock_guard<std::mutex> lock(mask_mu_);
@@ -116,28 +121,52 @@ void EpollEngine::remove_connection(int fd)
 void EpollEngine::arm_read(int fd)
 {
     // Read is always armed in level-triggered mode; no-op if already armed.
+    Connection *conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        auto                        it = connections_.find(fd);
+        if (it != connections_.end()) {
+            conn = it->second;
+        }
+    }
     std::lock_guard<std::mutex> lock(mask_mu_);
     auto                        it = fd_masks_.find(fd);
     if (it != fd_masks_.end() && !(it->second & EPOLLIN)) {
-        mod_fd(fd, it->second | EPOLLIN);
+        mod_fd(fd, it->second | EPOLLIN, conn);
     }
 }
 
 void EpollEngine::arm_write(int fd)
 {
+    Connection *conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        auto                        it = connections_.find(fd);
+        if (it != connections_.end()) {
+            conn = it->second;
+        }
+    }
     std::lock_guard<std::mutex> lock(mask_mu_);
     auto                        it = fd_masks_.find(fd);
     if (it != fd_masks_.end() && !(it->second & EPOLLOUT)) {
-        mod_fd(fd, it->second | EPOLLOUT);
+        mod_fd(fd, it->second | EPOLLOUT, conn);
     }
 }
 
 void EpollEngine::disarm_write(int fd)
 {
+    Connection *conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        auto                        it = connections_.find(fd);
+        if (it != connections_.end()) {
+            conn = it->second;
+        }
+    }
     std::lock_guard<std::mutex> lock(mask_mu_);
     auto                        it = fd_masks_.find(fd);
     if (it != fd_masks_.end() && (it->second & EPOLLOUT)) {
-        mod_fd(fd, it->second & ~EPOLLOUT);
+        mod_fd(fd, it->second & ~EPOLLOUT, conn);
     }
 }
 
@@ -179,10 +208,14 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
     int out = 0;
     for (int i = 0; i < n && out < max_events; i++) {
         const struct epoll_event &ev = events[i];
-        int                       fd = ev.data.fd;
+
+        // Special fds (notify/timer) use data.fd; connection fds use
+        // data.ptr = Connection*. The listen socket uses data.fd.
+        // We check data.fd first for special fds, then fall through to
+        // data.ptr for connections.
+        int fd = ev.data.fd;
 
         if (fd == notify_fd_) {
-            // Drain eventfd.
             uint64_t val;
             ::read(notify_fd_, &val, sizeof(val));
             out_events[out++] = {SocketEvent::Notify, -1, nullptr};
@@ -195,13 +228,17 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
             continue;
         }
 
-        Connection *conn = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(conn_mu_);
-            auto                        it = connections_.find(fd);
-            if (it != connections_.end()) {
-                conn = it->second;
-            }
+        // Connection fd: data.ptr holds Connection* (set in add_connection).
+        // The listen socket has data.ptr = nullptr (set via data.fd).
+        auto *conn = reinterpret_cast<Connection *>(ev.data.ptr);
+
+        // Recover fd for connection events: data.ptr was set, not data.fd.
+        // We need the fd for read/write syscalls. Store it in the event.
+        // For listen socket: fd is valid (data.fd was set).
+        // For connection: fd is garbage (data.ptr was set). Recover from
+        // the connection's transport_handle.
+        if (conn != nullptr) {
+            fd = static_cast<int>(conn->transport_handle);
         }
 
         if (ev.events & (EPOLLERR | EPOLLHUP)) {

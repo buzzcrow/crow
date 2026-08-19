@@ -43,6 +43,11 @@ int KqueueEngine::init()
     return 0;
 }
 
+void KqueueEngine::set_oneshot(bool on)
+{
+    oneshot_ = on;
+}
+
 void KqueueEngine::add_listen_fd(int fd)
 {
     struct kevent change;
@@ -56,7 +61,13 @@ void KqueueEngine::add_connection(int fd, Connection *conn)
         std::lock_guard<std::mutex> lock(conn_mu_);
         connections_[fd] = conn;
     }
-    arm_read(fd);
+    // Register read with udata = Connection* so wait() can dispatch
+    // without a map lookup. EV_ONESHOT in multi-worker mode prevents
+    // races (only one worker wakes per event; re-arm after processing).
+    int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
+    struct kevent change;
+    EV_SET(&change, fd, EVFILT_READ, flags, 0, 0, conn);
+    ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
 void KqueueEngine::remove_connection(int fd)
@@ -74,8 +85,19 @@ void KqueueEngine::remove_connection(int fd)
 
 void KqueueEngine::arm_read(int fd)
 {
+    // Look up the Connection* for udata (needed for zero-lock dispatch).
+    Connection *conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        auto                        it = connections_.find(fd);
+        if (it != connections_.end()) {
+            conn = it->second;
+        }
+    }
+    // In one-shot mode, EV_ADD re-arms the filter after a one-shot event.
+    int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
     struct kevent change;
-    EV_SET(&change, fd, EVFILT_READ, EV_ADD, 0, 0, nullptr);
+    EV_SET(&change, fd, EVFILT_READ, flags, 0, 0, conn);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
@@ -83,9 +105,19 @@ void KqueueEngine::arm_write(int fd)
 {
     // Level-triggered (no EV_CLEAR): fires whenever the socket is
     // writable. We disarm via disarm_write when the send queue is empty
-    // to avoid a busy-loop.
+    // to avoid a busy-loop. udata = Connection* for zero-lock dispatch.
+    // In one-shot mode, EV_ONESHOT ensures only one worker processes write.
+    Connection *conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        auto                        it = connections_.find(fd);
+        if (it != connections_.end()) {
+            conn = it->second;
+        }
+    }
+    int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
     struct kevent change;
-    EV_SET(&change, fd, EVFILT_WRITE, EV_ADD, 0, 0, nullptr);
+    EV_SET(&change, fd, EVFILT_WRITE, flags, 0, 0, conn);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
@@ -160,31 +192,19 @@ int KqueueEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
             out_events[out++] = {SocketEvent::Timer, -1, nullptr};
         }
         else if (ev.filter == EVFILT_READ) {
-            Connection *conn = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(conn_mu_);
-                auto                        it = connections_.find(static_cast<int>(ev.ident));
-                if (it != connections_.end()) {
-                    conn = it->second;
-                }
-            }
+            // udata holds the Connection* (set in add_connection/arm_read).
+            // No mutex needed — the kernel passes it back directly.
+            auto *conn = static_cast<Connection *>(ev.udata);
             if (conn != nullptr) {
                 out_events[out++] = {SocketEvent::Readable, static_cast<int>(ev.ident), conn};
             }
             else {
-                // No connection — must be the listen socket.
+                // No udata — must be the listen socket.
                 out_events[out++] = {SocketEvent::Accept, static_cast<int>(ev.ident), nullptr};
             }
         }
         else if (ev.filter == EVFILT_WRITE) {
-            Connection *conn = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(conn_mu_);
-                auto                        it = connections_.find(static_cast<int>(ev.ident));
-                if (it != connections_.end()) {
-                    conn = it->second;
-                }
-            }
+            auto *conn        = static_cast<Connection *>(ev.udata);
             out_events[out++] = {SocketEvent::Writable, static_cast<int>(ev.ident), conn};
         }
         // Check for error flags.
