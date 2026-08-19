@@ -7,10 +7,32 @@
 # No KV/storage layer in the path — purely I/O-bound.
 #
 # Configurations:
-#   - Scaling: 1T:1C → 16T:8C, pipeline_depth=connections*threads
+#   - Scaling: 1T:1C → 512T:32C, pipeline_depth=connections*threads
 #   - value_size=64, key_space=1000 (unused by echo, kept for CLI compat)
 #
-# 5 runs x 5s ~= 25s.
+# 9 runs x 5s ~= 45s.
+#
+# Reference platform (2026-08-19 run): Apple M5 Pro
+# (18 cores, arm64, macOS 26/Darwin 25.5). Peak ~104K ops/s at 512T.
+# Always record the CPU model in the doc when publishing a run —
+# absolute RPC throughput is platform-dependent.
+#
+# Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS):
+#   value_size=64, 5s, in-process echo, kqueue loopback
+#
+#   T    C    ops/s     avg    p50    p99    p999   err
+#   1    1    32,736    29     29     50     94     0
+#   2    2    48,787    40     40     56     98     0
+#   4    4    76,516    51     51     76     123    0
+#   8    4    83,850    94     94     132    209    0
+#   16   8    89,994    177    175    233    398    0
+#   64   8    96,508    662    657    789    1,332  0
+#   128  16   99,301    1,288  1,275  1,532  2,344  0
+#   256  16   103,058   2,483  2,454  3,192  4,320  0
+#   512  32   103,650   4,939  4,884  5,804  6,864  0
+#
+# TPS ceiling ~104K at 256T+. Single C++ I/O worker thread is the
+# bottleneck; beyond 256T latency doubles without TPS gain.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
