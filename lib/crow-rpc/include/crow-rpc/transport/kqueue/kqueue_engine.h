@@ -21,6 +21,12 @@ class KqueueEngine : public SocketEngine
 
     int  init() override;
     void set_oneshot(bool on) override;
+
+    bool oneshot() const override
+    {
+        return oneshot_;
+    }
+
     void add_listen_fd(int fd) override;
     void add_connection(int fd, Connection *conn) override;
     void remove_connection(int fd) override;

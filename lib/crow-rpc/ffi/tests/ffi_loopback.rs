@@ -85,6 +85,7 @@ async fn ping_loopback() {
     ctrl.write(fb_bytes);
 
     let caller = RpcClient::new();
+    caller.attach(&conn);
     let future = caller
         .call(
             &server,
@@ -151,6 +152,7 @@ async fn ping_loopback_with_data() {
     data.write(&payload);
 
     let caller = RpcClient::new();
+    caller.attach(&conn);
     let future = caller
         .call(
             &server,
@@ -224,6 +226,7 @@ async fn echo_handler_loopback() {
     data.write(&payload);
 
     let caller = RpcClient::new();
+    caller.attach(&conn);
     let future = caller
         .call(&server, &conn, ctrl, Some(data), ECHO_MSG_TYPE)
         .expect("call submit failed");

@@ -175,7 +175,7 @@ class CallerLoopbackTest : public ::testing::Test
 
 TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
 {
-    SocketTransport transport(1);
+    SocketTransport transport(1, 1);
     transport.start();
 
     // Connect client → server.

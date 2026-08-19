@@ -44,7 +44,7 @@ TEST(LoopbackTest, SimplePing)
     server.start();
 
     // Client side: connect through the transport.
-    SocketTransport client_transport(1);
+    SocketTransport client_transport(1, 1);
     client_transport.start();
 
     auto conn = client_transport.connect("127.0.0.1", port);
@@ -122,7 +122,7 @@ TEST(LoopbackTest, EchoHandler512B)
     server.start();
 
     // Client side.
-    SocketTransport client_transport(1);
+    SocketTransport client_transport(1, 1);
     client_transport.start();
 
     auto conn = client_transport.connect("127.0.0.1", port);

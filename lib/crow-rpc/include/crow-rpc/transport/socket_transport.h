@@ -124,6 +124,11 @@ class SocketEngine
     // one worker wakes per event; arm_read/arm_write re-arm after processing.
     virtual void set_oneshot(bool on) = 0;
 
+    // Whether one-shot mode is enabled (set via set_oneshot before workers
+    // start). Workers check this to decide whether to re-arm read/write
+    // after processing an event.
+    virtual bool oneshot() const = 0;
+
     // Register a listen socket (acceptor only). fd is the listening socket.
     virtual void add_listen_fd(int fd) = 0;
 
@@ -155,17 +160,16 @@ class SocketEngine
 
 // ── Worker: one thread driving I/O for a set of connections ────────
 //
-// In single-worker mode, the worker owns its own SocketEngine. In
-// multi-worker mode, all workers share one SocketEngine (one epoll/kqueue
-// fd) and use EV_ONESHOT/EPOLLONESHOT to prevent races. The cross-thread
-// submit queue is shared on SocketTransport in multi-worker mode.
+// Each worker references a SocketEngine (non-owning — the transport owns
+// all engines). When multiple workers share one engine, the engine uses
+// EV_ONESHOT/EPOLLONESHOT so only one worker wakes per event; the worker
+// re-arms read/write after processing. When one worker owns the engine
+// (workers_per_engine=1), no ONESHOT — level-triggered, no re-arm needed.
 class Worker
 {
   public:
-    // Single-worker: worker owns the engine.
-    Worker(int id, std::unique_ptr<SocketEngine> engine, TransportStats *stats);
-    // Multi-worker: worker shares the engine + submit queue.
-    Worker(int id, SocketEngine *shared_engine, SocketTransport *transport);
+    // engine is non-owning (SocketTransport owns all engines).
+    Worker(int id, SocketEngine *engine, TransportStats *stats);
 
     ~Worker();
 
@@ -189,21 +193,15 @@ class Worker
     }
 
   private:
-    int                           id_;
-    std::unique_ptr<SocketEngine> owned_engine_;        // non-null in single-worker mode
-    SocketEngine                 *engine_;              // owned (single) or shared (multi)
-    SocketTransport              *transport_ = nullptr; // shared submit queue (multi)
-    TransportStats               *stats_     = nullptr; // aggregation counters
-    std::thread                   thread_;
-    std::atomic<bool>             running_{false};
+    int               id_;
+    SocketEngine     *engine_; // non-owning; transport owns all engines
+    TransportStats   *stats_;  // aggregation counters
+    std::thread       thread_;
+    std::atomic<bool> running_{false};
 
-    // Connections (shared in multi-worker mode — any worker can process).
+    // Connections owned by this worker (one worker per connection).
     std::mutex                                           conns_mu_;
     std::unordered_map<int, std::shared_ptr<Connection>> connections_;
-
-    // Per-worker submit queue (single-worker mode only).
-    std::mutex                                       submit_mu_;
-    std::vector<std::pair<Connection *, OutFrame *>> pending_submits_;
 
     // Per-worker receive buffer: one big read() grabs data for multiple
     // frames, then feed_data processes them all. Reduces syscalls when
@@ -219,20 +217,28 @@ class Worker
     friend class SocketTransport;
 
     void run_loop();
-
-    // Drain pending cross-thread submits and try direct write for each.
-    void drain_pending_submits();
 };
 
 // ── SocketTransport: shared I/O logic for TCP ──────────────────────
 //
-// Implements Transport::submit (push to send queue + notify worker) and
+// Implements Transport::submit (caller-thread writev, buzz model) and
 // the shared on_readable / on_writable hot paths. The SocketEngine
 // subclass tells the base *when* to read/write; the base does the I/O.
+//
+// Multi-engine: N independent epoll/kqueue instances (io_engines), each
+// with M workers (workers_per_engine). Connections are partitioned
+// round-robin across engines. When M=1, the single worker owns the
+// engine with no ONESHOT (fast path). When M>1, the M workers share the
+// engine's fd with ONESHOT (re-arm only within that engine).
 class SocketTransport : public Transport
 {
   public:
-    SocketTransport(uint32_t num_workers = 1, BufferPool *pool = nullptr);
+    // Multi-engine ctor: io_engines independent epoll/kqueue instances,
+    // each with workers_per_engine workers. Total workers = io_engines *
+    // workers_per_engine.
+    SocketTransport(uint32_t io_engines, uint32_t workers_per_engine, BufferPool *pool = nullptr);
+    // Deprecated alias: maps to (1, num_workers). Kept for backward compat.
+    SocketTransport(uint32_t num_workers, BufferPool *pool);
     ~SocketTransport() override;
 
     // Transport interface
@@ -281,10 +287,6 @@ class SocketTransport : public Transport
         return pool_;
     }
 
-    // Shared submit queue (multi-worker mode). Drained by all workers.
-    bool shared_submit(Connection *conn, OutFrame *frame);
-    void drain_shared_submits();
-
     // Transport-level aggregation counters (sampled after a run).
     TransportStats &stats()
     {
@@ -292,18 +294,11 @@ class SocketTransport : public Transport
     }
 
   private:
-    BufferPool                          *pool_;
-    std::vector<std::unique_ptr<Worker>> workers_;
-    std::atomic<size_t>                  next_worker_{0};
-    std::atomic<int64_t>                 next_conn_id_{1};
-
-    // Shared engine (multi-worker mode only; nullptr in single-worker).
-    std::unique_ptr<SocketEngine> shared_engine_;
-    bool                          multi_worker_ = false;
-
-    // Shared submit queue (multi-worker mode).
-    std::mutex                                       shared_submit_mu_;
-    std::vector<std::pair<Connection *, OutFrame *>> shared_pending_submits_;
+    BufferPool                                *pool_;
+    std::vector<std::unique_ptr<Worker>>       workers_;
+    std::vector<std::unique_ptr<SocketEngine>> engines_; // transport owns all engines
+    std::atomic<size_t>                        next_worker_{0};
+    std::atomic<int64_t>                       next_conn_id_{1};
 
     // Aggregation-effect counters.
     TransportStats stats_;

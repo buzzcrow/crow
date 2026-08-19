@@ -14,18 +14,32 @@ pub struct RpcServer {
 
 impl RpcServer {
     /// Create a new server. If pool is None, the server creates its own
-    /// internal pool.
+    /// internal pool. Uses the single-engine single-worker fast path.
     pub fn new(pool: Option<&crate::BufferPool>) -> Self {
-        Self::with_workers(pool, 1)
+        Self::with_engines(pool, 1, 1)
     }
 
-    /// Create a new server with N I/O worker threads sharing one epoll/kqueue
-    /// instance. num_workers=1 uses the single-worker fast path (no ONESHOT
-    /// re-arm overhead). num_workers>1 enables EV_ONESHOT/EPOLLONESHOT for
-    /// multi-worker safety.
+    /// Create a new server with N I/O worker threads sharing one
+    /// epoll/kqueue instance. num_workers=1 uses the single-worker fast
+    /// path (no ONESHOT re-arm overhead). num_workers>1 enables
+    /// EV_ONESHOT/EPOLLONESHOT for multi-worker safety.
+    ///
+    /// Deprecated alias for `with_engines(pool, 1, num_workers)`.
     pub fn with_workers(pool: Option<&crate::BufferPool>, num_workers: u32) -> Self {
+        Self::with_engines(pool, 1, num_workers)
+    }
+
+    /// Create a new server with `io_engines` independent epoll/kqueue
+    /// instances, each with `workers_per_engine` worker threads. Total
+    /// workers = io_engines * workers_per_engine. Connections are
+    /// partitioned round-robin across engines. When workers_per_engine=1,
+    /// the single worker owns the engine with no ONESHOT (fast path).
+    /// When workers_per_engine>1, the workers share the engine's fd with
+    /// EV_ONESHOT/EPOLLONESHOT (re-arm only within that engine).
+    pub fn with_engines(pool: Option<&crate::BufferPool>, io_engines: u32, workers_per_engine: u32) -> Self {
         let pool_handle = pool.map(|p| p.handle()).unwrap_or(ptr::null_mut());
-        let handle = unsafe { sys::crow_rpc_server_create_with_workers(pool_handle, num_workers) };
+        let handle =
+            unsafe { sys::crow_rpc_server_create_with_engines(pool_handle, io_engines, workers_per_engine) };
         RpcServer { handle }
     }
 

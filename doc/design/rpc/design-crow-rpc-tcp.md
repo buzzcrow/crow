@@ -21,6 +21,7 @@ base does the actual I/O and parsing via `on_readable` and `on_writable`.
 - [3. Zero-Copy Receive](#3-zero-copy-receive)
 - [4. EpollEngine (Linux)](#4-epollengine-linux)
 - [5. KqueueEngine (macOS)](#5-kqueueengine-macos)
+- [6. Multi-Engine Scaling](#6-multi-engine-scaling)
 
 ---
 
@@ -28,36 +29,48 @@ base does the actual I/O and parsing via `on_readable` and `on_writable`.
 
 ```
 Per worker thread:
-  init engine (epoll_fd / kqueue_fd)
+  engine = transport-owned SocketEngine (shared with siblings if M>1)
   register: eventfd/notify-fd, timerfd/kqueue-timer
 
   loop:
     events = engine.wait(timeout)
     for event in events:
-      if event.fd == listen_socket:    // acceptor worker only
-        accept → create Connection → assign to worker (round-robin)
-                → engine.add_connection(fd, conn) → arm_read(fd)
-      elif event.fd == notify_fd:
-        drain cross-thread submit queue
-        for each pending send: conn->enqueue_send(frame) → arm_write(fd)
+      if event.fd == notify_fd:           // shutdown wake only
+        no-op (buzz model: no cross-thread submit queue)
       elif event.fd == timer_fd:
         run due scheduled tasks → reset timer to next deadline
       elif event is READABLE:
         on_readable(conn)
+        if engine.oneshot(): arm_read(fd)  // re-arm after EV_ONESHOT
       elif event is WRITABLE:
         on_writable(conn)
-        if send queue empty: disarm_write(fd)
+        if queue non-empty and engine.oneshot(): arm_write(fd)
+        if queue empty and not oneshot: disarm_write(fd)
       elif event is ERROR/HUP:
         conn->close() → remove_connection(fd) → trigger reconnect
+
+    // send aggregation: batch writev pending responses
+    for conn in pending_write_conns:
+      on_writable(conn)
+      if partial/EAGAIN: engine.arm_write(fd)
 ```
 
+The transport creates N independent engines (`io_engines`), each with M
+workers (`workers_per_engine`). Connections are partitioned round-robin
+across all workers; each connection is owned by one worker, so no
+cross-worker locking. When M=1, the single worker uses the engine with
+no `EV_ONESHOT`/`EPOLLONESHOT` — level-triggered, no re-arm overhead
+(the fast path). When M>1, the M workers sharing one engine's fd use
+`EV_ONESHOT`/`EPOLLONESHOT` so only one worker wakes per event; each
+worker re-arms read/write after processing.
+
 WRITABLE is armed only when there's data to send — idle connections
-don't wake the worker; when the send queue drains, disarm. Cross-thread
-submit (from a tokio thread) wakes the worker via notify_fd (eventfd on
-Linux, `EVFILT_USER` on macOS) — no locking on the hot path. One timer
-per worker (`timerfd` / `EVFILT_TIMER`) serves all scheduled tasks.
-Connections are assigned to workers round-robin at accept time; each
-connection is owned by one worker, so no cross-worker locking.
+don't wake the worker; when the send queue drains, disarm (level-
+triggered) or let the one-shot auto-disarm. The buzz-model caller-thread
+writev (`SocketTransport::submit`) handles sends on the caller's thread
+— no cross-thread submit queue or notify wake. The `Connection::io_engine`
+back-pointer routes `arm_write` to the owning engine on EAGAIN. One
+timer per worker (`timerfd` / `EVFILT_TIMER`) serves all scheduled tasks.
 
 ## 2. Scatter-Gather Send
 
@@ -98,3 +111,48 @@ wake. Read uses level-triggered to match epoll semantics. `arm_read` /
 `arm_write` / `disarm_write` are `kevent` on `EVFILT_READ` /
 `EVFILT_WRITE`; notify is `EVFILT_USER` (pipe fallback on older macOS);
 timer is `EVFILT_TIMER`.
+
+## 6. Multi-Engine Scaling
+
+The transport supports a 2D configuration: `io_engines` ×
+`workers_per_engine`. Each engine is an independent epoll/kqueue fd
+with its own connection set (round-robin partitioned at accept time).
+This separates two tuning axes that were previously conflated:
+
+- **Engines** — parallelize across independent kernel event queues.
+  Each engine has its own fd, its own interest set, and its own
+  `wait` call. No cross-engine locking or re-arm overhead.
+- **Workers per engine** — share one engine's fd among M threads using
+  `EV_ONESHOT`/`EPOLLONESHOT`. Only one worker wakes per event; the
+  worker re-arms after processing. This is the legacy multi-worker
+  mode, preserved for comparison but not the primary scaling path.
+
+### Configuration Matrix
+
+| Config | Engines | Workers/Engine | ONESHOT | Use case |
+| --- | --- | --- | --- | --- |
+| 1×1 | 1 | 1 | no | Fast path — single worker, level-triggered |
+| N×1 | N | 1 | no | Multi-engine — N independent event loops |
+| 1×M | 1 | M | yes | Legacy multi-worker — shared fd, ONESHOT re-arm |
+| N×M | N | M | yes | Mixed — N engines, M workers each |
+
+### Connection Engine Back-Pointer
+
+`Connection::io_engine` (type-erased `void*`) is set once at
+`Worker::add_connection` time, before the fd is registered with the
+engine. `SocketTransport::submit` casts it back to `SocketEngine*` and
+calls `arm_write(fd)` on EAGAIN. This routes the re-arm to the correct
+engine — arming write on a different engine's fd would be a silent
+no-op (the fd is not in that engine's interest set) and the partial
+send would stall.
+
+### Per-Platform Tuning
+
+- **macOS (kqueue)**: N×1 is the preferred scaling mode. Each
+  kqueue fd is independent; no `EV_ONESHOT` re-arm overhead. The
+  number of engines should match the number of performance cores
+  (e.g. 4–8 on Apple Silicon).
+- **Linux (epoll)**: N×1 is also preferred for the same reason. On
+  kernels with `io_uring` support (future), the engine abstraction
+  allows swapping epoll for io_uring without changing the worker
+  model.

@@ -22,7 +22,10 @@ namespace crow::rpc
 class RpcServer
 {
   public:
-    RpcServer(BufferPool *pool = nullptr, uint32_t num_workers = 1);
+    // Multi-engine ctor: io_engines independent epoll/kqueue instances,
+    // each with workers_per_engine workers. Total workers = io_engines *
+    // workers_per_engine.
+    RpcServer(BufferPool *pool = nullptr, uint32_t io_engines = 1, uint32_t workers_per_engine = 1);
     ~RpcServer();
 
     // Listen on the given address + port. Must be called before start().

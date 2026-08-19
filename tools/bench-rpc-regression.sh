@@ -48,14 +48,15 @@ KEYSPACE=1000
 VALUE_SIZE=64
 
 run_bench() {
-    local threads="$1" conn="$2" label="$3" io_workers="${4:-1}"
-    echo ">>> $label (io_workers=$io_workers) ..."
+    local threads="$1" conn="$2" label="$3" io_engines="${4:-1}" workers_per_engine="${5:-1}"
+    echo ">>> $label (io_engines=$io_engines, workers_per_engine=$workers_per_engine) ..."
     local output
     output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
         --target rpc --workload write --duration-secs "$DURATION" \
         --threads "$threads" --connections "$conn" \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
-        --io-workers "$io_workers" --json 2>&1)
+        --io-engines "$io_engines" --io-workers-per-engine "$workers_per_engine" \
+        --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
@@ -75,18 +76,21 @@ run_bench() {
 
 echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 
-echo "=== rpc echo (value_size=64, io_workers=1) ==="
-run_bench 1   1  "rpc_1w_1t_1c"    1
-run_bench 8   4  "rpc_1w_8t_4c"    1
-run_bench 64  4  "rpc_1w_64t_4c"   1
-run_bench 256 4  "rpc_1w_256t_4c"  1
-run_bench 256 8  "rpc_1w_256t_8c"  1
-run_bench 512 8  "rpc_1w_512t_8c"  1
+echo "=== rpc echo (value_size=64, 1 engine × 1 worker) ==="
+run_bench 1   1  "rpc_1e1w_1t_1c"    1 1
+run_bench 8   4  "rpc_1e1w_8t_4c"    1 1
+run_bench 64  4  "rpc_1e1w_64t_4c"   1 1
+run_bench 256 4  "rpc_1e1w_256t_4c"  1 1
+run_bench 256 8  "rpc_1e1w_256t_8c"  1 1
+run_bench 512 8  "rpc_1e1w_512t_8c"  1 1
 
-echo "=== rpc echo (value_size=64, io_workers=2) ==="
-run_bench 256 4  "rpc_2w_256t_4c"  2
-run_bench 256 8  "rpc_2w_256t_8c"  2
-run_bench 512 8  "rpc_2w_512t_8c"  2
+echo "=== rpc echo (value_size=64, 2 engines × 1 worker each) ==="
+run_bench 256 4  "rpc_2e1w_256t_4c"  2 1
+run_bench 512 8  "rpc_2e1w_512t_8c"  2 1
+
+echo "=== rpc echo (value_size=64, 1 engine × 2 workers, ONESHOT) ==="
+run_bench 256 4  "rpc_1e2w_256t_4c"  1 2
+run_bench 512 8  "rpc_1e2w_512t_8c"  1 2
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

@@ -55,11 +55,20 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 4)]
     pub connections: u32,
 
-    /// Number of C++ I/O worker threads sharing one epoll/kqueue instance
-    /// (RPC target only). 1 = single-worker fast path (no ONESHOT re-arm).
-    /// >1 enables EV_ONESHOT/EPOLLONESHOT for multi-worker safety.
+    /// Number of independent epoll/kqueue instances (RPC target only).
+    /// Each engine owns its own fd and its own set of connections
+    /// (round-robin partitioned). 1 = single-engine (current default).
+    /// More than 1 parallelizes event processing across independent
+    /// kernel event queues with no ONESHOT re-arm overhead.
     #[arg(long, default_value_t = 1)]
-    pub io_workers: u32,
+    pub io_engines: u32,
+
+    /// Number of C++ I/O worker threads per engine (RPC target only).
+    /// 1 = single-worker per engine (fast path, no ONESHOT re-arm).
+    /// More than 1 enables `EV_ONESHOT`/`EPOLLONESHOT` within that
+    /// engine for multi-worker safety.
+    #[arg(long, default_value_t = 1)]
+    pub io_workers_per_engine: u32,
 
     /// Number of Rust dispatch thread pool threads (RPC target only).
     /// The I/O worker hands off parsed frames to this pool; pool workers
@@ -480,7 +489,8 @@ async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
     cfg.duration = Duration::from_secs(args.duration_secs);
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
-    cfg.io_workers = args.io_workers;
+    cfg.io_engines = args.io_engines;
+    cfg.io_workers_per_engine = args.io_workers_per_engine;
     cfg.io_dispatch_threads = args.io_dispatch_threads;
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());

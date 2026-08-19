@@ -139,13 +139,20 @@ void crow_rpc_pool_destroy(crow_rpc_pool_t pool)
 crow_rpc_server_t crow_rpc_server_create(crow_rpc_pool_t pool)
 {
     crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
-    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, 1)};
+    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, 1, 1)};
 }
 
 crow_rpc_server_t crow_rpc_server_create_with_workers(crow_rpc_pool_t pool, uint32_t num_workers)
 {
     crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
-    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, num_workers)};
+    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, 1, num_workers)};
+}
+
+crow_rpc_server_t crow_rpc_server_create_with_engines(crow_rpc_pool_t pool, uint32_t io_engines,
+                                                      uint32_t workers_per_engine)
+{
+    crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
+    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, io_engines, workers_per_engine)};
 }
 
 void crow_rpc_server_destroy(crow_rpc_server_t server)

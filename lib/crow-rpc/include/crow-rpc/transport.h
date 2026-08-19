@@ -126,6 +126,12 @@ class Connection
     // RdmaTransport casts to ibv_qp*. The connection itself never uses this.
     uint64_t transport_handle = 0;
 
+    // Back-pointer to the owning SocketEngine (set by Worker::add_connection).
+    // SocketTransport::submit uses this to arm write on the correct engine
+    // when caller-thread writev hits EAGAIN. Type-erased (void*) to avoid
+    // a layering dependency on socket_transport.h.
+    void *io_engine = nullptr;
+
     // User data slot (for caller-side bookkeeping).
     void *user_data = nullptr;
 

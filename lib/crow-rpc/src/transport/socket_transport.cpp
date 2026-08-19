@@ -36,20 +36,7 @@ static inline uint64_t now_nano()
 
 // ── Worker ────────────────────────────────────────────────────────
 
-Worker::Worker(int id, std::unique_ptr<SocketEngine> engine, TransportStats *stats)
-    : id_(id),
-      owned_engine_(std::move(engine)),
-      engine_(owned_engine_.get()),
-      transport_(nullptr),
-      stats_(stats)
-{
-}
-
-Worker::Worker(int id, SocketEngine *shared_engine, SocketTransport *transport)
-    : id_(id),
-      engine_(shared_engine),
-      transport_(transport),
-      stats_(&transport->stats_)
+Worker::Worker(int id, SocketEngine *engine, TransportStats *stats) : id_(id), engine_(engine), stats_(stats)
 {
 }
 
@@ -77,45 +64,16 @@ void Worker::stop()
 
 void Worker::add_connection(int fd, std::shared_ptr<Connection> conn)
 {
+    // Set the engine back-pointer so SocketTransport::submit can route
+    // arm_write to the correct engine on EAGAIN. Done before registering
+    // the fd with the engine so the field is visible before any event.
+    conn->io_engine = engine_;
     {
         std::lock_guard<std::mutex> lock(conns_mu_);
         connections_[fd] = std::move(conn);
     }
     engine_->add_connection(fd, connections_.at(fd).get());
     engine_->arm_read(fd);
-}
-
-void Worker::drain_pending_submits()
-{
-    // In multi-worker mode, drain the shared queue. In single-worker mode,
-    // drain the per-worker queue.
-    std::vector<std::pair<Connection *, OutFrame *>> pending;
-    if (transport_ != nullptr) {
-        // Multi-worker: drain shared queue.
-        std::lock_guard<std::mutex> lock(transport_->shared_submit_mu_);
-        pending.swap(transport_->shared_pending_submits_);
-    }
-    else {
-        std::lock_guard<std::mutex> lock(submit_mu_);
-        pending.swap(pending_submits_);
-    }
-    for (auto &[conn, frame] : pending) {
-        if (conn->enqueue_send(frame)) {
-            int fd = static_cast<int>(conn->transport_handle);
-            if (!on_writable_impl(conn, fd, stats_)) {
-                // All data sent — no need to arm write.
-            }
-            else {
-                // Partial write or EAGAIN — arm write for remaining data.
-                engine_->arm_write(fd);
-            }
-            // In one-shot mode, re-arm read so we get the response.
-            // The read event may have been consumed by a previous event.
-            if (conn->is_open() && transport_ != nullptr) {
-                engine_->arm_read(fd);
-            }
-        }
-    }
 }
 
 void Worker::run_loop()
@@ -133,11 +91,10 @@ void Worker::run_loop()
         for (int i = 0; i < n; i++) {
             const auto &ev = events[i];
             switch (ev.type) {
-            case SocketEvent::Notify: {
-                // Drain cross-thread submit queue and try direct write.
-                drain_pending_submits();
+            case SocketEvent::Notify:
+                // No cross-thread submit queue — submits are caller-thread
+                // writev (buzz model). Notify is only used for shutdown wake.
                 break;
-            }
             case SocketEvent::Timer:
                 // Scheduled tasks fire here (Phase 3).
                 break;
@@ -147,7 +104,7 @@ void Worker::run_loop()
                     // In one-shot mode, re-arm read after processing
                     // (EV_ONESHOT consumed the event). Without this, the
                     // connection goes silent — no more read events fire.
-                    if (ev.conn->is_open()) {
+                    if (ev.conn->is_open() && engine_->oneshot()) {
                         engine_->arm_read(ev.fd);
                     }
                 }
@@ -155,16 +112,15 @@ void Worker::run_loop()
             case SocketEvent::Writable:
                 if (ev.conn != nullptr) {
                     if (on_writable_impl(ev.conn, ev.fd, stats_)) {
-                        // Still has data — re-arm write in one-shot mode
-                        // (level-triggered single-worker keeps it armed).
-                        if (transport_ != nullptr) {
+                        // Still has data — re-arm write in one-shot mode.
+                        if (engine_->oneshot()) {
                             engine_->arm_write(ev.fd);
                         }
                     }
                     else {
-                        // Queue empty — disarm (single-worker) or just
+                        // Queue empty — disarm (level-triggered) or just
                         // don't re-arm (one-shot auto-disarms).
-                        if (transport_ == nullptr) {
+                        if (!engine_->oneshot()) {
                             engine_->disarm_write(ev.fd);
                         }
                     }
@@ -301,29 +257,34 @@ static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats)
 
 // ── SocketTransport ───────────────────────────────────────────────
 
-SocketTransport::SocketTransport(uint32_t num_workers, BufferPool *pool) : pool_(pool)
+SocketTransport::SocketTransport(uint32_t io_engines, uint32_t workers_per_engine, BufferPool *pool) : pool_(pool)
 {
+    assert(io_engines >= 1 && workers_per_engine >= 1);
     if (pool_ == nullptr) {
         pool_ = new SystemBufferPool(); // own a default pool
     }
-    if (num_workers <= 1) {
-        // Single-worker: each worker owns its own engine.
+    // Create N independent engines, each with M workers. When M>1, the
+    // engine uses EV_ONESHOT/EPOLLONESHOT so only one worker wakes per
+    // event; workers re-arm after processing. When M=1, no ONESHOT —
+    // the single worker owns the engine (level-triggered fast path).
+    for (uint32_t e = 0; e < io_engines; e++) {
         auto engine = create_engine();
         engine->init();
-        auto worker = std::make_unique<Worker>(0, std::move(engine), &stats_);
-        workers_.push_back(std::move(worker));
-    }
-    else {
-        // Multi-worker: share one engine across all workers, use ONESHOT.
-        multi_worker_  = true;
-        shared_engine_ = create_engine();
-        shared_engine_->init();
-        shared_engine_->set_oneshot(true);
-        for (uint32_t i = 0; i < num_workers; i++) {
-            auto worker = std::make_unique<Worker>(static_cast<int>(i), shared_engine_.get(), this);
+        if (workers_per_engine > 1) {
+            engine->set_oneshot(true);
+        }
+        SocketEngine *engine_ptr = engine.get();
+        engines_.push_back(std::move(engine));
+        for (uint32_t w = 0; w < workers_per_engine; w++) {
+            int  worker_id = static_cast<int>(e * workers_per_engine + w);
+            auto worker    = std::make_unique<Worker>(worker_id, engine_ptr, &stats_);
             workers_.push_back(std::move(worker));
         }
     }
+}
+
+SocketTransport::SocketTransport(uint32_t num_workers, BufferPool *pool) : SocketTransport(1, num_workers, pool)
+{
 }
 
 SocketTransport::~SocketTransport()
@@ -360,49 +321,19 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     // writev directly on the caller's thread. The in_send_ flag serializes
     // concurrent senders — only one does writev at a time; others just
     // offer to the queue and return. If writev hits EAGAIN, arm write
-    // on the I/O worker for retry.
+    // on the owning engine for retry.
     if (!conn->enqueue_send(frame)) {
         return false; // backpressure or closed
     }
     int fd = static_cast<int>(conn->transport_handle);
     if (!conn->try_send(fd, &stats_)) {
-        // Partial write or EAGAIN — arm write on the I/O worker.
-        auto &w = workers_[0];
-        w->engine_->arm_write(fd);
-    }
-    return true;
-}
-
-bool SocketTransport::shared_submit(Connection *conn, OutFrame *frame)
-{
-    {
-        std::lock_guard<std::mutex> lock(shared_submit_mu_);
-        shared_pending_submits_.emplace_back(conn, frame);
-    }
-    shared_engine_->notify_worker();
-    return true;
-}
-
-void SocketTransport::drain_shared_submits()
-{
-    // Called by a worker in the event loop to drain the shared queue.
-    // This is a fallback — normally drain_pending_submits handles it.
-    std::vector<std::pair<Connection *, OutFrame *>> pending;
-    {
-        std::lock_guard<std::mutex> lock(shared_submit_mu_);
-        pending.swap(shared_pending_submits_);
-    }
-    for (auto &[conn, frame] : pending) {
-        if (conn->enqueue_send(frame)) {
-            int fd = static_cast<int>(conn->transport_handle);
-            if (!on_writable_impl(conn, fd, &stats_)) {
-                // All data sent.
-            }
-            else {
-                shared_engine_->arm_write(fd);
-            }
+        // Partial write or EAGAIN — arm write on the owning engine.
+        auto *engine = static_cast<SocketEngine *>(conn->io_engine);
+        if (engine != nullptr) {
+            engine->arm_write(fd);
         }
     }
+    return true;
 }
 
 bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)

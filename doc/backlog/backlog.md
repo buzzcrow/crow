@@ -11,10 +11,21 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R108** — Bump this line in the same commit when adding a new item.
+**Next R number: R109** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R108](R108-rpc-multi-engine-io.md)** — rpc multi-engine I/O
+  worker model — Area: rpc — Split `io_workers` into `io_engines`
+  (N independent epoll/kqueue instances) × `io_workers_per_engine`
+  (M workers per engine, ONESHOT only when M>1) so the single-fd
+  event-queue serialization bottleneck (~332K ops/s ceiling on M5
+  Pro) can be broken by parallelizing across independent kernel
+  event queues. `io_dispatch_threads` (Rust handler thread pool) is
+  preserved as a third independent axis. Every point is
+  independently tunable for per-platform profiling (macOS kqueue
+  vs Linux epoll may scale differently). Backward-compatible:
+  `with_workers(N)` maps to `(1, N)`.
 - **[R104](R104-kv-server-group0-authoritative-restore.md)** — group-0
   authoritative restore (toml bootstrap-only) — Area: server / kv —
   Make the toml optional: on restart the server scans

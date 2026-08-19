@@ -67,7 +67,7 @@ class TransportLoopbackTest : public ::testing::Test
 TEST_F(TransportLoopbackTest, SendAndReceiveFrame)
 {
     // Start the transport with 1 worker.
-    SocketTransport transport(1);
+    SocketTransport transport(1, 1);
     transport.start();
 
     // Connect to the listening socket.
@@ -134,7 +134,7 @@ TEST_F(TransportLoopbackTest, SendAndReceiveFrame)
 
 TEST_F(TransportLoopbackTest, ConnectionCloseCallback)
 {
-    SocketTransport transport(1);
+    SocketTransport transport(1, 1);
     transport.start();
 
     int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);

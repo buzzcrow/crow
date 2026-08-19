@@ -77,7 +77,7 @@ TEST(LoadTest, MultiThreadEcho)
 
     // Shared transport + C connections, each with one RpcClient.
     // All T threads submit to these shared connections.
-    SocketTransport transport(1);
+    SocketTransport transport(1, 1);
     transport.start();
 
     std::vector<std::shared_ptr<Connection>> conns;

@@ -152,10 +152,13 @@ Readable (server) → Notify → Writable (response) → Readable (client).
 - **Tokio worker threads** (N = `--threads`) — build flatbuffer control
   messages, allocate pool buffers, submit via FFI, await response
   futures. Each worker holds a cloned `RpcBenchClient` (Arc handles).
-- **C++ I/O worker thread** (1, single worker) — owns all connections,
-  runs the kqueue/epoll event loop, handles read/write/notify events
-  for both client-side and server-side sockets. This is the single
-  bottleneck (see Benchmark Results).
+- **C++ I/O worker threads** (`io_engines` × `workers_per_engine`,
+  default 1×1) — each engine owns an independent kqueue/epoll fd;
+  connections are partitioned round-robin across engines. Each worker
+  runs the event loop for its engine's connections. When
+  `workers_per_engine>1`, workers share one engine fd with
+  `EV_ONESHOT`/`EPOLLONESHOT`. The default 1×1 config uses a single
+  worker with no ONESHOT (level-triggered fast path).
 - **C++ acceptor thread** (1) — accepts new connections on the listen
   socket. Not on the hot path after setup.
 
@@ -194,36 +197,38 @@ caller's handles after submit.
 
 Scaling sweep. In-process echo server (kqueue loopback, no network),
 64-byte values, 1000 key space (unused by echo), 5-second duration,
-`io_workers=1` (single-worker fast path). Platform: **Apple M5 Pro**
-(18 cores, arm64, macOS 26/Darwin 25.5). 9 runs (6 single-worker +
-3 multi-worker comparison), zero errors across all configs.
+`io_engines=1, workers_per_engine=1` (single-engine single-worker
+fast path). Platform: **Apple M5 Pro** (18 cores, arm64, macOS
+26/Darwin 25.5). 10 runs (6 single-engine + 2 multi-engine + 2
+shared-engine multi-worker), zero errors across all configs.
 
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
 ### Full sweep (after shared connections + caller-thread in_send_ writev)
 
-| io_workers | Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| Config | Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 1 | 40,059 | 24 | 24 | 38 | 69 | 0 |
-| 1 | 8 | 4 | 32 | 132,928 | 59 | 57 | 121 | 182 | 0 |
-| 1 | 64 | 4 | 256 | 270,315 | 235 | 232 | 397 | 494 | 0 |
-| 1 | 256 | 4 | 1024 | 322,295 | 792 | 800 | 1,272 | 1,509 | 0 |
-| 1 | 256 | 8 | 2048 | 307,294 | 831 | 781 | 1,390 | 1,660 | 0 |
-| 1 | 512 | 8 | 4096 | 331,686 | 1,541 | 1,447 | 2,514 | 2,972 | 0 |
-| 2 | 256 | 4 | 1024 | 280,496 | 910 | 900 | 1,844 | 3,154 | 0 |
-| 2 | 256 | 8 | 2048 | 268,459 | 951 | 964 | 1,748 | 2,128 | 0 |
-| 2 | 512 | 8 | 4096 | 282,172 | 1,811 | 1,844 | 3,386 | 4,660 | 0 |
+| 1×1 | 1 | 1 | 1 | 41,361 | 23 | 23 | 36 | 69 | 0 |
+| 1×1 | 8 | 4 | 32 | 137,579 | 57 | 54 | 124 | 191 | 0 |
+| 1×1 | 64 | 4 | 256 | 268,219 | 237 | 233 | 417 | 532 | 0 |
+| 1×1 | 256 | 4 | 1024 | 316,845 | 806 | 814 | 1,285 | 1,531 | 0 |
+| 1×1 | 256 | 8 | 2048 | 299,400 | 853 | 807 | 1,427 | 1,697 | 0 |
+| 1×1 | 512 | 8 | 4096 | 311,904 | 1,639 | 1,542 | 2,620 | 3,076 | 0 |
+| 2×1 | 256 | 4 | 1024 | 302,924 | 842 | 838 | 1,384 | 1,600 | 0 |
+| 2×1 | 512 | 8 | 4096 | 293,686 | 1,740 | 1,801 | 2,702 | 2,988 | 0 |
+| 1×2 | 256 | 4 | 1024 | 276,613 | 923 | 905 | 2,120 | 5,468 | 0 |
+| 1×2 | 512 | 8 | 4096 | 286,942 | 1,781 | 1,803 | 3,568 | 6,404 | 0 |
 
 ### Optimization progression
 
 | Config | Pre-shared-conn | +shared-conn+in_send_ | Total |
 | --- | --- | --- | --- |
-| 1T:1C | 37K | 40K | +8% |
-| 8T:4C | 114K | 133K | +17% |
-| 64T:4C | 131K | 270K | +106% |
-| 256T:4C | 132K | 322K | +144% |
-| 512T:8C | 131K | 332K | +154% |
+| 1T:1C | 37K | 41K | +11% |
+| 8T:4C | 114K | 138K | +21% |
+| 64T:4C | 131K | 268K | +105% |
+| 256T:4C | 132K | 317K | +140% |
+| 512T:8C | 131K | 312K | +138% |
 
 Shared connections (multiple worker threads per connection) + the
 caller-thread `in_send_` writev model (one thread does the writev
@@ -233,39 +238,53 @@ share connections, creating multi-frame batches that the I/O worker
 coalesces into single read/writev calls. Aggregation ratios reach
 6.0x recv and 5.5x send at 256T:4C.
 
+### Multi-engine (2×1) — does not help for loopback
+
+Multi-engine with 2 independent kqueue instances (2 engines × 1
+worker each, no ONESHOT) is *slightly worse* than single-engine at
+both measurement points: 302K vs 317K at 256T:4C (-5%), 294K vs 312K
+at 512T:8C (-6%). The single I/O worker is NOT the serialization
+bottleneck — the buzz-model caller-thread writev already parallelizes
+sends across caller threads. Adding a second engine adds overhead
+(cross-engine connection partitioning, more context switches, two
+`kevent` wait calls) without relieving the actual bottleneck.
+
 ### Multi-worker (EV_ONESHOT) — does not help for loopback
 
-Multi-worker with `EV_ONESHOT` re-arm is *worse* than single-worker for
-the in-process loopback — 13-18% slower across all configs (see the
-`io_workers=2` rows in the full sweep table above). The re-arm
-overhead (1 extra `kevent` syscall per event) + kernel-level contention
-on the shared kqueue fd exceeds any parallelism benefit. The single I/O
-worker is NOT CPU-bound — the bottleneck is event queueing latency, not
-compute. Multi-worker would help with real network I/O where the I/O
-thread is CPU-bound on socket operations.
+Multi-worker with `EV_ONESHOT` re-arm is *worse* than single-worker
+for the in-process loopback — 13-18% slower across all configs (see
+the `1×2` rows in the full sweep table above). The re-arm overhead
+(1 extra `kevent` syscall per event) + kernel-level contention on the
+shared kqueue fd exceeds any parallelism benefit. The single I/O
+worker is NOT CPU-bound — the bottleneck is event queueing latency,
+not compute. Multi-worker would help with real network I/O where the
+I/O thread is CPU-bound on socket operations.
 
 ### Conclusions
 
 - **Shared connections + caller-thread writev lifted the ceiling from
-  ~132K to ~332K** — the key insight is that the benchmark client must
+  ~132K to ~317K** — the key insight is that the benchmark client must
   share connections across worker threads to create multi-frame batches.
   The `in_send_` atomic CAS model lets one thread perform the `writev`
   while others enqueue and return, coalescing all queued frames into a
   single syscall. Aggregation reaches 6.0x recv and 5.5x send at 256T:4C.
-- **Single C++ I/O worker is still the serialization bottleneck** — TPS
-  plateaus at ~332K at 512T:8C. Beyond 256T, latency increases (792µs →
-  1,541µs avg) without proportional TPS gain. The single worker thread's
-  event loop serializes all event processing across all connections.
+- **Single C++ I/O worker is NOT the serialization bottleneck** —
+  multi-engine (2×1) does not improve TPS (302K vs 317K at 256T:4C).
+  The caller-thread writev already parallelizes sends; the I/O worker
+  only does reads + inline dispatch, which is not CPU-bound. The ~317K
+  ceiling is set by the caller-thread writev contention (the `in_send_`
+  CAS serializes senders) + the per-op flatbuffer build + pool alloc
+  cost, not by the I/O worker's event loop.
 - **NOT CPU-bound — latency-bound by event queueing** — the latency
-  increase from 1T:1C (24µs) to 512T:8C (1,541µs) is pure queueing delay
+  increase from 1T:1C (23µs) to 512T:8C (1,639µs) is pure queueing delay
   on the single I/O thread's event queue, not compute.
 - **Multi-worker (EV_ONESHOT) does not help for loopback** — 13-18%
   slower than single-worker. The re-arm overhead exceeds parallelism
   benefit when the I/O thread is not CPU-bound. Would help with real
   network I/O.
-- **Zero errors across all 9 configs** — the 2s response timeout
+- **Zero errors across all 10 configs** — the 2s response timeout
   never fires under normal load; the in-process loopback is reliable.
-- **Per-op latency at 1T:1C is 24µs** — this is the round-trip cost
+- **Per-op latency at 1T:1C is 23µs** — this is the round-trip cost
   of: flatbuffer build + pool alloc + FFI call + kqueue notify +
   writev + read + echo handler + writev + read + oneshot wake.
 
@@ -273,11 +292,11 @@ thread is CPU-bound on socket operations.
 
 | Target | Ceiling (ops/s) | Bottleneck | Platform |
 | --- | --- | --- | --- |
-| RPC echo (in-process, optimized) | ~332K | Single C++ I/O worker thread | M5 Pro |
+| RPC echo (in-process, optimized) | ~317K | Caller-thread writev contention + per-op alloc | M5 Pro |
 | KV write (coalesced, 3-node) | ~87K | Consensus quorum RPC | M5 Pro |
 | KV write (coalesced, 3-node) | ~124K | Consensus quorum RPC | AMD 5950X |
 
-The RPC echo ceiling is ~3.8× the KV write ceiling on the same M5 Pro
+The RPC echo ceiling is ~3.6× the KV write ceiling on the same M5 Pro
 platform — the KV path adds Paxos consensus (2-phase quorum round +
 WAL persist + engine apply) on top of the RPC transport.
 
@@ -305,14 +324,19 @@ Copy points are annotated inline in the flow diagram above. Summary:
 
 ## Enhancement Ideas
 
-- **Multi-worker I/O (for real network, not loopback)** — the single
-  C++ I/O worker thread serializes all event processing. Multi-worker
-  with `EV_ONESHOT` is implemented (`--io-workers N`) but does not
-  help for the in-process loopback (re-arm overhead > parallelism
-  benefit when I/O thread is not CPU-bound). Would help with real
-  network I/O where the I/O thread is CPU-bound on socket operations.
-  The transport supports shared-engine multi-worker with `EV_ONESHOT`
-  re-arm, following the reference's design.
+- **Multi-engine I/O (R108, measured — does not help for loopback)** —
+  the transport now supports N independent epoll/kqueue instances
+  (`--io-engines N --io-workers-per-engine M`). Multi-engine (2×1)
+  does not improve TPS for the in-process loopback (302K vs 317K at
+  256T:4C) because the single I/O worker is not the bottleneck — the
+  caller-thread writev already parallelizes sends. Would help with
+  real network I/O where the I/O thread is CPU-bound on socket
+  operations. The 2D config (engines × workers) is exposed for
+  per-platform profiling.
+- **Caller-thread writev contention** — the `in_send_` CAS serializes
+  senders on the same connection. At high concurrency, this becomes
+  the bottleneck. Per-connection send queues with lock-free MPSC
+  enqueue + batch writev could reduce contention.
 - **RDMA transport (R32)** — bypasses the kernel socket path entirely,
   eliminating the `writev`/`read` copies and the kqueue/epoll event
   loop overhead. The reference's RDMA path achieves ~2× the TCP path.
@@ -323,4 +347,4 @@ Copy points are annotated inline in the flow diagram above. Summary:
 - **Flatbuffer reuse** — the `ConnectionPingRequest` is rebuilt per
   op (FlatBufferBuilder is fresh each time). Pre-building a template
   and patching the `id` field would save ~5µs per op (significant at
-  1T:1C where per-op cost is 26µs).
+  1T:1C where per-op cost is 23µs).
