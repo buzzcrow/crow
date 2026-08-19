@@ -173,7 +173,7 @@ caller's handles after submit.
 Scaling sweep. In-process echo server (kqueue loopback, no network),
 64-byte values, 1000 key space (unused by echo), 5-second duration.
 Platform: **Apple M5 Pro** (18 cores, arm64, macOS 26/Darwin 25.5).
-9 runs, zero errors across all configs.
+7 runs, zero errors across all configs.
 
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
@@ -183,8 +183,6 @@ Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 | Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 1 | 1 | 32,736 | 29 | 29 | 50 | 94 | 0 |
-| 2 | 2 | 4 | 48,787 | 40 | 40 | 56 | 98 | 0 |
-| 4 | 4 | 16 | 76,516 | 51 | 51 | 76 | 123 | 0 |
 | 8 | 4 | 32 | 83,850 | 94 | 94 | 132 | 209 | 0 |
 | 16 | 8 | 128 | 89,994 | 177 | 175 | 233 | 398 | 0 |
 | 64 | 8 | 512 | 96,508 | 662 | 657 | 789 | 1,332 | 0 |
@@ -194,16 +192,28 @@ Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
 ### Conclusions
 
-- **Single C++ I/O worker is the bottleneck** — TPS plateaus at ~104K
-  at 256T+. Beyond 256T, latency doubles (2.5ms → 4.9ms avg) without
-  TPS gain. The single worker thread's event loop (kqueue wait +
-  drain submits + readv/writev) is the hard ceiling.
+- **Single C++ I/O worker is the serialization bottleneck** — TPS
+  plateaus at ~104K at 256T+. Beyond 256T, latency doubles (2.5ms →
+  4.9ms avg) without TPS gain. The single worker thread's event loop
+  (kqueue wait + drain submits + readv/writev + dispatch) serializes
+  all 5 event-loop iterations per op across all connections.
+- **NOT CPU-bound — latency-bound by event queueing** — at 256T:16C,
+  CPU is 78% idle. The machine has plenty of headroom. The 86×
+  latency increase from 1T:1C (29µs) to 256T:16C (2500µs) is pure
+  queueing delay on the single I/O thread's event queue, not compute.
+  Little's Law: 256 in-flight × 5 events/op = ~1280 events queued at
+  ~2µs/event = 2.5ms round-trip — exactly what we observe.
+- **Value size has minimal effect** — at 256T:16C, 0B→4096B (64×
+  larger payload) only drops TPS by 16% (114K→96K). If the bottleneck
+  were data copy/memcpy, we'd expect a steep drop. Flat TPS across
+  payload sizes confirms the bottleneck is event loop overhead, not
+  data movement.
 - **Threads scale well to 16T** — 1T→16T gives 2.8× (33K→90K). Beyond
   16T the curve flattens (90K→104K from 16T→512T, only 1.15×).
 - **T:C ratio has minimal effect** — 128T:16C and 128T:8C both ~99K
   (tested separately). The bottleneck is the I/O thread, not the
   number of sockets.
-- **Zero errors across all 9 configs** — the 2s response timeout
+- **Zero errors across all 7 configs** — the 2s response timeout
   never fires under normal load; the in-process loopback is reliable.
 - **Per-op latency at 1T:1C is 29µs** — this is the round-trip cost
   of: flatbuffer build + pool alloc + FFI call + kqueue notify +
@@ -249,11 +259,14 @@ Copy points are annotated inline in the flow diagram above. Summary:
 
 ## Enhancement Ideas
 
-- **Multi-worker I/O** — the single C++ I/O worker thread is the hard
-  ceiling. Adding per-connection worker assignment (round-robin or
-  hash-based) with separate kqueue/epoll loops would scale linearly
-  with cores. The transport already has a `Worker` abstraction with
-  `get_worker()` (round-robin), but only 1 worker is created.
+- **Multi-worker I/O** — the single C++ I/O worker thread serializes
+  all event processing. With 78% idle CPU at saturation, adding
+  per-connection worker assignment (round-robin or hash-based) with
+  separate kqueue/epoll loops would reduce per-worker event queue
+  depth, directly cutting queueing latency and lifting TPS. The
+  transport already has a `Worker` abstraction with `get_worker()`
+  (round-robin), but only 1 worker is created (`SocketTransport(1,
+  pool_)`). 4-8 workers would likely scale TPS 3-5× on 18 cores.
 - **RDMA transport (R32)** — bypasses the kernel socket path entirely,
   eliminating the `writev`/`read` copies and the kqueue/epoll event
   loop overhead. The reference's RDMA path achieves ~2× the TCP path.

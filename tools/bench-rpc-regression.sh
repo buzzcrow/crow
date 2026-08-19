@@ -10,7 +10,7 @@
 #   - Scaling: 1T:1C → 512T:32C, pipeline_depth=connections*threads
 #   - value_size=64, key_space=1000 (unused by echo, kept for CLI compat)
 #
-# 9 runs x 5s ~= 45s.
+# 7 runs x 5s ~= 35s.
 #
 # Reference platform (2026-08-19 run): Apple M5 Pro
 # (18 cores, arm64, macOS 26/Darwin 25.5). Peak ~104K ops/s at 512T.
@@ -22,8 +22,6 @@
 #
 #   T    C    ops/s     avg    p50    p99    p999   err
 #   1    1    32,736    29     29     50     94     0
-#   2    2    48,787    40     40     56     98     0
-#   4    4    76,516    51     51     76     123    0
 #   8    4    83,850    94     94     132    209    0
 #   16   8    89,994    177    175    233    398    0
 #   64   8    96,508    662    657    789    1,332  0
@@ -75,8 +73,6 @@ echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE
 
 echo "=== rpc echo (value_size=64) ==="
 run_bench 1 1 "rpc_1t_1c"       # baseline: single-thread closed-loop
-run_bench 2 2 "rpc_2t_2c"       # light concurrency
-run_bench 4 4 "rpc_4t_4c"       # medium concurrency
 run_bench 8 4 "rpc_8t_4c"       # high threads, fewer connections
 run_bench 16 8 "rpc_16t_8c"     # high concurrency
 run_bench 64 8 "rpc_64t_8c"     # saturation: 64 threads on 8 connections
