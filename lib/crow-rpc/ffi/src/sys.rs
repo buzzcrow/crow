@@ -10,7 +10,7 @@ use std::os::raw::{c_char, c_int, c_void};
 pub type crow_rpc_pool_t = *mut crow_rpc_pool_s;
 pub type crow_rpc_buffer_t = *mut crow_rpc_buffer_s;
 pub type crow_rpc_conn_t = *mut crow_rpc_conn_s;
-pub type crow_rpc_caller_t = *mut crow_rpc_caller_s;
+pub type crow_rpc_client_t = *mut crow_rpc_client_s;
 pub type crow_rpc_server_t = *mut crow_rpc_server_s;
 
 #[repr(C)]
@@ -26,7 +26,7 @@ pub struct crow_rpc_conn_s {
     _private: [u8; 0],
 }
 #[repr(C)]
-pub struct crow_rpc_caller_s {
+pub struct crow_rpc_client_s {
     _private: [u8; 0],
 }
 #[repr(C)]
@@ -77,11 +77,11 @@ extern "C" {
     pub fn crow_rpc_server_stop(server: crow_rpc_server_t);
     pub fn crow_rpc_server_port(server: crow_rpc_server_t) -> c_int;
 
-    pub fn crow_rpc_caller_create() -> crow_rpc_caller_t;
-    pub fn crow_rpc_caller_destroy(caller: crow_rpc_caller_t);
+    pub fn crow_rpc_client_create() -> crow_rpc_client_t;
+    pub fn crow_rpc_client_destroy(client: crow_rpc_client_t);
 
-    pub fn crow_rpc_caller_call(
-        caller: crow_rpc_caller_t,
+    pub fn crow_rpc_client_call(
+        client: crow_rpc_client_t,
         server: crow_rpc_server_t,
         conn: crow_rpc_conn_t,
         control: crow_rpc_buffer_t,
@@ -92,8 +92,8 @@ extern "C" {
         out_request_id: *mut u64,
     ) -> crow_rpc_status;
 
-    pub fn crow_rpc_caller_call_one_way(
-        caller: crow_rpc_caller_t,
+    pub fn crow_rpc_client_call_one_way(
+        client: crow_rpc_client_t,
         server: crow_rpc_server_t,
         conn: crow_rpc_conn_t,
         control: crow_rpc_buffer_t,

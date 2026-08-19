@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "crow-rpc/buffer.h"
-#include "crow-rpc/client/caller.h"
+#include "crow-rpc/client/client.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/pool.h"
 #include "crow-rpc/scheduled_executor.h"
@@ -24,7 +24,7 @@ using crow::rpc::CompletionCallback;
 using crow::rpc::Connection;
 using crow::rpc::Frame;
 using crow::rpc::OutFrame;
-using crow::rpc::RemoteCaller;
+using crow::rpc::RpcClient;
 using crow::rpc::RpcError;
 using crow::rpc::ScheduledExecutor;
 using crow::rpc::SocketTransport;
@@ -138,7 +138,7 @@ TEST(ConnectionPoolTest, GetForEndpoint)
     EXPECT_EQ(pool.get_for("node3:8080"), nullptr);
 }
 
-// ── RemoteCaller tests (loopback) ─────────────────────────────────
+// ── RpcClient tests (loopback) ─────────────────────────────────
 
 class CallerLoopbackTest : public ::testing::Test
 {
@@ -210,12 +210,12 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
     });
 
     // Client connection — we'll send via raw write (bypassing the transport
-    // send path, since we're testing RemoteCaller's correlation logic, not
+    // send path, since we're testing RpcClient's correlation logic, not
     // the send path).
     auto client_conn              = std::make_shared<Connection>(100, "client", nullptr);
     client_conn->transport_handle = static_cast<uint64_t>(client_fd);
 
-    RemoteCaller      caller;
+    RpcClient         caller;
     std::atomic<bool> got_response{false};
     RpcError          recv_err = RpcError::Ok;
 
@@ -265,7 +265,7 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
 
 TEST_F(CallerLoopbackTest, FailAllOnClose)
 {
-    RemoteCaller     caller;
+    RpcClient        caller;
     SystemBufferPool buf_pool;
 
     // Create a dummy connection (not connected, just for the pool).

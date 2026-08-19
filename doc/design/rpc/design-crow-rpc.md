@@ -152,7 +152,7 @@ task runs on the C++ worker thread, not on a tokio thread.
 
 ### 4.2 Request/Response Correlation
 
-`RemoteCaller` tracks pending requests in a per-connection
+`RpcClient` tracks pending requests in a per-connection
 `folly::ConcurrentHashMap<request_id, CompletionCallback>`. `call`
 allocates a monotonic `request_id`, inserts the callback, submits the
 frame; `on_response` looks up the id, invokes the callback, removes the

@@ -158,7 +158,7 @@ the writers, and recovery all depend on.
    registered in R104's `msg_type` enum (diskio range).
 
 7. **Client library** (`lib/crow-diskio-client/`) — a
-   `DiskIoClient` that wraps R104's `RemoteCaller` with typed methods:
+   `DiskIoClient` that wraps R104's `RpcClient` with typed methods:
    `async fn write(&self, segment: &Segment, data: Bytes) ->
    Result<(), IoError>`, `async fn read(&self, segment: &Segment) ->
    Result<Bytes, IoError>`, `async fn fsync(&self, disk_id: &DiskId)

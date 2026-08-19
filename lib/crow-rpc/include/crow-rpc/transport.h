@@ -22,7 +22,7 @@ namespace crow::rpc
 //
 // The send queue holds OutFrame*. The worker drains up to BATCH_MAX per
 // drain cycle and sends them via scatter-gather (writev). request_id is
-// assigned by RemoteCaller::call; 0 for one-way messages.
+// assigned by RpcClient::call; 0 for one-way messages.
 struct OutFrame
 {
     uint64_t request_id = 0;
@@ -42,7 +42,7 @@ constexpr int BATCH_MAX = 64;
 // is stored as a type-erased transport_handle that only the transport
 // interprets.
 //
-// on_frame_callback is set by the caller (RemoteCaller on the client side,
+// on_frame_callback is set by the caller (RpcClient on the client side,
 // RpcServer on the server side) to dispatch received frames.
 class Connection
 {
@@ -89,7 +89,7 @@ class Connection
     // Dispatches to on_frame_callback_.
     void on_frame(Frame *frame);
 
-    // Callbacks (set by RemoteCaller / RpcServer).
+    // Callbacks (set by RpcClient / RpcServer).
     void set_on_frame(OnFrameCallback cb)
     {
         on_frame_callback_ = std::move(cb);
@@ -160,7 +160,7 @@ class Transport
     // Submit an OutFrame on a connection (non-blocking). Pushes to the
     // send queue and wakes the worker. Returns true on success, false if
     // the queue is full (backpressure) or the connection is closed.
-    // The caller (RemoteCaller) builds the OutFrame with request_id,
+    // The caller (RpcClient) builds the OutFrame with request_id,
     // header, and pool-allocated control/data buffers already set.
     virtual bool submit(Connection *conn, OutFrame *frame) = 0;
 

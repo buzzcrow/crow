@@ -11,7 +11,7 @@ a client can send a 512-byte-data request and receive a response.
 ## Gap Analysis
 
 The current code has buffer, framing, transport (epoll/kqueue), server
-acceptor, and RemoteCaller skeletons — but the end-to-end path is
+acceptor, and RpcClient skeletons — but the end-to-end path is
 broken:
 
 1. **No message layer.** Frames carry raw `control` / `data` bytes; there
@@ -25,7 +25,7 @@ broken:
 3. **Client connect not wired through transport.** `crow_rpc_connect`
    creates a raw socket but doesn't register it with a worker — the
    connection never receives responses.
-4. **RemoteCaller::call submit path incomplete.** `call()` builds an
+4. **RpcClient::call submit path incomplete.** `call()` builds an
    `OutFrame` and calls `transport->submit()`, but the connection's
    `on_frame` callback isn't set to route responses back to
    `on_response`.
@@ -52,7 +52,7 @@ lib/crow-rpc/
       handler.h           # MsgHandler, HandlerFn, dispatch by msg_type
       message.h           # Message, Request, Response (flatbuffer wrappers)
     client/
-      caller.h            # RemoteCaller
+      caller.h            # RpcClient
     transport/
       socket_transport.h  # SocketTransport, Worker, SocketEngine
       epoll/
@@ -156,8 +156,8 @@ lib/crow-rpc/
   and returns the `shared_ptr<Connection>`. Files:
   `src/transport/socket_transport.cpp`,
   `include/crow-rpc/transport/socket_transport.h`.
-- [ ] **3.3 Wire RemoteCaller to transport receive path.** When
-  `RemoteCaller::call()` submits a request, set the connection's
+- [ ] **3.3 Wire RpcClient to transport receive path.** When
+  `RpcClient::call()` submits a request, set the connection's
   `on_frame` callback to route response frames to
   `caller->on_response()`. The callback checks `frame->header.flags`
   for one-way (skip correlation) vs request-response (look up
@@ -167,8 +167,8 @@ lib/crow-rpc/
   `crow_rpc_connect` to use `SocketTransport::connect()` instead of raw
   socket. The returned `Connection` is registered with a worker and can
   receive responses. Files: `src/c_api.cpp`.
-- [ ] **3.5 Wire C ABI `crow_rpc_caller_call` end-to-end.** Ensure the
-  full path works: C ABI → RemoteCaller::call → transport submit →
+- [ ] **3.5 Wire C ABI `crow_rpc_client_call` end-to-end.** Ensure the
+  full path works: C ABI → RpcClient::call → transport submit →
   server handler → response → transport receive → on_complete callback.
   Files: `src/c_api.cpp`.
 
@@ -191,7 +191,7 @@ lib/crow-rpc/
 ### Phase 5: Rust FFI Loopback Test
 
 - [ ] **5.1 Rust FFI loopback test.** Using `crow_rpc_ffi`: create
-  server, listen, start. Create `RemoteCaller`, connect, send a request
+  server, listen, start. Create `RpcClient`, connect, send a request
   with 512-byte data, await response via `tokio::runtime`. Verify
   response data matches. This serves as the example for how other Rust
   crates (diskio, consensus) use the RPC library. Files:

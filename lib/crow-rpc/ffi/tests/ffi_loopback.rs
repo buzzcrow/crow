@@ -9,7 +9,7 @@
 use crow_protocol::fb::{
     ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, FBMsgType,
 };
-use crow_rpc_ffi::{BufferPool, RemoteCaller, RpcServer};
+use crow_rpc_ffi::{BufferPool, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 
 #[test]
@@ -84,7 +84,7 @@ async fn ping_loopback() {
     let mut ctrl = pool.alloc_buffer(fb_bytes.len() as u32).expect("alloc control");
     ctrl.write(fb_bytes);
 
-    let caller = RemoteCaller::new();
+    let caller = RpcClient::new();
     let future = caller
         .call(
             &server,
@@ -150,7 +150,7 @@ async fn ping_loopback_with_data() {
     let mut data = pool.alloc_buffer(512).expect("alloc data");
     data.write(&payload);
 
-    let caller = RemoteCaller::new();
+    let caller = RpcClient::new();
     let future = caller
         .call(
             &server,

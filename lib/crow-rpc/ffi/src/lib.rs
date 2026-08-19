@@ -12,10 +12,10 @@
 #![allow(unsafe_code)]
 
 mod buffer;
-mod caller;
+mod client;
 mod server;
 mod sys;
 
 pub use buffer::{Buffer, BufferPool};
-pub use caller::{RemoteCaller, Response};
+pub use client::{CallFuture, Response, RpcClient};
 pub use server::{Connection, RpcError, RpcServer};

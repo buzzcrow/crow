@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Async RemoteCaller — submits requests and awaits completions via
+//! Async RpcClient — submits requests and awaits completions via
 //! oneshot channels.
 
 use crate::sys;
@@ -15,17 +15,17 @@ pub struct Response {
     pub data: Option<Buffer>,
 }
 
-/// RemoteCaller manages request/response correlation. Each `call()` returns
+/// RpcClient manages request/response correlation. Each `call()` returns
 /// a future that resolves when the response arrives (or on error).
-pub struct RemoteCaller {
-    handle: sys::crow_rpc_caller_t,
+pub struct RpcClient {
+    handle: sys::crow_rpc_client_t,
 }
 
-impl RemoteCaller {
-    /// Create a new RemoteCaller.
+impl RpcClient {
+    /// Create a new RpcClient.
     pub fn new() -> Self {
-        let handle = unsafe { sys::crow_rpc_caller_create() };
-        RemoteCaller { handle }
+        let handle = unsafe { sys::crow_rpc_client_create() };
+        RpcClient { handle }
     }
 
     /// Submit a request-response call. Returns a future that resolves to
@@ -48,7 +48,7 @@ impl RemoteCaller {
 
         let mut request_id: u64 = 0;
         let status = unsafe {
-            sys::crow_rpc_caller_call(
+            sys::crow_rpc_client_call(
                 self.handle,
                 server.handle(),
                 conn.handle(),
@@ -87,7 +87,7 @@ impl RemoteCaller {
         let data_handle = data.map(|d| d.into_raw()).unwrap_or(ptr::null_mut());
 
         let status = unsafe {
-            sys::crow_rpc_caller_call_one_way(
+            sys::crow_rpc_client_call_one_way(
                 self.handle,
                 server.handle(),
                 conn.handle(),
@@ -104,16 +104,16 @@ impl RemoteCaller {
     }
 }
 
-impl Default for RemoteCaller {
+impl Default for RpcClient {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for RemoteCaller {
+impl Drop for RpcClient {
     fn drop(&mut self) {
         if !self.handle.is_null() {
-            unsafe { sys::crow_rpc_caller_destroy(self.handle) };
+            unsafe { sys::crow_rpc_client_destroy(self.handle) };
             self.handle = ptr::null_mut();
         }
     }

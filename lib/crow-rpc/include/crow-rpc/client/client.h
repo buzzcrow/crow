@@ -31,7 +31,7 @@ enum class RpcError : uint8_t {
 // the response frame (nullptr on error) and the error code.
 using CompletionCallback = std::function<void(Frame *response, RpcError err)>;
 
-// RemoteCaller manages request/response correlation. Each call allocates
+// RpcClient manages request/response correlation. Each call allocates
 // a monotonic request_id, inserts a callback into the pending map, and
 // submits the frame. When the response arrives (via Connection::on_frame),
 // on_response looks up the request_id, invokes the callback, and removes
@@ -44,10 +44,10 @@ using CompletionCallback = std::function<void(Frame *response, RpcError err)>;
 // because each connection is owned by one worker thread — the worker's
 // on_response lookup is contention-free; only cross-thread submit and
 // timeout removal contend, and those are not the hot path.
-class RemoteCaller
+class RpcClient
 {
   public:
-    RemoteCaller();
+    RpcClient();
 
     // Submit a request-response call. The request_id is provided by the
     // caller (it must match the id embedded in the flatbuffer control
@@ -89,8 +89,8 @@ class RemoteCaller
     std::mutex                                       pending_mu_;
     std::unordered_map<uint64_t, CompletionCallback> pending_;
 
-    // Build an OutFrame for submission. The caller (RemoteCaller) owns
-    // the OutFrame; the transport takes it and releases buffers after send.
+    // Build an OutFrame for submission. The RpcClient owns the OutFrame;
+    // the transport takes it and releases buffers after send.
     OutFrame *build_frame(uint64_t request_id, Buffer *control, Buffer *data, uint16_t msg_type, uint8_t flags);
 };
 

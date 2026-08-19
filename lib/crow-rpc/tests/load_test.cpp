@@ -3,7 +3,7 @@
 
 #include "common_msg_generated.h"
 #include "crow-rpc/buffer.h"
-#include "crow-rpc/client/caller.h"
+#include "crow-rpc/client/client.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/server/handler.h"
 #include "crow-rpc/server/message.h"
@@ -26,7 +26,7 @@ using crow::rpc::Connection;
 using crow::rpc::extract_request_id;
 using crow::rpc::Frame;
 using crow::rpc::OutFrame;
-using crow::rpc::RemoteCaller;
+using crow::rpc::RpcClient;
 using crow::rpc::RpcServer;
 using crow::rpc::SocketTransport;
 using crow::rpc::SystemBufferPool;
@@ -79,15 +79,15 @@ TEST(LoadTest, MultiThreadEcho)
         SocketTransport transport(1);
         transport.start();
 
-        std::vector<std::shared_ptr<Connection>>   conns;
-        std::vector<std::unique_ptr<RemoteCaller>> callers;
+        std::vector<std::shared_ptr<Connection>> conns;
+        std::vector<std::unique_ptr<RpcClient>>  callers;
         for (int c = 0; c < C; c++) {
             auto conn = transport.connect("127.0.0.1", port);
             if (conn == nullptr) {
                 failure_count.fetch_add(R, std::memory_order_relaxed);
                 continue;
             }
-            auto caller = std::make_unique<RemoteCaller>();
+            auto caller = std::make_unique<RpcClient>();
             caller->attach(conn.get());
             conns.push_back(conn);
             callers.push_back(std::move(caller));

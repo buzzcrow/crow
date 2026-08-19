@@ -17,7 +17,7 @@ extern "C" {
 typedef struct crow_rpc_pool_s   *crow_rpc_pool_t;
 typedef struct crow_rpc_buffer_s *crow_rpc_buffer_t;
 typedef struct crow_rpc_conn_s   *crow_rpc_conn_t;
-typedef struct crow_rpc_caller_s *crow_rpc_caller_t;
+typedef struct crow_rpc_client_s *crow_rpc_client_t;
 typedef struct crow_rpc_server_s *crow_rpc_server_t;
 
 // Status: 0 = ok, negative = error code.
@@ -53,9 +53,9 @@ void              crow_rpc_server_start(crow_rpc_server_t server);
 void              crow_rpc_server_stop(crow_rpc_server_t server);
 int               crow_rpc_server_port(crow_rpc_server_t server);
 
-// ── Caller ────────────────────────────────────────────────────────
-crow_rpc_caller_t crow_rpc_caller_create(void);
-void              crow_rpc_caller_destroy(crow_rpc_caller_t caller);
+// ── Client ────────────────────────────────────────────────────────
+crow_rpc_client_t crow_rpc_client_create(void);
+void              crow_rpc_client_destroy(crow_rpc_client_t client);
 
 // Completion callback — invoked on the C++ I/O thread when the response
 // arrives or on error. Must be O(1) and non-blocking.
@@ -65,12 +65,12 @@ typedef void (*crow_rpc_on_complete)(uint64_t request_id, crow_rpc_buffer_t cont
 // Submit a request-response call. Returns CROW_RPC_OK on success and
 // sets out_request_id. On error, returns negative status and the callback
 // is NOT invoked.
-crow_rpc_status crow_rpc_caller_call(crow_rpc_caller_t caller, crow_rpc_server_t server, crow_rpc_conn_t conn,
+crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                      crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type,
                                      crow_rpc_on_complete on_complete, void *user_data, uint64_t *out_request_id);
 
 // Submit a one-way message (no response expected).
-crow_rpc_status crow_rpc_caller_call_one_way(crow_rpc_caller_t caller, crow_rpc_server_t server, crow_rpc_conn_t conn,
+crow_rpc_status crow_rpc_client_call_one_way(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                              crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type);
 
 // ── Connection (for client-side use) ──────────────────────────────

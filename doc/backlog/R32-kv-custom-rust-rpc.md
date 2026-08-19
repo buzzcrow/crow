@@ -103,7 +103,7 @@ semantics and recovering the h2-lock throughput loss.
    client-facing surface until separately migrated.
 
 3. **Client-side migration** (`crow-kv/src/rpc/`) — replace the tonic
-   `PxServiceClient` with an R104 `RemoteCaller`. The connection pool
+   `PxServiceClient` with an R104 `RpcClient`. The connection pool
    manages connections to peer replicas. `NotLeaderHint` is parsed
    from the flatbuffer response and fed into the existing retry logic
    (`crow-kv-client` retry + topology cache). The `LearnerStream`
@@ -132,7 +132,7 @@ semantics and recovering the h2-lock throughput loss.
                           ─────────────                          ────────────
 
 Follower A ─┐                       Follower A ─┐
-Follower B ─┼─► tonic Client ──►    Follower B ─┼─► RemoteCaller ──► MPSC queue
+Follower B ─┼─► tonic Client ──►    Follower B ─┼─► RpcClient ──► MPSC queue
 Follower C ─┤    (h2 lock)          Follower C ─┤    (no lock)       │
 Follower D ─┘                       Follower D ─┘                    │
                                                                      ▼

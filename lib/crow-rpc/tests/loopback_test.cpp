@@ -3,7 +3,7 @@
 
 #include "common_msg_generated.h"
 #include "crow-rpc/buffer.h"
-#include "crow-rpc/client/caller.h"
+#include "crow-rpc/client/client.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/server/handler.h"
 #include "crow-rpc/server/message.h"
@@ -26,7 +26,7 @@ using crow::rpc::Connection;
 using crow::rpc::extract_request_id;
 using crow::rpc::Frame;
 using crow::rpc::OutFrame;
-using crow::rpc::RemoteCaller;
+using crow::rpc::RpcClient;
 using crow::rpc::RpcServer;
 using crow::rpc::SocketTransport;
 using crow::rpc::SystemBufferPool;
@@ -50,7 +50,7 @@ TEST(LoopbackTest, SimplePing)
     auto conn = client_transport.connect("127.0.0.1", port);
     ASSERT_NE(conn, nullptr);
 
-    RemoteCaller      caller;
+    RpcClient         caller;
     std::atomic<bool> got_response{false};
     uint64_t          recv_request_id = 0;
 
@@ -128,7 +128,7 @@ TEST(LoopbackTest, EchoHandler512B)
     auto conn = client_transport.connect("127.0.0.1", port);
     ASSERT_NE(conn, nullptr);
 
-    RemoteCaller      caller;
+    RpcClient         caller;
     std::atomic<bool> got_response{false};
     bool              data_matches = false;
 

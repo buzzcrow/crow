@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-rpc/client/caller.h"
+#include "crow-rpc/client/client.h"
 
 #include "crow-rpc/server/message.h"
 
@@ -10,10 +10,9 @@
 namespace crow::rpc
 {
 
-RemoteCaller::RemoteCaller() = default;
+RpcClient::RpcClient() = default;
 
-OutFrame *RemoteCaller::build_frame(uint64_t request_id, Buffer *control, Buffer *data, uint16_t msg_type,
-                                    uint8_t flags)
+OutFrame *RpcClient::build_frame(uint64_t request_id, Buffer *control, Buffer *data, uint16_t msg_type, uint8_t flags)
 {
     auto *frame            = new OutFrame;
     frame->request_id      = request_id;
@@ -30,8 +29,8 @@ OutFrame *RemoteCaller::build_frame(uint64_t request_id, Buffer *control, Buffer
     return frame;
 }
 
-uint64_t RemoteCaller::call(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
-                            uint16_t msg_type, CompletionCallback on_complete)
+uint64_t RpcClient::call(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
+                         uint16_t msg_type, CompletionCallback on_complete)
 {
     // Insert into pending map before submit (so on_response can find it
     // even if the response arrives before submit returns — unlikely but
@@ -68,8 +67,7 @@ uint64_t RemoteCaller::call(Transport *transport, Connection *conn, uint64_t req
     return request_id;
 }
 
-bool RemoteCaller::call_one_way(Transport *transport, Connection *conn, Buffer *control, Buffer *data,
-                                uint16_t msg_type)
+bool RpcClient::call_one_way(Transport *transport, Connection *conn, Buffer *control, Buffer *data, uint16_t msg_type)
 {
     // request_id 0 signals one-way (no pending entry, no callback).
     OutFrame *frame = build_frame(0, control, data, msg_type, FLAG_ONE_WAY);
@@ -84,7 +82,7 @@ bool RemoteCaller::call_one_way(Transport *transport, Connection *conn, Buffer *
     return true;
 }
 
-void RemoteCaller::attach(Connection *conn)
+void RpcClient::attach(Connection *conn)
 {
     // Set the on_frame callback to route response frames to on_response.
     // The request_id is extracted from the flatbuffer control message.
@@ -94,7 +92,7 @@ void RemoteCaller::attach(Connection *conn)
     });
 }
 
-void RemoteCaller::on_response(uint64_t request_id, Frame *response)
+void RpcClient::on_response(uint64_t request_id, Frame *response)
 {
     CompletionCallback cb;
     {
@@ -116,7 +114,7 @@ void RemoteCaller::on_response(uint64_t request_id, Frame *response)
     }
 }
 
-void RemoteCaller::fail_all(RpcError err)
+void RpcClient::fail_all(RpcError err)
 {
     std::unordered_map<uint64_t, CompletionCallback> to_fail;
     {
@@ -130,7 +128,7 @@ void RemoteCaller::fail_all(RpcError err)
     }
 }
 
-size_t RemoteCaller::pending_count()
+size_t RpcClient::pending_count()
 {
     std::lock_guard<std::mutex> lock(pending_mu_);
     return pending_.size();

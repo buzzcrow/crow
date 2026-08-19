@@ -4,7 +4,7 @@
 #include "crow-rpc/c_api.h"
 
 #include "crow-rpc/buffer.h"
-#include "crow-rpc/client/caller.h"
+#include "crow-rpc/client/client.h"
 #include "crow-rpc/server/message.h"
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
@@ -39,9 +39,9 @@ struct crow_rpc_conn_s
     std::shared_ptr<crow::rpc::Connection> conn;
 };
 
-struct crow_rpc_caller_s
+struct crow_rpc_client_s
 {
-    crow::rpc::RemoteCaller *caller;
+    crow::rpc::RpcClient *client;
 };
 
 struct crow_rpc_server_s
@@ -188,18 +188,18 @@ int crow_rpc_server_port(crow_rpc_server_t server)
 
 // ── Caller ────────────────────────────────────────────────────────
 
-crow_rpc_caller_t crow_rpc_caller_create(void)
+crow_rpc_client_t crow_rpc_client_create(void)
 {
-    return new crow_rpc_caller_s{new crow::rpc::RemoteCaller()};
+    return new crow_rpc_client_s{new crow::rpc::RpcClient()};
 }
 
-void crow_rpc_caller_destroy(crow_rpc_caller_t caller)
+void crow_rpc_client_destroy(crow_rpc_client_t client)
 {
-    if (caller == nullptr) {
+    if (client == nullptr) {
         return;
     }
-    delete caller->caller;
-    delete caller;
+    delete client->client;
+    delete client;
 }
 
 // Adapter: wraps the C completion callback into a C++ CompletionCallback.
@@ -276,11 +276,11 @@ struct OnCompleteAdapter
     }
 };
 
-crow_rpc_status crow_rpc_caller_call(crow_rpc_caller_t caller, crow_rpc_server_t server, crow_rpc_conn_t conn,
+crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                      crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type,
                                      crow_rpc_on_complete on_complete, void *user_data, uint64_t *out_request_id)
 {
-    if (caller == nullptr || server == nullptr || conn == nullptr || control == nullptr || on_complete == nullptr) {
+    if (client == nullptr || server == nullptr || conn == nullptr || control == nullptr || on_complete == nullptr) {
         return CROW_RPC_ERR_INVALID_ARG;
     }
 
@@ -289,15 +289,15 @@ crow_rpc_status crow_rpc_caller_call(crow_rpc_caller_t caller, crow_rpc_server_t
     crow::rpc::Buffer *ctrl_buf = control->buf;
     crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
 
-    // Bump refcount so the caller's handle stays valid after submit.
+    // Bump refcount so the client's handle stays valid after submit.
     if (ctrl_buf != nullptr)
         ctrl_buf->ref_clone();
     if (data_buf != nullptr)
         data_buf->ref_clone();
 
-    // Attach the caller to the connection so responses are routed to
+    // Attach the client to the connection so responses are routed to
     // on_response → callback. Idempotent (set_on_frame overwrites).
-    caller->caller->attach(conn->conn.get());
+    client->client->attach(conn->conn.get());
 
     // Extract the request_id from the flatbuffer control message so
     // the server can echo it back for correlation. All common messages
@@ -305,11 +305,11 @@ crow_rpc_status crow_rpc_caller_call(crow_rpc_caller_t caller, crow_rpc_server_t
     uint64_t req_id = crow::rpc::extract_request_id(ctrl_buf->data, ctrl_buf->len);
     if (req_id == 0) {
         // Not a standard common message — generate one.
-        req_id = caller->caller->next_request_id();
+        req_id = client->client->next_request_id();
     }
 
     uint64_t returned =
-        caller->caller->call(server->server->transport(), conn->conn.get(), req_id, ctrl_buf, data_buf, msg_type,
+        client->client->call(server->server->transport(), conn->conn.get(), req_id, ctrl_buf, data_buf, msg_type,
                              [adapter](crow::rpc::Frame *resp, crow::rpc::RpcError err) { (*adapter)(resp, err); });
 
     if (returned == 0) {
@@ -322,10 +322,10 @@ crow_rpc_status crow_rpc_caller_call(crow_rpc_caller_t caller, crow_rpc_server_t
     return CROW_RPC_OK;
 }
 
-crow_rpc_status crow_rpc_caller_call_one_way(crow_rpc_caller_t caller, crow_rpc_server_t server, crow_rpc_conn_t conn,
+crow_rpc_status crow_rpc_client_call_one_way(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                              crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type)
 {
-    if (caller == nullptr || server == nullptr || conn == nullptr || control == nullptr) {
+    if (client == nullptr || server == nullptr || conn == nullptr || control == nullptr) {
         return CROW_RPC_ERR_INVALID_ARG;
     }
 
@@ -337,7 +337,7 @@ crow_rpc_status crow_rpc_caller_call_one_way(crow_rpc_caller_t caller, crow_rpc_
     if (data_buf != nullptr)
         data_buf->ref_clone();
 
-    if (!caller->caller->call_one_way(server->server->transport(), conn->conn.get(), ctrl_buf, data_buf, msg_type)) {
+    if (!client->client->call_one_way(server->server->transport(), conn->conn.get(), ctrl_buf, data_buf, msg_type)) {
         return CROW_RPC_ERR_SEND_QUEUE;
     }
     return CROW_RPC_OK;
