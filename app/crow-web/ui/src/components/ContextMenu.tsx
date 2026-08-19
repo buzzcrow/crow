@@ -205,7 +205,12 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
               onClick={async () => {
                 if (item.disabled) return;
                 if (hasSubmenu) {
-                  setOpenSubmenu(isSubmenuOpen ? null : item.id);
+                  // Always open on click — never toggle. The submenu
+                  // opens on hover (onMouseEnter) too; toggling here
+                  // races with that re-render and can close the
+                  // submenu when the click lands after the hover
+                  // state has already committed.
+                  setOpenSubmenu(item.id);
                 } else {
                   await item.onSelect?.();
                   onClose();
