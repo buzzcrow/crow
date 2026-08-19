@@ -64,6 +64,10 @@ name = "reconcile_test"
 path = "tests/reconcile_test.rs"
 
 [[test]]
+name = "restore_test"
+path = "tests/restore_test.rs"
+
+[[test]]
 name = "server_api_test"
 path = "tests/server_api_test.rs"
 

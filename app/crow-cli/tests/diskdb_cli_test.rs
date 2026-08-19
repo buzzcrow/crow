@@ -177,13 +177,18 @@ async fn diskdb_cli_deploy_restart_stop_delete_lifecycle() {
     let (code, _, stderr) = run(&cli, &ip, port, &["diskdb", "restart", "--node", "1"]);
     assert_eq!(code, 0, "diskdb restart stderr={stderr}");
 
-    // diskdb stop → should succeed (also removes the ServerEntry).
+    // diskdb stop → should succeed. Stop kills the process but
+    // preserves the ServerEntry so it can be restarted later.
     let (code, _, stderr) = run(&cli, &ip, port, &["diskdb", "stop", "--node", "1"]);
     assert_eq!(code, 0, "diskdb stop stderr={stderr}");
 
-    // After stop, the ServerEntry is gone — delete returns 404.
-    let (code, _, _) = run(&cli, &ip, port, &["diskdb", "delete", "--node", "1"]);
-    assert_eq!(code, 2, "delete after stop should fail with 404");
+    // After stop, the ServerEntry is still present — delete succeeds
+    // (best-effort stop + remove entry).
+    let (code, _, _stderr) = run(&cli, &ip, port, &["diskdb", "delete", "--node", "1"]);
+    assert_eq!(
+        code, 0,
+        "delete after stop should succeed (entry preserved by stop)"
+    );
 
     // --- Second deploy → delete (without stop) ---
     let (_rest_port2, rpc_port2) = common::console::pick_two_distinct_free_ports();

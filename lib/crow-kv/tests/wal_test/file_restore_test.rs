@@ -126,8 +126,12 @@ async fn file_backed_wal_resumes_writing_after_reopen() {
     {
         let backend = Arc::new(IoBackend::File);
         let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
-        let wal = create_file_wal(wal_dir.clone()).await;
-        wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
+        let next_seg = replay.max_segment_id.saturating_add(1).max(1);
+        let mut config = WalConfig::with_root(wal_dir.clone());
+        config.wal_record_format = WalRecordFormat::Binary;
+        let wal = WalEngine::create_with_next_segment_id(backend, config, GROUP, next_seg)
+            .await
+            .expect("create file-backed wal");
 
         let entry = accepted_write(3, 1, b"k3", b"v3");
         wal.append(&WALRecord::from_accepted(GROUP, &entry))

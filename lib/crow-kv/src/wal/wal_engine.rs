@@ -137,10 +137,31 @@ impl WalEngine {
         config: WalConfig,
         group_id: PxGroupId,
     ) -> io::Result<Arc<Self>> {
+        Self::create_with_next_segment_id(backend, config, group_id, 1).await
+    }
+
+    /// Like [`create`] but with a custom initial `next_segment_id`.
+    ///
+    /// Use this when restoring from an existing WAL so the writer creates
+    /// the *next* segment (e.g. `seg-0000002.ck`) instead of overwriting
+    /// the existing `seg-0000001.ck`. The writer creates its initial
+    /// active segment immediately on spawn, so setting
+    /// `next_segment_id` after `create` via [`set_next_segment_id`]
+    /// is too late — the initial segment is already created.
+    ///
+    /// # Errors
+    /// Returns `io::Error` if the WAL directory cannot be created or
+    /// the pipeline writer fails to spawn.
+    pub async fn create_with_next_segment_id(
+        backend: Arc<IoBackend>,
+        config: WalConfig,
+        group_id: PxGroupId,
+        initial_next_segment_id: u64,
+    ) -> io::Result<Arc<Self>> {
         let pipeline_count = config.wal_disks.len();
         let failed = Arc::new(AtomicBool::new(false));
         let index = Arc::new(parking_lot::Mutex::new(SegmentIndex::new()));
-        let next_segment_id = Arc::new(AtomicU64::new(1));
+        let next_segment_id = Arc::new(AtomicU64::new(initial_next_segment_id));
         let flush_count = Arc::new(AtomicU64::new(0));
         let records_flushed = Arc::new(AtomicU64::new(0));
         let watchdog_wakeups = Arc::new(AtomicU64::new(0));

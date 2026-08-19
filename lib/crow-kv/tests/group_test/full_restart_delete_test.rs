@@ -59,10 +59,10 @@ async fn build_wal_group(
     let replay = replay_group(&backend, &config.wal_disks, GROUP)
         .await
         .expect("replay group");
-    let wal = WalEngine::create(backend, config, GROUP)
+    let next_seg = replay.max_segment_id.saturating_add(1).max(1);
+    let wal = WalEngine::create_with_next_segment_id(backend, config, GROUP, next_seg)
         .await
         .expect("create wal");
-    wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
 
     let mut replica = PxLocalReplica::restore_from_replay(id, PxLocalReplicaRole::Follower, &replay)
         .await

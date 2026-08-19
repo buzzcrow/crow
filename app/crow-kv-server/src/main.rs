@@ -10,7 +10,6 @@
 
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -83,34 +82,22 @@ async fn main() {
 
     let bootstrap = parse_and_validate_cli_args(&args);
 
-    // Load config: from --config file (required). CLI args override
-    // individual fields after loading.
-    let mut config = CrowKVConfig::load_from_file(&args.config)
-        .unwrap_or_else(|e| panic!("failed to load config from {}: {e}", args.config.display()));
+    // Load config: from --config file (optional, first-boot tunables
+    // only). When omitted, use defaults. Paths are always derived from
+    // --root via apply_root (fixed on-disk layout).
+    let mut config = match args.config.as_ref() {
+        Some(path) => CrowKVConfig::load_from_file(path)
+            .unwrap_or_else(|e| panic!("failed to load config from {}: {e}", path.display())),
+        None => CrowKVConfig::default(),
+    };
+    config.apply_root(&args.root);
 
-    // CLI overrides.
+    // CLI tunable overrides.
     config.election = match args.election_profile.as_str() {
         "test" => PxElectionConfig::for_tests(),
         "e2e" => PxElectionConfig::for_e2e(),
         _ => PxElectionConfig::DEFAULT,
     };
-    if let Some(ref wal_root) = args.wal_root {
-        config.wal_root = wal_root.clone();
-    }
-    config.config_root = args.config_root.clone().unwrap_or_else(|| {
-        config
-            .wal_root
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join("conf")
-    });
-    config.data_root = args.data_root.clone().unwrap_or_else(|| {
-        config
-            .wal_root
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join("ctdata")
-    });
     config.wal_backend = args.wal_backend.clone();
     config.crowtree_backend = args.kv_backend.clone();
     config.wal_skip_fsync = args.no_fsync;
@@ -131,23 +118,25 @@ async fn main() {
         ),
     );
 
-    // Spawn a config file watcher for diff logging. kv-server has few
-    // dynamic fields; most changes require restart (the registry owns
-    // the config). The watcher logs what changed so the operator knows
-    // a restart is needed.
+    // Spawn a config file watcher for diff logging. Only when --config is
+    // passed; with no toml there is nothing to watch.
     let watcher_old_config = Arc::new(std::sync::Mutex::new(config));
-    let _config_watcher =
-        match crow_common::config::watch::<CrowKVConfig, _>(std::path::Path::new(&args.config), move |new| {
-            let mut old = watcher_old_config.lock().unwrap();
-            crow_common::config::log_diff(&*old, new);
-            *old = new.clone();
-        }) {
-            Ok(w) => Some(w),
-            Err(e) => {
-                tracing::warn!(error = %e, "config file watcher failed to start; live reload disabled");
-                None
+    let _config_watcher = match args.config.as_ref() {
+        Some(path) => {
+            match crow_common::config::watch::<CrowKVConfig, _>(std::path::Path::new(path), move |new| {
+                let mut old = watcher_old_config.lock().unwrap();
+                crow_common::config::log_diff(&*old, new);
+                *old = new.clone();
+            }) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    tracing::warn!(error = %e, "config file watcher failed to start; live reload disabled");
+                    None
+                }
             }
-        };
+        }
+        None => None,
+    };
 
     // Populate the port pool from `--ports` even when `--stores` is not
     // provided, so stores created later via the management API can use
@@ -199,20 +188,45 @@ async fn main() {
     println!("Management API listening on: management_addr={display_addr}");
     std::io::stdout().flush().expect("failed to flush stdout");
 
-    // Create and start stores after management API is ready.
-    if let Some(b) = bootstrap.as_ref() {
-        create_and_start_stores(
-            &b.store_ids,
-            &b.group_ids,
-            b.replica_id,
-            b.ports.clone(),
-            registry.clone(),
-        )
-        .await;
+    // Boot stores/groups. Two modes:
+    // - Restore mode: group 0 is on disk (`<wal_root>/store0/group0`).
+    //   Scan local waldata, load every store/group from disk (replay WAL
+    //   + open crow-tree + apply node-config.json membership), then
+    //   reconcile with group 0 as verification/fallback. The toml and
+    //   --stores/--groups are ignored for topology.
+    // - First-boot mode: no group 0 on disk. Use --stores/--groups CLI
+    //   args (if given) to create stores; otherwise boot empty so the
+    //   operator can call POST /system/init.
+    let local_groups = crow_kv_server::restore::scan_local_groups(&registry.config.wal_root)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = %e, wal_root = %registry.config.wal_root.display(), "scan_local_groups failed; treating as empty");
+            Vec::new()
+        });
+    if crow_kv_server::restore::group0_exists(&registry.config.wal_root) {
+        info!(
+            local_count = local_groups.len(),
+            "restore mode: group 0 present on disk, loading local stores/groups"
+        );
+        if bootstrap.is_some() {
+            warn!("restore mode: --stores/--groups ignored (local disk is the source of truth)");
+        }
+        crow_kv_server::restore::load_local_groups(&local_groups, args.replica, &registry).await;
+        crow_kv_server::reconcile::reconcile_with_group0(&registry).await;
+    } else {
+        info!("first-boot mode: no group 0 on disk");
+        if let Some(b) = bootstrap.as_ref() {
+            create_and_start_stores(
+                &b.store_ids,
+                &b.group_ids,
+                b.replica_id,
+                b.ports.clone(),
+                registry.clone(),
+            )
+            .await;
+        }
+        // Reconcile is a no-op without group 0; skip the call.
     }
-
-    // Reconcile local state with group 0 topology KV.
-    crow_kv_server::reconcile::reconcile_with_group0(&registry).await;
 
     // Start the keep-alive loop (registers under /srv/kv-server/<id>).
     let keepalive = if args.keepalive_interval > 0 {
@@ -233,6 +247,12 @@ async fn main() {
             instance_id,
             mgmt_endpoint,
             &group0_ep,
+            registry
+                .config
+                .node_root
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             args.keepalive_interval,
         ))
     } else {

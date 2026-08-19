@@ -91,6 +91,7 @@ message KvServerExtra {
   repeated uint64         hosted_stores  = 1;
   repeated HostedGroup    hosted_groups  = 2;
   string                  health         = 3;  // aggregate health summary
+  string                  data_root      = 4;  // node root dir (R104)
 }
 
 // A (store_id, group_id) pair hosted by a kv-server instance.

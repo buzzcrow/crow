@@ -150,8 +150,8 @@ pub async fn create_group_with_wal(
     }
     wal_config.wal_skip_fsync = config.wal_skip_fsync;
     let replay = replay_group(&wal_backend, &wal_config.wal_disks, group_id).await?;
-    let wal = WalEngine::create(wal_backend, wal_config, group_id).await?;
-    wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
+    let next_seg = replay.max_segment_id.saturating_add(1).max(1);
+    let wal = WalEngine::create_with_next_segment_id(wal_backend, wal_config, group_id, next_seg).await?;
 
     let mut local_replica = {
         let engine = open_crow_tree_engine(

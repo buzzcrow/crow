@@ -268,7 +268,7 @@ impl ServiceRegistryClient {
 
 impl ServiceRegistryClient {
     /// Register a kv-server instance with `hosted_stores`,
-    /// `hosted_groups`, and aggregate `health`.
+    /// `hosted_groups`, aggregate `health`, and the node `data_root`.
     pub async fn register_kv_server(
         &self,
         instance_id: InstanceId,
@@ -276,6 +276,7 @@ impl ServiceRegistryClient {
         hosted_stores: &[u64],
         hosted_groups: &[crow_protocol::common::HostedGroup],
         health: &str,
+        data_root: &str,
     ) -> Result<()> {
         let extra = ServiceExtra {
             diskdb: None,
@@ -283,6 +284,7 @@ impl ServiceRegistryClient {
                 hosted_stores: hosted_stores.to_vec(),
                 hosted_groups: hosted_groups.to_vec(),
                 health: health.to_string(),
+                data_root: data_root.to_string(),
             }),
         };
         self.register("kv-server", instance_id, grpc_endpoint, &extra)
@@ -297,9 +299,17 @@ impl ServiceRegistryClient {
         hosted_stores: &[u64],
         hosted_groups: &[crow_protocol::common::HostedGroup],
         health: &str,
+        data_root: &str,
     ) -> Result<()> {
-        self.register_kv_server(instance_id, grpc_endpoint, hosted_stores, hosted_groups, health)
-            .await
+        self.register_kv_server(
+            instance_id,
+            grpc_endpoint,
+            hosted_stores,
+            hosted_groups,
+            health,
+            data_root,
+        )
+        .await
     }
 
     /// Read all live kv-server instances.

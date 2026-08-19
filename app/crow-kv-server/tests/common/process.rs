@@ -11,8 +11,7 @@ use std::time::{Duration, Instant};
 pub struct ServerHandle {
     child: Child,
     base_url: String,
-    _wal_dir: tempfile::TempDir,
-    _config_dir: tempfile::TempDir,
+    root: Option<tempfile::TempDir>,
 }
 
 impl ServerHandle {
@@ -74,14 +73,24 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
 /// (e.g. `&[0, 0]` for a two-store process). Each entry maps to a store in
 /// the order given by `--stores`; `0` lets the OS assign a port.
 pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_io::Result<ServerHandle> {
-    let wal_dir = tempfile::tempdir()?;
-    let wal_root = wal_dir.path().join("wal");
+    // One tempdir serves as the node root; waldata/conf/ctdata/log are
+    // derived subdirs. No toml is needed (--config is optional; defaults
+    // apply, and the e2e election profile is a CLI flag below).
+    let root = tempfile::tempdir()?;
+    let mut handle = start_test_server_at(root.path(), args, ports).await?;
+    handle.root = Some(root); // server owns the tempdir's lifetime
+    Ok(handle)
+}
 
-    // Write a minimal TOML config so --config is satisfied.
-    let config_dir = tempfile::tempdir()?;
-    let config_path = config_dir.path().join("crow_kv_server_config.toml");
-    std::fs::write(&config_path, "# test config\n")?;
-
+/// Start a server at a caller-owned `root` path. The caller is
+/// responsible for keeping `root` alive for the process's lifetime
+/// (e.g. holding the `tempfile::TempDir`). Used by restart/restore
+/// tests that need the same on-disk state across stop/start cycles.
+pub async fn start_test_server_at(
+    root: &std::path::Path,
+    args: &[&str],
+    ports: &[u16],
+) -> std_io::Result<ServerHandle> {
     let ports_str = ports.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
 
     // `parse_id_list` dedupes via a HashSet, so `0,0` collapses to a single
@@ -93,8 +102,8 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
     let bin = crow_kv_server_bin();
     let mut cmd = Command::new(bin);
     cmd.args(args)
-        .arg("--config")
-        .arg(&config_path)
+        .arg("--root")
+        .arg(root)
         .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
@@ -104,8 +113,6 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
     }
     cmd.arg("--election-profile")
         .arg("e2e")
-        .arg("--wal-root")
-        .arg(&wal_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
@@ -174,8 +181,7 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
     let handle = ServerHandle {
         child,
         base_url: format!("http://{addr}"),
-        _wal_dir: wal_dir,
-        _config_dir: config_dir,
+        root: None,
     };
     handle.wait_for_ready(Duration::from_secs(10)).await?;
     Ok(handle)

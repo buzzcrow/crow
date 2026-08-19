@@ -34,6 +34,7 @@ impl KeepAliveLoop {
         instance_id: u64,
         grpc_endpoint: String,
         group0_endpoint: &str,
+        data_root: String,
         interval_secs: u64,
     ) -> Self {
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
@@ -46,7 +47,7 @@ impl KeepAliveLoop {
             // Initial registration.
             let (stores, groups) = hosted_summary(&registry);
             if let Err(e) = svc
-                .register_kv_server(instance_id, &grpc_endpoint, &stores, &groups, "ok")
+                .register_kv_server(instance_id, &grpc_endpoint, &stores, &groups, "ok", &data_root)
                 .await
             {
                 warn!(error = %e, "keep-alive: initial register failed");
@@ -63,7 +64,7 @@ impl KeepAliveLoop {
                     _ = ticker.tick() => {
                         let (stores, groups) = hosted_summary(&registry);
                         if let Err(e) = svc
-                            .heartbeat_kv_server(instance_id, &grpc_endpoint, &stores, &groups, "ok")
+                            .heartbeat_kv_server(instance_id, &grpc_endpoint, &stores, &groups, "ok", &data_root)
                             .await
                         {
                             warn!(error = %e, "keep-alive: heartbeat failed");
