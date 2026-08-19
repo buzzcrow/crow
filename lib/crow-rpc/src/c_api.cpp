@@ -290,6 +290,10 @@ crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t
     crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
 
     // Bump refcount so the client's handle stays valid after submit.
+    // The caller transfers ownership of the crow_rpc_buffer_s wrapper
+    // to us; we release it after submit (decrementing the ref, freeing
+    // the wrapper struct). The C++ RpcClient holds its own ref via the
+    // cloned Buffer, which is released after the frame is sent.
     if (ctrl_buf != nullptr)
         ctrl_buf->ref_clone();
     if (data_buf != nullptr)
@@ -311,6 +315,14 @@ crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t
     uint64_t returned =
         client->client->call(server->server->transport(), conn->conn.get(), req_id, ctrl_buf, data_buf, msg_type,
                              [adapter](crow::rpc::Frame *resp, crow::rpc::RpcError err) { (*adapter)(resp, err); });
+
+    // Release the caller's wrapper handles (decrements the ref bumped
+    // above and frees the crow_rpc_buffer_s struct). The C++ side holds
+    // its own ref via the cloned Buffer.
+    crow_rpc_buffer_release(control);
+    if (data != nullptr) {
+        crow_rpc_buffer_release(data);
+    }
 
     if (returned == 0) {
         return CROW_RPC_ERR_SEND_QUEUE;
@@ -337,7 +349,15 @@ crow_rpc_status crow_rpc_client_call_one_way(crow_rpc_client_t client, crow_rpc_
     if (data_buf != nullptr)
         data_buf->ref_clone();
 
-    if (!client->client->call_one_way(server->server->transport(), conn->conn.get(), ctrl_buf, data_buf, msg_type)) {
+    bool ok = client->client->call_one_way(server->server->transport(), conn->conn.get(), ctrl_buf, data_buf, msg_type);
+
+    // Release the caller's wrapper handles (same as call).
+    crow_rpc_buffer_release(control);
+    if (data != nullptr) {
+        crow_rpc_buffer_release(data);
+    }
+
+    if (!ok) {
         return CROW_RPC_ERR_SEND_QUEUE;
     }
     return CROW_RPC_OK;
@@ -365,7 +385,7 @@ crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int
 // logic as the load_test.cpp echo handler, compiled into the library.
 static crow::rpc::OutFrame *echo_handler(crow::rpc::Frame *request, crow::rpc::Connection *conn)
 {
-    uint64_t           req_id = crow::rpc::extract_request_id(request->control, request->control_len);
+    uint64_t               req_id    = crow::rpc::extract_request_id(request->control, request->control_len);
     crow::rpc::BufferPool *pool      = conn->pool();
     crow::rpc::Buffer     *resp_ctrl = crow::rpc::build_ping_response(pool, req_id, 0);
 

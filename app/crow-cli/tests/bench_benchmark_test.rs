@@ -175,3 +175,46 @@ async fn bench_compare_two_reports() {
     assert!(stdout.contains(&run_id_1), "stdout={stdout}");
     assert!(stdout.contains(&run_id_2), "stdout={stdout}");
 }
+
+/// `bench run --target rpc --duration-secs 3` runs the in-process RPC
+/// echo benchmark end-to-end. No KV cluster needed — the RPC target
+/// provisions its own server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_benchmark_rpc_end_to_end() {
+    let _lock = bench_lock();
+    let cli = crow_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crow_kv CLI binary not built ({})", cli.display());
+        return;
+    }
+
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            "rpc",
+            "--workload",
+            "write",
+            "--duration-secs",
+            "3",
+            "--threads",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "64",
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("report (json):"), "stdout={stdout}");
+    assert!(stdout.contains("target          : rpc"), "stdout={stdout}");
+    assert!(stdout.contains("total_ops"), "stdout={stdout}");
+    // RPC echo should have zero errors.
+    assert!(stdout.contains("total_errors    : 0"), "stdout={stdout}");
+}

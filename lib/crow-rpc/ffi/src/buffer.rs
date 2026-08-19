@@ -101,3 +101,8 @@ impl Drop for BufferPool {
         }
     }
 }
+
+// Safety: BufferPool wraps a C++ handle that is safe to share across
+// threads (the pool uses a mutex-protected free list + atomic refcounts).
+unsafe impl Send for BufferPool {}
+unsafe impl Sync for BufferPool {}

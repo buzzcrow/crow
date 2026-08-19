@@ -1,7 +1,228 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! RPC bench target: provisions an in-process `RpcServer` with a
-//! built-in echo handler, builds `RpcClient`-backed workers that
-//! send ping requests with data payloads and verify the echo response.
-//! Implemented in Phase 3.
+//! RPC bench target: provisions an in-process `RpcServer` with the
+//! built-in echo handler, builds `RpcClient`-backed workers that send
+//! ping requests with data payloads and verify the echo response.
+//!
+//! This measures raw RPC transport throughput (epoll + framing +
+//! request/response correlation) without any KV/storage layer in the
+//! path. The echo handler simply copies request data to response data,
+//! so the benchmark is purely I/O-bound.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use crow_console_shared::error::{Error, Result};
+use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
+use crow_rpc_ffi::{BufferPool, Connection, RpcClient, RpcServer};
+use flatbuffers::FlatBufferBuilder;
+
+use super::super::report::OpOutcome;
+use super::super::runner::BenchConfig;
+use super::super::workload::OpGen;
+use super::super::workload::OpKind;
+use super::{BenchClient, BenchTarget};
+
+/// Msg type for the echo handler. Uses a custom type (100) to avoid
+/// colliding with the built-in ping handler (`EConnectionPingRequest`).
+const ECHO_MSG_TYPE: u16 = 100;
+
+/// RPC bench target: in-process server + echo handler.
+pub(crate) struct RpcTarget {
+    server: Option<Arc<RpcServer>>,
+    pool: Option<Arc<BufferPool>>,
+    port: i32,
+    /// The shared RPC client used by all workers.
+    client: Option<Arc<RpcClient>>,
+    /// Global request ID counter — shared across all workers to avoid
+    /// `request_id` collisions (the C API uses the flatbuffer's `id` field
+    /// as the `request_id` for response correlation).
+    request_id_counter: Arc<AtomicU64>,
+}
+
+impl RpcTarget {
+    pub(crate) fn new() -> Self {
+        Self {
+            server: None,
+            pool: None,
+            port: 0,
+            client: None,
+            request_id_counter: Arc::new(AtomicU64::new(1)),
+        }
+    }
+}
+
+impl BenchTarget for RpcTarget {
+    type Client = RpcBenchClient;
+
+    fn label(&self) -> &'static str {
+        "rpc"
+    }
+
+    async fn provision(&mut self, _cfg: &BenchConfig) -> Result<()> {
+        let pool = Arc::new(BufferPool::new(4096));
+        let server = Arc::new(RpcServer::new(Some(&pool)));
+        server
+            .listen("127.0.0.1", 0)
+            .map_err(|e| Error::Config(format!("rpc listen: {e}")))?;
+        self.port = server.port();
+        if self.port <= 0 {
+            return Err(Error::Config("rpc server did not bind a port".to_string()));
+        }
+
+        // Register the built-in echo handler for our custom msg_type.
+        server.register_echo_handler(ECHO_MSG_TYPE);
+
+        server.start();
+        // Give the acceptor thread time to start.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        self.client = Some(Arc::new(RpcClient::new()));
+        self.pool = Some(pool);
+        self.server = Some(server);
+        Ok(())
+    }
+
+    async fn build_client(&self) -> Result<RpcBenchClient> {
+        let server = self
+            .server
+            .as_ref()
+            .ok_or_else(|| Error::Config("rpc target not provisioned".to_string()))?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Config("rpc target not provisioned".to_string()))?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| Error::Config("rpc target not provisioned".to_string()))?;
+
+        // Connect to the server. Each worker gets its own connection.
+        let conn = server
+            .connect("127.0.0.1", self.port)
+            .map_err(|e| Error::Config(format!("rpc connect: {e}")))?;
+
+        Ok(RpcBenchClient {
+            client: Arc::clone(client),
+            server: Arc::clone(server),
+            conn: Arc::new(conn),
+            pool: Arc::clone(pool),
+            request_id_counter: Arc::clone(&self.request_id_counter),
+        })
+    }
+
+    async fn pre_populate(&self, _client: &RpcBenchClient, _cfg: &BenchConfig) -> Result<(u64, u64)> {
+        Ok((0, 0))
+    }
+
+    async fn cleanup(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.stop();
+        }
+        self.client = None;
+        self.pool = None;
+    }
+
+    fn supports_pipeline(&self) -> bool {
+        true
+    }
+
+    fn default_pipeline_depth(&self, cfg: &BenchConfig) -> usize {
+        // Default: connections * threads, clamped to [1, 256].
+        (cfg.connections as usize * cfg.threads as usize).clamp(1, 256)
+    }
+}
+
+/// RPC bench client: wraps an `RpcClient` + `Connection` and sends
+/// echo requests with data payloads. Cheaply cloneable (Arc handles).
+#[derive(Clone)]
+pub(crate) struct RpcBenchClient {
+    client: Arc<RpcClient>,
+    server: Arc<RpcServer>,
+    conn: Arc<Connection>,
+    pool: Arc<BufferPool>,
+    /// Global request ID counter — shared across all workers to avoid
+    /// `request_id` collisions (the C API uses the flatbuffer's `id` field
+    /// as the `request_id` for response correlation).
+    request_id_counter: Arc<AtomicU64>,
+}
+
+impl BenchClient for RpcBenchClient {
+    fn issue_op(
+        &self,
+        _kind: OpKind,
+        _gen: &mut OpGen,
+        cfg: &BenchConfig,
+        _worker_id: u32,
+        iter: u64,
+    ) -> impl std::future::Future<Output = OpOutcome> + Send {
+        let client = Arc::clone(&self.client);
+        let conn = Arc::clone(&self.conn);
+        let pool = Arc::clone(&self.pool);
+        let server = Arc::clone(&self.server);
+        let value_size = cfg.value_size;
+        let request_id = self.request_id_counter.fetch_add(1, Ordering::Relaxed);
+
+        async move {
+            // Build a ConnectionPingRequest flatbuffer control message.
+            // The echo handler extracts the request_id from it and
+            // echoes it back in the ConnectionPingResponse. Using a
+            // global counter ensures unique request_ids across workers.
+            let mut fbb = FlatBufferBuilder::new();
+            let req = ConnectionPingRequest::create(
+                &mut fbb,
+                &ConnectionPingRequestArgs {
+                    id: request_id,
+                    rpc_create_nano: 0,
+                },
+            );
+            fbb.finish(req, None);
+            let fb_bytes = fbb.finished_data();
+
+            #[allow(clippy::cast_possible_truncation, reason = "fb_bytes is small")]
+            let ctrl_cap = fb_bytes.len() as u32;
+            let Some(mut ctrl) = pool.alloc_buffer(ctrl_cap) else {
+                return OpOutcome::default();
+            };
+            ctrl.write(fb_bytes);
+
+            // Allocate data payload (echoed back by the handler).
+            let data = if value_size > 0 {
+                #[allow(clippy::cast_possible_truncation, reason = "value_size is bounded")]
+                let data_cap = value_size as u32;
+                let Some(mut buf) = pool.alloc_buffer(data_cap) else {
+                    return OpOutcome::default();
+                };
+                // Fill with a deterministic pattern for verification.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_possible_wrap,
+                    reason = "mod 256 result fits in u8"
+                )]
+                let payload: Vec<u8> = (0..value_size)
+                    .map(|i| ((iter.wrapping_add(i as u64)) % 256) as u8)
+                    .collect();
+                buf.write(&payload);
+                Some(buf)
+            } else {
+                None
+            };
+
+            match client.call(&server, &conn, ctrl, data, ECHO_MSG_TYPE) {
+                Ok(future) => {
+                    // 2s timeout — the in-process loopback should respond
+                    // in <1ms; a timeout indicates a lost response.
+                    match tokio::time::timeout(std::time::Duration::from_secs(2), future).await {
+                        Ok(Ok(_response)) => OpOutcome {
+                            ok: true,
+                            ..Default::default()
+                        },
+                        Ok(Err(_)) | Err(_) => OpOutcome::default(),
+                    }
+                }
+                Err(_) => OpOutcome::default(),
+            }
+        }
+    }
+}

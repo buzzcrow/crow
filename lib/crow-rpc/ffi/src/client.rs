@@ -119,6 +119,12 @@ impl Drop for RpcClient {
     }
 }
 
+// Safety: RpcClient wraps a C++ handle that is safe to share across
+// threads (request/response correlation is via oneshot channels, the
+// C++ side uses atomic request IDs).
+unsafe impl Send for RpcClient {}
+unsafe impl Sync for RpcClient {}
+
 /// A future that resolves to the RPC response or an error.
 pub struct CallFuture {
     rx: oneshot::Receiver<Result<Response, RpcError>>,

@@ -14,6 +14,7 @@ Rust workspace + C++ storage engine (via FFI).
 - **`crow-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, gRPC service stubs; allocation logic is R72).
 - **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CROW.
 - **`lib/crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
+- **`lib/crow-rpc/ffi`** — Rust async facade over C++ crow-rpc C ABI (epoll/kqueue transport, flatbuffer framing, request/response correlation via oneshot channels).
 
 ## Hard Constraints
 
@@ -33,6 +34,11 @@ Rust workspace + C++ storage engine (via FFI).
   - For anything potentially long-running or hang-prone, use `timeout: 0` (background) + `get_output` polling instead of a long blocking wait.
   - **Do not pipe output through `grep`/`head`/`tail` or redirect `2>&1 | grep error`** — run commands raw so the full stdout/stderr is captured. Only filter when the output is known to be huge (e.g. build logs) and you've said so in your response.
   - After every shell command, paste the full output (or a clearly marked truncation with the first + last N lines) in your response — never just "it passed" or "no errors." The user needs to see the actual output to judge whether a command is hung.
+
+## Bench Targets
+
+- `crow-cli bench run --target kv` (default) — 3-node Paxos cluster, measures full KV path (consensus + WAL + storage). Use `--mode mem|file|block` to select storage engine.
+- `crow-cli bench run --target rpc` — in-process RPC echo server, measures raw transport throughput (epoll/kqueue + framing + correlation). No KV layer. Use `tools/bench-rpc-regression.sh` for the regression sentinel.
 
 ## Dispatch — Read Before Acting
 

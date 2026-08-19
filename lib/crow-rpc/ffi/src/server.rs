@@ -82,6 +82,13 @@ impl Drop for RpcServer {
     }
 }
 
+// Safety: RpcServer wraps a C++ handle that is accessed from multiple
+// threads (the server's own I/O threads + the caller thread). The C++
+// implementation is thread-safe (atomic refcounts, mutex-protected
+// handler registry).
+unsafe impl Send for RpcServer {}
+unsafe impl Sync for RpcServer {}
+
 /// A connection to a peer endpoint.
 pub struct Connection {
     handle: sys::crow_rpc_conn_t,
@@ -100,6 +107,11 @@ impl Drop for Connection {
         // because connections are managed by the transport.
     }
 }
+
+// Safety: Connection wraps a C++ handle that is safe to share across
+// threads (the transport's send queue is mutex-protected).
+unsafe impl Send for Connection {}
+unsafe impl Sync for Connection {}
 
 /// Error codes for the RPC layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

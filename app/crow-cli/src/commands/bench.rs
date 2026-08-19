@@ -209,10 +209,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     let target_label = args.target.as_str();
     match target_label {
         "kv" => bench_benchmark_kv(args, json).await,
-        "rpc" => {
-            eprintln!("error: --target rpc is not yet implemented (Phase 3)");
-            ExitCode::from(1)
-        }
+        "rpc" => bench_benchmark_rpc(args, json).await,
         other => {
             eprintln!("error: unknown target {other:?} (expected: kv|rpc)");
             ExitCode::from(1)
@@ -434,6 +431,71 @@ async fn bench_benchmark_kv(args: RunArgs, json: bool) -> ExitCode {
     println!("\nreport (json): {}", path.display());
     println!("report (md):   {}", md_path.display());
     print_anomalies(&report, log_warning_count);
+    ExitCode::SUCCESS
+}
+
+/// RPC bench: in-process echo server, measure raw transport throughput.
+async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
+    use crate::bench::target::rpc::RpcTarget;
+    use crate::bench::target::BenchTarget;
+    use crate::bench::{run_bench, BenchConfig, WorkloadKind};
+    use std::time::Duration;
+
+    let kind = match WorkloadKind::parse(&args.workload) {
+        Ok(k) => k,
+        Err(bad) => {
+            eprintln!("error: unknown workload {bad:?} (expected: read|write|list|mix)");
+            return ExitCode::from(1);
+        }
+    };
+
+    let run_id = args.run_id.clone().unwrap_or_else(next_run_id);
+    let now = chrono::Utc::now();
+    let folder_name = run_folder_name(&run_id, "rpc", now);
+    let run_dir = crate::bench::BenchReport::default_dir().join(&folder_name);
+
+    println!("provisioning in-process RPC echo server...");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let mut target = RpcTarget::new();
+
+    let mut cfg = BenchConfig::defaults(String::new(), kind);
+    cfg.target = "rpc".to_string();
+    cfg.mode = "rpc".to_string();
+    cfg.connections = args.connections;
+    cfg.threads = args.threads;
+    cfg.duration = Duration::from_secs(args.duration_secs);
+    cfg.key_space = args.key_space;
+    cfg.value_size = args.value_size;
+    cfg.run_id = Some(run_id.clone());
+    cfg.report_dir = Some(run_dir.clone());
+    // RPC target doesn't use metrics_log_path (no KV client metrics).
+    cfg.pipeline_depth = args
+        .pipeline_depth
+        .unwrap_or_else(|| target.default_pipeline_depth(&cfg));
+
+    println!(
+        "running {} workload for {}s (pipeline_depth={})...",
+        args.workload, args.duration_secs, cfg.pipeline_depth
+    );
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let (report, path) = match run_bench(&mut target, cfg).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: bench run: {e}");
+            target.cleanup().await;
+            return ExitCode::from(2);
+        }
+    };
+
+    target.cleanup().await;
+
+    if json {
+        return crate::utils::print_json(&report);
+    }
+    println!("{}", report.human_summary());
+    println!("\nreport (json): {}", path.display());
     ExitCode::SUCCESS
 }
 
