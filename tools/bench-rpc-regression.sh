@@ -19,19 +19,20 @@
 #
 # Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS):
 #   value_size=64, 5s, in-process echo, kqueue loopback, io_workers=1
-#   (single-worker fast path: udata dispatch + direct-write + submit_inline)
+#   (single-worker fast path: udata dispatch + direct-write + submit_inline
+#    + per-worker recv buffer + send aggregation)
 #
 #   T    C    ops/s     avg    p50    p99    p999   err
-#   1    1    37,363    26     25     39     76     0
-#   8    4    105,483   75     74     106    169    0
-#   16   8    114,916   138    135    268    379    0
-#   64   8    122,264   522    516    720    1,045  0
-#   128  16   126,014   1,015  1,003  1,286  1,848  0
-#   256  16   125,622   2,037  1,987  3,388  4,900  0
-#   512  32   124,087   4,127  4,066  4,920  5,372  0
+#   1    1    36,711    26     26     41     72     0
+#   8    4    114,160   69     68     105    171    0
+#   16   8    122,734   129    127    183    292    0
+#   64   8    131,314   486    482    608    992    0
+#   128  16   129,252   989    978    1,261  1,783  0
+#   256  16   132,341   1,933  1,906  2,404  3,380  0
+#   512  32   130,884   3,912  3,854  4,636  5,392  0
 #
-# TPS ceiling ~126K at 128T+. Single C++ I/O worker thread is the
-# bottleneck; beyond 128T latency doubles without TPS gain.
+# TPS ceiling ~132K at 256T+. Single C++ I/O worker thread is the
+# bottleneck; beyond 256T latency doubles without TPS gain.
 # Multi-worker (io_workers>1) with EV_ONESHOT re-arm does NOT help for
 # loopback — the re-arm overhead exceeds parallelism benefit.
 #

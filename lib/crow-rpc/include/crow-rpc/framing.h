@@ -106,6 +106,35 @@ class FrameParser
     // returns nullptr (caller should check last_error()).
     Frame *advance(uint32_t bytes_read);
 
+    // Feed bytes from an external buffer (e.g. a per-worker receive
+    // buffer filled by one big read()). Copies bytes into the parser's
+    // internal buffers and yields complete frames via the callback.
+    // Returns the number of bytes consumed (may be < len if an error
+    // occurs or the parser needs a different state). This trades one
+    // extra memcpy for fewer syscalls: one read() can grab data for
+    // multiple frames, then feed_data processes them all.
+    template <typename Callback> uint32_t feed_data(const uint8_t *data, uint32_t len, Callback &&on_frame)
+    {
+        uint32_t consumed = 0;
+        while (consumed < len && error_ == FramingError::None) {
+            auto target = next_read_target();
+            if (target.len == 0) {
+                break;
+            }
+            uint32_t to_copy = target.len;
+            if (to_copy > len - consumed) {
+                to_copy = len - consumed;
+            }
+            std::memcpy(target.ptr, data + consumed, to_copy);
+            consumed += to_copy;
+            Frame *frame = advance(to_copy);
+            if (frame) {
+                on_frame(frame);
+            }
+        }
+        return consumed;
+    }
+
     // Reset to ReadingHeader (after a frame is yielded or on error).
     void reset();
 

@@ -26,9 +26,17 @@ op, down from 5 in the original design). The optimizations:
   Writable event. Eliminates 1 event per op (the Writable event for
   the request).
 - **submit_inline for server responses**: the server dispatch calls
-  `submit_inline` (direct enqueue + writev) instead of `transport->
-  submit` (cross-thread notify). Eliminates 1 event per op (the
-  Notify event for the response).
+  `submit_inline` (enqueue only, no immediate writev) instead of
+  `transport->submit` (cross-thread notify). Eliminates 1 event per
+  op (the Notify event for the response).
+- **Per-worker receive buffer**: one big `read()` into a 256KB
+  per-worker buffer, then `feed_data` parses all frames it contains.
+  Reduces syscalls when multiple frames are pending on one
+  connection (common at high pipeline depth).
+- **Send aggregation**: after processing all readable events in one
+  event-loop batch, `writev` all pending responses per connection in
+  one syscall. Coalesces multiple responses (from multiple frames
+  read in one `read()`) into a single `writev`.
 
 ```
 Rust worker (tokio task)
@@ -86,24 +94,23 @@ Rust worker (tokio task)
 
   ── Server-side (same C++ I/O worker, same process) ──
 
-  Event 2: Readable (EVFILT_READ) — read + echo + direct write response
+  Event 2: Readable (EVFILT_READ) — read + echo + enqueue response
     → kevent wait → Readable event (udata = Connection*, no map lookup)
-      → on_readable_impl(conn, fd)
-        → FrameParser::advance: parse header → alloc control → alloc data
-          [copy: ::read(fd, target.ptr, target.len) → parser buffers]
-        → conn->on_frame(frame) → RpcServer::dispatch(frame, conn)
-          → echo_handler:
-            → extract_request_id(request->control)
-            → build_ping_response(pool, req_id, 0)
-              [pool alloc + memcpy: response control buffer]
-            → pool->alloc + memcpy(request->data)
-              [copy: request data → response data buffer]
-            → delete request
-            → return OutFrame { response_ctrl, response_data }
-          → submit_inline(conn, response)  ← NO Notify event
-            → conn->enqueue_send(response)
-            → on_writable_impl(conn, fd)  ← DIRECT WRITE response
-              → writev response frame to socket
+      → on_readable_impl(conn, fd, recv_buf, recv_buf_size, pending_writes)
+        → ::read(fd, recv_buf, 256KB)  ← ONE big read for multiple frames
+        → parser.feed_data(recv_buf, n, on_frame callback)
+          → copies bytes into parser buffers, yields complete frames
+          → for each frame: conn->on_frame(frame)
+            → RpcServer::dispatch → echo_handler
+              → build response (pool alloc + memcpy)
+              → submit_inline(conn, response)  ← ENQUEUE ONLY (no writev)
+        → if conn has pending sends: add to pending_writes
+
+  After all events in this batch:
+    → for each conn in pending_writes:
+        → on_writable_impl(conn, fd)  ← ONE writev for all responses
+          → drain_send_queue + build iovecs + writev
+          → if partial: arm_write(fd)
 
   ── Response arrives back on client connection ──
 
@@ -194,31 +201,34 @@ all configs.
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
-### Full sweep (after single-epoll optimizations)
+### Full sweep (after single-epoll + recv-buffer + send-aggregation)
 
 | Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 37,363 | 26 | 25 | 39 | 76 | 0 |
-| 8 | 4 | 32 | 105,483 | 75 | 74 | 106 | 169 | 0 |
-| 16 | 8 | 128 | 114,916 | 138 | 135 | 268 | 379 | 0 |
-| 64 | 8 | 512 | 122,264 | 522 | 516 | 720 | 1,045 | 0 |
-| 128 | 16 | 2048 | 126,014 | 1,015 | 1,003 | 1,286 | 1,848 | 0 |
-| 256 | 16 | 4096 | 125,622 | 2,037 | 1,987 | 3,388 | 4,900 | 0 |
-| 512 | 32 | 16384 | 124,087 | 4,127 | 4,066 | 4,920 | 5,372 | 0 |
+| 1 | 1 | 1 | 36,711 | 26 | 26 | 41 | 72 | 0 |
+| 8 | 4 | 32 | 114,160 | 69 | 68 | 105 | 171 | 0 |
+| 16 | 8 | 128 | 122,734 | 129 | 127 | 183 | 292 | 0 |
+| 64 | 8 | 512 | 131,314 | 486 | 482 | 608 | 992 | 0 |
+| 128 | 16 | 2048 | 129,252 | 989 | 978 | 1,261 | 1,783 | 0 |
+| 256 | 16 | 4096 | 132,341 | 1,933 | 1,906 | 2,404 | 3,380 | 0 |
+| 512 | 32 | 16384 | 130,884 | 3,912 | 3,854 | 4,636 | 5,392 | 0 |
 
-### Before vs after single-epoll optimizations
+### Optimization progression
 
-The optimizations (udata dispatch, direct-write on notify, submit_inline
-for server responses) lifted the ceiling from ~104K to ~126K — a 22%
-improvement. Per-op latency at 1T:1C dropped from 29µs to 26µs.
+| Config | Baseline | +udata+direct-write+inline | +recv-buf+send-agg | Total |
+| --- | --- | --- | --- | --- |
+| 1T:1C | 33K | 37K (+12%) | 37K (0%) | +12% |
+| 8T:4C | 84K | 105K (+25%) | 114K (+9%) | +36% |
+| 16T:8C | 90K | 115K (+28%) | 123K (+7%) | +37% |
+| 64T:8C | 97K | 122K (+26%) | 131K (+7%) | +35% |
+| 128T:16C | 99K | 126K (+27%) | 129K (+2%) | +30% |
+| 256T:16C | 103K | 126K (+22%) | 132K (+5%) | +28% |
 
-| Config | Before (ops/s) | After (ops/s) | Improvement |
-| --- | --- | --- | --- |
-| 1T:1C | 33K | 37K | 12% |
-| 8T:4C | 84K | 105K | 25% |
-| 16T:8C | 90K | 115K | 28% |
-| 128T:16C | 99K | 126K | 27% |
-| 256T:16C | 103K | 126K | 22% |
+The per-worker receive buffer + send aggregation adds 5-9% on top of
+the single-epoll optimizations, with the biggest gain at 8T:4C (9%)
+where multiple frames are most likely to be pending per connection.
+1T:1C sees no gain because pipeline depth = 1 (only one frame in flight
+per connection, so each read() gets exactly one frame).
 
 ### Multi-worker (EV_ONESHOT) — does not help for loopback
 

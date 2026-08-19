@@ -135,6 +135,17 @@ class Worker
     std::mutex                                       submit_mu_;
     std::vector<std::pair<Connection *, OutFrame *>> pending_submits_;
 
+    // Per-worker receive buffer: one big read() grabs data for multiple
+    // frames, then feed_data processes them all. Reduces syscalls when
+    // multiple frames are pending on one connection.
+    static constexpr size_t RECV_BUF_SIZE = 256 * 1024;
+    std::vector<uint8_t>    recv_buf_;
+
+    // Pending sends accumulated during on_readable (send aggregation).
+    // After processing all readable frames for a connection, we batch
+    // writev all pending responses in one syscall.
+    std::vector<Connection *> pending_write_conns_;
+
     friend class SocketTransport;
 
     void run_loop();

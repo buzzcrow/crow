@@ -24,7 +24,8 @@ namespace crow::rpc
 {
 
 // Forward declarations — defined after Worker (shared I/O logic).
-static void on_readable_impl(Connection *conn, int fd);
+static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
+                             std::vector<Connection *> &pending_writes);
 static bool on_writable_impl(Connection *conn, int fd);
 
 // ── Worker ────────────────────────────────────────────────────────
@@ -114,6 +115,11 @@ void Worker::run_loop()
     constexpr int MAX_EVENTS = 64;
     EngineEvent   events[MAX_EVENTS];
 
+    // Lazily allocate the per-worker receive buffer.
+    if (recv_buf_.empty()) {
+        recv_buf_.resize(RECV_BUF_SIZE);
+    }
+
     while (running_.load(std::memory_order_relaxed)) {
         int n = engine_->wait(events, MAX_EVENTS, 1000); // 1s timeout
         for (int i = 0; i < n; i++) {
@@ -129,7 +135,7 @@ void Worker::run_loop()
                 break;
             case SocketEvent::Readable:
                 if (ev.conn != nullptr) {
-                    on_readable_impl(ev.conn, ev.fd);
+                    on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_);
                     // In one-shot mode, re-arm read after processing
                     // (EV_ONESHOT consumed the event). Without this, the
                     // connection goes silent — no more read events fire.
@@ -167,6 +173,27 @@ void Worker::run_loop()
                 break;
             }
         }
+
+        // Send aggregation: after processing all events, batch writev
+        // pending responses collected during on_readable. This coalesces
+        // multiple responses (from multiple frames read in one read())
+        // into a single writev per connection.
+        if (!pending_write_conns_.empty()) {
+            for (Connection *conn : pending_write_conns_) {
+                if (!conn->is_open()) {
+                    continue;
+                }
+                int fd = static_cast<int>(conn->transport_handle);
+                if (!on_writable_impl(conn, fd)) {
+                    // All data sent — no need to arm write.
+                }
+                else {
+                    // Partial write or EAGAIN — arm write for remaining.
+                    engine_->arm_write(fd);
+                }
+            }
+            pending_write_conns_.clear();
+        }
     }
 }
 
@@ -175,15 +202,15 @@ void Worker::run_loop()
 // hot-path read/write methods — the engine tells the worker *when* to
 // read/write, and these do the actual I/O + parsing.
 
-static void on_readable_impl(Connection *conn, int fd)
+static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
+                             std::vector<Connection *> &pending_writes)
 {
     auto &parser = conn->parser();
     while (true) {
-        auto target = parser.next_read_target();
-        if (target.len == 0) {
-            break;
-        }
-        ssize_t n = ::read(fd, target.ptr, target.len);
+        // One big read into the per-worker buffer, then feed_data
+        // processes all frames it contains. This reduces syscalls when
+        // multiple frames are pending on one connection.
+        ssize_t n = ::read(fd, recv_buf, recv_buf_size);
         if (n <= 0) {
             if (n == 0) {
                 conn->close();
@@ -191,12 +218,69 @@ static void on_readable_impl(Connection *conn, int fd)
             else if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 conn->close();
             }
-            return;
+            break;
         }
-        Frame *frame = parser.advance(static_cast<uint32_t>(n));
-        if (frame != nullptr) {
-            conn->on_frame(frame);
+        // feed_data copies bytes into parser buffers and yields frames.
+        uint32_t consumed =
+            parser.feed_data(recv_buf, static_cast<uint32_t>(n), [conn](Frame *frame) { conn->on_frame(frame); });
+        if (consumed < static_cast<uint32_t>(n)) {
+            // Parser couldn't consume all — partial frame at buffer end.
+            // Fill the parser's internal buffer directly to complete it.
+            while (true) {
+                auto target = parser.next_read_target();
+                if (target.len == 0) {
+                    break;
+                }
+                ssize_t n2 = ::read(fd, target.ptr, target.len);
+                if (n2 <= 0) {
+                    if (n2 == 0) {
+                        conn->close();
+                    }
+                    else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        conn->close();
+                    }
+                    goto done;
+                }
+                Frame *frame = parser.advance(static_cast<uint32_t>(n2));
+                if (frame != nullptr) {
+                    conn->on_frame(frame);
+                }
+            }
+            goto done;
         }
+        // All consumed — check if parser still needs more (partial frame
+        // at buffer boundary). If next_read_target returns non-zero len,
+        // we need to read more to complete the frame.
+        auto target = parser.next_read_target();
+        if (target.len == 0) {
+            break;
+        }
+        // Parser needs more bytes for the current frame — read directly
+        // into parser buffer until frame completes.
+        while (target.len > 0) {
+            ssize_t n2 = ::read(fd, target.ptr, target.len);
+            if (n2 <= 0) {
+                if (n2 == 0) {
+                    conn->close();
+                }
+                else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    conn->close();
+                }
+                goto done;
+            }
+            Frame *frame = parser.advance(static_cast<uint32_t>(n2));
+            if (frame != nullptr) {
+                conn->on_frame(frame);
+            }
+            target = parser.next_read_target();
+        }
+        break;
+    }
+done:
+    // If on_frame enqueued responses (via submit_inline), collect this
+    // connection for batch writev after all events are processed.
+    if (conn->has_pending_send()) {
+        pending_writes.push_back(conn);
     }
 }
 
@@ -421,19 +505,13 @@ void SocketTransport::drain_shared_submits()
 
 bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
 {
-    // Direct enqueue + write from the worker thread. Bypasses the
-    // cross-thread submit queue + notify, eliminating a Notify event
-    // per response on the server side.
-    if (!conn->enqueue_send(frame)) {
-        return false;
-    }
-    int  fd       = static_cast<int>(conn->transport_handle);
-    bool all_sent = !on_writable_impl(conn, fd);
-    if (!all_sent && shared_engine_) {
-        // Partial write in multi-worker mode — re-arm write via shared engine.
-        shared_engine_->arm_write(fd);
-    }
-    return all_sent;
+    // Enqueue only — the actual writev is deferred to the worker's
+    // post-event flush (send aggregation). This coalesces multiple
+    // responses from one read() into a single writev per connection,
+    // and multiple connections' responses into one event-loop batch.
+    // Bypasses the cross-thread submit queue + notify, eliminating a
+    // Notify event per response on the server side.
+    return conn->enqueue_send(frame);
 }
 
 Worker *SocketTransport::get_worker()
