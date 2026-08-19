@@ -59,6 +59,15 @@ impl RpcServer {
         }
     }
 
+    /// Register the built-in echo handler for the given msg_type. The
+    /// echo handler returns the request data as the response data, with
+    /// a ConnectionPingResponse control buffer echoing the request_id.
+    /// This is the simplest way to get a request-response loopback for
+    /// benchmarks and smoke tests.
+    pub fn register_echo_handler(&self, msg_type: u16) {
+        unsafe { sys::crow_rpc_server_register_echo_handler(self.handle, msg_type) };
+    }
+
     pub(crate) fn handle(&self) -> sys::crow_rpc_server_t {
         self.handle
     }

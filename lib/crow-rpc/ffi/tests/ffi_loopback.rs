@@ -178,3 +178,81 @@ async fn ping_loopback_with_data() {
 
     server.stop();
 }
+
+// ── Echo handler loopback ─────────────────────────────────────────
+// Register the built-in echo handler for a custom msg_type, send a
+// request with data payload, and verify the response data matches.
+#[tokio::test]
+async fn echo_handler_loopback() {
+    const ECHO_MSG_TYPE: u16 = 100;
+    const DATA_SIZE: usize = 512;
+
+    let server = RpcServer::new(None);
+    server.listen("127.0.0.1", 0).expect("listen failed");
+    let port = server.port();
+    assert!(port > 0);
+
+    // Register the built-in echo handler for our custom msg_type.
+    server.register_echo_handler(ECHO_MSG_TYPE);
+
+    server.start();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let conn = server.connect("127.0.0.1", port).expect("connect failed");
+
+    // Build a ConnectionPingRequest flatbuffer (the echo handler
+    // extracts the request_id from it and echoes it back in the
+    // ConnectionPingResponse control buffer).
+    let mut fbb = FlatBufferBuilder::new();
+    let req = ConnectionPingRequest::create(
+        &mut fbb,
+        &ConnectionPingRequestArgs {
+            id: 777,
+            rpc_create_nano: 0,
+        },
+    );
+    fbb.finish(req, None);
+    let fb_bytes = fbb.finished_data();
+
+    let pool = BufferPool::new(256);
+    let mut ctrl = pool.alloc_buffer(fb_bytes.len() as u32).expect("alloc control");
+    ctrl.write(fb_bytes);
+
+    // 512-byte data payload — the echo handler should return it verbatim.
+    let payload: Vec<u8> = (0..DATA_SIZE).map(|i| (i % 256) as u8).collect();
+    let mut data = pool.alloc_buffer(DATA_SIZE as u32).expect("alloc data");
+    data.write(&payload);
+
+    let caller = RpcClient::new();
+    let future = caller
+        .call(&server, &conn, ctrl, Some(data), ECHO_MSG_TYPE)
+        .expect("call submit failed");
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), future)
+        .await
+        .expect("timeout waiting for response")
+        .expect("callback dropped");
+
+    // Verify the control buffer has the echoed request_id.
+    assert!(response.control.is_some(), "response should have control");
+    let ctrl_buf = response.control.unwrap();
+    let resp_bytes = ctrl_buf.bytes();
+    let resp = flatbuffers::root::<ConnectionPingResponse>(resp_bytes).expect("failed to parse response");
+    assert_eq!(resp.id(), 777, "response id should match request id");
+
+    // Verify the data buffer matches the request payload (echo).
+    assert!(response.data.is_some(), "response should have data");
+    let data_buf = response.data.unwrap();
+    assert_eq!(
+        data_buf.bytes().len(),
+        DATA_SIZE,
+        "response data length should match"
+    );
+    assert_eq!(
+        data_buf.bytes(),
+        &payload[..],
+        "response data should match request data"
+    );
+
+    server.stop();
+}

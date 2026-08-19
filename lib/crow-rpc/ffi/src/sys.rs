@@ -102,4 +102,6 @@ extern "C" {
     ) -> crow_rpc_status;
 
     pub fn crow_rpc_connect(server: crow_rpc_server_t, addr: *const c_char, port: c_int) -> crow_rpc_conn_t;
+
+    pub fn crow_rpc_server_register_echo_handler(server: crow_rpc_server_t, msg_type: u16);
 }

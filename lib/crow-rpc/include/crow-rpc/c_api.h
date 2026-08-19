@@ -76,6 +76,15 @@ crow_rpc_status crow_rpc_client_call_one_way(crow_rpc_client_t client, crow_rpc_
 // ── Connection (for client-side use) ──────────────────────────────
 crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int port);
 
+// ── Built-in handlers ─────────────────────────────────────────────
+
+// Register the built-in echo handler for the given msg_type. The echo
+// handler returns the request data as the response data, with a
+// ConnectionPingResponse control buffer echoing the request_id. This is
+// the simplest way to get a request-response loopback for benchmarks and
+// smoke tests without writing a C++ handler.
+void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t msg_type);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

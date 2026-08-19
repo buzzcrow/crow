@@ -357,3 +357,38 @@ crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int
     }
     return new crow_rpc_conn_s{conn};
 }
+
+// ── Built-in echo handler ─────────────────────────────────────────
+
+// Echo handler: returns the request data as the response data, with a
+// ConnectionPingResponse control buffer echoing the request_id. Same
+// logic as the load_test.cpp echo handler, compiled into the library.
+static crow::rpc::OutFrame *echo_handler(crow::rpc::Frame *request, crow::rpc::Connection *conn)
+{
+    uint64_t           req_id = crow::rpc::extract_request_id(request->control, request->control_len);
+    crow::rpc::BufferPool *pool      = conn->pool();
+    crow::rpc::Buffer     *resp_ctrl = crow::rpc::build_ping_response(pool, req_id, 0);
+
+    crow::rpc::Buffer *resp_data = nullptr;
+    if (request->data != nullptr && request->data_len > 0) {
+        resp_data = pool->alloc(request->data_len);
+        if (resp_data != nullptr) {
+            std::memcpy(resp_data->data, request->data, request->data_len);
+            resp_data->write(resp_data->data, request->data_len);
+        }
+    }
+
+    // Capture msg_type from the request header so the response matches.
+    uint16_t msg_type = request->header.msg_type;
+
+    delete request;
+    return crow::rpc::build_out_frame(req_id, msg_type, resp_ctrl, resp_data);
+}
+
+void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t msg_type)
+{
+    if (server == nullptr) {
+        return;
+    }
+    server->server->register_handler(msg_type, echo_handler);
+}
