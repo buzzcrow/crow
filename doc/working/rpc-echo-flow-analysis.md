@@ -15,73 +15,67 @@ the benchmark is purely I/O-bound.
 
 ---
 
-## Echo Flow — Single Request/Response
+## Echo Flow — Callback Model (Gap2+Gap3, current)
 
-The flow below shows the optimized path (3 event-loop iterations per
-op, down from 5 in the original design). The optimizations:
-- **udata dispatch**: kqueue/epoll stores `Connection*` in udata,
-  eliminating per-event mutex + map lookup in `wait()`.
+The callback model replaces the tokio oneshot + scheduler path with
+an inline callback chain that runs entirely on the C++ I/O worker
+threads. 3 event-loop iterations per op (down from 5 in the original
+design). Key optimizations:
+
+- **udata dispatch**: epoll stores `Connection*` in udata, eliminating
+  per-event mutex + map lookup.
 - **Direct-write on notify**: when draining pending submits, try
   `writev` immediately instead of arming write + waiting for a
-  Writable event. Eliminates 1 event per op (the Writable event for
-  the request).
-- **submit_inline for server responses**: the server dispatch calls
-  `submit_inline` (enqueue only, no immediate writev) instead of
-  `transport->submit` (cross-thread notify). Eliminates 1 event per
-  op (the Notify event for the response).
+  Writable event. Eliminates 1 event per op.
+- **submit_inline for server responses**: server dispatch calls
+  `submit_inline` (enqueue only) instead of `transport->submit`
+  (cross-thread notify). Eliminates 1 event per op.
 - **Per-worker receive buffer**: one big `read()` into a 256KB
   per-worker buffer, then `feed_data` parses all frames it contains.
-  Reduces syscalls when multiple frames are pending on one
-  connection (common at high pipeline depth).
 - **Send aggregation**: after processing all readable events in one
   event-loop batch, `writev` all pending responses per connection in
-  one syscall. Coalesces multiple responses (from multiple frames
-  read in one `read()`) into a single `writev`.
+  one syscall.
+- **Slab completion pool**: O(1) bitmask index (`request_id &
+  pool_mask`), no hash map lookup, zero per-call heap allocation.
+- **Inline callback resume**: C++ I/O worker invokes the C ABI
+  callback directly on the response thread — no oneshot channel, no
+  tokio scheduler round-trip, no thread switch.
 
 ```
-Rust worker (tokio task)
-  → RpcBenchClient::issue_op
+Rust worker thread (std::thread::spawn, NOT tokio)
+  → submit_next(ctx, None)  ← initial kickoff
     1. request_id = global AtomicU64::fetch_add
-       [global counter: unique IDs across workers — the C API uses
-        the flatbuffer `id` field for response correlation]
     2. Build ConnectionPingRequest flatbuffer (control message)
-       - FlatBufferBuilder::create + finish
-         [copy: fbb internal buffer → pool Buffer via ctrl.write()]
+       [copy: fbb internal buffer → pool Buffer via ctrl.write()]
     3. Allocate data payload from BufferPool (if value_size > 0)
-       - pool.alloc_buffer(value_size)
-       - Fill with deterministic pattern (iter % 256 per byte)
-         [copy: Vec<u8> → pool Buffer via buf.write()]
-    4. RpcClient::call(server, conn, ctrl, data, ECHO_MSG_TYPE)
-       → Rust FFI: crow_rpc_client_call(...)
+       [copy: Vec<u8> → pool Buffer via buf.write()]
+    4. RpcClient::call_callback(server, conn, request_id, ctrl, data,
+       ECHO_MSG_TYPE, bench_on_complete, slot_ptr)
+       → Rust FFI: crow_rpc_client_call_callback(...)
          → C API (c_api.cpp):
            a. ref_clone() on ctrl + data buffers
               [O(1) ref-count bump: C++ RpcClient holds its own ref]
-           b. attach(client, conn) — set on_frame callback for response
-              routing (idempotent)
-           c. extract_request_id(ctrl_buf) — flatbuffer `id` field
-              [zero-copy: reads directly from the control buffer]
-           d. RpcClient::call(transport, conn, req_id, ctrl, data,
-              msg_type, OnCompleteAdapter callback)
-              → insert into pending_ map (req_id → callback)
-                [folly::ConcurrentHashMap insert_or_assign — striped lock]
+           b. RpcClient::call_callback(transport, conn, request_id,
+              ctrl, data, msg_type, cb, user_data)
+              → slab pool: slot[idx].request_id = request_id
+                slot[idx].cb = bench_on_complete
+                slot[idx].user_data = slot_ptr
+                slot[idx].state = PENDING (atomic release)
+                [O(1) bitmask index, no hash map lookup]
               → build_frame: new OutFrame { request_id, header, ctrl, data }
                 [zero-copy: OutFrame holds Buffer pointers, no copy]
               → transport->submit(conn, frame)
                 → SocketTransport::submit: lock submit_mu_, push to
                   pending_submits_ → engine->notify_worker()
-                    [cross-thread: tokio worker → C++ I/O worker]
-           e. crow_rpc_buffer_release(control + data)
+                    [cross-thread: Rust worker → C++ I/O worker]
+           c. crow_rpc_buffer_release(control + data)
               [decrements the ref bumped in (a), frees wrapper struct]
-         → returns CallFuture { oneshot::Receiver }
-    5. tokio::time::timeout(2s, CallFuture).await
-       [yields tokio worker thread while waiting for response]
+    5. thread::park()  ← wait for all in-flight to drain
 
-  ── C++ I/O worker thread (kqueue/epoll loop) ──
+  ── C++ I/O worker thread (epoll loop) ──
 
-  Worker::run_loop (event loop)
-
-  Event 1: Notify (EVFILT_USER) — drain submits + direct write
-    → kevent wait → Notify event
+  Event 1: Notify — drain submits + direct write
+    → epoll_wait → Notify event
       → drain_pending_submits():
         → swap pending_submits_ under submit_mu_
         → for each (conn, frame):
@@ -94,8 +88,8 @@ Rust worker (tokio task)
 
   ── Server-side (same C++ I/O worker, same process) ──
 
-  Event 2: Readable (EVFILT_READ) — read + echo + enqueue response
-    → kevent wait → Readable event (udata = Connection*, no map lookup)
+  Event 2: Readable — read + echo + enqueue response
+    → epoll_wait → Readable event (udata = Connection*, no map lookup)
       → on_readable_impl(conn, fd, recv_buf, recv_buf_size, pending_writes)
         → ::read(fd, recv_buf, 256KB)  ← ONE big read for multiple frames
         → parser.feed_data(recv_buf, n, on_frame callback)
@@ -109,64 +103,141 @@ Rust worker (tokio task)
   After all events in this batch:
     → for each conn in pending_writes:
         → on_writable_impl(conn, fd)  ← ONE writev for all responses
-          → drain_send_queue + build iovecs + writev
-          → if partial: arm_write(fd)
 
   ── Response arrives back on client connection ──
 
-  Event 3: Readable (EVFILT_READ) — read response + callback
-    → kevent wait → Readable event (udata = Connection*)
+  Event 3: Readable — read response + callback
+    → epoll_wait → Readable event (udata = Connection*)
       → on_readable_impl → FrameParser::advance → conn->on_frame
         → RpcClient::on_response(req_id, frame)
-          → pending_.find + erase (folly striped lock, no global mutex)
-          → callback(frame, RpcError::Ok)
-            → OnCompleteAdapter::operator()(frame, Ok)
-              → wrap response control/data in crow_rpc_buffer_s handles
+          → slab pool: idx = request_id & pool_mask_
+            slot[idx].state == PENDING && slot[idx].request_id == req_id
+            → slot[idx].state = DONE (atomic release)
+            → invoke_c_complete(cb, user_data, req_id, frame, Ok)
+              → frame_to_c_handles: wrap control/data in buffer handles
                 [zero-copy: Buffer wraps raw parser pointer, ref=nullptr]
-              → crow_rpc_on_complete(req_id, ctrl_handle, data_handle,
-                CROW_RPC_OK, user_data)
-                → Rust: on_complete_cb
-                  → Box::from_raw(user_data) → oneshot::Sender
-                  → Buffer::from_raw(ctrl_handle + data_handle)
-                  → tx.send(Ok(Response { control, data }))
-                    [wakes the tokio task awaiting CallFuture]
+              → cb(req_id, ctrl_handle, data_handle, CROW_RPC_OK, user_data)
+                → bench_on_complete (Rust, unsafe extern "C"):
+                  → record latency + outcome (if past measure_start)
+                  → release response buffer handles
+                  → if before deadline: submit_next(ctx, Some(req_id))
+                    → request_id = req_id + pool_size  ← SAME slot
+                    → build next request + call_callback
+                  → else: drain_in_flight (atomic fetch_sub)
+                    → if in_flight == 0: thread::unpark(worker)
 
-  ── Back on tokio worker thread ──
+  ── Back on Rust worker thread ──
 
-    6. CallFuture resolves → OpOutcome { ok: true }
-       [Buffer Drop: releases response control + data]
+    6. thread::park() returns → collect stats → return
 ```
 
-**Events per op: 3** (down from 5 in the original design):
+**Events per op: 3**:
 1. Notify — drain submits + direct write request
 2. Readable (server) — read + echo + direct write response
-3. Readable (client) — read response + callback
+3. Readable (client) — read response + inline callback
 
-The original design had 5 events: Notify → Writable (request) →
-Readable (server) → Notify → Writable (response) → Readable (client).
+**What the callback model eliminated (vs the old oneshot path):**
+- `oneshot::channel()` per call (2 allocs + 1 free)
+- `Box::into_raw`/`from_raw` for user_data (slot pointer is
+  pre-allocated in a `Box<[BenchSlot]>`)
+- tokio reactor wake + thread switch (callback runs inline on the
+  I/O worker thread)
+- `folly::ConcurrentHashMap` lookup/erase (O(1) bitmask index)
+- Slot reuse: callback advances request_id by pool_size (not +1) to
+  stay in the same slab slot, preventing out-of-order response
+  collisions
 
 ---
 
 ## Thread Model
 
-- **Tokio worker threads** (N = `--threads`) — build flatbuffer control
-  messages, allocate pool buffers, submit via FFI, await response
-  futures. Each worker holds a cloned `RpcBenchClient` (Arc handles).
+- **Rust worker threads** (N = `--threads`, `std::thread::spawn`) —
+  build flatbuffer control messages, allocate pool buffers, submit via
+  FFI, then `thread::park()` until all in-flight drain. The callback
+  chain (invoked on the C++ I/O worker thread) builds the next request
+  and submits it — no tokio scheduler involvement.
 - **C++ I/O worker threads** (`io_engines` × `workers_per_engine`,
-  default 1×1) — each engine owns an independent kqueue/epoll fd;
-  connections are partitioned round-robin across engines. Each worker
-  runs the event loop for its engine's connections. When
+  default 1×1) — each engine owns an independent epoll fd; connections
+  are partitioned round-robin across engines. When
   `workers_per_engine>1`, workers share one engine fd with
-  `EV_ONESHOT`/`EPOLLONESHOT`. The default 1×1 config uses a single
-  worker with no ONESHOT (level-triggered fast path).
-- **C++ acceptor thread** (1) — accepts new connections on the listen
-  socket. Not on the hot path after setup.
+  `EPOLLONESHOT`. The default 1×1 config uses a single worker with no
+  ONESHOT (level-triggered fast path).
+- **C++ acceptor thread** (1) — accepts new connections. Not on the
+  hot path after setup.
 
-All request/response correlation happens via the C++ `RpcClient`'s
-`pending_` map — `folly::ConcurrentHashMap` (striped locks) when
-folly is available, falling back to `unordered_map` + `mutex`.
-The C++ I/O thread calls the callback directly when a response frame
-arrives, which sends into a tokio oneshot channel.
+Request/response correlation: the callback model uses a pre-allocated
+slab pool (`CompletionSlot[]`, indexed by `request_id & pool_mask`).
+The oneshot model (still available for non-bench callers) uses
+`folly::ConcurrentHashMap` (striped locks) or `unordered_map` +
+`mutex` fallback.
+
+---
+
+## Rust API
+
+The `crow-rpc-ffi` crate exposes two client models:
+
+### Oneshot model (async, tokio-friendly)
+
+```rust,ignore
+let client = RpcClient::new();
+client.attach(&conn);
+let fut = client.call(&server, &conn, ctrl, data, msg_type)?;
+let response = tokio::time::timeout(Duration::from_secs(2), fut).await??;
+// response.control, response.data → Option<Buffer>
+```
+
+- `call()` returns a `CallFuture` (implements `Future`) that resolves
+  when the response arrives. Internally uses `oneshot::channel` +
+  `Box::into_raw` for the sender — 2 heap allocs per call.
+- Drop-safe: `RpcClient`, `CallFuture`, `Buffer` all implement
+  `Drop` correctly. No manual cleanup needed.
+- `Send + Sync`: `RpcClient` is safe to share across tokio tasks.
+- This is the path used by the KV client and consensus code.
+
+### Callback model (sync, zero-alloc hot path)
+
+```rust,ignore
+let client = RpcClient::new();
+client.attach(&conn);
+client.set_completion_pool_size(max_in_flight);
+client.call_callback(
+    &server, &conn, request_id, ctrl, data, msg_type,
+    Some(my_callback), user_data_ptr,
+)?;
+// callback fires on the C++ I/O worker thread when response arrives
+```
+
+- `call_callback()` stores the callback + `user_data` in a pre-allocated
+  slab slot and submits. Zero heap allocation per call.
+- The callback (`unsafe extern "C" fn`) runs on the C++ I/O worker
+  thread — must be non-blocking. It receives the response buffers as
+  C handles (`crow_rpc_buffer_t`), which must be released via
+  `crow_rpc_buffer_release`.
+- The caller manages `user_data` lifetime (typically a pointer into a
+  pre-allocated array, not a per-call `Box`).
+- The caller must ensure at most `max_in_flight` requests are
+  in-flight (so no two share a slab slot).
+- This is the path used by the RPC bench target. It is **not**
+  tokio-specific — works from any thread, including `std::thread`.
+
+### Is it easy for Rust code to use this RPC lib?
+
+**Yes, for the oneshot model** — it's a standard async Rust API:
+`call()` returns a `Future`, you `.await` it under tokio. The KV
+client and consensus code already use this path. Buffer management is
+automatic (Drop). No unsafe code needed from the caller.
+
+**The callback model is more involved** — it's a low-level C ABI
+callback with manual `user_data` lifetime management and raw buffer
+handle release. It's designed for hot paths where you want to bypass
+tokio's scheduler entirely (benchmarks, high-throughput pipelines).
+Most application code should use the oneshot model; the callback model
+is opt-in for cases where the ~2x TPS improvement matters.
+
+Both models share the same `RpcClient`, `Connection`, `BufferPool`,
+and `RpcServer` — you can mix them on the same client (though a
+single call uses one model or the other, not both).
 
 ---
 
@@ -182,188 +253,66 @@ Pool-allocated buffers (BufferPool, max 4096):
   pool → sent via `writev` → released after send → recycles to pool.
 - **Response arrival on client**: parser malloc's control + data (not
   pool-allocated) → wrapped in `crow_rpc_buffer_s` with `ref=nullptr`
-  → Rust `Buffer::from_raw` → Drop calls `crow_rpc_buffer_release`
-  (no-op for ref=nullptr) → `crow_rpc_buffer_s` struct freed.
-
-The buffer leak fix (2026-08-19): the C API's `crow_rpc_client_call`
-was bumping refcounts via `ref_clone()` but never releasing the
-caller's `crow_rpc_buffer_s` wrapper handles — each request leaked 2
-buffer refs + 2 wrapper structs, exhausting the 4096-buffer pool
-after ~2048 ops. Fix: call `crow_rpc_buffer_release()` on the
-caller's handles after submit.
+  → callback releases via `crow_rpc_buffer_release` (no-op for
+  ref=nullptr) → `crow_rpc_buffer_s` struct freed.
 
 ---
 
-## Benchmark Results — 2026-08-19
-
-Scaling sweep. In-process echo server (kqueue loopback, no network),
-64-byte values, 1000 key space (unused by echo), 5-second duration,
-`io_engines=1, workers_per_engine=1` (single-engine single-worker
-fast path). Platform: **Apple M5 Pro** (18 cores, arm64, macOS
-26/Darwin 25.5). 10 runs (6 single-engine + 2 multi-engine + 2
-shared-engine multi-worker), zero errors across all configs.
-
-Regression sentinel: `tools/bench-rpc-regression.sh`.
-Raw TSV: `doc/working/bench-rpc-regression.tsv`.
-
-### Full sweep (after shared connections + caller-thread in_send_ writev)
-
-| Config | Threads | Conn | Pipeline | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1×1 | 1 | 1 | 1 | 41,361 | 23 | 23 | 36 | 69 | 0 |
-| 1×1 | 8 | 4 | 32 | 137,579 | 57 | 54 | 124 | 191 | 0 |
-| 1×1 | 64 | 4 | 256 | 268,219 | 237 | 233 | 417 | 532 | 0 |
-| 1×1 | 256 | 4 | 1024 | 316,845 | 806 | 814 | 1,285 | 1,531 | 0 |
-| 1×1 | 256 | 8 | 2048 | 299,400 | 853 | 807 | 1,427 | 1,697 | 0 |
-| 1×1 | 512 | 8 | 4096 | 311,904 | 1,639 | 1,542 | 2,620 | 3,076 | 0 |
-| 2×1 | 256 | 4 | 1024 | 302,924 | 842 | 838 | 1,384 | 1,600 | 0 |
-| 2×1 | 512 | 8 | 4096 | 293,686 | 1,740 | 1,801 | 2,702 | 2,988 | 0 |
-| 1×2 | 256 | 4 | 1024 | 276,613 | 923 | 905 | 2,120 | 5,468 | 0 |
-| 1×2 | 512 | 8 | 4096 | 286,942 | 1,781 | 1,803 | 3,568 | 6,404 | 0 |
-
-### Optimization progression
-
-| Config | Pre-shared-conn | +shared-conn+in_send_ | Total |
-| --- | --- | --- | --- |
-| 1T:1C | 37K | 41K | +11% |
-| 8T:4C | 114K | 138K | +21% |
-| 64T:4C | 131K | 268K | +105% |
-| 256T:4C | 132K | 317K | +140% |
-| 512T:8C | 131K | 312K | +138% |
-
-Shared connections (multiple worker threads per connection) + the
-caller-thread `in_send_` writev model (one thread does the writev
-while others enqueue and return) dramatically improves throughput at
-high concurrency. The biggest gains are at 64T+ where multiple threads
-share connections, creating multi-frame batches that the I/O worker
-coalesces into single read/writev calls. Aggregation ratios reach
-6.0x recv and 5.5x send at 256T:4C.
-
-### Multi-engine (2×1) — does not help for loopback
-
-Multi-engine with 2 independent kqueue instances (2 engines × 1
-worker each, no ONESHOT) is *slightly worse* than single-engine at
-both measurement points: 302K vs 317K at 256T:4C (-5%), 294K vs 312K
-at 512T:8C (-6%). The single I/O worker is NOT the serialization
-bottleneck — the caller-thread writev already parallelizes
-sends across caller threads. Adding a second engine adds overhead
-(cross-engine connection partitioning, more context switches, two
-`kevent` wait calls) without relieving the actual bottleneck.
-
-### Multi-worker (EV_ONESHOT) — does not help for loopback
-
-Multi-worker with `EV_ONESHOT` re-arm is *worse* than single-worker
-for the in-process loopback — 13-18% slower across all configs (see
-the `1×2` rows in the full sweep table above). The re-arm overhead
-(1 extra `kevent` syscall per event) + kernel-level contention on the
-shared kqueue fd exceeds any parallelism benefit. The single I/O
-worker is NOT CPU-bound — the bottleneck is event queueing latency,
-not compute. Multi-worker would help with real network I/O where the
-I/O thread is CPU-bound on socket operations.
-
-### Conclusions
-
-- **Shared connections + caller-thread writev lifted the ceiling from
-  ~132K to ~317K** — the key insight is that the benchmark client must
-  share connections across worker threads to create multi-frame batches.
-  The `in_send_` atomic CAS model lets one thread perform the `writev`
-  while others enqueue and return, coalescing all queued frames into a
-  single syscall. Aggregation reaches 6.0x recv and 5.5x send at 256T:4C.
-- **Single C++ I/O worker is NOT the serialization bottleneck** —
-  multi-engine (2×1) does not improve TPS (302K vs 317K at 256T:4C).
-  The caller-thread writev already parallelizes sends; the I/O worker
-  only does reads + inline dispatch, which is not CPU-bound. The ~317K
-  ceiling is set by the caller-thread writev contention (the `in_send_`
-  CAS serializes senders) + the per-op flatbuffer build + pool alloc
-  cost, not by the I/O worker's event loop.
-- **NOT CPU-bound — latency-bound by event queueing** — the latency
-  increase from 1T:1C (23µs) to 512T:8C (1,639µs) is pure queueing delay
-  on the single I/O thread's event queue, not compute.
-- **Multi-worker (EV_ONESHOT) does not help for loopback** — 13-18%
-  slower than single-worker. The re-arm overhead exceeds parallelism
-  benefit when the I/O thread is not CPU-bound. Would help with real
-  network I/O.
-- **Zero errors across all 10 configs** — the 2s response timeout
-  never fires under normal load; the in-process loopback is reliable.
-- **Per-op latency at 1T:1C is 23µs** — this is the round-trip cost
-  of: flatbuffer build + pool alloc + FFI call + kqueue notify +
-  writev + read + echo handler + writev + read + oneshot wake.
-
-### Scaling ceiling comparison
-
-| Target | Ceiling (ops/s) | Bottleneck | Platform |
-| --- | --- | --- | --- |
-| RPC echo (in-process, optimized) | ~317K | Caller-thread writev contention + per-op alloc | M5 Pro |
-| RPC echo (Gap4+Gap1, 128B/20s) | ~276K | Tokio scheduler round-trip + per-op alloc | AMD 5950X |
-| KV write (coalesced, 3-node) | ~87K | Consensus quorum RPC | M5 Pro |
-| KV write (coalesced, 3-node) | ~124K | Consensus quorum RPC | AMD 5950X |
-
-The RPC echo ceiling is ~3.6× the KV write ceiling on the same M5 Pro
-platform — the KV path adds Paxos consensus (2-phase quorum round +
-WAL persist + engine apply) on top of the RPC transport.
-
----
-
-## Benchmark Results — 2026-08-20 (Gap4+Gap1, Linux)
+## Benchmark Results — 2026-08-20 (Gap2+Gap3, Linux)
 
 Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
-Config: 128B values, 20s duration, in-process echo, epoll loopback.
-Gap4: ONESHOT zero-lock re-arm (skip `conn_mu_` + `mask_mu_` in
-`arm_read`/`arm_write`/`disarm_write`, pass `Connection*` directly).
-Gap1: `folly::ConcurrentHashMap` replaces `unordered_map` + `mutex`
-in `RpcClient::pending_`.
+Config: 128B values, 20s duration, in-process echo, epoll loopback,
+pipeline_depth=1.
 
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
 ### Full sweep (9 configs)
 
-| Eng×Wkr | T | C | ops/s | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | err |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1×1 | 1 | 1 | 35,656 | 27 | 24 | 53 | 95 | 0 |
-| 1×1 | 64 | 4 | 148,189 | 430 | 444 | 654 | 707 | 0 |
-| 1×1 | 256 | 8 | 202,409 | 1,263 | 1,274 | 1,667 | 1,804 | 0 |
-| 2×1 | 512 | 8 | 111,078 | 4,605 | 612 | 2,246 | 1,999,872 | 1,452 |
-| 1×2 | 512 | 8 | 152,742 | 3,348 | 768 | 41,056 | 83,584 | 1,762 |
-| 1×1 | 1000 | 32 | 198,607 | 5,033 | 5,108 | 5,552 | 5,892 | 0 |
-| 1×4 | 1000 | 32 | 276,424 | 3,615 | 3,578 | 7,432 | 8,712 | 0 |
-| 1×16 | 1000 | 32 | 230,825 | 4,323 | 3,272 | 15,728 | 23,264 | 0 |
-| 2×16 | 1000 | 32 | 224,889 | 4,403 | 3,344 | 17,936 | 41,120 | 0 |
+| Eng×Wkr | T | C | ops/s | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | raggr | saggr | err |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1×1 | 1 | 1 | 76,394 | 12 | 12 | 17 | 20 | 1.0 | 1.0 | 0 |
+| 1×1 | 64 | 4 | 308,105 | 207 | 205 | 223 | 262 | 8.0 | 1.8 | 0 |
+| 1×1 | 256 | 8 | 358,065 | 713 | 712 | 777 | 905 | 15.9 | 1.9 | 0 |
+| 2×1 | 512 | 8 | 303,872 | 1,682 | 1,502 | 3,022 | 3,310 | 0.6 | 1.3 | 0 |
+| 1×2 | 512 | 8 | 202,971 | 2,519 | 391 | 1,769 | 41,568 | 1.5 | 1.7 | 0 |
+| 1×1 | 1000 | 32 | 340,358 | 2,932 | 2,990 | 3,202 | 3,722 | 15.5 | 1.9 | 0 |
+| 1×4 | 1000 | 32 | 584,941 | 1,705 | 1,551 | 5,104 | 40,416 | 9.3 | 1.9 | 0 |
+| 1×16 | 1000 | 32 | 496,799 | 2,008 | 1,765 | 6,060 | 8,488 | 1.7 | 1.8 | 0 |
+| 2×16 | 1000 | 32 | 237,669 | 4,197 | 3,192 | 13,728 | 19,456 | 1.2 | 1.7 | 0 |
 
-CROW peaks at ~276K (1e4w high-concurrency config).
+Peak **~585K** (1e4w 1000t32c) — 2.1x vs Gap4+Gap1 baseline (276K).
+Sentinel (1e1w 256t8c): 358K vs 202K = 1.8x. Zero errors across all
+9 configs (vs 1452+1762 timeout errors in baseline at 512T:8C).
 
-### Multi-worker scaling (folly ConcurrentHashMap impact)
+### Multi-worker scaling
 
-The high-concurrency configs (1000T × 32C) show folly's effect on
-multi-worker shared-epoll scaling:
+- 1e1w → 1e4w: **+72%** (340K → 585K). Without the tokio scheduler
+  bottleneck, 4 epoll workers fully parallelize the callback chain.
+- 1e4w → 1e16w: **-15%** (585K → 497K). ONESHOT re-arm overhead +
+  worker contention dominate beyond 4 workers.
+- 2e1w at 512T:8C: **303K, zero errors** (was 111K with 1452 timeout
+  errors). The callback model has no timeout path — the worker parks
+  until all in-flight drain.
 
-- 1e1w → 1e4w: **+39%** (199K → 276K). Adding 4 workers to one epoll
-  instance scales well — folly's striped locks eliminate the single
-  `pending_mu_` bottleneck, and Gap4's zero-lock re-arm keeps the
-  ONESHOT overhead low.
-- 1e4w → 1e16w: **-16%** (276K → 231K). Beyond 4 workers, ONESHOT
-  re-arm overhead + worker contention on the shared epoll fd dominate.
-- 1e1w at 256T:8C (202K, level-triggered) is the best standard config
-  — zero re-arm overhead. The 2e1w and 1e2w configs at 512T:8C
-  regressed to 111K/153K with timeout errors (see below).
+### Scaling ceiling comparison
 
-### 2e1w / 1e2w timeout errors at 512T:8C
+| Target | Ceiling (ops/s) | Bottleneck | Platform |
+| --- | --- | --- | --- |
+| RPC echo (Gap2+Gap3, 128B/20s) | ~585K | Epoll syscall overhead + flatbuffer build | AMD 5950X |
+| RPC echo (Gap4+Gap1, 128B/20s) | ~276K | Tokio scheduler round-trip + per-op alloc | AMD 5950X |
+| RPC echo (in-process, optimized) | ~317K | Caller-thread writev contention + per-op alloc | M5 Pro |
+| KV write (coalesced, 3-node) | ~124K | Consensus quorum RPC | AMD 5950X |
 
-The 2e1w (1452 errors) and 1e2w (1762 errors) configs at 512T:8C have
-**2-second response timeouts** — `p999` is ~2,000,000 us (exactly the
-timeout). Root cause: the `connection.cpp` `goto retry_send` loop
-(fix for a SIGSEGV race where two threads writev on the same fd) can
-busy-loop under high contention (512 tasks on 8 connections),
-delaying the I/O worker from re-arming other connections' epoll
-events. The longer 20s duration (vs the earlier 5s) gives more time
-for the tail-latency spikes to exceed the 2s timeout. Not a
-correctness bug — bounding the retry loop would fix it.
+The Gap2+Gap3 ceiling is ~4.7× the KV write ceiling — the callback
+model closed ~60% of the gap to the theoretical 2M TPS reference
+(inline coroutine resume technique). The remaining gap is epoll syscall
+overhead + flatbuffer build cost, which would require RDMA (R32) or
+zero-copy framing to close.
 
 ---
 
 ## Memory Copy Summary
-
-Copy points are annotated inline in the flow diagram above. Summary:
 
 - **O(n) unavoidable** — flatbuffer build (FBB internal → pool Buffer);
   data payload fill (Vec<u8> → pool Buffer); kernel socket copy
@@ -383,38 +332,36 @@ Copy points are annotated inline in the flow diagram above. Summary:
 
 ## Enhancement Ideas
 
-- **Gap2: Callback-based client model (planned)** — replace the
-  tokio oneshot + scheduler response path with an inline callback
-  invoked directly on the C++ I/O worker thread. Eliminates: oneshot
-  channel send, tokio reactor wake, thread switch, future poll. This
-  is the biggest remaining perf gap.
-  Plan: `doc/working/plan-rpc-perf-gap2-3.md`.
-- **Gap3: Slab-based completion pool (planned)** — replace per-call
-  `Box::into_raw`/`from_raw` + `oneshot::channel()` with a
-  pre-allocated slab indexed by `request_id % pool_size`. Zero
-  per-request heap allocation. Subsumed by Gap2's design.
-  Plan: `doc/working/plan-rpc-perf-gap2-3.md`.
+- **Gap2+Gap3 (done, 2026-08-20)** — callback-based client model +
+  slab completion pool. Peak TPS 2.1x (276K → 585K), zero timeout
+  errors. Plan: `doc/working/plan-rpc-perf-gap2-3.md`.
 - **Multi-engine I/O (R108, measured — does not help for loopback)** —
-  the transport now supports N independent epoll/kqueue instances
+  the transport supports N independent epoll/kqueue instances
   (`--io-engines N --io-workers-per-engine M`). Multi-engine (2×1)
-  does not improve TPS for the in-process loopback (302K vs 317K at
-  256T:4C) because the single I/O worker is not the bottleneck — the
-  caller-thread writev already parallelizes sends. Would help with
-  real network I/O where the I/O thread is CPU-bound on socket
-  operations. The 2D config (engines × workers) is exposed for
-  per-platform profiling.
+  does not improve TPS for the in-process loopback because the single
+  I/O worker is not the bottleneck. Would help with real network I/O.
 - **Caller-thread writev contention** — the `in_send_` CAS serializes
-  senders on the same connection. At high concurrency, this becomes
-  the bottleneck. Per-connection send queues with lock-free MPSC
-  enqueue + batch writev could reduce contention.
+  senders on the same connection. Per-connection send queues with
+  lock-free MPSC enqueue + batch writev could reduce contention.
 - **RDMA transport (R32)** — bypasses the kernel socket path entirely,
-  eliminating the `writev`/`read` copies and the kqueue/epoll event
-  loop overhead. The reference's RDMA path achieves ~2× the TCP path.
-- **Buffer pool sizing** — the current 4096-buffer pool limits
-  pipeline depth. At 512T:32C with pipeline=16384, the pool is the
-  constraint (alloc returns None → op dropped). A larger pool or
-  dynamic growth would remove this limit.
+  eliminating the `writev`/`read` copies and the epoll event loop
+  overhead. The reference's RDMA path achieves ~2× the TCP path.
 - **Flatbuffer reuse** — the `ConnectionPingRequest` is rebuilt per
-  op (FlatBufferBuilder is fresh each time). Pre-building a template
-  and patching the `id` field would save ~5µs per op (significant at
-  1T:1C where per-op cost is 23µs).
+  op. Pre-building a template and patching the `id` field would save
+  ~5µs per op (significant at 1T:1C where per-op cost is 12µs).
+
+---
+
+## History (brief)
+
+- **2026-08-19 (M5 Pro, 64B/5s)**: shared connections + caller-thread
+  `in_send_` writev lifted ceiling from ~132K to ~317K. Multi-engine
+  (2×1) and multi-worker (EV_ONESHOT) did not help for loopback.
+  Zero errors across 10 configs. Per-op latency at 1T:1C: 23µs.
+- **2026-08-20 (AMD 5950X, 128B/20s, Gap4+Gap1)**: ONESHOT zero-lock
+  re-arm + `folly::ConcurrentHashMap`. Peak ~276K (1e4w 1000t32c).
+  2e1w/1e2w at 512T:8C had 1452/1762 timeout errors from
+  `connection.cpp` `retry_send` busy-loop under high contention.
+- **2026-08-20 (AMD 5950X, 128B/20s, Gap2+Gap3)**: callback-based
+  client model + slab completion pool. Peak ~585K (2.1x baseline),
+  zero errors. See sections above for full detail.

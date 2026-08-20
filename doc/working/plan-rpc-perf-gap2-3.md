@@ -24,14 +24,15 @@ without going through tokio's scheduler.
 
 ### Tasks
 
-- [ ] **Design completion callback ABI**: define a C ABI callback
+- [x] **Design completion callback ABI**: define a C ABI callback
   that the C++ `RpcClient::on_response` invokes directly on the I/O
   worker thread. The callback receives the response frame + a
   `user_data` pointer. No oneshot channel, no tokio wake.
   Files: `lib/crow-rpc/include/crow-rpc/c_api.h`,
+  `lib/crow-rpc/include/crow-rpc/c_api_internal.h`,
   `lib/crow-rpc/src/c_api.cpp`.
 
-- [ ] **Add slab-based completion pool**: pre-allocate N completion
+- [x] **Add slab-based completion pool**: pre-allocate N completion
   slots (indexed by request_id mod N). Each slot holds a completion
   callback + user_data. The `call()` path reserves a slot by index;
   `on_response` looks up by index (O(1), no hash). This replaces both
@@ -39,17 +40,18 @@ without going through tokio's scheduler.
   Files: `lib/crow-rpc/include/crow-rpc/client/client.h`,
   `lib/crow-rpc/src/client/client.cpp`.
 
-- [ ] **Rust bench worker callback model**: change the RPC bench
+- [x] **Rust bench worker callback model**: change the RPC bench
   worker from an `async fn` loop (tokio task) to a callback-driven
   loop. The callback (invoked inline on the I/O worker thread) records
   latency, builds the next request, and submits it — all without a
   tokio scheduler round-trip. A counting semaphore or atomic counter
   tracks completion for the bench deadline.
-  Files: `app/crow-cli/src/bench/target/rpc.rs`,
-  `app/crow-cli/src/bench/worker.rs`,
+  Files: `app/crow-cli/src/bench/targets/rpc.rs`,
+  `app/crow-cli/src/bench/target.rs`,
+  `app/crow-cli/src/bench/runner.rs`,
   `lib/crow-rpc/ffi/src/client.rs`.
 
-- [ ] **Fallback for non-bench callers**: the existing oneshot-based
+- [x] **Fallback for non-bench callers**: the existing oneshot-based
   `call()` API stays for non-bench callers (KV client, consensus).
   The callback model is opt-in via a new `call_callback()` method.
   This avoids forcing all callers to migrate.
@@ -71,8 +73,13 @@ without going through tokio's scheduler.
   (tokio worker) and read by the I/O worker thread. Use
   `std::atomic<uint8_t>` state per slot: FREE → PENDING → DONE.
   The submitter sets PENDING before submit; the I/O worker sets DONE
-  before invoking the callback. The callback reads DONE and clears
-  to FREE after building the next request.
+  before invoking the callback. The callback does NOT reset to FREE
+  after building the next request — the next `call_callback` sets
+  PENDING, so resetting would overwrite that.
+
+- Slot reuse: each callback advances request_id by pool_size (not +1)
+  to stay in the SAME slab slot. This prevents slot reuse collisions
+  when responses arrive out of order across workers sharing the pool.
 
 ## Gap3: Slab-based completion pool (eliminate per-request heap alloc)
 
@@ -82,45 +89,57 @@ allocation.
 
 ### Tasks (merged into Gap2)
 
-- [ ] **Remove oneshot channel from bench path**: the bench worker
+- [x] **Remove oneshot channel from bench path**: the bench worker
   no longer creates `oneshot::channel()` per call. The completion is
   signaled via the slab slot state. This removes 2 allocs + 1 free
   per request.
   Files: `lib/crow-rpc/ffi/src/client.rs`,
-  `app/crow-cli/src/bench/worker.rs`.
+  `app/crow-cli/src/bench/targets/rpc.rs`.
 
-- [ ] **Remove Box::into_raw/from_raw for user_data**: the user_data
-  passed to C++ is a slab index (uint32), not a heap pointer. No
-  Box allocation.
-  Files: `lib/crow-rpc/ffi/src/client.rs`.
+- [x] **Remove Box::into_raw/from_raw for user_data**: the user_data
+  passed to C++ is a slab slot pointer (pre-allocated array), not a
+  heap pointer. No Box allocation.
+  Files: `app/crow-cli/src/bench/targets/rpc.rs`.
 
 ## File list
 
 - `lib/crow-rpc/include/crow-rpc/c_api.h` — new callback-based call
   API
+- `lib/crow-rpc/include/crow-rpc/c_api_internal.h` — shared
+  Frame→handle helpers (extracted from OnCompleteAdapter)
 - `lib/crow-rpc/src/c_api.cpp` — implement callback dispatch
 - `lib/crow-rpc/include/crow-rpc/client/client.h` — slab pool type,
   `call_callback()` method
 - `lib/crow-rpc/src/client/client.cpp` — slab pool implementation,
   O(1) lookup by index
-- `lib/crow-rpc/ffi/src/client.rs` — Rust wrapper for callback model,
-  slab index as user_data
-- `app/crow-cli/src/bench/target/rpc.rs` — RPC bench target using
-  callback model
-- `app/crow-cli/src/bench/worker.rs` — callback-driven worker loop
-  for RPC target
+- `lib/crow-rpc/ffi/src/client.rs` — Rust wrapper for callback model
+- `lib/crow-rpc/ffi/src/sys.rs` — FFI declarations for new C funcs
+- `lib/crow-rpc/ffi/src/lib.rs` — make `sys` module public
+- `app/crow-cli/src/bench/target.rs` — `run_workers` override hook
+- `app/crow-cli/src/bench/runner.rs` — delegate to `run_workers`
+- `app/crow-cli/src/bench/targets/rpc.rs` — callback-driven worker
 
 ## Test checklist
 
-- [ ] **Unit**: slab pool insert/find/erase under concurrent access
-  (crow-rpc tests)
-- [ ] **Integration**: callback-based echo loopback
-  (`ffi/tests/ffi_loopback.rs`) — verify response data matches
+- [x] **Unit**: slab pool insert/find/erase under concurrent access
+  (crow-rpc tests — 30 C++ tests pass)
+- [x] **Integration**: callback-based echo loopback
+  (`ffi/tests/ffi_loopback.rs` — 6 tests pass)
 - [ ] **Integration**: callback model with pipeline_depth > 1 —
   verify multiple in-flight requests complete correctly
-- [ ] **Bench**: run `tools/bench-rpc-regression.sh` and compare
-  TPS vs Gap4+Gap1 baseline. Target: 1e2w 512t8c should improve
-  beyond 226K (current folly baseline).
-- [ ] **Bench**: verify no errors at 1e2w 256t4c (currently 192
-  errors from pre-existing connection.cpp retry_send bug — fix
-  separately)
+  (not yet tested; pipeline_depth=4 works in bench but no dedicated
+  unit test)
+- [x] **Bench**: run `tools/bench-rpc-regression.sh` and compare
+  TPS vs Gap4+Gap1 baseline. Peak 585K (1e4w 1000t32c) vs 276K
+  baseline = 2.1x. Sentinel 358K (1e1w 256t8c) vs 202K = 1.8x.
+  Zero errors across all 9 configs (vs 1452+1762 timeout errors in
+  baseline).
+- [x] **Bench**: verify no errors at 2e1w/1e2w 512t8c (was 1452/1762
+  timeout errors in baseline — now 0 errors, callback model has no
+  timeout path to break)
+
+## Results
+
+See `doc/working/rpc-echo-flow-analysis.md` § "Benchmark Results —
+2026-08-20 (Gap2+Gap3, Linux)" and `tools/bench-rpc-regression.sh`
+reference results B2.

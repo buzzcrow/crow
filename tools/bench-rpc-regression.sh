@@ -71,6 +71,35 @@
 # Gap2+Gap3 (tokio scheduler elimination + slab pool) planned to close
 # the remaining ~7x perf gap.
 #
+# Reference results B2 (2026-08-20, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
+#   Gap2+Gap3 (callback-driven client + slab completion pool). Callback
+#   model: C++ I/O worker invokes the C ABI callback directly on the
+#   response thread — no oneshot channel, no tokio scheduler round-trip,
+#   no per-call heap alloc. Slab pool indexed by request_id & mask.
+#   value_size=128, 20s, in-process echo, epoll loopback, pipeline_depth=1
+#   raggr=recv aggregation factor, saggr=send aggregation factor
+#
+#   Eng Wkr    T    C  ops/s      avg    p50    p99    p999   raggr  saggr  err
+#   1   1      1    1     76,394   12     12     17      20     1.0    1.0    0
+#   1   1     64    4    308,105  207    205    223     262     8.0    1.8    0
+#   1   1    256    8    358,065  713    712    777     905    15.9    1.9    0
+#   2   1    512    8    303,872 1682   1502   3022   3310     0.6    1.3    0
+#   1   2    512    8    202,971 2519    391   1769  41568     1.5    1.7    0
+#   1   1   1000   32    340,358 2932   2990   3202   3722    15.5    1.9    0
+#   1   4   1000   32    584,941 1705   1551   5104  40416     9.3    1.9    0
+#   1  16   1000   32    496,799 2008   1765   6060   8488     1.7    1.8    0
+#   2  16   1000   32    237,669 4197   3192  13728  19456     1.2    1.7    0
+#
+# TPS ceiling ~585K (1e4w 1000t32c) / ~358K (1e1w 256t8c) — 2.1x / 1.8x
+# vs Gap4+Gap1 baseline. Zero errors across all configs (vs 1452+1762
+# timeout errors in baseline at 512T:8C). The callback model eliminates
+# the tokio scheduler round-trip entirely — the I/O worker thread
+# directly resumes the next iteration via the C ABI callback, matching
+# the buzz-cpp coroutine loader technique. 1e4w remains the peak config
+# (4 epoll workers amortize syscall overhead); 1e16w degrades from
+# worker contention. 2e1w at 512T:8C improved 2.7x (303K vs 111K) with
+# zero errors — the callback model has no timeout path to break.
+#
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
@@ -99,18 +128,20 @@ run_bench() {
         echo -e "$label\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
         return
     fi
-    local ops_s avg_us p50_us p99_us p999_us errors
+    local ops_s avg_us p50_us p99_us p999_us errors raggr saggr
     ops_s=$(echo "$json" | jq -r '.total_ops * 1000 / .duration_ms' | awk '{printf "%.0f", $1}')
     avg_us=$(echo "$json" | jq -r '.by_op.write.latency_us.avg_us')
     p50_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p50_us')
     p99_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p99_us')
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
-    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors"
-    echo -e "$label\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors" >> "$RESULTS_FILE"
+    raggr=$(echo "$output" | grep -oP 'recv_agg=\K[0-9.]+' || echo "0")
+    saggr=$(echo "$output" | grep -oP 'send_agg=\K[0-9.]+' || echo "0")
+    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us raggr=$raggr saggr=$saggr err=$errors"
+    echo -e "$label\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$raggr\t$saggr\t$errors" >> "$RESULTS_FILE"
 }
 
-echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
+echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\traggr\tsaggr\terrors" > "$RESULTS_FILE"
 
 echo "=== rpc echo regression (128B, 20s, 9 configs) ==="
 

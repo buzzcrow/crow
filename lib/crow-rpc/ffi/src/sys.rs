@@ -118,6 +118,20 @@ extern "C" {
         out_request_id: *mut u64,
     ) -> crow_rpc_status;
 
+    pub fn crow_rpc_client_set_completion_pool_size(client: crow_rpc_client_t, max_in_flight: u32);
+
+    pub fn crow_rpc_client_call_callback(
+        client: crow_rpc_client_t,
+        server: crow_rpc_server_t,
+        conn: crow_rpc_conn_t,
+        request_id: u64,
+        control: crow_rpc_buffer_t,
+        data: crow_rpc_buffer_t,
+        msg_type: u16,
+        on_complete: crow_rpc_on_complete,
+        user_data: *mut c_void,
+    ) -> crow_rpc_status;
+
     pub fn crow_rpc_client_call_one_way(
         client: crow_rpc_client_t,
         server: crow_rpc_server_t,

@@ -35,8 +35,8 @@ use tracing::{info, warn};
 
 use super::report::{per_op_map, BenchReport, OpStats};
 use super::target::BenchTarget;
-use super::worker::{run_worker, WorkerCounters};
-use super::workload::{MinSlotPolicy, OpGen, OpKind, WorkloadKind};
+use super::worker::WorkerCounters;
+use super::workload::{MinSlotPolicy, OpKind, WorkloadKind};
 
 /// Knobs controlling a single bench invocation.
 #[derive(Debug, Clone)]
@@ -309,35 +309,7 @@ pub(crate) async fn run_bench<T: BenchTarget>(
         target.spawn_metrics_flusher(started_instant, deadline, counters.clone(), path.clone())
     });
 
-    let mut handles = Vec::with_capacity(cfg.threads as usize);
-    for worker_id in 0..cfg.threads {
-        let client = worker_clients[worker_id as usize].clone();
-        let cfg2 = cfg.clone();
-        let counters = counters[worker_id as usize].clone();
-        let handle = tokio::spawn(async move {
-            let mut gen = OpGen::new(
-                u64::from(worker_id) ^ 0x9E37_79B9_7F4A_7C15,
-                cfg2.key_space,
-                cfg2.value_size,
-            );
-            if let Some(count) = cfg2.pre_populate {
-                if count > 0 {
-                    gen.set_read_key_space(count);
-                }
-            }
-            run_worker(
-                &client,
-                &mut gen,
-                &cfg2,
-                measure_start,
-                deadline,
-                worker_id,
-                &counters,
-            )
-            .await
-        });
-        handles.push(handle);
-    }
+    let handles = target.run_workers(worker_clients, &cfg, measure_start, deadline, counters);
 
     // Reduce per-worker stats into one map.
     let mut by_kind: BTreeMap<OpKind, OpStats> = BTreeMap::new();

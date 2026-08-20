@@ -14,7 +14,7 @@
 mod buffer;
 mod client;
 mod server;
-mod sys;
+pub mod sys;
 
 pub use buffer::{Buffer, BufferPool};
 pub use client::{CallFuture, Response, RpcClient};

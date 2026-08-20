@@ -13,6 +13,7 @@ pub(crate) mod kv;
 #[path = "targets/rpc.rs"]
 pub(crate) mod rpc;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,8 +21,8 @@ use crow_console_shared::error::Result;
 use crow_kv_client::ClientMetricsSnapshot;
 use tokio::task::JoinHandle;
 
-use super::report::OpOutcome;
-use super::worker::WorkerCounters;
+use super::report::{OpOutcome, OpStats};
+use super::worker::{run_worker, WorkerCounters};
 use super::workload::{OpGen, OpKind};
 use crate::bench::runner::BenchConfig;
 
@@ -39,6 +40,58 @@ pub(crate) trait BenchTarget: Send {
 
     /// Build a client for one worker. Called `cfg.threads` times.
     async fn build_client(&self) -> Result<Self::Client>;
+
+    /// Spawn the worker loop for all `cfg.threads` workers. Returns one
+    /// `JoinHandle` per worker, each resolving to that worker's per-op
+    /// stats. The default implementation spawns tokio tasks running the
+    /// standard `run_worker` async loop (oneshot/future-based). Targets
+    /// with a custom hot path (e.g. RPC's callback-driven loop) override
+    /// this to bypass the tokio scheduler.
+    fn run_workers(
+        &self,
+        clients: Vec<Self::Client>,
+        cfg: &BenchConfig,
+        measure_start: Instant,
+        deadline: Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+    ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>>
+    where
+        Self::Client: Sized,
+    {
+        let mut handles = Vec::with_capacity(cfg.threads as usize);
+        for (worker_id, (client, counters)) in clients.into_iter().zip(counters).enumerate() {
+            let cfg2 = cfg.clone();
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "worker_id is bounded by cfg.threads which fits in u32"
+            )]
+            let worker_id = worker_id as u32;
+            let handle = tokio::spawn(async move {
+                let mut gen = OpGen::new(
+                    u64::from(worker_id) ^ 0x9E37_79B9_7F4A_7C15,
+                    cfg2.key_space,
+                    cfg2.value_size,
+                );
+                if let Some(count) = cfg2.pre_populate {
+                    if count > 0 {
+                        gen.set_read_key_space(count);
+                    }
+                }
+                run_worker(
+                    &client,
+                    &mut gen,
+                    &cfg2,
+                    measure_start,
+                    deadline,
+                    worker_id,
+                    &counters,
+                )
+                .await
+            });
+            handles.push(handle);
+        }
+        handles
+    }
 
     /// Pre-populate the key space. Returns (ms, errors). KV-only; RPC
     /// and future targets return (0, 0).

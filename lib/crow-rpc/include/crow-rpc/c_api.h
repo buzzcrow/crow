@@ -103,6 +103,25 @@ crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t
                                      crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type,
                                      crow_rpc_on_complete on_complete, void *user_data, uint64_t *out_request_id);
 
+// Size the callback completion pool (Gap2+Gap3). Must be called before
+// any call_callback. The pool is sized to the next power of two >=
+// max_in_flight. Slots are indexed by request_id & mask. Zero per-call
+// heap allocation — the callback + user_data live in pre-allocated slots.
+// Flow: doc/working/rpc-echo-flow-analysis.md § "Echo Flow — Callback Model".
+void crow_rpc_client_set_completion_pool_size(crow_rpc_client_t client, uint32_t max_in_flight);
+
+// Callback-based call (Gap2+Gap3): reserves a slab slot by request_id,
+// stores the callback + user_data, and submits. The callback is invoked
+// directly on the I/O worker thread when the response arrives — no
+// oneshot channel, no scheduler round-trip, no per-call heap alloc.
+// The request_id must be provided by the caller (embedded in the
+// flatbuffer control). Returns CROW_RPC_OK on success. On submit error,
+// returns CROW_RPC_ERR_SEND_QUEUE (callback NOT invoked).
+// The pool must be sized first (set_completion_pool_size).
+crow_rpc_status crow_rpc_client_call_callback(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
+                                              uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                              uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data);
+
 // Submit a one-way message (no response expected).
 crow_rpc_status crow_rpc_client_call_one_way(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                              crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type);

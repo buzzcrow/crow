@@ -36,6 +36,72 @@ impl RpcClient {
         unsafe { sys::crow_rpc_client_attach(self.handle, conn.handle()) };
     }
 
+    /// Size the callback completion pool (Gap2+Gap3). Must be called
+    /// before any `call_callback`. The pool is sized to the next power
+    /// of two >= max_in_flight. Slots are indexed by request_id & mask.
+    /// Zero per-call heap allocation — the callback + user_data live in
+    /// pre-allocated C++ slots.
+    pub fn set_completion_pool_size(&self, max_in_flight: u32) {
+        unsafe { sys::crow_rpc_client_set_completion_pool_size(self.handle, max_in_flight) };
+    }
+
+    /// Callback-based call (Gap2+Gap3): reserves a slab slot by
+    /// request_id, stores the C ABI callback + user_data, and submits.
+    /// The callback is invoked directly on the C++ I/O worker thread
+    /// when the response arrives — no oneshot channel, no tokio
+    /// scheduler round-trip, no per-call heap alloc. The caller must
+    /// size the pool first (`set_completion_pool_size`) and ensure at
+    /// most `max_in_flight` requests are in-flight (so no two in-flight
+    /// share a slab slot). The `user_data` is opaque to C++; typically
+    /// a pointer to a pre-allocated Rust slot (not a per-call Box).
+    /// The callback must be non-blocking (it runs on the I/O thread).
+    /// Returns `Ok(())` on success, `Err` on submit error (callback NOT
+    /// invoked — caller must handle the error).
+    /// Flow: doc/working/rpc-echo-flow-analysis.md § "Echo Flow — Callback Model".
+    ///
+    /// # Safety
+    ///
+    /// `user_data` must be a valid pointer (or null) that remains valid
+    /// until the callback fires. The callback must not block.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "FFI wrapper mirrors C ABI; user_data is opaque to C++"
+    )]
+    pub fn call_callback(
+        &self,
+        server: &RpcServer,
+        conn: &Connection,
+        request_id: u64,
+        control: Buffer,
+        data: Option<Buffer>,
+        msg_type: u16,
+        on_complete: sys::crow_rpc_on_complete,
+        user_data: *mut std::ffi::c_void,
+    ) -> Result<(), RpcError> {
+        let control_handle = control.into_raw();
+        let data_handle = data.map(|d| d.into_raw()).unwrap_or(ptr::null_mut());
+
+        let status = unsafe {
+            sys::crow_rpc_client_call_callback(
+                self.handle,
+                server.handle(),
+                conn.handle(),
+                request_id,
+                control_handle,
+                data_handle,
+                msg_type,
+                on_complete,
+                user_data,
+            )
+        };
+
+        if status != sys::CROW_RPC_OK {
+            return Err(RpcError::from_status(status));
+        }
+        Ok(())
+    }
+
     /// Submit a request-response call. Returns a future that resolves to
     /// the response or an error.
     pub fn call(

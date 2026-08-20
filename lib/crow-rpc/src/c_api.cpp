@@ -4,6 +4,7 @@
 #include "crow-rpc/c_api.h"
 
 #include "crow-rpc/buffer.h"
+#include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/client.h"
 #include "crow-rpc/server/message.h"
 #include "crow-rpc/server/server.h"
@@ -241,6 +242,8 @@ void crow_rpc_client_destroy(crow_rpc_client_t client)
 }
 
 // Adapter: wraps the C completion callback into a C++ CompletionCallback.
+// Used by the oneshot call() path. The slab call_callback() path invokes
+// the C callback directly via invoke_c_complete (no adapter allocation).
 struct OnCompleteAdapter
 {
     crow_rpc_on_complete cb;
@@ -248,71 +251,80 @@ struct OnCompleteAdapter
 
     void operator()(crow::rpc::Frame *response, crow::rpc::RpcError err)
     {
-        crow_rpc_status status = CROW_RPC_OK;
-        switch (err) {
-        case crow::rpc::RpcError::Ok:
-            status = CROW_RPC_OK;
-            break;
-        case crow::rpc::RpcError::ConnectionClosed:
-            status = CROW_RPC_ERR_CONN_CLOSED;
-            break;
-        case crow::rpc::RpcError::Timeout:
-            status = CROW_RPC_ERR_TIMEOUT;
-            break;
-        case crow::rpc::RpcError::SendQueueFull:
-            status = CROW_RPC_ERR_SEND_QUEUE;
-            break;
-        case crow::rpc::RpcError::ConnectionError:
-            status = CROW_RPC_ERR_CONN_ERROR;
-            break;
-        default:
-            status = CROW_RPC_ERR_CONN_ERROR;
-            break;
-        }
-
-        // The response frame's control/data are raw pointers from the
-        // parser (malloc'd). Wrap them in crow_rpc_buffer_s handles for
-        // the Rust side. We create a Buffer that wraps the raw pointer
-        // without pool ownership (ref=nullptr → release is a no-op; the
-        // Frame destructor frees the underlying malloc'd memory).
-        crow_rpc_buffer_t ctrl_handle = nullptr;
-        crow_rpc_buffer_t data_handle = nullptr;
-
-        if (response != nullptr) {
-            if (response->control != nullptr && response->control_len > 0) {
-                auto *buf     = new crow::rpc::Buffer;
-                buf->data     = response->control;
-                buf->len      = response->control_len;
-                buf->capacity = response->control_len;
-                buf->type     = crow::rpc::BufferType::System;
-                buf->pool     = nullptr;
-                buf->ref      = nullptr; // no refcount — release is no-op
-                ctrl_handle   = new crow_rpc_buffer_s{buf};
-            }
-            if (response->data != nullptr && response->data_len > 0) {
-                auto *buf     = new crow::rpc::Buffer;
-                buf->data     = response->data;
-                buf->len      = response->data_len;
-                buf->capacity = response->data_len;
-                buf->type     = crow::rpc::BufferType::System;
-                buf->pool     = nullptr;
-                buf->ref      = nullptr;
-                data_handle   = new crow_rpc_buffer_s{buf};
-            }
-            // Null the Frame's pointers so its destructor doesn't free
-            // them (the crow_rpc_buffer_s owns them now via the Buffer
-            // wrapper; the Rust side will release the Buffer, which is
-            // a no-op since ref==nullptr, and then the crow_rpc_buffer_s
-            // is freed).
-            response->control = nullptr;
-            response->data    = nullptr;
-            delete response;
-        }
-
-        cb(0, ctrl_handle, data_handle, status, user_data);
+        invoke_c_complete(cb, user_data, 0, response, err);
         delete this;
     }
 };
+
+// ── Internal helpers (c_api_internal.h) ───────────────────────────
+
+namespace crow::rpc
+{
+
+// Wrap a raw malloc'd byte range in a crow_rpc_buffer_s handle with no
+// pool ownership (ref=nullptr → release frees the data + Buffer).
+static crow_rpc_buffer_t wrap_raw_buffer(uint8_t *data, uint32_t len)
+{
+    if (data == nullptr || len == 0) {
+        return nullptr;
+    }
+    auto *buf     = new Buffer;
+    buf->data     = data;
+    buf->len      = len;
+    buf->capacity = len;
+    buf->type     = BufferType::System;
+    buf->pool     = nullptr;
+    buf->ref      = nullptr;
+    return new crow_rpc_buffer_s{buf};
+}
+
+void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buffer_t *out_data)
+{
+    *out_ctrl = nullptr;
+    *out_data = nullptr;
+    if (frame == nullptr) {
+        return;
+    }
+    *out_ctrl = wrap_raw_buffer(frame->control, frame->control_len);
+    *out_data = wrap_raw_buffer(frame->data, frame->data_len);
+    // Null the Frame's pointers so its destructor doesn't free them —
+    // the crow_rpc_buffer_s handles own the data now.
+    frame->control = nullptr;
+    frame->data    = nullptr;
+    delete frame;
+}
+
+static crow_rpc_status rpc_error_to_status(RpcError err)
+{
+    switch (err) {
+    case RpcError::Ok:
+        return CROW_RPC_OK;
+    case RpcError::ConnectionClosed:
+        return CROW_RPC_ERR_CONN_CLOSED;
+    case RpcError::Timeout:
+        return CROW_RPC_ERR_TIMEOUT;
+    case RpcError::SendQueueFull:
+        return CROW_RPC_ERR_SEND_QUEUE;
+    case RpcError::ConnectionError:
+        return CROW_RPC_ERR_CONN_ERROR;
+    default:
+        return CROW_RPC_ERR_CONN_ERROR;
+    }
+}
+
+void invoke_c_complete(crow_rpc_on_complete cb, void *user_data, uint64_t request_id, Frame *frame, RpcError err)
+{
+    if (cb == nullptr) {
+        delete frame;
+        return;
+    }
+    crow_rpc_buffer_t ctrl_handle = nullptr;
+    crow_rpc_buffer_t data_handle = nullptr;
+    frame_to_c_handles(frame, &ctrl_handle, &data_handle);
+    cb(request_id, ctrl_handle, data_handle, rpc_error_to_status(err), user_data);
+}
+
+} // namespace crow::rpc
 
 void crow_rpc_client_attach(crow_rpc_client_t client, crow_rpc_conn_t conn)
 {
@@ -408,6 +420,44 @@ crow_rpc_status crow_rpc_client_call_one_way(crow_rpc_client_t client, crow_rpc_
         return CROW_RPC_ERR_SEND_QUEUE;
     }
     return CROW_RPC_OK;
+}
+
+void crow_rpc_client_set_completion_pool_size(crow_rpc_client_t client, uint32_t max_in_flight)
+{
+    if (client == nullptr || max_in_flight == 0) {
+        return;
+    }
+    client->client->set_completion_pool_size(max_in_flight);
+}
+
+crow_rpc_status crow_rpc_client_call_callback(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
+                                              uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                              uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data)
+{
+    if (client == nullptr || server == nullptr || conn == nullptr || control == nullptr || on_complete == nullptr) {
+        return CROW_RPC_ERR_INVALID_ARG;
+    }
+
+    crow::rpc::Buffer *ctrl_buf = control->buf;
+    crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
+
+    // Bump refcount so the client's handle stays valid after submit.
+    if (ctrl_buf != nullptr)
+        ctrl_buf->ref_clone();
+    if (data_buf != nullptr)
+        data_buf->ref_clone();
+
+    bool ok = client->client->call_callback(server->server->transport(), conn->conn.get(), request_id, ctrl_buf,
+                                            data_buf, msg_type, on_complete, user_data);
+
+    // Release the caller's wrapper handles (decrements the ref bumped
+    // above and frees the crow_rpc_buffer_s struct).
+    crow_rpc_buffer_release(control);
+    if (data != nullptr) {
+        crow_rpc_buffer_release(data);
+    }
+
+    return ok ? CROW_RPC_OK : CROW_RPC_ERR_SEND_QUEUE;
 }
 
 // ── Connection ────────────────────────────────────────────────────
