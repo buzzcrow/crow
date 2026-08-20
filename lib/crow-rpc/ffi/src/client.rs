@@ -213,6 +213,8 @@ impl RpcClient {
             resp_map_matched: 0,
             reaped_slab: 0,
             reaped_map: 0,
+            map_in_flight: 0,
+            slab_in_flight: 0,
         };
         unsafe { sys::crow_rpc_client_get_counters(self.handle, &mut out) };
         out

@@ -190,6 +190,8 @@ void crow_rpc_client_get_counters(crow_rpc_client_t client, crow_rpc_client_coun
     out->resp_map_matched = c.resp_map_matched.load(std::memory_order_relaxed);
     out->reaped_slab      = c.reaped_slab.load(std::memory_order_relaxed);
     out->reaped_map       = c.reaped_map.load(std::memory_order_relaxed);
+    out->map_in_flight    = c.map_in_flight.load(std::memory_order_relaxed);
+    out->slab_in_flight   = c.slab_in_flight.load(std::memory_order_relaxed);
 }
 
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port)

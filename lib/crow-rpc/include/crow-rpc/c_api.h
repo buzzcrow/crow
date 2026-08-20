@@ -92,6 +92,8 @@ typedef struct crow_rpc_client_counters
     uint64_t resp_map_matched; // on_response matched in map
     uint64_t reaped_slab;      // reaper timed out a slab slot
     uint64_t reaped_map;       // reaper timed out a map entry
+    int64_t  map_in_flight;    // live: current entries in pending map
+    int64_t  slab_in_flight;   // live: current PENDING slab slots
 } crow_rpc_client_counters_t;
 
 void crow_rpc_client_get_counters(crow_rpc_client_t client, crow_rpc_client_counters_t *out);

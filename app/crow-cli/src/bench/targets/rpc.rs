@@ -401,12 +401,15 @@ impl RpcTarget {
                 resp_map_matched: 0,
                 reaped_slab: 0,
                 reaped_map: 0,
+                map_in_flight: 0,
+                slab_in_flight: 0,
             };
             unsafe { sys::crow_rpc_client_get_counters(client_handle, &mut cc) };
             eprintln!(
                 "client_counters : submit_ok={so} submit_fail={sf} \
                  resp_matched={rm} resp_mismatch={rmm} resp_wrong_id={rwi} resp_dropped={rd} \
-                 slab_fallback={sfw} resp_map_matched={rmm2} reaped_slab={rs} reaped_map={rm2}",
+                 slab_fallback={sfw} resp_map_matched={rmm2} reaped_slab={rs} reaped_map={rm2} \
+                 slab_in_flight={sif} map_in_flight={mif}",
                 so = cc.submit_ok,
                 sf = cc.submit_fail,
                 rm = cc.resp_matched,
@@ -417,6 +420,8 @@ impl RpcTarget {
                 rmm2 = cc.resp_map_matched,
                 rs = cc.reaped_slab,
                 rm2 = cc.reaped_map,
+                sif = cc.slab_in_flight,
+                mif = cc.map_in_flight,
             );
 
             // Read stats from the Rust-side atomics (written by FFI callbacks).

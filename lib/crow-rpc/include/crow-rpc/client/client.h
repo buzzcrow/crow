@@ -204,6 +204,8 @@ class RpcClient
         std::atomic<uint64_t> resp_map_matched{0}; // on_response matched in map
         std::atomic<uint64_t> reaped_slab{0};      // reaper timed out a slab slot
         std::atomic<uint64_t> reaped_map{0};       // reaper timed out a map entry
+        std::atomic<int64_t>  map_in_flight{0};    // live: current entries in pending map
+        std::atomic<int64_t>  slab_in_flight{0};   // live: current PENDING slab slots
     };
 
     Counters &counters()

@@ -63,6 +63,8 @@ pub struct CrowRpcClientCounters {
     pub resp_map_matched: u64,
     pub reaped_slab: u64,
     pub reaped_map: u64,
+    pub map_in_flight: i64,
+    pub slab_in_flight: i64,
 }
 
 pub type crow_rpc_status = i32;

@@ -68,6 +68,7 @@ uint64_t RpcClient::call(Transport *transport, Connection *conn, uint64_t reques
     // its own timeout via Rust oneshot channels — the C++ reaper skips
     // entries with deadline 0.
     pending_.insert_or_assign(request_id, PendingEntry{std::move(on_complete), 0});
+    counters_.map_in_flight.fetch_add(1, std::memory_order_relaxed);
 
     OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
     if (!transport->submit(conn, frame)) {
@@ -77,6 +78,7 @@ uint64_t RpcClient::call(Transport *transport, Connection *conn, uint64_t reques
         if (it != pending_.end()) {
             cb = std::move(it->second.cb);
             pending_.erase(it);
+            counters_.map_in_flight.fetch_sub(1, std::memory_order_relaxed);
         }
         if (cb) {
             cb(nullptr, RpcError::SendQueueFull);
@@ -127,9 +129,11 @@ bool RpcClient::call_callback(Transport *transport, Connection *conn, uint64_t r
         uint8_t expected = st;
         if (slot.state.compare_exchange_strong(expected, SLOT_PENDING, std::memory_order_acq_rel)) {
             // Slab path — zero heap alloc.
+            counters_.slab_in_flight.fetch_add(1, std::memory_order_relaxed);
             OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
             if (!transport->submit(conn, frame)) {
                 slot.state.store(SLOT_FREE, std::memory_order_release);
+                counters_.slab_in_flight.fetch_sub(1, std::memory_order_relaxed);
                 if (frame->control != nullptr)
                     frame->control->release();
                 if (frame->data != nullptr)
@@ -153,12 +157,14 @@ bool RpcClient::call_callback(Transport *transport, Connection *conn, uint64_t r
         invoke_c_complete(cb, user_data, request_id, resp, err);
     };
     pending_.insert_or_assign(request_id, PendingEntry{std::move(wrapped), deadline});
+    counters_.map_in_flight.fetch_add(1, std::memory_order_relaxed);
 
     OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
     if (!transport->submit(conn, frame)) {
         // Submit failed — remove from map. Callback NOT invoked (caller
         // handles the error, same as the slab path).
         pending_.erase(request_id);
+        counters_.map_in_flight.fetch_sub(1, std::memory_order_relaxed);
         if (frame->control != nullptr)
             frame->control->release();
         if (frame->data != nullptr)
@@ -216,6 +222,7 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
                     auto cb = slot.cb;
                     auto ud = slot.user_data;
                     counters_.resp_matched.fetch_add(1, std::memory_order_relaxed);
+                    counters_.slab_in_flight.fetch_sub(1, std::memory_order_relaxed);
                     invoke_c_complete(cb, ud, request_id, response, RpcError::Ok);
                     return;
                 }
@@ -248,6 +255,7 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
     }
     CompletionCallback cb = std::move(it->second.cb);
     pending_.erase(it);
+    counters_.map_in_flight.fetch_sub(1, std::memory_order_relaxed);
     counters_.resp_map_matched.fetch_add(1, std::memory_order_relaxed);
     if (cb) {
         cb(response, RpcError::Ok);
@@ -267,6 +275,7 @@ void RpcClient::fail_all(RpcError err)
         if (slot.state.compare_exchange_strong(expected, SLOT_DONE, std::memory_order_acq_rel)) {
             auto cb = slot.cb;
             auto ud = slot.user_data;
+            counters_.slab_in_flight.fetch_sub(1, std::memory_order_relaxed);
             invoke_c_complete(cb, ud, slot.request_id, nullptr, err);
             slot.state.store(SLOT_FREE, std::memory_order_release);
         }
@@ -281,6 +290,7 @@ void RpcClient::fail_all(RpcError err)
         auto               key = it->first;
         ++it;
         pending_.erase(key);
+        counters_.map_in_flight.fetch_sub(1, std::memory_order_relaxed);
         if (cb) {
             cb(nullptr, err);
         }
@@ -346,6 +356,7 @@ void RpcClient::reaper_loop()
                 auto cb = slot.cb;
                 auto ud = slot.user_data;
                 counters_.reaped_slab.fetch_add(1, std::memory_order_relaxed);
+                counters_.slab_in_flight.fetch_sub(1, std::memory_order_relaxed);
                 invoke_c_complete(cb, ud, slot.request_id, nullptr, RpcError::Timeout);
                 slot.state.store(SLOT_FREE, std::memory_order_release);
             }
@@ -367,6 +378,7 @@ void RpcClient::reaper_loop()
             }
             CompletionCallback cb = std::move(it->second.cb);
             pending_.erase(it);
+            counters_.map_in_flight.fetch_sub(1, std::memory_order_relaxed);
             counters_.reaped_map.fetch_add(1, std::memory_order_relaxed);
             if (cb) {
                 cb(nullptr, RpcError::Timeout);
