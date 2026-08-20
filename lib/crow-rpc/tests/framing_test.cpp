@@ -1,6 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#include "crow-rpc/buffer.h"
 #include "crow-rpc/framing.h"
 
 #include <gtest/gtest.h>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <vector>
 
+using crow::rpc::BufferPool;
 using crow::rpc::Frame;
 using crow::rpc::FrameParser;
 using crow::rpc::FramingError;
@@ -16,6 +18,7 @@ using crow::rpc::HEADER_SIZE;
 using crow::rpc::MAGIC;
 using crow::rpc::parse_header;
 using crow::rpc::serialize_header;
+using crow::rpc::SystemBufferPool;
 
 // Helper: serialize a full frame (header + control + data) into a byte vec.
 static std::vector<uint8_t> build_frame(uint16_t msg_type, const uint8_t *ctrl, uint32_t ctrl_len, const uint8_t *data,
@@ -38,6 +41,27 @@ static std::vector<uint8_t> build_frame(uint16_t msg_type, const uint8_t *ctrl, 
     return buf;
 }
 
+// Helper: feed all bytes to a parser, returning the first complete frame.
+static Frame *feed_all(FrameParser &parser, const std::vector<uint8_t> &bytes)
+{
+    uint32_t offset = 0;
+    Frame   *frame  = nullptr;
+    while (offset < bytes.size()) {
+        auto target = parser.next_read_target();
+        if (target.len == 0) {
+            break;
+        }
+        uint32_t to_read = std::min(target.len, static_cast<uint32_t>(bytes.size() - offset));
+        std::memcpy(target.ptr, bytes.data() + offset, to_read);
+        offset += to_read;
+        frame = parser.advance(to_read);
+        if (frame) {
+            break;
+        }
+    }
+    return frame;
+}
+
 TEST(FramingTest, HeaderRoundTrip)
 {
     Header h;
@@ -58,7 +82,22 @@ TEST(FramingTest, HeaderRoundTrip)
     EXPECT_EQ(parsed.flags, 0x01u);
 }
 
-TEST(FramingTest, FullFrameRoundTrip)
+TEST(FramingTest, ControlOnlyFrame)
+{
+    std::vector<uint8_t> ctrl(32, 0x42);
+    auto                 bytes = build_frame(3, ctrl.data(), 32, nullptr, 0);
+
+    FrameParser parser;
+    Frame      *frame = feed_all(parser, bytes);
+
+    ASSERT_NE(frame, nullptr);
+    EXPECT_EQ(frame->header.msg_type, 3u);
+    EXPECT_EQ(frame->header.data_size, 0u);
+    EXPECT_EQ(frame->data_buf, nullptr);
+    delete frame;
+}
+
+TEST(FramingTest, FullFrameWithData)
 {
     // 128-byte control + 1 MB data
     std::vector<uint8_t> ctrl(128, 0xAB);
@@ -66,30 +105,18 @@ TEST(FramingTest, FullFrameRoundTrip)
 
     auto bytes = build_frame(7, ctrl.data(), 128, data.data(), 1024 * 1024);
 
-    FrameParser parser;
-    Frame      *frame = nullptr;
-
-    // Feed all bytes at once
-    uint32_t offset = 0;
-    while (offset < bytes.size()) {
-        auto     target  = parser.next_read_target();
-        uint32_t to_read = std::min(target.len, static_cast<uint32_t>(bytes.size() - offset));
-        std::memcpy(target.ptr, bytes.data() + offset, to_read);
-        offset += to_read;
-        frame = parser.advance(to_read);
-        if (frame)
-            break;
-    }
+    SystemBufferPool pool(256);
+    FrameParser      parser;
+    parser.set_pool(&pool);
+    Frame *frame = feed_all(parser, bytes);
 
     ASSERT_NE(frame, nullptr);
     EXPECT_EQ(frame->header.msg_type, 7u);
     EXPECT_EQ(frame->header.msg_size, 128u);
     EXPECT_EQ(frame->header.data_size, 1024u * 1024u);
-    EXPECT_EQ(frame->control_len, 128u);
-    EXPECT_EQ(frame->data_len, 1024u * 1024u);
-    EXPECT_EQ(std::memcmp(frame->control, ctrl.data(), 128), 0);
-    EXPECT_EQ(std::memcmp(frame->data, data.data(), 1024 * 1024), 0);
-
+    ASSERT_NE(frame->data_buf, nullptr);
+    EXPECT_EQ(frame->data_buf->len, 1024u * 1024u);
+    EXPECT_EQ(std::memcmp(frame->data_buf->data, data.data(), 1024 * 1024), 0);
     delete frame;
 }
 
@@ -136,33 +163,6 @@ TEST(FramingTest, PartialHeader)
     Frame *frame = parser.advance(16);
     ASSERT_NE(frame, nullptr);
     EXPECT_EQ(frame->header.msg_type, 1u);
-    EXPECT_EQ(frame->control_len, 16u);
-    delete frame;
-}
-
-TEST(FramingTest, ControlOnlyFrame)
-{
-    std::vector<uint8_t> ctrl(32, 0x42);
-    auto                 bytes = build_frame(3, ctrl.data(), 32, nullptr, 0);
-
-    FrameParser parser;
-    uint32_t    offset = 0;
-    Frame      *frame  = nullptr;
-    while (offset < bytes.size()) {
-        auto     target  = parser.next_read_target();
-        uint32_t to_read = std::min(target.len, static_cast<uint32_t>(bytes.size() - offset));
-        std::memcpy(target.ptr, bytes.data() + offset, to_read);
-        offset += to_read;
-        frame = parser.advance(to_read);
-        if (frame)
-            break;
-    }
-
-    ASSERT_NE(frame, nullptr);
-    EXPECT_EQ(frame->header.data_size, 0u);
-    EXPECT_EQ(frame->data_len, 0u);
-    EXPECT_EQ(frame->data, nullptr);
-    EXPECT_EQ(frame->control_len, 32u);
     delete frame;
 }
 
@@ -191,17 +191,7 @@ TEST(FramingTest, OneWayFlag)
     auto                 bytes = build_frame(2, ctrl.data(), 8, nullptr, 0, crow::rpc::FLAG_ONE_WAY);
 
     FrameParser parser;
-    uint32_t    offset = 0;
-    Frame      *frame  = nullptr;
-    while (offset < bytes.size()) {
-        auto     target  = parser.next_read_target();
-        uint32_t to_read = std::min(target.len, static_cast<uint32_t>(bytes.size() - offset));
-        std::memcpy(target.ptr, bytes.data() + offset, to_read);
-        offset += to_read;
-        frame = parser.advance(to_read);
-        if (frame)
-            break;
-    }
+    Frame      *frame = feed_all(parser, bytes);
 
     ASSERT_NE(frame, nullptr);
     EXPECT_EQ(frame->header.flags, crow::rpc::FLAG_ONE_WAY);

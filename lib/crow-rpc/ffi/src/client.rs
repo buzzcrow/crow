@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 
 /// A response from an RPC call.
 pub struct Response {
+    pub request_id: u64,
     pub control: Option<Buffer>,
     pub data: Option<Buffer>,
 }
@@ -239,7 +240,7 @@ impl std::future::Future for CallFuture {
 // The C++→Rust callback — O(1), non-blocking, runs on the C++ I/O thread.
 // It looks up the oneshot sender, sends the result, returns.
 unsafe extern "C" fn on_complete_cb(
-    _request_id: u64,
+    request_id: u64,
     control: sys::crow_rpc_buffer_t,
     data: sys::crow_rpc_buffer_t,
     status: i32,
@@ -249,6 +250,7 @@ unsafe extern "C" fn on_complete_cb(
 
     let result = if status == sys::CROW_RPC_OK {
         Ok(Response {
+            request_id,
             control: if !control.is_null() {
                 Some(Buffer::from_raw(control))
             } else {

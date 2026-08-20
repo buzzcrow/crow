@@ -3,6 +3,8 @@
 
 #include "crow-rpc/framing.h"
 
+#include "crow-rpc/buffer.h"
+
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
@@ -10,6 +12,9 @@
 
 namespace crow::rpc
 {
+
+// extract_control_fields is implemented in message.cpp (needs flatbuffer
+// generated headers not available here).
 
 // ── Header serialize/parse (little-endian, field-by-field) ────────
 
@@ -32,11 +37,11 @@ void serialize_header(uint8_t *buf, const Header &h)
 Header parse_header(const uint8_t *buf)
 {
     Header h;
-    h.magic     = static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8);
-    h.msg_type  = static_cast<uint16_t>(buf[2]) | (static_cast<uint16_t>(buf[3]) << 8);
-    h.msg_size  = static_cast<uint16_t>(buf[4]) | (static_cast<uint16_t>(buf[5]) << 8);
-    h.data_size = static_cast<uint32_t>(buf[6]) | (static_cast<uint32_t>(buf[7]) << 8) |
-                  (static_cast<uint32_t>(buf[8]) << 16) | (static_cast<uint32_t>(buf[9]) << 24);
+    h.magic      = static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8);
+    h.msg_type   = static_cast<uint16_t>(buf[2]) | (static_cast<uint16_t>(buf[3]) << 8);
+    h.msg_size   = static_cast<uint16_t>(buf[4]) | (static_cast<uint16_t>(buf[5]) << 8);
+    h.data_size  = static_cast<uint32_t>(buf[6]) | (static_cast<uint32_t>(buf[7]) << 8) |
+                   (static_cast<uint32_t>(buf[8]) << 16) | (static_cast<uint32_t>(buf[9]) << 24);
     h.msg_offset = buf[10];
     h.flags      = buf[11];
     return h;
@@ -54,32 +59,17 @@ void FrameParser::reset()
     state_         = ParseState::ReadingHeader;
     error_         = FramingError::None;
     header_offset_ = 0;
-    if (control_ != nullptr) {
-        free_buf(control_);
-        control_ = nullptr;
-    }
-    control_len_    = 0;
+    control_buf_.clear();
     control_offset_ = 0;
-    if (data_ != nullptr) {
-        free_buf(data_);
-        data_ = nullptr;
+    if (data_buf_ != nullptr) {
+        data_buf_->release();
+        data_buf_ = nullptr;
     }
-    data_len_    = 0;
     data_offset_ = 0;
     if (frame_ != nullptr) {
         delete frame_;
         frame_ = nullptr;
     }
-}
-
-uint8_t *FrameParser::alloc_buf(uint32_t capacity)
-{
-    return static_cast<uint8_t *>(std::malloc(capacity));
-}
-
-void FrameParser::free_buf(uint8_t *ptr)
-{
-    std::free(ptr);
 }
 
 FramingError FrameParser::validate_header() const
@@ -99,27 +89,26 @@ FramingError FrameParser::validate_header() const
 Frame *FrameParser::yield_frame()
 {
     assert(frame_ != nullptr);
-    frame_->header      = header_;
-    frame_->control     = control_;
-    frame_->control_len = control_len_;
-    frame_->data        = data_;
-    frame_->data_len    = data_len_;
-    frame_->parsed_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    frame_->header          = header_;
+    frame_->request_id      = parsed_request_id_;
+    frame_->rpc_create_nano = parsed_rpc_create_nano_;
+    frame_->data_buf        = data_buf_;
+    frame_->parsed_nano     = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 
     // Transfer ownership to the caller — clear our pointers so reset()
-    // doesn't free them.
+    // doesn't release them.
     Frame *out = frame_;
     frame_     = nullptr;
-    control_   = nullptr;
-    data_      = nullptr;
+    data_buf_  = nullptr;
 
     // Reset for the next frame.
-    state_          = ParseState::ReadingHeader;
-    header_offset_  = 0;
-    control_len_    = 0;
-    control_offset_ = 0;
-    data_len_       = 0;
-    data_offset_    = 0;
+    state_         = ParseState::ReadingHeader;
+    header_offset_ = 0;
+    control_buf_.clear();
+    control_offset_         = 0;
+    data_offset_            = 0;
+    parsed_request_id_      = 0;
+    parsed_rpc_create_nano_ = 0;
 
     return out;
 }
@@ -130,9 +119,12 @@ FrameParser::ReadTarget FrameParser::next_read_target()
     case ParseState::ReadingHeader:
         return {header_buf_ + header_offset_, HEADER_SIZE - header_offset_};
     case ParseState::ReadingControl:
-        return {control_ + control_offset_, control_len_ - control_offset_};
+        return {control_buf_.data() + control_offset_, static_cast<uint32_t>(control_buf_.size()) - control_offset_};
     case ParseState::ReadingData:
-        return {data_ + data_offset_, data_len_ - data_offset_};
+        if (data_buf_ != nullptr) {
+            return {data_buf_->data + data_offset_, data_buf_->capacity - data_offset_};
+        }
+        return {nullptr, 0};
     }
     return {nullptr, 0};
 }
@@ -155,67 +147,70 @@ Frame *FrameParser::advance(uint32_t bytes_read)
         if (error_ != FramingError::None) {
             return nullptr;
         }
-        // Skip extra header bytes if msg_offset > HEADER_SIZE (forward
-        // compat: a future header extension). For now msg_offset ==
-        // HEADER_SIZE always.
         if (header_.msg_size == 0) {
             // No control message.
+            parsed_request_id_      = 0;
+            parsed_rpc_create_nano_ = 0;
             if (header_.data_size == 0) {
                 // Control-only, data-less frame (e.g. one-way ping).
                 frame_ = new Frame;
                 return yield_frame();
             }
             // Data-only frame (no control message).
-            data_ = alloc_buf(header_.data_size);
-            if (data_ == nullptr) {
+            if (pool_ != nullptr) {
+                data_buf_ = pool_->alloc(header_.data_size);
+            }
+            if (data_buf_ == nullptr) {
                 error_ = FramingError::DataTooLarge;
                 return nullptr;
             }
-            data_len_ = header_.data_size;
-            state_    = ParseState::ReadingData;
+            state_ = ParseState::ReadingData;
         }
         else {
-            // Allocate control buffer.
-            control_ = alloc_buf(header_.msg_size);
-            if (control_ == nullptr) {
-                error_ = FramingError::DataTooLarge;
-                return nullptr;
-            }
-            control_len_ = header_.msg_size;
-            state_       = ParseState::ReadingControl;
+            // Allocate control buffer (reused vector).
+            control_buf_.resize(header_.msg_size);
+            control_offset_ = 0;
+            state_          = ParseState::ReadingControl;
         }
         return nullptr;
     }
 
     case ParseState::ReadingControl: {
         control_offset_ += bytes_read;
-        if (control_offset_ < control_len_) {
+        if (control_offset_ < control_buf_.size()) {
             return nullptr; // need more control bytes
         }
-        // Control complete.
+        // Control complete — extract fields (buzz-cpp style).
+        extract_control_fields(control_buf_.data(), static_cast<uint32_t>(control_buf_.size()), parsed_request_id_,
+                               parsed_rpc_create_nano_);
         if (header_.data_size == 0) {
             // Control-only frame.
             frame_ = new Frame;
             return yield_frame();
         }
-        // Allocate data buffer.
-        data_ = alloc_buf(header_.data_size);
-        if (data_ == nullptr) {
+        // Allocate data buffer from pool.
+        if (pool_ != nullptr) {
+            data_buf_ = pool_->alloc(header_.data_size);
+        }
+        if (data_buf_ == nullptr) {
             error_ = FramingError::DataTooLarge;
             return nullptr;
         }
-        data_len_ = header_.data_size;
-        state_    = ParseState::ReadingData;
+        state_ = ParseState::ReadingData;
         return nullptr;
     }
 
     case ParseState::ReadingData: {
         data_offset_ += bytes_read;
-        if (data_offset_ < data_len_) {
+        if (data_buf_ == nullptr) {
+            return nullptr;
+        }
+        if (data_offset_ < data_buf_->capacity) {
             return nullptr; // need more data bytes
         }
-        // Frame complete.
-        frame_ = new Frame;
+        // Frame complete — set len so consumers know how much data is valid.
+        data_buf_->len = data_offset_;
+        frame_         = new Frame;
         return yield_frame();
     }
     }

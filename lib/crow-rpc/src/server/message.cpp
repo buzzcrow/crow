@@ -15,27 +15,25 @@
 namespace crow::rpc
 {
 
-uint64_t extract_request_id(const uint8_t *control, uint32_t len)
+void extract_control_fields(const uint8_t *control, uint32_t len, uint64_t &out_request_id,
+                            uint64_t &out_rpc_create_nano)
 {
+    out_request_id      = 0;
+    out_rpc_create_nano = 0;
     if (control == nullptr || len == 0) {
-        return 0;
+        return;
     }
-    // All common messages have `id` at VT_ID=4. We try ping request first,
-    // then ping response, then unknown — they all share the same layout
-    // for the id field.
-    auto *ping_req = ::flatbuffers::GetRoot<proto::ConnectionPingRequest>(control);
-    if (ping_req != nullptr) {
-        return ping_req->id();
+    // All common messages (ConnectionPingRequest/Response, UnknownMessage)
+    // share the same flatbuffer layout for id + rpc_create_nano.
+    // Use Verifier to safely access fields on untrusted input.
+    ::flatbuffers::Verifier verifier(control, len);
+    if (verifier.VerifyBuffer<proto::ConnectionPingRequest>()) {
+        auto *ping = ::flatbuffers::GetRoot<proto::ConnectionPingRequest>(control);
+        if (ping != nullptr) {
+            out_request_id      = ping->id();
+            out_rpc_create_nano = ping->rpc_create_nano();
+        }
     }
-    auto *ping_resp = ::flatbuffers::GetRoot<proto::ConnectionPingResponse>(control);
-    if (ping_resp != nullptr) {
-        return ping_resp->id();
-    }
-    auto *unknown = ::flatbuffers::GetRoot<proto::UnknownMessage>(control);
-    if (unknown != nullptr) {
-        return unknown->id();
-    }
-    return 0;
 }
 
 // Helper: serialize a flatbuffer offset into a pool Buffer.

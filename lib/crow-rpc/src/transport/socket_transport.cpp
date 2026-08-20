@@ -16,6 +16,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -171,11 +172,73 @@ void Worker::run_loop()
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
                              std::vector<Connection *> &pending_writes, TransportStats *stats)
 {
-    auto &parser = conn->parser();
+    auto &parser      = conn->parser();
+    auto  on_frame_cb = [conn](Frame *frame) { conn->on_frame(frame); };
+
+    // Process bytes from recv_buf starting at offset `pos`, up to `end`.
+    // Handles header+control (via feed_data) and data (direct copy to
+    // data_buf_). Returns when all bytes are consumed or parser needs
+    // more bytes from the socket.
+    auto process_recv_bytes = [&](uint32_t pos, uint32_t end) -> bool {
+        while (pos < end && parser.last_error() == FramingError::None) {
+            if (parser.state() == ParseState::ReadingData) {
+                // Copy data bytes from recv_buf to data_buf_.
+                auto target = parser.next_read_target();
+                if (target.len == 0) {
+                    return false; // shouldn't happen
+                }
+                uint32_t avail   = end - pos;
+                uint32_t to_copy = std::min(avail, target.len);
+                std::memcpy(target.ptr, recv_buf + pos, to_copy);
+                pos += to_copy;
+                Frame *frame = parser.advance(to_copy);
+                if (frame != nullptr) {
+                    on_frame_cb(frame);
+                }
+            }
+            else {
+                // Header + control: feed_data stops at ReadingData.
+                uint32_t consumed = parser.feed_data(recv_buf + pos, end - pos, on_frame_cb);
+                pos += consumed;
+                if (parser.state() == ParseState::ReadingData) {
+                    continue; // loop back to copy data bytes
+                }
+                if (consumed == 0 && end - pos > 0) {
+                    // feed_data consumed nothing but bytes remain —
+                    // shouldn't happen, but break to avoid infinite loop.
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
     while (true) {
-        // One big read into the per-worker buffer, then feed_data
-        // processes all frames it contains. This reduces syscalls when
-        // multiple frames are pending on one connection.
+        // If parser is waiting for data, read directly into the data
+        // buffer (buzz-cpp style: separate read for data into pool Buffer).
+        if (parser.state() == ParseState::ReadingData) {
+            auto target = parser.next_read_target();
+            if (target.len == 0) {
+                break;
+            }
+            ssize_t n2 = ::read(fd, target.ptr, target.len);
+            if (n2 <= 0) {
+                if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+                    conn->close();
+                }
+                goto done;
+            }
+            if (stats != nullptr) {
+                stats->read_calls.fetch_add(1, std::memory_order_relaxed);
+            }
+            Frame *frame = parser.advance(static_cast<uint32_t>(n2));
+            if (frame != nullptr) {
+                conn->on_frame(frame);
+            }
+            continue;
+        }
+
+        // Header + control: read into recv_buf (batching multiple frames).
         ssize_t n = ::read(fd, recv_buf, recv_buf_size);
         if (n <= 0) {
             if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
@@ -186,44 +249,23 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
         if (stats != nullptr) {
             stats->read_calls.fetch_add(1, std::memory_order_relaxed);
         }
-        // feed_data copies bytes into parser buffers and yields frames.
-        uint32_t consumed =
-            parser.feed_data(recv_buf, static_cast<uint32_t>(n), [conn](Frame *frame) { conn->on_frame(frame); });
-        if (consumed < static_cast<uint32_t>(n)) {
-            // Parser couldn't consume all — partial frame at buffer end.
-            // Fill the parser's internal buffer directly to complete it.
-            while (true) {
-                auto target = parser.next_read_target();
-                if (target.len == 0) {
-                    break;
-                }
-                ssize_t n2 = ::read(fd, target.ptr, target.len);
-                if (n2 <= 0) {
-                    if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-                        conn->close();
-                    }
-                    goto done;
-                }
-                if (stats != nullptr) {
-                    stats->read_calls.fetch_add(1, std::memory_order_relaxed);
-                }
-                Frame *frame = parser.advance(static_cast<uint32_t>(n2));
-                if (frame != nullptr) {
-                    conn->on_frame(frame);
-                }
-            }
-            goto done;
+
+        // Process all bytes in recv_buf — header+control via feed_data,
+        // data via direct copy. Handles multiple frames in one read.
+        process_recv_bytes(0, static_cast<uint32_t>(n));
+
+        // If parser is now waiting for data, loop back for direct read.
+        if (parser.state() == ParseState::ReadingData) {
+            continue;
         }
-        // All consumed — check if parser still needs more (partial frame
-        // at buffer boundary). If next_read_target returns non-zero len,
-        // we need to read more to complete the frame.
+
+        // Check if parser needs more bytes (partial header/control).
         auto target = parser.next_read_target();
         if (target.len == 0) {
             break;
         }
-        // Parser needs more bytes for the current frame — read directly
-        // into parser buffer until frame completes.
-        while (target.len > 0) {
+        // Read directly into parser buffer until header/control completes.
+        while (target.len > 0 && parser.state() != ParseState::ReadingData) {
             ssize_t n2 = ::read(fd, target.ptr, target.len);
             if (n2 <= 0) {
                 if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
@@ -240,7 +282,7 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
             }
             target = parser.next_read_target();
         }
-        break;
+        // If parser transitioned to ReadingData, loop back for direct read.
     }
 done:
     // If on_frame enqueued responses (via submit_inline), collect this

@@ -249,7 +249,8 @@ struct OnCompleteAdapter
 
     void operator()(crow::rpc::Frame *response, crow::rpc::RpcError err)
     {
-        invoke_c_complete(cb, user_data, 0, response, err);
+        uint64_t req_id = (response != nullptr) ? response->request_id : 0;
+        invoke_c_complete(cb, user_data, req_id, response, err);
         delete this;
     }
 };
@@ -259,21 +260,18 @@ struct OnCompleteAdapter
 namespace crow::rpc
 {
 
-// Wrap a raw malloc'd byte range in a crow_rpc_buffer_s handle with no
-// pool ownership (ref=nullptr → release frees the data + Buffer).
-static crow_rpc_buffer_t wrap_raw_buffer(uint8_t *data, uint32_t len)
+// Wrap a pool Buffer in a crow_rpc_buffer_s handle. The handle holds a
+// ref_clone so the frame's release doesn't free the buffer.
+static crow_rpc_buffer_t wrap_pool_buffer(Buffer *buf)
 {
-    if (data == nullptr || len == 0) {
+    if (buf == nullptr || buf->len == 0) {
         return nullptr;
     }
-    auto *buf     = new Buffer;
-    buf->data     = data;
-    buf->len      = len;
-    buf->capacity = len;
-    buf->type     = BufferType::System;
-    buf->pool     = nullptr;
-    buf->ref      = nullptr;
-    return new crow_rpc_buffer_s{buf};
+    Buffer *clone = buf->ref_clone();
+    if (clone == nullptr) {
+        return nullptr;
+    }
+    return new crow_rpc_buffer_s{clone};
 }
 
 void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buffer_t *out_data)
@@ -283,12 +281,9 @@ void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buff
     if (frame == nullptr) {
         return;
     }
-    *out_ctrl = wrap_raw_buffer(frame->control, frame->control_len);
-    *out_data = wrap_raw_buffer(frame->data, frame->data_len);
-    // Null the Frame's pointers so its destructor doesn't free them —
-    // the crow_rpc_buffer_s handles own the data now.
-    frame->control = nullptr;
-    frame->data    = nullptr;
+    // Control fields are extracted during parse — no control buffer.
+    // Data is a pool Buffer — ref_clone so the frame's release doesn't free.
+    *out_data = wrap_pool_buffer(frame->data_buf);
     delete frame;
 }
 
@@ -361,9 +356,10 @@ crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t
     // the same connection.
 
     // Extract the request_id from the flatbuffer control message so
-    // the server can echo it back for correlation. All common messages
-    // have `id` as the first field (VT_ID=4).
-    uint64_t req_id = crow::rpc::extract_request_id(ctrl_buf->data, ctrl_buf->len);
+    // the server can echo it back for correlation.
+    uint64_t req_id      = 0;
+    uint64_t create_nano = 0;
+    crow::rpc::extract_control_fields(ctrl_buf->data, ctrl_buf->len, req_id, create_nano);
     if (req_id == 0) {
         // Not a standard common message — generate one.
         req_id = client->client->next_request_id();
@@ -480,16 +476,16 @@ crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int
 // logic as the load_test.cpp echo handler, compiled into the library.
 static crow::rpc::OutFrame *echo_handler(crow::rpc::Frame *request, crow::rpc::Connection *conn)
 {
-    uint64_t               req_id    = crow::rpc::extract_request_id(request->control, request->control_len);
+    uint64_t               req_id    = request->request_id;
     crow::rpc::BufferPool *pool      = conn->pool();
     crow::rpc::Buffer     *resp_ctrl = crow::rpc::build_ping_response(pool, req_id, 0);
 
     crow::rpc::Buffer *resp_data = nullptr;
-    if (request->data != nullptr && request->data_len > 0) {
-        resp_data = pool->alloc(request->data_len);
+    if (request->data_buf != nullptr && request->data_buf->len > 0) {
+        resp_data = pool->alloc(request->data_buf->len);
         if (resp_data != nullptr) {
-            std::memcpy(resp_data->data, request->data, request->data_len);
-            resp_data->write(resp_data->data, request->data_len);
+            std::memcpy(resp_data->data, request->data_buf->data, request->data_buf->len);
+            resp_data->write(resp_data->data, request->data_buf->len);
         }
     }
 
@@ -506,15 +502,6 @@ void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t ms
         return;
     }
     server->server->register_handler(msg_type, echo_handler);
-}
-
-void crow_rpc_server_set_dispatch_callback(crow_rpc_server_t server, crow_rpc_dispatch_callback callback,
-                                           void *user_data)
-{
-    if (server == nullptr) {
-        return;
-    }
-    server->server->set_dispatch_callback(callback, user_data);
 }
 
 crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *conn_handle, const uint8_t *control,

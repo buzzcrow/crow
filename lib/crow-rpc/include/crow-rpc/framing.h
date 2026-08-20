@@ -3,9 +3,12 @@
 
 #pragma once
 
+#include "crow-rpc/buffer.h"
+
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace crow::rpc
 {
@@ -35,23 +38,25 @@ struct Header
     uint8_t  flags      = 0;
 };
 
-// A complete frame: header + control buffer + optional data buffer.
-// Ownership: control and data are malloc'd by the parser and freed by
-// the destructor. The handler/callback that receives a Frame* must
-// delete it when done (or transfer ownership by nulling the pointers).
+// A complete frame: header + extracted control fields + optional data
+// buffer. The parser extracts request_id + rpc_create_nano from the
+// flatbuffer control message during parse (buzz-cpp style) and discards
+// the control bytes. Data is read into a pool-allocated, ref-counted
+// Buffer. The handler/callback that receives a Frame* must delete it
+// when done (destructor releases data_buf to the pool).
 struct Frame
 {
     Header   header;
-    uint8_t *control     = nullptr; // flatbuffer control message bytes
-    uint32_t control_len = 0;
-    uint8_t *data        = nullptr; // raw data payload, nullptr if control-only
-    uint32_t data_len    = 0;
-    uint64_t parsed_nano = 0; // steady_clock ns when parser yielded this frame
+    uint64_t request_id      = 0;       // extracted from control during parse
+    uint64_t rpc_create_nano = 0;       // extracted from control during parse
+    Buffer  *data_buf        = nullptr; // pool-allocated; nullptr if control-only
+    uint64_t parsed_nano     = 0;       // steady_clock ns when parser yielded this frame
 
     ~Frame()
     {
-        std::free(control);
-        std::free(data);
+        if (data_buf != nullptr) {
+            data_buf->release();
+        }
     }
 };
 
@@ -68,6 +73,12 @@ void serialize_header(uint8_t *buf, const Header &h);
 // Parse a 12-byte buffer into a header (little-endian, field-by-field).
 Header parse_header(const uint8_t *buf);
 
+// Extract request_id + rpc_create_nano from a flatbuffer control
+// message. All common messages (ConnectionPingRequest/Response,
+// UnknownMessage) share the same layout for these two fields.
+void extract_control_fields(const uint8_t *control, uint32_t len, uint64_t &out_request_id,
+                            uint64_t &out_rpc_create_nano);
+
 // ── FrameParser — pull-based zero-copy state machine ──────────────
 //
 // The parser drives receive-side zero-copy. Instead of reading into a
@@ -75,11 +86,19 @@ Header parse_header(const uint8_t *buf);
 // next* — directly into pool-allocated Buffers. This unifies the TCP and
 // RDMA receive paths.
 //
+// buzz-cpp style: control fields (request_id, rpc_create_nano) are
+// extracted during parse and the control bytes are discarded. Data is
+// read into a pool-allocated Buffer. No malloc per frame.
+//
 // Usage in the read loop:
 //   target = parser.next_read_target();
 //   n = read(fd, target.ptr, target.len);
 //   frame = parser.advance(n);
 //   if (frame) dispatch(frame);
+//
+// For batched reads (header + control from recv_buf):
+//   consumed = parser.feed_data(recv_buf, n, on_frame);
+//   // feed_data stops at ReadingData — read loop handles data directly.
 
 enum class ParseState {
     ReadingHeader,
@@ -98,6 +117,17 @@ class FrameParser
 
     explicit FrameParser(uint32_t max_data_size = 4 << 20);
 
+    // Set the pool for data buffer allocation (called by Connection).
+    void set_pool(BufferPool *p)
+    {
+        pool_ = p;
+    }
+
+    ParseState state() const
+    {
+        return state_;
+    }
+
     // Where to read next. len == 0 means no more bytes needed right now.
     ReadTarget next_read_target();
 
@@ -108,16 +138,19 @@ class FrameParser
     Frame *advance(uint32_t bytes_read);
 
     // Feed bytes from an external buffer (e.g. a per-worker receive
-    // buffer filled by one big read()). Copies bytes into the parser's
-    // internal buffers and yields complete frames via the callback.
-    // Returns the number of bytes consumed (may be < len if an error
-    // occurs or the parser needs a different state). This trades one
-    // extra memcpy for fewer syscalls: one read() can grab data for
-    // multiple frames, then feed_data processes them all.
+    // buffer filled by one big read()). Processes header + control,
+    // yields complete control-only frames via the callback. Stops when
+    // the parser enters ReadingData state — the read loop handles data
+    // directly (buzz-cpp style: separate read for data into pool Buffer).
+    // Returns the number of bytes consumed.
     template <typename Callback> uint32_t feed_data(const uint8_t *data, uint32_t len, Callback &&on_frame)
     {
         uint32_t consumed = 0;
         while (consumed < len && error_ == FramingError::None) {
+            // Stop at data — the read loop handles data directly.
+            if (state_ == ParseState::ReadingData) {
+                break;
+            }
             auto target = next_read_target();
             if (target.len == 0) {
                 break;
@@ -153,24 +186,23 @@ class FrameParser
     uint8_t  header_buf_[HEADER_SIZE];
     uint32_t header_offset_ = 0;
 
-    // Control message (allocated by the caller via the pool, or by the
-    // parser itself for testing). The parser owns these allocations.
-    uint8_t *control_        = nullptr;
-    uint32_t control_len_    = 0;
-    uint32_t control_offset_ = 0;
+    // Control: reused across frames (resized to msg_size).
+    std::vector<uint8_t> control_buf_;
+    uint32_t             control_offset_ = 0;
 
-    // Data payload.
-    uint8_t *data_        = nullptr;
-    uint32_t data_len_    = 0;
+    // Data: pool-allocated Buffer (replaces malloc'd data_).
+    Buffer  *data_buf_    = nullptr;
     uint32_t data_offset_ = 0;
+
+    // Pool for data allocation.
+    BufferPool *pool_ = nullptr;
+
+    // Extracted during parse (stored in Frame on yield).
+    uint64_t parsed_request_id_      = 0;
+    uint64_t parsed_rpc_create_nano_ = 0;
 
     // The completed frame (returned by advance, owned by the caller).
     Frame *frame_ = nullptr;
-
-    // Allocate control/data buffers. Override in tests; production uses
-    // BufferPool. Default: malloc (freed on reset).
-    virtual uint8_t *alloc_buf(uint32_t capacity);
-    virtual void     free_buf(uint8_t *ptr);
 
     // Validate the parsed header; returns FramingError::None if ok.
     FramingError validate_header() const;

@@ -121,33 +121,6 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_register_echo_handler(self.handle, msg_type) };
     }
 
-    /// Set a dispatch callback (executor model). When set, the I/O worker
-    /// calls this callback instead of running the C++ handler inline.
-    /// The callback receives the raw Connection* as conn_handle and
-    /// takes ownership of the malloc'd control/data buffers (free with
-    /// `libc::free`). The callback must be non-blocking.
-    ///
-    /// # Safety
-    /// `user_data` must be a valid pointer (or null) that outlives the
-    /// server. The callback must be non-blocking.
-    pub unsafe fn set_dispatch_callback(
-        &self,
-        callback: Option<
-            unsafe extern "C" fn(
-                user_data: *mut std::ffi::c_void,
-                conn_handle: *mut std::ffi::c_void,
-                msg_type: u16,
-                control: *mut u8,
-                control_len: u32,
-                data: *mut u8,
-                data_len: u32,
-            ),
-        >,
-        user_data: *mut std::ffi::c_void,
-    ) {
-        sys::crow_rpc_server_set_dispatch_callback(self.handle, callback, user_data);
-    }
-
     /// Submit a response on a server-side connection. Thread-safe — may
     /// be called from any thread (e.g. a Rust thread pool worker).
     /// conn_handle is the raw pointer passed to the dispatch callback.

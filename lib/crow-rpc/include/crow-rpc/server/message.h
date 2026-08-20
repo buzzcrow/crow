@@ -23,10 +23,10 @@ namespace crow::rpc
 // crates and use the same Frame + Buffer structures — they just parse
 // the control buffer with their own generated flatbuffer headers.
 
-// Extract request_id from a flatbuffer control message. All common
-// messages carry `id: uint64` as the first field. Returns 0 if the
-// control buffer is null or empty.
-uint64_t extract_request_id(const uint8_t *control, uint32_t len);
+// Extract request_id + rpc_create_nano from a flatbuffer control
+// message. All common messages (ConnectionPingRequest/Response,
+// UnknownMessage) share the same layout for these two fields.
+// Declared in framing.h, implemented here (needs flatbuffer generated headers).
 
 // Build a ping request control buffer. Returns a pool-allocated Buffer
 // with the serialized ConnectionPingRequest flatbuffer.

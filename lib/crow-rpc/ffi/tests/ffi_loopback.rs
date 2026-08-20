@@ -6,9 +6,7 @@
 //! These tests exercise the full FFI loopback: Rust creates a server,
 //! connects a client, sends a ping request, and verifies the response.
 
-use crow_protocol::fb::{
-    ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, FBMsgType,
-};
+use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs, FBMsgType};
 use crow_rpc_ffi::{BufferPool, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 
@@ -102,14 +100,9 @@ async fn ping_loopback() {
         .expect("timeout waiting for response")
         .expect("callback dropped");
 
-    assert!(response.control.is_some(), "response should have control");
-    let ctrl_buf = response.control.unwrap();
-    let resp_bytes = ctrl_buf.bytes();
-    assert!(!resp_bytes.is_empty(), "control bytes should be non-empty");
-
-    // Parse the response as a ConnectionPingResponse and verify the id.
-    let resp = flatbuffers::root::<ConnectionPingResponse>(resp_bytes).expect("failed to parse response");
-    assert_eq!(resp.id(), 42, "response id should match request id");
+    // With zero-copy parse, control fields are extracted during parse
+    // and the control buffer is discarded. request_id is in the Response.
+    assert_eq!(response.request_id, 42, "response id should match request id");
 
     server.stop();
 }
@@ -169,14 +162,8 @@ async fn ping_loopback_with_data() {
         .expect("callback dropped");
 
     // The built-in ping handler returns a ConnectionPingResponse with
-    // no data. Verify we got a control buffer back with the right id.
-    assert!(response.control.is_some(), "response should have control");
-    let ctrl_buf = response.control.unwrap();
-    let resp_bytes = ctrl_buf.bytes();
-    assert!(!resp_bytes.is_empty(), "control bytes should be non-empty");
-
-    let resp = flatbuffers::root::<ConnectionPingResponse>(resp_bytes).expect("failed to parse response");
-    assert_eq!(resp.id(), 99, "response id should match request id");
+    // no data. With zero-copy parse, request_id is in the Response.
+    assert_eq!(response.request_id, 99, "response id should match request id");
 
     server.stop();
 }
@@ -236,12 +223,8 @@ async fn echo_handler_loopback() {
         .expect("timeout waiting for response")
         .expect("callback dropped");
 
-    // Verify the control buffer has the echoed request_id.
-    assert!(response.control.is_some(), "response should have control");
-    let ctrl_buf = response.control.unwrap();
-    let resp_bytes = ctrl_buf.bytes();
-    let resp = flatbuffers::root::<ConnectionPingResponse>(resp_bytes).expect("failed to parse response");
-    assert_eq!(resp.id(), 777, "response id should match request id");
+    // Verify the echoed request_id (extracted during parse).
+    assert_eq!(response.request_id, 777, "response id should match request id");
 
     // Verify the data buffer matches the request payload (echo).
     assert!(response.data.is_some(), "response should have data");

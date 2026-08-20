@@ -58,20 +58,6 @@ class RpcServer
         return pool_;
     }
 
-    // Set a dispatch callback (executor model). When set, the I/O worker
-    // calls this callback instead of running the C++ handler inline.
-    // The callback takes ownership of the frame's control/data buffers
-    // (malloc'd) and must be non-blocking. The callback receives the raw
-    // Connection* as conn_handle — pass it to submit_response later.
-    using DispatchCallback = void (*)(void *user_data, void *conn_handle, uint16_t msg_type, uint8_t *control,
-                                      uint32_t control_len, uint8_t *data, uint32_t data_len);
-
-    void set_dispatch_callback(DispatchCallback cb, void *user_data)
-    {
-        dispatch_callback_  = cb;
-        dispatch_user_data_ = user_data;
-    }
-
   private:
     BufferPool                      *pool_;
     bool                             owns_pool_;
@@ -82,11 +68,6 @@ class RpcServer
     int               listen_port_ = 0;
     std::atomic<bool> running_{false};
     std::thread       acceptor_thread_;
-
-    // Dispatch callback (executor model). When non-null, dispatch()
-    // calls this instead of the C++ handler.
-    DispatchCallback dispatch_callback_  = nullptr;
-    void            *dispatch_user_data_ = nullptr;
 
     void acceptor_loop();
     void dispatch(Frame *frame, Connection *conn);

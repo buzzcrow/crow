@@ -94,14 +94,13 @@ TEST_F(TransportLoopbackTest, SendAndReceiveFrame)
 
     // Atomic flag + received frame data.
     std::atomic<bool> got_frame{false};
-    uint16_t          recv_msg_type    = 0;
-    uint32_t          recv_control_len = 0;
+    uint16_t          recv_msg_type = 0;
+    uint32_t          recv_msg_size = 0;
 
     server_conn->set_on_frame([&](Frame *frame, Connection *) {
-        recv_msg_type    = frame->header.msg_type;
-        recv_control_len = frame->control_len;
+        recv_msg_type = frame->header.msg_type;
+        recv_msg_size = frame->header.msg_size;
         got_frame.store(true, std::memory_order_release);
-        // Free the frame (parser-allocated buffers).
         delete frame;
     });
 
@@ -126,7 +125,7 @@ TEST_F(TransportLoopbackTest, SendAndReceiveFrame)
     }
     EXPECT_TRUE(got_frame.load(std::memory_order_acquire));
     EXPECT_EQ(recv_msg_type, 42u);
-    EXPECT_EQ(recv_control_len, 16u);
+    EXPECT_EQ(recv_msg_size, 16u);
 
     transport.stop();
     ::close(client_fd);

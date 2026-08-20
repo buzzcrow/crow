@@ -54,6 +54,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     build
         .cpp(true)
         .std("c++20")
+        // Line-tables-only debug info for C++: enough for GDB
+        // backtraces (file:line) from core dumps, ~1MB per object.
+        // .debug(false) guards against cc-rs inheriting a future
+        // Cargo profile debug setting (which maps to full -g).
+        .debug(false)
+        .flag("-g1")
         .include(&include)
         .include(&common_include)
         .warnings(false);

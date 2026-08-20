@@ -3,10 +3,10 @@
 
 # RPC Echo Perf Gap Analysis — CROW vs buzz-cpp
 
-Gap analysis between CROW's RPC echo bench (585K TPS, Gap2+Gap3) and
-buzz-cpp's coroutine loader bench (2.03M TPS, same platform). Both use
-the same inline-resume technique; the gap is in the surrounding
-architecture, not the resume model.
+Gap analysis between CROW's RPC echo bench (~520K TPS, 2-process +
+C++ coroutines) and buzz-cpp's coroutine loader bench (2.03M TPS, same
+platform). Both use the same inline-resume technique; the gap is in
+the surrounding architecture, not the resume model.
 
 Companion: `rpc-echo-flow-analysis.md` (CROW flow detail).
 
@@ -15,22 +15,22 @@ Companion: `rpc-echo-flow-analysis.md` (CROW flow detail).
 ## Benchmark Comparison
 
 Both measured on the same AMD Ryzen 9 5950X (16c/32t), 128B values,
-20s duration, epoll + TCP loopback.
+epoll + TCP loopback.
 
-| Metric | buzz-cpp | CROW (Gap2+Gap3) | Ratio |
+| Metric | buzz-cpp | CROW (current) | Ratio |
 | --- | --- | --- | --- |
-| Peak TPS | 2,029,024 | 584,941 | 3.5× |
-| Per-worker TPS | 63K (32 workers) | 146K (4 workers) | 0.43× (CROW wins) |
-| Workers at peak | 32 client + 16 server | 4 (1×4) | — |
-| Epoll fds | 2 (client + server, separate processes) | 1 (shared) | — |
-| Connections per epoll fd | 32 (one side) | 64 (32 client + 32 server) | — |
-| Process model | 2 processes (bench + bench-server) | 1 process (in-process echo) | — |
-| Avg latency at peak | 592µs | 1,705µs | 2.9× |
-| p999 at peak | 42ms | 40ms | ~same |
+| Peak TPS | 2,029,024 | ~520,000 | 3.9× |
+| Per-worker TPS | 63K (32 workers) | ~33K (16 workers) | 0.52× (CROW wins per-worker) |
+| Workers at peak | 32 client + 16 server | 16 client + 16 server | — |
+| Epoll fds | 2 (client + server, separate processes) | 2 (client + server, separate processes) | — (matched) |
+| Connections per epoll fd | 32 (one side) | 16–32 (one side) | — (matched) |
+| Process model | 2 processes | 2 processes | — (matched) |
+| Client model | C++ coroutines | C++ coroutines | — (matched) |
+| Avg latency at peak | 592µs | 242µs (128 coros) / 2ms (1000 coros) | — |
 | Errors | 0 | 0 | — |
 
 Source: `buzz-cpp/logs/bench.log.20260820-100050` (2,029,024 TPS),
-`rpc-echo-flow-analysis.md` § Benchmark Results (584,941 TPS).
+CROW bench runs (128 coros, 16 conns, 16+16 workers, 128B, 5s).
 
 ---
 
@@ -50,12 +50,13 @@ iteration on the response thread — no scheduler, no thread switch.
   Source: `buzz-cpp/src/lib/buzz-rpc/send/coroutine_remote_caller.cpp`
   lines 81-95.
 
-- **CROW**: `RpcClient::on_response()` → slab lookup →
-  `bench_on_complete()`. The callback runs inline, records latency,
-  calls `submit_next()` → builds flatbuffer → `call_callback()` →
-  `transport->submit()` → writev — building and submitting the next
-  request on the I/O worker thread.
-  Source: `app/crow-cli/src/bench/targets/rpc.rs` lines 762-811.
+- **CROW**: C++ coroutine suspends at `co_await` → I/O worker receives
+  response → `on_response` → `co_on_complete` → `handle.resume()`
+  (direct function call, ~10ns). Rust `co_on_response()` runs via FFI
+  on the I/O worker thread, records stats, then the coroutine loops
+  back to `co_build_request()` → submit → suspend.
+  Source: `app/crow-cli/src/bench/targets/rpc.rs` lines 309-420,
+  `lib/crow-rpc/src/client/co_client.cpp`.
 
 ### CROW's slab pool is better than buzz-cpp's hash map
 
@@ -64,88 +65,70 @@ CROW uses a pre-allocated slab pool indexed by `request_id & pool_mask`
 —a lock-free concurrent hash map with hazard pointers and a heap
 allocation per node (`new node_type(...)` on every `add`).
 
-The global_rules note describes buzz-cpp as using "pre-allocate
-completion slots, index by request_id & mask" — this is actually
-CROW's design, not buzz-cpp's. CROW improved on buzz-cpp here.
-
 ---
 
-## The 5 Architectural Diffs (3.5× gap)
+## The Remaining Architectural Diffs (3.9× gap)
 
-### Diff 1: Process model — 2 epoll fds vs 1 (biggest factor, ~2×)
-
-buzz-cpp runs the bench client and bench-server as **2 separate
-processes**, each with its own epoll fd. The client-side re-arms and
-server-side re-arms never contend with each other.
-
-CROW runs the echo server and client in **1 process** with **1 epoll
-fd**. All client + server connections share that fd. The in-process
-echo creates a tight feedback loop on the fd: every server read
-triggers a response writev, which immediately makes the client
-connection readable, which triggers a callback that submits a new
-request writev, which immediately makes the server connection readable
-—all on the same epoll fd, all requiring ONESHOT re-arms
-(`epoll_ctl MOD`).
-
-### Diff 2: Worker count — 48 vs 4 (~2×)
+### Diff 1: Worker count — 48 vs 32 (~1.5×)
 
 buzz-cpp: 32 client I/O workers + 16 server I/O workers = 48 threads
 covering 2 epoll fds. More workers keep `epoll_wait` covered while
 others do callback work.
 
-CROW: 4 workers (1×4) on 1 epoll fd. Beyond 4 workers, ONESHOT re-arm
-contention + empty `epoll_wait` calls dominate: 1×16 drops to 497K
-(31K/worker, massive degradation from 146K/worker at 1×4).
+CROW: 16 client I/O workers + 16 server I/O workers = 32 threads.
+Scaling beyond 16 workers per engine hits diminishing returns due to
+`EPOLLONESHOT` re-arm contention within a single epoll fd. buzz-cpp
+scales to 32 client workers because its per-worker cost is lower (no
+flatbuffer, no FFI callback).
 
-CROW's workers are individually more efficient (146K vs 63K per
-worker) because in-process echo avoids cross-process context switches.
-But CROW **cannot add more workers** due to Diff 1.
+CROW's workers are individually more efficient at low concurrency
+(~33K vs 63K per worker at peak) but **cannot scale to as many
+workers** due to higher per-op cost (flatbuffer build + FFI + malloc).
 
-### Diff 3: Connections per epoll fd — 32 vs 64 (~1.3×)
+### Diff 2: Per-op cost — flatbuffer + malloc vs custom codec (~1.3×)
 
-buzz-cpp: 32 connections per epoll fd (client-side only or server-side
-only). Shorter kernel interest list, lower lock hold time.
+buzz-cpp: custom binary codec (`msg_bench_write_request`), direct
+`recv()` into message buffer, no heap alloc per frame. Per-op cost
+is dominated by the syscall + epoll re-arm, not the codec.
 
-CROW: 64 connections per epoll fd (32 client + 32 server mixed).
-Longer interest list, longer kernel epoll lock hold during re-arms.
+CROW (after zero-copy parse refactor): flatbuffer build per op
+(`FlatBufferBuilder::new()` + create + finish), FFI callback overhead
+(~20ns/op). The `FrameParser` no longer mallocs per frame — control
+uses a reused `std::vector`, data uses a pool `Buffer`. The flatbuffer
+rebuild is the biggest remaining contributor — it allocates a new
+buffer every op.
 
-### Diff 4: Read path — direct-to-message-buffer vs copy-through-worker-buffer (~1.1×)
+### Diff 3: Read path — direct-to-message-buffer vs copy-through-worker-buffer (resolved)
 
 buzz-cpp: for the data phase, `recv()` reads directly into the message
 object's data buffer (`transfer_socket_data`), avoiding one copy.
 Source: `buzz-cpp/src/app/buzz-bench-server/rpc/proto/msg_bench_write_request.cpp`
 lines 44-61.
 
-CROW: always reads into a per-worker buffer, then `feed_data` copies
-into parser buffers. For 128B payloads this is a small cost, but it
-scales with payload size.
-
-### Diff 5: Server write — immediate vs batched (CROW wins here)
-
-buzz-cpp: `post_send` → writev per response (no batching across
-responses in one event batch).
-
-CROW: `submit_inline` + batch writev after all events in the batch
-(send aggregation). This coalesces multiple responses into one writev
-per connection. CROW is better here, but it doesn't offset Diffs 1-3.
+CROW (after zero-copy parse refactor): when the parser is in
+`ReadingData` state, `read()` goes directly into the pool-allocated
+`data_buf_` — zero copy, matching buzz-cpp. Header + control still
+read into the per-worker `recv_buf` (small, fixed-size, batched).
+One residual copy remains: when header + control + data arrive in a
+single `read()` batch, the data bytes in `recv_buf` are `memcpy`'d
+to `data_buf_`. This is unavoidable (bytes already consumed from the
+socket) and bounded by `data_size` (128B in bench — negligible).
+For large payloads, most data arrives via the direct-read path.
 
 ---
 
 ## Lock Analysis — Full Hot Path
 
-### Rust side (bench callback path)
+### Rust side (C++ coroutine FFI callbacks)
 
 | Location | Lock type | Contended? | Hot path? |
 | --- | --- | --- | --- |
-| `BenchWorkerCtx.stats` (lock-free atomics) | `AtomicU64` | No (Relaxed) | YES — every `bench_on_complete` |
-| `BenchWorkerCtx.in_flight` (AtomicU64) | atomic | No (Relaxed/AcqRel) | YES — every callback |
-| `request_id_counter` (AtomicU64) | atomic | Low contention (only initial kickoff) | Only kickoff |
-| `WorkerCounters` | lock-free atomics | No (per-worker) | YES — every callback |
-| `next_conn` (AtomicUsize) | atomic | No (only at worker spawn) | No |
+| `CoCtx.stats` (atomics) | `AtomicU64` | No (Relaxed) | YES — every `co_on_response` |
+| `request_id_counter` (AtomicU64) | atomic | No (per-coroutine slot) | No (C++ assigns slots) |
+| `WorkerCounters` | lock-free atomics | No (per-worker) | YES — every `co_on_response` |
+| `next_conn` (AtomicUsize) | atomic | No (only at spawn) | No |
 
-**No contended locks on the Rust hot path.** The former `stats` Mutex
-was replaced with `LockFreeStats` (atomic counters for ops, errors,
-total latency ns) — see Implementation Results below.
+**No contended locks on the Rust hot path.**
 
 ### C++ side (echo round-trip)
 
@@ -156,20 +139,20 @@ total latency ns) — see Implementation Results below.
 | Slab pool `slot.state` (atomic u8) | atomic | No (per-slot, no cross-slot) | YES — every submit + response |
 | `EpollEngine::mask_mu_` (Mutex) | `std::mutex` | Only in level-triggered mode | No (ONESHOT fast path skips it) |
 | `EpollEngine::conn_mu_` (Mutex) | `std::mutex` | Only add/remove connection | No (setup only) |
-| `FrameParser` malloc/free | heap | Per-frame `malloc` for control + data | **YES** — 4 mallocs + 4 frees per op |
+| `FrameParser` pool alloc | `BufferPool` | Per-frame data `Buffer` alloc (pool-reused) | **YES** — 1 pool alloc + 1 release per op (server + client) |
 | `RpcClient::pending_mu_` (Mutex) | `std::mutex` | No — slab path bypasses it | No (only oneshot path) |
 
 **The `send_mu_` mutex is the contended C++ lock.** It's held during
 `enqueue_send` (push to deque), `drain_send_queue` (pop from deque),
-and `has_pending_send` (check if empty). With the in-process echo
-feedback loop, the same connection's send queue is touched by the
-submitter thread (request) and the I/O worker (response batch flush),
-creating cross-thread contention on the same mutex.
+and `has_pending_send` (check if empty). With the 2-process model,
+the same connection's send queue is touched by the submitter thread
+(request) and the I/O worker (response batch flush), creating
+cross-thread contention on the same mutex.
 
 Source: `lib/crow-rpc/src/connection.cpp` lines 26-48, 57-223;
 `lib/crow-rpc/include/crow-rpc/transport.h` lines 160-166.
 
-### Per-op lock count (callback model, 1×4 config)
+### Per-op lock count (2-process, 16+16 workers)
 
 Per echo round-trip (1 request + 1 response):
 
@@ -178,33 +161,15 @@ Per echo round-trip (1 request + 1 response):
 | C++ `send_mu_` | 3 | request `enqueue_send`, response `enqueue_send`, response batch `has_pending_send` + `drain_send_queue` |
 | C++ `in_send_` CAS | 2 | request writev, response writev |
 | Slab `state` atomic | 2 | submit (PENDING), response (DONE) |
-| `malloc`/`free` | 4+4 | parser alloc control+data (server), parser alloc control+data (client), + Frame struct |
+| `BufferPool` alloc/release | 2 | data `Buffer` alloc (server parse), data `Buffer` release (client callback) |
 
-**Total: 3 C++ mutex acquisitions + 2 CAS + 8 heap ops per op.**
+**Total: 3 C++ mutex acquisitions + 2 CAS + 2 pool ops per op.**
 The C++ `send_mu_` is the only contended lock; the rest are
-low-contention or per-slot. (The former Rust `stats` mutex was
-removed — see Implementation Results.)
+low-contention or per-slot.
 
 ---
 
-## Recommendations
-
-### Multi-engine + separate client transport (medium effort, ~1.7×)
-
-The highest-impact architectural change: give CROW the same 2-epoll-fd
-architecture that buzz-cpp has, without going cross-process.
-
-- Create a **client-side `SocketTransport`** separate from the
-  server's transport. Client connections live on the client
-  transport's epoll fd; server connections live on the server
-  transport's epoll fd.
-- This breaks the in-process echo feedback loop's single-fd
-  contention: client-side re-arms and server-side re-arms happen on
-  different fds, in parallel.
-- Use `--io-engines 2` (one for client, one for server) to get 2
-  independent epoll fds.
-
-Expected: ~1M TPS (1.7×), with more headroom to add workers.
+## Recommendations (Next Optimizations)
 
 ### Flatbuffer template reuse (low effort, ~1.2×)
 
@@ -216,12 +181,21 @@ Expected: ~5µs saved per op (significant at low concurrency where
 per-op cost is 12µs; less impact at high concurrency where queueing
 dominates).
 
-### Parser buffer pooling (low-medium effort, tail-latency win)
+### Parser buffer pooling (done — zero-copy parse refactor)
 
-`FrameParser::alloc_buf` calls `std::malloc` per frame for control +
-data. Replace with pool-backed allocation (reuse buffers from a
-per-worker free list). This eliminates 4 malloc + 4 free per op,
-reducing allocator pressure and tail latency.
+`FrameParser` now uses a reused `std::vector` for control and a
+`BufferPool`-allocated `Buffer` for data. No per-frame `malloc`/`free`
+on the receive path. The `Frame` struct holds a `Buffer*` (ref-counted)
+instead of raw pointers.
+
+### More workers via multi-engine (medium effort, ~1.3×)
+
+CROW currently uses 1 engine per process (1 epoll fd per side). Adding
+`--io-engines 2` on the client side would give 2 client epoll fds,
+allowing 32 client workers without ONESHOT re-arm contention on a
+single fd. This matches buzz-cpp's 32 client workers.
+
+The server side can also use multi-engine to scale beyond 16 workers.
 
 ### Lock-free send queue (high effort, ~1.1×)
 
@@ -238,177 +212,31 @@ lock-free MPSC is a future optimization" —
 
 ## Projected TPS After Fixes
 
-| Fix | Expected TPS | Cumulative |
+These are **rough estimates** based on bottleneck reasoning, not
+measurements. Each multiplier is a guess; stacking them compounds
+error. Treat as ordering of impact, not precise predictions.
+
+| Fix | Estimated impact | Basis |
 | --- | --- | --- |
-| Current (Gap2+Gap3, lock-free stats) | 585K | 585K |
-| + Flatbuffer reuse | 700K | 700K |
-| + Parser buffer pooling | 750K | 750K |
-| + Multi-engine + separate client transport | 1.1M | 1.1M |
-| + Lock-free send queue | 1.2M | 1.2M |
-| + RDMA (R32) | 2.0M+ | 2.0M+ |
+| Current (2-process + C++ coroutines) | 520K (measured) | 128 coros, 16 conns, 16+16 workers, 128B, 5s |
+| + Flatbuffer reuse | ~1.2× | eliminates per-op `FlatBufferBuilder::new()` alloc + build |
+| + Parser buffer pooling (done) | ~1.1× | eliminated 4 malloc + 4 free per op via zero-copy parse |
+| + Multi-engine (more workers) | ~1.3× | 2 client epoll fds → 32 client workers, matching buzz-cpp |
+| + Lock-free send queue | ~1.1× | removes 3 mutex acquisitions per op |
 
-Without RDMA, the realistic ceiling is ~1.2M (60% of buzz-cpp's 2M).
-The remaining 40% is the cross-process parallelism advantage: buzz-cpp
-runs client and server on 2 independent cores with 2 address spaces,
-while CROW's in-process echo shares 1 address space. Closing that
-final gap requires either RDMA (R32, bypasses the kernel socket path)
-or a cross-process echo bench mode.
+Cumulative multiplier (if independent): ~1.9× → ~1.0M. This is
+optimistic — the fixes likely overlap (e.g. reducing per-op cost
+also reduces the benefit of more workers). Realistic range: 700K–1.0M.
 
----
-
-## Implementation Results (2-process + lock-free stats)
-
-Both recommendations were implemented and measured on the same
-AMD Ryzen 9 5950X, 512B values, 10s, epoll + TCP loopback.
-
-### Changes
-
-- **2-process model**: `crow-cli bench run --target rpc` now spawns
-  `crow-rpc-echo-server` as a child process (separate epoll fd). The
-  CLI creates a local `RpcServer` (no listen) only for its client-side
-  transport, giving 2 independent epoll fds — matching buzz-cpp's
-  architecture. The server prints `listening port=NNNN` to stdout; the
-  CLI polls the log file to discover the port.
-- **Lock-free stats**: Replaced `Mutex<OpStats>` with
-  `LatencyHistogram` (atomic bucket counters) + `Counter` (atomic u64)
-  for ops/errors. No mutex on the callback hot path. Added
-  `--stats-mode histogram|avg-only` to compare overhead.
-- **Server metrics**: The echo server prints `stats ...` to stdout on
-  SIGTERM. The CLI reads it from the log file and includes it in the
-  report as `server_transport_stats`.
-
-### Measured TPS
-
-| Config | TPS | Avg lat | Notes |
-| --- | --- | --- | --- |
-| In-process (Gap2+Gap3, baseline) | 585K | 1.7ms | 1 epoll fd, 4 workers |
-| 2-process, 4+4 workers, histogram | 173K | 23µs | 2 epoll fds, cross-process |
-| 2-process, 4+4 workers, avg-only | 174K | 23µs | histogram overhead < 1% |
-| 2-process, 16+16 workers, histogram | 242K | 66µs | scales with workers |
-
-`N+M workers` = N client-side bench threads (`--threads N`) + M
-server-side I/O workers (`--io-workers-per-engine M` on the spawned
-echo server). Both sides use `--io-engines 1` (1 epoll fd per process,
-2 total across the 2 processes).
-
-### Analysis
-
-The 2-process model is **slower** than the in-process baseline (173K vs
-585K) despite having 2 epoll fds. The reason: cross-process context
-switches (2 sched transitions per op) cost more than the single-epoll-fd
-contention saves. The in-process model's `submit_inline` path is a
-direct function call (no syscall), while the 2-process model adds a
-kernel scheduler transition for every response.
-
-The lock-free histogram has **no measurable overhead** vs minimal atomic
-counters (173K vs 174K, < 1% difference). The `Mutex<OpStats>` removal
-is a correctness + tail-latency win, not a throughput win — the mutex
-was uncontended at 4 workers.
-
-### Next steps
-
-The 2-process model's value is architectural isolation (matching
-buzz-cpp's deployment model), not raw throughput. To close the
-throughput gap:
-
-- **Multi-engine in-process** (1 process, 2 epoll fds): keep the
-  in-process `submit_inline` direct-call path, but split client vs
-  server connections across 2 engines. This gets the 2-epoll-fd benefit
-  without the cross-process cost. Expected ~1M TPS.
-- **RDMA (R32)**: bypass the kernel socket path entirely. Expected
-  2M+ TPS.
+**RDMA (R32) is untested.** The "2M+" target is based on buzz-cpp
+hitting 2M with a similar coroutine technique, but RDMA bypasses the
+kernel socket path entirely — the bottleneck shifts from epoll/syscall
+overhead to NIC + PCIe latency. Whether CROW's flatbuffer + FFI
+overhead matters at that level is unknown until measured.
 
 ---
 
-## Client Model Comparison: Callback vs Coroutine
-
-Added `--client-mode callback|coroutine` to compare the two client
-models. Both use the same 2-process echo server (16+16 workers, 16
-connections, 512B values, 10s).
-
-### Callback model (existing)
-
-Closed-loop callback chain on C++ I/O worker threads. Each bench thread
-maintains `pipeline_depth` in-flight requests via a callback chain:
-response arrives → callback runs inline on I/O worker → submits next
-request → writev. No scheduler, no per-call heap alloc.
-
-### Coroutine model (new)
-
-N independent tokio tasks using the oneshot `call()` path. Each task =
-one independent "client" that loops: submit → await response → submit
-next. When a task `await`s, it yields the tokio runtime thread — another
-task runs. The C++ I/O worker receives the response → `on_response` →
-`oneshot::send` → tokio wakes the task. `--threads` = number of
-coroutines.
-
-### Measured comparison
-
-| Mode | In-flight | TPS | Avg lat | p99 | p999 |
-| --- | --- | --- | --- | --- | --- |
-| callback, 16×depth 1 | 16 | 242K | 66µs | 66µs | 66µs |
-| callback, 16×depth 8 | 128 | 469K | 272µs | 274µs | 274µs |
-| callback, 128×depth 8 | 1024 | 454K | 2.3ms | 2.5ms | 2.5ms |
-| coroutine, 16 tasks | 16 | 200K | 78µs | 157µs | 213µs |
-| coroutine, 128 tasks | 128 | 446K | 281µs | 699µs | 974µs |
-| coroutine, 1000 tasks | 1000 | 444K | 2.2ms | 7.6ms | 18ms |
-
-### Analysis
-
-- **Peak TPS is similar** (~445-469K) — both saturate the server. The
-  bottleneck is server-side, not the client model.
-- **Callback mode has lower latency** at all load levels:
-  - 128 in-flight: callback 272µs vs coroutine 281µs avg — **3%
-    overhead** from oneshot channel + tokio scheduler.
-  - p99: callback 274µs vs coroutine 699µs — **2.6× worse tail**
-    (tokio scheduler jitter).
-- **Coroutine mode has more realistic latency distribution** — p99/p999
-  spread is wider, matching real client behavior. Callback mode's tight
-  p99 (274µs) is artificial — the closed-loop chain has no scheduling
-  jitter.
-- **1000 coroutines work** but latency explodes (2.2ms avg, 18ms p999)
-  — 1000 tasks on ~16 tokio runtime threads means heavy context
-  switching.
-
-### Rust coroutine overhead breakdown
-
-- Per-call oneshot channel heap alloc: ~50ns
-- Tokio scheduler wake → poll → resume: ~200ns
-- Tokio task scheduling jitter on p99: ~400µs
-
-Total per-op overhead: ~250ns (0.8% of 30µs server cost). The throughput
-impact is small; the tail-latency impact (p99 2.6×) is the real cost.
-
-### C++ coroutine client (proposed)
-
-If the ~3% throughput + 2.6× p99 overhead of Rust coroutines is
-unacceptable for production, a C++ coroutine client (matching buzz-cpp's
-design) can be wrapped via FFI:
-
-- **C++ side**: C++20 coroutines on the I/O worker threads, same as
-  buzz-cpp. `co_await co_call()` → `post_send()` → suspend →
-  `handle.resume()` on response. No scheduler, no per-call heap alloc
-  (slab pool for coroutine state).
-- **Rust side**: thin FFI wrapper exposing `coroutine_call()` →
-  `CoFuture` (a Rust `Future` that resolves when the C++ coroutine
-  completes). The Rust `Future` is polled by tokio, but the actual
-  coroutine runs on the C++ I/O worker thread — no tokio scheduler
-  round-trip for the resume.
-- **Expected**: same throughput as callback mode, with independent
-  client semantics (1000 coroutines). The C++ coroutine resume is
-  inline on the I/O worker (no scheduler), so p99 should match callback
-  mode.
-
-This is the same architecture as buzz-cpp: C++ coroutines for the hot
-path, Rust for the orchestration layer. The FFI boundary is at the
-coroutine spawn/join level, not per-op.
-
----
-
-## C++ Coroutine Client (Option 3) — Implemented
-
-Implemented `--client-mode cpp-coroutine`: N C++20 coroutines on the
-I/O worker threads, with Rust domain logic via FFI callbacks.
+## C++ Coroutine Client — Implementation Details
 
 ### Architecture
 
@@ -430,42 +258,23 @@ co_on_response() ◄───        coroutine: process → loop back to build
 - Per-coroutine slab slot (no collision): `request_id = slot_index +
   N * pool_size`, so each coroutine always uses the same slot.
 
-### Measured comparison (16+16 workers, 16 conns, 512B, 10s)
-
-| Mode | In-flight | TPS | Avg lat | p99 |
-| --- | --- | --- | --- | --- |
-| callback, 16×depth 8 | 128 | 469K | 272µs | 274µs |
-| rust-coroutine, 128 tasks | 128 | 446K | 281µs | 699µs |
-| cpp-coroutine, 128 coros | 128 | 513K | 244µs | 244µs |
-| callback, 128×depth 8 | 1024 | 454K | 2.3ms | 2.5ms |
-| rust-coroutine, 1000 tasks | 1000 | 444K | 2.2ms | 7.6ms |
-| cpp-coroutine, 512 coros | 512 | 489K | 1.04ms | — |
-
-### Analysis
-
-- **C++ coroutines are 9% faster than callback mode** (513K vs 469K).
-  The callback mode's fixed chain has per-callback overhead (function
-  pointer indirect call + slot state machine). The coroutine's
-  `handle.resume()` is a direct jump.
-- **C++ coroutines are 15% faster than Rust coroutines** (513K vs 446K).
-  The tokio scheduler round-trip (~300ns/op) is eliminated — resume is
-  inline on the I/O worker thread.
-- **p99 is tight** (244µs = avg) — no scheduler jitter, unlike Rust
-  coroutines (699µs p99). The inline resume has no scheduling delay.
-- **512 coroutines work** (489K TPS) — the slab pool scales. 1000
-  coroutines segfault (likely stack overflow from 1000 coroutine
-  frames — TODO: use a custom allocator with stack pool).
-
 ### Per-op overhead breakdown
 
-| Component | callback | rust-coroutine | cpp-coroutine |
-| --- | --- | --- | --- |
-| Submit | ~50ns | ~50ns | ~50ns |
-| Resume | ~10ns (cb) | ~300ns (tokio) | ~10ns (handle.resume) |
-| Channel | 0 | ~50ns (oneshot) | 0 |
-| FFI | 0 | 0 | ~20ns (build + on_response) |
-| **Total** | **~60ns** | **~400ns** | **~80ns** |
+| Component | cpp-coroutine |
+| --- | --- |
+| Submit | ~50ns |
+| Resume | ~10ns (handle.resume) |
+| Channel | 0 |
+| FFI | ~20ns (build + on_response) |
+| **Total** | **~80ns** |
 
 The C++ coroutine has ~20ns FFI overhead per op (two `extern "C"`
-calls), but eliminates the ~300ns tokio scheduler round-trip. Net:
-~80ns vs ~400ns = **5× less overhead** than Rust coroutines.
+calls), but no scheduler round-trip. This is 5× less overhead than
+Rust coroutines (~400ns with tokio scheduler + oneshot channel).
+
+### Current measured results (128B values, 5s, epoll + TCP loopback)
+
+| Config | TPS | Avg lat | Notes |
+| --- | --- | --- | --- |
+| 128 coros, 16 conns, 16+16 workers | 518K | 242µs | peak per-worker efficiency |
+| 1000 coros, 32 conns, 16+16 workers | 489K | 2.0ms | scales to 1000, latency rises |

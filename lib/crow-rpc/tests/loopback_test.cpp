@@ -23,7 +23,6 @@ using crow::rpc::BufferPool;
 using crow::rpc::build_out_frame;
 using crow::rpc::build_ping_request;
 using crow::rpc::Connection;
-using crow::rpc::extract_request_id;
 using crow::rpc::Frame;
 using crow::rpc::OutFrame;
 using crow::rpc::RpcClient;
@@ -65,10 +64,7 @@ TEST(LoopbackTest, SimplePing)
                 static_cast<uint16_t>(crow::rpc::proto::FBMsgType_EConnectionPingRequest),
                 [&](Frame *response, crow::rpc::RpcError err) {
                     if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                        auto *resp = flatbuffers::GetRoot<crow::rpc::proto::ConnectionPingResponse>(response->control);
-                        if (resp != nullptr) {
-                            recv_request_id = resp->id();
-                        }
+                        recv_request_id = response->request_id;
                     }
                     got_response.store(true, std::memory_order_release);
                     delete response;
@@ -99,7 +95,7 @@ TEST(LoopbackTest, EchoHandler512B)
     // Echo handler: msg_type=100, returns the request data as response data.
     constexpr uint16_t ECHO_MSG_TYPE = 100;
     server.register_handler(ECHO_MSG_TYPE, [](Frame *request, Connection *conn) -> OutFrame * {
-        uint64_t req_id = extract_request_id(request->control, request->control_len);
+        uint64_t req_id = request->request_id;
 
         // Allocate a response control buffer (echo back request_id).
         BufferPool *pool      = conn->pool();
@@ -107,11 +103,11 @@ TEST(LoopbackTest, EchoHandler512B)
 
         // Echo the request data back.
         Buffer *resp_data = nullptr;
-        if (request->data != nullptr && request->data_len > 0) {
-            resp_data = pool->alloc(request->data_len);
+        if (request->data_buf != nullptr && request->data_buf->len > 0) {
+            resp_data = pool->alloc(request->data_buf->len);
             if (resp_data != nullptr) {
-                std::memcpy(resp_data->data, request->data, request->data_len);
-                resp_data->write(resp_data->data, request->data_len);
+                std::memcpy(resp_data->data, request->data_buf->data, request->data_buf->len);
+                resp_data->write(resp_data->data, request->data_buf->len);
             }
         }
 
@@ -152,8 +148,8 @@ TEST(LoopbackTest, EchoHandler512B)
     caller.call(&client_transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
                 [&](Frame *response, crow::rpc::RpcError err) {
                     if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                        if (response->data != nullptr && response->data_len == DATA_SIZE) {
-                            data_matches = (std::memcmp(response->data, payload.data(), DATA_SIZE) == 0);
+                        if (response->data_buf != nullptr && response->data_buf->len == DATA_SIZE) {
+                            data_matches = (std::memcmp(response->data_buf->data, payload.data(), DATA_SIZE) == 0);
                         }
                     }
                     got_response.store(true, std::memory_order_release);

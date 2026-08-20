@@ -21,6 +21,7 @@ Connection::Connection(int64_t id, std::string name, BufferPool *pool, uint32_t 
       pool_(pool),
       parser_(max_data_size)
 {
+    parser_.set_pool(pool);
 }
 
 bool Connection::enqueue_send(OutFrame *frame)

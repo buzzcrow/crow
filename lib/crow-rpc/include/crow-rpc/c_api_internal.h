@@ -41,9 +41,9 @@ namespace crow::rpc
 // struct is defined.
 
 // Convert a response Frame into C ABI buffer handles. Takes ownership of
-// the frame's control/data pointers (nulls them so the Frame destructor
-// doesn't free them), then deletes the Frame. On error (frame == nullptr),
-// both handles are set to nullptr.
+// the frame (deletes it). The data buffer is ref_clone'd so the handle
+// owns its own reference. Control is nullptr (fields extracted during parse).
+// On error (frame == nullptr), both handles are set to nullptr.
 void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buffer_t *out_data);
 
 // Invoke a C ABI completion callback with a response Frame. Converts the

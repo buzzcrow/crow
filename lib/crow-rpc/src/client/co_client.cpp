@@ -20,6 +20,23 @@
 namespace crow::rpc
 {
 
+// Coroutine state machine: synchronizes co_on_complete (I/O worker
+// thread) with await_suspend (coroutine thread). The race is:
+//   1. Coroutine submits request, then tries to suspend.
+//   2. I/O worker receives response, calls co_on_complete.
+//   3. If co_on_complete runs before await_suspend sets the handle,
+//      resuming a null handle crashes.
+// The state machine ensures co_on_complete only resumes when the
+// coroutine is actually suspended (handle is valid). If the response
+// arrives while RUNNING, it sets RESPONSE_READY — the coroutine sees
+// this in await_suspend and doesn't suspend (returns false → resumes).
+enum CoStateFlag : int {
+    CO_IDLE           = 0, // coroutine not started or already exited
+    CO_RUNNING        = 1, // coroutine is running (handle may be stale)
+    CO_SUSPENDED      = 2, // coroutine is suspended, handle is valid
+    CO_RESPONSE_READY = 3, // response arrived while RUNNING — don't suspend
+};
+
 // Per-coroutine state. Allocated on the heap (one per coroutine),
 // lives until the coroutine exits + is joined.
 struct CoState
@@ -51,10 +68,9 @@ struct CoState
 
     std::atomic<bool> *running;
 
-    // True while the coroutine is active (between initial resume and
-    // final exit). co_on_complete checks this to avoid resuming a
-    // coroutine that has already exited (late response).
-    std::atomic<bool> active{false};
+    // State machine: IDLE → RUNNING → SUSPENDED ↔ RESPONSE_READY → IDLE.
+    // Replaces the old `active` boolean — see CoStateFlag above.
+    std::atomic<int> co_state{CO_IDLE};
 
     // Slot index for this coroutine (fixed, no collision with others).
     // request_id = slot_index + iteration * (pool_mask + 1).
@@ -72,17 +88,26 @@ struct CoState
                                             crow_rpc_status status, void *user_data)
 {
     auto *s = static_cast<CoState *>(user_data);
-    // Don't resume if the coroutine has already exited (late response
-    // after the deadline). The handle is at final_suspend — resuming
-    // it is undefined behavior.
-    if (!s->active.load(std::memory_order_acquire)) {
-        return;
-    }
+    // Store the response — the coroutine reads it after resume (or
+    // immediately if it hasn't suspended yet).
     s->resp_control = control;
     s->resp_data    = data;
     s->resp_status  = status;
-    // Resume the coroutine inline on the I/O worker thread.
-    s->handle.resume();
+    // Try to transition SUSPENDED → RESPONSE_READY. If successful,
+    // the coroutine was suspended (handle is valid) — resume it.
+    int expected = CO_SUSPENDED;
+    if (s->co_state.compare_exchange_strong(expected, CO_RESPONSE_READY, std::memory_order_acq_rel)) {
+        s->handle.resume();
+        return;
+    }
+    // If RUNNING, the coroutine hasn't suspended yet (handle may be
+    // null). Set RESPONSE_READY so await_suspend sees it and doesn't
+    // suspend — the coroutine picks up the response immediately.
+    if (expected == CO_RUNNING) {
+        s->co_state.store(CO_RESPONSE_READY, std::memory_order_release);
+        return;
+    }
+    // IDLE or RESPONSE_READY — late/duplicate response, drop it.
 }
 
 // Awaitable: suspends the coroutine, resumed by co_on_complete.
@@ -97,15 +122,27 @@ struct CoAwait
         return false;
     }
 
-    void await_suspend(std::coroutine_handle<> h) noexcept
+    bool await_suspend(std::coroutine_handle<> h) noexcept
     {
         state->handle = h;
-        // The coroutine is now suspended. co_on_complete will call
-        // state->handle.resume() when the response arrives.
+        // Try to transition RUNNING → SUSPENDED. If successful, the
+        // response hasn't arrived yet — suspend and wait for
+        // co_on_complete to resume us.
+        int expected = CO_RUNNING;
+        if (state->co_state.compare_exchange_strong(expected, CO_SUSPENDED, std::memory_order_acq_rel)) {
+            return true; // suspend
+        }
+        // State is not RUNNING — co_on_complete already set
+        // RESPONSE_READY (response arrived before we suspended).
+        // Don't suspend — resume immediately. The response is already
+        // stored in state->resp_*.
+        return false; // don't suspend — resume inline
     }
 
     void await_resume() noexcept
     {
+        // Coroutine is about to continue — mark it as running.
+        state->co_state.store(CO_RUNNING, std::memory_order_release);
     }
 };
 
@@ -160,7 +197,7 @@ struct CoTask
 // heap-allocated on first suspend (one alloc per coroutine, not per-op).
 static CoTask co_run(CoState *s)
 {
-    s->active.store(true, std::memory_order_release);
+    s->co_state.store(CO_RUNNING, std::memory_order_release);
     while (s->running->load(std::memory_order_relaxed)) {
         // 1. Build request via Rust callback.
         crow_rpc_buffer_t control = nullptr;
@@ -229,9 +266,9 @@ static CoTask co_run(CoState *s)
             break;
         }
     }
-    // Mark inactive before final_suspend — late responses will see
-    // this and skip the resume (avoiding UB on a done coroutine).
-    s->active.store(false, std::memory_order_release);
+    // Mark idle before final_suspend — late responses will see
+    // CO_IDLE and drop (avoiding UB on a done coroutine).
+    s->co_state.store(CO_IDLE, std::memory_order_release);
 }
 
 } // namespace crow::rpc

@@ -25,7 +25,6 @@ using crow::rpc::BufferPool;
 using crow::rpc::build_out_frame;
 using crow::rpc::build_ping_request;
 using crow::rpc::Connection;
-using crow::rpc::extract_request_id;
 using crow::rpc::Frame;
 using crow::rpc::OutFrame;
 using crow::rpc::RpcClient;
@@ -55,17 +54,17 @@ TEST(LoadTest, MultiThreadEcho)
 
     // Echo handler: returns the request data as response data.
     server.register_handler(ECHO_MSG_TYPE, [](Frame *request, Connection *conn) -> OutFrame * {
-        uint64_t req_id = extract_request_id(request->control, request->control_len);
+        uint64_t req_id = request->request_id;
 
         BufferPool *pool      = conn->pool();
         Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
 
         Buffer *resp_data = nullptr;
-        if (request->data != nullptr && request->data_len > 0) {
-            resp_data = pool->alloc(request->data_len);
+        if (request->data_buf != nullptr && request->data_buf->len > 0) {
+            resp_data = pool->alloc(request->data_buf->len);
             if (resp_data != nullptr) {
-                std::memcpy(resp_data->data, request->data, request->data_len);
-                resp_data->write(resp_data->data, request->data_len);
+                std::memcpy(resp_data->data, request->data_buf->data, request->data_buf->len);
+                resp_data->write(resp_data->data, request->data_buf->len);
             }
         }
 
@@ -135,17 +134,18 @@ TEST(LoadTest, MultiThreadEcho)
             data->write(pr->payload.data(), DATA_SIZE);
 
             auto pr_copy = pr;
-            caller->call(&transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
-                         [pr_copy](Frame *response, crow::rpc::RpcError err) {
-                             if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                                 if (response->data != nullptr && response->data_len == pr_copy->payload.size()) {
-                                     pr_copy->data_matches = (std::memcmp(response->data, pr_copy->payload.data(),
-                                                                          pr_copy->payload.size()) == 0);
-                                 }
-                             }
-                             pr_copy->got_response.store(true, std::memory_order_release);
-                             delete response;
-                         });
+            caller->call(
+                &transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
+                [pr_copy](Frame *response, crow::rpc::RpcError err) {
+                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
+                        if (response->data_buf != nullptr && response->data_buf->len == pr_copy->payload.size()) {
+                            pr_copy->data_matches = (std::memcmp(response->data_buf->data, pr_copy->payload.data(),
+                                                                 pr_copy->payload.size()) == 0);
+                        }
+                    }
+                    pr_copy->got_response.store(true, std::memory_order_release);
+                    delete response;
+                });
 
             reqs.push_back(std::move(pr));
         }
@@ -213,17 +213,17 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
     ASSERT_GT(port, 0);
 
     server.register_handler(ECHO_MSG_TYPE, [](Frame *request, Connection *conn) -> OutFrame * {
-        uint64_t req_id = extract_request_id(request->control, request->control_len);
+        uint64_t req_id = request->request_id;
 
         BufferPool *pool      = conn->pool();
         Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
 
         Buffer *resp_data = nullptr;
-        if (request->data != nullptr && request->data_len > 0) {
-            resp_data = pool->alloc(request->data_len);
+        if (request->data_buf != nullptr && request->data_buf->len > 0) {
+            resp_data = pool->alloc(request->data_buf->len);
             if (resp_data != nullptr) {
-                std::memcpy(resp_data->data, request->data, request->data_len);
-                resp_data->write(resp_data->data, request->data_len);
+                std::memcpy(resp_data->data, request->data_buf->data, request->data_buf->len);
+                resp_data->write(resp_data->data, request->data_buf->len);
             }
         }
 
@@ -286,17 +286,18 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
             data->write(pr->payload.data(), DATA_SIZE);
 
             auto pr_copy = pr;
-            caller->call(&transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
-                         [pr_copy](Frame *response, crow::rpc::RpcError err) {
-                             if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                                 if (response->data != nullptr && response->data_len == pr_copy->payload.size()) {
-                                     pr_copy->data_matches = (std::memcmp(response->data, pr_copy->payload.data(),
-                                                                          pr_copy->payload.size()) == 0);
-                                 }
-                             }
-                             pr_copy->got_response.store(true, std::memory_order_release);
-                             delete response;
-                         });
+            caller->call(
+                &transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
+                [pr_copy](Frame *response, crow::rpc::RpcError err) {
+                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
+                        if (response->data_buf != nullptr && response->data_buf->len == pr_copy->payload.size()) {
+                            pr_copy->data_matches = (std::memcmp(response->data_buf->data, pr_copy->payload.data(),
+                                                                 pr_copy->payload.size()) == 0);
+                        }
+                    }
+                    pr_copy->got_response.store(true, std::memory_order_release);
+                    delete response;
+                });
 
             reqs.push_back(std::move(pr));
         }
@@ -361,15 +362,15 @@ TEST(LoadTest, SharedTransportOneshotEcho)
     ASSERT_GT(port, 0);
 
     server.register_handler(ECHO_MSG_TYPE, [](Frame *request, Connection *conn) -> OutFrame * {
-        uint64_t    req_id    = extract_request_id(request->control, request->control_len);
+        uint64_t    req_id    = request->request_id;
         BufferPool *pool      = conn->pool();
         Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
         Buffer     *resp_data = nullptr;
-        if (request->data != nullptr && request->data_len > 0) {
-            resp_data = pool->alloc(request->data_len);
+        if (request->data_buf != nullptr && request->data_buf->len > 0) {
+            resp_data = pool->alloc(request->data_buf->len);
             if (resp_data != nullptr) {
-                std::memcpy(resp_data->data, request->data, request->data_len);
-                resp_data->write(resp_data->data, request->data_len);
+                std::memcpy(resp_data->data, request->data_buf->data, request->data_buf->len);
+                resp_data->write(resp_data->data, request->data_buf->len);
             }
         }
         delete request;
@@ -425,17 +426,18 @@ TEST(LoadTest, SharedTransportOneshotEcho)
             }
             data->write(pr->payload.data(), DATA_SIZE);
             auto pr_copy = pr;
-            caller->call(&shared_transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
-                         [pr_copy](Frame *response, crow::rpc::RpcError err) {
-                             if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                                 if (response->data != nullptr && response->data_len == pr_copy->payload.size()) {
-                                     pr_copy->data_matches = (std::memcmp(response->data, pr_copy->payload.data(),
-                                                                          pr_copy->payload.size()) == 0);
-                                 }
-                             }
-                             pr_copy->got_response.store(true, std::memory_order_release);
-                             delete response;
-                         });
+            caller->call(
+                &shared_transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
+                [pr_copy](Frame *response, crow::rpc::RpcError err) {
+                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
+                        if (response->data_buf != nullptr && response->data_buf->len == pr_copy->payload.size()) {
+                            pr_copy->data_matches = (std::memcmp(response->data_buf->data, pr_copy->payload.data(),
+                                                                 pr_copy->payload.size()) == 0);
+                        }
+                    }
+                    pr_copy->got_response.store(true, std::memory_order_release);
+                    delete response;
+                });
             reqs.push_back(std::move(pr));
         }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);

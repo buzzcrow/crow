@@ -244,10 +244,9 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
     resp_frame->header.msg_type  = 43;
     resp_frame->header.msg_size  = 0;
     resp_frame->header.data_size = 0;
-    resp_frame->control          = nullptr;
-    resp_frame->control_len      = 0;
-    resp_frame->data             = nullptr;
-    resp_frame->data_len         = 0;
+    resp_frame->request_id       = req_id;
+    resp_frame->rpc_create_nano  = 0;
+    resp_frame->data_buf         = nullptr;
 
     caller.on_response(req_id, resp_frame);
 
