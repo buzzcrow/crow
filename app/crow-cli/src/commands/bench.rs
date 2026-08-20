@@ -204,6 +204,13 @@ pub struct RunArgs {
     /// histogram buckets). Used to measure histogram overhead.
     #[arg(long, default_value = "histogram")]
     pub stats_mode: String,
+    /// Client model for RPC target. `callback` (default): closed-loop
+    /// callback chain on C++ I/O worker threads (fastest, no scheduler).
+    /// `coroutine`: N independent tokio tasks using the oneshot `call()`
+    /// path, simulating independent clients (more realistic, has per-call
+    /// channel + scheduler overhead). `--threads` = number of coroutines.
+    #[arg(long, default_value = "callback")]
+    pub client_mode: String,
 }
 
 /// Arguments for `crow-cli bench`.
@@ -466,7 +473,7 @@ async fn bench_benchmark_kv(args: RunArgs, json: bool) -> ExitCode {
 /// RPC bench: 2-process echo server (child) + client (CLI), measure
 /// raw transport throughput.
 async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
-    use crate::bench::target::rpc::{RpcTarget, StatsMode};
+    use crate::bench::target::rpc::{ClientMode, RpcTarget, StatsMode};
     use crate::bench::target::BenchTarget;
     use crate::bench::{run_bench, BenchConfig, WorkloadKind};
     use std::time::Duration;
@@ -487,18 +494,28 @@ async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
         return ExitCode::from(1);
     };
 
+    let Some(client_mode) = ClientMode::parse(&args.client_mode) else {
+        eprintln!(
+            "error: unknown client-mode {:?} (expected: callback|coroutine)",
+            args.client_mode
+        );
+        return ExitCode::from(1);
+    };
+
     let run_id = args.run_id.clone().unwrap_or_else(next_run_id);
     let now = chrono::Utc::now();
     let folder_name = run_folder_name(&run_id, "rpc", now);
     let run_dir = crate::bench::BenchReport::default_dir().join(&folder_name);
 
     println!(
-        "provisioning 2-process RPC echo server (stats-mode={})...",
-        args.stats_mode
+        "provisioning 2-process RPC echo server (stats-mode={}, client-mode={})...",
+        args.stats_mode, args.client_mode
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
-    let mut target = RpcTarget::new().with_stats_mode(stats_mode);
+    let mut target = RpcTarget::new()
+        .with_stats_mode(stats_mode)
+        .with_client_mode(client_mode);
 
     let mut cfg = BenchConfig::defaults(String::new(), kind);
     cfg.target = "rpc".to_string();
@@ -511,6 +528,7 @@ async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
     cfg.io_engines = args.io_engines;
     cfg.io_workers_per_engine = args.io_workers_per_engine;
     cfg.io_dispatch_threads = args.io_dispatch_threads;
+    cfg.client_mode = args.client_mode.clone();
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
     // RPC target doesn't use metrics_log_path (no KV client metrics).

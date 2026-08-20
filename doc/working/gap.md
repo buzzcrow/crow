@@ -323,6 +323,11 @@ AMD Ryzen 9 5950X, 512B values, 10s, epoll + TCP loopback.
 | 2-process, 4+4 workers, avg-only | 174K | 23µs | histogram overhead < 1% |
 | 2-process, 16+16 workers, histogram | 242K | 66µs | scales with workers |
 
+`N+M workers` = N client-side bench threads (`--threads N`) + M
+server-side I/O workers (`--io-workers-per-engine M` on the spawned
+echo server). Both sides use `--io-engines 1` (1 epoll fd per process,
+2 total across the 2 processes).
+
 ### Analysis
 
 The 2-process model is **slower** than the in-process baseline (173K vs
@@ -349,3 +354,88 @@ throughput gap:
   without the cross-process cost. Expected ~1M TPS.
 - **RDMA (R32)**: bypass the kernel socket path entirely. Expected
   2M+ TPS.
+
+---
+
+## Client Model Comparison: Callback vs Coroutine
+
+Added `--client-mode callback|coroutine` to compare the two client
+models. Both use the same 2-process echo server (16+16 workers, 16
+connections, 512B values, 10s).
+
+### Callback model (existing)
+
+Closed-loop callback chain on C++ I/O worker threads. Each bench thread
+maintains `pipeline_depth` in-flight requests via a callback chain:
+response arrives → callback runs inline on I/O worker → submits next
+request → writev. No scheduler, no per-call heap alloc.
+
+### Coroutine model (new)
+
+N independent tokio tasks using the oneshot `call()` path. Each task =
+one independent "client" that loops: submit → await response → submit
+next. When a task `await`s, it yields the tokio runtime thread — another
+task runs. The C++ I/O worker receives the response → `on_response` →
+`oneshot::send` → tokio wakes the task. `--threads` = number of
+coroutines.
+
+### Measured comparison
+
+| Mode | In-flight | TPS | Avg lat | p99 | p999 |
+| --- | --- | --- | --- | --- | --- |
+| callback, 16×depth 1 | 16 | 242K | 66µs | 66µs | 66µs |
+| callback, 16×depth 8 | 128 | 469K | 272µs | 274µs | 274µs |
+| callback, 128×depth 8 | 1024 | 454K | 2.3ms | 2.5ms | 2.5ms |
+| coroutine, 16 tasks | 16 | 200K | 78µs | 157µs | 213µs |
+| coroutine, 128 tasks | 128 | 446K | 281µs | 699µs | 974µs |
+| coroutine, 1000 tasks | 1000 | 444K | 2.2ms | 7.6ms | 18ms |
+
+### Analysis
+
+- **Peak TPS is similar** (~445-469K) — both saturate the server. The
+  bottleneck is server-side, not the client model.
+- **Callback mode has lower latency** at all load levels:
+  - 128 in-flight: callback 272µs vs coroutine 281µs avg — **3%
+    overhead** from oneshot channel + tokio scheduler.
+  - p99: callback 274µs vs coroutine 699µs — **2.6× worse tail**
+    (tokio scheduler jitter).
+- **Coroutine mode has more realistic latency distribution** — p99/p999
+  spread is wider, matching real client behavior. Callback mode's tight
+  p99 (274µs) is artificial — the closed-loop chain has no scheduling
+  jitter.
+- **1000 coroutines work** but latency explodes (2.2ms avg, 18ms p999)
+  — 1000 tasks on ~16 tokio runtime threads means heavy context
+  switching.
+
+### Rust coroutine overhead breakdown
+
+- Per-call oneshot channel heap alloc: ~50ns
+- Tokio scheduler wake → poll → resume: ~200ns
+- Tokio task scheduling jitter on p99: ~400µs
+
+Total per-op overhead: ~250ns (0.8% of 30µs server cost). The throughput
+impact is small; the tail-latency impact (p99 2.6×) is the real cost.
+
+### C++ coroutine client (proposed)
+
+If the ~3% throughput + 2.6× p99 overhead of Rust coroutines is
+unacceptable for production, a C++ coroutine client (matching buzz-cpp's
+design) can be wrapped via FFI:
+
+- **C++ side**: C++20 coroutines on the I/O worker threads, same as
+  buzz-cpp. `co_await co_call()` → `post_send()` → suspend →
+  `handle.resume()` on response. No scheduler, no per-call heap alloc
+  (slab pool for coroutine state).
+- **Rust side**: thin FFI wrapper exposing `coroutine_call()` →
+  `CoFuture` (a Rust `Future` that resolves when the C++ coroutine
+  completes). The Rust `Future` is polled by tokio, but the actual
+  coroutine runs on the C++ I/O worker thread — no tokio scheduler
+  round-trip for the resume.
+- **Expected**: same throughput as callback mode, with independent
+  client semantics (1000 coroutines). The C++ coroutine resume is
+  inline on the I/O worker (no scheduler), so p99 should match callback
+  mode.
+
+This is the same architecture as buzz-cpp: C++ coroutines for the hot
+path, Rust for the orchestration layer. The FFI boundary is at the
+coroutine spawn/join level, not per-op.

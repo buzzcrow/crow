@@ -153,6 +153,10 @@ pub(crate) struct BenchConfig {
     /// The I/O worker hands off parsed frames to this pool; pool workers
     /// run the handler and submit responses. 0 = use C++ inline handler.
     pub(crate) io_dispatch_threads: u32,
+    /// Client model for RPC target: `callback` (closed-loop callback
+    /// chain, default) or `coroutine` (N independent tokio tasks using
+    /// the oneshot `call()` path, simulating independent clients).
+    pub(crate) client_mode: String,
 }
 
 impl BenchConfig {
@@ -190,6 +194,7 @@ impl BenchConfig {
             io_engines: 1,
             io_workers_per_engine: 1,
             io_dispatch_threads: 0,
+            client_mode: "callback".to_string(),
         }
     }
 

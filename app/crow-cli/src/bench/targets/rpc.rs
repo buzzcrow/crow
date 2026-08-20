@@ -63,6 +63,32 @@ impl StatsMode {
     }
 }
 
+/// Client model: callback chain (closed-loop) or coroutine (independent
+/// tokio tasks simulating independent clients).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClientMode {
+    /// Closed-loop callback chain on C++ I/O worker threads. Fastest —
+    /// no per-call heap alloc, no scheduler round-trip. `--threads` =
+    /// number of bench threads, each maintaining `pipeline_depth`
+    /// in-flight via a callback chain.
+    Callback,
+    /// N independent tokio tasks using the oneshot `call()` path.
+    /// `--threads` = number of coroutines (tasks). Each task loops:
+    /// submit → await response → submit next. More realistic client
+    /// simulation; has per-call channel + scheduler overhead.
+    Coroutine,
+}
+
+impl ClientMode {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "callback" => Some(Self::Callback),
+            "coroutine" => Some(Self::Coroutine),
+            _ => None,
+        }
+    }
+}
+
 /// Locate the `crow-rpc-echo-server` binary. Search order:
 /// 1. `$CROW_RPC_ECHO_SERVER_BIN`
 /// 2. `lib/crow-rpc/build/crow-rpc-echo-server` relative to the
@@ -117,6 +143,8 @@ pub(crate) struct RpcTarget {
     request_id_counter: Arc<AtomicU64>,
     /// Stats collection mode (histogram vs avg-only).
     stats_mode: StatsMode,
+    /// Client model (callback vs coroutine).
+    client_mode: ClientMode,
 }
 
 impl RpcTarget {
@@ -132,11 +160,17 @@ impl RpcTarget {
             next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
             stats_mode: StatsMode::Histogram,
+            client_mode: ClientMode::Callback,
         }
     }
 
     pub(crate) fn with_stats_mode(mut self, mode: StatsMode) -> Self {
         self.stats_mode = mode;
+        self
+    }
+
+    pub(crate) fn with_client_mode(mut self, mode: ClientMode) -> Self {
+        self.client_mode = mode;
         self
     }
 }
@@ -340,6 +374,27 @@ impl BenchTarget for RpcTarget {
         deadline: std::time::Instant,
         counters: Vec<Arc<WorkerCounters>>,
     ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
+        match self.client_mode {
+            ClientMode::Callback => {
+                self.run_callback_workers(clients, cfg, measure_start, deadline, counters)
+            }
+            ClientMode::Coroutine => {
+                Self::run_coroutine_workers(clients, cfg, measure_start, deadline, counters)
+            }
+        }
+    }
+}
+
+impl RpcTarget {
+    /// Callback mode: closed-loop callback chain on C++ I/O worker threads.
+    fn run_callback_workers(
+        &self,
+        clients: Vec<RpcBenchClient>,
+        cfg: &BenchConfig,
+        measure_start: std::time::Instant,
+        deadline: std::time::Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+    ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
         // Size the shared completion pool. Max in-flight = threads ×
         // pipeline_depth. The C++ side rounds up to the next power of two;
         // we replicate the rounding to compute the same mask.
@@ -403,9 +458,48 @@ impl BenchTarget for RpcTarget {
         }
         handles
     }
-}
 
-/// RPC bench client: wraps an `RpcClient` + `Connection` and sends
+    /// Coroutine mode: N independent tokio tasks using the oneshot
+    /// `call()` path. Each task = one independent "client" that loops:
+    /// submit → await response → submit next. `--threads` = number of
+    /// coroutines. More realistic client simulation; has per-call
+    /// channel + scheduler overhead vs the callback model.
+    fn run_coroutine_workers(
+        clients: Vec<RpcBenchClient>,
+        cfg: &BenchConfig,
+        measure_start: std::time::Instant,
+        deadline: std::time::Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+    ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
+        use super::super::worker::run_worker;
+        use super::super::workload::OpGen;
+
+        let mut handles = Vec::with_capacity(cfg.threads as usize);
+        for (worker_id, (client, counters)) in clients.into_iter().zip(counters).enumerate() {
+            let cfg2 = cfg.clone();
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "worker_id is bounded by cfg.threads which fits in u32"
+            )]
+            let worker_id = worker_id as u32;
+            let mut gen = OpGen::new(u64::from(worker_id), cfg2.key_space, cfg2.value_size);
+            let handle = tokio::spawn(async move {
+                run_worker(
+                    &client,
+                    &mut gen,
+                    &cfg2,
+                    measure_start,
+                    deadline,
+                    worker_id,
+                    &counters,
+                )
+                .await
+            });
+            handles.push(handle);
+        }
+        handles
+    }
+}
 /// echo requests with data payloads. Cheaply cloneable (Arc handles).
 #[derive(Clone)]
 pub(crate) struct RpcBenchClient {
