@@ -114,8 +114,10 @@ bool RpcClient::call_callback(Transport *transport, Connection *conn, uint64_t r
         if (frame->data != nullptr)
             frame->data->release();
         delete frame;
+        counters_.submit_fail.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    counters_.submit_ok.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -151,18 +153,29 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
     // a callback-model request. The atomic state serializes submitter
     // vs I/O worker access.
     if (completion_pool_ != nullptr) {
-        size_t idx  = request_id & pool_mask_;
-        auto  &slot = completion_pool_[idx];
-        if (slot.state.load(std::memory_order_acquire) == SLOT_PENDING && slot.request_id == request_id) {
-            // Set DONE, then invoke the callback. Do NOT reset to FREE
-            // after the callback — the callback may reuse this slot
-            // (via call_callback → SLOT_PENDING) for the next request.
-            // Resetting to FREE here would overwrite that PENDING.
-            slot.state.store(SLOT_DONE, std::memory_order_release);
-            auto cb = slot.cb;
-            auto ud = slot.user_data;
-            invoke_c_complete(cb, ud, request_id, response, RpcError::Ok);
-            return;
+        size_t  idx  = request_id & pool_mask_;
+        auto   &slot = completion_pool_[idx];
+        uint8_t st   = slot.state.load(std::memory_order_acquire);
+        if (st == SLOT_PENDING) {
+            if (slot.request_id == request_id) {
+                // Set DONE, then invoke the callback. Do NOT reset to FREE
+                // after the callback — the callback may reuse this slot
+                // (via call_callback → SLOT_PENDING) for the next request.
+                // Resetting to FREE here would overwrite that PENDING.
+                slot.state.store(SLOT_DONE, std::memory_order_release);
+                auto cb = slot.cb;
+                auto ud = slot.user_data;
+                counters_.resp_matched.fetch_add(1, std::memory_order_relaxed);
+                invoke_c_complete(cb, ud, request_id, response, RpcError::Ok);
+                return;
+            }
+            // Slot is PENDING but for a different request_id — a stale
+            // response arrived after the slot was reused for a new request.
+            counters_.resp_wrong_id.fetch_add(1, std::memory_order_relaxed);
+        }
+        else {
+            // Slot not PENDING (FREE or DONE) — late response or duplicate.
+            counters_.resp_mismatch.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -172,6 +185,7 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
     auto it = pending_.find(request_id);
     if (it == pending_.end()) {
         // Late response after timeout or duplicate — discard.
+        counters_.resp_dropped.fetch_add(1, std::memory_order_relaxed);
         delete response;
         return;
     }
@@ -183,6 +197,7 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
         auto                        it = pending_.find(request_id);
         if (it == pending_.end()) {
             // Late response after timeout or duplicate — discard.
+            counters_.resp_dropped.fetch_add(1, std::memory_order_relaxed);
             delete response;
             return;
         }

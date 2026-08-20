@@ -144,6 +144,26 @@ class RpcClient
     // Build an OutFrame for submission. The RpcClient owns the OutFrame;
     // the transport takes it and releases buffers after send.
     OutFrame *build_frame(uint64_t request_id, Buffer *control, Buffer *data, uint16_t msg_type, uint8_t flags);
+
+  public:
+    // Perf counters for debugging response correlation.
+    struct Counters
+    {
+        std::atomic<uint64_t> submit_ok{0};     // call_callback succeeded
+        std::atomic<uint64_t> submit_fail{0};   // call_callback submit failed
+        std::atomic<uint64_t> resp_matched{0};  // on_response matched a slab slot
+        std::atomic<uint64_t> resp_mismatch{0}; // on_response: slot state != PENDING
+        std::atomic<uint64_t> resp_wrong_id{0}; // on_response: slot PENDING but request_id mismatch
+        std::atomic<uint64_t> resp_dropped{0};  // on_response: no slab + no map entry
+    };
+
+    Counters &counters()
+    {
+        return counters_;
+    }
+
+  private:
+    Counters counters_;
 };
 
 } // namespace crow::rpc

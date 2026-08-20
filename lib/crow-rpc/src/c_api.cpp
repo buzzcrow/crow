@@ -174,6 +174,20 @@ void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transpor
     copy_latency(&out->dispatch_to_enq, s.dispatch_to_enq);
 }
 
+void crow_rpc_client_get_counters(crow_rpc_client_t client, crow_rpc_client_counters_t *out)
+{
+    if (client == nullptr || out == nullptr) {
+        return;
+    }
+    auto &c            = client->client->counters();
+    out->submit_ok     = c.submit_ok.load(std::memory_order_relaxed);
+    out->submit_fail   = c.submit_fail.load(std::memory_order_relaxed);
+    out->resp_matched  = c.resp_matched.load(std::memory_order_relaxed);
+    out->resp_mismatch = c.resp_mismatch.load(std::memory_order_relaxed);
+    out->resp_wrong_id = c.resp_wrong_id.load(std::memory_order_relaxed);
+    out->resp_dropped  = c.resp_dropped.load(std::memory_order_relaxed);
+}
+
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port)
 {
     if (server == nullptr || addr == nullptr) {

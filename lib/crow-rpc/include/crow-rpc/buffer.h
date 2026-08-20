@@ -74,7 +74,7 @@ class SystemBufferPool : public BufferPool
 {
   public:
     // max_buffers: pool capacity bound (total outstanding + recycled).
-    SystemBufferPool(uint32_t max_buffers = 1024);
+    SystemBufferPool(uint32_t max_buffers = 8192);
     ~SystemBufferPool() override;
 
     Buffer *alloc(uint32_t capacity) override;

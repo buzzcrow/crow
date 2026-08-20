@@ -181,6 +181,20 @@ impl RpcClient {
         }
         Ok(())
     }
+
+    /// Get client-side correlation counters (submit/response match/drop).
+    pub fn counters(&self) -> sys::CrowRpcClientCounters {
+        let mut out = sys::CrowRpcClientCounters {
+            submit_ok: 0,
+            submit_fail: 0,
+            resp_matched: 0,
+            resp_mismatch: 0,
+            resp_wrong_id: 0,
+            resp_dropped: 0,
+        };
+        unsafe { sys::crow_rpc_client_get_counters(self.handle, &mut out) };
+        out
+    }
 }
 
 impl Default for RpcClient {

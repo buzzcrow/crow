@@ -51,6 +51,11 @@ struct CoState
 
     std::atomic<bool> *running;
 
+    // True while the coroutine is active (between initial resume and
+    // final exit). co_on_complete checks this to avoid resuming a
+    // coroutine that has already exited (late response).
+    std::atomic<bool> active{false};
+
     // Slot index for this coroutine (fixed, no collision with others).
     // request_id = slot_index + iteration * (pool_mask + 1).
     // This guarantees each coroutine always uses the same slab slot,
@@ -66,7 +71,13 @@ struct CoState
 [[maybe_unused]] static void co_on_complete(uint64_t /*request_id*/, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
                                             crow_rpc_status status, void *user_data)
 {
-    auto *s         = static_cast<CoState *>(user_data);
+    auto *s = static_cast<CoState *>(user_data);
+    // Don't resume if the coroutine has already exited (late response
+    // after the deadline). The handle is at final_suspend — resuming
+    // it is undefined behavior.
+    if (!s->active.load(std::memory_order_acquire)) {
+        return;
+    }
     s->resp_control = control;
     s->resp_data    = data;
     s->resp_status  = status;
@@ -149,6 +160,7 @@ struct CoTask
 // heap-allocated on first suspend (one alloc per coroutine, not per-op).
 static CoTask co_run(CoState *s)
 {
+    s->active.store(true, std::memory_order_release);
     while (s->running->load(std::memory_order_relaxed)) {
         // 1. Build request via Rust callback.
         crow_rpc_buffer_t control = nullptr;
@@ -170,12 +182,18 @@ static CoTask co_run(CoState *s)
                                            (data != nullptr) ? data->buf : nullptr, s->msg_type, co_on_complete, s);
 
         if (!ok) {
-            // Submit failed — release buffers, record error.
+            // Submit failed (send queue full) — release buffers, yield
+            // to let I/O workers drain, then retry.
             if (control != nullptr)
                 crow_rpc_buffer_release(control);
             if (data != nullptr)
                 crow_rpc_buffer_release(data);
             s->total_errors++;
+            // Yield this thread — suspend until resumed. We use a
+            // self-resume: set handle, then suspend. A helper thread
+            // (or the spin-wait loop) will resume us shortly.
+            // For now, just yield the OS thread.
+            std::this_thread::yield();
             continue;
         }
 
@@ -211,6 +229,9 @@ static CoTask co_run(CoState *s)
             break;
         }
     }
+    // Mark inactive before final_suspend — late responses will see
+    // this and skip the resume (avoiding UB on a done coroutine).
+    s->active.store(false, std::memory_order_release);
 }
 
 } // namespace crow::rpc
@@ -269,22 +290,42 @@ extern "C" void crow_rpc_co_spawn(crow_rpc_client_t client, crow_rpc_server_t se
 
     // Start all coroutines. Each runs until its first co_await, then
     // suspends (yields the I/O worker thread back to epoll_wait).
-    for (auto &task : tasks) {
-        task.handle.resume();
+    // Resume in small batches with a yield between batches to avoid
+    // overwhelming the send queue during startup.
+    constexpr size_t RESUME_BATCH = 16;
+    constexpr auto   BATCH_DELAY  = std::chrono::microseconds(500);
+    for (size_t i = 0; i < tasks.size(); i++) {
+        tasks[i].handle.resume();
+        if ((i + 1) % RESUME_BATCH == 0 && i + 1 < tasks.size()) {
+            std::this_thread::sleep_for(BATCH_DELAY);
+        }
     }
 
     // Wait for all coroutines to complete. The coroutines exit when
     // build_fn or on_response_fn returns false (Rust sets this when
     // the deadline is reached).
+    auto wait_start = std::chrono::steady_clock::now();
     while (true) {
-        bool all_done = true;
+        uint32_t not_done = 0;
         for (auto &task : tasks) {
             if (!task.handle.done()) {
-                all_done = false;
-                break;
+                not_done++;
             }
         }
-        if (all_done) {
+        if (not_done == 0) {
+            break;
+        }
+        // After 5s past the expected deadline, force-stop: set running=false
+        // and resume any still-suspended coroutines.
+        auto elapsed = std::chrono::steady_clock::now() - wait_start;
+        if (elapsed > std::chrono::seconds(30)) {
+            std::fprintf(stderr, "co_spawn: timeout, %u coroutines still running, forcing exit\n", not_done);
+            running.store(false, std::memory_order_release);
+            for (auto &task : tasks) {
+                if (!task.handle.done()) {
+                    task.handle.resume();
+                }
+            }
             break;
         }
         std::this_thread::yield();

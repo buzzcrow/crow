@@ -192,7 +192,7 @@ impl BenchTarget for RpcTarget {
     }
 
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
-        let pool = Arc::new(BufferPool::new(4096));
+        let pool = Arc::new(BufferPool::new(8192));
 
         // Spawn the external echo server process. It gets its own
         // epoll fd — the client-side transport (below) gets a separate
@@ -597,6 +597,27 @@ impl RpcTarget {
                     ctx_ptr,
                 );
             }
+
+            // Read client-side correlation counters for debugging.
+            let mut cc = sys::CrowRpcClientCounters {
+                submit_ok: 0,
+                submit_fail: 0,
+                resp_matched: 0,
+                resp_mismatch: 0,
+                resp_wrong_id: 0,
+                resp_dropped: 0,
+            };
+            unsafe { sys::crow_rpc_client_get_counters(client_handle, &mut cc) };
+            eprintln!(
+                "client_counters : submit_ok={so} submit_fail={sf} \
+                 resp_matched={rm} resp_mismatch={rmm} resp_wrong_id={rwi} resp_dropped={rd}",
+                so = cc.submit_ok,
+                sf = cc.submit_fail,
+                rm = cc.resp_matched,
+                rmm = cc.resp_mismatch,
+                rwi = cc.resp_wrong_id,
+                rd = cc.resp_dropped,
+            );
 
             // Read stats from the Rust-side atomics (written by FFI callbacks).
             let total_ops = ctx_arc.stats.ops.load(Ordering::Relaxed);

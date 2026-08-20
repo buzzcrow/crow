@@ -79,6 +79,19 @@ typedef struct crow_rpc_transport_stats
 
 void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out);
 
+// Client-side correlation counters for debugging response matching.
+typedef struct crow_rpc_client_counters
+{
+    uint64_t submit_ok;     // call_callback succeeded
+    uint64_t submit_fail;   // call_callback submit failed
+    uint64_t resp_matched;  // on_response matched a slab slot
+    uint64_t resp_mismatch; // on_response: slot not PENDING (late/dup)
+    uint64_t resp_wrong_id; // on_response: slot PENDING but different request_id
+    uint64_t resp_dropped;  // on_response: no slab + no map entry
+} crow_rpc_client_counters_t;
+
+void crow_rpc_client_get_counters(crow_rpc_client_t client, crow_rpc_client_counters_t *out);
+
 // ── Client ────────────────────────────────────────────────────────
 crow_rpc_client_t crow_rpc_client_create(void);
 void              crow_rpc_client_destroy(crow_rpc_client_t client);

@@ -51,6 +51,16 @@ pub struct CrowRpcTransportStats {
     pub dispatch_to_enq: CrowRpcLatencyStats,
 }
 
+#[repr(C)]
+pub struct CrowRpcClientCounters {
+    pub submit_ok: u64,
+    pub submit_fail: u64,
+    pub resp_matched: u64,
+    pub resp_mismatch: u64,
+    pub resp_wrong_id: u64,
+    pub resp_dropped: u64,
+}
+
 pub type crow_rpc_status = i32;
 
 pub const CROW_RPC_OK: crow_rpc_status = 0;
@@ -131,6 +141,8 @@ extern "C" {
     pub fn crow_rpc_server_port(server: crow_rpc_server_t) -> c_int;
 
     pub fn crow_rpc_server_transport_stats(server: crow_rpc_server_t, out: *mut CrowRpcTransportStats);
+
+    pub fn crow_rpc_client_get_counters(client: crow_rpc_client_t, out: *mut CrowRpcClientCounters);
 
     pub fn crow_rpc_client_create() -> crow_rpc_client_t;
     pub fn crow_rpc_client_destroy(client: crow_rpc_client_t);
