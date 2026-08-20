@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -105,22 +106,44 @@ void RpcServer::stop()
     if (!running_.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
+    // Join the acceptor before closing listen_fd_ — on Linux, close() on
+    // a socket another thread is blocked in accept() on does NOT unblock
+    // it (unlike macOS). The acceptor uses poll() with a 100ms timeout,
+    // so it checks running_ and exits promptly. Closing the fd here would
+    // race with the acceptor's poll().
+    if (acceptor_thread_.joinable()) {
+        acceptor_thread_.join();
+    }
     if (listen_fd_ >= 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
-    }
-    if (acceptor_thread_.joinable()) {
-        acceptor_thread_.join();
     }
     transport_->stop();
 }
 
 void RpcServer::acceptor_loop()
 {
+    // Make the listen socket non-blocking and use poll() with a short
+    // timeout. On Linux, close(listen_fd) from another thread does NOT
+    // unblock a thread blocked in accept() (unlike macOS). The poll()
+    // timeout lets the acceptor check running_ periodically for shutdown.
+    int lflags = fcntl(listen_fd_, F_GETFL, 0);
+    fcntl(listen_fd_, F_SETFL, lflags | O_NONBLOCK);
+
     while (running_.load(std::memory_order_relaxed)) {
+        struct pollfd pfd;
+        pfd.fd      = listen_fd_;
+        pfd.events  = POLLIN;
+        pfd.revents = 0;
+        int ret     = ::poll(&pfd, 1, 100); // 100ms timeout
+        if (ret <= 0) {
+            // Timeout (ret == 0) or error — loop back and check running_.
+            continue;
+        }
+
         int fd = ::accept(listen_fd_, nullptr, nullptr);
         if (fd < 0) {
-            if (errno == EINTR) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
                 continue;
             }
             if (!running_.load(std::memory_order_relaxed)) {

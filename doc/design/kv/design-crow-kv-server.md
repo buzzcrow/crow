@@ -49,16 +49,45 @@ when `--kv-engine crow-tree` is selected.
 ### 2.2 Startup ordering
 
 The management API starts **before** stores so the server is observable
-even if store creation fails. When `--stores` is omitted, the server
-boots empty and stores are created via the management API.
+even if store creation fails. `--root <dir>` is required on every
+start; it derives the four node paths via `CrowKVConfig::apply_root`:
+`wal_root = <root>/waldata`, `config_root = <root>/conf`,
+`data_root = <root>/ctdata`, `log_dir = <root>/log` (fixed subfolder
+names, the only supported layout). `--config <toml>` is optional and
+supplies first-boot tunable overrides only; when omitted, tunables
+come from `CrowKVConfig::default()`. The config-file watcher runs only
+when `--config` is passed.
 
-With persistent cluster config, the server auto-loads its store/group configuration from
-`conf/node-config.json` (per-node config cache) on startup. If the
-cache exists, `--stores`/`--groups` CLI args are not needed. The
-server restores all stores/groups from the cache, replays WAL, and
-rejoins the cluster. If the cache is missing, explicit CLI args serve
-as fallback. After store creation, the server reconciles with group 0
-topology KV if group 0 is reachable and finalized.
+Boot has two modes, selected by whether group 0 is on disk
+(`restore::group0_exists` checks `<wal_root>/store0/group0`):
+
+- **Restore mode** — group 0 is on disk. `restore::scan_local_groups`
+  enumerates every `store{S}/group{G}` directory under `<wal_root>`,
+  and `restore::load_local_groups` creates each `PxKvStore` and loads
+  every group via `create_group_with_wal` (replays the WAL, opens the
+  crow-tree engine, and applies persisted membership from
+  `conf/node-config.json` — including remote-replica endpoints). The
+  local `replica_id` per group is read from `node-config.json`, falling
+  back to the `--replica` CLI arg. `--stores`/`--groups` are ignored
+  (warned); local disk is the source of truth for which stores/groups
+  this node hosts. After load, `reconcile::reconcile_with_group0`
+  compares local state against group 0's `/kv/replica/` records:
+  groups that came up with no remotes (`node-config.json` missing or
+  stale for them) get their remotes seeded from group 0 via a group
+  rebuild; groups that already have remotes are verified and any
+  peer present in group 0 but not wired locally is logged (the live
+  membership is not forcibly overwritten — it may be legitimately
+  ahead of group 0 during an in-flight reconfiguration). Reconciliation
+  is best-effort: if group 0 is unreachable or has no `/kv/replica/`
+  records, the node continues with local state and retries on the next
+  restart.
+- **First-boot mode** — no group 0 on disk. The server boots empty
+  (or from `--stores`/`--groups` if given) and the operator calls
+  `POST /system/init` to create store 0 / group 0.
+
+A scan IO error is treated as empty (first-boot mode); a failed
+`create_group_with_wal` for one group is logged and skipped while the
+store still starts with its other groups.
 
 ### 2.3 Concurrency model
 

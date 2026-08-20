@@ -414,10 +414,20 @@ clean shutdown.
 ### 5.1 Two-phase bootstrap
 
 Phase 1 uses console TOML as the topology source of truth
-(operator-managed, existing behavior). Phase 2 cuts over to group 0
-authoritative: `http_cluster_init` writes hardware records via
-`HardwareClient` and KV-cluster topology records via
-`KVClusterMetaClient` into group 0.
+(operator-managed). Phase 2 cuts over to group 0 authoritative:
+`http_cluster_init` writes hardware records via `HardwareClient` and
+KV-cluster topology records via `KVClusterMetaClient` into group 0,
+and `crow-kv-server` restores its stores/groups from local disk on
+restart with group 0 as the verification and fallback source for
+remote-replica wiring (see
+[`design-crow-kv-server.md`](design-crow-kv-server.md) §2.2). The
+toml is bootstrap-only: `--root` is required on every start, `--config`
+is optional (first-boot tunables only), and once group 0 exists the
+operator can delete the toml — restart with `--root` alone rebuilds
+every local store/group from WAL and rejoins the cluster. The node
+root is persisted to group 0 via `KvServerExtra.data_root` on each
+keep-alive tick so the cluster/console knows each node's data
+location.
 
 ### 5.2 No `/topology/ready` flag
 

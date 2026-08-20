@@ -10,8 +10,10 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <mutex>
-#include <unordered_map>
+
+#if CROW_RPC_HAVE_FOLLY
+#    include <folly/concurrency/ConcurrentHashMap.h>
+#endif
 
 namespace crow::rpc
 {
@@ -37,13 +39,12 @@ using CompletionCallback = std::function<void(Frame *response, RpcError err)>;
 // on_response looks up the request_id, invokes the callback, and removes
 // the entry.
 //
-// The pending map is a plain std::unordered_map protected by a mutex for
-// v1. The design calls for folly::ConcurrentHashMap (lock-free) on the
-// consensus hot path; that optimization is deferred until the FFI layer
-// is wired and benchmarks show contention. The mutex is fine for v1
-// because each connection is owned by one worker thread — the worker's
-// on_response lookup is contention-free; only cross-thread submit and
-// timeout removal contend, and those are not the hot path.
+// The pending map uses folly::ConcurrentHashMap (striped locks) when
+// folly is available, falling back to std::unordered_map + mutex
+// otherwise. The striped-lock map eliminates the single-mutex bottleneck
+// on the response hot path — at high TPS (benchmarks, consensus), the
+// I/O worker's on_response lookup no longer contends with cross-thread
+// submit/timeout removal on a single lock.
 class RpcClient
 {
   public:
@@ -86,8 +87,12 @@ class RpcClient
   private:
     std::atomic<uint64_t> next_request_id_{1};
 
+#if CROW_RPC_HAVE_FOLLY
+    folly::ConcurrentHashMap<uint64_t, CompletionCallback> pending_;
+#else
     std::mutex                                       pending_mu_;
     std::unordered_map<uint64_t, CompletionCallback> pending_;
+#endif
 
     // Build an OutFrame for submission. The RpcClient owns the OutFrame;
     // the transport takes it and releases buffers after send.

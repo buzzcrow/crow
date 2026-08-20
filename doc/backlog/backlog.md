@@ -15,15 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R104](R104-kv-server-group0-authoritative-restore.md)** — group-0
-  authoritative restore (toml bootstrap-only) — Area: server / kv —
-  Make the toml optional: on restart the server scans
-  `<root>/waldata` for local stores/groups, loads them from disk via
-  `create_group_with_wal`, then reads group 0 `/kv/replica/` records to
-  wire remote replicas. The toml is only needed for first-boot tunables
-  before group 0 exists. Implements the Phase 2 cutover from
-  `design-crow-kv-group0.md` §5.1. Adds `--root` CLI (fixed subdir
-  layout) and persists the node root to group 0 via `KvServerExtra`.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb

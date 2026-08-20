@@ -73,7 +73,7 @@ void Worker::add_connection(int fd, std::shared_ptr<Connection> conn)
         connections_[fd] = std::move(conn);
     }
     engine_->add_connection(fd, connections_.at(fd).get());
-    engine_->arm_read(fd);
+    engine_->arm_read(fd, connections_.at(fd).get());
 }
 
 void Worker::run_loop()
@@ -105,7 +105,7 @@ void Worker::run_loop()
                     // (EV_ONESHOT consumed the event). Without this, the
                     // connection goes silent — no more read events fire.
                     if (ev.conn->is_open() && engine_->oneshot()) {
-                        engine_->arm_read(ev.fd);
+                        engine_->arm_read(ev.fd, ev.conn);
                     }
                 }
                 break;
@@ -114,15 +114,17 @@ void Worker::run_loop()
                     if (on_writable_impl(ev.conn, ev.fd, stats_)) {
                         // Still has data — re-arm write in one-shot mode.
                         if (engine_->oneshot()) {
-                            engine_->arm_write(ev.fd);
+                            engine_->arm_write(ev.fd, ev.conn);
                         }
                     }
                     else {
-                        // Queue empty — disarm (level-triggered) or just
-                        // don't re-arm (one-shot auto-disarms).
-                        if (!engine_->oneshot()) {
-                            engine_->disarm_write(ev.fd);
-                        }
+                        // Queue empty — disarm write. In level-triggered
+                        // mode, this removes EPOLLOUT from the kernel. In
+                        // one-shot mode, the kernel already disarmed all
+                        // events; disarm_write re-arms with just EPOLLIN
+                        // so read events resume (EPOLLONESHOT disarms both
+                        // read and write, unlike kqueue's per-filter oneshot).
+                        engine_->disarm_write(ev.fd, ev.conn);
                     }
                 }
                 break;
@@ -153,7 +155,7 @@ void Worker::run_loop()
                 }
                 else {
                     // Partial write or EAGAIN — arm write for remaining.
-                    engine_->arm_write(fd);
+                    engine_->arm_write(fd, conn);
                 }
             }
             pending_write_conns_.clear();
@@ -330,7 +332,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         // Partial write or EAGAIN — arm write on the owning engine.
         auto *engine = static_cast<SocketEngine *>(conn->io_engine);
         if (engine != nullptr) {
-            engine->arm_write(fd);
+            engine->arm_write(fd, conn);
         }
     }
     return true;

@@ -83,17 +83,9 @@ void KqueueEngine::remove_connection(int fd)
     ::kevent(kq_, changes, 2, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::arm_read(int fd)
+void KqueueEngine::arm_read(int fd, Connection *conn)
 {
-    // Look up the Connection* for udata (needed for zero-lock dispatch).
-    Connection *conn = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(conn_mu_);
-        auto                        it = connections_.find(fd);
-        if (it != connections_.end()) {
-            conn = it->second;
-        }
-    }
+    // Caller passes conn directly — no map lookup or mutex.
     // In one-shot mode, EV_ADD re-arms the filter after a one-shot event.
     int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
     struct kevent change;
@@ -101,27 +93,19 @@ void KqueueEngine::arm_read(int fd)
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::arm_write(int fd)
+void KqueueEngine::arm_write(int fd, Connection *conn)
 {
     // Level-triggered (no EV_CLEAR): fires whenever the socket is
     // writable. We disarm via disarm_write when the send queue is empty
     // to avoid a busy-loop. udata = Connection* for zero-lock dispatch.
     // In one-shot mode, EV_ONESHOT ensures only one worker processes write.
-    Connection *conn = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(conn_mu_);
-        auto                        it = connections_.find(fd);
-        if (it != connections_.end()) {
-            conn = it->second;
-        }
-    }
     int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
     struct kevent change;
     EV_SET(&change, fd, EVFILT_WRITE, flags, 0, 0, conn);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::disarm_write(int fd)
+void KqueueEngine::disarm_write(int fd, Connection * /*conn*/)
 {
     struct kevent change;
     EV_SET(&change, fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);

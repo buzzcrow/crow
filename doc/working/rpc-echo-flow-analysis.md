@@ -63,7 +63,7 @@ Rust worker (tokio task)
            d. RpcClient::call(transport, conn, req_id, ctrl, data,
               msg_type, OnCompleteAdapter callback)
               → insert into pending_ map (req_id → callback)
-                [mutex lock: pending_mu_]
+                [folly::ConcurrentHashMap insert_or_assign — striped lock]
               → build_frame: new OutFrame { request_id, header, ctrl, data }
                 [zero-copy: OutFrame holds Buffer pointers, no copy]
               → transport->submit(conn, frame)
@@ -118,7 +118,7 @@ Rust worker (tokio task)
     → kevent wait → Readable event (udata = Connection*)
       → on_readable_impl → FrameParser::advance → conn->on_frame
         → RpcClient::on_response(req_id, frame)
-          → lock pending_mu_, find + erase callback for req_id
+          → pending_.find + erase (folly striped lock, no global mutex)
           → callback(frame, RpcError::Ok)
             → OnCompleteAdapter::operator()(frame, Ok)
               → wrap response control/data in crow_rpc_buffer_s handles
@@ -163,7 +163,8 @@ Readable (server) → Notify → Writable (response) → Readable (client).
   socket. Not on the hot path after setup.
 
 All request/response correlation happens via the C++ `RpcClient`'s
-`pending_` map (mutex-protected `unordered_map<req_id, callback>`).
+`pending_` map — `folly::ConcurrentHashMap` (striped locks) when
+folly is available, falling back to `unordered_map` + `mutex`.
 The C++ I/O thread calls the callback directly when a response frame
 arrives, which sends into a tokio oneshot channel.
 
@@ -244,7 +245,7 @@ Multi-engine with 2 independent kqueue instances (2 engines × 1
 worker each, no ONESHOT) is *slightly worse* than single-engine at
 both measurement points: 302K vs 317K at 256T:4C (-5%), 294K vs 312K
 at 512T:8C (-6%). The single I/O worker is NOT the serialization
-bottleneck — the buzz-model caller-thread writev already parallelizes
+bottleneck — the caller-thread writev already parallelizes
 sends across caller threads. Adding a second engine adds overhead
 (cross-engine connection partitioning, more context switches, two
 `kevent` wait calls) without relieving the actual bottleneck.
@@ -293,12 +294,70 @@ I/O thread is CPU-bound on socket operations.
 | Target | Ceiling (ops/s) | Bottleneck | Platform |
 | --- | --- | --- | --- |
 | RPC echo (in-process, optimized) | ~317K | Caller-thread writev contention + per-op alloc | M5 Pro |
+| RPC echo (Gap4+Gap1, 128B/20s) | ~276K | Tokio scheduler round-trip + per-op alloc | AMD 5950X |
 | KV write (coalesced, 3-node) | ~87K | Consensus quorum RPC | M5 Pro |
 | KV write (coalesced, 3-node) | ~124K | Consensus quorum RPC | AMD 5950X |
 
 The RPC echo ceiling is ~3.6× the KV write ceiling on the same M5 Pro
 platform — the KV path adds Paxos consensus (2-phase quorum round +
 WAL persist + engine apply) on top of the RPC transport.
+
+---
+
+## Benchmark Results — 2026-08-20 (Gap4+Gap1, Linux)
+
+Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
+Config: 128B values, 20s duration, in-process echo, epoll loopback.
+Gap4: ONESHOT zero-lock re-arm (skip `conn_mu_` + `mask_mu_` in
+`arm_read`/`arm_write`/`disarm_write`, pass `Connection*` directly).
+Gap1: `folly::ConcurrentHashMap` replaces `unordered_map` + `mutex`
+in `RpcClient::pending_`.
+
+Regression sentinel: `tools/bench-rpc-regression.sh`.
+Raw TSV: `doc/working/bench-rpc-regression.tsv`.
+
+### Full sweep (9 configs)
+
+| Eng×Wkr | T | C | ops/s | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | err |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1×1 | 1 | 1 | 35,656 | 27 | 24 | 53 | 95 | 0 |
+| 1×1 | 64 | 4 | 148,189 | 430 | 444 | 654 | 707 | 0 |
+| 1×1 | 256 | 8 | 202,409 | 1,263 | 1,274 | 1,667 | 1,804 | 0 |
+| 2×1 | 512 | 8 | 111,078 | 4,605 | 612 | 2,246 | 1,999,872 | 1,452 |
+| 1×2 | 512 | 8 | 152,742 | 3,348 | 768 | 41,056 | 83,584 | 1,762 |
+| 1×1 | 1000 | 32 | 198,607 | 5,033 | 5,108 | 5,552 | 5,892 | 0 |
+| 1×4 | 1000 | 32 | 276,424 | 3,615 | 3,578 | 7,432 | 8,712 | 0 |
+| 1×16 | 1000 | 32 | 230,825 | 4,323 | 3,272 | 15,728 | 23,264 | 0 |
+| 2×16 | 1000 | 32 | 224,889 | 4,403 | 3,344 | 17,936 | 41,120 | 0 |
+
+CROW peaks at ~276K (1e4w high-concurrency config).
+
+### Multi-worker scaling (folly ConcurrentHashMap impact)
+
+The high-concurrency configs (1000T × 32C) show folly's effect on
+multi-worker shared-epoll scaling:
+
+- 1e1w → 1e4w: **+39%** (199K → 276K). Adding 4 workers to one epoll
+  instance scales well — folly's striped locks eliminate the single
+  `pending_mu_` bottleneck, and Gap4's zero-lock re-arm keeps the
+  ONESHOT overhead low.
+- 1e4w → 1e16w: **-16%** (276K → 231K). Beyond 4 workers, ONESHOT
+  re-arm overhead + worker contention on the shared epoll fd dominate.
+- 1e1w at 256T:8C (202K, level-triggered) is the best standard config
+  — zero re-arm overhead. The 2e1w and 1e2w configs at 512T:8C
+  regressed to 111K/153K with timeout errors (see below).
+
+### 2e1w / 1e2w timeout errors at 512T:8C
+
+The 2e1w (1452 errors) and 1e2w (1762 errors) configs at 512T:8C have
+**2-second response timeouts** — `p999` is ~2,000,000 us (exactly the
+timeout). Root cause: the `connection.cpp` `goto retry_send` loop
+(fix for a SIGSEGV race where two threads writev on the same fd) can
+busy-loop under high contention (512 tasks on 8 connections),
+delaying the I/O worker from re-arming other connections' epoll
+events. The longer 20s duration (vs the earlier 5s) gives more time
+for the tail-latency spikes to exceed the 2s timeout. Not a
+correctness bug — bounding the retry loop would fix it.
 
 ---
 
@@ -324,6 +383,17 @@ Copy points are annotated inline in the flow diagram above. Summary:
 
 ## Enhancement Ideas
 
+- **Gap2: Callback-based client model (planned)** — replace the
+  tokio oneshot + scheduler response path with an inline callback
+  invoked directly on the C++ I/O worker thread. Eliminates: oneshot
+  channel send, tokio reactor wake, thread switch, future poll. This
+  is the biggest remaining perf gap.
+  Plan: `doc/working/plan-rpc-perf-gap2-3.md`.
+- **Gap3: Slab-based completion pool (planned)** — replace per-call
+  `Box::into_raw`/`from_raw` + `oneshot::channel()` with a
+  pre-allocated slab indexed by `request_id % pool_size`. Zero
+  per-request heap allocation. Subsumed by Gap2's design.
+  Plan: `doc/working/plan-rpc-perf-gap2-3.md`.
 - **Multi-engine I/O (R108, measured — does not help for loopback)** —
   the transport now supports N independent epoll/kqueue instances
   (`--io-engines N --io-workers-per-engine M`). Multi-engine (2×1)

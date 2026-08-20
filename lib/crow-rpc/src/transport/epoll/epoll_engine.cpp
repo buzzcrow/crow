@@ -66,17 +66,15 @@ void EpollEngine::set_oneshot(bool on)
     oneshot_ = on;
 }
 
+// Caller must hold mask_mu_ — does epoll_ctl only, no mask update
+// (the caller updates fd_masks_ under the lock it already holds).
 void EpollEngine::mod_fd(int fd, uint32_t events, Connection *conn)
 {
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
-    ev.events   = events | (oneshot_ ? EPOLLONESHOT : 0);
+    ev.events   = events | (oneshot_ ? static_cast<uint32_t>(EPOLLONESHOT) : 0u);
     ev.data.ptr = conn; // udata = Connection* for zero-lock dispatch
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
-    {
-        std::lock_guard<std::mutex> lock(mask_mu_);
-        fd_masks_[fd] = events;
-    }
 }
 
 void EpollEngine::add_listen_fd(int fd)
@@ -96,7 +94,7 @@ void EpollEngine::add_connection(int fd, Connection *conn)
     }
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
-    ev.events   = EPOLLIN | (oneshot_ ? EPOLLONESHOT : 0);
+    ev.events   = EPOLLIN | (oneshot_ ? static_cast<uint32_t>(EPOLLONESHOT) : 0u);
     ev.data.ptr = conn; // udata = Connection* for zero-lock dispatch
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
     {
@@ -118,55 +116,60 @@ void EpollEngine::remove_connection(int fd)
     }
 }
 
-void EpollEngine::arm_read(int fd)
+void EpollEngine::arm_read(int fd, Connection *conn)
 {
-    // Read is always armed in level-triggered mode; no-op if already armed.
-    Connection *conn = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(conn_mu_);
-        auto                        it = connections_.find(fd);
-        if (it != connections_.end()) {
-            conn = it->second;
-        }
+    // ONESHOT fast-path: the kernel auto-disarmed all events after the
+    // last event, so we always need EPOLL_CTL_MOD to re-arm. No mask
+    // tracking needed (the kernel is the source of truth). The caller
+    // passes conn directly — no map lookup, no mutex.
+    if (oneshot_) {
+        mod_fd(fd, EPOLLIN, conn);
+        return;
     }
+    // Level-triggered: skip if EPOLLIN is already armed (avoid redundant
+    // syscall). Mask tracking under mask_mu_ is still needed here.
     std::lock_guard<std::mutex> lock(mask_mu_);
     auto                        it = fd_masks_.find(fd);
     if (it != fd_masks_.end() && !(it->second & EPOLLIN)) {
-        mod_fd(fd, it->second | EPOLLIN, conn);
+        uint32_t new_mask = it->second | EPOLLIN;
+        mod_fd(fd, new_mask, conn);
+        it->second = new_mask;
     }
 }
 
-void EpollEngine::arm_write(int fd)
+void EpollEngine::arm_write(int fd, Connection *conn)
 {
-    Connection *conn = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(conn_mu_);
-        auto                        it = connections_.find(fd);
-        if (it != connections_.end()) {
-            conn = it->second;
-        }
+    // ONESHOT fast-path: kernel disarmed everything — just MOD with
+    // EPOLLIN|EPOLLOUT to re-arm both. No mutex, no mask map.
+    if (oneshot_) {
+        mod_fd(fd, EPOLLIN | EPOLLOUT, conn);
+        return;
     }
+    // Level-triggered: only MOD if EPOLLOUT isn't already armed.
     std::lock_guard<std::mutex> lock(mask_mu_);
     auto                        it = fd_masks_.find(fd);
     if (it != fd_masks_.end() && !(it->second & EPOLLOUT)) {
-        mod_fd(fd, it->second | EPOLLOUT, conn);
+        uint32_t new_mask = it->second | EPOLLOUT;
+        mod_fd(fd, new_mask, conn);
+        it->second = new_mask;
     }
 }
 
-void EpollEngine::disarm_write(int fd)
+void EpollEngine::disarm_write(int fd, Connection *conn)
 {
-    Connection *conn = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(conn_mu_);
-        auto                        it = connections_.find(fd);
-        if (it != connections_.end()) {
-            conn = it->second;
-        }
+    // ONESHOT fast-path: kernel already disarmed all events. Re-arm
+    // with EPOLLIN only so read events resume. No mutex, no mask map.
+    if (oneshot_) {
+        mod_fd(fd, EPOLLIN, conn);
+        return;
     }
+    // Level-triggered: remove EPOLLOUT from the kernel registration.
     std::lock_guard<std::mutex> lock(mask_mu_);
     auto                        it = fd_masks_.find(fd);
     if (it != fd_masks_.end() && (it->second & EPOLLOUT)) {
-        mod_fd(fd, it->second & ~EPOLLOUT, conn);
+        uint32_t new_mask = it->second & ~static_cast<uint32_t>(EPOLLOUT);
+        mod_fd(fd, new_mask, conn);
+        it->second = new_mask;
     }
 }
 

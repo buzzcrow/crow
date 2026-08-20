@@ -35,15 +35,19 @@ uint64_t RpcClient::call(Transport *transport, Connection *conn, uint64_t reques
     // Insert into pending map before submit (so on_response can find it
     // even if the response arrives before submit returns — unlikely but
     // possible on loopback).
-    {
-        std::lock_guard<std::mutex> lock(pending_mu_);
-        pending_[request_id] = std::move(on_complete);
-    }
+    pending_.insert_or_assign(request_id, std::move(on_complete));
 
     OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
     if (!transport->submit(conn, frame)) {
         // Submit failed — remove from pending, invoke callback with error.
         CompletionCallback cb;
+#if CROW_RPC_HAVE_FOLLY
+        auto it = pending_.find(request_id);
+        if (it != pending_.end()) {
+            cb = std::move(it->second);
+            pending_.erase(it);
+        }
+#else
         {
             std::lock_guard<std::mutex> lock(pending_mu_);
             auto                        it = pending_.find(request_id);
@@ -52,6 +56,7 @@ uint64_t RpcClient::call(Transport *transport, Connection *conn, uint64_t reques
                 pending_.erase(it);
             }
         }
+#endif
         if (cb) {
             cb(nullptr, RpcError::SendQueueFull);
         }
@@ -95,6 +100,16 @@ void RpcClient::attach(Connection *conn)
 void RpcClient::on_response(uint64_t request_id, Frame *response)
 {
     CompletionCallback cb;
+#if CROW_RPC_HAVE_FOLLY
+    auto it = pending_.find(request_id);
+    if (it == pending_.end()) {
+        // Late response after timeout or duplicate — discard.
+        delete response;
+        return;
+    }
+    cb = std::move(it->second);
+    pending_.erase(it);
+#else
     {
         std::lock_guard<std::mutex> lock(pending_mu_);
         auto                        it = pending_.find(request_id);
@@ -106,6 +121,7 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
         cb = std::move(it->second);
         pending_.erase(it);
     }
+#endif
     if (cb) {
         cb(response, RpcError::Ok);
     }
@@ -116,6 +132,20 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
 
 void RpcClient::fail_all(RpcError err)
 {
+#if CROW_RPC_HAVE_FOLLY
+    // folly::ConcurrentHashMap has no swap; iterate + erase + invoke.
+    // Each erase is safe during iteration (striped-lock map).
+    auto it = pending_.begin();
+    while (it != pending_.end()) {
+        CompletionCallback cb  = std::move(it->second);
+        auto               key = it->first;
+        ++it;
+        pending_.erase(key);
+        if (cb) {
+            cb(nullptr, err);
+        }
+    }
+#else
     std::unordered_map<uint64_t, CompletionCallback> to_fail;
     {
         std::lock_guard<std::mutex> lock(pending_mu_);
@@ -126,12 +156,17 @@ void RpcClient::fail_all(RpcError err)
             cb(nullptr, err);
         }
     }
+#endif
 }
 
 size_t RpcClient::pending_count()
 {
+#if CROW_RPC_HAVE_FOLLY
+    return pending_.size();
+#else
     std::lock_guard<std::mutex> lock(pending_mu_);
     return pending_.size();
+#endif
 }
 
 } // namespace crow::rpc

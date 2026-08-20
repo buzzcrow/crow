@@ -139,9 +139,13 @@ class SocketEngine
     // Arm/disarm read/write events. Read is always armed (level-triggered);
     // write is armed on-demand (when send queue has data) and disarmed when
     // the queue drains. In one-shot mode, arm re-arms after processing.
-    virtual void arm_read(int fd)     = 0;
-    virtual void arm_write(int fd)    = 0;
-    virtual void disarm_write(int fd) = 0;
+    // The caller passes the Connection* directly (it already has it from
+    // the event or the submit path) so the engine avoids a map lookup +
+    // mutex on every re-arm — critical for ONESHOT mode where re-arm
+    // happens after every event.
+    virtual void arm_read(int fd, Connection *conn)     = 0;
+    virtual void arm_write(int fd, Connection *conn)    = 0;
+    virtual void disarm_write(int fd, Connection *conn) = 0;
 
     // Notify the worker for a cross-thread submit. Wakes the event loop.
     virtual void notify_worker() = 0;

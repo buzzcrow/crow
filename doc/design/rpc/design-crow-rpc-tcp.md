@@ -66,7 +66,7 @@ worker re-arms read/write after processing.
 
 WRITABLE is armed only when there's data to send — idle connections
 don't wake the worker; when the send queue drains, disarm (level-
-triggered) or let the one-shot auto-disarm. The buzz-model caller-thread
+triggered) or let the one-shot auto-disarm. The caller-thread
 writev (`SocketTransport::submit`) handles sends on the caller's thread
 — no cross-thread submit queue or notify wake. The `Connection::io_engine`
 back-pointer routes `arm_write` to the owning engine on EAGAIN. One

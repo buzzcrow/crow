@@ -31,9 +31,9 @@ class EpollEngine : public SocketEngine
     void add_listen_fd(int fd) override;
     void add_connection(int fd, Connection *conn) override;
     void remove_connection(int fd) override;
-    void arm_read(int fd) override;
-    void arm_write(int fd) override;
-    void disarm_write(int fd) override;
+    void arm_read(int fd, Connection *conn) override;
+    void arm_write(int fd, Connection *conn) override;
+    void disarm_write(int fd, Connection *conn) override;
     void notify_worker() override;
     void set_timer(int timeout_ms) override;
     int  wait(EngineEvent *out_events, int max_events, int timeout_ms) override;

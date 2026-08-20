@@ -64,6 +64,7 @@ bool Connection::try_send(int fd, TransportStats *stats)
     }
 
     bool all_sent = true;
+retry_send:
     while (true) {
         OutFrame *batch[BATCH_MAX];
         int       n = drain_send_queue(batch, BATCH_MAX);
@@ -211,13 +212,11 @@ bool Connection::try_send(int fd, TransportStats *stats)
         if (!send_queue_.empty()) {
             expected = false;
             if (in_send_.compare_exchange_strong(expected, true)) {
-                // Recurse — but we're already holding in_send_, so just
-                // fall through to the loop. This is safe because we
-                // just set in_send_ and no one else can enter.
-                // Actually, we need to re-enter the send loop. Let's
-                // just return false and let the worker pick it up.
-                in_send_.store(false, std::memory_order_release);
-                return false;
+                // We re-acquired in_send_ — retry the send loop to
+                // drain the frames that arrived in the gap between
+                // in_send_.store(false) and this lock.
+                all_sent = true;
+                goto retry_send;
             }
         }
     }
