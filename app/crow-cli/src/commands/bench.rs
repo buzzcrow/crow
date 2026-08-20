@@ -197,6 +197,13 @@ pub struct RunArgs {
     /// behavior).
     #[arg(long, default_value_t = false)]
     pub flush_after_prepopulate: bool,
+
+    /// Stats collection mode for the RPC callback hot path (RPC target
+    /// only). `histogram` (default): lock-free `LatencyHistogram` with
+    /// p50/p99/avg/max. `avg-only`: minimal atomic sum + count (no
+    /// histogram buckets). Used to measure histogram overhead.
+    #[arg(long, default_value = "histogram")]
+    pub stats_mode: String,
 }
 
 /// Arguments for `crow-cli bench`.
@@ -456,9 +463,10 @@ async fn bench_benchmark_kv(args: RunArgs, json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// RPC bench: in-process echo server, measure raw transport throughput.
+/// RPC bench: 2-process echo server (child) + client (CLI), measure
+/// raw transport throughput.
 async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
-    use crate::bench::target::rpc::RpcTarget;
+    use crate::bench::target::rpc::{RpcTarget, StatsMode};
     use crate::bench::target::BenchTarget;
     use crate::bench::{run_bench, BenchConfig, WorkloadKind};
     use std::time::Duration;
@@ -471,15 +479,26 @@ async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
         }
     };
 
+    let Some(stats_mode) = StatsMode::parse(&args.stats_mode) else {
+        eprintln!(
+            "error: unknown stats-mode {:?} (expected: histogram|avg-only)",
+            args.stats_mode
+        );
+        return ExitCode::from(1);
+    };
+
     let run_id = args.run_id.clone().unwrap_or_else(next_run_id);
     let now = chrono::Utc::now();
     let folder_name = run_folder_name(&run_id, "rpc", now);
     let run_dir = crate::bench::BenchReport::default_dir().join(&folder_name);
 
-    println!("provisioning in-process RPC echo server...");
+    println!(
+        "provisioning 2-process RPC echo server (stats-mode={})...",
+        args.stats_mode
+    );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
-    let mut target = RpcTarget::new();
+    let mut target = RpcTarget::new().with_stats_mode(stats_mode);
 
     let mut cfg = BenchConfig::defaults(String::new(), kind);
     cfg.target = "rpc".to_string();

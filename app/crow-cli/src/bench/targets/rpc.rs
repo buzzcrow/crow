@@ -4,26 +4,29 @@
 #![allow(unsafe_code)]
 // FFI dispatch callback + raw pointer handoff requires unsafe.
 
-//! RPC bench target: provisions an in-process `RpcServer` with the
-//! built-in echo handler, builds `RpcClient`-backed workers that send
-//! ping requests with data payloads and verify the echo response.
+//! RPC bench target: spawns a standalone `crow-rpc-echo-server` as a
+//! child process (separate epoll fd), then builds `RpcClient`-backed
+//! workers in the CLI process that connect to the external server and
+//! send ping requests with data payloads, verifying the echo response.
 //!
 //! This measures raw RPC transport throughput (epoll + framing +
 //! request/response correlation) without any KV/storage layer in the
-//! path. The echo handler simply copies request data to response data,
-//! so the benchmark is purely I/O-bound.
+//! path. The 2-process model gives 2 independent epoll fds (client +
+//! server), matching buzz-cpp's architecture and eliminating the
+//! single-epoll-fd contention of the in-process model.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
-use crossbeam_channel::{bounded, Sender};
-
+use crow_common::metrics::{Counter, LatencyHistogram, MetricName};
 use crow_console_shared::error::{Error, Result};
-use crow_protocol::fb::{
-    ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, ConnectionPingResponseArgs,
-};
+use crow_console_shared::lifecycle::stop_pid_with_timeout;
+use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
 use crow_rpc_ffi::{BufferPool, Connection, CrowRpcLatencyStats, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 use tokio::task::JoinHandle;
@@ -39,108 +42,68 @@ use super::{BenchClient, BenchTarget};
 /// colliding with the built-in ping handler (`EConnectionPingRequest`).
 const ECHO_MSG_TYPE: u16 = 100;
 
-/// Wrapper for a raw pointer that is `Send`. Used for the dispatch
-/// callback `user_data` (only accessed from the main bench thread).
-struct SendPtr(*mut std::ffi::c_void);
-unsafe impl Send for SendPtr {}
-
-/// The C++ dispatch callback. Called by the I/O worker with parsed frame
-/// data. Hands off to the Rust thread pool via the channel. Must be
-/// non-blocking.
-unsafe extern "C" fn dispatch_callback(
-    user_data: *mut std::ffi::c_void,
-    conn_handle: *mut std::ffi::c_void,
-    msg_type: u16,
-    control: *mut u8,
-    control_len: u32,
-    data: *mut u8,
-    data_len: u32,
-) {
-    let tx = &*(user_data as *const Sender<DispatchTask>);
-    let task = DispatchTask {
-        conn_handle,
-        _msg_type: msg_type,
-        control,
-        control_len,
-        data,
-        data_len,
-    };
-    // try_send: if the channel is full, drop the request (backpressure).
-    let _ = tx.try_send(task);
+/// Stats collection mode for the callback hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatsMode {
+    /// Lock-free `LatencyHistogram`: p50/p99/avg/max via atomic
+    /// bucket counters. No mutex, no locks.
+    Histogram,
+    /// Minimal: atomic sum + count only (avg latency). No histogram
+    /// buckets, no binary search. Used to measure histogram overhead.
+    AvgOnly,
 }
 
-/// Run the echo handler on a dispatch thread pool worker. Builds the
-/// response (`ConnectionPingResponse` + echoed data) and submits it via
-/// the C++ transport.
-#[allow(clippy::needless_pass_by_value)]
-fn handle_dispatch_task(server: &RpcServer, task: DispatchTask) {
-    unsafe {
-        // Extract request_id from the control flatbuffer.
-        let req_id = if task.control_len > 0 && !task.control.is_null() {
-            let slice = std::slice::from_raw_parts(task.control, task.control_len as usize);
-            // ConnectionPingRequest has `id` as the first field (VT_ID=4).
-            // Use flatbuffers to read it.
-            flatbuffers::root::<ConnectionPingRequest>(slice).map_or(0, |r| r.id())
-        } else {
-            0
-        };
-
-        // Build the response control: ConnectionPingResponse.
-        let mut fbb = FlatBufferBuilder::new();
-        let resp = ConnectionPingResponse::create(
-            &mut fbb,
-            &ConnectionPingResponseArgs {
-                id: req_id,
-                rpc_create_nano: 0,
-                ret: crow_protocol::fb::FBRetCode::Success,
-            },
-        );
-        fbb.finish(resp, None);
-        let resp_ctrl = fbb.finished_data().to_vec();
-
-        // Echo the request data.
-        let resp_data = if task.data_len > 0 && !task.data.is_null() {
-            Some(std::slice::from_raw_parts(task.data, task.data_len as usize).to_vec())
-        } else {
-            None
-        };
-
-        // Submit the response via C++ transport.
-        let _ = server.submit_response(
-            task.conn_handle,
-            &resp_ctrl,
-            resp_data.as_deref(),
-            ECHO_MSG_TYPE,
-            req_id,
-        );
-
-        // Free the request buffers (malloc'd by C++ parser).
-        if !task.control.is_null() {
-            libc::free(task.control.cast());
-        }
-        if !task.data.is_null() {
-            libc::free(task.data.cast());
+impl StatsMode {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "histogram" => Some(Self::Histogram),
+            "avg-only" => Some(Self::AvgOnly),
+            _ => None,
         }
     }
 }
 
-/// A dispatch task: the parsed frame data handed off from C++ to Rust.
-struct DispatchTask {
-    conn_handle: *mut std::ffi::c_void,
-    /// Echo handler always responds with `ECHO_MSG_TYPE`, so this is
-    /// unused — kept for future handlers that dispatch by `msg_type`.
-    _msg_type: u16,
-    control: *mut u8,
-    control_len: u32,
-    data: *mut u8,
-    data_len: u32,
+/// Locate the `crow-rpc-echo-server` binary. Search order:
+/// 1. `$CROW_RPC_ECHO_SERVER_BIN`
+/// 2. `lib/crow-rpc/build/crow-rpc-echo-server` relative to the
+///    workspace root (pixi build output)
+/// 3. Sibling next to the current executable
+fn echo_server_bin() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CROW_RPC_ECHO_SERVER_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    // Pixi build output: lib/crow-rpc/build/crow-rpc-echo-server
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let mut p = dir.to_path_buf();
+            for _ in 0..5 {
+                let candidate = p
+                    .join("lib")
+                    .join("crow-rpc")
+                    .join("build")
+                    .join("crow-rpc-echo-server");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                if !p.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    None
 }
 
-unsafe impl Send for DispatchTask {}
-
-/// RPC bench target: in-process server + echo handler.
+/// RPC bench target: 2-process echo server (child) + client (CLI).
 pub(crate) struct RpcTarget {
+    /// Local `RpcServer` used only for its client-side transport (epoll
+    /// fd + I/O workers). No listening — connections go to the external
+    /// echo server process.
     server: Option<Arc<RpcServer>>,
+    /// The spawned echo server child process.
+    server_child: Option<Child>,
+    /// Path to the server's stdout log (contains transport stats).
+    server_log_path: Option<PathBuf>,
     pool: Option<Arc<BufferPool>>,
     port: i32,
     /// The shared RPC client used by all workers.
@@ -152,31 +115,29 @@ pub(crate) struct RpcTarget {
     /// `request_id` collisions (the C API uses the flatbuffer's `id` field
     /// as the `request_id` for response correlation).
     request_id_counter: Arc<AtomicU64>,
-    /// Dispatch thread pool sender. The C++ I/O worker hands off parsed
-    /// frames to this channel; Rust worker threads run the echo handler
-    /// and submit responses. This enables pipeline parallelism (I/O
-    /// worker focuses on read/parse, handler runs in parallel).
-    dispatch_tx: Option<Sender<DispatchTask>>,
-    /// Raw pointer to the `Box<Sender>` passed to C++ as `user_data`.
-    /// Freed in cleanup to close the channel.
-    dispatch_user_data: SendPtr,
-    dispatch_threads: Vec<thread::JoinHandle<()>>,
+    /// Stats collection mode (histogram vs avg-only).
+    stats_mode: StatsMode,
 }
 
 impl RpcTarget {
     pub(crate) fn new() -> Self {
         Self {
             server: None,
+            server_child: None,
+            server_log_path: None,
             pool: None,
             port: 0,
             client: None,
             conns: Vec::new(),
             next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
-            dispatch_tx: None,
-            dispatch_user_data: SendPtr(std::ptr::null_mut()),
-            dispatch_threads: Vec::new(),
+            stats_mode: StatsMode::Histogram,
         }
+    }
+
+    pub(crate) fn with_stats_mode(mut self, mode: StatsMode) -> Self {
+        self.stats_mode = mode;
+        self
     }
 }
 
@@ -189,67 +150,85 @@ impl BenchTarget for RpcTarget {
 
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
         let pool = Arc::new(BufferPool::new(4096));
+
+        // Spawn the external echo server process. It gets its own
+        // epoll fd — the client-side transport (below) gets a separate
+        // one, giving 2 independent epoll fds (matching buzz-cpp).
+        let binary = echo_server_bin().ok_or_else(|| {
+            Error::Config(
+                "could not locate crow-rpc-echo-server binary; set $CROW_RPC_ECHO_SERVER_BIN".to_string(),
+            )
+        })?;
+        let log_path = std::env::temp_dir().join(format!("crow-rpc-echo-server-{}.log", std::process::id()));
+        let log_file = std::fs::File::create(&log_path)?;
+        let log_file_stderr = log_file.try_clone()?;
+        let mut cmd = Command::new(&binary);
+        cmd.arg("--port")
+            .arg("0")
+            .arg("--io-engines")
+            .arg(cfg.io_engines.to_string())
+            .arg("--io-workers-per-engine")
+            .arg(cfg.io_workers_per_engine.to_string())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_stderr));
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Error::Config(format!("failed to spawn echo server {}: {e}", binary.display())))?;
+
+        // Wait for the server to print its listening port. Read stdout
+        // from the log file (the child's stdout is redirected there).
+        // Poll the file until we see "listening port=NNNN".
+        let port = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut found = None;
+            while std::time::Instant::now() < deadline {
+                if let Ok(content) = std::fs::read_to_string(&log_path) {
+                    for line in content.lines() {
+                        if let Some(rest) = line.strip_prefix("listening port=") {
+                            if let Ok(p) = rest.trim().parse::<i32>() {
+                                found = Some(p);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            found.ok_or_else(|| {
+                // Check if the child already exited.
+                match child.try_wait() {
+                    Ok(Some(status)) => Error::Config(format!("echo server exited before binding: {status}")),
+                    _ => Error::Config("echo server did not bind within 5s".to_string()),
+                }
+            })?
+        };
+        self.port = port;
+        self.server_child = Some(child);
+        self.server_log_path = Some(log_path);
+
+        // Create a local RpcServer (no listen) — used only for its
+        // client-side transport (epoll fd + I/O workers). Connections
+        // created through this transport live on the CLI's epoll fd,
+        // separate from the external server's epoll fd.
         let server = Arc::new(RpcServer::with_engines(
             Some(&pool),
             cfg.io_engines,
             cfg.io_workers_per_engine,
         ));
-        server
-            .listen("127.0.0.1", 0)
-            .map_err(|e| Error::Config(format!("rpc listen: {e}")))?;
-        self.port = server.port();
-        if self.port <= 0 {
-            return Err(Error::Config("rpc server did not bind a port".to_string()));
-        }
-
-        // Set up the dispatch thread pool (executor model). When
-        // io_dispatch_threads > 0, the C++ I/O worker hands off parsed
-        // frames to this Rust thread pool via a channel. The pool workers
-        // run the echo handler and submit responses. This enables
-        // pipeline parallelism for non-trivial handlers. When
-        // io_dispatch_threads == 0, use the C++ inline echo handler
-        // (faster for trivial handlers like echo).
-        let num_dispatch_threads = cfg.io_dispatch_threads as usize;
-        if num_dispatch_threads > 0 {
-            let (tx, rx) = bounded::<DispatchTask>(4096);
-            let server_for_dispatch = Arc::clone(&server);
-            for _ in 0..num_dispatch_threads {
-                let rx = rx.clone();
-                let server = Arc::clone(&server_for_dispatch);
-                let handle = thread::spawn(move || {
-                    while let Ok(task) = rx.recv() {
-                        handle_dispatch_task(&server, task);
-                    }
-                });
-                self.dispatch_threads.push(handle);
-            }
-            self.dispatch_tx = Some(tx);
-
-            let dispatch_tx_ptr = self.dispatch_tx.as_ref().unwrap().clone();
-            let user_data = Box::into_raw(Box::new(dispatch_tx_ptr)).cast();
-            self.dispatch_user_data = SendPtr(user_data);
-            unsafe { server.set_dispatch_callback(Some(dispatch_callback), user_data) };
-        } else {
-            // Use the C++ inline echo handler (no dispatch overhead).
-            server.register_echo_handler(ECHO_MSG_TYPE);
-        }
-
         server.start();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Create exactly cfg.connections connections. These are shared
-        // across all worker threads — when threads > connections, multiple
-        // threads send on the same connection, creating multi-frame batches
-        // that the I/O worker can coalesce into one read/writev.
+        // Connect to the external echo server. These connections live
+        // on the local transport's epoll fd.
         let client = Arc::new(RpcClient::new());
         let mut conns = Vec::with_capacity(cfg.connections as usize);
         for _ in 0..cfg.connections {
             let conn = server
                 .connect("127.0.0.1", self.port)
                 .map_err(|e| Error::Config(format!("rpc connect: {e}")))?;
-            // Attach the client to the connection once, before sharing
-            // it across threads. This sets the on_frame callback that
-            // routes responses to the client's response handler.
             client.attach(&conn);
             conns.push(Arc::new(conn));
         }
@@ -296,26 +275,9 @@ impl BenchTarget for RpcTarget {
 
     #[allow(clippy::cast_precision_loss, reason = "counters fit in f64 mantissa")]
     async fn cleanup(&mut self) {
-        // Sample transport stats before stopping the server.
+        // Sample client-side transport stats before stopping.
         if let Some(server) = &self.server {
             let s = server.transport_stats();
-            // submit_to_writev.count = total frames sent (request + response).
-            // read_calls = total read() syscalls (client + server).
-            // Each op = 1 request frame + 1 response frame = 2 frames,
-            // and 1 server read + 1 client read = 2 reads.
-            // So recv_agg = frames_per_read = submit_to_writev.count / read_calls.
-            // send_agg = frames_per_writev = submit_to_writev.count / writev_calls.
-            // When aggregation works, both should be > 1.0.
-            let recv_agg = if s.read_calls > 0 {
-                s.submit_to_writev.count as f64 / s.read_calls as f64
-            } else {
-                0.0
-            };
-            let send_agg = if s.writev_calls > 0 {
-                s.submit_to_writev.count as f64 / s.writev_calls as f64
-            } else {
-                0.0
-            };
             let avg_us = |h: &CrowRpcLatencyStats| {
                 if h.count > 0 {
                     h.sum_ns as f64 / h.count as f64 / 1000.0
@@ -324,43 +286,34 @@ impl BenchTarget for RpcTarget {
                 }
             };
             eprintln!(
-                "transport_stats : read_calls={rc} writev_calls={wc} \
-                 recv_agg={ra:.1}x send_agg={sa:.1}x \
-                 submit_to_writev={sw_avg:.1}us({sw_c}) \
-                 read_to_dispatch={rd_avg:.1}us({rd_c}) \
-                 dispatch_to_enq={de_avg:.1}us({de_c})",
+                "client_transport_stats : read_calls={rc} writev_calls={wc} \
+                 submit_to_writev={sw_avg:.1}us({sw_c})",
                 rc = s.read_calls,
                 wc = s.writev_calls,
-                ra = recv_agg,
-                sa = send_agg,
                 sw_avg = avg_us(&s.submit_to_writev),
                 sw_c = s.submit_to_writev.count,
-                rd_avg = avg_us(&s.read_to_dispatch),
-                rd_c = s.read_to_dispatch.count,
-                de_avg = avg_us(&s.dispatch_to_enq),
-                de_c = s.dispatch_to_enq.count,
             );
         }
-        // Clear the dispatch callback (if set) so the C++ I/O worker
-        // stops calling it. Then free the Box<Sender> (user_data) which
-        // closes the channel and lets the dispatch threads exit.
-        if !self.dispatch_user_data.0.is_null() {
-            if let Some(server) = self.server.as_ref() {
-                unsafe { server.set_dispatch_callback(None, std::ptr::null_mut()) };
-            }
-            unsafe {
-                drop(Box::from_raw(
-                    self.dispatch_user_data.0.cast::<Sender<DispatchTask>>(),
-                ));
-            }
-            self.dispatch_user_data.0 = std::ptr::null_mut();
-        }
-        drop(self.dispatch_tx.take());
-        for handle in self.dispatch_threads.drain(..) {
-            let _ = handle.join();
-        }
+        // Stop the local client-side transport.
         if let Some(server) = self.server.take() {
             server.stop();
+        }
+        // Stop the external echo server (SIGTERM, then read its stats).
+        if let Some(mut child) = self.server_child.take() {
+            let pid = child.id();
+            let _ = stop_pid_with_timeout(pid, Duration::from_secs(5));
+            let _ = child.wait();
+        }
+        // Read server-side stats from the log file.
+        if let Some(ref log_path) = self.server_log_path {
+            if let Ok(content) = std::fs::read_to_string(log_path) {
+                for line in content.lines() {
+                    if line.starts_with("stats ") {
+                        eprintln!("server_transport_stats : {line}");
+                        break;
+                    }
+                }
+            }
         }
         self.client = None;
         self.pool = None;
@@ -425,6 +378,7 @@ impl BenchTarget for RpcTarget {
             let worker_id = worker_id as u32;
             let slots = Arc::clone(&slots_arc);
             let rid_counter = Arc::clone(&request_id_counter);
+            let stats_mode = self.stats_mode;
             // Use std::thread::spawn (not tokio::spawn_blocking) to avoid
             // tokio's blocking-pool limits on long-parked threads. The
             // worker thread kicks off requests, parks until the deadline,
@@ -441,6 +395,7 @@ impl BenchTarget for RpcTarget {
                     slots,
                     rid_counter,
                     pool_mask,
+                    stats_mode,
                 )
             });
             let handle = tokio::task::spawn_blocking(move || join.join().unwrap_or_default());
@@ -577,7 +532,16 @@ unsafe impl Sync for UnsafeSlots {}
 /// of the `run_callback_worker` call.
 #[allow(dead_code, reason = "worker_id/pipeline_depth kept for diagnostics")]
 struct BenchWorkerCtx {
-    stats: Mutex<OpStats>,
+    /// Lock-free latency histogram (p50/p99/avg/max). No mutex.
+    latency: LatencyHistogram,
+    /// Lock-free op counter. No mutex.
+    ops: Counter,
+    /// Lock-free error counter. No mutex.
+    errors: Counter,
+    /// Avg-only mode: just atomic sum + count (no histogram buckets).
+    avg_sum_ns: AtomicU64,
+    avg_count: AtomicU64,
+    stats_mode: StatsMode,
     counters: Arc<WorkerCounters>,
     client: Arc<RpcClient>,
     server: Arc<RpcServer>,
@@ -615,10 +579,16 @@ fn run_callback_worker(
     slots: Arc<UnsafeSlots>,
     request_id_counter: Arc<AtomicU64>,
     pool_mask: usize,
+    stats_mode: StatsMode,
 ) -> BTreeMap<OpKind, OpStats> {
     let pipeline_depth = cfg.pipeline_depth.max(1);
     let ctx = Box::new(BenchWorkerCtx {
-        stats: Mutex::new(OpStats::new()),
+        latency: LatencyHistogram::new(MetricName::Static("bench.rpc.latency")),
+        ops: Counter::new(MetricName::Static("bench.rpc.ops")),
+        errors: Counter::new(MetricName::Static("bench.rpc.errors")),
+        avg_sum_ns: AtomicU64::new(0),
+        avg_count: AtomicU64::new(0),
+        stats_mode,
         counters,
         client: Arc::clone(&client.client),
         server: Arc::clone(&client.server),
@@ -654,14 +624,37 @@ fn run_callback_worker(
         thread::park();
     }
 
-    // Collect stats. SAFETY: all callbacks have completed (in_flight == 0
-    // with Acquire ordering provides the happens-before), so no concurrent
-    // access to stats.
+    // Collect stats from the lock-free metrics. SAFETY: all callbacks
+    // have completed (in_flight == 0 with Acquire ordering provides the
+    // happens-before), so no concurrent access to the metrics.
     let ctx = unsafe { Box::from_raw(ctx_ptr) };
-    let stats = {
-        let mut guard = ctx.stats.lock().expect("stats mutex poisoned");
-        std::mem::take(&mut *guard)
-    };
+    let mut stats = OpStats::new();
+    match ctx.stats_mode {
+        StatsMode::Histogram => {
+            let h = ctx.latency.snapshot();
+            stats.ops = h.count;
+            stats.errors = ctx.errors.snapshot().count;
+            // Record avg latency into the PreciseHistogram for the report.
+            // The LatencyHistogram gives bucket-level p50/p99; the
+            // bucket-level percentiles are printed separately.
+            if h.count > 0 {
+                #[allow(clippy::cast_possible_truncation, reason = "ns to us fits in u64")]
+                let latency_us = (h.avg + 500) / 1000;
+                stats.histogram.record(latency_us.max(1));
+            }
+        }
+        StatsMode::AvgOnly => {
+            let count = ctx.avg_count.load(Ordering::Relaxed);
+            let sum_ns = ctx.avg_sum_ns.load(Ordering::Relaxed);
+            stats.ops = count;
+            stats.errors = ctx.errors.snapshot().count;
+            if let Some(avg_ns) = sum_ns.checked_div(count) {
+                #[allow(clippy::cast_possible_truncation, reason = "ns to us fits in u64")]
+                let latency_us = (avg_ns + 500) / 1000;
+                stats.histogram.record(latency_us.max(1));
+            }
+        }
+    }
     let mut map = BTreeMap::new();
     map.insert(OpKind::Write, stats);
     map
@@ -776,16 +769,20 @@ unsafe extern "C" fn bench_on_complete(
     let recording = now >= ctx.measure_start;
     let ok = status == crow_rpc_ffi::sys::CROW_RPC_OK;
     if recording {
-        let lat_us = u64::try_from(slot.start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        {
-            let mut op_stats = ctx.stats.lock().expect("stats mutex poisoned");
-            op_stats.record(
-                lat_us,
-                OpOutcome {
-                    ok,
-                    ..Default::default()
-                },
-            );
+        let lat_ns = slot.start.elapsed().as_nanos();
+        let lat_ns_u64 = u64::try_from(lat_ns).unwrap_or(u64::MAX);
+        match ctx.stats_mode {
+            StatsMode::Histogram => {
+                ctx.latency.observe(lat_ns_u64);
+            }
+            StatsMode::AvgOnly => {
+                ctx.avg_sum_ns.fetch_add(lat_ns_u64, Ordering::Relaxed);
+                ctx.avg_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        ctx.ops.inc();
+        if !ok {
+            ctx.errors.inc();
         }
         ctx.counters.record(OpKind::Write, ok);
     }

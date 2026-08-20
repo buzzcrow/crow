@@ -19,8 +19,8 @@ the benchmark is purely I/O-bound.
 
 The callback model replaces the tokio oneshot + scheduler path with
 an inline callback chain that runs entirely on the C++ I/O worker
-threads. 3 event-loop iterations per op (down from 5 in the original
-design). Key optimizations:
+threads. 2 epoll events per op (down from 5 in the original design).
+Key optimizations:
 
 - **udata dispatch**: epoll stores `Connection*` in udata, eliminating
   per-event mutex + map lookup.
@@ -65,30 +65,25 @@ Rust worker thread (std::thread::spawn, NOT tokio)
               → build_frame: new OutFrame { request_id, header, ctrl, data }
                 [zero-copy: OutFrame holds Buffer pointers, no copy]
               → transport->submit(conn, frame)
-                → SocketTransport::submit: lock submit_mu_, push to
-                  pending_submits_ → engine->notify_worker()
-                    [cross-thread: Rust worker → C++ I/O worker]
+                → SocketTransport::submit: enqueue_send(frame) +
+                  caller-thread writev (buzz model — no notify queue,
+                  no cross-thread round-trip). The in_send_ CAS
+                  serializes concurrent senders; if writev hits EAGAIN,
+                  arm write on the owning engine.
+                    [kernel copy: user → socket buffer (unavoidable)]
            c. crow_rpc_buffer_release(control + data)
               [decrements the ref bumped in (a), frees wrapper struct]
     5. thread::park()  ← wait for all in-flight to drain
 
-  ── C++ I/O worker thread (epoll loop) ──
-
-  Event 1: Notify — drain submits + direct write
-    → epoll_wait → Notify event
-      → drain_pending_submits():
-        → swap pending_submits_ under submit_mu_
-        → for each (conn, frame):
-            conn->enqueue_send(frame)
-            on_writable_impl(conn, fd)  ← DIRECT WRITE (no Writable event)
-              → drain_send_queue + build iovecs + writev
-                [kernel copy: user → socket buffer (unavoidable)]
-              → release sent frames (buffer refcount decrement)
-            if partial write: engine->arm_write(fd)  ← only on EAGAIN
+  Note: for callback-driven submits (bench_on_complete → submit_next),
+  the caller thread IS the C++ I/O worker (the callback runs inline on
+  the I/O worker thread), so the writev happens on the I/O worker
+  thread — no cross-thread notify at all. notify_worker() is only used
+  for shutdown wake (Worker::stop), not on the hot path.
 
   ── Server-side (same C++ I/O worker, same process) ──
 
-  Event 2: Readable — read + echo + enqueue response
+  Event 1: Readable — read + echo + enqueue response
     → epoll_wait → Readable event (udata = Connection*, no map lookup)
       → on_readable_impl(conn, fd, recv_buf, recv_buf_size, pending_writes)
         → ::read(fd, recv_buf, 256KB)  ← ONE big read for multiple frames
@@ -106,7 +101,7 @@ Rust worker thread (std::thread::spawn, NOT tokio)
 
   ── Response arrives back on client connection ──
 
-  Event 3: Readable — read response + callback
+  Event 2: Readable — read response + callback
     → epoll_wait → Readable event (udata = Connection*)
       → on_readable_impl → FrameParser::advance → conn->on_frame
         → RpcClient::on_response(req_id, frame)
@@ -131,10 +126,15 @@ Rust worker thread (std::thread::spawn, NOT tokio)
     6. thread::park() returns → collect stats → return
 ```
 
-**Events per op: 3**:
-1. Notify — drain submits + direct write request
-2. Readable (server) — read + echo + direct write response
-3. Readable (client) — read response + inline callback
+**Events per op: 2**:
+1. Readable (server) — read + echo + enqueue response + batch writev
+2. Readable (client) — read response + inline callback + caller-thread
+   writev (next request)
+
+The request writev happens on the caller thread (Rust worker for the
+initial kickoff, C++ I/O worker for callback-driven submits) — not an
+epoll event. The server response writev happens in the post-event
+batch flush (send aggregation) — also not a separate epoll event.
 
 **What the callback model eliminated (vs the old oneshot path):**
 - `oneshot::channel()` per call (2 allocs + 1 free)
