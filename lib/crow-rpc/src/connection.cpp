@@ -1,7 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-rpc/transport.h"
+#include "crow-rpc/connection.h"
+
 #include "crow-rpc/transport/socket_transport.h" // TransportStats
 
 #include <sys/uio.h>
@@ -29,23 +30,12 @@ bool Connection::enqueue_send(OutFrame *frame)
     if (!is_open()) {
         return false;
     }
-    std::lock_guard<std::mutex> lock(send_mu_);
-    if (send_queue_.size() >= send_queue_capacity_) {
-        return false; // backpressure
-    }
-    send_queue_.push_back(frame);
-    return true;
+    return send_queue_.try_push(frame);
 }
 
 int Connection::drain_send_queue(OutFrame **out, int max)
 {
-    std::lock_guard<std::mutex> lock(send_mu_);
-    int                         n = 0;
-    while (n < max && !send_queue_.empty()) {
-        out[n++] = send_queue_.front();
-        send_queue_.pop_front();
-    }
-    return n;
+    return send_queue_.drain(out, max);
 }
 
 // ── try_send: caller-thread direct writev (buzz model) ────────────
@@ -205,20 +195,20 @@ retry_send:
 
     // Race check: if more frames were offered while we were sending,
     // try again (another thread may have missed the in_send_ window).
+    // Lock-free — the check + CAS is not atomic, but the race is benign:
+    // if another thread acquires in_send_ between the check and the CAS,
+    // it will drain the frames. If no thread does, the worker's
+    // on_writable will pick them up via arm_write.
     if (!all_sent) {
         return false;
     }
-    {
-        std::lock_guard<std::mutex> lock(send_mu_);
-        if (!send_queue_.empty()) {
-            expected = false;
-            if (in_send_.compare_exchange_strong(expected, true)) {
-                // We re-acquired in_send_ — retry the send loop to
-                // drain the frames that arrived in the gap between
-                // in_send_.store(false) and this lock.
-                all_sent = true;
-                goto retry_send;
-            }
+    if (send_queue_.has_pending()) {
+        expected = false;
+        if (in_send_.compare_exchange_strong(expected, true)) {
+            // Re-acquired in_send_ — retry to drain frames that arrived
+            // in the gap between in_send_.store(false) and this check.
+            all_sent = true;
+            goto retry_send;
         }
     }
     return true;

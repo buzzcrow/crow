@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "crow-rpc/transport.h"
+#include "crow-rpc/connection.h"
 
 #include <atomic>
 #include <memory>

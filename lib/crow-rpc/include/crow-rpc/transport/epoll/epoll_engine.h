@@ -11,7 +11,10 @@ namespace crow::rpc
 // EpollEngine: Linux event loop using epoll.
 // - Level-triggered (not edge-triggered) — simpler correctness model.
 // - Read: always armed (EPOLLIN).
-// - Write: armed on-demand (EPOLLOUT add via MOD), disarmed when idle.
+// - Write: armed on-demand (EPOLLOUT via MOD), disarmed when idle.
+// - No userspace mask tracking — epoll_ctl is kernel-serialized, so
+//   arm/disarm always call MOD directly (redundant MODs are ~1µs, cheaper
+//   than a mutex). This eliminates mask_mu_ from the hot path.
 // - Notify: eventfd.
 // - Timer: timerfd.
 class EpollEngine : public SocketEngine
@@ -48,10 +51,6 @@ class EpollEngine : public SocketEngine
     // fd → Connection* map (only used for add/remove; wait() uses data.ptr).
     std::mutex                            conn_mu_;
     std::unordered_map<int, Connection *> connections_;
-
-    // Track per-fd event mask for MOD operations.
-    std::mutex                        mask_mu_;
-    std::unordered_map<int, uint32_t> fd_masks_;
 
     void mod_fd(int fd, uint32_t events, Connection *conn);
 };

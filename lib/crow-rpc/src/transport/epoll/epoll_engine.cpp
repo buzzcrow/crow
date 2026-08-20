@@ -66,8 +66,8 @@ void EpollEngine::set_oneshot(bool on)
     oneshot_ = on;
 }
 
-// Caller must hold mask_mu_ — does epoll_ctl only, no mask update
-// (the caller updates fd_masks_ under the lock it already holds).
+// epoll_ctl is kernel-serialized (thread-safe), so no userspace lock
+// is needed. Redundant MODs are ~1µs each — cheaper than a mutex.
 void EpollEngine::mod_fd(int fd, uint32_t events, Connection *conn)
 {
     struct epoll_event ev;
@@ -97,10 +97,6 @@ void EpollEngine::add_connection(int fd, Connection *conn)
     ev.events   = EPOLLIN | (oneshot_ ? static_cast<uint32_t>(EPOLLONESHOT) : 0u);
     ev.data.ptr = conn; // udata = Connection* for zero-lock dispatch
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
-    {
-        std::lock_guard<std::mutex> lock(mask_mu_);
-        fd_masks_[fd] = EPOLLIN;
-    }
 }
 
 void EpollEngine::remove_connection(int fd)
@@ -110,67 +106,29 @@ void EpollEngine::remove_connection(int fd)
         connections_.erase(fd);
     }
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-    {
-        std::lock_guard<std::mutex> lock(mask_mu_);
-        fd_masks_.erase(fd);
-    }
 }
 
 void EpollEngine::arm_read(int fd, Connection *conn)
 {
-    // ONESHOT fast-path: the kernel auto-disarmed all events after the
-    // last event, so we always need EPOLL_CTL_MOD to re-arm. No mask
-    // tracking needed (the kernel is the source of truth). The caller
-    // passes conn directly — no map lookup, no mutex.
-    if (oneshot_) {
-        mod_fd(fd, EPOLLIN, conn);
-        return;
-    }
-    // Level-triggered: skip if EPOLLIN is already armed (avoid redundant
-    // syscall). Mask tracking under mask_mu_ is still needed here.
-    std::lock_guard<std::mutex> lock(mask_mu_);
-    auto                        it = fd_masks_.find(fd);
-    if (it != fd_masks_.end() && !(it->second & EPOLLIN)) {
-        uint32_t new_mask = it->second | EPOLLIN;
-        mod_fd(fd, new_mask, conn);
-        it->second = new_mask;
-    }
+    // Always MOD — epoll_ctl is kernel-serialized (thread-safe), so no
+    // userspace mask tracking is needed. Redundant MODs when EPOLLIN is
+    // already armed are ~1µs each, cheaper than a mutex lock/unlock.
+    mod_fd(fd, EPOLLIN, conn);
 }
 
 void EpollEngine::arm_write(int fd, Connection *conn)
 {
-    // ONESHOT fast-path: kernel disarmed everything — just MOD with
-    // EPOLLIN|EPOLLOUT to re-arm both. No mutex, no mask map.
-    if (oneshot_) {
-        mod_fd(fd, EPOLLIN | EPOLLOUT, conn);
-        return;
-    }
-    // Level-triggered: only MOD if EPOLLOUT isn't already armed.
-    std::lock_guard<std::mutex> lock(mask_mu_);
-    auto                        it = fd_masks_.find(fd);
-    if (it != fd_masks_.end() && !(it->second & EPOLLOUT)) {
-        uint32_t new_mask = it->second | EPOLLOUT;
-        mod_fd(fd, new_mask, conn);
-        it->second = new_mask;
-    }
+    // MOD with EPOLLIN|EPOLLOUT to arm both. In ONESHOT mode the kernel
+    // disarmed everything; in level-triggered mode this may be a redundant
+    // MOD if EPOLLOUT is already armed — acceptable (epoll_ctl is cheap).
+    mod_fd(fd, EPOLLIN | EPOLLOUT, conn);
 }
 
 void EpollEngine::disarm_write(int fd, Connection *conn)
 {
-    // ONESHOT fast-path: kernel already disarmed all events. Re-arm
-    // with EPOLLIN only so read events resume. No mutex, no mask map.
-    if (oneshot_) {
-        mod_fd(fd, EPOLLIN, conn);
-        return;
-    }
-    // Level-triggered: remove EPOLLOUT from the kernel registration.
-    std::lock_guard<std::mutex> lock(mask_mu_);
-    auto                        it = fd_masks_.find(fd);
-    if (it != fd_masks_.end() && (it->second & EPOLLOUT)) {
-        uint32_t new_mask = it->second & ~static_cast<uint32_t>(EPOLLOUT);
-        mod_fd(fd, new_mask, conn);
-        it->second = new_mask;
-    }
+    // MOD with EPOLLIN only — removes EPOLLOUT from the registration.
+    // In ONESHOT mode this also re-arms read (kernel disarmed both).
+    mod_fd(fd, EPOLLIN, conn);
 }
 
 void EpollEngine::notify_worker()

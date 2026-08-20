@@ -5,6 +5,7 @@
 
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api.h"
+#include "crow-rpc/connection.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/transport.h"
 

@@ -28,6 +28,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let src = engine.join("src");
     let include = engine.join("include");
+    // crow-common headers (MpscQueue) — shared with crow-tree.
+    let common_include = engine
+        .parent()
+        .ok_or("engine dir must have a parent lib dir")?
+        .join("crow-common")
+        .join("cpp")
+        .join("include");
 
     let mut sources = Vec::new();
     collect_cpp(&src, &mut sources)?;
@@ -68,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .flag_if_supported("-Wextra")
         .flag_if_supported("-Werror")
         .include(&include)
+        .include(&common_include)
         .files(sources.iter().map(|p| p.as_path()).collect::<Vec<_>>());
 
     // Generated flatbuffer headers (from CMake build dir).
@@ -120,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={}", src.display());
     }
     println!("cargo:rerun-if-changed={}", include.display());
+    println!("cargo:rerun-if-changed={}", common_include.display());
 
     Ok(())
 }

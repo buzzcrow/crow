@@ -54,3 +54,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 else()
   target_compile_definitions(crowcommon PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
 endif()
+
+# ── Tests ─────────────────────────────────────────────────────────
+enable_testing()
+include(GoogleTest)
+find_package(GTest REQUIRED)
+file(GLOB_RECURSE CROWCOMMON_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+add_executable(crowcommon_tests ${CROWCOMMON_TEST_SRC})
+target_include_directories(crowcommon_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(crowcommon_tests PRIVATE crowcommon GTest::gtest GTest::gtest_main)
+gtest_discover_tests(crowcommon_tests DISCOVERY_MODE PRE_TEST)

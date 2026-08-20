@@ -6,9 +6,6 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
-#include <unordered_map>
-#include <vector>
 
 namespace crow::rpc
 {
@@ -68,30 +65,24 @@ class BufferPool
     virtual void recycle(Buffer *buf) = 0;
 };
 
-// SystemBufferPool: posix_memalign for cache-line alignment, free list of
-// recycled buffers keyed by capacity bucket. Default pool for TCP transport.
+// SystemBufferPool: direct heap allocation (posix_memalign + new/delete),
+// no free-list recycling. Matches buzz-cpp's approach — glibc per-thread
+// arenas handle small-allocation recycling efficiently without a userspace
+// pool. The max_buffers bound limits outstanding allocations; alloc returns
+// nullptr when exceeded. Default pool for TCP transport.
 class SystemBufferPool : public BufferPool
 {
   public:
-    // max_buffers: pool capacity bound (total outstanding + recycled).
+    // max_buffers: outstanding allocation bound (safety valve).
     SystemBufferPool(uint32_t max_buffers = 8192);
-    ~SystemBufferPool() override;
+    ~SystemBufferPool() override = default;
 
     Buffer *alloc(uint32_t capacity) override;
     void    recycle(Buffer *buf) override;
 
   private:
-    // Allocate a fresh Buffer + data + refcount slot (no recycle).
-    Buffer *alloc_fresh(uint32_t capacity);
-
     uint32_t              max_buffers_;
-    std::atomic<uint32_t> outstanding_{0}; // in-use buffers (allocated, not recycled)
-    std::atomic<uint64_t> total_alloc_{0};
-    std::atomic<uint64_t> total_recycle_{0};
-
-    // Free list keyed by capacity bucket (rounded up to next power of 2).
-    std::mutex                                          mu_;
-    std::unordered_map<uint32_t, std::vector<Buffer *>> free_list_;
+    std::atomic<uint32_t> outstanding_{0}; // in-use buffers (allocated, not yet freed)
 };
 
 } // namespace crow::rpc

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "crow-rpc/connection.h"
 #include "crow-rpc/transport.h"
 
 #include <atomic>
@@ -140,9 +141,9 @@ class SocketEngine
     // write is armed on-demand (when send queue has data) and disarmed when
     // the queue drains. In one-shot mode, arm re-arms after processing.
     // The caller passes the Connection* directly (it already has it from
-    // the event or the submit path) so the engine avoids a map lookup +
-    // mutex on every re-arm — critical for ONESHOT mode where re-arm
-    // happens after every event.
+    // the event or the submit path) so the engine avoids a map lookup.
+    // epoll_ctl/kevent are kernel-serialized, so arm/disarm call MOD
+    // directly — no userspace mask tracking, no mutex on the hot path.
     virtual void arm_read(int fd, Connection *conn)     = 0;
     virtual void arm_write(int fd, Connection *conn)    = 0;
     virtual void disarm_write(int fd, Connection *conn) = 0;

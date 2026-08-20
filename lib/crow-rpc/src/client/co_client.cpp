@@ -7,6 +7,7 @@
 #include "crow-rpc/c_api.h"
 #include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/client.h"
+#include "crow-rpc/connection.h"
 #include "crow-rpc/transport.h"
 
 #include <atomic>

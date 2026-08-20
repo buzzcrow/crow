@@ -77,6 +77,7 @@ endif()
 add_library(crow-rpc STATIC ${CROW_RPC_SRC})
 target_include_directories(crow-rpc
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+          ${CMAKE_CURRENT_SOURCE_DIR}/../crow-common/cpp/include
   PRIVATE ${CROW_RPC_PROTO_GEN_DIR}
 )
 find_package(Threads REQUIRED)

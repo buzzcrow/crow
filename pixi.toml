@@ -99,6 +99,7 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 # ── Test ─────────────────────────────────────────────────────────
 clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
 test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
+test-common-ct = { cmd = "lib/crow-tree/build/crow-common-build/crowcommon_tests", depends-on = ["build"] }
 test-rpc-ct = { cmd = "ctest --test-dir lib/crow-rpc/build --output-on-failure", depends-on = ["build"] }
 test-rpc-ffi = { cmd = "cargo test -p crow-rpc-ffi --all-targets", depends-on = ["build"] }
 test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }

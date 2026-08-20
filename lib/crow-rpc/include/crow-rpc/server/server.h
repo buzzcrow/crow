@@ -4,8 +4,8 @@
 #pragma once
 
 #include "crow-rpc/buffer.h"
+#include "crow-rpc/connection.h"
 #include "crow-rpc/server/handler.h"
-#include "crow-rpc/transport.h"
 #include "crow-rpc/transport/socket_transport.h"
 
 #include <atomic>

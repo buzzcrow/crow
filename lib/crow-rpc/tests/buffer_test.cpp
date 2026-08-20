@@ -37,7 +37,7 @@ TEST(BufferTest, WriteSetsLenAndBytes)
     buf->release();
 }
 
-TEST(BufferTest, RefCloneAndReleaseRecycles)
+TEST(BufferTest, RefCloneAndRelease)
 {
     SystemBufferPool pool;
     Buffer          *buf = pool.alloc(512);
@@ -48,44 +48,37 @@ TEST(BufferTest, RefCloneAndReleaseRecycles)
     EXPECT_EQ(buf->ref->load(), 2);
     EXPECT_EQ(ref1->data, original_ptr);
 
-    // Release one — ref == 1, buffer not recycled yet
+    // Release one — ref == 1, buffer not freed yet
     ref1->release();
     EXPECT_EQ(buf->ref->load(), 1);
 
-    // Release the other — ref == 0, buffer recycled to pool
+    // Release the other — ref == 0, buffer freed (direct delete, no pool reuse)
     buf->release();
-
-    // Next alloc should reuse the recycled buffer (same data pointer)
-    Buffer *reused = pool.alloc(512);
-    ASSERT_NE(reused, nullptr);
-    EXPECT_EQ(reused->data, original_ptr);
-    reused->release();
 }
 
 TEST(BufferTest, PoolExhaustedReturnsNull)
 {
-    SystemBufferPool pool(2); // max 2 buffers
+    SystemBufferPool pool(2); // max 2 outstanding
     Buffer          *a = pool.alloc(64);
     Buffer          *b = pool.alloc(64);
     ASSERT_NE(a, nullptr);
     ASSERT_NE(b, nullptr);
     EXPECT_EQ(pool.alloc(64), nullptr); // exhausted
-    a->release();
+    a->release();                       // frees buffer, outstanding drops
+    Buffer *c = pool.alloc(64);         // should succeed now
+    ASSERT_NE(c, nullptr);
     b->release();
+    c->release();
 }
 
-TEST(BufferTest, DifferentCapacitiesReuseSameBucket)
+TEST(BufferTest, ExactCapacityNoBucketing)
 {
+    // Direct allocation — capacity is exactly what was requested (no
+    // power-of-2 bucket rounding). This differs from the old pool which
+    // rounded up to the next power of 2.
     SystemBufferPool pool;
-    Buffer          *buf = pool.alloc(200); // bucketed to 256
+    Buffer          *buf = pool.alloc(200);
     ASSERT_NE(buf, nullptr);
-    uint8_t *ptr256 = buf->data;
-    EXPECT_GE(buf->capacity, 256u);
+    EXPECT_EQ(buf->capacity, 200u); // exact, not bucketed to 256
     buf->release();
-
-    // A 130-byte request also buckets to 256 → should reuse
-    Buffer *reused = pool.alloc(130);
-    ASSERT_NE(reused, nullptr);
-    EXPECT_EQ(reused->data, ptr256);
-    reused->release();
 }
