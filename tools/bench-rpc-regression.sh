@@ -100,6 +100,41 @@
 # worker contention. 2e1w at 512T:8C improved 2.7x (303K vs 111K) with
 # zero errors — the callback model has no timeout path to break.
 #
+# Reference results B3 (2026-08-20, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
+#   Slab fallback + timeout reaper. call_callback now uses CAS
+#   FREE/DONE→PENDING to claim slab slots — if the slot is occupied
+#   (slow request), falls back to folly::ConcurrentHashMap (one heap
+#   alloc). on_response uses CAS PENDING→DONE to prevent double-invoke
+#   with the reaper. Reaper thread scans slab + map every
+#   scan_interval_ns for timed-out entries. folly made unconditional
+#   (no #if/#else fallback). value_size=128, 20s, in-process echo,
+#   epoll loopback, pipeline_depth=1
+#   raggr/saggr: 0 (script grep does not match current output format)
+#   slab_fallback=0, map_in_flight=0 across all configs (coroutine model
+#   pins fixed slots per coroutine — CAS always succeeds, map never used)
+#
+#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
+#   1   1      1    1      52,759    18     18     18      18     0      0      0
+#   1   1     64    4     312,816   204    204    204     204     0      0      0
+#   1   1    256    8     345,745   740    740    740     740     0      0      0
+#   2   1    512    8     571,031   895    895    895     895     0      0      0
+#   1   2    512    8     606,933   842    842    842     842     0      0      0
+#   1   1   1000   32     307,580  3247   3246   3246    3246     0      0      0
+#   1   4   1000   32   1,084,619   920    920    920     920     0      0      0
+#   1  16   1000   32   2,274,259   438    438    438     438     0      0      0
+#   2  16   1000   32   2,339,116   425    425    425     425     0      0      0
+#
+# TPS ceiling ~2.34M (2e16w 1000t32c) / ~345K (1e1w 256t8c) — 4.0x / 1.0x
+# vs B2. The 1e16w config jumped 4.6x (497K → 2.27M) — the old code's
+# unconditional slot overwrite caused silent callback loss under high
+# worker contention (resp_wrong_id ticking, coroutines stuck waiting for
+# dropped responses). The CAS fix (DONE→PENDING) ensures clean slot
+# reuse; the coroutine model's fixed-slot-per-coroutine design means the
+# CAS always succeeds (slab_fallback=0). Low-concurrency configs (1l1c,
+# 256l8c) are slightly below B2 from the extra acquire-load + branch on
+# the hot path. 1e2w at 512T:8C: 607K (3x vs B2's 203K) — the CAS
+# eliminated the contention that capped B2's multi-worker configs.
+#
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
