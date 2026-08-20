@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "crow-rpc/buffer.h"
+#include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/pool.h"
@@ -273,4 +274,262 @@ TEST_F(CallerLoopbackTest, FailAllOnClose)
     // Test fail_all with 0 pending (edge case — should be a no-op).
     caller.fail_all(RpcError::ConnectionClosed);
     EXPECT_EQ(caller.pending_count(), 0u);
+}
+
+// ── Slab fallback + reaper tests ───────────────────────────────────
+
+// C ABI callback that records the request_id + status into a struct.
+struct SlabCallbackState
+{
+    std::atomic<int>      call_count{0};
+    std::atomic<int>      last_status{CROW_RPC_OK};
+    std::atomic<uint64_t> last_request_id{0};
+};
+
+extern "C" void slab_test_cb(uint64_t        request_id, crow_rpc_buffer_t /*control*/, crow_rpc_buffer_t /*data*/,
+                             crow_rpc_status status, void *user_data)
+{
+    auto *s = static_cast<SlabCallbackState *>(user_data);
+    s->call_count.fetch_add(1, std::memory_order_relaxed);
+    s->last_status.store(status, std::memory_order_relaxed);
+    s->last_request_id.store(request_id, std::memory_order_relaxed);
+}
+
+// Test: slab fallback to map when the slot is occupied by a slow request.
+// Two requests with request_ids that map to the same slab slot (differ by
+// pool_size). The first occupies the slot (PENDING, no response). The
+// second should fall back to the map. Both callbacks should fire.
+TEST_F(CallerLoopbackTest, SlabFallbackToMapWhenSlotOccupied)
+{
+    SocketTransport transport(1, 1);
+    transport.start();
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    struct sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(port_);
+    ASSERT_EQ(::connect(client_fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)), 0);
+
+    int server_fd = ::accept(listen_fd_, nullptr, nullptr);
+    ASSERT_GE(server_fd, 0);
+
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    auto server_conn = transport.create_connection(server_fd, "server");
+    // Server: discard requests (we manually drive responses via on_response).
+    server_conn->set_on_frame([&](Frame *frame, Connection * /*conn*/) { delete frame; });
+
+    auto client_conn              = std::make_shared<Connection>(100, "client", nullptr);
+    client_conn->transport_handle = static_cast<uint64_t>(client_fd);
+
+    RpcClient caller;
+    caller.set_completion_pool_size(4); // pool_size=4, mask=3
+    caller.attach(client_conn.get());
+
+    SlabCallbackState state1;
+    SlabCallbackState state2;
+
+    SystemBufferPool buf_pool;
+    Buffer          *ctrl1 = buf_pool.alloc(32);
+    ASSERT_NE(ctrl1, nullptr);
+    std::memset(ctrl1->data, 0x42, 32);
+    ctrl1->write(ctrl1->data, 32);
+
+    Buffer *ctrl2 = buf_pool.alloc(32);
+    ASSERT_NE(ctrl2, nullptr);
+    std::memset(ctrl2->data, 0x43, 32);
+    ctrl2->write(ctrl2->data, 32);
+
+    // req_id=1 → slot 1. req_id=5 → slot 1 (5 & 3 = 1). Same slot.
+    uint64_t req1 = 1;
+    uint64_t req2 = 5;
+
+    // First call — occupies slot 1 (PENDING). No response yet.
+    bool ok1 = caller.call_callback(&transport, client_conn.get(), req1, ctrl1, nullptr, 42, slab_test_cb, &state1);
+    EXPECT_TRUE(ok1);
+
+    // Second call — slot 1 is occupied, should fall back to map.
+    bool ok2 = caller.call_callback(&transport, client_conn.get(), req2, ctrl2, nullptr, 42, slab_test_cb, &state2);
+    EXPECT_TRUE(ok2);
+
+    EXPECT_EQ(caller.counters().slab_fallback.load(std::memory_order_relaxed), 1u);
+
+    // Deliver response for req1 — slab path.
+    auto *resp1            = new Frame;
+    resp1->request_id      = req1;
+    resp1->header.msg_type = 42;
+    resp1->data_buf        = nullptr;
+    caller.on_response(req1, resp1);
+
+    // Deliver response for req2 — map path.
+    auto *resp2            = new Frame;
+    resp2->request_id      = req2;
+    resp2->header.msg_type = 42;
+    resp2->data_buf        = nullptr;
+    caller.on_response(req2, resp2);
+
+    EXPECT_EQ(state1.call_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(state1.last_status.load(std::memory_order_relaxed), CROW_RPC_OK);
+    EXPECT_EQ(state2.call_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(state2.last_status.load(std::memory_order_relaxed), CROW_RPC_OK);
+    EXPECT_EQ(caller.counters().resp_matched.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(caller.counters().resp_map_matched.load(std::memory_order_relaxed), 1u);
+
+    transport.stop();
+    ::close(client_fd);
+}
+
+// Test: reaper times out a slab slot that never gets a response.
+// The callback should be invoked with CROW_RPC_ERR_TIMEOUT.
+TEST_F(CallerLoopbackTest, ReaperTimesOutSlabSlot)
+{
+    SocketTransport transport(1, 1);
+    transport.start();
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    struct sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(port_);
+    ASSERT_EQ(::connect(client_fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)), 0);
+
+    int server_fd = ::accept(listen_fd_, nullptr, nullptr);
+    ASSERT_GE(server_fd, 0);
+
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    auto server_conn = transport.create_connection(server_fd, "server");
+    server_conn->set_on_frame([&](Frame *frame, Connection * /*conn*/) { delete frame; });
+
+    auto client_conn              = std::make_shared<Connection>(100, "client", nullptr);
+    client_conn->transport_handle = static_cast<uint64_t>(client_fd);
+
+    RpcClient caller;
+    caller.set_completion_pool_size(4);
+    caller.attach(client_conn.get());
+
+    // Start reaper: 50ms timeout, 10ms scan interval.
+    caller.start_reaper(50 * 1000 * 1000, 10 * 1000 * 1000);
+
+    SlabCallbackState state;
+    SystemBufferPool  buf_pool;
+    Buffer           *ctrl = buf_pool.alloc(32);
+    ASSERT_NE(ctrl, nullptr);
+    std::memset(ctrl->data, 0x42, 32);
+    ctrl->write(ctrl->data, 32);
+
+    // Submit a request — no response will arrive.
+    bool ok = caller.call_callback(&transport, client_conn.get(), 1, ctrl, nullptr, 42, slab_test_cb, &state);
+    EXPECT_TRUE(ok);
+
+    // Wait for the reaper to time it out (up to 200ms).
+    for (int i = 0; i < 40; i++) {
+        if (state.call_count.load(std::memory_order_acquire) > 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    EXPECT_EQ(state.call_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(state.last_status.load(std::memory_order_relaxed), CROW_RPC_ERR_TIMEOUT);
+    EXPECT_EQ(caller.counters().reaped_slab.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(caller.pending_count(), 0u);
+
+    // Late response after timeout — should be dropped, no double-invoke.
+    auto *late_resp            = new Frame;
+    late_resp->request_id      = 1;
+    late_resp->header.msg_type = 42;
+    late_resp->data_buf        = nullptr;
+    caller.on_response(1, late_resp);
+
+    EXPECT_EQ(state.call_count.load(std::memory_order_acquire), 1); // still 1
+    EXPECT_EQ(caller.counters().resp_dropped.load(std::memory_order_relaxed), 1u);
+
+    caller.stop_reaper();
+    transport.stop();
+    ::close(client_fd);
+}
+
+// Test: reaper times out a map-fallback entry (slab full → map).
+TEST_F(CallerLoopbackTest, ReaperTimesOutMapFallback)
+{
+    SocketTransport transport(1, 1);
+    transport.start();
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    struct sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(port_);
+    ASSERT_EQ(::connect(client_fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)), 0);
+
+    int server_fd = ::accept(listen_fd_, nullptr, nullptr);
+    ASSERT_GE(server_fd, 0);
+
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    auto server_conn = transport.create_connection(server_fd, "server");
+    server_conn->set_on_frame([&](Frame *frame, Connection * /*conn*/) { delete frame; });
+
+    auto client_conn              = std::make_shared<Connection>(100, "client", nullptr);
+    client_conn->transport_handle = static_cast<uint64_t>(client_fd);
+
+    RpcClient caller;
+    caller.set_completion_pool_size(4);
+    caller.attach(client_conn.get());
+    caller.start_reaper(50 * 1000 * 1000, 10 * 1000 * 1000);
+
+    SlabCallbackState state1;
+    SlabCallbackState state2;
+
+    SystemBufferPool buf_pool;
+    Buffer          *ctrl1 = buf_pool.alloc(32);
+    ASSERT_NE(ctrl1, nullptr);
+    std::memset(ctrl1->data, 0x42, 32);
+    ctrl1->write(ctrl1->data, 32);
+    Buffer *ctrl2 = buf_pool.alloc(32);
+    ASSERT_NE(ctrl2, nullptr);
+    std::memset(ctrl2->data, 0x43, 32);
+    ctrl2->write(ctrl2->data, 32);
+
+    // req_id=1 → slot 1 (occupied, no response).
+    caller.call_callback(&transport, client_conn.get(), 1, ctrl1, nullptr, 42, slab_test_cb, &state1);
+    // req_id=5 → slot 1 occupied → map fallback (no response).
+    caller.call_callback(&transport, client_conn.get(), 5, ctrl2, nullptr, 42, slab_test_cb, &state2);
+
+    EXPECT_EQ(caller.counters().slab_fallback.load(std::memory_order_relaxed), 1u);
+
+    // Wait for reaper to time out both (up to 200ms).
+    for (int i = 0; i < 40; i++) {
+        if (state1.call_count.load(std::memory_order_acquire) > 0 &&
+            state2.call_count.load(std::memory_order_acquire) > 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    EXPECT_EQ(state1.call_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(state1.last_status.load(std::memory_order_relaxed), CROW_RPC_ERR_TIMEOUT);
+    EXPECT_EQ(state2.call_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(state2.last_status.load(std::memory_order_relaxed), CROW_RPC_ERR_TIMEOUT);
+    EXPECT_EQ(caller.counters().reaped_slab.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(caller.counters().reaped_map.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(caller.pending_count(), 0u);
+
+    caller.stop_reaper();
+    transport.stop();
+    ::close(client_fd);
 }

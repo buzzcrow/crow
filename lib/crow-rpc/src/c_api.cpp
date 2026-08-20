@@ -179,13 +179,17 @@ void crow_rpc_client_get_counters(crow_rpc_client_t client, crow_rpc_client_coun
     if (client == nullptr || out == nullptr) {
         return;
     }
-    auto &c            = client->client->counters();
-    out->submit_ok     = c.submit_ok.load(std::memory_order_relaxed);
-    out->submit_fail   = c.submit_fail.load(std::memory_order_relaxed);
-    out->resp_matched  = c.resp_matched.load(std::memory_order_relaxed);
-    out->resp_mismatch = c.resp_mismatch.load(std::memory_order_relaxed);
-    out->resp_wrong_id = c.resp_wrong_id.load(std::memory_order_relaxed);
-    out->resp_dropped  = c.resp_dropped.load(std::memory_order_relaxed);
+    auto &c               = client->client->counters();
+    out->submit_ok        = c.submit_ok.load(std::memory_order_relaxed);
+    out->submit_fail      = c.submit_fail.load(std::memory_order_relaxed);
+    out->resp_matched     = c.resp_matched.load(std::memory_order_relaxed);
+    out->resp_mismatch    = c.resp_mismatch.load(std::memory_order_relaxed);
+    out->resp_wrong_id    = c.resp_wrong_id.load(std::memory_order_relaxed);
+    out->resp_dropped     = c.resp_dropped.load(std::memory_order_relaxed);
+    out->slab_fallback    = c.slab_fallback.load(std::memory_order_relaxed);
+    out->resp_map_matched = c.resp_map_matched.load(std::memory_order_relaxed);
+    out->reaped_slab      = c.reaped_slab.load(std::memory_order_relaxed);
+    out->reaped_map       = c.reaped_map.load(std::memory_order_relaxed);
 }
 
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port)
@@ -422,6 +426,22 @@ void crow_rpc_client_set_completion_pool_size(crow_rpc_client_t client, uint32_t
         return;
     }
     client->client->set_completion_pool_size(max_in_flight);
+}
+
+void crow_rpc_client_start_reaper(crow_rpc_client_t client, uint64_t timeout_ns, uint64_t scan_interval_ns)
+{
+    if (client == nullptr || timeout_ns == 0 || scan_interval_ns == 0) {
+        return;
+    }
+    client->client->start_reaper(timeout_ns, scan_interval_ns);
+}
+
+void crow_rpc_client_stop_reaper(crow_rpc_client_t client)
+{
+    if (client == nullptr) {
+        return;
+    }
+    client->client->stop_reaper();
 }
 
 crow_rpc_status crow_rpc_client_call_callback(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,

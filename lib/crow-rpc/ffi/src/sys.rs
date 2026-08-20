@@ -59,6 +59,10 @@ pub struct CrowRpcClientCounters {
     pub resp_mismatch: u64,
     pub resp_wrong_id: u64,
     pub resp_dropped: u64,
+    pub slab_fallback: u64,
+    pub resp_map_matched: u64,
+    pub reaped_slab: u64,
+    pub reaped_map: u64,
 }
 
 pub type crow_rpc_status = i32;
@@ -161,6 +165,10 @@ extern "C" {
     ) -> crow_rpc_status;
 
     pub fn crow_rpc_client_set_completion_pool_size(client: crow_rpc_client_t, max_in_flight: u32);
+
+    pub fn crow_rpc_client_start_reaper(client: crow_rpc_client_t, timeout_ns: u64, scan_interval_ns: u64);
+
+    pub fn crow_rpc_client_stop_reaper(client: crow_rpc_client_t);
 
     pub fn crow_rpc_client_call_callback(
         client: crow_rpc_client_t,

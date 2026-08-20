@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         build.include(format!("{prefix}/include"));
     }
 
-    // Find folly headers (for ConcurrentHashMap — used in later phases).
+    // Find folly headers (for ConcurrentHashMap — required, no fallback).
     // The pixi env has folly installed. folly::ConcurrentHashMap is
     // header-only (template), but its DCHECK/CHECK macros reference
     // glog types, so glog headers must be on the include path even
@@ -99,8 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         let cmake_dir = format!("{prefix}/lib/cmake/folly");
         if Path::new(&cmake_dir).exists() {
-            build.define("CROW_RPC_HAVE_FOLLY", "1");
             build.define("GLOG_USE_GLOG_EXPORT", "1");
+        } else {
+            panic!("folly not found in CONDA_PREFIX (required for crow-rpc)");
         }
     }
 
@@ -112,9 +113,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-lib=rdmacm");
     }
 
-    // Link folly + glog when folly is enabled. ConcurrentHashMap uses
-    // hazard pointers, SharedMutex, and glog (CHECK/DCHECK) — all
-    // require the shared libs at link time.
+    // Link folly + glog. ConcurrentHashMap uses hazard pointers,
+    // SharedMutex, and glog (CHECK/DCHECK) — all require the shared
+    // libs at link time.
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         let cmake_dir = format!("{prefix}/lib/cmake/folly");
         if Path::new(&cmake_dir).exists() {

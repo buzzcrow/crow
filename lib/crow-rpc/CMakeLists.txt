@@ -89,15 +89,12 @@ if(FLATBUFFERS_INCLUDE_DIR)
   target_include_directories(crow-rpc SYSTEM PRIVATE ${FLATBUFFERS_INCLUDE_DIR})
 endif()
 
-# ── folly (ConcurrentHashMap for RemoteCaller, R104 §7.1) ─────────
-find_package(folly CONFIG QUIET)
-if(folly_FOUND)
-  target_link_libraries(crow-rpc PUBLIC Folly::folly)
-  target_compile_definitions(crow-rpc PUBLIC CROW_RPC_HAVE_FOLLY=1)
-  message(STATUS "crow-rpc folly: enabled (ConcurrentHashMap)")
-else()
-  message(STATUS "crow-rpc folly: not found (will use std::unordered_map)")
-endif()
+# ── folly (ConcurrentHashMap for pending map) ─────────────────────
+# Required: the pending map uses folly::ConcurrentHashMap (striped locks)
+# for the response hot path. No fallback to std::unordered_map.
+find_package(folly CONFIG REQUIRED)
+target_link_libraries(crow-rpc PUBLIC Folly::folly)
+message(STATUS "crow-rpc folly: enabled (ConcurrentHashMap)")
 
 if(CROW_RPC_HAVE_RDMA)
   target_include_directories(crow-rpc SYSTEM PRIVATE ${IBVERBS_INCLUDE_DIR} ${RDMACM_INCLUDE_DIR})

@@ -51,6 +51,23 @@ impl RpcClient {
         unsafe { sys::crow_rpc_client_set_completion_pool_size(self.handle, max_in_flight) };
     }
 
+    /// Start the timeout reaper thread. Scans the slab pool + pending map
+    /// every `scan_interval_ns` for entries past their deadline (`timeout_ns`
+    /// from submit time). Timed-out entries are failed with `Timeout` and
+    /// their slots/entries are reclaimed. Must be called after
+    /// `set_completion_pool_size`. No-op if already running.
+    pub fn start_reaper(&self, timeout_ns: u64, scan_interval_ns: u64) {
+        unsafe {
+            sys::crow_rpc_client_start_reaper(self.handle, timeout_ns, scan_interval_ns);
+        }
+    }
+
+    /// Stop the timeout reaper thread. Called automatically by `Drop`.
+    /// No-op if not running.
+    pub fn stop_reaper(&self) {
+        unsafe { sys::crow_rpc_client_stop_reaper(self.handle) };
+    }
+
     /// Callback-based call (Gap2+Gap3): reserves a slab slot by
     /// request_id, stores the C ABI callback + user_data, and submits.
     /// The callback is invoked directly on the C++ I/O worker thread
@@ -192,6 +209,10 @@ impl RpcClient {
             resp_mismatch: 0,
             resp_wrong_id: 0,
             resp_dropped: 0,
+            slab_fallback: 0,
+            resp_map_matched: 0,
+            reaped_slab: 0,
+            reaped_map: 0,
         };
         unsafe { sys::crow_rpc_client_get_counters(self.handle, &mut out) };
         out

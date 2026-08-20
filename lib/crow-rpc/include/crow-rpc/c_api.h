@@ -82,12 +82,16 @@ void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transpor
 // Client-side correlation counters for debugging response matching.
 typedef struct crow_rpc_client_counters
 {
-    uint64_t submit_ok;     // call_callback succeeded
-    uint64_t submit_fail;   // call_callback submit failed
-    uint64_t resp_matched;  // on_response matched a slab slot
-    uint64_t resp_mismatch; // on_response: slot not PENDING (late/dup)
-    uint64_t resp_wrong_id; // on_response: slot PENDING but different request_id
-    uint64_t resp_dropped;  // on_response: no slab + no map entry
+    uint64_t submit_ok;        // call_callback succeeded (slab or map)
+    uint64_t submit_fail;      // call_callback submit failed
+    uint64_t resp_matched;     // on_response matched a slab slot
+    uint64_t resp_mismatch;    // on_response: slab miss + map miss (late/dup)
+    uint64_t resp_wrong_id;    // on_response: slab PENDING wrong id + map miss
+    uint64_t resp_dropped;     // on_response: no slab + no map entry
+    uint64_t slab_fallback;    // call_callback fell back to map (slab full)
+    uint64_t resp_map_matched; // on_response matched in map
+    uint64_t reaped_slab;      // reaper timed out a slab slot
+    uint64_t reaped_map;       // reaper timed out a map entry
 } crow_rpc_client_counters_t;
 
 void crow_rpc_client_get_counters(crow_rpc_client_t client, crow_rpc_client_counters_t *out);
@@ -122,6 +126,17 @@ crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t
 // heap allocation — the callback + user_data live in pre-allocated slots.
 // Flow: doc/working/rpc-echo-flow-analysis.md § "Echo Flow — Callback Model".
 void crow_rpc_client_set_completion_pool_size(crow_rpc_client_t client, uint32_t max_in_flight);
+
+// Start the timeout reaper thread. Scans the slab pool + pending map
+// every scan_interval_ns for entries past their deadline (timeout_ns
+// from submit time). Timed-out entries are failed with
+// CROW_RPC_ERR_TIMEOUT and their slots/entries are reclaimed. Must be
+// called after set_completion_pool_size. No-op if already running.
+void crow_rpc_client_start_reaper(crow_rpc_client_t client, uint64_t timeout_ns, uint64_t scan_interval_ns);
+
+// Stop the timeout reaper thread. Called automatically by client destroy.
+// No-op if not running.
+void crow_rpc_client_stop_reaper(crow_rpc_client_t client);
 
 // Callback-based call (Gap2+Gap3): reserves a slab slot by request_id,
 // stores the callback + user_data, and submits. The callback is invoked
