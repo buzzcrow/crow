@@ -3,14 +3,15 @@
 
 # RPC Echo Flow Analysis
 
-End-to-end trace of the CROW RPC echo path (in-process loopback
+End-to-end trace of the CROW RPC echo path (standalone-server loopback
 benchmark). Mirrors the structure of
 [`kv-write-flow-analysis.md`](../design/kv/kv-write-flow-analysis.md).
 
 The echo benchmark measures raw RPC transport throughput (epoll/kqueue
-+ framing + request/response correlation) with no KV/storage layer.
-The echo handler copies request data to response data, so the
-benchmark is purely I/O-bound.
++ framing + request/response correlation) with no KV/storage layer. The
+CLI starts a standalone echo-server process and connects over loopback.
+The echo handler copies request data to response data, so the benchmark
+is purely I/O-bound.
 
 ---
 
@@ -60,7 +61,7 @@ Rust worker thread (std::thread::spawn, NOT tokio)
   the caller IS the C++ I/O worker — writev happens on the I/O worker
   thread, no cross-thread notify at all.
 
-  ── Server-side (same C++ I/O worker, same process) ──
+  ── Server-side (standalone process, server C++ I/O worker) ──
 
   Event 1: Readable — read + echo + enqueue response
     → read(fd, recv_buf, 256KB)  ← one read for multiple frames
@@ -93,11 +94,12 @@ not as separate epoll events.
   via FFI, then `thread::park()` until in-flight drain. The callback
   chain builds the next request on the C++ I/O worker thread — no
   tokio scheduler involvement.
-- **C++ I/O worker threads** (`io_workers` total; per-engine =
-  `io_workers / io_engines`) — each engine owns an independent epoll
-  fd; connections are partitioned round-robin. When per-engine>1,
-  workers share one fd with `EPOLLONESHOT`. Default 1 worker, no
-  ONESHOT (level-triggered fast path).
+- **C++ I/O worker threads** (`io_workers` total per process;
+  per-engine = `io_workers / io_engines`) — the client and standalone
+  server use the same configuration. Each engine owns an independent
+  epoll/kqueue fd and connections are partitioned round-robin. On Linux,
+  workers sharing one fd use `EPOLLONESHOT`; the single-worker default
+  uses the level-triggered fast path.
 - **C++ acceptor thread** (1) — accepts new connections. Not on the
   hot path after setup.
 - **C++ reaper thread** (0 or 1, opt-in) — scans slab + map for
@@ -145,16 +147,54 @@ and `RpcServer`.
 
 ---
 
-## Benchmark Results — 2026-08-20 (Slab Fallback + Reaper, Linux)
+## Benchmark Results
+
+Regression sentinel: `tools/bench-rpc-regression.sh`.
+Raw TSV: `doc/working/bench-rpc-regression.tsv`.
+
+### 2026-08-21 (Standalone Server, macOS)
+
+Platform: **Apple M5 Pro** (18c, arm64, macOS 26/Darwin 25.5).
+Config: 128B values, 20s duration, standalone echo server, kqueue
+loopback, pipeline_depth=1.
+
+#### Full sweep (6 configs)
+
+| Eng | Wkr | T | C | ops/s | avg | p50 | p99 | p999 | raggr | saggr | err |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 1 | 53,600 | 17 | 17 | 27 | 47 | 1.0 | 1.0 | 0 |
+| 1 | 4 | 64 | 4 | 597,960 | 104 | 96 | 273 | 434 | 2.3 | 5.1 | 0 |
+| 1 | 8 | 512 | 8 | 886,967 | 571 | 563 | 741 | 843 | 5.2 | 7.9 | 0 |
+| 2 | 8 | 512 | 8 | 956,159 | 530 | 517 | 669 | 734 | 6.7 | 8.7 | 0 |
+| 1 | 16 | 1000 | 32 | 565,808 | 1760 | 1781 | 4026 | 8104 | 9.1 | 9.7 | 0 |
+| 2 | 16 | 1000 | 16 | 575,428 | 1732 | 1882 | 2278 | 4428 | 16.0 | 18.4 | 0 |
+
+Eng=io_engines, Wkr=total io_workers per process (Eng × per-engine;
+client and server use the same config), T=client dispatch threads, and
+C=connections. raggr=frames per read and saggr=frames per writev on the
+server.
+
+Peak throughput is **956K ops/s** at 2e8w 512t8c. All six configurations
+completed with zero errors.
+
+#### Multi-worker scaling
+
+- 1w→4w: **11.2x** (54K→598K). More dispatch threads, connections, and
+  I/O workers expose send and receive aggregation.
+- 4w→1e8w: **+48%** (598K→887K).
+- 1e8w→2e8w at 512T:8C: **+7.8%** (887K→956K). Splitting eight workers
+  across two kqueue engines improves throughput and tail latency.
+- Both 16-worker configurations regress to about 570K ops/s. The 1,000
+  dispatch threads raise average latency above 1.7ms, so this machine's
+  saturation point is the 2e8w 512t8c configuration.
+
+### 2026-08-20 (Slab Fallback + Reaper, Linux)
 
 Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
 Config: 128B values, 20s duration, in-process echo, epoll loopback,
 pipeline_depth=1.
 
-Regression sentinel: `tools/bench-rpc-regression.sh`.
-Raw TSV: `doc/working/bench-rpc-regression.tsv`.
-
-### Full sweep (6 configs)
+#### Full sweep (6 configs)
 
 | Eng | Wkr | T | C | ops/s | avg | p50 | p99 | p999 | raggr | saggr | err |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -166,30 +206,20 @@ Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 | 2 | 16 | 1000 | 16 | 2,293,581 | 432 | 379 | 1282 | 6092 | 9.1 | 10.0 | 0 |
 
 Eng=io_engines, Wkr=total io_workers (Eng × per-engine; client uses
-same config), T=client dispatch threads (coroutines), C=connections.
-raggr=frames per read, saggr=frames per writev (server-side).
+same config), T=client dispatch threads, C=connections. raggr=frames per
+read and saggr=frames per writev on the server.
 
-Peak **~2.29M** (2e16w 1000t16c) — 8.3x vs Gap4+Gap1 baseline (276K).
-Zero errors across all 6 configs. `slab_fallback=0`, `map_in_flight=0`
-across all configs (coroutine model pins fixed slots — CAS always
-succeeds).
+Peak **~2.29M** (2e16w 1000t16c), 8.3x the 276K baseline. Zero errors
+across all six configs. `slab_fallback=0` and `map_in_flight=0` across
+all configs.
 
-### Multi-worker scaling
+#### Multi-worker scaling
 
-- 1w→4w: **+17x** (53K→939K). 4 workers parallelize the callback
-  chain; more coroutines + connections saturate the event loop.
-- 4w→8w: **+1.9x** (939K→1.78M). 8 workers with 512 coroutines scale
-  near-linearly.
-- 1e8w vs 2e8w (512T:8C): **-2%** (1.78M→1.74M). 2 engines × 4
-  workers/engine slightly underperforms 1 × 8 — engine overhead
-  exceeds parallelism benefit at this concurrency.
-- 1e16w 32c: 2.20M. Peak single-engine (16 workers on one epoll fd).
-- 2e16w 16c: **2.29M (peak)**. 2 engines × 8 workers/engine beats
-  1e16w by spreading workers across 2 epoll fds, reducing per-engine
-  ONESHOT re-arm contention.
-
-The slab fallback ceiling (~2.29M) is ~18.5× the KV write ceiling
-(~124K, consensus quorum bound).
+- 1w→4w: **17.8x** (53K→939K).
+- 4w→8w: **+90%** (939K→1.78M).
+- 1e8w→2e8w at 512T:8C: **-2%** (1.78M→1.74M).
+- 2e16w 1000t16c reaches the 2.29M peak, ahead of the 2.20M single-engine
+  result at 1e16w 1000t32c.
 
 ---
 
@@ -224,3 +254,6 @@ The slab fallback ceiling (~2.29M) is ~18.5× the KV write ceiling
   `on_response`). `slab_fallback=0` across all configs. Per-op
   latency histogram fix for accurate p50/p99/p999. CLI flag renamed
   from `--io-workers-per-engine` to `--io-workers` (total).
+- **2026-08-21 (M5 Pro, standalone server)**: 128B/20s two-process
+  kqueue sweep peaked at 956K ops/s with 2 engines and 8 total workers.
+  All six configurations completed without errors.
