@@ -36,6 +36,11 @@ impl RpcClient {
         unsafe { sys::crow_rpc_client_attach(self.handle, conn.handle()) };
     }
 
+    /// Get the raw FFI handle (for the coroutine client API).
+    pub fn handle(&self) -> sys::crow_rpc_client_t {
+        self.handle
+    }
+
     /// Size the callback completion pool (Gap2+Gap3). Must be called
     /// before any `call_callback`. The pool is sized to the next power
     /// of two >= max_in_flight. Slots are indexed by request_id & mask.

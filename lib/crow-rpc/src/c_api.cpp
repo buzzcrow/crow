@@ -6,6 +6,7 @@
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/client.h"
+#include "crow-rpc/co_client.h"
 #include "crow-rpc/server/message.h"
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
@@ -30,25 +31,8 @@ struct crow_rpc_pool_s
     bool                   owns;
 };
 
-struct crow_rpc_buffer_s
-{
-    crow::rpc::Buffer *buf;
-};
-
-struct crow_rpc_conn_s
-{
-    std::shared_ptr<crow::rpc::Connection> conn;
-};
-
-struct crow_rpc_client_s
-{
-    crow::rpc::RpcClient *client;
-};
-
-struct crow_rpc_server_s
-{
-    crow::rpc::RpcServer *server;
-};
+// Opaque handle struct definitions are in c_api_internal.h (shared
+// with co_client.cpp).
 
 // ── Buffer ────────────────────────────────────────────────────────
 

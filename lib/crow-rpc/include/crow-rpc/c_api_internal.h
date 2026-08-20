@@ -5,7 +5,33 @@
 
 #include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
+#include "crow-rpc/co_client.h"
 #include "crow-rpc/framing.h"
+#include "crow-rpc/server/server.h"
+
+// Concrete struct definitions for the C API opaque handles.
+// Defined here so both c_api.cpp and co_client.cpp can access them.
+struct crow_rpc_buffer_s
+{
+    crow::rpc::Buffer *buf;
+};
+
+struct crow_rpc_conn_s
+{
+    std::shared_ptr<crow::rpc::Connection> conn;
+};
+
+struct crow_rpc_client_s
+{
+    crow::rpc::RpcClient *client;
+    // Aggregated stats from crow_rpc_co_spawn (coroutine client).
+    crow_rpc_co_stats_t co_stats{};
+};
+
+struct crow_rpc_server_s
+{
+    crow::rpc::RpcServer *server;
+};
 
 namespace crow::rpc
 {

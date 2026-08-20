@@ -187,7 +187,7 @@ impl RpcServer {
         }
     }
 
-    pub(crate) fn handle(&self) -> sys::crow_rpc_server_t {
+    pub fn handle(&self) -> sys::crow_rpc_server_t {
         self.handle
     }
 }
@@ -218,7 +218,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub(crate) fn handle(&self) -> sys::crow_rpc_conn_t {
+    pub fn handle(&self) -> sys::crow_rpc_conn_t {
         self.handle
     }
 }

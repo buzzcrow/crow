@@ -1,0 +1,330 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+#include "crow-rpc/co_client.h"
+
+#include "crow-rpc/buffer.h"
+#include "crow-rpc/c_api.h"
+#include "crow-rpc/c_api_internal.h"
+#include "crow-rpc/client/client.h"
+#include "crow-rpc/transport.h"
+
+#include <atomic>
+#include <chrono>
+#include <coroutine>
+#include <cstdint>
+#include <memory>
+#include <thread>
+#include <vector>
+
+namespace crow::rpc
+{
+
+// Per-coroutine state. Allocated on the heap (one per coroutine),
+// lives until the coroutine exits + is joined.
+struct CoState
+{
+    // Rust callbacks.
+    crow_rpc_co_build_request build_fn;
+    crow_rpc_co_on_response   on_response_fn;
+    void                     *rust_ctx;
+
+    // C++ handles.
+    RpcClient  *client;
+    Transport  *transport;
+    Connection *conn;
+    uint16_t    msg_type;
+
+    // Per-coroutine stats.
+    uint64_t total_ops        = 0;
+    uint64_t total_errors     = 0;
+    uint64_t total_latency_ns = 0;
+    uint64_t min_latency_ns   = UINT64_MAX;
+    uint64_t max_latency_ns   = 0;
+
+    // The awaitable for the current in-flight request. Filled by
+    // co_on_complete; read by the coroutine after resume.
+    crow_rpc_buffer_t       resp_control = nullptr;
+    crow_rpc_buffer_t       resp_data    = nullptr;
+    crow_rpc_status         resp_status  = CROW_RPC_OK;
+    std::coroutine_handle<> handle; // set by await_suspend
+
+    std::atomic<bool> *running;
+
+    // Slot index for this coroutine (fixed, no collision with others).
+    // request_id = slot_index + iteration * (pool_mask + 1).
+    // This guarantees each coroutine always uses the same slab slot,
+    // so no two coroutines ever collide on the same slot.
+    size_t   slot_index  = 0;
+    size_t   pool_mask   = 0;
+    uint64_t next_req_id = 0; // per-coroutine request_id counter
+};
+
+// The C++ → Rust callback that resumes the coroutine. Set as the slab
+// slot's callback. Called inline on the I/O worker thread when the
+// response arrives.
+[[maybe_unused]] static void co_on_complete(uint64_t /*request_id*/, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                            crow_rpc_status status, void *user_data)
+{
+    auto *s         = static_cast<CoState *>(user_data);
+    s->resp_control = control;
+    s->resp_data    = data;
+    s->resp_status  = status;
+    // Resume the coroutine inline on the I/O worker thread.
+    s->handle.resume();
+}
+
+// Awaitable: suspends the coroutine, resumed by co_on_complete.
+// The CoState pointer is passed to the awaitable so co_on_complete
+// can store the response + resume.
+struct CoAwait
+{
+    CoState *state;
+
+    constexpr bool await_ready() const noexcept
+    {
+        return false;
+    }
+
+    void await_suspend(std::coroutine_handle<> h) noexcept
+    {
+        state->handle = h;
+        // The coroutine is now suspended. co_on_complete will call
+        // state->handle.resume() when the response arrives.
+    }
+
+    void await_resume() noexcept
+    {
+    }
+};
+
+// ── Coroutine task type ───────────────────────────────────────────
+//
+// We use a minimal coroutine type. The promise stores nothing — all
+// state is in the CoState struct, accessed via the captured pointer
+// in the coroutine body. The coroutine body is a lambda that captures
+// CoState* by value.
+
+struct CoTask
+{
+    struct promise_type
+    {
+        CoTask get_return_object()
+        {
+            return CoTask{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+
+        std::suspend_always initial_suspend() noexcept
+        {
+            return {};
+        }
+
+        std::suspend_always final_suspend() noexcept
+        {
+            return {};
+        }
+
+        void return_void() noexcept
+        {
+        }
+
+        void unhandled_exception() noexcept
+        {
+            std::abort();
+        }
+    };
+
+    std::coroutine_handle<promise_type> handle;
+
+    explicit CoTask(std::coroutine_handle<promise_type> h) : handle(h)
+    {
+    }
+};
+
+// The coroutine body. Captures CoState* by value (it's a pointer,
+// stable on the heap). Loops: build → submit → co_await → on_response.
+//
+// This is a coroutine function (contains co_await). The compiler
+// generates the coroutine frame + state machine. The frame is
+// heap-allocated on first suspend (one alloc per coroutine, not per-op).
+static CoTask co_run(CoState *s)
+{
+    while (s->running->load(std::memory_order_relaxed)) {
+        // 1. Build request via Rust callback.
+        crow_rpc_buffer_t control = nullptr;
+        crow_rpc_buffer_t data    = nullptr;
+        // Per-coroutine request_id: slot_index + N * pool_size.
+        // Guarantees no slab slot collision between coroutines.
+        uint64_t req_id = s->slot_index + s->next_req_id * (s->pool_mask + 1);
+        s->next_req_id++;
+        if (!s->build_fn(s->rust_ctx, req_id, &control, &data)) {
+            break;
+        }
+
+        // 2. Record start time.
+        auto start = std::chrono::steady_clock::now();
+
+        // 3. Submit via call_callback. user_data = s (CoState*).
+        //    co_on_complete will fill s->resp_* and resume.
+        bool ok = s->client->call_callback(s->transport, s->conn, req_id, (control != nullptr) ? control->buf : nullptr,
+                                           (data != nullptr) ? data->buf : nullptr, s->msg_type, co_on_complete, s);
+
+        if (!ok) {
+            // Submit failed — release buffers, record error.
+            if (control != nullptr)
+                crow_rpc_buffer_release(control);
+            if (data != nullptr)
+                crow_rpc_buffer_release(data);
+            s->total_errors++;
+            continue;
+        }
+
+        // 4. Suspend. co_on_complete resumes us when the response
+        //    arrives. After resume, s->resp_* has the response.
+        co_await CoAwait{s};
+
+        // 5. Process response via Rust callback.
+        auto elapsed    = std::chrono::steady_clock::now() - start;
+        auto elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+
+        bool keep_going =
+            s->on_response_fn(s->rust_ctx, req_id, s->resp_control, s->resp_data, s->resp_status, elapsed_ns);
+
+        // Release the response buffers.
+        if (s->resp_control != nullptr)
+            crow_rpc_buffer_release(s->resp_control);
+        if (s->resp_data != nullptr)
+            crow_rpc_buffer_release(s->resp_data);
+
+        // Update stats.
+        s->total_ops++;
+        if (s->resp_status != CROW_RPC_OK) {
+            s->total_errors++;
+        }
+        s->total_latency_ns += elapsed_ns;
+        if (elapsed_ns < s->min_latency_ns)
+            s->min_latency_ns = elapsed_ns;
+        if (elapsed_ns > s->max_latency_ns)
+            s->max_latency_ns = elapsed_ns;
+
+        if (!keep_going) {
+            break;
+        }
+    }
+}
+
+} // namespace crow::rpc
+
+// ── C API ─────────────────────────────────────────────────────────
+
+extern "C" void crow_rpc_co_spawn(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t *conns,
+                                  size_t num_conns, uint32_t num_coroutines, uint16_t msg_type,
+                                  crow_rpc_co_build_request build_request, crow_rpc_co_on_response on_response,
+                                  void *ctx)
+{
+    if (client == nullptr || server == nullptr || conns == nullptr || num_conns == 0) {
+        return;
+    }
+
+    auto *client_ptr = client->client;
+    auto *transport  = server->server->transport();
+
+    std::atomic<bool> running{true};
+
+    // Create + start N coroutines.
+    std::vector<crow::rpc::CoTask> tasks;
+    tasks.reserve(num_coroutines);
+
+    std::vector<std::unique_ptr<crow::rpc::CoState>> states;
+    states.reserve(num_coroutines);
+
+    // Compute pool size (next power of two >= num_coroutines).
+    size_t pool_size = 1;
+    while (pool_size < num_coroutines) {
+        pool_size *= 2;
+    }
+    size_t pool_mask = pool_size - 1;
+
+    for (uint32_t i = 0; i < num_coroutines; i++) {
+        auto state            = std::make_unique<crow::rpc::CoState>();
+        state->build_fn       = build_request;
+        state->on_response_fn = on_response;
+        state->rust_ctx       = ctx;
+        state->client         = client_ptr;
+        state->transport      = transport;
+        state->conn           = conns[i % num_conns]->conn.get();
+        state->msg_type       = msg_type;
+        state->running        = &running;
+        state->slot_index     = i;
+        state->pool_mask      = pool_mask;
+        state->next_req_id    = 0;
+
+        auto *state_ptr = state.get();
+        states.push_back(std::move(state));
+
+        // Create the coroutine (starts suspended).
+        auto task = crow::rpc::co_run(state_ptr);
+        tasks.push_back(std::move(task));
+    }
+
+    // Start all coroutines. Each runs until its first co_await, then
+    // suspends (yields the I/O worker thread back to epoll_wait).
+    for (auto &task : tasks) {
+        task.handle.resume();
+    }
+
+    // Wait for all coroutines to complete. The coroutines exit when
+    // build_fn or on_response_fn returns false (Rust sets this when
+    // the deadline is reached).
+    while (true) {
+        bool all_done = true;
+        for (auto &task : tasks) {
+            if (!task.handle.done()) {
+                all_done = false;
+                break;
+            }
+        }
+        if (all_done) {
+            break;
+        }
+        std::this_thread::yield();
+    }
+
+    // Aggregate stats.
+    uint64_t total_ops        = 0;
+    uint64_t total_errors     = 0;
+    uint64_t total_latency_ns = 0;
+    uint64_t min_latency_ns   = UINT64_MAX;
+    uint64_t max_latency_ns   = 0;
+    for (auto &state : states) {
+        total_ops += state->total_ops;
+        total_errors += state->total_errors;
+        total_latency_ns += state->total_latency_ns;
+        if (state->min_latency_ns < min_latency_ns)
+            min_latency_ns = state->min_latency_ns;
+        if (state->max_latency_ns > max_latency_ns)
+            max_latency_ns = state->max_latency_ns;
+    }
+    client->co_stats.total_ops        = total_ops;
+    client->co_stats.total_errors     = total_errors;
+    client->co_stats.total_latency_ns = total_latency_ns;
+    client->co_stats.min_latency_ns   = (total_ops > 0) ? min_latency_ns : 0;
+    client->co_stats.max_latency_ns   = max_latency_ns;
+
+    // Destroy the coroutines (frees the coroutine frames).
+    for (auto &task : tasks) {
+        task.handle.destroy();
+    }
+}
+
+extern "C" void crow_rpc_co_get_stats(crow_rpc_client_t client, crow_rpc_co_stats_t *out)
+{
+    if (out == nullptr || client == nullptr) {
+        return;
+    }
+    out->total_ops        = client->co_stats.total_ops;
+    out->total_errors     = client->co_stats.total_errors;
+    out->total_latency_ns = client->co_stats.total_latency_ns;
+    out->min_latency_ns   = client->co_stats.min_latency_ns;
+    out->max_latency_ns   = client->co_stats.max_latency_ns;
+}

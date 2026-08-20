@@ -46,14 +46,14 @@ impl Buffer {
     }
 
     /// Take ownership of the handle (prevents Drop from releasing it).
-    pub(crate) fn into_raw(mut self) -> sys::crow_rpc_buffer_t {
+    pub fn into_raw(mut self) -> sys::crow_rpc_buffer_t {
         let h = self.handle;
         self.handle = ptr::null_mut();
         h
     }
 
     /// Create a Buffer from a raw handle (takes ownership).
-    pub(crate) fn from_raw(handle: sys::crow_rpc_buffer_t) -> Self {
+    pub fn from_raw(handle: sys::crow_rpc_buffer_t) -> Self {
         Buffer { handle }
     }
 }

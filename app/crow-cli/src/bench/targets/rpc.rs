@@ -27,7 +27,8 @@ use crow_common::metrics::{Counter, LatencyHistogram, MetricName};
 use crow_console_shared::error::{Error, Result};
 use crow_console_shared::lifecycle::stop_pid_with_timeout;
 use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
-use crow_rpc_ffi::{BufferPool, Connection, CrowRpcLatencyStats, RpcClient, RpcServer};
+use crow_rpc_ffi::sys;
+use crow_rpc_ffi::{Buffer, BufferPool, Connection, CrowRpcLatencyStats, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 use tokio::task::JoinHandle;
 
@@ -77,6 +78,13 @@ pub(crate) enum ClientMode {
     /// submit → await response → submit next. More realistic client
     /// simulation; has per-call channel + scheduler overhead.
     Coroutine,
+    /// C++ coroutines on I/O worker threads, Rust domain logic via
+    /// FFI callbacks. `--threads` = number of C++ coroutines. Each
+    /// coroutine loops: Rust `build_request` -> C++ submit -> `co_await`
+    /// (suspend) -> I/O worker resumes inline -> Rust `on_response` ->
+    /// loop. No tokio, no oneshot channel — inline resume like
+    /// buzz-cpp, but Rust domain code runs via FFI on the I/O thread.
+    CppCoroutine,
 }
 
 impl ClientMode {
@@ -84,6 +92,7 @@ impl ClientMode {
         match s {
             "callback" => Some(Self::Callback),
             "coroutine" => Some(Self::Coroutine),
+            "cpp-coroutine" => Some(Self::CppCoroutine),
             _ => None,
         }
     }
@@ -381,6 +390,9 @@ impl BenchTarget for RpcTarget {
             ClientMode::Coroutine => {
                 Self::run_coroutine_workers(clients, cfg, measure_start, deadline, counters)
             }
+            ClientMode::CppCoroutine => {
+                self.run_cpp_coroutine_workers(clients, cfg, measure_start, deadline, counters)
+            }
         }
     }
 }
@@ -499,6 +511,228 @@ impl RpcTarget {
         }
         handles
     }
+
+    /// C++ coroutine mode: N C++ coroutines on I/O worker threads.
+    /// Rust domain logic (build request, process response) runs via
+    /// FFI callbacks on the I/O thread. No tokio, no oneshot channel.
+    fn run_cpp_coroutine_workers(
+        &self,
+        clients: Vec<RpcBenchClient>,
+        cfg: &BenchConfig,
+        measure_start: std::time::Instant,
+        deadline: std::time::Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+    ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
+        // The C++ co_spawn blocks until all coroutines complete, so we
+        // run it on a spawn_blocking thread. We only need one client
+        // (all coroutines share the same client + connections).
+        let client = clients.into_iter().next().unwrap_or_else(|| {
+            panic!("cpp-coroutine mode requires at least one client");
+        });
+        let counters = counters
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Arc::new(WorkerCounters::new()));
+
+        // Collect connection handles for the C API.
+        let conn_handles: Vec<_> = self.conns.iter().map(|c| c.handle()).collect();
+
+        // Shared context for the FFI callbacks. Allocated on the heap
+        // (stable address); the raw pointer is passed to C++.
+        let ctx = Arc::new(CoCtx {
+            pool: Arc::clone(&client.pool),
+            request_id_counter: Arc::clone(&self.request_id_counter),
+            value_size: cfg.value_size,
+            measure_start,
+            deadline,
+            counters: Arc::clone(&counters),
+            stats: LockFreeStats::default(),
+        });
+        // Keep the Arc alive for the duration of co_spawn — the C++
+        // callbacks access it via the raw pointer.
+        let ctx_arc = Arc::clone(&ctx);
+        let ctx_ptr = Arc::as_ptr(&ctx) as *mut std::ffi::c_void;
+
+        let num_coroutines = cfg.threads;
+        let msg_type = ECHO_MSG_TYPE;
+
+        // Size the completion pool before entering the closure —
+        // RpcClient contains a raw pointer (not Send).
+        // Pool must be >= max in-flight (num_coroutines). Round up to
+        // next power of two (the C++ side does this too).
+        client.client.set_completion_pool_size(num_coroutines.max(1));
+
+        // Convert raw pointers to usize for Send. Reconstruct inside the closure.
+        let client_handle_usize = client.client.handle() as usize;
+        let server_handle_usize = client.server.handle() as usize;
+        let ctx_ptr_usize = ctx_ptr as usize;
+        // Convert conn_handles to Vec<usize> for Send, keep alive in closure.
+        let conn_usizes: Vec<usize> = conn_handles.iter().map(|h| *h as usize).collect();
+        let num_conns = conn_usizes.len();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            // Hold ctx_arc for the duration of co_spawn — the C++
+            // callbacks access the CoCtx via the raw pointer.
+            let ctx_arc = ctx_arc;
+
+            // Reconstruct conn_handles from usize — keep alive in scope.
+            let conn_handles: Vec<sys::crow_rpc_conn_t> =
+                conn_usizes.iter().map(|u| *u as sys::crow_rpc_conn_t).collect();
+            let conn_ptr = conn_handles.as_ptr();
+
+            let client_handle = client_handle_usize as sys::crow_rpc_client_t;
+            let server_handle = server_handle_usize as sys::crow_rpc_server_t;
+            let ctx_ptr = ctx_ptr_usize as *mut std::ffi::c_void;
+
+            unsafe {
+                sys::crow_rpc_co_spawn(
+                    client_handle,
+                    server_handle,
+                    conn_ptr,
+                    num_conns,
+                    num_coroutines,
+                    msg_type,
+                    Some(co_build_request),
+                    Some(co_on_response),
+                    ctx_ptr,
+                );
+            }
+
+            // Read stats from the Rust-side atomics (written by FFI callbacks).
+            let total_ops = ctx_arc.stats.ops.load(Ordering::Relaxed);
+            let total_errors = ctx_arc.stats.errors.load(Ordering::Relaxed);
+            let total_latency_ns = ctx_arc.stats.total_latency_ns.load(Ordering::Relaxed);
+
+            // Build OpStats.
+            let mut stats = OpStats::new();
+            stats.ops = total_ops;
+            stats.errors = total_errors;
+            if let Some(avg_ns) = total_latency_ns.checked_div(total_ops) {
+                #[allow(clippy::cast_possible_truncation, reason = "ns to us fits in u64")]
+                let avg_micros = (avg_ns + 500) / 1000;
+                stats.histogram.record(avg_micros.max(1));
+            }
+
+            let mut map = BTreeMap::new();
+            map.insert(OpKind::Write, stats);
+            map
+        });
+        vec![handle]
+    }
+}
+
+/// Lock-free stats shared between the FFI callbacks (C++ I/O thread)
+/// and the Rust `spawn_blocking` thread (reads after `co_spawn` returns).
+#[derive(Default)]
+#[allow(dead_code, reason = "stats are read via C++ co_get_stats, not these atomics")]
+struct LockFreeStats {
+    ops: AtomicU64,
+    errors: AtomicU64,
+    total_latency_ns: AtomicU64,
+}
+
+/// Context passed to the C++ coroutine FFI callbacks. Allocated on the
+/// heap (stable address), accessed via raw pointer from C++.
+struct CoCtx {
+    pool: Arc<BufferPool>,
+    #[allow(dead_code, reason = "request_id is generated by C++ side")]
+    request_id_counter: Arc<AtomicU64>,
+    value_size: usize,
+    measure_start: std::time::Instant,
+    deadline: std::time::Instant,
+    counters: Arc<WorkerCounters>,
+    stats: LockFreeStats,
+}
+
+/// C++ → Rust FFI callback: build the next request.
+/// Allocates control + data buffers from the pool. Returns false to
+/// stop the coroutine (deadline reached).
+unsafe extern "C" fn co_build_request(
+    ctx: *mut std::ffi::c_void,
+    request_id: u64,
+    out_control: *mut sys::crow_rpc_buffer_t,
+    out_data: *mut sys::crow_rpc_buffer_t,
+) -> bool {
+    let ctx = &*(ctx as *const CoCtx);
+
+    // Check deadline.
+    let now = std::time::Instant::now();
+    if now >= ctx.deadline {
+        return false;
+    }
+
+    // Build ConnectionPingRequest flatbuffer.
+    let mut fbb = FlatBufferBuilder::new();
+    let req = ConnectionPingRequest::create(
+        &mut fbb,
+        &ConnectionPingRequestArgs {
+            id: request_id,
+            rpc_create_nano: 0,
+        },
+    );
+    fbb.finish(req, None);
+    let fb_bytes = fbb.finished_data();
+
+    #[allow(clippy::cast_possible_truncation, reason = "fb_bytes is small")]
+    let ctrl_cap = fb_bytes.len() as u32;
+    let Some(mut ctrl) = ctx.pool.alloc_buffer(ctrl_cap) else {
+        return false;
+    };
+    ctrl.write(fb_bytes);
+
+    // Allocate data payload.
+    let data = if ctx.value_size > 0 {
+        #[allow(clippy::cast_possible_truncation, reason = "value_size is bounded")]
+        let data_cap = ctx.value_size as u32;
+        let Some(mut buf) = ctx.pool.alloc_buffer(data_cap) else {
+            return false;
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "mod 256 result fits in u8"
+        )]
+        let payload: Vec<u8> = (0..ctx.value_size).map(|i| (i % 256) as u8).collect();
+        buf.write(&payload);
+        Some(buf)
+    } else {
+        None
+    };
+
+    // Transfer ownership to C++ (into_raw so Drop doesn't release).
+    *out_control = ctrl.into_raw();
+    *out_data = data.map_or(std::ptr::null_mut(), Buffer::into_raw);
+    true
+}
+
+/// C++ → Rust FFI callback: process the response.
+/// Records stats. Returns false to stop the coroutine (deadline).
+unsafe extern "C" fn co_on_response(
+    ctx: *mut std::ffi::c_void,
+    _request_id: u64,
+    _control: sys::crow_rpc_buffer_t,
+    _data: sys::crow_rpc_buffer_t,
+    status: i32,
+    latency_ns: u64,
+) -> bool {
+    let ctx = &*(ctx as *const CoCtx);
+    let now = std::time::Instant::now();
+    let recording = now >= ctx.measure_start;
+    let ok = status == sys::CROW_RPC_OK;
+
+    if recording {
+        ctx.stats.ops.fetch_add(1, Ordering::Relaxed);
+        if !ok {
+            ctx.stats.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        ctx.stats
+            .total_latency_ns
+            .fetch_add(latency_ns, Ordering::Relaxed);
+        ctx.counters.record(OpKind::Write, ok);
+    }
+
+    // Check deadline — return false to stop the coroutine.
+    now < ctx.deadline
 }
 /// echo requests with data payloads. Cheaply cloneable (Arc handles).
 #[derive(Clone)]

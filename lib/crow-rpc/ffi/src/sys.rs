@@ -72,6 +72,36 @@ pub type crow_rpc_on_complete = Option<
     ),
 >;
 
+// ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────────
+pub type crow_rpc_co_build_request = Option<
+    unsafe extern "C" fn(
+        ctx: *mut c_void,
+        request_id: u64,
+        out_control: *mut crow_rpc_buffer_t,
+        out_data: *mut crow_rpc_buffer_t,
+    ) -> bool,
+>;
+
+pub type crow_rpc_co_on_response = Option<
+    unsafe extern "C" fn(
+        ctx: *mut c_void,
+        request_id: u64,
+        control: crow_rpc_buffer_t,
+        data: crow_rpc_buffer_t,
+        status: crow_rpc_status,
+        latency_ns: u64,
+    ) -> bool,
+>;
+
+#[repr(C)]
+pub struct CrowRpcCoStats {
+    pub total_ops: u64,
+    pub total_errors: u64,
+    pub total_latency_ns: u64,
+    pub min_latency_ns: u64,
+    pub max_latency_ns: u64,
+}
+
 extern "C" {
     pub fn crow_rpc_buffer_alloc(pool: crow_rpc_pool_t, capacity: u32) -> crow_rpc_buffer_t;
     pub fn crow_rpc_buffer_write(buf: crow_rpc_buffer_t, data: *const u8, len: u32);
@@ -171,4 +201,19 @@ extern "C" {
         msg_type: u16,
         request_id: u64,
     ) -> crow_rpc_status;
+
+    // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
+    pub fn crow_rpc_co_spawn(
+        client: crow_rpc_client_t,
+        server: crow_rpc_server_t,
+        conns: *const crow_rpc_conn_t,
+        num_conns: usize,
+        num_coroutines: u32,
+        msg_type: u16,
+        build_request: crow_rpc_co_build_request,
+        on_response: crow_rpc_co_on_response,
+        ctx: *mut c_void,
+    );
+
+    pub fn crow_rpc_co_get_stats(client: crow_rpc_client_t, out: *mut CrowRpcCoStats);
 }

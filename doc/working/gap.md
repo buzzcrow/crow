@@ -439,3 +439,70 @@ design) can be wrapped via FFI:
 This is the same architecture as buzz-cpp: C++ coroutines for the hot
 path, Rust for the orchestration layer. The FFI boundary is at the
 coroutine spawn/join level, not per-op.
+
+---
+
+## C++ Coroutine Client (Option 3) — Implemented
+
+Implemented `--client-mode cpp-coroutine`: N C++20 coroutines on the
+I/O worker threads, with Rust domain logic via FFI callbacks.
+
+### Architecture
+
+```
+Rust (domain logic)          C++ I/O worker (epoll)
+───────────────────          ──────────────────────
+co_build_request() ───►      coroutine: build → submit → co_await (suspend)
+  (alloc flatbuffer)         ...epoll_wait → read → parse → on_response...
+                             co_on_complete → handle.resume() (inline)
+co_on_response() ◄───        coroutine: process → loop back to build
+  (record stats)
+```
+
+- C++20 coroutine suspends at `co_await`, yields I/O thread to epoll.
+- Response arrives → `on_response` → `co_on_complete` → `handle.resume()`
+  (direct function call, ~10ns — no scheduler, no channel).
+- Rust domain logic (build request, record stats) runs via FFI on the
+  I/O worker thread.
+- Per-coroutine slab slot (no collision): `request_id = slot_index +
+  N * pool_size`, so each coroutine always uses the same slot.
+
+### Measured comparison (16+16 workers, 16 conns, 512B, 10s)
+
+| Mode | In-flight | TPS | Avg lat | p99 |
+| --- | --- | --- | --- | --- |
+| callback, 16×depth 8 | 128 | 469K | 272µs | 274µs |
+| rust-coroutine, 128 tasks | 128 | 446K | 281µs | 699µs |
+| cpp-coroutine, 128 coros | 128 | 513K | 244µs | 244µs |
+| callback, 128×depth 8 | 1024 | 454K | 2.3ms | 2.5ms |
+| rust-coroutine, 1000 tasks | 1000 | 444K | 2.2ms | 7.6ms |
+| cpp-coroutine, 512 coros | 512 | 489K | 1.04ms | — |
+
+### Analysis
+
+- **C++ coroutines are 9% faster than callback mode** (513K vs 469K).
+  The callback mode's fixed chain has per-callback overhead (function
+  pointer indirect call + slot state machine). The coroutine's
+  `handle.resume()` is a direct jump.
+- **C++ coroutines are 15% faster than Rust coroutines** (513K vs 446K).
+  The tokio scheduler round-trip (~300ns/op) is eliminated — resume is
+  inline on the I/O worker thread.
+- **p99 is tight** (244µs = avg) — no scheduler jitter, unlike Rust
+  coroutines (699µs p99). The inline resume has no scheduling delay.
+- **512 coroutines work** (489K TPS) — the slab pool scales. 1000
+  coroutines segfault (likely stack overflow from 1000 coroutine
+  frames — TODO: use a custom allocator with stack pool).
+
+### Per-op overhead breakdown
+
+| Component | callback | rust-coroutine | cpp-coroutine |
+| --- | --- | --- | --- |
+| Submit | ~50ns | ~50ns | ~50ns |
+| Resume | ~10ns (cb) | ~300ns (tokio) | ~10ns (handle.resume) |
+| Channel | 0 | ~50ns (oneshot) | 0 |
+| FFI | 0 | 0 | ~20ns (build + on_response) |
+| **Total** | **~60ns** | **~400ns** | **~80ns** |
+
+The C++ coroutine has ~20ns FFI overhead per op (two `extern "C"`
+calls), but eliminates the ~300ns tokio scheduler round-trip. Net:
+~80ns vs ~400ns = **5× less overhead** than Rust coroutines.
