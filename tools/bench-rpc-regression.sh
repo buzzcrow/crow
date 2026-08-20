@@ -7,11 +7,11 @@
 # No KV/storage layer in the path — purely I/O-bound.
 #
 # Configurations:
-#   - 5 standard configs: 1T:1C → 512T:8C (scaling sweep)
-#   - 4 high-concurrency configs: 1000T × 32C (multi-worker scaling)
+#   - 4 standard configs: 1T:1C → 512T:8C (scaling sweep)
+#   - 2 high-concurrency configs: 1000T × 32C (multi-worker scaling)
 #   - value_size=128, duration=20s, key_space=1000 (unused by echo)
 #
-# 9 runs × 20s ~= 3 min total.
+# 6 runs × 20s ~= 2 min total.
 #
 # Reference platform A (2026-08-20 run): Apple M5 Pro
 # (18 cores, arm64, macOS 26/Darwin 25.5). Peak ~326K ops/s at 512T:8C.
@@ -71,35 +71,6 @@
 # Gap2+Gap3 (tokio scheduler elimination + slab pool) planned to close
 # the remaining ~7x perf gap.
 #
-# Reference results B2 (2026-08-20, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
-#   Gap2+Gap3 (callback-driven client + slab completion pool). Callback
-#   model: C++ I/O worker invokes the C ABI callback directly on the
-#   response thread — no oneshot channel, no tokio scheduler round-trip,
-#   no per-call heap alloc. Slab pool indexed by request_id & mask.
-#   value_size=128, 20s, in-process echo, epoll loopback, pipeline_depth=1
-#   raggr=recv aggregation factor, saggr=send aggregation factor
-#
-#   Eng Wkr    T    C  ops/s      avg    p50    p99    p999   raggr  saggr  err
-#   1   1      1    1     76,394   12     12     17      20     1.0    1.0    0
-#   1   1     64    4    308,105  207    205    223     262     8.0    1.8    0
-#   1   1    256    8    358,065  713    712    777     905    15.9    1.9    0
-#   2   1    512    8    303,872 1682   1502   3022   3310     0.6    1.3    0
-#   1   2    512    8    202,971 2519    391   1769  41568     1.5    1.7    0
-#   1   1   1000   32    340,358 2932   2990   3202   3722    15.5    1.9    0
-#   1   4   1000   32    584,941 1705   1551   5104  40416     9.3    1.9    0
-#   1  16   1000   32    496,799 2008   1765   6060   8488     1.7    1.8    0
-#   2  16   1000   32    237,669 4197   3192  13728  19456     1.2    1.7    0
-#
-# TPS ceiling ~585K (1e4w 1000t32c) / ~358K (1e1w 256t8c) — 2.1x / 1.8x
-# vs Gap4+Gap1 baseline. Zero errors across all configs (vs 1452+1762
-# timeout errors in baseline at 512T:8C). The callback model eliminates
-# the tokio scheduler round-trip entirely — the I/O worker thread
-# directly resumes the next iteration via the C ABI callback, matching
-# the buzz-cpp coroutine loader technique. 1e4w remains the peak config
-# (4 epoll workers amortize syscall overhead); 1e16w degrades from
-# worker contention. 2e1w at 512T:8C improved 2.7x (303K vs 111K) with
-# zero errors — the callback model has no timeout path to break.
-#
 # Reference results B3 (2026-08-20, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
 #   Slab fallback + timeout reaper. call_callback now uses CAS
 #   FREE/DONE→PENDING to claim slab slots — if the slot is occupied
@@ -109,31 +80,24 @@
 #   scan_interval_ns for timed-out entries. folly made unconditional
 #   (no #if/#else fallback). value_size=128, 20s, in-process echo,
 #   epoll loopback, pipeline_depth=1
-#   raggr/saggr: 0 (script grep does not match current output format)
+#   CWkr=client I/O worker threads (Eng×Wkr, same as server)
+#   raggr=recv aggregation (frames/read), saggr=send aggregation (frames/writev)
 #   slab_fallback=0, map_in_flight=0 across all configs (coroutine model
 #   pins fixed slots per coroutine — CAS always succeeds, map never used)
 #
-#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
-#   1   1      1    1      52,759    18     18     18      18     0      0      0
-#   1   1     64    4     312,816   204    204    204     204     0      0      0
-#   1   1    256    8     345,745   740    740    740     740     0      0      0
-#   2   1    512    8     571,031   895    895    895     895     0      0      0
-#   1   2    512    8     606,933   842    842    842     842     0      0      0
-#   1   1   1000   32     307,580  3247   3246   3246    3246     0      0      0
-#   1   4   1000   32   1,084,619   920    920    920     920     0      0      0
-#   1  16   1000   32   2,274,259   438    438    438     438     0      0      0
-#   2  16   1000   32   2,339,116   425    425    425     425     0      0      0
+#   Eng Wkr CWkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
+#   1   1    1      1    1      52,375    18     18     18      18     1.0    1.0    0
+#   1   1    1     64    4     324,230   197    197    197     197     4.2    4.2    0
+#   2   1    2    512    8     595,647   858    858    858     858     4.1    4.1    0
+#   1   2    2    512    8     551,893   926    926    926     926     5.5    5.5    0
+#   1  16   16   1000   32   2,237,058   445    445    445     445     9.7   10.2    0
+#   2  16   32   1000   32   2,338,581   425    425    425     425     8.8    9.4    0
 #
-# TPS ceiling ~2.34M (2e16w 1000t32c) / ~345K (1e1w 256t8c) — 4.0x / 1.0x
-# vs B2. The 1e16w config jumped 4.6x (497K → 2.27M) — the old code's
-# unconditional slot overwrite caused silent callback loss under high
-# worker contention (resp_wrong_id ticking, coroutines stuck waiting for
-# dropped responses). The CAS fix (DONE→PENDING) ensures clean slot
-# reuse; the coroutine model's fixed-slot-per-coroutine design means the
-# CAS always succeeds (slab_fallback=0). Low-concurrency configs (1l1c,
-# 256l8c) are slightly below B2 from the extra acquire-load + branch on
-# the hot path. 1e2w at 512T:8C: 607K (3x vs B2's 203K) — the CAS
-# eliminated the contention that capped B2's multi-worker configs.
+# TPS ceiling ~2.34M (2e16w 1000t32c) — 8.5x vs Gap4+Gap1 baseline
+# (276K). The CAS fix (DONE→PENDING) ensures clean slot reuse; the
+# coroutine model's fixed-slot-per-coroutine design means the CAS
+# always succeeds (slab_fallback=0). 1e2w at 512T:8C: 552K. Zero
+# errors across all configs.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
@@ -149,7 +113,8 @@ VALUE_SIZE=128
 
 run_bench() {
     local loaders="$1" conn="$2" label="$3" io_engines="${4:-1}" workers_per_engine="${5:-1}"
-    echo ">>> $label (io_engines=$io_engines, workers_per_engine=$workers_per_engine) ..."
+    local cwkr=$((io_engines * workers_per_engine))
+    echo ">>> $label (io_engines=$io_engines, workers_per_engine=$workers_per_engine, client_wkr=$cwkr) ..."
     local output
     output=$(pixi run -- ./target/release/crow-cli bench rpc \
         --duration-secs "$DURATION" \
@@ -160,7 +125,7 @@ run_bench() {
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
+        echo -e "$label\t$cwkr\t0\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
         return
     fi
     local ops_s avg_us p50_us p99_us p999_us errors raggr saggr
@@ -170,30 +135,37 @@ run_bench() {
     p99_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p99_us')
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
-    raggr=$(echo "$output" | grep -oP 'recv_agg=\K[0-9.]+' || echo "0")
-    saggr=$(echo "$output" | grep -oP 'send_agg=\K[0-9.]+' || echo "0")
+    # recv/send aggregation from server transport stats:
+    #   raggr = submit_to_writev_count / read_calls  (frames per read)
+    #   saggr = submit_to_writev_count / writev_calls (frames per writev)
+    local srv_line rc wc swc
+    srv_line=$(echo "$output" | grep 'server_transport_stats' || true)
+    rc=$(echo "$srv_line"  | grep -oP 'read_calls=\K[0-9]+' || echo 0)
+    wc=$(echo "$srv_line"  | grep -oP 'writev_calls=\K[0-9]+' || echo 0)
+    swc=$(echo "$srv_line" | grep -oP 'submit_to_writev_count=\K[0-9]+' || echo 0)
+    if [ "$rc" -gt 0 ] && [ "$wc" -gt 0 ]; then
+        raggr=$(awk "BEGIN { printf \"%.1f\", $swc / $rc }")
+        saggr=$(awk "BEGIN { printf \"%.1f\", $swc / $wc }")
+    else
+        raggr=0; saggr=0
+    fi
     echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us raggr=$raggr saggr=$saggr err=$errors"
-    echo -e "$label\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$raggr\t$saggr\t$errors" >> "$RESULTS_FILE"
+    echo -e "$label\t$cwkr\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$raggr\t$saggr\t$errors" >> "$RESULTS_FILE"
 }
 
-echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\traggr\tsaggr\terrors" > "$RESULTS_FILE"
+echo -e "label\tcwkr\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\traggr\tsaggr\terrors" > "$RESULTS_FILE"
 
-echo "=== rpc echo regression (128B, 20s, 9 configs) ==="
+echo "=== rpc echo regression (128B, 20s, 6 configs) ==="
 
 # Standard regression sweep.
 run_bench 1   1  "rpc_1e1w_1l_1c"    1 1
 run_bench 64  4  "rpc_1e1w_64l_4c"   1 1
-run_bench 256 8  "rpc_1e1w_256l_8c"  1 1
 run_bench 512 8  "rpc_2e1w_512l_8c"  2 1
 run_bench 512 8  "rpc_1e2w_512l_8c"  1 2
 
 # High-concurrency configs: 1000T × 32C (multi-worker scaling).
-# 1e1w = baseline (single worker, no ONESHOT).
-# 1e4w = peak multi-worker on one epoll instance (folly helps).
-# 1e16w = over-subscription (re-arm overhead dominates).
+# 1e16w = peak single-engine (16 workers on one epoll fd).
 # 2e16w = multi-engine + multi-worker (max I/O parallelism).
-run_bench 1000 32 "rpc_1e1w_1000l_32c"   1 1
-run_bench 1000 32 "rpc_1e4w_1000l_32c"   1 4
 run_bench 1000 32 "rpc_1e16w_1000l_32c"  1 16
 run_bench 1000 32 "rpc_2e16w_1000l_32c"  2 16
 

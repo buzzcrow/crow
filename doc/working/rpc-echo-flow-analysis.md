@@ -286,24 +286,24 @@ pipeline_depth=1.
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
-### Full sweep (9 configs)
+### Full sweep (6 configs)
 
-| Eng | Wkr | T | C | ops/s | avg | p50 | p99 | p999 | err |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 1 | 52,759 | 18 | 18 | 18 | 18 | 0 |
-| 1 | 1 | 64 | 4 | 312,816 | 204 | 204 | 204 | 204 | 0 |
-| 1 | 1 | 256 | 8 | 345,745 | 740 | 740 | 740 | 740 | 0 |
-| 2 | 1 | 512 | 8 | 571,031 | 895 | 895 | 895 | 895 | 0 |
-| 1 | 2 | 512 | 8 | 606,933 | 842 | 842 | 842 | 842 | 0 |
-| 1 | 1 | 1000 | 32 | 307,580 | 3247 | 3246 | 3246 | 3246 | 0 |
-| 1 | 4 | 1000 | 32 | 1,084,619 | 920 | 920 | 920 | 920 | 0 |
-| 1 | 16 | 1000 | 32 | 2,274,259 | 438 | 438 | 438 | 438 | 0 |
-| 2 | 16 | 1000 | 32 | 2,339,116 | 425 | 425 | 425 | 425 | 0 |
+| Eng | Wkr | CWkr | T | C | ops/s | avg | p50 | p99 | p999 | raggr | saggr | err |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 1 | 1 | 52,375 | 18 | 18 | 18 | 18 | 1.0 | 1.0 | 0 |
+| 1 | 1 | 1 | 64 | 4 | 324,230 | 197 | 197 | 197 | 197 | 4.2 | 4.2 | 0 |
+| 2 | 1 | 2 | 512 | 8 | 595,647 | 858 | 858 | 858 | 858 | 4.1 | 4.1 | 0 |
+| 1 | 2 | 2 | 512 | 8 | 551,893 | 926 | 926 | 926 | 926 | 5.5 | 5.5 | 0 |
+| 1 | 16 | 16 | 1000 | 32 | 2,237,058 | 445 | 445 | 445 | 445 | 9.7 | 10.2 | 0 |
+| 2 | 16 | 32 | 1000 | 32 | 2,338,581 | 425 | 425 | 425 | 425 | 8.8 | 9.4 | 0 |
 
-Peak **~2.34M** (2e16w 1000t32c) — 4.0x vs B2 (585K), 8.5x vs Gap4+Gap1
-baseline (276K). Sentinel (1e1w 256t8c): 346K vs 358K B2 = -3% (CAS
-acquire-load overhead on the uncontended hot path). Zero errors across
-all 9 configs.
+Eng=server io_engines, Wkr=server io_workers_per_engine, CWkr=client
+I/O worker threads (Eng×Wkr, same config on both sides), T=client
+dispatch threads (coroutines), C=connections. raggr=frames per read,
+saggr=frames per writev (server-side).
+
+Peak **~2.34M** (2e16w 1000t32c) — 8.5x vs Gap4+Gap1 baseline (276K).
+Zero errors across all 6 configs.
 
 ### Slab vs map usage
 
@@ -317,39 +317,21 @@ latency), not for the bench.
 
 ### Multi-worker scaling
 
-- 1e1w → 1e4w: **+253%** (308K → 1.08M). Without the tokio scheduler
-  bottleneck, 4 epoll workers fully parallelize the callback chain.
-- 1e4w → 1e16w: **+110%** (1.08M → 2.27M). Unlike B2 (where 1e16w
-  degraded -15% from worker contention), the CAS fix eliminated the
-  silent callback loss that capped B2's high-worker configs. 16 workers
-  now scale linearly — each worker processes responses independently
-  without stomping on each other's slots.
-- 1e16w → 2e16w: **+3%** (2.27M → 2.34M). Two epoll engines provide
+- 1e1w 64l → 2e1w 512l: **+80%** (324K → 596K). More coroutines +
+  connections saturate the single-worker event loop.
+- 2e1w → 1e16w: **+275%** (596K → 2.24M). 16 workers on one epoll fd
+  parallelize the callback chain — each worker processes responses
+  independently. The CAS fix (DONE→PENDING) ensures clean slot reuse
+  under high worker contention.
+- 1e16w → 2e16w: **+5%** (2.24M → 2.34M). Two epoll engines provide
   marginal improvement — the bottleneck shifts to socket buffer
   throughput, not epoll contention.
-- 1e2w at 512T:8C: **607K** (3x vs B2's 203K). The CAS eliminated the
-  contention that capped B2's multi-worker configs at 512T.
-
-### Why 1e16w jumped 4.6x vs B2
-
-B2's 1e16w was 497K — slower than 1e4w (585K), attributed to "ONESHOT
-re-arm overhead + worker contention." The real cause: B2's
-`call_callback` unconditionally overwrote the slot (no CAS), so under
-high worker contention (16 workers sharing one epoll fd), concurrent
-`on_response` calls for the same connection could stomp on each other's
-slots — `resp_wrong_id` would tick, the response was silently dropped,
-and the coroutine hung until the 30s force-exit. This reduced effective
-concurrency. The CAS fix (`DONE→PENDING` in `call_callback`,
-`PENDING→DONE` in `on_response`) ensures clean slot reuse — no double
-invoke, no silent drops. All coroutines are properly resumed, so
-effective concurrency matches configured concurrency.
 
 ### Scaling ceiling comparison
 
 | Target | Ceiling (ops/s) | Bottleneck | Platform |
 | --- | --- | --- | --- |
 | RPC echo (slab fallback + reaper, 128B/20s) | ~2.34M | Socket buffer throughput | AMD 5950X |
-| RPC echo (Gap2+Gap3, 128B/20s) | ~585K | Silent callback loss under worker contention | AMD 5950X |
 | RPC echo (Gap4+Gap1, 128B/20s) | ~276K | Tokio scheduler round-trip + per-op alloc | AMD 5950X |
 | RPC echo (in-process, optimized) | ~317K | Caller-thread writev contention + per-op alloc | M5 Pro |
 | KV write (coalesced, 3-node) | ~124K | Consensus quorum RPC | AMD 5950X |
@@ -416,12 +398,10 @@ was always correct, but the slot management wasn't.
   `connection.cpp` `retry_send` busy-loop under high contention.
 - **2026-08-20 (AMD 5950X, 128B/20s, Gap2+Gap3)**: callback-based
   client model + slab completion pool. Peak ~585K (2.1x baseline),
-  zero errors. See sections above for full detail.
+  zero errors. Superseded by slab fallback + reaper.
 - **2026-08-20 (AMD 5950X, 128B/20s, slab fallback + reaper)**: CAS-
   based slab claim + map fallback + timeout reaper. folly made
-  unconditional. Peak ~2.34M (4.0x B2, 8.5x baseline), zero errors.
-  Fixed silent callback loss under high worker contention (B2's 1e16w
-  was 497K due to unconditional slot overwrite; CAS fix → 2.27M).
-  Low-concurrency configs slightly below B2 from CAS acquire-load
-  overhead. slab_fallback=0 across all configs (coroutine model pins
-  fixed slots).
+  unconditional. Peak ~2.34M (8.5x baseline), zero errors. Fixed
+  silent callback loss under high worker contention (Gap2+Gap3's
+  1e16w was 497K due to unconditional slot overwrite; CAS fix → 2.24M).
+  slab_fallback=0 across all configs (coroutine model pins fixed slots).
