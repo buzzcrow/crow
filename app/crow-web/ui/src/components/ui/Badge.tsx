@@ -3,9 +3,9 @@
 
 import React from 'react';
 import { cn } from '../../utils/cn';
-import { CheckCircle2, AlertTriangle, XCircle, HelpCircle, Crown, Users } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, XCircle, HelpCircle, Crown, Users, Wrench, EyeOff, PowerOff } from 'lucide-react';
 import { ReplicaRole, ReplicaState, GroupHealth, NodeHealth } from '../../types';
-import { toDisplayState, toUiHealth, toUiRole } from '../../utils/entityDisplay';
+import { toDisplayState, toUiHealth, toUiRole, hwStatusLabel, HwStatusName } from '../../utils/entityDisplay';
 
 type BadgeVariant = 'default' | 'secondary' | 'outline' | 'health' | 'role';
 type BadgeSize = 'sm' | 'md' | 'lg';
@@ -123,6 +123,45 @@ export function RoleBadge({ role, size = 'sm', compact = false }: { role: Replic
   return (
     <Badge variant="role" role={normalizedRole} size={size} compact={compact} title={normalizedRole}>
       {toDisplayState(normalizedRole)}
+    </Badge>
+  );
+}
+
+const hwStatusColors: Record<HwStatusName, string> = {
+  Init: 'tw-bg-white/10 tw-text-white tw-border tw-border-white/30',
+  Up: 'tw-bg-green-500/10 tw-text-green-500 tw-border tw-border-green-500/30',
+  Maintenance: 'tw-bg-yellow-500/10 tw-text-yellow-500 tw-border tw-border-yellow-500/30',
+  Suspect: 'tw-bg-yellow-500/10 tw-text-yellow-500 tw-border tw-border-yellow-500/30',
+  Missing: 'tw-bg-red-500/10 tw-text-red-500 tw-border tw-border-red-500/30',
+  Bad: 'tw-bg-red-500/10 tw-text-red-500 tw-border tw-border-red-500/30',
+  Offline: 'tw-bg-red-500/10 tw-text-red-500 tw-border tw-border-red-500/30',
+};
+
+const hwStatusIconColors: Record<HwStatusName, string> = {
+  Init: 'tw-text-white',
+  Up: 'tw-text-green-500',
+  Maintenance: 'tw-text-yellow-500',
+  Suspect: 'tw-text-yellow-500',
+  Missing: 'tw-text-red-500',
+  Bad: 'tw-text-red-500',
+  Offline: 'tw-text-red-500',
+};
+
+const hwStatusIcons: Record<HwStatusName, React.ReactNode> = {
+  Init: <HelpCircle className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Init)} />,
+  Up: <CheckCircle2 className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Up)} />,
+  Maintenance: <Wrench className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Maintenance)} />,
+  Suspect: <AlertTriangle className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Suspect)} />,
+  Missing: <EyeOff className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Missing)} />,
+  Bad: <XCircle className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Bad)} />,
+  Offline: <PowerOff className={cn('tw-h-3.5 tw-w-3.5', hwStatusIconColors.Offline)} />,
+};
+
+export function HwStatusBadge({ status, size = 'sm', compact = false }: { status: number; size?: BadgeSize; compact?: boolean }) {
+  const label = hwStatusLabel(status);
+  return (
+    <Badge variant="default" size={size} compact={compact} className={hwStatusColors[label]} icon={hwStatusIcons[label]} title={label}>
+      {label}
     </Badge>
   );
 }

@@ -18,8 +18,8 @@ export interface AddDiskDialogProps {
 }
 
 // R77 defaults: 4 TiB capacity / 32 GiB zone / 1 MiB unit (locked).
-const DEFAULT_CAPACITY_GIB = 4 * 1024;
-const DEFAULT_ZONE_SIZE_MIB = 32 * 1024;
+const DEFAULT_CAPACITY_TIB = 4;
+const DEFAULT_ZONE_SIZE_GIB = 32;
 const DEFAULT_UNIT_SIZE_BYTES = 1024 * 1024;
 
 function randomDiskId(): string {
@@ -41,8 +41,8 @@ export function AddDiskDialog({
   onSuccess,
 }: AddDiskDialogProps) {
   const [rows, setRows] = useState<DiskRow[]>([{ disk_id: randomDiskId(), disk_type: 'Ssd' }]);
-  const [capacityGiB, setCapacityGiB] = useState(String(DEFAULT_CAPACITY_GIB));
-  const [zoneSizeMiB, setZoneSizeMiB] = useState(String(DEFAULT_ZONE_SIZE_MIB));
+  const [capacityTiB, setCapacityTiB] = useState(String(DEFAULT_CAPACITY_TIB));
+  const [zoneSizeGiB, setZoneSizeGiB] = useState(String(DEFAULT_ZONE_SIZE_GIB));
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
   const { success, error } = useToast();
@@ -50,8 +50,8 @@ export function AddDiskDialog({
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
       setRows([{ disk_id: randomDiskId(), disk_type: 'Ssd' }]);
-      setCapacityGiB(String(DEFAULT_CAPACITY_GIB));
-      setZoneSizeMiB(String(DEFAULT_ZONE_SIZE_MIB));
+      setCapacityTiB(String(DEFAULT_CAPACITY_TIB));
+      setZoneSizeGiB(String(DEFAULT_ZONE_SIZE_GIB));
     }
     wasOpenRef.current = isOpen;
   }, [isOpen]);
@@ -59,8 +59,8 @@ export function AddDiskDialog({
   const isPositiveInt = (v: string) => /^\d+$/.test(v) && Number(v) > 0;
   const valid = rows.length > 0
     && rows.every((r) => r.disk_id.trim().length > 0)
-    && isPositiveInt(capacityGiB)
-    && isPositiveInt(zoneSizeMiB);
+    && isPositiveInt(capacityTiB)
+    && isPositiveInt(zoneSizeGiB);
 
   const addRow = () => setRows((prev) => [...prev, { disk_id: randomDiskId(), disk_type: 'Ssd' }]);
   const removeRow = (idx: number) => setRows((prev) => prev.filter((_, i) => i !== idx));
@@ -71,8 +71,8 @@ export function AddDiskDialog({
     if (!valid) return;
     setIsLoading(true);
     try {
-      const capacityBytes = Number(capacityGiB) * 1024 * 1024 * 1024;
-      const zoneSizeBytes = Number(zoneSizeMiB) * 1024 * 1024;
+      const capacityBytes = Number(capacityTiB) * 1024 * 1024 * 1024 * 1024;
+      const zoneSizeBytes = Number(zoneSizeGiB) * 1024 * 1024 * 1024;
       const disks: AddDiskRequest[] = rows.map((r) => ({
         disk_id: r.disk_id.trim(),
         disk_type: r.disk_type,
@@ -111,18 +111,18 @@ export function AddDiskDialog({
         <div className="tw-flex tw-gap-3">
           <div className="tw-flex-1">
             <Input
-              label="Disk Size (GiB)"
+              label="Disk Size (TiB)"
               inputMode="numeric"
-              value={capacityGiB}
-              onChange={(e) => setCapacityGiB(e.target.value)}
+              value={capacityTiB}
+              onChange={(e) => setCapacityTiB(e.target.value)}
             />
           </div>
           <div className="tw-flex-1">
             <Input
-              label="Zone Size (MiB)"
+              label="Zone Size (GiB)"
               inputMode="numeric"
-              value={zoneSizeMiB}
-              onChange={(e) => setZoneSizeMiB(e.target.value)}
+              value={zoneSizeGiB}
+              onChange={(e) => setZoneSizeGiB(e.target.value)}
             />
           </div>
         </div>

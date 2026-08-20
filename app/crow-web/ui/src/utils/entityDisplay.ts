@@ -53,6 +53,19 @@ export function hwStatusToUiHealth(status: number): UiHealth {
   }
 }
 
+export type HwStatusName = 'Init' | 'Up' | 'Maintenance' | 'Suspect' | 'Missing' | 'Bad' | 'Offline';
+
+export const HW_STATUS_NAMES: HwStatusName[] = ['Init', 'Up', 'Maintenance', 'Suspect', 'Missing', 'Bad', 'Offline'];
+
+export function hwStatusLabel(s: number): HwStatusName {
+  if (s >= 0 && s <= 6) return HW_STATUS_NAMES[s];
+  return 'Init';
+}
+
+export function hwStatusValue(label: HwStatusName): number {
+  return HW_STATUS_NAMES.indexOf(label);
+}
+
 export function toUiRole(value?: string | null): UiRole {
   const raw = normalize(value);
   if (raw === 'leader') return 'Leader';

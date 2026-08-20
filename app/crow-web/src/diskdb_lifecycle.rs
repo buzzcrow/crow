@@ -112,6 +112,23 @@ pub async fn http_deploy_diskdb(
         cfg.add_server(entry).map_err(|e| err_500(format!("{e}")))?;
     }
     state.persist().map_err(|e| err_500(format!("{e}")))?;
+    // Refresh the monitor cache so health badges reflect the new DDB
+    // process. The process may not be listening yet, so retry a few
+    // times with short delays until the probe succeeds.
+    crate::mgmt::refresh_node_cache(&state, node_id).await;
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            crate::mgmt::refresh_node_cache(&state_clone, node_id).await;
+            let snap = state_clone.monitor_cache.snapshot().await;
+            if let Some(rec) = snap.get(&node_id) {
+                if rec.health == crow_console_shared::cluster::NodeHealth::Up {
+                    break;
+                }
+            }
+        }
+    });
 
     Ok((
         StatusCode::CREATED,
@@ -134,6 +151,7 @@ pub async fn http_deploy_diskdb(
 /// # Errors
 /// Returns `404` if no diskdb instance is registered on the node,
 /// `502` on spawn/stop failure.
+#[allow(clippy::too_many_lines)]
 pub async fn http_restart_diskdb(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
@@ -224,10 +242,35 @@ pub async fn http_restart_diskdb(
     state.set_diskdb_runtime_pid(node_id, deployed.pid);
     {
         let mut cfg = state.config.write().unwrap();
-        let _ = cfg.remove_server_for_node(node_id);
+        // Remove only the DDB entry (not the KV entry) before adding
+        // the refreshed one. `remove_server_for_node` is KV-only.
+        let pos = cfg
+            .servers
+            .iter()
+            .position(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Diskdb);
+        if let Some(p) = pos {
+            cfg.servers.remove(p);
+        }
         cfg.add_server(new_entry).map_err(|e| err_500(format!("{e}")))?;
     }
     state.persist().map_err(|e| err_500(format!("{e}")))?;
+    // Refresh the monitor cache so health badges reflect the restarted
+    // DDB process. The process may not be listening yet, so retry a few
+    // times with short delays until the probe succeeds.
+    crate::mgmt::refresh_node_cache(&state, node_id).await;
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            crate::mgmt::refresh_node_cache(&state_clone, node_id).await;
+            let snap = state_clone.monitor_cache.snapshot().await;
+            if let Some(rec) = snap.get(&node_id) {
+                if rec.health == crow_console_shared::cluster::NodeHealth::Up {
+                    break;
+                }
+            }
+        }
+    });
 
     Ok(Json(DiskdbDeployResult {
         node_id,
@@ -237,8 +280,10 @@ pub async fn http_restart_diskdb(
     }))
 }
 
-/// `POST /api/nodes/:id/diskdb/stop` — stop the diskdb instance on a
-/// node and remove its `ServerEntry`.
+/// `POST /api/nodes/:id/diskdb/stop` — stop the diskdb process on a
+/// node but keep its `ServerEntry` so it can be restarted later.
+/// Mirrors `http_stop_node_server` for KV: stop process + clear PID
+/// only; the deployment record is preserved for restart.
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
@@ -276,18 +321,15 @@ pub async fn http_stop_diskdb(
         .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
         .map_err(|e| err_500(format!("stop_pid: {e}")))?;
     state.clear_diskdb_runtime_pid(node_id);
-    {
-        let mut cfg = state.config.write().unwrap();
-        // Remove the diskdb ServerEntry (not the kv-server entry).
-        let pos = cfg
-            .servers
-            .iter()
-            .position(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Diskdb);
-        if let Some(p) = pos {
-            cfg.servers.remove(p);
-        }
+    // Only mark the shared node record Down when no KV server is still
+    // running on this node. The record is shared between KV and DDB; an
+    // unconditional mark_down would flip the KV health badge (derived from
+    // the record in build_server_process) even though KV is unaffected.
+    // The DDB badge already drops via the no-pid override in
+    // http_list_servers, which derives DDB health from the DDB pid alone.
+    if state.runtime_pid(node_id).is_none() {
+        state.monitor_cache.mark_down(node_id, "diskdb stopped").await;
     }
-    state.persist().map_err(|e| err_500(format!("{e}")))?;
     Ok(Json(crate::lifecycle::StopResult { sent }))
 }
 
@@ -342,6 +384,9 @@ pub async fn http_delete_diskdb(
         }
     }
     state.persist().map_err(|e| err_500(format!("{e}")))?;
+    // Refresh the monitor cache: if KV is still running it stays Up;
+    // if this was a DDB-only node, it marks Down.
+    crate::mgmt::refresh_node_cache(&state, node_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

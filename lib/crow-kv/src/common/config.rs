@@ -9,7 +9,7 @@
 //! the call sites (`crow-kv-server` CLI, testkit harness) before the
 //! group is wrapped in an `Arc`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crow_common::config::BaseConfig;
 
@@ -465,6 +465,12 @@ pub struct CrowKVConfig {
     /// static: log directory. `#[serde(skip)]` — set from CLI.
     #[serde(skip)]
     pub log_dir: String,
+    /// static: node root directory (the `--root` CLI arg). The four
+    /// path fields above are derived from it via `apply_root`.
+    /// `#[serde(skip)]` — set from CLI. Used to populate the
+    /// kv-server keep-alive's `data_root` field in group 0.
+    #[serde(skip)]
+    pub node_root: Option<PathBuf>,
 }
 
 impl BaseConfig for CrowKVConfig {
@@ -531,6 +537,7 @@ impl Default for CrowKVConfig {
             crowtree_backend: "file".to_string(),
             wal_skip_fsync: false,
             log_dir: "log".to_string(),
+            node_root: None,
         }
     }
 }
@@ -583,6 +590,19 @@ impl CrowKVConfig {
     #[must_use]
     pub fn inflight_admission(&self) -> AdmissionPolicy {
         self.paxos.inflight_admission
+    }
+
+    /// Derive the four runtime paths from a node root directory using
+    /// the fixed on-disk layout: `wal_root = root/waldata`,
+    /// `config_root = root/conf`, `data_root = root/ctdata`,
+    /// `log_dir = root/log`. Also records `root` in `node_root` so the
+    /// keep-alive loop can publish it to group 0.
+    pub fn apply_root(&mut self, root: &Path) {
+        self.wal_root = root.join("waldata");
+        self.config_root = root.join("conf");
+        self.data_root = root.join("ctdata");
+        self.log_dir = root.join("log").to_string_lossy().into_owned();
+        self.node_root = Some(root.to_path_buf());
     }
 }
 

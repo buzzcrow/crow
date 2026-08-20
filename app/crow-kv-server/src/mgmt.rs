@@ -22,6 +22,7 @@ use serde::Serialize;
 use utoipa::{OpenApi, ToSchema};
 
 use crow_kv::cluster::group_config::GroupConfigStore;
+use crow_kv::cluster::node_config::NodeConfigStore;
 use crow_kv::cluster::status::{GroupStatus, RemoteStatus, ReplicaStatus, StoreStatus};
 use crow_protocol::mgmt::{
     AddGroupRequest, AddStoreRequest, GroupSummary, HealthResponse, MetricField, MetricPoint,
@@ -47,12 +48,27 @@ pub(super) fn err_json(
     (status, Json(ErrorResponse { error: msg.into() }))
 }
 
-/// Scan the config root for any `store{store_id}_group*.json` file, load it,
-/// and extract the port from the first member's endpoint. Returns `None` if
-/// no config file exists or no valid endpoint is found.
+/// Resolve the persisted listen port for `store_id` from the on-disk
+/// node config. Checks `node-config.json` first (the primary format),
+/// then falls back to legacy `store{S}_group{G}.json` files for
+/// migration. Returns `None` if no config exists or no valid endpoint
+/// is found.
 ///
 /// Priority: explicit port > persisted config port > OS-assigned (port 0).
 pub async fn persisted_port_for_store(config_root: &std::path::Path, store_id: u64) -> Option<u16> {
+    // Primary: node-config.json.
+    let node_store = NodeConfigStore::new(config_root);
+    if let Ok(config) = node_store.load().await {
+        if let Some(store_entry) = config.store(store_id) {
+            for group in &store_entry.groups {
+                if let Some(port) = extract_port_from_members(&group.members) {
+                    return Some(port);
+                }
+            }
+        }
+    }
+
+    // Fallback: legacy per-group config files.
     let conf_dir = std::fs::read_dir(config_root).ok()?;
     for entry in conf_dir.flatten() {
         let name = entry.file_name();
@@ -62,17 +78,8 @@ pub async fn persisted_port_for_store(config_root: &std::path::Path, store_id: u
                 if let Ok(group_id) = group_str.parse::<u64>() {
                     let store = GroupConfigStore::new(config_root, store_id, group_id);
                     if let Ok(Some(config)) = store.load().await {
-                        for member in &config.members {
-                            if let Some(port) = member
-                                .endpoint
-                                .rsplit(':')
-                                .next()
-                                .and_then(|p| p.parse::<u16>().ok())
-                            {
-                                if port > 0 {
-                                    return Some(port);
-                                }
-                            }
+                        if let Some(port) = extract_port_from_members(&config.members) {
+                            return Some(port);
                         }
                     }
                 }
@@ -80,6 +87,14 @@ pub async fn persisted_port_for_store(config_root: &std::path::Path, store_id: u
         }
     }
     None
+}
+
+/// Extract the first non-zero port from a list of group members.
+fn extract_port_from_members(members: &[crow_kv::cluster::group_config::PxGroupMember]) -> Option<u16> {
+    members
+        .iter()
+        .find_map(|m| m.endpoint.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()))
+        .filter(|&p| p > 0)
 }
 
 // ── Router ────────────────────────────────────────────────

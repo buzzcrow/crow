@@ -53,7 +53,8 @@ pub struct DeployRequest {
     /// `--coalesce-drain-threshold` value. `None` leaves the spawned
     /// server's own default in effect.
     pub coalesce_drain_threshold: Option<usize>,
-    /// Optional `--config` JSON path for `crow-kv-server`.
+    /// Optional `--config` TOML path for `crow-kv-server` (first-boot
+    /// tunable overrides only; ignored in restore mode).
     pub config: Option<PathBuf>,
 }
 
@@ -139,30 +140,12 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
 }
 
 /// Resolve the `--config` path for a deploy. When `req.config` is set,
-/// it is used verbatim. When unset, a minimal (comment-only) TOML config
-/// is written so the server's required `--config` arg is satisfied; all
-/// config fields are `#[serde(default)]`, so an empty file loads defaults.
-/// In a workspace deploy the file lives at `<dir>/conf/crow_kv_server_config.toml`
-/// (matching the server's default `config_root`); otherwise a unique file
-/// under the system temp dir keyed by `rest_port`.
-fn resolve_config_path(req: &DeployRequest, workspace_dir: Option<&std::path::Path>) -> Result<PathBuf> {
-    if let Some(config) = &req.config {
-        return Ok(config.clone());
-    }
-    let path = match workspace_dir {
-        Some(dir) => {
-            let conf = dir.join("conf");
-            std::fs::create_dir_all(&conf).map_err(Error::Io)?;
-            conf.join("crow_kv_server_config.toml")
-        }
-        None => std::env::temp_dir().join(format!("crow-kv-server-deploy-{}.toml", req.rest_port)),
-    };
-    std::fs::write(
-        &path,
-        "# auto-generated minimal config; all fields use defaults\n",
-    )
-    .map_err(Error::Io)?;
-    Ok(path)
+/// it is used verbatim. When unset, returns `None` — the server boots
+/// with `CrowKVConfig::default()` tunables (no toml needed). The
+/// `--config` flag is now optional and only used for first-boot
+/// tunable overrides.
+fn resolve_config_path(req: &DeployRequest) -> Option<PathBuf> {
+    req.config.clone()
 }
 
 async fn deploy_local_in_workspace(
@@ -197,15 +180,13 @@ async fn deploy_local_in_workspace(
         binary.clone()
     };
 
-    let config_path = resolve_config_path(req, workspace_dir)?;
+    let config_path = resolve_config_path(req);
 
     let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
     let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     let mut cmd = Command::new(&launch_binary);
-    cmd.arg("--config")
-        .arg(&config_path)
-        .arg("--management-addr")
+    cmd.arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
         .arg(req.rest_port.to_string())
@@ -220,12 +201,17 @@ async fn deploy_local_in_workspace(
                 .unwrap_or_else(|| "default".into()),
         )
         .kill_on_drop(false);
+    if let Some(config) = &config_path {
+        cmd.arg("--config").arg(config);
+    }
     apply_benchmark_flags(&mut cmd, req);
     for arg in extra_args {
         cmd.arg(arg);
     }
     if let Some(dir) = workspace_dir {
-        cmd.arg("--wal-root").arg("waldata");
+        // The workspace dir is the node root; waldata/conf/ctdata/log
+        // are derived subdirs.
+        cmd.arg("--root").arg(dir);
         // Merge stdout and stderr into one file. We open a temp file before
         // spawn (PID unknown), then rename it with the PID after spawn.
         let log_dir = dir.join("log");
@@ -239,6 +225,11 @@ async fn deploy_local_in_workspace(
         cmd.stdout(Stdio::from(out.try_clone().map_err(Error::Io)?));
         cmd.stderr(Stdio::from(out));
     } else {
+        // Non-workspace deploy: create a unique temp dir as the node
+        // root (waldata/conf/ctdata/log derived under it).
+        let root = std::env::temp_dir().join(format!("crow-kv-server-deploy-{}", req.rest_port));
+        std::fs::create_dir_all(&root).map_err(Error::Io)?;
+        cmd.arg("--root").arg(&root);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
     }
@@ -360,12 +351,14 @@ pub fn process_is_alive(pid: u32) -> bool {
 pub(crate) fn remote_start_command(req: &DeployRequest, server_bin: &str) -> String {
     // `nohup ... &` + redirected fds detaches the child from the SSH
     // channel; the trailing `echo $!` prints the pid we want to capture.
+    // The node root is a per-port dir under /tmp; waldata/conf/ctdata/log
+    // are derived subdirs.
     let config_arg = req
         .config
         .as_ref()
         .map_or_else(String::new, |c| format!(" --config {}", c.display()));
     format!(
-        "nohup {bin}{config_arg} --management-addr 127.0.0.1 --management-port {mp} --ports {gp} \
+        "nohup {bin}{config_arg} --root /tmp/crow-kv-server-{mp} --management-addr 127.0.0.1 --management-port {mp} --ports {gp} \
          >/tmp/crow-kv-server.{mp}.out 2>/tmp/crow-kv-server.{mp}.err </dev/null & echo $!",
         bin = server_bin,
         mp = req.rest_port,

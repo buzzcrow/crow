@@ -120,7 +120,7 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: NodeId) {
         cfg.server_for_node(node_id).map(|s| s.url.clone())
     };
     if let Some(url) = url {
-        if let Ok(client) = ServerClient::new(url) {
+        if let Ok(client) = ServerClient::new(&url) {
             match client.topology().await {
                 Ok(stores) => {
                     let rec = crow_console_shared::monitor::NodeRecord {
@@ -215,6 +215,11 @@ fn remap_zero_host(addr: &str) -> String {
 /// no group-0 endpoint is known (e.g. cluster not yet initialized).
 pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crow_kv_client::HardwareClient> {
     let snap = state.monitor_cache.snapshot().await;
+    if snap.is_empty() {
+        // First-run scenario — no nodes deployed yet. This is normal,
+        // not a warning-worthy condition. Callers fall back to config.
+        return None;
+    }
     for node_id in snap.keys() {
         if let Some(ep) = grpc_endpoint_for_node(state, *node_id, 0).await {
             let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
@@ -222,8 +227,15 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crow_kv_cl
             return Some(crow_kv_client::HardwareClient::new(kv));
         }
     }
-    warn!("build_hardware_client: no group-0 endpoint found in monitor cache");
+    warn!("build_hardware_client: nodes exist but no group-0 endpoint found in monitor cache");
     None
+}
+
+/// Cheap check: is group-0 (store 0) known to the monitor cache?
+/// Use this to gate group-0 sysdata reads without logging warnings
+/// on every poll when the cluster isn't initialized yet.
+pub(crate) async fn group0_available(state: &AppState) -> bool {
+    state.monitor_cache.resolve_store(0).await.is_some()
 }
 
 // ── Metrics proxy (R11) ───────────────────────────────────────────────

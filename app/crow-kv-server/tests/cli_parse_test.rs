@@ -54,15 +54,22 @@ fn parse_port_valid() {
 }
 
 #[test]
-fn parse_wal_root_cli_option() {
+fn parse_root_cli_option() {
     let cli = Cli::parse_from([
         "crow-kv-server",
-        "--config",
-        "conf/crow_kv_server_config.toml",
+        "--root",
+        "/data/N-1",
         "--management-port",
         "9910",
-        "--wal-root",
-        "waldata",
     ]);
-    assert_eq!(cli.wal_root, Some(std::path::PathBuf::from("waldata")));
+    assert_eq!(cli.root, std::path::PathBuf::from("/data/N-1"));
+    // --config is now optional.
+    assert!(cli.config.is_none());
+}
+
+#[test]
+fn parse_root_is_required() {
+    // Omitting --root should fail (clap rejects the invocation).
+    let result = Cli::try_parse_from(["crow-kv-server", "--management-port", "9910"]);
+    assert!(result.is_err());
 }

@@ -421,3 +421,46 @@ export interface DiskdbDeployResult {
 export interface StopResult {
   sent: boolean;
 }
+
+// ── Hardware capacity summary (from group-0 sysdata) ─────────────
+
+export interface HardwareCapacitySummary {
+  datacenter_capacity_bytes: number;
+  racks: RackCapacityEntry[];
+  nodes: NodeCapacityEntry[];
+  disk_groups: DiskGroupCapacityEntry[];
+}
+
+export interface RackCapacityEntry {
+  rack_id: number;
+  status: number;
+  node_count: number;
+  capacity_bytes: number;
+}
+
+export interface NodeCapacityEntry {
+  node_id: number;
+  rack_id: number;
+  status: number;
+  disk_group_count: number;
+  capacity_bytes: number;
+}
+
+export interface DiskGroupCapacityEntry {
+  disk_group_id: number;
+  rack_id: number;
+  node_id: number;
+  status: number;
+  disk_count: number;
+  capacity_bytes: number;
+  disks: DiskCapacityEntry[];
+}
+
+export interface DiskCapacityEntry {
+  disk_id: string;
+  disk_type: number;
+  status: number;
+  capacity_bytes: number;
+  zone_count: number;
+  unit_size_bytes: number;
+}

@@ -26,7 +26,7 @@
 //! Deeper levels (per-replica detail) are intentionally not inlined;
 //! callers needing them follow the logical-tree replica endpoints.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
@@ -145,13 +145,21 @@ impl Expandable for GroupOnNodeView {
 pub struct PhysicalBuilder<'a> {
     pub cfg: &'a ConsoleConfig,
     pub snap: &'a BTreeMap<NodeId, NodeRecord>,
+    pub pids: &'a HashMap<NodeId, u32>,
     truncation: Truncation,
     path: Vec<String>,
 }
 
 impl<'a> PhysicalBuilder<'a> {
-    fn build_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
-        let health = rec.map_or(NodeHealth::Unknown, |node| node.health);
+    fn build_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>, has_pid: bool) -> ServerProcess {
+        // Override health to Down if no PID is tracked — the process
+        // was stopped or the console restarted. The monitor cache may
+        // be stale (no background polling to update it).
+        let health = if has_pid {
+            rec.map_or(NodeHealth::Unknown, |node| node.health)
+        } else {
+            NodeHealth::Down
+        };
         let state = match health {
             NodeHealth::Up => ProcState::Running,
             NodeHealth::Down => ProcState::Failed,
@@ -160,7 +168,7 @@ impl<'a> PhysicalBuilder<'a> {
         ServerProcess {
             mgmt_url: entry.url.clone(),
             grpc_url: entry.grpc_url.clone().unwrap_or_default(),
-            pid: None,
+            pid: if has_pid { Some(0) } else { None },
             state,
             health,
             last_seen_ms: rec.map_or(0, |node| node.last_seen_ms),
@@ -168,10 +176,15 @@ impl<'a> PhysicalBuilder<'a> {
     }
 
     #[must_use]
-    pub fn new(cfg: &'a ConsoleConfig, snap: &'a BTreeMap<NodeId, NodeRecord>) -> Self {
+    pub fn new(
+        cfg: &'a ConsoleConfig,
+        snap: &'a BTreeMap<NodeId, NodeRecord>,
+        pids: &'a HashMap<NodeId, u32>,
+    ) -> Self {
         Self {
             cfg,
             snap,
+            pids,
             truncation: Truncation::default(),
             path: Vec::new(),
         }
@@ -216,10 +229,10 @@ impl<'a> PhysicalBuilder<'a> {
     pub fn build_node(&mut self, node: &NodeEntry, remaining: u8) -> NodeView {
         self.path.push(format!("node:{}", node.id));
         let rec = self.snap.get(&node.id);
-        let server = self
-            .cfg
-            .server_for_node(node.id)
-            .map(|entry| Self::build_server_process(entry, rec));
+        let server = self.cfg.server_for_node(node.id).map(|entry| {
+            let has_pid = self.pids.get(&node.id).is_some();
+            Self::build_server_process(entry, rec, has_pid)
+        });
         let has_server = server.is_some();
         let has_stores = rec.is_some_and(|r| !r.stores.is_empty());
         let stores = if remaining >= 1 {
@@ -333,7 +346,8 @@ mod tests {
     #[test]
     fn depth_one_inlines_nodes_but_not_stores() {
         let (cfg, snap) = seeded_state();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         let view = b.build_rack(&cfg.racks[0], 1);
         let nodes = view.nodes.as_ref().expect("nodes inlined");
         assert_eq!(nodes.len(), 1);
@@ -344,7 +358,8 @@ mod tests {
     #[test]
     fn depth_two_inlines_stores_but_not_groups() {
         let (cfg, snap) = seeded_state();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         let view = b.build_rack(&cfg.racks[0], 2);
         let stores = view.nodes.as_ref().unwrap()[0]
             .stores
@@ -358,7 +373,8 @@ mod tests {
     #[test]
     fn depth_three_inlines_groups() {
         let (cfg, snap) = seeded_state();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         let view = b.build_rack(&cfg.racks[0], 3);
         let groups = view.nodes.as_ref().unwrap()[0].stores.as_ref().unwrap()[0]
             .groups
@@ -372,7 +388,8 @@ mod tests {
     #[test]
     fn depth_zero_returns_flat_rack_no_children() {
         let (cfg, snap) = seeded_state();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         let view = b.build_rack(&cfg.racks[0], 0);
         assert!(view.nodes.is_none());
     }
@@ -380,7 +397,8 @@ mod tests {
     #[test]
     fn truncation_reports_path_when_children_clipped() {
         let (cfg, snap) = seeded_state();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         // depth=1: nodes inlined but stores clipped under n1.
         let _view = b.build_rack(&cfg.racks[0], 1);
         let trunc = b.into_truncation();
@@ -393,7 +411,8 @@ mod tests {
     #[test]
     fn truncation_empty_when_build_reaches_leaves() {
         let (cfg, snap) = seeded_state();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         let _view = b.build_rack(&cfg.racks[0], 3);
         let trunc = b.into_truncation();
         assert!(trunc.is_empty(), "depth 3 reaches every leaf");
@@ -402,7 +421,8 @@ mod tests {
     #[test]
     fn truncation_at_rack_when_depth_zero_but_rack_has_nodes() {
         let (cfg, snap) = seeded_state();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         let _view = b.build_rack(&cfg.racks[0], 0);
         let trunc = b.into_truncation();
         assert_eq!(trunc.paths, vec![vec!["rack:1".to_string()]]);
@@ -429,7 +449,8 @@ mod tests {
         })
         .unwrap();
         let snap = BTreeMap::new();
-        let mut b = PhysicalBuilder::new(&cfg, &snap);
+        let pids = std::collections::HashMap::new();
+        let mut b = PhysicalBuilder::new(&cfg, &snap, &pids);
         let _view = b.build_rack(&cfg.racks[0], 2);
         assert!(
             b.into_truncation().is_empty(),

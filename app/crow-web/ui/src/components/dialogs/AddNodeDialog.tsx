@@ -18,6 +18,7 @@ export interface AddNodeDialogProps {
   defaultHost?: string;
   defaultRestPort?: string;
   defaultRpcPort?: string;
+  defaultDiskdbRpcPort?: string;
   onCreatedRackId?: (rackId: number) => void;
   onSuccess?: () => void | Promise<void>;
 }
@@ -34,6 +35,7 @@ export function AddNodeDialog({
   defaultHost = '127.0.0.1',
   defaultRestPort = '19910',
   defaultRpcPort = '19920',
+  defaultDiskdbRpcPort = '29920',
   onCreatedRackId,
   onSuccess,
 }: AddNodeDialogProps) {
@@ -48,7 +50,7 @@ export function AddNodeDialog({
   const [restPort, setRestPort] = useState(defaultRestPort);
   const [rpcPort, setRpcPort] = useState(defaultRpcPort);
   const [enableDiskdb, setEnableDiskdb] = useState(true);
-  const [diskdbRpcPort, setDiskdbRpcPort] = useState('29920');
+  const [diskdbRpcPort, setDiskdbRpcPort] = useState(defaultDiskdbRpcPort);
   const [isLoading, setIsLoading] = useState(false);
   const { success, error } = useToast();
 
@@ -58,8 +60,8 @@ export function AddNodeDialog({
     setRpcPort(defaultRpcPort);
     setEnableCrowKV(true);
     setEnableDiskdb(true);
-    setDiskdbRpcPort('29920');
-  }, [defaultRpcPort, defaultRestPort, isOpen]);
+    setDiskdbRpcPort(defaultDiskdbRpcPort);
+  }, [defaultRpcPort, defaultRestPort, defaultDiskdbRpcPort, isOpen]);
 
   const isPort = (value: string) => /^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536;
   const deployPortsValid = isPort(restPort) && isPort(rpcPort) && restPort !== rpcPort;
@@ -108,7 +110,7 @@ export function AddNodeDialog({
       setRestPort(defaultRestPort);
       setRpcPort(defaultRpcPort);
       setEnableDiskdb(true);
-      setDiskdbRpcPort('29920');
+      setDiskdbRpcPort(defaultDiskdbRpcPort);
       onClose();
       await onSuccess?.();
     } catch (err) {
@@ -129,7 +131,7 @@ export function AddNodeDialog({
     setRestPort(defaultRestPort);
     setRpcPort(defaultRpcPort);
     setEnableDiskdb(true);
-    setDiskdbRpcPort('29920');
+    setDiskdbRpcPort(defaultDiskdbRpcPort);
     onClose();
   };
 
@@ -208,6 +210,7 @@ export function AddNodeDialog({
             <Input
               label="RPC Port"
               inputMode="numeric"
+              data-testid="kv-rpc-port"
               value={rpcPort}
               onChange={(e) => setRpcPort(e.target.value)}
             />
@@ -224,8 +227,9 @@ export function AddNodeDialog({
         </label>
         {enableDiskdb && (
           <Input
-            label="DiskDB RPC Port"
+            label="RPC Port"
             inputMode="numeric"
+            data-testid="diskdb-rpc-port"
             value={diskdbRpcPort}
             onChange={(e) => setDiskdbRpcPort(e.target.value)}
           />

@@ -16,9 +16,17 @@ pub struct Cli {
     #[arg(long, default_value = "0.0.0.0")]
     pub management_addr: String,
 
-    /// Required: path to a TOML config file. Example: `conf/crow_kv_server_config.toml`
+    /// Node root directory. Derives `wal_root`=`<root>`/waldata,
+    /// `config_root`=`<root>`/conf, `data_root`=`<root>`/ctdata, `log_dir`=`<root>`/log
+    /// (fixed on-disk layout). Required on every start.
     #[arg(long)]
-    pub config: std::path::PathBuf,
+    pub root: std::path::PathBuf,
+
+    /// Optional TOML config for first-boot tunable overrides. Ignored in
+    /// restore mode (group 0 present on disk). When omitted, tunables use
+    /// `CrowKVConfig::default()`.
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
 
     /// Port pool for gRPC `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
     #[arg(long)]
@@ -44,19 +52,8 @@ pub struct Cli {
     #[arg(short = 'l', long)]
     pub log: bool,
 
-    #[arg(long)]
-    pub wal_root: Option<std::path::PathBuf>,
-
-    /// Root directory for group config files. Default: sibling of `wal_root` named `conf`.
-    #[arg(long)]
-    pub config_root: Option<std::path::PathBuf>,
-
     #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e"])]
     pub election_profile: String,
-
-    /// Root directory for durable per-group crow-tree files. Default: sibling of `wal_root` named `ctdata`.
-    #[arg(long)]
-    pub data_root: Option<std::path::PathBuf>,
 
     /// Durable backend for the crow-tree engine. `file` (default) is the
     /// file-based page store (no alignment); `block` opens `data_root`'s

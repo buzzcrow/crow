@@ -100,9 +100,19 @@ pub fn router(state: AppState) -> axum::Router {
             "/api/disk-groups/:rack_id/:node_id/:dg_id/status",
             axum::routing::put(diskdb::http_set_disk_group_status),
         )
+        // Disk-group ownership/bind assignment (capacity view).
+        .route(
+            "/api/disk-groups/:rack_id/:node_id/:dg_id/owner",
+            axum::routing::put(diskdb::http_set_disk_group_owner),
+        )
+        .route(
+            "/api/disk-groups/:rack_id/:node_id/:dg_id/bind",
+            axum::routing::put(diskdb::http_set_disk_group_bind),
+        )
         // ── Diskdb runtime proxy (R77): /api/diskdb/* ───────────────
         .route("/api/diskdb/instances", get(diskdb::http_list_diskdb_instances))
         .route("/api/diskdb/usage", get(diskdb::http_diskdb_usage))
+        .route("/api/hardware/capacity", get(diskdb::http_hardware_capacity))
         .route("/api/diskdb/scan-status", get(diskdb::http_diskdb_scan_status))
         .route("/api/diskdb/scan", post(diskdb::http_diskdb_scan))
         .route("/api/diskdb/recalc", post(diskdb::http_diskdb_recalc))

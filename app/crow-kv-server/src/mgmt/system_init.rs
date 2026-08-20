@@ -175,6 +175,16 @@ pub(super) async fn system_init(
         store.add_group_without_election(group);
     }
 
+    // Persist the group config to node-config.json so the replica_id,
+    // endpoint, and membership survive a restart. Without this,
+    // single-node init (no remote-wiring step) leaves no node-config
+    // entry for store 0, and restore mode cannot recover the store's
+    // listen port — it falls back to the port pool, which may collide
+    // with another store's persisted port.
+    if let Some(g) = store.get_group(SYSTEM_GROUP_ID) {
+        g.persist_config().await;
+    }
+
     info!(
         store_id = SYSTEM_STORE_ID,
         group_id = SYSTEM_GROUP_ID,

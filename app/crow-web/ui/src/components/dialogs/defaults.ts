@@ -76,6 +76,22 @@ export function nextNumericId(existingIds: (string | number)[], min = 1): string
   return String(max + 1);
 }
 
+/// Find the minimal unused numeric id >= `min`. Unlike `nextNumericId`
+/// (which returns max+1), this fills gaps: if ids 1 and 3 exist, it
+/// returns 2 instead of 4.
+export function minUnusedId(existingIds: (string | number)[], min = 1): string {
+  const used = new Set<number>();
+  for (const id of existingIds) {
+    const raw = String(id).trim();
+    if (!/^\d+$/.test(raw)) continue;
+    const n = Number(raw);
+    if (Number.isFinite(n)) used.add(n);
+  }
+  let candidate = min;
+  while (used.has(candidate)) candidate += 1;
+  return String(candidate);
+}
+
 export function extractPort(urlOrAddr?: string | null): number | null {
   const value = (urlOrAddr || '').trim();
   if (!value) return null;

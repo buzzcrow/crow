@@ -17,6 +17,7 @@ import 'reactflow/dist/style.css';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth } from '../types';
+import { DEFAULT_DC_ID } from '../data/defaultDatacenter';
 import { buildFlowForViewMode, FlowNodeData } from './buildFlow';
 import { layoutTree } from './layout';
 import { CrowKVNode } from './CrowKVNode';
@@ -28,6 +29,8 @@ export interface MenuTarget {
   rawId?: string | number;
   parentIds?: Record<string, string | number>;
   label?: string;
+  /** Service flavor for `Server` targets: KV vs DiskDB. */
+  serviceType?: 'kv' | 'diskdb';
 }
 
 interface TopologyCanvasProps {
@@ -38,6 +41,7 @@ interface TopologyCanvasProps {
   nodeStores?: Record<string, NodeStore[]>;
   nodeHealthById?: Record<string, NodeHealth>;
   diskdbNodeIds?: Set<number>;
+  diskdbInstances?: { instance_id: number; owned_dg_ids: number[] }[];
   refreshToken?: number;
   focusRequest?: { targetId: string; subtree: boolean; nonce: number } | null;
   /** Right-click on a canvas node. */
@@ -78,9 +82,15 @@ function selectedNodeId(entity: SelectedEntity): string | null {
   const p = entity.parentIds || {};
   if (entity.viewMode === ViewMode.Physical || entity.viewMode === ViewMode.Capacity) {
     switch (entity.type) {
+      case 'Datacenter': return `DC-${DEFAULT_DC_ID}`;
       case 'Rack': return `R-${entity.id}`;
       case 'Node': return `N-${entity.id}`;
-      case 'Server': return p.node_id ? `KV-${p.node_id}` : null;
+      case 'Server': {
+        // DDB server nodes use `DDB-` prefix; KV servers use `KV-`.
+        if (entity.id?.startsWith?.('DDB-')) return p.node_id ? `DDB-${p.node_id}` : null;
+        return p.node_id ? `KV-${p.node_id}` : null;
+      }
+      case 'DiskGroup': return p.node_id ? `DDBG-${p.node_id}-${entity.id}` : null;
       case 'Store': return p.node_id ? `S-${p.node_id}-${entity.id}` : null;
       case 'Group':
         return p.node_id && p.store_id ? `G-${p.node_id}-${p.store_id}-${entity.id}` : null;
@@ -91,6 +101,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
     }
   }
   switch (entity.type) {
+    case 'Datacenter': return `DC-${DEFAULT_DC_ID}`;
     case 'Store': return `S-${entity.id}`;
     case 'Group': return p.store_id ? `G-${p.store_id}-${entity.id}` : null;
     case 'Replica':
@@ -99,7 +110,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
   }
 }
 
-function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
+function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
   const { viewMode } = useViewMode();
   const { selectedEntity, selectEntity } = useSelection();
   const { fitView, setViewport, setCenter, getZoom, getNodes } = useReactFlow();
@@ -120,8 +131,8 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   const fitRafIdRef = useRef<number | undefined>(undefined);
 
   const { nodes: rawNodes, edges } = useMemo(
-    () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds),
-    [viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds],
+    () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances),
+    [viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances],
   );
 
   const positioned = useMemo(() => layoutTree(rawNodes, edges), [rawNodes, edges]);
@@ -257,7 +268,7 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       if (!data.entity) return;
       selectEntity({ ...data.entity, viewMode });
       onEntityContextMenu?.(
-        { type: data.entity.type, id: data.entity.id, parentIds: data.entity.parentIds, label: data.label },
+        { type: data.entity.type, id: data.entity.id, parentIds: data.entity.parentIds, label: data.label, serviceType: data.entity.serviceType },
         e,
       );
     },

@@ -3,12 +3,12 @@
 
 import { memo } from 'react';
 import { Handle, NodeProps, Position } from 'reactflow';
-import { FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Crown, AlertTriangle } from 'lucide-react';
+import { FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Crown, AlertTriangle, Building2 } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { toUiHealth } from '../utils/entityDisplay';
 
 interface CrowKVNodeData {
-  kind: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
+  kind: 'Datacenter' | 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica' | 'DiskGroup';
   label: string;
   sublabel?: string;
   health?: string;
@@ -22,6 +22,7 @@ interface CrowKVNodeData {
 }
 
 const iconForKind: Record<CrowKVNodeData['kind'], typeof FolderTree> = {
+  Datacenter: Building2,
   Rack: FolderTree,
   Node: Monitor,
   Server: Cog,
@@ -30,9 +31,11 @@ const iconForKind: Record<CrowKVNodeData['kind'], typeof FolderTree> = {
   Replica: HardDrive,
   LocalReplica: HardDrive,
   RemoteReplica: RadioTower,
+  DiskGroup: Boxes,
 };
 
 const accentForKind: Record<CrowKVNodeData['kind'], string> = {
+  Datacenter: 'tw-text-accent',
   Rack: 'tw-text-accent',
   Node: 'tw-text-accent2',
   Server: 'tw-text-accent',
@@ -41,9 +44,11 @@ const accentForKind: Record<CrowKVNodeData['kind'], string> = {
   Replica: 'tw-text-healthy',
   LocalReplica: 'tw-text-healthy',
   RemoteReplica: 'tw-text-remote',
+  DiskGroup: 'tw-text-accent',
 };
 
 const surfaceForKind: Record<CrowKVNodeData['kind'], string> = {
+  Datacenter: 'tw-bg-panel tw-border-border',
   Rack: 'tw-bg-panel tw-border-border',
   Node: 'tw-bg-panel tw-border-border',
   Server: 'tw-bg-accent2/10 tw-border-accent2/30',
@@ -52,6 +57,7 @@ const surfaceForKind: Record<CrowKVNodeData['kind'], string> = {
   Replica: 'tw-bg-healthy/10 tw-border-healthy/30',
   LocalReplica: 'tw-bg-healthy/10 tw-border-healthy/30',
   RemoteReplica: 'tw-bg-remote/10 tw-border-remote/30',
+  DiskGroup: 'tw-bg-accent/10 tw-border-accent/30',
 };
 
 /**

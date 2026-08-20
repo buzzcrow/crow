@@ -35,6 +35,82 @@ use crate::{CrowkvClient, Error, Result};
 const G0_STORE: u64 = 0;
 const G0_GROUP: u64 = 0;
 
+// ── capacity summary types ───────────────────────────────────────
+
+/// A disk record with full key context, returned by `list_all_disks`.
+#[derive(Debug, Clone)]
+pub struct DiskRecord {
+    pub rack_id: RackId,
+    pub node_id: NodeId,
+    pub disk_group_id: DiskGroupId,
+    pub disk_id: crow_protocol::common::DiskId,
+    pub value: DiskValue,
+}
+
+impl DiskRecord {
+    /// Physical capacity in bytes = `capacity_units * unit_size_bytes`.
+    #[must_use]
+    pub fn capacity_bytes(&self) -> u64 {
+        self.value.capacity_units * u64::from(self.value.unit_size_bytes)
+    }
+}
+
+/// Per-disk capacity entry in a [`HardwareCapacitySummary`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiskCapacityEntry {
+    pub disk_id: String,
+    pub disk_type: i32,
+    pub status: i32,
+    pub capacity_bytes: u64,
+    pub zone_count: u32,
+    pub unit_size_bytes: u32,
+}
+
+/// Per-disk-group capacity entry.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiskGroupCapacityEntry {
+    pub disk_group_id: DiskGroupId,
+    pub rack_id: RackId,
+    pub node_id: NodeId,
+    pub status: i32,
+    pub disk_count: u32,
+    pub capacity_bytes: u64,
+    pub disks: Vec<DiskCapacityEntry>,
+}
+
+/// Per-node capacity entry.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NodeCapacityEntry {
+    pub node_id: NodeId,
+    pub rack_id: RackId,
+    pub status: i32,
+    pub disk_group_count: u32,
+    pub capacity_bytes: u64,
+}
+
+/// Per-rack capacity entry.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RackCapacityEntry {
+    pub rack_id: RackId,
+    pub status: i32,
+    pub node_count: u32,
+    pub capacity_bytes: u64,
+}
+
+/// Hierarchical capacity summary computed from group-0 hardware
+/// sysdata. Does NOT require diskdb ownership or binding — the
+/// physical disk capacity is a property of the disk record itself.
+///
+/// `datacenter.capacity_bytes` = sum of all racks = sum of all nodes
+/// = sum of all disk-groups = sum of all disks.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HardwareCapacitySummary {
+    pub datacenter_capacity_bytes: u64,
+    pub racks: Vec<RackCapacityEntry>,
+    pub nodes: Vec<NodeCapacityEntry>,
+    pub disk_groups: Vec<DiskGroupCapacityEntry>,
+}
+
 /// Client for the hardware hierarchy and per-disk-group maps in
 /// group 0.
 ///
@@ -461,6 +537,121 @@ impl HardwareClient {
             out.push((k.disk_id, value));
         }
         Ok(out)
+    }
+
+    /// List all disk records (prefix scan `/hw/disk/`). Returns full
+    /// key context (rack, node, dg, `disk_id`) plus the `DiskValue`.
+    pub async fn list_all_disks(&self) -> Result<Vec<DiskRecord>> {
+        let entries = scan_prefix::<DiskValue>(&self.kv, &<DiskKey as TextKey>::prefix_all()).await?;
+        let mut out = Vec::with_capacity(entries.len());
+        for (path, value) in entries {
+            let k = DiskKey::from_path(&path).map_err(|e| Error::SysdataKeyParse(e.to_string()))?;
+            out.push(DiskRecord {
+                rack_id: k.rack_id,
+                node_id: k.node_id,
+                disk_group_id: k.disk_group_id,
+                disk_id: k.disk_id,
+                value,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Build a hierarchical capacity summary from group-0 hardware
+    /// sysdata. Scans all racks, nodes, disk-groups, and disks, then
+    /// sums `capacity_units * unit_size_bytes` at each level.
+    ///
+    /// Does NOT require diskdb ownership or binding — physical disk
+    /// capacity is a property of the disk record itself.
+    pub async fn capacity_summary(&self) -> Result<HardwareCapacitySummary> {
+        let racks = self.list_racks().await?;
+        let nodes = self.list_nodes().await?;
+        let disk_groups = self.list_disk_groups().await?;
+        let disks = self.list_all_disks().await?;
+
+        // Group disks by (rack_id, node_id, dg_id).
+        let mut dg_map: std::collections::BTreeMap<(RackId, NodeId, DiskGroupId), Vec<&DiskRecord>> =
+            std::collections::BTreeMap::new();
+        for d in &disks {
+            dg_map
+                .entry((d.rack_id, d.node_id, d.disk_group_id))
+                .or_default()
+                .push(d);
+        }
+
+        // Build disk-group entries with per-disk detail.
+        let mut dg_entries: Vec<DiskGroupCapacityEntry> = Vec::new();
+        let mut dg_cap_by_node: std::collections::BTreeMap<(RackId, NodeId), u64> =
+            std::collections::BTreeMap::new();
+        for dg in &disk_groups {
+            let key = (dg.rack_id, dg.node_id, dg.dg_id);
+            let dg_disks = dg_map.get(&key).cloned().unwrap_or_default();
+            let disk_entries: Vec<DiskCapacityEntry> = dg_disks
+                .iter()
+                .map(|d| DiskCapacityEntry {
+                    disk_id: crow_protocol::diskdb_type_util::DiskIdExt::to_display_string(&d.disk_id),
+                    disk_type: d.value.disk_type,
+                    status: d.value.status,
+                    capacity_bytes: d.capacity_bytes(),
+                    zone_count: d.value.zone_count,
+                    unit_size_bytes: d.value.unit_size_bytes,
+                })
+                .collect();
+            let cap: u64 = disk_entries.iter().map(|d| d.capacity_bytes).sum();
+            *dg_cap_by_node.entry((dg.rack_id, dg.node_id)).or_insert(0) += cap;
+            dg_entries.push(DiskGroupCapacityEntry {
+                disk_group_id: dg.dg_id,
+                rack_id: dg.rack_id,
+                node_id: dg.node_id,
+                status: dg.value.status,
+                disk_count: disk_entries.len() as u32,
+                capacity_bytes: cap,
+                disks: disk_entries,
+            });
+        }
+
+        // Build node entries.
+        let node_entries: Vec<NodeCapacityEntry> = nodes
+            .iter()
+            .map(|(rack_id, node_id, nv)| {
+                let cap = dg_cap_by_node.get(&(*rack_id, *node_id)).copied().unwrap_or(0);
+                let dg_count = disk_groups
+                    .iter()
+                    .filter(|dg| dg.rack_id == *rack_id && dg.node_id == *node_id)
+                    .count() as u32;
+                NodeCapacityEntry {
+                    node_id: *node_id,
+                    rack_id: *rack_id,
+                    status: nv.status,
+                    disk_group_count: dg_count,
+                    capacity_bytes: cap,
+                }
+            })
+            .collect();
+
+        // Build rack entries.
+        let mut rack_cap: std::collections::BTreeMap<RackId, u64> = std::collections::BTreeMap::new();
+        for n in &node_entries {
+            *rack_cap.entry(n.rack_id).or_insert(0) += n.capacity_bytes;
+        }
+        let rack_entries: Vec<RackCapacityEntry> = racks
+            .iter()
+            .map(|(rid, rv)| RackCapacityEntry {
+                rack_id: *rid,
+                status: rv.status,
+                node_count: nodes.iter().filter(|(r, _, _)| r == rid).count() as u32,
+                capacity_bytes: rack_cap.get(rid).copied().unwrap_or(0),
+            })
+            .collect();
+
+        let dc_cap: u64 = rack_entries.iter().map(|r| r.capacity_bytes).sum();
+
+        Ok(HardwareCapacitySummary {
+            datacenter_capacity_bytes: dc_cap,
+            racks: rack_entries,
+            nodes: node_entries,
+            disk_groups: dg_entries,
+        })
     }
 
     /// Set a disk's status (read-modify-write).

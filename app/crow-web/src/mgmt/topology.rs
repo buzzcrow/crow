@@ -4,14 +4,14 @@
 //! Topology restore: startup three-way fallback + per-node restore.
 
 use crate::mgmt::{
-    build_server_client, grpc_endpoint_for_node, mgmt_url_for_node, refresh_node_cache, rpc_is_conflict,
-    rpc_is_not_found,
+    build_server_client, grpc_endpoint_for_node, mgmt_url_for_node, port_of, refresh_node_cache,
+    rpc_is_conflict, rpc_is_not_found,
 };
 use crate::state::AppState;
 use crow_console_shared::clients::http::ServerClient;
 use crow_console_shared::cluster::NodeId;
-use crow_console_shared::config::{GroupEntry, NodeEntry, ServerEntry, StoreEntry};
-use crow_console_shared::lifecycle::{self, DeployRequest};
+use crow_console_shared::config::{GroupEntry, NodeEntry, ServerEntry, ServiceType, StoreEntry};
+use crow_console_shared::lifecycle::{self, DeployRequest, DiskdbDeployRequest};
 use crow_console_shared::mgmt::{AddGroupInitialRole, AddGroupRequest, AddStoreRequest};
 use tracing::{info, warn};
 
@@ -98,7 +98,12 @@ pub(crate) async fn restore_persisted_topology(state: &AppState) {
             );
             continue;
         };
-        if let Err(err) = ensure_server_running(state, node, server).await {
+        let result = if server.service_type == ServiceType::Diskdb {
+            ensure_diskdb_running(state, node, server).await
+        } else {
+            ensure_server_running(state, node, server).await
+        };
+        if let Err(err) = result {
             warn!(server_id = server.id, node_id, error = %err, "failed to restore server process");
         }
     }
@@ -261,6 +266,69 @@ async fn ensure_server_running(
             .map_err(|e| e.to_string())?
     };
     state.set_runtime_pid(node.id, deployed.pid);
+    refresh_node_cache(state, node.id).await;
+    Ok(())
+}
+
+/// Restore a persisted `DiskDB` instance on startup. Mirrors
+/// `ensure_server_running` but spawns `crow-diskdb` via
+/// `deploy_diskdb_local` instead of the KV-server deploy path.
+async fn ensure_diskdb_running(
+    state: &AppState,
+    node: &NodeEntry,
+    server: &ServerEntry,
+) -> Result<(), String> {
+    // If the process is already alive, just refresh the cache.
+    if let Some(pid) = state.diskdb_runtime_pid(node.id) {
+        if lifecycle::process_is_alive(pid) {
+            refresh_node_cache(state, node.id).await;
+            return Ok(());
+        }
+        state.clear_diskdb_runtime_pid(node.id);
+    }
+    if !server.auto_start {
+        return Ok(());
+    }
+    let rpc_port = server
+        .rpc_port
+        .or_else(|| server.grpc_url.as_deref().and_then(port_of))
+        .ok_or_else(|| format!("diskdb entry {} missing persisted rpc_port", server.id))?;
+    // Look up the kv-server management URL(s) on this node so the
+    // diskdb can discover group-0 after restart.
+    let kv_server_mgmt_seeds: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.servers
+            .iter()
+            .filter(|s| s.node_id == Some(node.id) && s.service_type == ServiceType::Kv)
+            .map(|s| s.url.clone())
+            .collect()
+    };
+    let req = DiskdbDeployRequest {
+        server_id: server.id.clone(),
+        rpc_port,
+        kv_server_mgmt_seeds,
+    };
+    let workspace_dir = state
+        .prepare_node_workspace(node.id.to_string())
+        .map_err(|e| e.to_string())?;
+    let deployed = lifecycle::deploy_diskdb_local(&req, node, &workspace_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    state.set_diskdb_runtime_pid(node.id, deployed.pid);
+    // Update the persisted entry with the fresh mgmt_url/grpc_url in
+    // case the HTTP listen address changed (e.g. port rotation).
+    {
+        let mut cfg = state.config.write().unwrap();
+        if let Some(entry) = cfg
+            .servers
+            .iter_mut()
+            .find(|s| s.node_id == Some(node.id) && s.service_type == ServiceType::Diskdb)
+        {
+            entry.url.clone_from(&deployed.mgmt_url);
+            entry.grpc_url = Some(deployed.grpc_url.clone());
+        }
+    }
+    state.persist().map_err(|e| e.to_string())?;
     refresh_node_cache(state, node.id).await;
     Ok(())
 }

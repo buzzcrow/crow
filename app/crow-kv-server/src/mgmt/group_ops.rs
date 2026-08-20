@@ -290,6 +290,14 @@ pub(super) async fn add_group(
         store.add_group_without_election(group);
     }
 
+    // Persist the group config to node-config.json so the replica_id
+    // and membership survive a restart. Without this, single-replica
+    // groups (no remote-replica trigger) would have no node-config.json
+    // entry, and restore would fall back to the CLI --replica default.
+    if let Some(g) = store.get_group(req.group_id) {
+        g.persist_config().await;
+    }
+
     info!(
         store_id = sid,
         group_id = req.group_id,

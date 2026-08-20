@@ -21,6 +21,7 @@ import type {
   RebuildResultResponse,
   DiskdbDeployResult,
   StopResult,
+  HardwareCapacitySummary,
 } from './types';
 
 /**
@@ -912,6 +913,11 @@ export async function getDiskdbUsage(
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
 
+/** `GET /api/hardware/capacity` — hierarchical capacity from group-0 sysdata. */
+export async function getHardwareCapacity(options?: RequestOptions): Promise<HardwareCapacitySummary> {
+  return jsonOrThrow(await fetchWithOptions('/api/hardware/capacity', { ...options, method: 'GET' }));
+}
+
 /** `GET /api/diskdb/scan-status` — get scan status. */
 export async function getDiskdbScanStatus(dg?: number, options?: RequestOptions): Promise<ScanStatusResponse> {
   const url = `/api/diskdb/scan-status${qs({ dg })}`;
@@ -1011,6 +1017,48 @@ export async function setDiskGroupStatus(
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(`PUT /api/disk-groups/${rackId}/${nodeId}/${dgId}/status: HTTP ${resp.status}: ${body}`);
+  }
+}
+
+/** `PUT /api/disk-groups/:rack_id/:node_id/:dg_id/owner` — assign a disk-group to a diskdb instance. */
+export async function setDiskGroupOwner(
+  rackId: number,
+  nodeId: number,
+  dgId: number,
+  body: { instance_id: number; lease_expiry_ms: number },
+  options?: RequestOptions,
+): Promise<void> {
+  const resp = await fetchWithOptions(`/api/disk-groups/${rackId}/${nodeId}/${dgId}/owner`, {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`PUT /api/disk-groups/${rackId}/${nodeId}/${dgId}/owner: HTTP ${resp.status}: ${text}`);
+  }
+}
+
+/** `PUT /api/disk-groups/:rack_id/:node_id/:dg_id/bind` — bind a disk-group to a paxos data group. */
+export async function setDiskGroupBind(
+  rackId: number,
+  nodeId: number,
+  dgId: number,
+  body: { store_id: number; group_id: number },
+  options?: RequestOptions,
+): Promise<void> {
+  const resp = await fetchWithOptions(`/api/disk-groups/${rackId}/${nodeId}/${dgId}/bind`, {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    skipDeduplication: true,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`PUT /api/disk-groups/${rackId}/${nodeId}/${dgId}/bind: HTTP ${resp.status}: ${text}`);
   }
 }
 

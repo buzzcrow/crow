@@ -31,6 +31,11 @@ pub struct AppState {
     pub monitor_cache: Arc<MonitorCache>,
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     pub diskdb_client: Arc<tokio::sync::RwLock<Option<crow_diskdb_client::DiskdbClient>>>,
+    /// Rate-limiter for repeated gRPC failure warnings: maps
+    /// `endpoint` → last-warned timestamp. Prevents flooding the
+    /// console with identical "instance query failed" warnings every
+    /// poll cycle when a diskdb instance is unreachable.
+    pub warn_dedup: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 impl Default for AppState {
@@ -79,6 +84,7 @@ impl AppState {
             monitor_cache: Arc::new(MonitorCache::new()),
             runtime_pids: Arc::new(std::sync::Mutex::new(HashMap::new())),
             diskdb_client: Arc::new(tokio::sync::RwLock::new(None)),
+            warn_dedup: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -127,6 +133,27 @@ impl AppState {
         self.runtime_pids.lock().unwrap().remove(&node_id.to_string());
     }
 
+    /// Snapshot of all tracked KV server PIDs, keyed by node id.
+    /// Excludes DDB PIDs (keyed as `diskdb-{node_id}`).
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    #[must_use]
+    pub fn kv_pid_snapshot(&self) -> std::collections::HashMap<u64, u32> {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, v)| {
+                if k.starts_with("diskdb-") {
+                    None
+                } else {
+                    k.parse::<u64>().ok().map(|n| (n, *v))
+                }
+            })
+            .collect()
+    }
+
     /// Get the runtime PID for a diskdb instance on a node (R77).
     /// Keyed separately from kv-server PIDs.
     ///
@@ -166,6 +193,25 @@ impl AppState {
     #[must_use]
     pub fn node_workspace_dir(&self, node_id: impl std::fmt::Display) -> PathBuf {
         self.runtime_root.join(format!("N-{node_id}"))
+    }
+
+    /// Rate-limited warning: returns `true` if the caller should warn
+    /// (at most once per `interval` per `key`), `false` if the same
+    /// key was warned recently and should be suppressed.
+    ///
+    /// # Panics
+    /// Panics if the `Mutex` is poisoned.
+    #[must_use]
+    pub fn should_warn(&self, key: &str, interval: std::time::Duration) -> bool {
+        let mut map = self.warn_dedup.lock().unwrap();
+        let now = std::time::Instant::now();
+        if let Some(last) = map.get(key) {
+            if now.duration_since(*last) < interval {
+                return false;
+            }
+        }
+        map.insert(key.to_string(), now);
+        true
     }
 
     /// Remove all node workspace directories under `runtime_root`.

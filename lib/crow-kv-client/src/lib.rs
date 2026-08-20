@@ -44,7 +44,10 @@ pub use client::{
 };
 pub use config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
 pub use error::{Error, Result};
-pub use hardware::HardwareClient;
+pub use hardware::{
+    DiskCapacityEntry, DiskGroupCapacityEntry, DiskRecord, HardwareCapacitySummary, HardwareClient,
+    NodeCapacityEntry, RackCapacityEntry,
+};
 pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 pub use range_binding::{ChunkdbRangeBinding, RangeBindingClient, RangeRouteError, RouteWithFallback};

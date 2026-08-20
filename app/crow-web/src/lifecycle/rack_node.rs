@@ -43,7 +43,8 @@ pub(crate) async fn http_list_racks(
     }
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let pids = state.kv_pid_snapshot();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
     let limit = depth.effective();
     let racks: Vec<_> = cfg.racks.iter().map(|r| builder.build_rack(r, limit)).collect();
     let trunc = builder.into_truncation();
@@ -191,10 +192,20 @@ pub(crate) async fn http_ping_node(
             )
         })?
     };
+    // For local-fork nodes, check whether a KV server process is
+    // actually running (has a tracked PID). SSH reachability is a
+    // no-op for local nodes, so without this check the health badge
+    // always shows Healthy even after the server is stopped.
     if !node.ssh_enabled() {
+        let has_kv_pid = state.runtime_pid(id).is_some();
+        let has_ddb_pid = state.diskdb_runtime_pid(id).is_some();
         return Ok(Json(PingResult {
-            ok: true,
-            error: None,
+            ok: has_kv_pid || has_ddb_pid,
+            error: if has_kv_pid || has_ddb_pid {
+                None
+            } else {
+                Some("no running server process".to_string())
+            },
         }));
     }
     match crow_console_shared::ssh::probe(&node).await {
@@ -259,7 +270,8 @@ pub(crate) async fn http_get_rack(
             )
         })?
         .clone();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let pids = state.kv_pid_snapshot();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
     let view = builder.build_rack(&rack, depth.effective());
     let trunc = builder.into_truncation();
     let mut body = serde_json::to_value(&view).expect("serialize rack view");
@@ -314,7 +326,8 @@ pub(crate) async fn http_list_rack_nodes(
         .filter(|n| n.rack_id == rack_id_num)
         .cloned()
         .collect();
-    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let pids = state.kv_pid_snapshot();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap, &pids);
     let limit = depth.effective();
     let views: Vec<_> = nodes.iter().map(|n| builder.build_node(n, limit)).collect();
     let trunc = builder.into_truncation();

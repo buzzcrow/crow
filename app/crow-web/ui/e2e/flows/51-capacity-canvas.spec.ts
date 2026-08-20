@@ -13,7 +13,7 @@ import {
   addDisksBatch,
   removeDisk,
   randomDiskId,
-  stopDiskdb,
+  removeDiskdb,
   deployDiskdb,
   deployNodeServer,
   clusterInit,
@@ -60,7 +60,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText('Capacity Overview')).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
 
       // ScannerPanel header + Run Scan button.
       await expect(panel.getByText('Scanner', { exact: true })).toBeVisible({ timeout: 3_000 });
@@ -79,11 +79,11 @@ test.describe('capacity · canvas + scanner/recalc', () => {
         return btn.isEnabled();
       }, { timeout: 10_000, intervals: [100] }).toBe(true);
     } finally {
-      await stopDiskdb(baseURL!, nodeId);
+      await removeDiskdb(baseURL!, nodeId);
     }
   });
 
-  test('CapacityPanel shows instance header with grpc endpoint', async ({ page, baseURL }) => {
+  test('CapacityPanel shows cluster totals and instance count', async ({ page, baseURL }) => {
     test.setTimeout(30_000);
     const nodeId = CANVAS_NODE;
     const rpcPort = freePort();
@@ -91,14 +91,28 @@ test.describe('capacity · canvas + scanner/recalc', () => {
     try {
       await deployDiskdb(baseURL!, nodeId, rpcPort);
 
+      // Wait for the diskdb instance to register in the service
+      // registry before loading the page (the keepalive loop takes
+      // a few seconds to write the instance entry).
+      const api = await apiContext(baseURL!);
+      try {
+        await expect.poll(async () => {
+          const r = await api.get('/api/diskdb/instances');
+          if (!r.ok()) return 0;
+          return (await r.json()).length;
+        }, { timeout: 15_000, intervals: [500] }).toBeGreaterThanOrEqual(1);
+      } finally {
+        await api.dispose();
+      }
+
       await page.goto('/');
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText('Capacity Overview')).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
 
-      // The instance header should show "diskdb-N" and the grpc endpoint.
-      await expect(panel.getByText(/diskdb-\d+/).first()).toBeVisible({ timeout: 3_000 });
+      // The header subtitle shows the instance count (at least 1).
+      await expect(panel.getByText(/\d+ instance\(s\)/)).toBeVisible({ timeout: 10_000 });
 
       // Cluster-wide totals cards.
       await expect(panel.getByText('Total Capacity')).toBeVisible({ timeout: 3_000 });
@@ -108,7 +122,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       // Refresh button.
       await expect(panel.getByRole('button', { name: 'Refresh' })).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopDiskdb(baseURL!, nodeId);
+      await removeDiskdb(baseURL!, nodeId);
     }
   });
 
@@ -128,38 +142,45 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText('Capacity Overview')).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
 
-      // Wait for the diskdb to report owning this DG. The keepalive
-      // loop writes owned_dg_ids to the service registry; this may
-      // take a few seconds. If the DG never appears, the diskdb's
-      // gRPC endpoint isn't reachable — skip the canvas assertions.
-      const dgLocator = panel.getByText(`DG-${dgId}`, { exact: true });
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${CANVAS_RACK}` }).locator('button[aria-label="Expand"]');
+      if (await expandRack.count() > 0) await expandRack.click();
+      await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
+      const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
+      if (await expandNode.count() > 0) await expandNode.click();
 
+      // Wait for the DG to appear in the sidebar. The keepalive loop
+      // writes owned_dg_ids to the service registry; this may take a
+      // few seconds. If the DG never appears, the diskdb's gRPC
+      // endpoint isn't reachable — skip the canvas assertions.
       let dgVisible = false;
       try {
-        await expect(dgLocator).toBeVisible({ timeout: 15_000 });
+        await expect(aside.getByText(/DG-610/, { exact: true })).toBeVisible({ timeout: 15_000 });
         dgVisible = true;
       } catch {
-        console.warn(`DG-${dgId} did not appear in CapacityPanel — diskdb gRPC not reachable, skipping canvas assertions`);
+        console.warn(`DG-${dgId} did not appear in sidebar — diskdb gRPC not reachable, skipping canvas assertions`);
       }
 
       if (dgVisible) {
-        // Expand the disk-group.
-        const dgRow = dgLocator.locator('..');
-        await dgRow.click();
+        // --- DiskGroup scope: per-disk box grid ---
+        // Click the DG in the sidebar → center panel switches to
+        // DiskGroup scope showing per-disk boxes.
+        await aside.getByText(/DG-610/, { exact: true }).click();
+        await expect(panel.getByText(`Capacity — DG-${dgId}`)).toBeVisible({ timeout: 3_000 });
 
-        // RecalcPanel should render inside the expanded DG.
+        // Per-disk boxes render as colored buttons with busy percentage.
+        await expect(panel.getByText(diskId.slice(0, 8), { exact: false })).toBeVisible({ timeout: 3_000 });
+
+        // --- Disk scope: zone grid + RecalcPanel ---
+        // Click the disk box → center panel switches to Disk scope.
+        await panel.getByText(diskId.slice(0, 8), { exact: false }).click();
+        await expect(panel.getByText(/Capacity — Disk/)).toBeVisible({ timeout: 3_000 });
+
+        // RecalcPanel renders in the Disk scope (scoped to parent DG).
         await expect(panel.getByText(`Recalc (DG-${dgId})`)).toBeVisible({ timeout: 3_000 });
         await expect(panel.getByRole('button', { name: /run recalc/i })).toBeVisible({ timeout: 3_000 });
-
-        // Per-disk boxes render as colored divs with busy percentage.
-        // The disk row should show the disk ID.
-        await expect(panel.getByText(diskId, { exact: true })).toBeVisible({ timeout: 3_000 });
-
-        // Expand the disk row to see the zone grid.
-        const diskRow = panel.getByText(diskId, { exact: true }).locator('..');
-        await diskRow.click();
 
         // Zone grid section should appear.
         await expect(panel.getByText(/Zone grid|No zone usage data available/)).toBeVisible({ timeout: 3_000 });
@@ -176,7 +197,101 @@ test.describe('capacity · canvas + scanner/recalc', () => {
     } finally {
       await removeDisk(baseURL!, nodeId, dgId, diskId).catch(() => {});
       await apiRemoveDiskGroup(baseURL!, nodeId, dgId).catch(() => {});
-      await stopDiskdb(baseURL!, nodeId);
+      await removeDiskdb(baseURL!, nodeId);
+    }
+  });
+
+  /**
+   * Datacenter root (plan-datacenter-root): the fixed `datacenter` node
+   * sits above racks in the Capacity sidebar. Selecting it opens the
+   * inspector with rack count + cluster-wide capacity totals (one DC →
+   * its totals ARE the cluster totals).
+   */
+  test('datacenter root in Capacity sidebar; inspector shows cluster totals', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
+    const nodeId = CANVAS_NODE;
+    const dgId = 620;
+    const diskId = randomDiskId();
+    const rpcPort = freePort();
+
+    try {
+      await deployDiskdb(baseURL!, nodeId, rpcPort);
+      await apiAddDiskGroup(baseURL!, nodeId, dgId, 'dc-dg');
+      await addDisksBatch(baseURL!, nodeId, dgId, [{ disk_id: diskId }]);
+
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Capacity' }).click();
+
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      // The datacenter root is the top treeitem, above the rack.
+      const dcItem = aside.getByRole('treeitem').filter({ hasText: /^datacenter$/ });
+      await expect(dcItem).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByRole('treeitem').first()).toHaveText(/datacenter/);
+
+      // Select the datacenter → inspector opens.
+      await aside.getByText('datacenter', { exact: true }).click();
+      const inspector = page.locator('aside[aria-label="Entity inspector"]');
+      await expect(inspector).toBeVisible({ timeout: 3_000 });
+      const typeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
+      await expect(typeDd).toHaveText('Datacenter', { timeout: 3_000 });
+      // Rack count is always shown (one rack from beforeAll).
+      const rackCountDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Rack Count' }) }).locator('dd');
+      await expect(rackCountDd).toHaveText('1', { timeout: 3_000 });
+
+      // Capacity totals (Total Capacity / Used / Free) are shown in the
+      // Capacity view. Wait for the DG to report usage so the totals are
+      // non-zero; if the diskdb gRPC is unreachable, still verify the
+      // labels render (totals would be 0 B).
+      await expect(inspector.getByText('Total Capacity')).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText('Used', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText('Free', { exact: true })).toBeVisible({ timeout: 3_000 });
+
+      // If the DG appears in usage, verify the inspector totals match the
+      // cluster-wide sum from the API.
+      const api = await apiContext(baseURL!);
+      try {
+        let usageOk = false;
+        try {
+          await expect.poll(async () => {
+            const r = await api.get('/api/diskdb/usage');
+            if (!r.ok()) return false;
+            const body = await r.json();
+            return Array.isArray(body.disk_groups) && body.disk_groups.some((g: any) => g.disk_group_id === dgId);
+          }, { timeout: 15_000, intervals: [200] }).toBe(true);
+          usageOk = true;
+        } catch {
+          console.warn(`DG-${dgId} never reported usage — diskdb gRPC not reachable, skipping totals match`);
+        }
+
+        if (usageOk) {
+          const r = await api.get('/api/diskdb/usage');
+          const body = await r.json();
+          const sum = (body.disk_groups || []).reduce(
+            (acc: { capacity: number; busy: number; free: number }, g: any) => ({
+              capacity: acc.capacity + g.capacity_bytes,
+              busy: acc.busy + g.busy_bytes,
+              free: acc.free + g.free_bytes,
+            }),
+            { capacity: 0, busy: 0, free: 0 },
+          );
+          const capDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Total Capacity' }) }).locator('dd');
+          await expect(capDd).toHaveText(formatBytesAssert(sum.capacity), { timeout: 3_000 });
+        }
+      } finally {
+        await api.dispose();
+      }
+    } finally {
+      await removeDisk(baseURL!, nodeId, dgId, diskId).catch(() => {});
+      await apiRemoveDiskGroup(baseURL!, nodeId, dgId).catch(() => {});
+      await removeDiskdb(baseURL!, nodeId);
     }
   });
 });
+
+/** Match the Inspector's formatBytes rendering for an exact-text assertion. */
+function formatBytesAssert(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}

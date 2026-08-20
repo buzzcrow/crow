@@ -34,6 +34,9 @@ use crate::state::AppState;
 /// is known.
 pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient> {
     let snap = state.monitor_cache.snapshot().await;
+    if snap.is_empty() {
+        return None;
+    }
     for node_id in snap.keys() {
         if let Some(ep) = grpc_endpoint_for_node(state, *node_id, 0).await {
             let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
@@ -46,7 +49,7 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
             return Some(client);
         }
     }
-    warn!("build_diskdb_client: no group-0 endpoint found in monitor cache");
+    warn!("build_diskdb_client: nodes exist but no group-0 endpoint found in monitor cache");
     None
 }
 
@@ -301,6 +304,7 @@ pub async fn http_diskdb_usage(
             .into_iter()
             .map(|(_id, val)| {
                 let endpoint = val.grpc_endpoint.clone();
+                let state_clone = state.clone();
                 async move {
                     let req = QueryCapacityStatsRequest {
                         disk_group_id: 0,
@@ -310,7 +314,12 @@ pub async fn http_diskdb_usage(
                     match query_instance_direct(&endpoint, req).await {
                         Ok(resp) => Some(resp),
                         Err(e) => {
-                            warn!(endpoint = %endpoint, error = %e, "cluster merge: instance query failed; skipping");
+                            // Rate-limit: at most one warning per 60s per
+                            // endpoint to avoid flooding the console when
+                            // a diskdb instance is persistently down.
+                            if state_clone.should_warn(&format!("diskdb-merge-{endpoint}"), std::time::Duration::from_secs(60)) {
+                                warn!(endpoint = %endpoint, error = %e, "cluster merge: instance query failed; skipping");
+                            }
                             None
                         }
                     }
@@ -320,6 +329,25 @@ pub async fn http_diskdb_usage(
         let responses: Vec<_> = join_all(futs).await.into_iter().flatten().collect();
         Ok(Json(merge_capacity_responses(responses)))
     }
+}
+
+/// `GET /api/hardware/capacity` — hierarchical capacity summary
+/// computed directly from group-0 hardware sysdata (rack/node/DG/disk
+/// records). Does NOT require diskdb ownership or binding; the
+/// physical disk capacity is a property of the disk record itself.
+///
+/// # Errors
+/// Returns `502` if group-0 is not available.
+pub async fn http_hardware_capacity(
+    State(state): State<AppState>,
+) -> Result<Json<crow_kv_client::HardwareCapacitySummary>, (StatusCode, Json<ErrorBody>)> {
+    let hw = build_hardware_client(&state)
+        .await
+        .ok_or_else(|| err_502("no group-0 endpoint; cluster not initialized"))?;
+    hw.capacity_summary()
+        .await
+        .map(Json)
+        .map_err(|e| err_502(format!("capacity_summary: {e}")))
 }
 
 /// Query a specific instance directly (bypass the dg cache).
@@ -351,13 +379,8 @@ pub struct UsageQuery {
 }
 
 fn parse_disk_id(s: &str) -> Option<crow_protocol::common::DiskId> {
-    if s.len() == 32 {
-        let high = u64::from_str_radix(&s[..16], 16).ok()?;
-        let low = u64::from_str_radix(&s[16..], 16).ok()?;
-        Some(crow_protocol::common::DiskId { high, low })
-    } else {
-        None
-    }
+    use crow_protocol::diskdb_type_util::DiskIdExt;
+    crow_protocol::common::DiskId::from_display_string(s).ok()
 }
 
 /// `GET /api/diskdb/scan-status?dg=<id>` — `GetScanStatus`.
@@ -536,6 +559,50 @@ pub async fn http_set_disk_group_status(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /api/disk-groups/:rack_id/:node_id/:dg_id/owner` — assign a
+/// disk-group to a diskdb instance (ownership map).
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `400` on invalid body, `502` on group-0 write failure.
+pub async fn http_set_disk_group_owner(
+    State(state): State<AppState>,
+    Path((rack_id, node_id, dg_id)): Path<(u64, u64, u64)>,
+    Json(body): Json<SetOwnerBody>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let hw = build_hardware_client(&state)
+        .await
+        .ok_or_else(|| err_502("no group-0 endpoint; cluster not initialized"))?;
+    hw.set_owner(rack_id, node_id, dg_id, body.instance_id, body.lease_expiry_ms)
+        .await
+        .map_err(|e| err_502(format!("set_owner: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/disk-groups/:rack_id/:node_id/:dg_id/bind` — bind a
+/// disk-group to a paxos data group (bind map).
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+///
+/// # Errors
+/// Returns `502` on group-0 write failure.
+pub async fn http_set_disk_group_bind(
+    State(state): State<AppState>,
+    Path((rack_id, node_id, dg_id)): Path<(u64, u64, u64)>,
+    Json(body): Json<SetBindBody>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let hw = build_hardware_client(&state)
+        .await
+        .ok_or_else(|| err_502("no group-0 endpoint; cluster not initialized"))?;
+    hw.set_bind(rack_id, node_id, dg_id, body.store_id, body.group_id)
+        .await
+        .map_err(|e| err_502(format!("set_bind: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── request/response DTOs ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -567,6 +634,19 @@ pub struct RebuildBody {
 #[derive(Debug, Deserialize)]
 pub struct SetStatusBody {
     pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetOwnerBody {
+    pub instance_id: u64,
+    #[serde(default)]
+    pub lease_expiry_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetBindBody {
+    pub store_id: u64,
+    pub group_id: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -748,5 +828,32 @@ fn parse_hw_status(s: &str) -> Option<HwStatus> {
         "BAD" | "HW_STATUS_BAD" => Some(HwStatus::Bad),
         "OFFLINE" | "HW_STATUS_OFFLINE" => Some(HwStatus::Offline),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_disk_id;
+
+    #[test]
+    fn parse_disk_id_accepts_dashed_format() {
+        // Display format: {high:016x}-{low:016x}
+        let id = parse_disk_id("31e27c300686a353-1110eceecf0013c9").unwrap();
+        assert_eq!(id.high, 0x31e2_7c30_0686_a353);
+        assert_eq!(id.low, 0x1110_ecee_cf00_13c9);
+    }
+
+    #[test]
+    fn parse_disk_id_accepts_bare_hex_format() {
+        let id = parse_disk_id("31e27c300686a3531110eceecf0013c9").unwrap();
+        assert_eq!(id.high, 0x31e2_7c30_0686_a353);
+        assert_eq!(id.low, 0x1110_ecee_cf00_13c9);
+    }
+
+    #[test]
+    fn parse_disk_id_rejects_garbage() {
+        assert!(parse_disk_id("not-a-disk-id").is_none());
+        assert!(parse_disk_id("").is_none());
+        assert!(parse_disk_id("xyz").is_none());
     }
 }

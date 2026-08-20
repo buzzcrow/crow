@@ -45,8 +45,12 @@ async fn reopen_group(wal_dir: &Path) -> PxGroup {
     let disks = vec![wal_dir.to_path_buf()];
     let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
 
-    let wal = create_file_wal(wal_dir.to_path_buf()).await;
-    wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
+    let next_seg = replay.max_segment_id.saturating_add(1).max(1);
+    let mut config = WalConfig::with_root(wal_dir.to_path_buf());
+    config.wal_record_format = WalRecordFormat::Binary;
+    let wal = WalEngine::create_with_next_segment_id(backend, config, GROUP, next_seg)
+        .await
+        .expect("create file-backed wal");
 
     let mut replica = PxLocalReplica::restore_from_replay(REPLICA_ID, PxLocalReplicaRole::Leader, &replay)
         .await
