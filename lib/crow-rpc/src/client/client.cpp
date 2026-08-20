@@ -109,21 +109,22 @@ bool RpcClient::call_callback(Transport *transport, Connection *conn, uint64_t r
     size_t idx  = request_id & pool_mask_;
     auto  &slot = completion_pool_[idx];
 
-    // Check if the slot is FREE before writing any fields. This prevents
-    // corrupting a PENDING slot's callback/user_data when the CAS would
-    // fail (slow request holding the slot). The remaining race — two
-    // submitters both seeing FREE and both writing before one CAS wins —
-    // is extremely rare (requires two request_ids differing by pool_size
-    // submitted simultaneously with the slot FREE) and only affects the
-    // general call_callback path, not the coroutine model (which assigns
-    // fixed slots per coroutine).
+    // Check if the slot is reusable (FREE or DONE) before writing fields.
+    // This prevents corrupting a PENDING slot's callback/user_data when
+    // the slot is held by a slow request. DONE means the response was
+    // delivered and the callback already ran — the slot is safe to reuse
+    // (the coroutine model leaves slots in DONE after each response).
+    // The remaining race — two submitters both seeing FREE/DONE and both
+    // writing before one CAS wins — is extremely rare and only affects
+    // the general call_callback path, not the coroutine model (which
+    // assigns fixed slots per coroutine).
     uint8_t st = slot.state.load(std::memory_order_acquire);
-    if (st == SLOT_FREE) {
+    if (st == SLOT_FREE || st == SLOT_DONE) {
         slot.request_id = request_id;
         slot.cb         = cb;
         slot.user_data  = user_data;
         slot.deadline_ns.store(deadline, std::memory_order_relaxed);
-        uint8_t expected = SLOT_FREE;
+        uint8_t expected = st;
         if (slot.state.compare_exchange_strong(expected, SLOT_PENDING, std::memory_order_acq_rel)) {
             // Slab path — zero heap alloc.
             OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
