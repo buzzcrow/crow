@@ -54,9 +54,9 @@ run_bench() {
     fi
     echo ">>> $display ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
         --mode mem --workload read --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$connections" \
+        --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
         --pre-populate "$KEYSPACE" --key-space "$KEYSPACE" \

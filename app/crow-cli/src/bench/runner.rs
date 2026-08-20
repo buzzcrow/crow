@@ -13,7 +13,7 @@
 //! delete,scan}().await`, await completion, record latency, repeat.
 //! There is no internal queue and no per-worker pipelining, so the
 //! number of in-flight requests at any instant is exactly bounded by
-//! `cfg.threads`. Doubling `--threads` doubles both offered load and
+//! `cfg.loader_num`. Doubling `--loader-num` doubles both offered load and
 //! observable concurrency by the same factor; tail latency cannot blow
 //! up due to runner-side queueing. This is why no separate
 //! `--max-in-flight` flag exists.
@@ -50,8 +50,9 @@ pub(crate) struct BenchConfig {
     pub(crate) mode: String,
     /// Number of independent gRPC channels (1..=64). Default 4.
     pub(crate) connections: u32,
-    /// Number of worker tasks (1..=1000). Default 8.
-    pub(crate) threads: u32,
+    /// Number of load generators (worker threads or coroutines).
+    /// Default 8.
+    pub(crate) loader_num: u32,
     pub(crate) duration: Duration,
     pub(crate) key_space: u64,
     pub(crate) value_size: usize,
@@ -137,8 +138,7 @@ pub(crate) struct BenchConfig {
     pub(crate) flush_after_prepopulate: bool,
     /// Max concurrent in-flight ops per worker. 1 = closed-loop (wait
     /// for each response before sending the next). >1 = pipelined via
-    /// semaphore-bounded concurrency. Default 1; RPC target defaults
-    /// to `connections * threads` (capped at 256).
+    /// semaphore-bounded concurrency. Default 1.
     pub(crate) pipeline_depth: usize,
     /// Target label: "kv", "rpc", etc. Stored in the report.
     pub(crate) target: String,
@@ -153,10 +153,6 @@ pub(crate) struct BenchConfig {
     /// The I/O worker hands off parsed frames to this pool; pool workers
     /// run the handler and submit responses. 0 = use C++ inline handler.
     pub(crate) io_dispatch_threads: u32,
-    /// Client model for RPC target: `callback` (closed-loop callback
-    /// chain, default) or `coroutine` (N independent tokio tasks using
-    /// the oneshot `call()` path, simulating independent clients).
-    pub(crate) client_mode: String,
 }
 
 impl BenchConfig {
@@ -169,7 +165,7 @@ impl BenchConfig {
             workload,
             mode: String::new(),
             connections: 4,
-            threads: 8,
+            loader_num: 8,
             duration: Duration::from_secs(5),
             key_space: 1_000,
             value_size: 64,
@@ -194,7 +190,6 @@ impl BenchConfig {
             io_engines: 1,
             io_workers_per_engine: 1,
             io_dispatch_threads: 0,
-            client_mode: "callback".to_string(),
         }
     }
 
@@ -203,8 +198,8 @@ impl BenchConfig {
         if !(1..=64).contains(&self.connections) {
             return Err(bad("--connections must be in 1..=64"));
         }
-        if !(1..=1000).contains(&self.threads) {
-            return Err(bad("--threads must be in 1..=1000"));
+        if !(1..=1000).contains(&self.loader_num) {
+            return Err(bad("--loader-num must be in 1..=1000"));
         }
         if self.duration.is_zero() {
             return Err(bad("--duration must be > 0"));
@@ -242,7 +237,7 @@ pub(crate) async fn run_bench<T: BenchTarget>(
     info!(
         target = target.label(),
         workload = ?cfg.workload,
-        threads = cfg.threads,
+        threads = cfg.loader_num,
         connections = cfg.connections,
         pipeline_depth = cfg.pipeline_depth,
         duration_ms = u64::try_from(cfg.duration.as_millis()).unwrap_or(u64::MAX),
@@ -253,8 +248,8 @@ pub(crate) async fn run_bench<T: BenchTarget>(
     target.provision(&cfg).await?;
 
     // Build one client per worker.
-    let mut worker_clients = Vec::with_capacity(cfg.threads as usize);
-    for _ in 0..cfg.threads {
+    let mut worker_clients = Vec::with_capacity(cfg.loader_num as usize);
+    for _ in 0..cfg.loader_num {
         worker_clients.push(target.build_client().await?);
     }
 
@@ -300,8 +295,8 @@ pub(crate) async fn run_bench<T: BenchTarget>(
     let measure_start = started_instant + warmup_dur;
 
     // Per-worker live counters (lock-free).
-    let mut counters: Vec<Arc<WorkerCounters>> = Vec::with_capacity(cfg.threads as usize);
-    for _ in 0..cfg.threads {
+    let mut counters: Vec<Arc<WorkerCounters>> = Vec::with_capacity(cfg.loader_num as usize);
+    for _ in 0..cfg.loader_num {
         counters.push(Arc::new(WorkerCounters::new()));
     }
 
@@ -371,7 +366,7 @@ pub(crate) async fn run_bench<T: BenchTarget>(
         mode: cfg.mode.clone(),
         target: cfg.target.clone(),
         connections: cfg.connections,
-        threads: cfg.threads,
+        loader_num: cfg.loader_num,
         key_space: cfg.key_space,
         value_size: cfg.value_size,
         target_endpoint: cfg.endpoint.clone(),

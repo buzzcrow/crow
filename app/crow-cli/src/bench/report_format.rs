@@ -77,7 +77,11 @@ impl BenchReport {
         let _ = writeln!(out, "- **target:** {}", self.target);
         let _ = writeln!(out, "- **storage_mode:** {}", self.mode);
         let _ = writeln!(out, "- **connections:** {} (gRPC channels)", self.connections);
-        let _ = writeln!(out, "- **threads:** {} (worker tasks, closed-loop)", self.threads);
+        let _ = writeln!(
+            out,
+            "- **loaders:** {} (worker tasks, closed-loop)",
+            self.loader_num
+        );
         let _ = writeln!(out, "- **key_space:** {} keys", self.key_space);
         let _ = writeln!(out, "- **value_size:** {} bytes", self.value_size);
         let _ = writeln!(out, "- **target_endpoint:** {}", self.target_endpoint);
@@ -320,7 +324,7 @@ impl BenchReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "run_id          : {}\ntarget          : {}\nmode            : {}\nworkload        : {:?}\nduration        : {} ms (measurement)\nwarmup          : {} ms (discarded)\nconnections     : {}\nthreads         : {}\nkey_space       : {}\nvalue_size      : {} B\nendpoint        : {} (store={} group={})\ntotal_ops       : {}\ntotal_errors    : {}\nerror_rate      : {:.4}\ncorrectness_err : {}\npre_populate    : {} ms, {} errors",
+            "run_id          : {}\ntarget          : {}\nmode            : {}\nworkload        : {:?}\nduration        : {} ms (measurement)\nwarmup          : {} ms (discarded)\nconnections     : {}\nloaders         : {}\nkey_space       : {}\nvalue_size      : {} B\nendpoint        : {} (store={} group={})\ntotal_ops       : {}\ntotal_errors    : {}\nerror_rate      : {:.4}\ncorrectness_err : {}\npre_populate    : {} ms, {} errors",
             self.run_id,
             self.target,
             self.mode,
@@ -328,7 +332,7 @@ impl BenchReport {
             self.duration_ms,
             self.warmup_ms,
             self.connections,
-            self.threads,
+            self.loader_num,
             self.key_space,
             self.value_size,
             self.target_endpoint,

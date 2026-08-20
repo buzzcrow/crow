@@ -20,10 +20,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
-use crow_common::metrics::{Counter, LatencyHistogram, MetricName};
 use crow_console_shared::error::{Error, Result};
 use crow_console_shared::lifecycle::stop_pid_with_timeout;
 use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
@@ -42,61 +40,6 @@ use super::{BenchClient, BenchTarget};
 /// Msg type for the echo handler. Uses a custom type (100) to avoid
 /// colliding with the built-in ping handler (`EConnectionPingRequest`).
 const ECHO_MSG_TYPE: u16 = 100;
-
-/// Stats collection mode for the callback hot path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StatsMode {
-    /// Lock-free `LatencyHistogram`: p50/p99/avg/max via atomic
-    /// bucket counters. No mutex, no locks.
-    Histogram,
-    /// Minimal: atomic sum + count only (avg latency). No histogram
-    /// buckets, no binary search. Used to measure histogram overhead.
-    AvgOnly,
-}
-
-impl StatsMode {
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        match s {
-            "histogram" => Some(Self::Histogram),
-            "avg-only" => Some(Self::AvgOnly),
-            _ => None,
-        }
-    }
-}
-
-/// Client model: callback chain (closed-loop) or coroutine (independent
-/// tokio tasks simulating independent clients).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClientMode {
-    /// Closed-loop callback chain on C++ I/O worker threads. Fastest —
-    /// no per-call heap alloc, no scheduler round-trip. `--threads` =
-    /// number of bench threads, each maintaining `pipeline_depth`
-    /// in-flight via a callback chain.
-    Callback,
-    /// N independent tokio tasks using the oneshot `call()` path.
-    /// `--threads` = number of coroutines (tasks). Each task loops:
-    /// submit → await response → submit next. More realistic client
-    /// simulation; has per-call channel + scheduler overhead.
-    Coroutine,
-    /// C++ coroutines on I/O worker threads, Rust domain logic via
-    /// FFI callbacks. `--threads` = number of C++ coroutines. Each
-    /// coroutine loops: Rust `build_request` -> C++ submit -> `co_await`
-    /// (suspend) -> I/O worker resumes inline -> Rust `on_response` ->
-    /// loop. No tokio, no oneshot channel — inline resume like
-    /// buzz-cpp, but Rust domain code runs via FFI on the I/O thread.
-    CppCoroutine,
-}
-
-impl ClientMode {
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        match s {
-            "callback" => Some(Self::Callback),
-            "coroutine" => Some(Self::Coroutine),
-            "cpp-coroutine" => Some(Self::CppCoroutine),
-            _ => None,
-        }
-    }
-}
 
 /// Locate the `crow-rpc-echo-server` binary. Search order:
 /// 1. `$CROW_RPC_ECHO_SERVER_BIN`
@@ -150,10 +93,6 @@ pub(crate) struct RpcTarget {
     /// `request_id` collisions (the C API uses the flatbuffer's `id` field
     /// as the `request_id` for response correlation).
     request_id_counter: Arc<AtomicU64>,
-    /// Stats collection mode (histogram vs avg-only).
-    stats_mode: StatsMode,
-    /// Client model (callback vs coroutine).
-    client_mode: ClientMode,
 }
 
 impl RpcTarget {
@@ -168,19 +107,7 @@ impl RpcTarget {
             conns: Vec::new(),
             next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
-            stats_mode: StatsMode::Histogram,
-            client_mode: ClientMode::Callback,
         }
-    }
-
-    pub(crate) fn with_stats_mode(mut self, mode: StatsMode) -> Self {
-        self.stats_mode = mode;
-        self
-    }
-
-    pub(crate) fn with_client_mode(mut self, mode: ClientMode) -> Self {
-        self.client_mode = mode;
-        self
     }
 }
 
@@ -363,18 +290,6 @@ impl BenchTarget for RpcTarget {
         self.conns.clear();
     }
 
-    fn supports_pipeline(&self) -> bool {
-        true
-    }
-
-    fn default_pipeline_depth(&self, _cfg: &BenchConfig) -> usize {
-        // Callback model: pipeline_depth=1 (closed-loop) by default,
-        // matching the old oneshot worker behavior. Higher depths can be
-        // set explicitly via --pipeline-depth; the callback chain
-        // naturally maintains the in-flight count.
-        1
-    }
-
     fn run_workers(
         &self,
         clients: Vec<Self::Client>,
@@ -383,135 +298,11 @@ impl BenchTarget for RpcTarget {
         deadline: std::time::Instant,
         counters: Vec<Arc<WorkerCounters>>,
     ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
-        match self.client_mode {
-            ClientMode::Callback => {
-                self.run_callback_workers(clients, cfg, measure_start, deadline, counters)
-            }
-            ClientMode::Coroutine => {
-                Self::run_coroutine_workers(clients, cfg, measure_start, deadline, counters)
-            }
-            ClientMode::CppCoroutine => {
-                self.run_cpp_coroutine_workers(clients, cfg, measure_start, deadline, counters)
-            }
-        }
+        self.run_cpp_coroutine_workers(clients, cfg, measure_start, deadline, counters)
     }
 }
 
 impl RpcTarget {
-    /// Callback mode: closed-loop callback chain on C++ I/O worker threads.
-    fn run_callback_workers(
-        &self,
-        clients: Vec<RpcBenchClient>,
-        cfg: &BenchConfig,
-        measure_start: std::time::Instant,
-        deadline: std::time::Instant,
-        counters: Vec<Arc<WorkerCounters>>,
-    ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
-        // Size the shared completion pool. Max in-flight = threads ×
-        // pipeline_depth. The C++ side rounds up to the next power of two;
-        // we replicate the rounding to compute the same mask.
-        let pipeline_depth = cfg.pipeline_depth.max(1);
-        let max_in_flight = (cfg.threads as usize) * pipeline_depth;
-        let pool_size = max_in_flight.next_power_of_two().max(1);
-        let pool_mask = pool_size - 1;
-
-        if let Some(client) = &self.client {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "max_in_flight = threads * pipeline_depth, bounded by u32 range"
-            )]
-            let pool_arg = max_in_flight as u32;
-            client.set_completion_pool_size(pool_arg);
-        }
-
-        // Shared slots array — one BenchSlot per C++ slab slot. Stable
-        // addresses (Box<[BenchSlot]>); callbacks access via raw pointer.
-        let slots: Box<[BenchSlot]> = (0..pool_size)
-            .map(|_| BenchSlot {
-                ctx: std::ptr::null(),
-                start: std::time::Instant::now(),
-            })
-            .collect();
-        let slots_arc = Arc::new(UnsafeSlots(slots));
-        let request_id_counter = Arc::clone(&self.request_id_counter);
-
-        let mut handles = Vec::with_capacity(cfg.threads as usize);
-        for (worker_id, (client, counters)) in clients.into_iter().zip(counters).enumerate() {
-            let cfg2 = cfg.clone();
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "worker_id is bounded by cfg.threads which fits in u32"
-            )]
-            let worker_id = worker_id as u32;
-            let slots = Arc::clone(&slots_arc);
-            let rid_counter = Arc::clone(&request_id_counter);
-            let stats_mode = self.stats_mode;
-            // Use std::thread::spawn (not tokio::spawn_blocking) to avoid
-            // tokio's blocking-pool limits on long-parked threads. The
-            // worker thread kicks off requests, parks until the deadline,
-            // then returns stats. Wrap the std JoinHandle in a tokio
-            // task that blocks on join.
-            let join = thread::spawn(move || {
-                run_callback_worker(
-                    client,
-                    cfg2,
-                    measure_start,
-                    deadline,
-                    worker_id,
-                    counters,
-                    slots,
-                    rid_counter,
-                    pool_mask,
-                    stats_mode,
-                )
-            });
-            let handle = tokio::task::spawn_blocking(move || join.join().unwrap_or_default());
-            handles.push(handle);
-        }
-        handles
-    }
-
-    /// Coroutine mode: N independent tokio tasks using the oneshot
-    /// `call()` path. Each task = one independent "client" that loops:
-    /// submit → await response → submit next. `--threads` = number of
-    /// coroutines. More realistic client simulation; has per-call
-    /// channel + scheduler overhead vs the callback model.
-    fn run_coroutine_workers(
-        clients: Vec<RpcBenchClient>,
-        cfg: &BenchConfig,
-        measure_start: std::time::Instant,
-        deadline: std::time::Instant,
-        counters: Vec<Arc<WorkerCounters>>,
-    ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
-        use super::super::worker::run_worker;
-        use super::super::workload::OpGen;
-
-        let mut handles = Vec::with_capacity(cfg.threads as usize);
-        for (worker_id, (client, counters)) in clients.into_iter().zip(counters).enumerate() {
-            let cfg2 = cfg.clone();
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "worker_id is bounded by cfg.threads which fits in u32"
-            )]
-            let worker_id = worker_id as u32;
-            let mut gen = OpGen::new(u64::from(worker_id), cfg2.key_space, cfg2.value_size);
-            let handle = tokio::spawn(async move {
-                run_worker(
-                    &client,
-                    &mut gen,
-                    &cfg2,
-                    measure_start,
-                    deadline,
-                    worker_id,
-                    &counters,
-                )
-                .await
-            });
-            handles.push(handle);
-        }
-        handles
-    }
-
     /// C++ coroutine mode: N C++ coroutines on I/O worker threads.
     /// Rust domain logic (build request, process response) runs via
     /// FFI callbacks on the I/O thread. No tokio, no oneshot channel.
@@ -553,7 +344,7 @@ impl RpcTarget {
         let ctx_arc = Arc::clone(&ctx);
         let ctx_ptr = Arc::as_ptr(&ctx) as *mut std::ffi::c_void;
 
-        let num_coroutines = cfg.threads;
+        let num_coroutines = cfg.loader_num;
         let msg_type = ECHO_MSG_TYPE;
 
         // Size the completion pool before entering the closure —
@@ -844,321 +635,5 @@ impl BenchClient for RpcBenchClient {
                 Err(_) => OpOutcome::default(),
             }
         }
-    }
-}
-
-// ── Callback-driven worker (Gap2+Gap3) ────────────────────────────
-//
-// Replaces the tokio async loop with a callback chain that runs entirely
-// on the C++ I/O worker threads. The worker thread kicks off the initial
-// requests, then parks until all in-flight requests complete. Each
-// callback (invoked inline on the I/O worker thread when a response
-// arrives) records latency, builds the next request, and submits it —
-// no oneshot channel, no tokio scheduler round-trip, no per-call heap
-// allocation. The I/O worker directly resumes the next iteration.
-// Flow: doc/working/rpc-echo-flow-analysis.md § "Echo Flow — Callback Model".
-
-/// A pre-allocated completion slot. One per C++ slab slot (shared array).
-/// Written by the submitter (worker thread or callback) before submit,
-/// read by the callback after the response arrives. No two in-flight
-/// requests share a slot (guaranteed by the C++ slab indexing), so there
-/// is no concurrent access to the same slot.
-struct BenchSlot {
-    ctx: *const BenchWorkerCtx,
-    start: std::time::Instant,
-}
-
-/// Wrapper for the shared slots array. `UnsafeCell`-free: each slot is
-/// independently accessed (no concurrent same-slot access), so raw
-/// pointer mutation through `*mut BenchSlot` is safe. The `Send`/`Sync`
-/// impls reflect this per-slot independence.
-struct UnsafeSlots(Box<[BenchSlot]>);
-unsafe impl Send for UnsafeSlots {}
-unsafe impl Sync for UnsafeSlots {}
-
-/// Per-worker context. Heap-allocated (stable address) so the callback
-/// can access it via a raw pointer from the slot. Lives for the duration
-/// of the `run_callback_worker` call.
-#[allow(dead_code, reason = "worker_id/pipeline_depth kept for diagnostics")]
-struct BenchWorkerCtx {
-    /// Lock-free latency histogram (p50/p99/avg/max). No mutex.
-    latency: LatencyHistogram,
-    /// Lock-free op counter. No mutex.
-    ops: Counter,
-    /// Lock-free error counter. No mutex.
-    errors: Counter,
-    /// Avg-only mode: just atomic sum + count (no histogram buckets).
-    avg_sum_ns: AtomicU64,
-    avg_count: AtomicU64,
-    stats_mode: StatsMode,
-    counters: Arc<WorkerCounters>,
-    client: Arc<RpcClient>,
-    server: Arc<RpcServer>,
-    conn: Arc<Connection>,
-    pool: Arc<BufferPool>,
-    request_id_counter: Arc<AtomicU64>,
-    deadline: std::time::Instant,
-    measure_start: std::time::Instant,
-    value_size: usize,
-    in_flight: AtomicU64,
-    pipeline_depth: usize,
-    pool_mask: usize,
-    worker_id: u32,
-    /// Handle to the worker thread (for unpark when all in-flight drain).
-    thread: thread::Thread,
-    /// Pointer to the shared slots array (for `submit_next` from callbacks).
-    slots: *const UnsafeSlots,
-}
-
-/// Run one callback-driven worker. Kicks off `pipeline_depth` initial
-/// requests, parks until all in-flight drain (deadline reached), then
-/// returns the per-op stats.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::needless_pass_by_value,
-    reason = "spawn closure moves all args; refs would require separate Arc clones"
-)]
-fn run_callback_worker(
-    client: RpcBenchClient,
-    cfg: BenchConfig,
-    measure_start: std::time::Instant,
-    deadline: std::time::Instant,
-    worker_id: u32,
-    counters: Arc<WorkerCounters>,
-    slots: Arc<UnsafeSlots>,
-    request_id_counter: Arc<AtomicU64>,
-    pool_mask: usize,
-    stats_mode: StatsMode,
-) -> BTreeMap<OpKind, OpStats> {
-    let pipeline_depth = cfg.pipeline_depth.max(1);
-    let ctx = Box::new(BenchWorkerCtx {
-        latency: LatencyHistogram::new(MetricName::Static("bench.rpc.latency")),
-        ops: Counter::new(MetricName::Static("bench.rpc.ops")),
-        errors: Counter::new(MetricName::Static("bench.rpc.errors")),
-        avg_sum_ns: AtomicU64::new(0),
-        avg_count: AtomicU64::new(0),
-        stats_mode,
-        counters,
-        client: Arc::clone(&client.client),
-        server: Arc::clone(&client.server),
-        conn: Arc::clone(&client.conn),
-        pool: Arc::clone(&client.pool),
-        request_id_counter,
-        deadline,
-        measure_start,
-        value_size: cfg.value_size,
-        in_flight: AtomicU64::new(0),
-        pipeline_depth,
-        pool_mask,
-        worker_id,
-        thread: thread::current(),
-        slots: Arc::as_ptr(&slots),
-    });
-    let ctx_ptr = Box::into_raw(ctx);
-
-    // Kick off the initial pipeline_depth requests.
-    for _ in 0..pipeline_depth {
-        // SAFETY: ctx_ptr is valid for the duration of this function.
-        unsafe { (*ctx_ptr).in_flight.fetch_add(1, Ordering::Relaxed) };
-        if !submit_next(ctx_ptr, None) {
-            // Submit failed — undo the in_flight bump. If this drops to
-            // zero, no callback will ever fire, so the worker would hang.
-            unsafe { (*ctx_ptr).in_flight.fetch_sub(1, Ordering::Relaxed) };
-        }
-    }
-
-    // Park until all in-flight requests drain. The last callback
-    // (when in_flight hits zero) calls thread::unpark.
-    while unsafe { (*ctx_ptr).in_flight.load(Ordering::Acquire) } > 0 {
-        thread::park();
-    }
-
-    // Collect stats from the lock-free metrics. SAFETY: all callbacks
-    // have completed (in_flight == 0 with Acquire ordering provides the
-    // happens-before), so no concurrent access to the metrics.
-    let ctx = unsafe { Box::from_raw(ctx_ptr) };
-    let mut stats = OpStats::new();
-    match ctx.stats_mode {
-        StatsMode::Histogram => {
-            let h = ctx.latency.snapshot();
-            stats.ops = h.count;
-            stats.errors = ctx.errors.snapshot().count;
-            // Record avg latency into the PreciseHistogram for the report.
-            // The LatencyHistogram gives bucket-level p50/p99; the
-            // bucket-level percentiles are printed separately.
-            if h.count > 0 {
-                #[allow(clippy::cast_possible_truncation, reason = "ns to us fits in u64")]
-                let latency_us = (h.avg + 500) / 1000;
-                stats.histogram.record(latency_us.max(1));
-            }
-        }
-        StatsMode::AvgOnly => {
-            let count = ctx.avg_count.load(Ordering::Relaxed);
-            let sum_ns = ctx.avg_sum_ns.load(Ordering::Relaxed);
-            stats.ops = count;
-            stats.errors = ctx.errors.snapshot().count;
-            if let Some(avg_ns) = sum_ns.checked_div(count) {
-                #[allow(clippy::cast_possible_truncation, reason = "ns to us fits in u64")]
-                let latency_us = (avg_ns + 500) / 1000;
-                stats.histogram.record(latency_us.max(1));
-            }
-        }
-    }
-    let mut map = BTreeMap::new();
-    map.insert(OpKind::Write, stats);
-    map
-}
-
-/// Build and submit the next echo request. Uses `current_id + pool_size`
-/// as the next `request_id` to stay in the SAME slab slot (slot index =
-/// `request_id` & `pool_mask`). This prevents slot reuse collisions when
-/// responses arrive out of order across workers sharing the pool.
-///
-/// `current_id` is None for the initial kickoff (uses the global atomic
-/// counter); Some(id) for callback-driven submits (advances by `pool_size`).
-fn submit_next(ctx: *const BenchWorkerCtx, current_id: Option<u64>) -> bool {
-    // SAFETY: ctx is valid (allocated in run_callback_worker, alive for
-    // the duration of the callback chain).
-    let ctx = unsafe { &*ctx };
-    let request_id = match current_id {
-        Some(id) => id + (ctx.pool_mask + 1) as u64, // +pool_size → same slot
-        None => ctx.request_id_counter.fetch_add(1, Ordering::Relaxed),
-    };
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "request_id is bounded by pool_size * iterations; fits in usize"
-    )]
-    let idx = request_id as usize & ctx.pool_mask;
-
-    // Set the slot's ctx + start time before submit (so the callback can
-    // read them when the response arrives).
-    // SAFETY: the slot at idx is FREE — for the initial kickoff, no
-    // in-flight request uses it (max in-flight = pool_size); for the
-    // callback path, the slot was just set to DONE by on_response.
-    // SAFETY: ctx.slots points to the shared UnsafeSlots (alive for the
-    // duration of the bench run, held by the Arc in run_callback_worker).
-    let slots = unsafe { &*ctx.slots };
-    let slot_ptr = std::ptr::addr_of!(slots.0[idx]).cast_mut();
-    unsafe {
-        (*slot_ptr).ctx = ctx;
-        (*slot_ptr).start = std::time::Instant::now();
-    }
-
-    // Build the ConnectionPingRequest flatbuffer control message.
-    let mut fbb = FlatBufferBuilder::new();
-    let req = ConnectionPingRequest::create(
-        &mut fbb,
-        &ConnectionPingRequestArgs {
-            id: request_id,
-            rpc_create_nano: 0,
-        },
-    );
-    fbb.finish(req, None);
-    let fb_bytes = fbb.finished_data();
-
-    #[allow(clippy::cast_possible_truncation, reason = "fb_bytes is small")]
-    let ctrl_cap = fb_bytes.len() as u32;
-    let Some(mut ctrl) = ctx.pool.alloc_buffer(ctrl_cap) else {
-        return false;
-    };
-    ctrl.write(fb_bytes);
-
-    // Allocate data payload (echoed back by the handler).
-    let data = if ctx.value_size > 0 {
-        #[allow(clippy::cast_possible_truncation, reason = "value_size is bounded")]
-        let data_cap = ctx.value_size as u32;
-        let Some(mut buf) = ctx.pool.alloc_buffer(data_cap) else {
-            return false;
-        };
-        // Fill with a deterministic pattern (same as issue_op).
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            reason = "mod 256 result fits in u8"
-        )]
-        let payload: Vec<u8> = (0..ctx.value_size).map(|i| (i % 256) as u8).collect();
-        buf.write(&payload);
-        Some(buf)
-    } else {
-        None
-    };
-
-    ctx.client
-        .call_callback(
-            &ctx.server,
-            &ctx.conn,
-            request_id,
-            ctrl,
-            data,
-            ECHO_MSG_TYPE,
-            Some(bench_on_complete),
-            slot_ptr.cast::<std::ffi::c_void>(),
-        )
-        .is_ok()
-}
-
-/// The C++→Rust completion callback. Invoked inline on the C++ I/O worker
-/// thread when a response arrives. Records latency, releases the response
-/// buffers, then either submits the next request (before deadline) or
-/// decrements `in_flight` (deadline reached). Must be non-blocking.
-unsafe extern "C" fn bench_on_complete(
-    request_id: u64,
-    control: crow_rpc_ffi::sys::crow_rpc_buffer_t,
-    data: crow_rpc_ffi::sys::crow_rpc_buffer_t,
-    status: i32,
-    user_data: *mut std::ffi::c_void,
-) {
-    let slot = &*(user_data as *const BenchSlot);
-    let ctx = &*slot.ctx;
-
-    // Record latency + outcome (only during the measurement window —
-    // during warmup, the callback still submits the next request but
-    // discards the stats, matching run_worker's `recording` check).
-    let now = std::time::Instant::now();
-    let recording = now >= ctx.measure_start;
-    let ok = status == crow_rpc_ffi::sys::CROW_RPC_OK;
-    if recording {
-        let lat_ns = slot.start.elapsed().as_nanos();
-        let lat_ns_u64 = u64::try_from(lat_ns).unwrap_or(u64::MAX);
-        match ctx.stats_mode {
-            StatsMode::Histogram => {
-                ctx.latency.observe(lat_ns_u64);
-            }
-            StatsMode::AvgOnly => {
-                ctx.avg_sum_ns.fetch_add(lat_ns_u64, Ordering::Relaxed);
-                ctx.avg_count.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        ctx.ops.inc();
-        if !ok {
-            ctx.errors.inc();
-        }
-        ctx.counters.record(OpKind::Write, ok);
-    }
-
-    // Release the response buffers (echo bench doesn't need the data).
-    if !control.is_null() {
-        crow_rpc_ffi::sys::crow_rpc_buffer_release(control);
-    }
-    if !data.is_null() {
-        crow_rpc_ffi::sys::crow_rpc_buffer_release(data);
-    }
-
-    // Check deadline. If before, submit the next request (maintaining
-    // the pipeline depth). If after, drain in_flight and unpark when zero.
-    if now < ctx.deadline {
-        if !submit_next(ctx as *const BenchWorkerCtx, Some(request_id)) {
-            // Submit failed — drain this in-flight slot.
-            drain_in_flight(ctx);
-        }
-    } else {
-        drain_in_flight(ctx);
-    }
-}
-
-/// Decrement `in_flight`; if it hits zero, unpark the worker thread.
-fn drain_in_flight(ctx: &BenchWorkerCtx) {
-    if ctx.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
-        ctx.thread.unpark();
     }
 }

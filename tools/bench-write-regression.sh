@@ -36,9 +36,9 @@ run_bench() {
     local threads="$1" conn="$2" mi="$3" coalesce="$4" drain="$5" label="$6"
     echo ">>> $label ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
         --mode mem --workload write --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$conn" \
+        --loader-num "$threads" --connections "$conn" \
         --max-inflight "$mi" \
         --coalesce-max-keys "$coalesce" \
         $([ "$drain" != "" ] && echo "--coalesce-drain-threshold $drain") \

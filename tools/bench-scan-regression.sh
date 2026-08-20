@@ -60,9 +60,9 @@ run_bench() {
     fi
     echo ">>> $label (${threads}T:${connections}C) ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
         --mode mem --workload list --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$connections" \
+        --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
         --scan-limit "$limit" --scan-prefix "$prefix" --scan-start-after "$start_after" \

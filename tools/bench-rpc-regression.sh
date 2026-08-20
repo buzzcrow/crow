@@ -113,12 +113,12 @@ KEYSPACE=1000
 VALUE_SIZE=128
 
 run_bench() {
-    local threads="$1" conn="$2" label="$3" io_engines="${4:-1}" workers_per_engine="${5:-1}"
+    local loaders="$1" conn="$2" label="$3" io_engines="${4:-1}" workers_per_engine="${5:-1}"
     echo ">>> $label (io_engines=$io_engines, workers_per_engine=$workers_per_engine) ..."
     local output
-    output=$(pixi run -- ./target/release/crow-cli bench run \
-        --target rpc --workload write --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$conn" \
+    output=$(pixi run -- ./target/release/crow-cli bench rpc \
+        --duration-secs "$DURATION" \
+        --loader-num "$loaders" --connections "$conn" \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --io-engines "$io_engines" --io-workers-per-engine "$workers_per_engine" \
         --json 2>&1)
@@ -146,21 +146,21 @@ echo -e "label\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\traggr\tsaggr\terrors" > 
 echo "=== rpc echo regression (128B, 20s, 9 configs) ==="
 
 # Standard regression sweep.
-run_bench 1   1  "rpc_1e1w_1t_1c"    1 1
-run_bench 64  4  "rpc_1e1w_64t_4c"   1 1
-run_bench 256 8  "rpc_1e1w_256t_8c"  1 1
-run_bench 512 8  "rpc_2e1w_512t_8c"  2 1
-run_bench 512 8  "rpc_1e2w_512t_8c"  1 2
+run_bench 1   1  "rpc_1e1w_1l_1c"    1 1
+run_bench 64  4  "rpc_1e1w_64l_4c"   1 1
+run_bench 256 8  "rpc_1e1w_256l_8c"  1 1
+run_bench 512 8  "rpc_2e1w_512l_8c"  2 1
+run_bench 512 8  "rpc_1e2w_512l_8c"  1 2
 
 # High-concurrency configs: 1000T × 32C (multi-worker scaling).
 # 1e1w = baseline (single worker, no ONESHOT).
 # 1e4w = peak multi-worker on one epoll instance (folly helps).
 # 1e16w = over-subscription (re-arm overhead dominates).
 # 2e16w = multi-engine + multi-worker (max I/O parallelism).
-run_bench 1000 32 "rpc_1e1w_1000t_32c"   1 1
-run_bench 1000 32 "rpc_1e4w_1000t_32c"   1 4
-run_bench 1000 32 "rpc_1e16w_1000t_32c"  1 16
-run_bench 1000 32 "rpc_2e16w_1000t_32c"  2 16
+run_bench 1000 32 "rpc_1e1w_1000l_32c"   1 1
+run_bench 1000 32 "rpc_1e4w_1000l_32c"   1 4
+run_bench 1000 32 "rpc_1e16w_1000l_32c"  1 16
+run_bench 1000 32 "rpc_2e16w_1000l_32c"  2 16
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

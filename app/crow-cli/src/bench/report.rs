@@ -122,7 +122,7 @@ pub(crate) struct BenchReport {
     #[serde(default)]
     pub(crate) mode: String,
     pub(crate) connections: u32,
-    pub(crate) threads: u32,
+    pub(crate) loader_num: u32,
     pub(crate) key_space: u64,
     pub(crate) value_size: usize,
     pub(crate) target_endpoint: String,

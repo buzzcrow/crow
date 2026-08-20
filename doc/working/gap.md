@@ -8,8 +8,7 @@ buzz-cpp's coroutine loader bench (2.03M TPS, same platform). Both use
 the same inline-resume technique; the gap is in the surrounding
 architecture, not the resume model.
 
-Companion: `rpc-echo-flow-analysis.md` (CROW flow detail),
-`plan-rpc-perf-gap2-3.md` (Gap2+Gap3 plan, completed).
+Companion: `rpc-echo-flow-analysis.md` (CROW flow detail).
 
 ---
 
@@ -138,19 +137,15 @@ per connection. CROW is better here, but it doesn't offset Diffs 1-3.
 
 | Location | Lock type | Contended? | Hot path? |
 | --- | --- | --- | --- |
-| `BenchWorkerCtx.stats` (Mutex) | `std::sync::Mutex` | **YES** — 4 I/O workers invoke callbacks concurrently, all lock the same mutex per op | **YES** — every `bench_on_complete` |
+| `BenchWorkerCtx.stats` (lock-free atomics) | `AtomicU64` | No (Relaxed) | YES — every `bench_on_complete` |
 | `BenchWorkerCtx.in_flight` (AtomicU64) | atomic | No (Relaxed/AcqRel) | YES — every callback |
 | `request_id_counter` (AtomicU64) | atomic | Low contention (only initial kickoff) | Only kickoff |
 | `WorkerCounters` | lock-free atomics | No (per-worker) | YES — every callback |
 | `next_conn` (AtomicUsize) | atomic | No (only at worker spawn) | No |
 
-**The `stats` Mutex is the only contended lock on the Rust hot path.**
-Every `bench_on_complete` callback locks it to record latency into
-`OpStats` (which contains a `PreciseHistogram`). With 4 I/O workers
-invoking callbacks concurrently on the same `BenchWorkerCtx`, this
-mutex serializes the stat-recording portion of every op.
-
-Source: `app/crow-cli/src/bench/targets/rpc.rs` lines 778-791.
+**No contended locks on the Rust hot path.** The former `stats` Mutex
+was replaced with `LockFreeStats` (atomic counters for ops, errors,
+total latency ns) — see Implementation Results below.
 
 ### C++ side (echo round-trip)
 
@@ -180,50 +175,19 @@ Per echo round-trip (1 request + 1 response):
 
 | Lock | Count | Where |
 | --- | --- | --- |
-| Rust `stats` Mutex | 1 | `bench_on_complete` |
 | C++ `send_mu_` | 3 | request `enqueue_send`, response `enqueue_send`, response batch `has_pending_send` + `drain_send_queue` |
 | C++ `in_send_` CAS | 2 | request writev, response writev |
 | Slab `state` atomic | 2 | submit (PENDING), response (DONE) |
 | `malloc`/`free` | 4+4 | parser alloc control+data (server), parser alloc control+data (client), + Frame struct |
 
-**Total: 1 Rust mutex + 3 C++ mutex acquisitions + 2 CAS + 8 heap
-ops per op.** The Rust `stats` mutex and the C++ `send_mu_` are the
-contended ones; the rest are low-contention or per-slot.
+**Total: 3 C++ mutex acquisitions + 2 CAS + 8 heap ops per op.**
+The C++ `send_mu_` is the only contended lock; the rest are
+low-contention or per-slot. (The former Rust `stats` mutex was
+removed — see Implementation Results.)
 
 ---
 
 ## Recommendations
-
-### Remove the Rust `stats` Mutex (low effort, tail-latency win)
-
-The `stats` mutex serializes stat recording across all I/O workers
-invoking callbacks on the same `BenchWorkerCtx`. Replace with
-per-worker stats merged at the end:
-
-- **Option A (simplest):** Use `UnsafeCell<OpStats>` — the callback
-  model guarantees no concurrent same-slot access, but different
-  workers CAN invoke callbacks on the same `BenchWorkerCtx`
-  concurrently. So this is NOT safe without additional synchronization.
-- **Option B (correct):** Per-I/O-worker stats. Each C++ I/O worker
-  gets its own `OpStats` (no mutex). Merge at the end via
-  `OpStats::merge`. This requires knowing which I/O worker invoked the
-  callback — the C ABI callback doesn't currently pass this.
-- **Option C (simplest correct):** Lock-free histogram. Replace
-  `OpStats` with a version that uses atomic counters + a lock-free
-  histogram. `PreciseHistogram` is not currently lock-free, so this
-  requires a new atomic histogram type.
-- **Option D (pragmatic):** Thread-local accumulation. Each callback
-  thread accumulates into a thread-local `OpStats`, merged at thread
-  exit. The C++ I/O worker threads are long-lived, so merge happens at
-  `Worker::stop`. This requires a C++-side hook to merge per-thread
-  stats into the Rust `BenchWorkerCtx`.
-
-**Recommended: Option B** — pass the I/O worker index through the
-callback (via the slab slot or a new C ABI field), and index into a
-per-worker `OpStats[]` array. Zero locks, zero contention, correct.
-
-Expected impact: removes the p999 40ms tail (mutex contention is the
-likely cause of the long tail at 1×4).
 
 ### Multi-engine + separate client transport (medium effort, ~1.7×)
 
@@ -276,8 +240,7 @@ lock-free MPSC is a future optimization" —
 
 | Fix | Expected TPS | Cumulative |
 | --- | --- | --- |
-| Current (Gap2+Gap3) | 585K | 585K |
-| + Remove stats mutex | 585K (tail-latency only) | 585K |
+| Current (Gap2+Gap3, lock-free stats) | 585K | 585K |
 | + Flatbuffer reuse | 700K | 700K |
 | + Parser buffer pooling | 750K | 750K |
 | + Multi-engine + separate client transport | 1.1M | 1.1M |

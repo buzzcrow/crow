@@ -9,9 +9,10 @@ use crate::Cli;
 /// Subcommands for `crow-cli bench`.
 #[derive(Subcommand, Debug)]
 pub enum BenchSub {
-    /// Run a benchmark (deploy 3-node cluster, drive load, collect
-    /// metrics, report, cleanup).
-    Run(Box<RunArgs>),
+    /// Run a KV benchmark (3-node Paxos cluster, full consensus + WAL + storage).
+    Kv(Box<KvArgs>),
+    /// Run an RPC echo benchmark (2-process transport throughput, no KV layer).
+    Rpc(Box<RpcArgs>),
     /// Re-render a previously-saved report.
     Report {
         /// Run ID of the report to re-render.
@@ -21,23 +22,11 @@ pub enum BenchSub {
     Compare { run_id_1: String, run_id_2: String },
 }
 
-/// Arguments for `crow-cli bench run`.
+/// Arguments for `crow-cli bench kv`.
 #[derive(Args, Debug)]
-pub struct RunArgs {
-    /// Bench target: `kv` (default, 3-node Paxos cluster) or `rpc`
-    /// (in-process RPC echo server, measures raw transport throughput).
-    #[arg(long, default_value = "kv")]
-    pub target: String,
-
-    /// Pipeline depth: max concurrent in-flight ops per worker. 1 =
-    /// closed-loop (wait for each response before sending next).
-    /// Default: 1 for KV, `connections * threads` (capped 256) for RPC.
-    #[arg(long)]
-    pub pipeline_depth: Option<usize>,
-
+pub struct KvArgs {
     /// Storage mode: `mem` (crow-tree + mem-block), `file` (crow-tree +
     /// file page store), or `block` (crow-tree + block page store).
-    /// Ignored for `--target rpc`.
     #[arg(long, default_value = "mem")]
     pub mode: String,
 
@@ -49,33 +38,12 @@ pub struct RunArgs {
     #[arg(long, default_value = "mix")]
     pub workload: String,
 
+    /// Number of worker threads.
     #[arg(long, default_value_t = 8)]
-    pub threads: u32,
+    pub loader_num: u32,
 
     #[arg(long, default_value_t = 4)]
     pub connections: u32,
-
-    /// Number of independent epoll/kqueue instances (RPC target only).
-    /// Each engine owns its own fd and its own set of connections
-    /// (round-robin partitioned). 1 = single-engine (current default).
-    /// More than 1 parallelizes event processing across independent
-    /// kernel event queues with no ONESHOT re-arm overhead.
-    #[arg(long, default_value_t = 1)]
-    pub io_engines: u32,
-
-    /// Number of C++ I/O worker threads per engine (RPC target only).
-    /// 1 = single-worker per engine (fast path, no ONESHOT re-arm).
-    /// More than 1 enables `EV_ONESHOT`/`EPOLLONESHOT` within that
-    /// engine for multi-worker safety.
-    #[arg(long, default_value_t = 1)]
-    pub io_workers_per_engine: u32,
-
-    /// Number of Rust dispatch thread pool threads (RPC target only).
-    /// The I/O worker hands off parsed frames to this pool; pool workers
-    /// run the handler and submit responses. 0 = use C++ inline handler
-    /// (faster for trivial handlers like echo).
-    #[arg(long, default_value_t = 0)]
-    pub io_dispatch_threads: u32,
 
     #[arg(long, default_value_t = 1_000_000)]
     pub key_space: u64,
@@ -91,10 +59,6 @@ pub struct RunArgs {
     /// exercise multiple value sizes in a single run.
     #[arg(long)]
     pub value_size_mix: Option<String>,
-
-    /// Deprecated: workspace is now always kept in the run directory.
-    #[arg(long, default_value_t = false)]
-    pub keep_workspace: bool,
 
     /// Config-driven (SSH) cluster deployment. Accepted but not yet
     /// implemented — only the local 3-node fixture runs in this
@@ -197,20 +161,55 @@ pub struct RunArgs {
     /// behavior).
     #[arg(long, default_value_t = false)]
     pub flush_after_prepopulate: bool,
+}
 
-    /// Stats collection mode for the RPC callback hot path (RPC target
-    /// only). `histogram` (default): lock-free `LatencyHistogram` with
-    /// p50/p99/avg/max. `avg-only`: minimal atomic sum + count (no
-    /// histogram buckets). Used to measure histogram overhead.
-    #[arg(long, default_value = "histogram")]
-    pub stats_mode: String,
-    /// Client model for RPC target. `callback` (default): closed-loop
-    /// callback chain on C++ I/O worker threads (fastest, no scheduler).
-    /// `coroutine`: N independent tokio tasks using the oneshot `call()`
-    /// path, simulating independent clients (more realistic, has per-call
-    /// channel + scheduler overhead). `--threads` = number of coroutines.
-    #[arg(long, default_value = "callback")]
-    pub client_mode: String,
+/// Arguments for `crow-cli bench rpc`.
+#[derive(Args, Debug)]
+pub struct RpcArgs {
+    /// Test duration in seconds.
+    #[arg(long, default_value_t = 20)]
+    pub duration_secs: u64,
+
+    /// Number of C++ coroutines (load generators).
+    #[arg(long, default_value_t = 8)]
+    pub loader_num: u32,
+
+    /// Number of TCP connections to the echo server.
+    #[arg(long, default_value_t = 4)]
+    pub connections: u32,
+
+    /// Number of independent epoll/kqueue instances. Each engine owns
+    /// its own fd and its own set of connections (round-robin
+    /// partitioned). 1 = single-engine (default). More than 1
+    /// parallelizes event processing across independent kernel event
+    /// queues with no ONESHOT re-arm overhead.
+    #[arg(long, default_value_t = 1)]
+    pub io_engines: u32,
+
+    /// Number of C++ I/O worker threads per engine. 1 = single-worker
+    /// per engine (fast path, no ONESHOT re-arm). More than 1 enables
+    /// `EV_ONESHOT`/`EPOLLONESHOT` within that engine for multi-worker
+    /// safety.
+    #[arg(long, default_value_t = 1)]
+    pub io_workers_per_engine: u32,
+
+    /// Number of Rust dispatch thread pool threads. The I/O worker
+    /// hands off parsed frames to this pool; pool workers run the
+    /// handler and submit responses. 0 = use C++ inline handler
+    /// (faster for trivial handlers like echo).
+    #[arg(long, default_value_t = 0)]
+    pub io_dispatch_threads: u32,
+
+    #[arg(long, default_value_t = 1_000_000)]
+    pub key_space: u64,
+
+    #[arg(long, default_value_t = 512)]
+    pub value_size: usize,
+
+    /// Optional explicit run id; defaults to an auto-incremented
+    /// sequence number.
+    #[arg(long)]
+    pub run_id: Option<String>,
 }
 
 /// Arguments for `crow-cli bench`.
@@ -222,32 +221,16 @@ pub struct BenchArgs {
 
 pub async fn run_bench_verb(cli: &Cli, args: BenchArgs) -> ExitCode {
     match args.sub {
-        Some(BenchSub::Run(run_args)) => bench_benchmark(*run_args, cli.json).await,
+        Some(BenchSub::Kv(args)) => bench_benchmark_kv(*args, cli.json).await,
+        Some(BenchSub::Rpc(args)) => bench_benchmark_rpc(*args, cli.json).await,
         Some(BenchSub::Report { run_id }) => bench_report(&run_id, cli.json),
         Some(BenchSub::Compare { run_id_1, run_id_2 }) => bench_compare(&run_id_1, &run_id_2, cli.json),
         None => {
-            eprintln!("usage: crow-cli bench <run|report|compare>");
-            eprintln!("  run     Run a benchmark (deploy, drive load, collect, report)");
+            eprintln!("usage: crow-cli bench <kv|rpc|report|compare>");
+            eprintln!("  kv      Run a KV benchmark (3-node cluster)");
+            eprintln!("  rpc     Run an RPC echo benchmark (transport throughput)");
             eprintln!("  report  Re-render a previously-saved report");
             eprintln!("  compare Compare two previously-saved reports");
-            ExitCode::from(1)
-        }
-    }
-}
-
-/// `bench run` — full self-contained lifecycle: deploy (fixture),
-/// run, collect, cleanup, report.
-#[allow(
-    clippy::too_many_lines,
-    reason = "orchestrates deploy/run/report; splitting reduces readability"
-)]
-async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
-    let target_label = args.target.as_str();
-    match target_label {
-        "kv" => bench_benchmark_kv(args, json).await,
-        "rpc" => bench_benchmark_rpc(args, json).await,
-        other => {
-            eprintln!("error: unknown target {other:?} (expected: kv|rpc)");
             ExitCode::from(1)
         }
     }
@@ -258,7 +241,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     clippy::too_many_lines,
     reason = "orchestrates deploy/run/report; splitting reduces readability"
 )]
-async fn bench_benchmark_kv(args: RunArgs, json: bool) -> ExitCode {
+async fn bench_benchmark_kv(args: KvArgs, json: bool) -> ExitCode {
     use crate::bench::target::kv::{BenchMode, KvTarget, GROUP_ID, STORE_ID};
     use crate::bench::target::BenchTarget;
     use crate::bench::{run_bench, BenchConfig, MinSlotPolicy, WorkloadKind};
@@ -338,16 +321,13 @@ async fn bench_benchmark_kv(args: RunArgs, json: bool) -> ExitCode {
         args.coalesce_drain_threshold,
     );
 
-    // Build a preliminary config to pass to provision (the target needs
-    // topology_seed + read_endpoint_policy to configure the client).
-    // We build the full cfg first, then provision.
     let mut cfg = BenchConfig::defaults(String::new(), kind);
     cfg.target = "kv".to_string();
     cfg.store_id = STORE_ID;
     cfg.group_id = GROUP_ID;
     cfg.mode = mode.label().to_string();
     cfg.connections = args.connections;
-    cfg.threads = args.threads;
+    cfg.loader_num = args.loader_num;
     cfg.duration = Duration::from_secs(args.duration_secs);
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
@@ -472,73 +452,39 @@ async fn bench_benchmark_kv(args: RunArgs, json: bool) -> ExitCode {
 
 /// RPC bench: 2-process echo server (child) + client (CLI), measure
 /// raw transport throughput.
-async fn bench_benchmark_rpc(args: RunArgs, json: bool) -> ExitCode {
-    use crate::bench::target::rpc::{ClientMode, RpcTarget, StatsMode};
+async fn bench_benchmark_rpc(args: RpcArgs, json: bool) -> ExitCode {
+    use crate::bench::target::rpc::RpcTarget;
     use crate::bench::target::BenchTarget;
     use crate::bench::{run_bench, BenchConfig, WorkloadKind};
     use std::time::Duration;
-
-    let kind = match WorkloadKind::parse(&args.workload) {
-        Ok(k) => k,
-        Err(bad) => {
-            eprintln!("error: unknown workload {bad:?} (expected: read|write|list|mix)");
-            return ExitCode::from(1);
-        }
-    };
-
-    let Some(stats_mode) = StatsMode::parse(&args.stats_mode) else {
-        eprintln!(
-            "error: unknown stats-mode {:?} (expected: histogram|avg-only)",
-            args.stats_mode
-        );
-        return ExitCode::from(1);
-    };
-
-    let Some(client_mode) = ClientMode::parse(&args.client_mode) else {
-        eprintln!(
-            "error: unknown client-mode {:?} (expected: callback|coroutine)",
-            args.client_mode
-        );
-        return ExitCode::from(1);
-    };
 
     let run_id = args.run_id.clone().unwrap_or_else(next_run_id);
     let now = chrono::Utc::now();
     let folder_name = run_folder_name(&run_id, "rpc", now);
     let run_dir = crate::bench::BenchReport::default_dir().join(&folder_name);
 
-    println!(
-        "provisioning 2-process RPC echo server (stats-mode={}, client-mode={})...",
-        args.stats_mode, args.client_mode
-    );
+    println!("provisioning 2-process RPC echo server...");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
-    let mut target = RpcTarget::new()
-        .with_stats_mode(stats_mode)
-        .with_client_mode(client_mode);
+    let mut target = RpcTarget::new();
 
-    let mut cfg = BenchConfig::defaults(String::new(), kind);
+    let mut cfg = BenchConfig::defaults(String::new(), WorkloadKind::Write);
     cfg.target = "rpc".to_string();
     cfg.mode = "rpc".to_string();
     cfg.connections = args.connections;
-    cfg.threads = args.threads;
+    cfg.loader_num = args.loader_num;
     cfg.duration = Duration::from_secs(args.duration_secs);
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
     cfg.io_engines = args.io_engines;
     cfg.io_workers_per_engine = args.io_workers_per_engine;
     cfg.io_dispatch_threads = args.io_dispatch_threads;
-    cfg.client_mode = args.client_mode.clone();
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
-    // RPC target doesn't use metrics_log_path (no KV client metrics).
-    cfg.pipeline_depth = args
-        .pipeline_depth
-        .unwrap_or_else(|| target.default_pipeline_depth(&cfg));
 
     println!(
-        "running {} workload for {}s (pipeline_depth={})...",
-        args.workload, args.duration_secs, cfg.pipeline_depth
+        "running rpc echo for {}s (loaders={})...",
+        args.duration_secs, args.loader_num
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 

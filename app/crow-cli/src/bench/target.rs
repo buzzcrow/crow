@@ -38,10 +38,10 @@ pub(crate) trait BenchTarget: Send {
     /// Provision the server(s). Called before measurement.
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()>;
 
-    /// Build a client for one worker. Called `cfg.threads` times.
+    /// Build a client for one worker. Called `cfg.loader_num` times.
     async fn build_client(&self) -> Result<Self::Client>;
 
-    /// Spawn the worker loop for all `cfg.threads` workers. Returns one
+    /// Spawn the worker loop for all `cfg.loader_num` workers. Returns one
     /// `JoinHandle` per worker, each resolving to that worker's per-op
     /// stats. The default implementation spawns tokio tasks running the
     /// standard `run_worker` async loop (oneshot/future-based). Targets
@@ -58,12 +58,12 @@ pub(crate) trait BenchTarget: Send {
     where
         Self::Client: Sized,
     {
-        let mut handles = Vec::with_capacity(cfg.threads as usize);
+        let mut handles = Vec::with_capacity(cfg.loader_num as usize);
         for (worker_id, (client, counters)) in clients.into_iter().zip(counters).enumerate() {
             let cfg2 = cfg.clone();
             #[allow(
                 clippy::cast_possible_truncation,
-                reason = "worker_id is bounded by cfg.threads which fits in u32"
+                reason = "worker_id is bounded by cfg.loader_num which fits in u32"
             )]
             let worker_id = worker_id as u32;
             let handle = tokio::spawn(async move {
@@ -108,7 +108,7 @@ pub(crate) trait BenchTarget: Send {
     }
 
     /// Default pipeline depth when `--pipeline-depth` is not set.
-    /// RPC: `connections * threads` (capped); others: 1.
+    /// RPC: `connections * loader_num` (capped); others: 1.
     #[allow(dead_code, reason = "used by RPC target in Phase 3")]
     fn default_pipeline_depth(&self, _cfg: &BenchConfig) -> usize {
         1
