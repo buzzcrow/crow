@@ -186,12 +186,13 @@ pub struct RpcArgs {
     #[arg(long, default_value_t = 1)]
     pub io_engines: u32,
 
-    /// Number of C++ I/O worker threads per engine. 1 = single-worker
-    /// per engine (fast path, no ONESHOT re-arm). More than 1 enables
+    /// Total number of C++ I/O worker threads (across all engines).
+    /// Per-engine = `io_workers` / `io_engines`. 1 = single-worker (fast
+    /// path, no ONESHOT re-arm). More than 1 per engine enables
     /// `EV_ONESHOT`/`EPOLLONESHOT` within that engine for multi-worker
-    /// safety.
+    /// safety. Must be divisible by `io_engines`.
     #[arg(long, default_value_t = 1)]
-    pub io_workers_per_engine: u32,
+    pub io_workers: u32,
 
     /// Number of Rust dispatch thread pool threads. The I/O worker
     /// hands off parsed frames to this pool; pool workers run the
@@ -477,7 +478,7 @@ async fn bench_benchmark_rpc(args: RpcArgs, json: bool) -> ExitCode {
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
     cfg.io_engines = args.io_engines;
-    cfg.io_workers_per_engine = args.io_workers_per_engine;
+    cfg.io_workers = args.io_workers;
     cfg.io_dispatch_threads = args.io_dispatch_threads;
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());

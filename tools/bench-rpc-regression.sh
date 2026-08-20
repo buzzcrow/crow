@@ -7,8 +7,8 @@
 # No KV/storage layer in the path — purely I/O-bound.
 #
 # Configurations:
-#   - 4 standard configs: 1T:1C → 512T:8C (scaling sweep)
-#   - 2 high-concurrency configs: 1000T × 32C (multi-worker scaling)
+#   - 4 standard configs: 1T:1C → 512T:8C (worker scaling sweep)
+#   - 2 high-concurrency configs: 1000T × 32C / 1000T × 16C
 #   - value_size=128, duration=20s, key_space=1000 (unused by echo)
 #
 # 6 runs × 20s ~= 2 min total.
@@ -21,7 +21,7 @@
 #
 # Reference results A (2026-08-20, Apple M5 Pro, 18c, arm64, macOS):
 #   value_size=64, 5s, in-process echo, kqueue loopback
-#   Eng=io_engines, Wkr=io_workers_per_engine (kqueue loop threads),
+#   Eng=io_engines, Wkr=io_workers (kqueue loop threads, total),
 #   T=client dispatch threads, C=connections
 #   raggr=recv aggregation factor, saggr=send aggregation factor
 #
@@ -46,7 +46,7 @@
 #
 # Reference results B (2026-08-20, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
 #   value_size=128, 20s, in-process echo, epoll loopback
-#   Eng=io_engines, Wkr=io_workers_per_engine (epoll loop threads),
+#   Eng=io_engines, Wkr=io_workers (epoll loop threads, total),
 #   T=client dispatch threads, C=connections
 #
 #   Eng Wkr    T    C  ops/s      avg    p50    p99    p999      err
@@ -80,24 +80,27 @@
 #   scan_interval_ns for timed-out entries. folly made unconditional
 #   (no #if/#else fallback). value_size=128, 20s, in-process echo,
 #   epoll loopback, pipeline_depth=1
-#   CWkr=client I/O worker threads (Eng×Wkr, same as server)
+#   Wkr=total I/O workers (Eng × per-engine); client uses same config.
 #   raggr=recv aggregation (frames/read), saggr=send aggregation (frames/writev)
 #   slab_fallback=0, map_in_flight=0 across all configs (coroutine model
 #   pins fixed slots per coroutine — CAS always succeeds, map never used)
 #
-#   Eng Wkr CWkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
-#   1   1    1      1    1      52,375    18     18     18      18     1.0    1.0    0
-#   1   1    1     64    4     324,230   197    197    197     197     4.2    4.2    0
-#   2   1    2    512    8     595,647   858    858    858     858     4.1    4.1    0
-#   1   2    2    512    8     551,893   926    926    926     926     5.5    5.5    0
-#   1  16   16   1000   32   2,237,058   445    445    445     445     9.7   10.2    0
-#   2  16   32   1000   32   2,338,581   425    425    425     425     8.8    9.4    0
+#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
+#   1   1      1    1      52,790    17     17     23      32     1.0    1.0    0
+#   1   4     64    4     938,568    66     63    155     614     6.0    6.0    0
+#   1   8    512    8   1,780,802   285    264    457    4112    11.0   11.7    0
+#   2   8    512    8   1,744,829   291    270    387     438     7.6    7.8    0
+#   1  16   1000   32   2,197,231   452    362   1607    2404     9.7   10.0    0
+#   2  16   1000   16   2,293,581   432    379   1282    6092     9.1   10.0    0
 #
-# TPS ceiling ~2.34M (2e16w 1000t32c) — 8.5x vs Gap4+Gap1 baseline
+# TPS ceiling ~2.29M (2e16w 1000t16c) — 8.3x vs Gap4+Gap1 baseline
 # (276K). The CAS fix (DONE→PENDING) ensures clean slot reuse; the
 # coroutine model's fixed-slot-per-coroutine design means the CAS
-# always succeeds (slab_fallback=0). 1e2w at 512T:8C: 552K. Zero
-# errors across all configs.
+# always succeeds (slab_fallback=0). Worker scaling: 1w→4w +17x
+# (53K→939K), 4w→8w +1.9x (939K→1.78M). 2e8w at 512T:8C slightly
+# underperforms 1e8w (1.74M vs 1.78M). Peak at 2e16w 1000t16c (2.29M)
+# — 2 engines × 8 workers/engine with 16 conns beats 1e16w 32c (2.20M).
+# Zero errors across all configs.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
@@ -112,20 +115,19 @@ KEYSPACE=1000
 VALUE_SIZE=128
 
 run_bench() {
-    local loaders="$1" conn="$2" label="$3" io_engines="${4:-1}" workers_per_engine="${5:-1}"
-    local cwkr=$((io_engines * workers_per_engine))
-    echo ">>> $label (io_engines=$io_engines, workers_per_engine=$workers_per_engine, client_wkr=$cwkr) ..."
+    local loaders="$1" conn="$2" label="$3" io_engines="${4:-1}" wkr="${5:-1}"
+    echo ">>> $label (io_engines=$io_engines, io_workers=$wkr) ..."
     local output
     output=$(pixi run -- ./target/release/crow-cli bench rpc \
         --duration-secs "$DURATION" \
         --loader-num "$loaders" --connections "$conn" \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
-        --io-engines "$io_engines" --io-workers-per-engine "$workers_per_engine" \
+        --io-engines "$io_engines" --io-workers "$wkr" \
         --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t$cwkr\t0\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
+        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
         return
     fi
     local ops_s avg_us p50_us p99_us p999_us errors raggr saggr
@@ -150,24 +152,25 @@ run_bench() {
         raggr=0; saggr=0
     fi
     echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us raggr=$raggr saggr=$saggr err=$errors"
-    echo -e "$label\t$cwkr\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$raggr\t$saggr\t$errors" >> "$RESULTS_FILE"
+    echo -e "$label\t$wkr\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$raggr\t$saggr\t$errors" >> "$RESULTS_FILE"
 }
 
-echo -e "label\tcwkr\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\traggr\tsaggr\terrors" > "$RESULTS_FILE"
+echo -e "label\twkr\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\traggr\tsaggr\terrors" > "$RESULTS_FILE"
 
 echo "=== rpc echo regression (128B, 20s, 6 configs) ==="
 
-# Standard regression sweep.
-run_bench 1   1  "rpc_1e1w_1l_1c"    1 1
-run_bench 64  4  "rpc_1e1w_64l_4c"   1 1
-run_bench 512 8  "rpc_2e1w_512l_8c"  2 1
-run_bench 512 8  "rpc_1e2w_512l_8c"  1 2
+# Standard regression sweep — scale workers with connections.
+# Wkr = total I/O workers (Eng × per-engine); per-engine = Wkr / Eng.
+run_bench 1   1  "rpc_1e1w_1l_1c"      1 1
+run_bench 64  4  "rpc_1e4w_64l_4c"     1 4
+run_bench 512 8  "rpc_1e8w_512l_8c"    1 8
+run_bench 512 8  "rpc_2e8w_512l_8c"    2 8
 
-# High-concurrency configs: 1000T × 32C (multi-worker scaling).
-# 1e16w = peak single-engine (16 workers on one epoll fd).
-# 2e16w = multi-engine + multi-worker (max I/O parallelism).
+# High-concurrency configs: 1000T (multi-worker scaling).
+# 1e16w 32c = peak single-engine (16 workers on one epoll fd).
+# 2e16w 16c = 2 engines × 8 workers/engine, reduced connections.
 run_bench 1000 32 "rpc_1e16w_1000l_32c"  1 16
-run_bench 1000 32 "rpc_2e16w_1000l_32c"  2 16
+run_bench 1000 16 "rpc_2e16w_1000l_16c"  2 16
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

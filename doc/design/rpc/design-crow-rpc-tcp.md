@@ -36,7 +36,7 @@ Per worker thread:
     events = engine.wait(timeout)
     for event in events:
       if event.fd == notify_fd:           // shutdown wake only
-        no-op (buzz model: no cross-thread submit queue)
+        no-op (no cross-thread submit queue)
       elif event.fd == timer_fd:
         run due scheduled tasks → reset timer to next deadline
       elif event is READABLE:
@@ -55,11 +55,12 @@ Per worker thread:
       if partial/EAGAIN: engine.arm_write(fd)
 ```
 
-The transport creates N independent engines (`io_engines`), each with M
-workers (`workers_per_engine`). Connections are partitioned round-robin
-across all workers; each connection is owned by one worker, so no
-cross-worker locking. When M=1, the single worker uses the engine with
-no `EV_ONESHOT`/`EPOLLONESHOT` — level-triggered, no re-arm overhead
+The transport creates N independent engines (`io_engines`), with
+`io_workers` total workers (per-engine M = `io_workers / io_engines`).
+Connections are partitioned round-robin across all workers; each
+connection is owned by one worker, so no cross-worker locking. When
+M=1, the single worker uses the engine with no
+`EV_ONESHOT`/`EPOLLONESHOT` — level-triggered, no re-arm overhead
 (the fast path). When M>1, the M workers sharing one engine's fd use
 `EV_ONESHOT`/`EPOLLONESHOT` so only one worker wakes per event; each
 worker re-arms read/write after processing.
@@ -114,10 +115,11 @@ timer is `EVFILT_TIMER`.
 
 ## 6. Multi-Engine Scaling
 
-The transport supports a 2D configuration: `io_engines` ×
-`workers_per_engine`. Each engine is an independent epoll/kqueue fd
-with its own connection set (round-robin partitioned at accept time).
-This separates two tuning axes that were previously conflated:
+The transport supports a 2D configuration: `io_engines` × per-engine
+workers (`io_workers / io_engines`). Each engine is an independent
+epoll/kqueue fd with its own connection set (round-robin partitioned at
+accept time). This separates two tuning axes that were previously
+conflated:
 
 - **Engines** — parallelize across independent kernel event queues.
   Each engine has its own fd, its own interest set, and its own

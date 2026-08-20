@@ -66,7 +66,7 @@ class BufferPool
 };
 
 // SystemBufferPool: direct heap allocation (posix_memalign + new/delete),
-// no free-list recycling. Matches buzz-cpp's approach — glibc per-thread
+// no free-list recycling. Uses glibc per-thread
 // arenas handle small-allocation recycling efficiently without a userspace
 // pool. The max_buffers bound limits outstanding allocations; alloc returns
 // nullptr when exceeded. Default pool for TCP transport.

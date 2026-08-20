@@ -13,7 +13,7 @@ namespace crow::rpc
 
 OutFrame *handle_ping(Frame *request, Connection *conn)
 {
-    // request_id + rpc_create_nano extracted during parse (buzz-cpp style).
+    // request_id + rpc_create_nano extracted during parse.
     uint64_t req_id      = request->request_id;
     uint64_t create_nano = request->rpc_create_nano;
 

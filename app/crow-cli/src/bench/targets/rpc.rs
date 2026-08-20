@@ -12,16 +12,17 @@
 //! This measures raw RPC transport throughput (epoll + framing +
 //! request/response correlation) without any KV/storage layer in the
 //! path. The 2-process model gives 2 independent epoll fds (client +
-//! server), matching buzz-cpp's architecture and eliminating the
+//! server), giving 2 independent epoll fds and eliminating the
 //! single-epoll-fd contention of the in-process model.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crow_common::metrics::PreciseHistogram;
 use crow_console_shared::error::{Error, Result};
 use crow_console_shared::lifecycle::stop_pid_with_timeout;
 use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
@@ -123,7 +124,7 @@ impl BenchTarget for RpcTarget {
 
         // Spawn the external echo server process. It gets its own
         // epoll fd — the client-side transport (below) gets a separate
-        // one, giving 2 independent epoll fds (matching buzz-cpp).
+        // one, giving 2 independent epoll fds.
         let binary = echo_server_bin().ok_or_else(|| {
             Error::Config(
                 "could not locate crow-rpc-echo-server binary; set $CROW_RPC_ECHO_SERVER_BIN".to_string(),
@@ -137,8 +138,8 @@ impl BenchTarget for RpcTarget {
             .arg("0")
             .arg("--io-engines")
             .arg(cfg.io_engines.to_string())
-            .arg("--io-workers-per-engine")
-            .arg(cfg.io_workers_per_engine.to_string())
+            .arg("--io-workers")
+            .arg(cfg.io_workers.to_string())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_stderr));
         let mut child = cmd
@@ -186,7 +187,7 @@ impl BenchTarget for RpcTarget {
         let server = Arc::new(RpcServer::with_engines(
             Some(&pool),
             cfg.io_engines,
-            cfg.io_workers_per_engine,
+            cfg.io_workers,
         ));
         server.start();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -427,16 +428,13 @@ impl RpcTarget {
             // Read stats from the Rust-side atomics (written by FFI callbacks).
             let total_ops = ctx_arc.stats.ops.load(Ordering::Relaxed);
             let total_errors = ctx_arc.stats.errors.load(Ordering::Relaxed);
-            let total_latency_ns = ctx_arc.stats.total_latency_ns.load(Ordering::Relaxed);
 
-            // Build OpStats.
+            // Build OpStats from the per-op latency histogram.
             let mut stats = OpStats::new();
             stats.ops = total_ops;
             stats.errors = total_errors;
-            if let Some(avg_ns) = total_latency_ns.checked_div(total_ops) {
-                #[allow(clippy::cast_possible_truncation, reason = "ns to us fits in u64")]
-                let avg_micros = (avg_ns + 500) / 1000;
-                stats.histogram.record(avg_micros.max(1));
+            if let Ok(h) = ctx_arc.stats.histogram.lock() {
+                stats.histogram = h.clone();
             }
 
             let mut map = BTreeMap::new();
@@ -450,11 +448,10 @@ impl RpcTarget {
 /// Lock-free stats shared between the FFI callbacks (C++ I/O thread)
 /// and the Rust `spawn_blocking` thread (reads after `co_spawn` returns).
 #[derive(Default)]
-#[allow(dead_code, reason = "stats are read via C++ co_get_stats, not these atomics")]
 struct LockFreeStats {
     ops: AtomicU64,
     errors: AtomicU64,
-    total_latency_ns: AtomicU64,
+    histogram: Mutex<PreciseHistogram>,
 }
 
 /// Context passed to the C++ coroutine FFI callbacks. Allocated on the
@@ -551,9 +548,10 @@ unsafe extern "C" fn co_on_response(
         if !ok {
             ctx.stats.errors.fetch_add(1, Ordering::Relaxed);
         }
-        ctx.stats
-            .total_latency_ns
-            .fetch_add(latency_ns, Ordering::Relaxed);
+        let lat_us = latency_ns / 1000;
+        if let Ok(mut h) = ctx.stats.histogram.lock() {
+            h.record(lat_us);
+        }
         ctx.counters.record(OpKind::Write, ok);
     }
 

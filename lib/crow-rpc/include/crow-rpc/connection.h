@@ -66,7 +66,7 @@ class Connection
     int drain_send_queue(OutFrame **out, int max);
 
     // Try to send all queued frames via writev directly on the caller's
-    // thread (buzz model). Uses in_send_ to serialize: only one thread
+    // thread. Uses in_send_ to serialize: only one thread
     // does writev at a time; others just offer to the queue and return.
     // Returns true if all data was sent, false if partial/EAGAIN (the
     // I/O worker will retry via arm_write).
@@ -143,7 +143,7 @@ class Connection
     // for writev. Defined in crow-common/cpp/include/crow-common/mpsc_queue.h.
     SendQueue send_queue_;
 
-    // Caller-thread direct-write flag (buzz model). Only one thread
+    // Caller-thread direct-write flag. Only one thread
     // does writev at a time; others just offer to the queue and return.
     std::atomic<bool> in_send_{false};
 

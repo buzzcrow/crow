@@ -180,7 +180,7 @@ Frame *FrameParser::advance(uint32_t bytes_read)
         if (control_offset_ < control_buf_.size()) {
             return nullptr; // need more control bytes
         }
-        // Control complete — extract fields (buzz-cpp style).
+        // Control complete — extract fields.
         extract_control_fields(control_buf_.data(), static_cast<uint32_t>(control_buf_.size()), parsed_request_id_,
                                parsed_rpc_create_nano_);
         if (header_.data_size == 0) {

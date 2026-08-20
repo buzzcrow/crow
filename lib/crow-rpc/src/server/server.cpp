@@ -25,14 +25,14 @@ static inline uint64_t now_nano()
     return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 }
 
-RpcServer::RpcServer(BufferPool *pool, uint32_t io_engines, uint32_t workers_per_engine)
+RpcServer::RpcServer(BufferPool *pool, uint32_t io_engines, uint32_t io_workers)
     : pool_(pool),
       owns_pool_(pool == nullptr)
 {
     if (pool_ == nullptr) {
         pool_ = new SystemBufferPool();
     }
-    transport_ = std::make_unique<SocketTransport>(io_engines, workers_per_engine, pool_);
+    transport_ = std::make_unique<SocketTransport>(io_engines, io_workers, pool_);
 }
 
 RpcServer::~RpcServer()

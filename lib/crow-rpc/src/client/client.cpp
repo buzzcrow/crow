@@ -195,7 +195,7 @@ bool RpcClient::call_one_way(Transport *transport, Connection *conn, Buffer *con
 void RpcClient::attach(Connection *conn)
 {
     // Set the on_frame callback to route response frames to on_response.
-    // request_id is extracted during parse (buzz-cpp style).
+    // request_id is extracted during parse.
     conn->set_on_frame([this](Frame *frame, Connection * /*conn*/) { on_response(frame->request_id, frame); });
 }
 

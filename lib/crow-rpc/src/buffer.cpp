@@ -46,7 +46,7 @@ void Buffer::release()
 // Direct heap allocation — no free-list, no mutex. Each alloc does
 // posix_memalign + new (Buffer + refcount); each recycle does free +
 // delete. glibc per-thread arenas handle small-allocation recycling
-// efficiently without a userspace pool. Matches buzz-cpp's approach.
+// efficiently without a userspace pool.
 
 SystemBufferPool::SystemBufferPool(uint32_t max_buffers) : max_buffers_(max_buffers)
 {

@@ -94,7 +94,7 @@ void Worker::run_loop()
             switch (ev.type) {
             case SocketEvent::Notify:
                 // No cross-thread submit queue — submits are caller-thread
-                // writev (buzz model). Notify is only used for shutdown wake.
+                // writev. Notify is only used for shutdown wake.
                 break;
             case SocketEvent::Timer:
                 // Scheduled tasks fire here (Phase 3).
@@ -215,7 +215,7 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
 
     while (true) {
         // If parser is waiting for data, read directly into the data
-        // buffer (buzz-cpp style: separate read for data into pool Buffer).
+        // buffer (separate read for data into pool Buffer).
         if (parser.state() == ParseState::ReadingData) {
             auto target = parser.next_read_target();
             if (target.len == 0) {
@@ -301,9 +301,10 @@ static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats)
 
 // ── SocketTransport ───────────────────────────────────────────────
 
-SocketTransport::SocketTransport(uint32_t io_engines, uint32_t workers_per_engine, BufferPool *pool) : pool_(pool)
+SocketTransport::SocketTransport(uint32_t io_engines, uint32_t io_workers, BufferPool *pool) : pool_(pool)
 {
-    assert(io_engines >= 1 && workers_per_engine >= 1);
+    assert(io_engines >= 1 && io_workers >= 1);
+    assert(io_workers % io_engines == 0);
     if (pool_ == nullptr) {
         pool_ = new SystemBufferPool(); // own a default pool
     }
@@ -311,6 +312,7 @@ SocketTransport::SocketTransport(uint32_t io_engines, uint32_t workers_per_engin
     // engine uses EV_ONESHOT/EPOLLONESHOT so only one worker wakes per
     // event; workers re-arm after processing. When M=1, no ONESHOT —
     // the single worker owns the engine (level-triggered fast path).
+    uint32_t workers_per_engine = io_workers / io_engines;
     for (uint32_t e = 0; e < io_engines; e++) {
         auto engine = create_engine();
         engine->init();

@@ -23,9 +23,8 @@ class RpcServer
 {
   public:
     // Multi-engine ctor: io_engines independent epoll/kqueue instances,
-    // each with workers_per_engine workers. Total workers = io_engines *
-    // workers_per_engine.
-    RpcServer(BufferPool *pool = nullptr, uint32_t io_engines = 1, uint32_t workers_per_engine = 1);
+    // with io_workers total workers (per-engine = io_workers / io_engines).
+    RpcServer(BufferPool *pool = nullptr, uint32_t io_engines = 1, uint32_t io_workers = 1);
     ~RpcServer();
 
     // Listen on the given address + port. Must be called before start().

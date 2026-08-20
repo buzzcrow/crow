@@ -30,16 +30,15 @@ impl RpcServer {
     }
 
     /// Create a new server with `io_engines` independent epoll/kqueue
-    /// instances, each with `workers_per_engine` worker threads. Total
-    /// workers = io_engines * workers_per_engine. Connections are
-    /// partitioned round-robin across engines. When workers_per_engine=1,
-    /// the single worker owns the engine with no ONESHOT (fast path).
-    /// When workers_per_engine>1, the workers share the engine's fd with
-    /// EV_ONESHOT/EPOLLONESHOT (re-arm only within that engine).
-    pub fn with_engines(pool: Option<&crate::BufferPool>, io_engines: u32, workers_per_engine: u32) -> Self {
+    /// instances and `io_workers` total worker threads (per-engine =
+    /// io_workers / io_engines). Connections are partitioned round-robin
+    /// across engines. When per-engine=1, the single worker owns the
+    /// engine with no ONESHOT (fast path). When per-engine>1, the workers
+    /// share the engine's fd with EV_ONESHOT/EPOLLONESHOT (re-arm only
+    /// within that engine).
+    pub fn with_engines(pool: Option<&crate::BufferPool>, io_engines: u32, io_workers: u32) -> Self {
         let pool_handle = pool.map(|p| p.handle()).unwrap_or(ptr::null_mut());
-        let handle =
-            unsafe { sys::crow_rpc_server_create_with_engines(pool_handle, io_engines, workers_per_engine) };
+        let handle = unsafe { sys::crow_rpc_server_create_with_engines(pool_handle, io_engines, io_workers) };
         RpcServer { handle }
     }
 

@@ -145,10 +145,10 @@ pub(crate) struct BenchConfig {
     /// Number of independent epoll/kqueue instances (RPC target only).
     /// Each engine owns its own fd + connections (round-robin partitioned).
     pub(crate) io_engines: u32,
-    /// Number of C++ I/O worker threads per engine (RPC target only).
-    /// 1 = single-worker per engine (fast path, no ONESHOT). >1 enables
-    /// `EV_ONESHOT`/`EPOLLONESHOT` within that engine.
-    pub(crate) io_workers_per_engine: u32,
+    /// Total C++ I/O worker threads (RPC target only). Per-engine =
+    /// `io_workers` / `io_engines`. 1 = single-worker (fast path, no
+    /// ONESHOT). >1 per engine enables `EV_ONESHOT`/`EPOLLONESHOT`.
+    pub(crate) io_workers: u32,
     /// Number of Rust dispatch thread pool threads (RPC target only).
     /// The I/O worker hands off parsed frames to this pool; pool workers
     /// run the handler and submit responses. 0 = use C++ inline handler.
@@ -188,7 +188,7 @@ impl BenchConfig {
             pipeline_depth: 1,
             target: "kv".to_string(),
             io_engines: 1,
-            io_workers_per_engine: 1,
+            io_workers: 1,
             io_dispatch_threads: 0,
         }
     }
@@ -210,8 +210,11 @@ impl BenchConfig {
         if self.io_engines == 0 {
             return Err(bad("--io-engines must be >= 1"));
         }
-        if self.io_workers_per_engine == 0 {
-            return Err(bad("--io-workers-per-engine must be >= 1"));
+        if self.io_workers == 0 {
+            return Err(bad("--io-workers must be >= 1"));
+        }
+        if self.io_workers % self.io_engines != 0 {
+            return Err(bad("--io-workers must be divisible by --io-engines"));
         }
         if let Some(w) = self.warmup {
             if w >= self.duration {

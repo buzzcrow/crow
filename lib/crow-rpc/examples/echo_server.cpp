@@ -7,7 +7,7 @@
 // until SIGTERM/SIGINT. On shutdown, prints transport stats to stdout
 // as key=value lines (parsed by the CLI bench runner).
 //
-// Usage: crow-rpc-echo-server --port <port> [--io-engines N] [--io-workers-per-engine M]
+// Usage: crow-rpc-echo-server --port <port> [--io-engines N] [--io-workers M]
 
 #include "crow-rpc/c_api.h"
 
@@ -39,9 +39,9 @@ static uint32_t parse_u32(const char *s, const char *name)
 
 int main(int argc, char *argv[])
 {
-    int      port               = 0;
-    uint32_t io_engines         = 1;
-    uint32_t workers_per_engine = 1;
+    int      port       = 0;
+    uint32_t io_engines = 1;
+    uint32_t io_workers = 1;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -51,12 +51,12 @@ int main(int argc, char *argv[])
         else if (arg == "--io-engines" && i + 1 < argc) {
             io_engines = parse_u32(argv[++i], "io-engines");
         }
-        else if (arg == "--io-workers-per-engine" && i + 1 < argc) {
-            workers_per_engine = parse_u32(argv[++i], "io-workers-per-engine");
+        else if (arg == "--io-workers" && i + 1 < argc) {
+            io_workers = parse_u32(argv[++i], "io-workers");
         }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-rpc-echo-server --port <port> "
-                        "[--io-engines N] [--io-workers-per-engine M]\n");
+                        "[--io-engines N] [--io-workers M]\n");
             return 0;
         }
         else {
@@ -68,7 +68,7 @@ int main(int argc, char *argv[])
     std::signal(SIGTERM, on_signal);
     std::signal(SIGINT, on_signal);
 
-    crow_rpc_server_t server = crow_rpc_server_create_with_engines(nullptr, io_engines, workers_per_engine);
+    crow_rpc_server_t server = crow_rpc_server_create_with_engines(nullptr, io_engines, io_workers);
     if (server == nullptr) {
         std::fprintf(stderr, "error: failed to create server\n");
         return 1;

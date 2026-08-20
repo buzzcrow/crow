@@ -38,7 +38,7 @@ int Connection::drain_send_queue(OutFrame **out, int max)
     return send_queue_.drain(out, max);
 }
 
-// ── try_send: caller-thread direct writev (buzz model) ────────────
+// ── try_send: caller-thread direct writev ────────────
 //
 // Drains the send queue and does writev directly on the caller's thread.
 // The in_send_ flag serializes: only one thread does writev at a time.

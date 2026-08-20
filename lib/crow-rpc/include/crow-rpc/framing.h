@@ -40,7 +40,7 @@ struct Header
 
 // A complete frame: header + extracted control fields + optional data
 // buffer. The parser extracts request_id + rpc_create_nano from the
-// flatbuffer control message during parse (buzz-cpp style) and discards
+// flatbuffer control message during parse and discards
 // the control bytes. Data is read into a pool-allocated, ref-counted
 // Buffer. The handler/callback that receives a Frame* must delete it
 // when done (destructor releases data_buf to the pool).
@@ -86,7 +86,7 @@ void extract_control_fields(const uint8_t *control, uint32_t len, uint64_t &out_
 // next* — directly into pool-allocated Buffers. This unifies the TCP and
 // RDMA receive paths.
 //
-// buzz-cpp style: control fields (request_id, rpc_create_nano) are
+// Control fields (request_id, rpc_create_nano) are
 // extracted during parse and the control bytes are discarded. Data is
 // read into a pool-allocated Buffer. No malloc per frame.
 //
@@ -141,7 +141,7 @@ class FrameParser
     // buffer filled by one big read()). Processes header + control,
     // yields complete control-only frames via the callback. Stops when
     // the parser enters ReadingData state — the read loop handles data
-    // directly (buzz-cpp style: separate read for data into pool Buffer).
+    // directly (separate read for data into pool Buffer).
     // Returns the number of bytes consumed.
     template <typename Callback> uint32_t feed_data(const uint8_t *data, uint32_t len, Callback &&on_frame)
     {

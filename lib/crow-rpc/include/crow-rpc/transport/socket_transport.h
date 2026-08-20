@@ -169,7 +169,7 @@ class SocketEngine
 // all engines). When multiple workers share one engine, the engine uses
 // EV_ONESHOT/EPOLLONESHOT so only one worker wakes per event; the worker
 // re-arms read/write after processing. When one worker owns the engine
-// (workers_per_engine=1), no ONESHOT — level-triggered, no re-arm needed.
+// (per-engine=1), no ONESHOT — level-triggered, no re-arm needed.
 class Worker
 {
   public:
@@ -226,12 +226,12 @@ class Worker
 
 // ── SocketTransport: shared I/O logic for TCP ──────────────────────
 //
-// Implements Transport::submit (caller-thread writev, buzz model) and
+// Implements Transport::submit (caller-thread writev) and
 // the shared on_readable / on_writable hot paths. The SocketEngine
 // subclass tells the base *when* to read/write; the base does the I/O.
 //
 // Multi-engine: N independent epoll/kqueue instances (io_engines), each
-// with M workers (workers_per_engine). Connections are partitioned
+// with M workers (io_workers / io_engines). Connections are partitioned
 // round-robin across engines. When M=1, the single worker owns the
 // engine with no ONESHOT (fast path). When M>1, the M workers share the
 // engine's fd with ONESHOT (re-arm only within that engine).
@@ -239,9 +239,8 @@ class SocketTransport : public Transport
 {
   public:
     // Multi-engine ctor: io_engines independent epoll/kqueue instances,
-    // each with workers_per_engine workers. Total workers = io_engines *
-    // workers_per_engine.
-    SocketTransport(uint32_t io_engines, uint32_t workers_per_engine, BufferPool *pool = nullptr);
+    // with io_workers total workers (per-engine = io_workers / io_engines).
+    SocketTransport(uint32_t io_engines, uint32_t io_workers, BufferPool *pool = nullptr);
     // Deprecated alias: maps to (1, num_workers). Kept for backward compat.
     SocketTransport(uint32_t num_workers, BufferPool *pool);
     ~SocketTransport() override;
