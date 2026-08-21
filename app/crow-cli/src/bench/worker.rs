@@ -1,12 +1,12 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Per-worker counters and the closed-loop / pipelined worker task.
+//! Per-worker counters and the closed-loop worker task.
 //!
-//! Each worker is a strict closed loop when `pipeline_depth == 1`:
-//! issue one op via `BenchClient::issue_op`, await completion, record
-//! latency, repeat. When `pipeline_depth > 1`, the worker uses a
-//! semaphore to bound concurrent in-flight ops (pipelined sends).
+//! Each worker is a strict closed loop: issue one op via
+//! `BenchClient::issue_op`, await completion, record latency, repeat.
+//! Concurrency comes from having multiple workers (threads) each in
+//! closed-loop mode.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -83,12 +83,9 @@ impl WorkerCounters {
 /// stats. Errors during ops are recorded in the histogram (with `ok=false`)
 /// rather than aborting the worker.
 ///
-/// Closed loop: at most one in-flight RPC per worker at any instant
-/// (when `pipeline_depth == 1`). Pipelined: up to `pipeline_depth`
-/// concurrent in-flight ops (when > 1).
+/// Closed loop: at most one in-flight RPC per worker at any instant.
 #[allow(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "per-op dispatch loop; splitting per-kind reduces readability"
 )]
 pub(crate) async fn run_worker<C: BenchClient>(
@@ -102,63 +99,23 @@ pub(crate) async fn run_worker<C: BenchClient>(
 ) -> BTreeMap<OpKind, OpStats> {
     let mut stats: BTreeMap<OpKind, OpStats> = BTreeMap::new();
     let mut iter: u64 = 0;
-    let pipeline_depth = cfg.pipeline_depth.max(1);
 
-    if pipeline_depth == 1 {
-        // Closed-loop: one op at a time.
-        loop {
-            let now_pre = Instant::now();
-            if now_pre >= deadline {
-                break;
-            }
-            let recording = now_pre >= measure_start;
-            iter = iter.wrapping_add(1);
-
-            let kind = pick_kind(cfg, gen);
-            let t0 = Instant::now();
-            let outcome = client.issue_op(kind, gen, cfg, worker_id, iter).await;
-            if recording {
-                record_op(&mut stats, counters, kind, outcome, t0);
-            }
-            if iter % 64 == 0 {
-                tokio::task::yield_now().await;
-            }
+    loop {
+        let now_pre = Instant::now();
+        if now_pre >= deadline {
+            break;
         }
-    } else {
-        // Pipelined: up to `pipeline_depth` concurrent in-flight ops.
-        // The worker issues ops in a loop, but instead of awaiting each
-        // one immediately, it collects futures and awaits them in
-        // bounded batches. This gives the transport a chance to batch
-        // multiple sends into one writev call.
-        //
-        // Since `BenchClient::issue_op` takes `&mut OpGen`, we can't
-        // spawn multiple concurrent issue_op calls from one worker.
-        // Instead, pipelining at the worker level is achieved by having
-        // the RPC client's `call()` submit immediately and return a
-        // future — the worker can fire multiple calls before awaiting
-        // any. This requires the BenchClient to support a "fire then
-        // collect" pattern, which is a future enhancement.
-        //
-        // For now, pipeline_depth > 1 falls back to closed-loop. The
-        // real pipelining comes from having multiple workers (threads)
-        // each in closed-loop mode, which is the existing behavior.
-        loop {
-            let now_pre = Instant::now();
-            if now_pre >= deadline {
-                break;
-            }
-            let recording = now_pre >= measure_start;
-            iter = iter.wrapping_add(1);
+        let recording = now_pre >= measure_start;
+        iter = iter.wrapping_add(1);
 
-            let kind = pick_kind(cfg, gen);
-            let t0 = Instant::now();
-            let outcome = client.issue_op(kind, gen, cfg, worker_id, iter).await;
-            if recording {
-                record_op(&mut stats, counters, kind, outcome, t0);
-            }
-            if iter % 64 == 0 {
-                tokio::task::yield_now().await;
-            }
+        let kind = pick_kind(cfg, gen);
+        let t0 = Instant::now();
+        let outcome = client.issue_op(kind, gen, cfg, worker_id, iter).await;
+        if recording {
+            record_op(&mut stats, counters, kind, outcome, t0);
+        }
+        if iter % 64 == 0 {
+            tokio::task::yield_now().await;
         }
     }
 

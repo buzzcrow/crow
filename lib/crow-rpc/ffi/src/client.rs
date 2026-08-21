@@ -9,7 +9,12 @@ use crate::{Buffer, Connection, RpcError, RpcServer};
 use std::ptr;
 use tokio::sync::oneshot;
 
+/// Default slab completion pool size for `call()` (next power of two).
+/// Call `set_completion_pool_size` before the first `call()` to override.
+const DEFAULT_POOL_SIZE: u32 = 1024;
+
 /// A response from an RPC call.
+#[derive(Debug)]
 pub struct Response {
     pub request_id: u64,
     pub control: Option<Buffer>,
@@ -20,6 +25,14 @@ pub struct Response {
 /// a future that resolves when the response arrives (or on error).
 pub struct RpcClient {
     handle: sys::crow_rpc_client_t,
+}
+
+impl std::fmt::Debug for RpcClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcClient")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RpcClient {
@@ -42,8 +55,8 @@ impl RpcClient {
         self.handle
     }
 
-    /// Size the callback completion pool (Gap2+Gap3). Must be called
-    /// before any `call_callback`. The pool is sized to the next power
+    /// Size the callback completion pool. Must be called
+    /// before any `send`. The pool is sized to the next power
     /// of two >= max_in_flight. Slots are indexed by request_id & mask.
     /// Zero per-call heap allocation — the callback + user_data live in
     /// pre-allocated C++ slots.
@@ -68,10 +81,10 @@ impl RpcClient {
         unsafe { sys::crow_rpc_client_stop_reaper(self.handle) };
     }
 
-    /// Callback-based call (Gap2+Gap3): reserves a slab slot by
-    /// request_id, stores the C ABI callback + user_data, and submits.
-    /// The callback is invoked directly on the C++ I/O worker thread
-    /// when the response arrives — no oneshot channel, no tokio
+    /// Send a request with a C ABI completion callback: reserves a slab
+    /// slot by request_id, stores the callback + user_data, and
+    /// submits. The callback is invoked directly on the C++ I/O worker
+    /// thread when the response arrives — no oneshot channel, no tokio
     /// scheduler round-trip, no per-call heap alloc. The caller must
     /// size the pool first (`set_completion_pool_size`) and ensure at
     /// most `max_in_flight` requests are in-flight (so no two in-flight
@@ -80,7 +93,7 @@ impl RpcClient {
     /// The callback must be non-blocking (it runs on the I/O thread).
     /// Returns `Ok(())` on success, `Err` on submit error (callback NOT
     /// invoked — caller must handle the error).
-    /// Flow: doc/working/rpc-echo-flow-analysis.md § "Echo Flow — Callback Model".
+    /// Flow: doc/design/rpc/rpc-echo-flow-analysis.md § "Flow".
     ///
     /// # Safety
     ///
@@ -91,7 +104,7 @@ impl RpcClient {
         clippy::not_unsafe_ptr_arg_deref,
         reason = "FFI wrapper mirrors C ABI; user_data is opaque to C++"
     )]
-    pub fn call_callback(
+    pub fn send(
         &self,
         server: &RpcServer,
         conn: &Connection,
@@ -106,7 +119,7 @@ impl RpcClient {
         let data_handle = data.map(|d| d.into_raw()).unwrap_or(ptr::null_mut());
 
         let status = unsafe {
-            sys::crow_rpc_client_call_callback(
+            sys::crow_rpc_client_send(
                 self.handle,
                 server.handle(),
                 conn.handle(),
@@ -127,95 +140,67 @@ impl RpcClient {
 
     /// Submit a request-response call. Returns a future that resolves to
     /// the response or an error.
+    ///
+    /// This is a convenience wrapper around `send`: it creates a
+    /// oneshot channel, passes the sender as `user_data`, and returns the
+    /// receiver as a `CallFuture`. The C++ slab completion pool is sized
+    /// automatically on first call (idempotent — call
+    /// `set_completion_pool_size` first to control the size).
+    ///
+    /// `request_id` must match the `id` field in the control flatbuffer
+    /// so the server's response can be correlated. The caller is
+    /// responsible for generating unique request_ids (e.g. via an
+    /// `AtomicU64`) and for sizing the pool >= max in-flight.
+    ///
+    /// One per-call heap allocation: the `oneshot::Sender` boxed into
+    /// `user_data`. The C++ slab path itself is zero-alloc (no
+    /// `OnCompleteAdapter`, no `std::function`).
     pub fn call(
         &self,
         server: &RpcServer,
         conn: &Connection,
+        request_id: u64,
         control: Buffer,
         data: Option<Buffer>,
         msg_type: u16,
     ) -> Result<CallFuture, RpcError> {
+        // Ensure the slab completion pool is sized (idempotent on the
+        // C++ side — returns early if already sized).
+        self.set_completion_pool_size(DEFAULT_POOL_SIZE);
+
         let (tx, rx) = oneshot::channel();
         let user_data = Box::into_raw(Box::new(tx)) as *mut std::ffi::c_void;
 
-        // Extract handles and transfer ownership to C++ (forget the Buffer
-        // wrappers so Drop doesn't release the handles).
-        let control_handle = control.into_raw();
-        let data_handle = data.map(|d| d.into_raw()).unwrap_or(ptr::null_mut());
-
-        let mut request_id: u64 = 0;
-        let status = unsafe {
-            sys::crow_rpc_client_call(
-                self.handle,
-                server.handle(),
-                conn.handle(),
-                control_handle,
-                data_handle,
+        if self
+            .send(
+                server,
+                conn,
+                request_id,
+                control,
+                data,
                 msg_type,
                 Some(on_complete_cb),
                 user_data,
-                &mut request_id,
             )
-        };
-
-        if status != sys::CROW_RPC_OK {
-            // Reclaim the user_data box to avoid a leak.
+            .is_err()
+        {
+            // Reclaim the oneshot sender to avoid a leak (callback was
+            // NOT invoked — caller must handle the error).
             unsafe {
                 drop(Box::from_raw(
                     user_data as *mut oneshot::Sender<Result<Response, RpcError>>,
                 ))
             };
-            return Err(RpcError::from_status(status));
+            return Err(RpcError::SendQueueFull);
         }
 
         Ok(CallFuture { rx })
     }
 
-    /// Submit a one-way message (no response expected).
-    pub fn call_one_way(
-        &self,
-        server: &RpcServer,
-        conn: &Connection,
-        control: Buffer,
-        data: Option<Buffer>,
-        msg_type: u16,
-    ) -> Result<(), RpcError> {
-        let control_handle = control.into_raw();
-        let data_handle = data.map(|d| d.into_raw()).unwrap_or(ptr::null_mut());
-
-        let status = unsafe {
-            sys::crow_rpc_client_call_one_way(
-                self.handle,
-                server.handle(),
-                conn.handle(),
-                control_handle,
-                data_handle,
-                msg_type,
-            )
-        };
-
-        if status != sys::CROW_RPC_OK {
-            return Err(RpcError::from_status(status));
-        }
-        Ok(())
-    }
-
-    /// Get client-side correlation counters (submit/response match/drop).
+    /// Get global client-side correlation counters (submit/response
+    /// match/miss/reap). Static — shared across all RpcClient instances.
     pub fn counters(&self) -> sys::CrowRpcClientCounters {
-        let mut out = sys::CrowRpcClientCounters {
-            submit_ok: 0,
-            submit_fail: 0,
-            resp_matched: 0,
-            resp_mismatch: 0,
-            resp_wrong_id: 0,
-            resp_dropped: 0,
-            slab_fallback: 0,
-            resp_map_matched: 0,
-            reaped_slab: 0,
-            reaped_map: 0,
-            map_in_flight: 0,
-            slab_in_flight: 0,
-        };
+        let mut out = sys::CrowRpcClientCounters::default();
         unsafe { sys::crow_rpc_client_get_counters(self.handle, &mut out) };
         out
     }
@@ -245,6 +230,12 @@ unsafe impl Sync for RpcClient {}
 /// A future that resolves to the RPC response or an error.
 pub struct CallFuture {
     rx: oneshot::Receiver<Result<Response, RpcError>>,
+}
+
+impl std::fmt::Debug for CallFuture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallFuture").finish_non_exhaustive()
+    }
 }
 
 impl std::future::Future for CallFuture {

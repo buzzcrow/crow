@@ -92,30 +92,18 @@ class RpcClient
   public:
     RpcClient();
     ~RpcClient();
-    // Submit a request-response call. The request_id is provided by the
-    // caller (it must match the id embedded in the flatbuffer control
-    // message so the server can echo it back for correlation). Returns
-    // the request_id, or 0 on error (submit failed — callback already
-    // invoked with the error).
-    uint64_t call(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
-                  uint16_t msg_type, CompletionCallback on_complete);
 
-    // Callback-based call (Gap2+Gap3): tries to reserve a slab slot by
-    // index (request_id & pool_mask) via CAS FREE→PENDING. If the slot
-    // is occupied (slow request holding it), falls back to the pending
-    // map (one heap alloc for the std::function — the overload path).
-    // The callback is invoked directly on the I/O worker thread by
-    // on_response — no oneshot channel, no scheduler round-trip.
-    // The pool must be sized (set_completion_pool_size) before use.
-    // If the reaper is active (start_reaper), each call gets a deadline
-    // = now + timeout_ns; timed-out entries are failed with Timeout.
-    // Returns true on success, false on submit error (callback NOT invoked).
-    bool call_callback(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
-                       uint16_t msg_type, crow_rpc_on_complete cb, void *user_data);
-
-    // Submit a one-way message (no response expected, no callback).
-    // Returns true on success, false on submit error.
-    bool call_one_way(Transport *transport, Connection *conn, Buffer *control, Buffer *data, uint16_t msg_type);
+    // Send a request with a C ABI completion callback. Reserves a slab
+    // slot by index (request_id & pool_mask) via CAS FREE→PENDING; if
+    // the slot is occupied, falls back to the pending map. The callback
+    // is invoked directly on the I/O worker thread when the response
+    // arrives — no oneshot channel, no scheduler round-trip. The pool
+    // must be sized (set_completion_pool_size) before use. If the reaper
+    // is active (start_reaper), each call gets a deadline = now +
+    // timeout_ns; timed-out entries are failed with Timeout. Returns
+    // true on success, false on submit error (callback NOT invoked).
+    bool send(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
+              uint16_t msg_type, crow_rpc_on_complete cb, void *user_data);
 
     // Attach this caller to a connection's on_frame callback so responses
     // are routed to on_response. Call this once per connection before
@@ -136,7 +124,7 @@ class RpcClient
 
     // Size the callback completion pool. Must be a power of two; the
     // caller passes the max in-flight (the next power of two is used).
-    // Must be called before any call_callback(). No-op if already sized.
+    // Must be called before any send(). No-op if already sized.
     void set_completion_pool_size(size_t max_in_flight);
 
     // Start the timeout reaper thread. Scans the slab pool + pending map
@@ -189,32 +177,6 @@ class RpcClient
 
     // Compute steady-clock nanoseconds (monotonic).
     static uint64_t steady_now_ns();
-
-  public:
-    // Perf counters for debugging response correlation.
-    struct Counters
-    {
-        std::atomic<uint64_t> submit_ok{0};        // call_callback succeeded (slab or map)
-        std::atomic<uint64_t> submit_fail{0};      // call_callback submit failed
-        std::atomic<uint64_t> resp_matched{0};     // on_response matched a slab slot
-        std::atomic<uint64_t> resp_mismatch{0};    // on_response: slab miss + map miss (late/dup)
-        std::atomic<uint64_t> resp_wrong_id{0};    // on_response: slab PENDING wrong id + map miss
-        std::atomic<uint64_t> resp_dropped{0};     // on_response: no slab + no map entry
-        std::atomic<uint64_t> slab_fallback{0};    // call_callback fell back to map (slab full)
-        std::atomic<uint64_t> resp_map_matched{0}; // on_response matched in map
-        std::atomic<uint64_t> reaped_slab{0};      // reaper timed out a slab slot
-        std::atomic<uint64_t> reaped_map{0};       // reaper timed out a map entry
-        std::atomic<int64_t>  map_in_flight{0};    // live: current entries in pending map
-        std::atomic<int64_t>  slab_in_flight{0};   // live: current PENDING slab slots
-    };
-
-    Counters &counters()
-    {
-        return counters_;
-    }
-
-  private:
-    Counters counters_;
 };
 
 } // namespace crow::rpc

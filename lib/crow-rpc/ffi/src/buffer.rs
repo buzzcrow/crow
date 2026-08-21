@@ -13,6 +13,14 @@ pub struct Buffer {
     handle: sys::crow_rpc_buffer_t,
 }
 
+impl std::fmt::Debug for Buffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buffer")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Buffer {
     /// Allocate a new buffer from the pool with the given capacity.
     /// Returns `None` if the pool is exhausted.
@@ -74,6 +82,14 @@ unsafe impl Send for Buffer {}
 /// A buffer pool. Allocates and recycles Buffer objects.
 pub struct BufferPool {
     handle: sys::crow_rpc_pool_t,
+}
+
+impl std::fmt::Debug for BufferPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BufferPool")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BufferPool {

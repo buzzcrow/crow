@@ -3,7 +3,7 @@
 
 // Reproduces the bench's FFI access pattern via the C API directly:
 // shared transport, 1 engine x 2 workers (EPOLLONESHOT), many client
-// threads calling crow_rpc_client_call concurrently on shared
+// threads calling crow_rpc_client_send concurrently on shared
 // connections. This test runs under ASAN to catch heap corruption.
 
 #include "crow-rpc/c_api.h"
@@ -53,6 +53,9 @@ TEST(CApiLoadTest, MultiWorkerOneshotSharedTransport)
 
     crow_rpc_client_t client = crow_rpc_client_create();
     ASSERT_NE(client, nullptr);
+    // Size the slab completion pool for send() (must be >= max
+    // in-flight = T * R per thread, but all threads share one client).
+    crow_rpc_client_set_completion_pool_size(client, T * R * 4);
 
     std::vector<crow_rpc_conn_t> conns;
     for (int c = 0; c < C; c++) {
@@ -122,8 +125,8 @@ TEST(CApiLoadTest, MultiWorkerOneshotSharedTransport)
                 crow_rpc_buffer_write(data, payload, DATA_SIZE);
             }
 
-            crow_rpc_status status = crow_rpc_client_call(client, server, conns[cidx], ctrl, data, ECHO_MSG_TYPE,
-                                                          on_complete_cb, pr, nullptr);
+            crow_rpc_status status = crow_rpc_client_send(client, server, conns[cidx], req_id, ctrl, data,
+                                                          ECHO_MSG_TYPE, on_complete_cb, pr);
 
             if (status != CROW_RPC_OK) {
                 failure_count.fetch_add(1, std::memory_order_relaxed);

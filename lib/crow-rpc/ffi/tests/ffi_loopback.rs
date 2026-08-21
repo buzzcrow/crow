@@ -88,6 +88,7 @@ async fn ping_loopback() {
         .call(
             &server,
             &conn,
+            42,
             ctrl,
             None,
             FBMsgType::EConnectionPingRequest.0 as u16,
@@ -150,6 +151,7 @@ async fn ping_loopback_with_data() {
         .call(
             &server,
             &conn,
+            99,
             ctrl,
             Some(data),
             FBMsgType::EConnectionPingRequest.0 as u16,
@@ -215,7 +217,7 @@ async fn echo_handler_loopback() {
     let caller = RpcClient::new();
     caller.attach(&conn);
     let future = caller
-        .call(&server, &conn, ctrl, Some(data), ECHO_MSG_TYPE)
+        .call(&server, &conn, 777, ctrl, Some(data), ECHO_MSG_TYPE)
         .expect("call submit failed");
 
     let response = tokio::time::timeout(std::time::Duration::from_secs(10), future)

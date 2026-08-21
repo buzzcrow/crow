@@ -214,10 +214,10 @@ static CoTask co_run(CoState *s)
         // 2. Record start time.
         auto start = std::chrono::steady_clock::now();
 
-        // 3. Submit via call_callback. user_data = s (CoState*).
+        // 3. Submit via send(). user_data = s (CoState*).
         //    co_on_complete will fill s->resp_* and resume.
-        bool ok = s->client->call_callback(s->transport, s->conn, req_id, (control != nullptr) ? control->buf : nullptr,
-                                           (data != nullptr) ? data->buf : nullptr, s->msg_type, co_on_complete, s);
+        bool ok = s->client->send(s->transport, s->conn, req_id, (control != nullptr) ? control->buf : nullptr,
+                                  (data != nullptr) ? data->buf : nullptr, s->msg_type, co_on_complete, s);
 
         if (!ok) {
             // Submit failed (send queue full) — release buffers, yield

@@ -12,6 +12,14 @@ pub struct RpcServer {
     handle: sys::crow_rpc_server_t,
 }
 
+impl std::fmt::Debug for RpcServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcServer")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RpcServer {
     /// Create a new server. If pool is None, the server creates its own
     /// internal pool. Uses the single-engine single-worker fast path.
@@ -25,6 +33,7 @@ impl RpcServer {
     /// EV_ONESHOT/EPOLLONESHOT for multi-worker safety.
     ///
     /// Deprecated alias for `with_engines(pool, 1, num_workers)`.
+    #[deprecated(since = "0.1.0", note = "use `with_engines(pool, 1, num_workers)` instead")]
     pub fn with_workers(pool: Option<&crate::BufferPool>, num_workers: u32) -> Self {
         Self::with_engines(pool, 1, num_workers)
     }
@@ -74,28 +83,7 @@ impl RpcServer {
     ///   recv_agg = submit_to_writev.count / read_calls  (frames per read)
     ///   send_agg = submit_to_writev.count / writev_calls (frames per writev)
     pub fn transport_stats(&self) -> sys::CrowRpcTransportStats {
-        let mut stats = sys::CrowRpcTransportStats {
-            read_calls: 0,
-            writev_calls: 0,
-            submit_to_writev: sys::CrowRpcLatencyStats {
-                count: 0,
-                sum_ns: 0,
-                min_ns: 0,
-                max_ns: 0,
-            },
-            read_to_dispatch: sys::CrowRpcLatencyStats {
-                count: 0,
-                sum_ns: 0,
-                min_ns: 0,
-                max_ns: 0,
-            },
-            dispatch_to_enq: sys::CrowRpcLatencyStats {
-                count: 0,
-                sum_ns: 0,
-                min_ns: 0,
-                max_ns: 0,
-            },
-        };
+        let mut stats = sys::CrowRpcTransportStats::default();
         unsafe { sys::crow_rpc_server_transport_stats(self.handle, &mut stats) };
         stats
     }
@@ -187,6 +175,14 @@ unsafe impl Sync for RpcServer {}
 #[derive(Clone)]
 pub struct Connection {
     handle: sys::crow_rpc_conn_t,
+}
+
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Connection {

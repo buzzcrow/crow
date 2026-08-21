@@ -136,10 +136,6 @@ pub(crate) struct BenchConfig {
     /// rate / value size. The target provides the mgmt URLs via
     /// `BenchTarget::flush_mgmt_urls()`.
     pub(crate) flush_after_prepopulate: bool,
-    /// Max concurrent in-flight ops per worker. 1 = closed-loop (wait
-    /// for each response before sending the next). >1 = pipelined via
-    /// semaphore-bounded concurrency. Default 1.
-    pub(crate) pipeline_depth: usize,
     /// Target label: "kv", "rpc", etc. Stored in the report.
     pub(crate) target: String,
     /// Number of independent epoll/kqueue instances (RPC target only).
@@ -149,10 +145,6 @@ pub(crate) struct BenchConfig {
     /// `io_workers` / `io_engines`. 1 = single-worker (fast path, no
     /// ONESHOT). >1 per engine enables `EV_ONESHOT`/`EPOLLONESHOT`.
     pub(crate) io_workers: u32,
-    /// Number of Rust dispatch thread pool threads (RPC target only).
-    /// The I/O worker hands off parsed frames to this pool; pool workers
-    /// run the handler and submit responses. 0 = use C++ inline handler.
-    pub(crate) io_dispatch_threads: u32,
 }
 
 impl BenchConfig {
@@ -185,11 +177,9 @@ impl BenchConfig {
             scan_prefix: Vec::new(),
             scan_start_after: Vec::new(),
             flush_after_prepopulate: false,
-            pipeline_depth: 1,
             target: "kv".to_string(),
             io_engines: 1,
             io_workers: 1,
-            io_dispatch_threads: 0,
         }
     }
 
@@ -242,7 +232,6 @@ pub(crate) async fn run_bench<T: BenchTarget>(
         workload = ?cfg.workload,
         threads = cfg.loader_num,
         connections = cfg.connections,
-        pipeline_depth = cfg.pipeline_depth,
         duration_ms = u64::try_from(cfg.duration.as_millis()).unwrap_or(u64::MAX),
         "bench: starting"
     );

@@ -74,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .flag_if_supported("-Wall")
         .flag_if_supported("-Wextra")
         .flag_if_supported("-Werror")
+        .flag_if_supported("-Wno-sign-compare")
         .include(&include)
         .include(&common_include)
         .files(sources.iter().map(|p| p.as_path()).collect::<Vec<_>>());

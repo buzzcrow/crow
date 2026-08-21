@@ -1,8 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
-// Licensed under the Apache License, Version 2.0.
 
 #include "common_msg_generated.h"
 #include "crow-rpc/buffer.h"
+#include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/server/handler.h"
@@ -30,6 +30,35 @@ using crow::rpc::RpcServer;
 using crow::rpc::SocketTransport;
 using crow::rpc::SystemBufferPool;
 
+// ── Callback state + C ABI callback for loopback tests ─────────────
+
+struct LoopbackState
+{
+    std::atomic<bool>    got_response{false};
+    uint64_t             recv_request_id{0};
+    bool                 data_matches{false};
+    std::vector<uint8_t> expected_payload;
+};
+
+extern "C" void loopback_on_complete(uint64_t request_id, crow_rpc_buffer_t /*control*/, crow_rpc_buffer_t data,
+                                     crow_rpc_status status, void *user_data)
+{
+    auto *s = static_cast<LoopbackState *>(user_data);
+    if (status == CROW_RPC_OK) {
+        s->recv_request_id = request_id;
+        if (data != nullptr && !s->expected_payload.empty()) {
+            uint32_t    len = crow_rpc_buffer_len(data);
+            const auto *ptr = crow_rpc_buffer_data(data);
+            s->data_matches =
+                (len == s->expected_payload.size() && std::memcmp(ptr, s->expected_payload.data(), len) == 0);
+        }
+    }
+    if (data != nullptr) {
+        crow_rpc_buffer_release(data);
+    }
+    s->got_response.store(true, std::memory_order_release);
+}
+
 // ── Simple ping loopback ──────────────────────────────────────────
 // Server listens, client connects through transport, sends a ping
 // request, receives a ping response. Verify request_id matches.
@@ -49,33 +78,27 @@ TEST(LoopbackTest, SimplePing)
     auto conn = client_transport.connect("127.0.0.1", port);
     ASSERT_NE(conn, nullptr);
 
-    RpcClient         caller;
-    std::atomic<bool> got_response{false};
-    uint64_t          recv_request_id = 0;
-
+    RpcClient caller;
+    caller.set_completion_pool_size(16);
     caller.attach(conn.get());
+
+    LoopbackState state;
 
     // Build a ping request.
     BufferPool *pool   = client_transport.pool() != nullptr ? client_transport.pool() : server.pool();
     uint64_t    req_id = 42;
     Buffer     *ctrl   = build_ping_request(pool, req_id, 0);
 
-    caller.call(&client_transport, conn.get(), req_id, ctrl, nullptr,
-                static_cast<uint16_t>(crow::rpc::proto::FBMsgType_EConnectionPingRequest),
-                [&](Frame *response, crow::rpc::RpcError err) {
-                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                        recv_request_id = response->request_id;
-                    }
-                    got_response.store(true, std::memory_order_release);
-                    delete response;
-                });
+    ASSERT_TRUE(caller.send(&client_transport, conn.get(), req_id, ctrl, nullptr,
+                            static_cast<uint16_t>(crow::rpc::proto::FBMsgType_EConnectionPingRequest),
+                            loopback_on_complete, &state));
 
     // Wait for the response.
-    for (int i = 0; i < 300 && !got_response.load(std::memory_order_acquire); i++) {
+    for (int i = 0; i < 300 && !state.got_response.load(std::memory_order_acquire); i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    EXPECT_TRUE(got_response.load(std::memory_order_acquire));
-    EXPECT_EQ(recv_request_id, 42u);
+    EXPECT_TRUE(state.got_response.load(std::memory_order_acquire));
+    EXPECT_EQ(state.recv_request_id, 42u);
 
     client_transport.stop();
     server.stop();
@@ -124,10 +147,8 @@ TEST(LoopbackTest, EchoHandler512B)
     auto conn = client_transport.connect("127.0.0.1", port);
     ASSERT_NE(conn, nullptr);
 
-    RpcClient         caller;
-    std::atomic<bool> got_response{false};
-    bool              data_matches = false;
-
+    RpcClient caller;
+    caller.set_completion_pool_size(16);
     caller.attach(conn.get());
 
     // Build a request with 512-byte data.
@@ -145,23 +166,18 @@ TEST(LoopbackTest, EchoHandler512B)
     }
     data->write(payload.data(), DATA_SIZE);
 
-    caller.call(&client_transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
-                [&](Frame *response, crow::rpc::RpcError err) {
-                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                        if (response->data_buf != nullptr && response->data_buf->len == DATA_SIZE) {
-                            data_matches = (std::memcmp(response->data_buf->data, payload.data(), DATA_SIZE) == 0);
-                        }
-                    }
-                    got_response.store(true, std::memory_order_release);
-                    delete response;
-                });
+    LoopbackState state;
+    state.expected_payload = payload;
+
+    ASSERT_TRUE(
+        caller.send(&client_transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE, loopback_on_complete, &state));
 
     // Wait for the response.
-    for (int i = 0; i < 300 && !got_response.load(std::memory_order_acquire); i++) {
+    for (int i = 0; i < 300 && !state.got_response.load(std::memory_order_acquire); i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    EXPECT_TRUE(got_response.load(std::memory_order_acquire));
-    EXPECT_TRUE(data_matches) << "Response data does not match request data";
+    EXPECT_TRUE(state.got_response.load(std::memory_order_acquire));
+    EXPECT_TRUE(state.data_matches) << "Response data does not match request data";
 
     client_transport.stop();
     server.stop();

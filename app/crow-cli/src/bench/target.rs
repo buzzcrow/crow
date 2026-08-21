@@ -100,20 +100,6 @@ pub(crate) trait BenchTarget: Send {
     /// Cleanup: stop servers, kill processes, etc.
     async fn cleanup(&mut self);
 
-    /// Whether this target supports pipelined sends. KV = false
-    /// (closed-loop); RPC = true.
-    #[allow(dead_code, reason = "used by RPC target in Phase 3")]
-    fn supports_pipeline(&self) -> bool {
-        false
-    }
-
-    /// Default pipeline depth when `--pipeline-depth` is not set.
-    /// RPC: `connections * loader_num` (capped); others: 1.
-    #[allow(dead_code, reason = "used by RPC target in Phase 3")]
-    fn default_pipeline_depth(&self, _cfg: &BenchConfig) -> usize {
-        1
-    }
-
     /// Spawn the optional progress snapshotter. Returns `None` if the
     /// target has no progress reporting (RPC). KV overrides this with
     /// the existing `spawn_progress_snapshotter`.
@@ -175,8 +161,8 @@ pub(crate) trait BenchTarget: Send {
 }
 
 /// A client that can issue bench ops. One instance per worker. The
-/// worker calls `issue_op` in a closed loop (or pipelined via semaphore
-/// when `pipeline_depth > 1`). Must be cheaply cloneable (typically an
+/// worker calls `issue_op` in a closed loop. Must be cheaply cloneable
+/// (typically an
 /// `Arc` handle to a shared client).
 pub(crate) trait BenchClient: Send + Sync + Clone + 'static {
     /// Issue one op. The caller measures latency and records the outcome.

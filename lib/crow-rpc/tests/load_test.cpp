@@ -3,6 +3,7 @@
 
 #include "common_msg_generated.h"
 #include "crow-rpc/buffer.h"
+#include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/server/handler.h"
@@ -30,6 +31,32 @@ using crow::rpc::OutFrame;
 using crow::rpc::RpcClient;
 using crow::rpc::RpcServer;
 using crow::rpc::SocketTransport;
+
+// ── Shared callback state + C ABI callback for load tests ──────────
+
+struct PendingReq
+{
+    std::atomic<bool>    got_response{false};
+    bool                 data_matches = false;
+    std::vector<uint8_t> payload;
+};
+
+extern "C" void load_on_complete(uint64_t /*request_id*/, crow_rpc_buffer_t /*control*/, crow_rpc_buffer_t data,
+                                 crow_rpc_status status, void *user_data)
+{
+    auto *pr = static_cast<PendingReq *>(user_data);
+    if (status == CROW_RPC_OK && data != nullptr) {
+        uint32_t    len = crow_rpc_buffer_len(data);
+        const auto *ptr = crow_rpc_buffer_data(data);
+        if (len == pr->payload.size()) {
+            pr->data_matches = (std::memcmp(ptr, pr->payload.data(), len) == 0);
+        }
+    }
+    if (data != nullptr) {
+        crow_rpc_buffer_release(data);
+    }
+    pr->got_response.store(true, std::memory_order_release);
+}
 
 // ── Multi-threaded pipelined echo load test ───────────────────────
 // T client threads share C connections (created once, not per thread).
@@ -85,6 +112,7 @@ TEST(LoadTest, MultiThreadEcho)
         auto conn = transport.connect("127.0.0.1", port);
         ASSERT_NE(conn, nullptr);
         auto caller = std::make_unique<RpcClient>();
+        caller->set_completion_pool_size(T * R);
         caller->attach(conn.get());
         conns.push_back(conn);
         callers.push_back(std::move(caller));
@@ -92,16 +120,6 @@ TEST(LoadTest, MultiThreadEcho)
 
     std::atomic<int> success_count{0};
     std::atomic<int> failure_count{0};
-
-    // Per-request state for pipelined response tracking. shared_ptr so
-    // the callback (running on the I/O worker thread) and the worker
-    // thread (collecting responses) can both safely access it.
-    struct PendingReq
-    {
-        std::atomic<bool>    got_response{false};
-        bool                 data_matches = false;
-        std::vector<uint8_t> payload;
-    };
 
     auto worker_fn = [&](int tid) {
         // Phase 1: fire all R requests (pipelined, no wait between sends).
@@ -133,19 +151,7 @@ TEST(LoadTest, MultiThreadEcho)
 
             data->write(pr->payload.data(), DATA_SIZE);
 
-            auto pr_copy = pr;
-            caller->call(
-                &transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
-                [pr_copy](Frame *response, crow::rpc::RpcError err) {
-                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                        if (response->data_buf != nullptr && response->data_buf->len == pr_copy->payload.size()) {
-                            pr_copy->data_matches = (std::memcmp(response->data_buf->data, pr_copy->payload.data(),
-                                                                 pr_copy->payload.size()) == 0);
-                        }
-                    }
-                    pr_copy->got_response.store(true, std::memory_order_release);
-                    delete response;
-                });
+            caller->send(&transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE, load_on_complete, pr.get());
 
             reqs.push_back(std::move(pr));
         }
@@ -243,6 +249,7 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
         auto conn = transport.connect("127.0.0.1", port);
         ASSERT_NE(conn, nullptr);
         auto caller = std::make_unique<RpcClient>();
+        caller->set_completion_pool_size(T * R);
         caller->attach(conn.get());
         conns.push_back(conn);
         callers.push_back(std::move(caller));
@@ -250,13 +257,6 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
 
     std::atomic<int> success_count{0};
     std::atomic<int> failure_count{0};
-
-    struct PendingReq
-    {
-        std::atomic<bool>    got_response{false};
-        bool                 data_matches = false;
-        std::vector<uint8_t> payload;
-    };
 
     auto worker_fn = [&](int tid) {
         std::vector<std::shared_ptr<PendingReq>> reqs;
@@ -285,19 +285,7 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
 
             data->write(pr->payload.data(), DATA_SIZE);
 
-            auto pr_copy = pr;
-            caller->call(
-                &transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
-                [pr_copy](Frame *response, crow::rpc::RpcError err) {
-                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                        if (response->data_buf != nullptr && response->data_buf->len == pr_copy->payload.size()) {
-                            pr_copy->data_matches = (std::memcmp(response->data_buf->data, pr_copy->payload.data(),
-                                                                 pr_copy->payload.size()) == 0);
-                        }
-                    }
-                    pr_copy->got_response.store(true, std::memory_order_release);
-                    delete response;
-                });
+            caller->send(&transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE, load_on_complete, pr.get());
 
             reqs.push_back(std::move(pr));
         }
@@ -390,6 +378,7 @@ TEST(LoadTest, SharedTransportOneshotEcho)
         auto conn = shared_transport.connect("127.0.0.1", port);
         ASSERT_NE(conn, nullptr);
         auto caller = std::make_unique<RpcClient>();
+        caller->set_completion_pool_size(T * R);
         caller->attach(conn.get());
         conns.push_back(conn);
         callers.push_back(std::move(caller));
@@ -397,13 +386,6 @@ TEST(LoadTest, SharedTransportOneshotEcho)
 
     std::atomic<int> success_count{0};
     std::atomic<int> failure_count{0};
-
-    struct PendingReq
-    {
-        std::atomic<bool>    got_response{false};
-        bool                 data_matches = false;
-        std::vector<uint8_t> payload;
-    };
 
     auto worker_fn = [&](int tid) {
         std::vector<std::shared_ptr<PendingReq>> reqs;
@@ -425,19 +407,7 @@ TEST(LoadTest, SharedTransportOneshotEcho)
                 continue;
             }
             data->write(pr->payload.data(), DATA_SIZE);
-            auto pr_copy = pr;
-            caller->call(
-                &shared_transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE,
-                [pr_copy](Frame *response, crow::rpc::RpcError err) {
-                    if (err == crow::rpc::RpcError::Ok && response != nullptr) {
-                        if (response->data_buf != nullptr && response->data_buf->len == pr_copy->payload.size()) {
-                            pr_copy->data_matches = (std::memcmp(response->data_buf->data, pr_copy->payload.data(),
-                                                                 pr_copy->payload.size()) == 0);
-                        }
-                    }
-                    pr_copy->got_response.store(true, std::memory_order_release);
-                    delete response;
-                });
+            caller->send(&shared_transport, conn.get(), req_id, ctrl, data, ECHO_MSG_TYPE, load_on_complete, pr.get());
             reqs.push_back(std::move(pr));
         }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);

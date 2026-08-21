@@ -15,7 +15,7 @@ is purely I/O-bound.
 
 ---
 
-## Echo Flow — Callback Model (current)
+## Flow
 
 The callback model uses an inline callback chain that runs entirely on
 C++ I/O worker threads. 2 epoll events per op (down from 5 in the
@@ -28,7 +28,9 @@ Key optimizations:
 - **Caller-thread writev**: `submit` does `writev` directly on the
   caller's thread (no notify queue, no cross-thread round-trip). The
   `in_send_` CAS serializes concurrent senders; EAGAIN arms write on
-  the owning engine.
+  the owning engine. Per-connection MPSC send queue + batch writev is
+  already the shipped design — the residual contention is the
+  single-writer CAS itself.
 - **submit_inline for server responses**: server dispatch enqueues
   only (no writev). Responses are batched into one `writev` per
   connection after all events in the batch (send aggregation).
@@ -51,7 +53,7 @@ Key optimizations:
 Rust worker thread (std::thread::spawn, NOT tokio)
   → submit_next(ctx)  ← initial kickoff
     1. Build flatbuffer control + allocate data payload from BufferPool
-    2. RpcClient::call_callback(server, conn, request_id, ctrl, data,
+    2. RpcClient::send(server, conn, request_id, ctrl, data,
        ECHO_MSG_TYPE, bench_on_complete, slot_ptr)
        → slab pool: CAS FREE/DONE→PENDING to claim slot
        → transport->submit: enqueue_send + caller-thread writev
@@ -86,9 +88,7 @@ and client Readable (read response + inline callback + caller-thread
 writev for next request). The two writevs happen on the caller thread,
 not as separate epoll events.
 
----
-
-## Thread Model
+### Thread Model
 
 - **Rust worker threads** (N = `--threads`) — build requests, submit
   via FFI, then `thread::park()` until in-flight drain. The callback
@@ -105,9 +105,7 @@ not as separate epoll events.
 - **C++ reaper thread** (0 or 1, opt-in) — scans slab + map for
   timed-out entries. Not on the hot path.
 
----
-
-## Rust API
+### Rust API
 
 The `crow-rpc-ffi` crate exposes two client models:
 
@@ -115,7 +113,7 @@ The `crow-rpc-ffi` crate exposes two client models:
   that resolves on response. Uses `oneshot::channel` (2 heap allocs
   per call). This is the path used by the KV client and consensus
   code. Drop-safe, `Send + Sync`, no unsafe code needed.
-- **Callback (sync, zero-alloc hot path)** — `call_callback()` stores
+- **Callback (sync, zero-alloc hot path)** — `send()` stores
   the callback in a pre-allocated slab slot. The callback runs on the
   C++ I/O worker thread (must be non-blocking). Caller manages
   `user_data` lifetime. Used by the RPC bench target; ~2x TPS vs
@@ -124,9 +122,7 @@ The `crow-rpc-ffi` crate exposes two client models:
 Both models share the same `RpcClient`, `Connection`, `BufferPool`,
 and `RpcServer`.
 
----
-
-## Buffer Lifecycle
+### Buffer Lifecycle
 
 - **Request control + data**: allocated by Rust → `ref_clone` in C
   API → released after `writev` sends → recycles to pool.
@@ -136,7 +132,7 @@ and `RpcServer`.
   wrapped as `ref=nullptr` Buffer → callback releases (no-op) →
   wrapper struct freed.
 
-**Memory copy summary:**
+Memory copy summary:
 
 - O(n) unavoidable: flatbuffer build, data payload fill, kernel
   socket copy (both directions), echo handler memcpy, header serialize.
@@ -147,7 +143,7 @@ and `RpcServer`.
 
 ---
 
-## Benchmark Results
+## Current Data
 
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
@@ -223,20 +219,6 @@ all configs.
 
 ---
 
-## Enhancement Ideas
-
-- **Caller-thread writev contention** — the `in_send_` CAS serializes
-  senders on the same connection. Per-connection send queues with
-  lock-free MPSC enqueue + batch writev could reduce contention.
-- **RDMA transport (R32)** — bypasses the kernel socket path
-  entirely, eliminating `writev`/`read` copies and epoll event loop
-  overhead.
-- **Flatbuffer reuse** — `ConnectionPingRequest` is rebuilt per op.
-  Pre-building a template and patching the `id` field would save
-  ~5µs per op (significant at 1T:1C where per-op cost is 12µs).
-
----
-
 ## History
 
 - **2026-08-19 (M5 Pro, 64B/5s)**: shared connections + caller-thread
@@ -250,10 +232,22 @@ all configs.
 - **2026-08-20 (slab fallback + reaper)**: CAS-based slab claim + map
   fallback + timeout reaper. Peak ~2.29M (8.3x baseline), zero
   errors. Fixed silent callback loss under high worker contention
-  (CAS `DONE→PENDING` in `call_callback`, `PENDING→DONE` in
+  (CAS `DONE→PENDING` in `send()`, `PENDING→DONE` in
   `on_response`). `slab_fallback=0` across all configs. Per-op
   latency histogram fix for accurate p50/p99/p999. CLI flag renamed
   from `--io-workers-per-engine` to `--io-workers` (total).
 - **2026-08-21 (M5 Pro, standalone server)**: 128B/20s two-process
   kqueue sweep peaked at 956K ops/s with 2 engines and 8 total workers.
   All six configurations completed without errors.
+
+### Deferred
+
+- **RDMA transport (R32)** — fully implemented (transport abstraction,
+  buffer pool, build wiring) but not exercised by the echo bench. Can
+  be removed if the TCP path suffices for production; kept behind the
+  transport abstraction so it does not burden the socket path.
+- **Flatbuffer reuse** — `ConnectionPingRequest` is rebuilt per op in
+  the Rust bench and the C++ server. The C++ load test already uses a
+  24-byte template + `memcpy` id patch. This optimization is
+  benchmark-only: production RPCs carry varying payloads that cannot
+  be patched in place, so the rebuild cost is unavoidable there.

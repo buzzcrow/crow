@@ -79,20 +79,17 @@ typedef struct crow_rpc_transport_stats
 void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out);
 
 // Client-side correlation counters for debugging response matching.
+// Global (static) — shared across all RpcClient instances. Read via
+// crow_rpc_client_get_counters (the client param is ignored, kept for
+// ABI compatibility).
 typedef struct crow_rpc_client_counters
 {
-    uint64_t submit_ok;        // call_callback succeeded (slab or map)
-    uint64_t submit_fail;      // call_callback submit failed
-    uint64_t resp_matched;     // on_response matched a slab slot
-    uint64_t resp_mismatch;    // on_response: slab miss + map miss (late/dup)
-    uint64_t resp_wrong_id;    // on_response: slab PENDING wrong id + map miss
-    uint64_t resp_dropped;     // on_response: no slab + no map entry
-    uint64_t slab_fallback;    // call_callback fell back to map (slab full)
-    uint64_t resp_map_matched; // on_response matched in map
-    uint64_t reaped_slab;      // reaper timed out a slab slot
-    uint64_t reaped_map;       // reaper timed out a map entry
-    int64_t  map_in_flight;    // live: current entries in pending map
-    int64_t  slab_in_flight;   // live: current PENDING slab slots
+    uint64_t submit_ok;     // send() succeeded (slab or map)
+    uint64_t submit_fail;   // send() submit failed
+    uint64_t resp_matched;  // on_response matched (slab or map)
+    uint64_t resp_missed;   // on_response: late/dup/wrong_id/dropped
+    uint64_t reaped;        // reaper timed out (slab or map)
+    uint64_t slab_fallback; // send() fell back to map (slab full)
 } crow_rpc_client_counters_t;
 
 void crow_rpc_client_get_counters(crow_rpc_client_t client, crow_rpc_client_counters_t *out);
@@ -113,19 +110,11 @@ void crow_rpc_client_attach(crow_rpc_client_t client, crow_rpc_conn_t conn);
 typedef void (*crow_rpc_on_complete)(uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
                                      crow_rpc_status status, void *user_data);
 
-// Submit a request-response call. Returns CROW_RPC_OK on success and
-// sets out_request_id. On error, returns negative status and the callback
-// is NOT invoked. Thread-safe: multiple threads may call this
-// concurrently on the same connection (the send queue is mutex-protected).
-crow_rpc_status crow_rpc_client_call(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
-                                     crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type,
-                                     crow_rpc_on_complete on_complete, void *user_data, uint64_t *out_request_id);
-
-// Size the callback completion pool (Gap2+Gap3). Must be called before
-// any call_callback. The pool is sized to the next power of two >=
+// Size the callback completion pool. Must be called before
+// any send(). The pool is sized to the next power of two >=
 // max_in_flight. Slots are indexed by request_id & mask. Zero per-call
 // heap allocation — the callback + user_data live in pre-allocated slots.
-// Flow: doc/working/rpc-echo-flow-analysis.md § "Echo Flow — Callback Model".
+// Flow: doc/design/rpc/rpc-echo-flow-analysis.md § "Flow".
 void crow_rpc_client_set_completion_pool_size(crow_rpc_client_t client, uint32_t max_in_flight);
 
 // Start the timeout reaper thread. Scans the slab pool + pending map
@@ -139,7 +128,7 @@ void crow_rpc_client_start_reaper(crow_rpc_client_t client, uint64_t timeout_ns,
 // No-op if not running.
 void crow_rpc_client_stop_reaper(crow_rpc_client_t client);
 
-// Callback-based call (Gap2+Gap3): reserves a slab slot by request_id,
+// Callback-based call: reserves a slab slot by request_id,
 // stores the callback + user_data, and submits. The callback is invoked
 // directly on the I/O worker thread when the response arrives — no
 // oneshot channel, no scheduler round-trip, no per-call heap alloc.
@@ -147,13 +136,9 @@ void crow_rpc_client_stop_reaper(crow_rpc_client_t client);
 // flatbuffer control). Returns CROW_RPC_OK on success. On submit error,
 // returns CROW_RPC_ERR_SEND_QUEUE (callback NOT invoked).
 // The pool must be sized first (set_completion_pool_size).
-crow_rpc_status crow_rpc_client_call_callback(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
-                                              uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
-                                              uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data);
-
-// Submit a one-way message (no response expected).
-crow_rpc_status crow_rpc_client_call_one_way(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
-                                             crow_rpc_buffer_t control, crow_rpc_buffer_t data, uint16_t msg_type);
+crow_rpc_status crow_rpc_client_send(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
+                                     uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                     uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data);
 
 // ── Connection (for client-side use) ──────────────────────────────
 crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int port);

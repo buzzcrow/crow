@@ -17,7 +17,7 @@ extern "C" {
 // The C++ I/O worker thread runs N coroutines, each simulating an
 // independent client. Each coroutine loops:
 //   1. Call rust_build_request(ctx) → returns control + data buffers
-//   2. Submit via call_callback (slab slot, inline)
+//   2. Submit via send() (slab slot, inline)
 //   3. co_await — suspend until response arrives
 //   4. I/O worker: epoll → read → on_response → handle.resume()
 //   5. Call rust_on_response(ctx, status) → records stats, checks deadline

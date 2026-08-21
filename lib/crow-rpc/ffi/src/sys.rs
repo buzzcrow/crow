@@ -35,6 +35,7 @@ pub struct crow_rpc_server_s {
 }
 
 #[repr(C)]
+#[derive(Default, Debug)]
 pub struct CrowRpcLatencyStats {
     pub count: u64,
     pub sum_ns: u64,
@@ -43,6 +44,7 @@ pub struct CrowRpcLatencyStats {
 }
 
 #[repr(C)]
+#[derive(Default, Debug)]
 pub struct CrowRpcTransportStats {
     pub read_calls: u64,
     pub writev_calls: u64,
@@ -52,19 +54,14 @@ pub struct CrowRpcTransportStats {
 }
 
 #[repr(C)]
+#[derive(Default, Debug)]
 pub struct CrowRpcClientCounters {
     pub submit_ok: u64,
     pub submit_fail: u64,
     pub resp_matched: u64,
-    pub resp_mismatch: u64,
-    pub resp_wrong_id: u64,
-    pub resp_dropped: u64,
+    pub resp_missed: u64,
+    pub reaped: u64,
     pub slab_fallback: u64,
-    pub resp_map_matched: u64,
-    pub reaped_slab: u64,
-    pub reaped_map: u64,
-    pub map_in_flight: i64,
-    pub slab_in_flight: i64,
 }
 
 pub type crow_rpc_status = i32;
@@ -109,15 +106,6 @@ pub type crow_rpc_co_on_response = Option<
     ) -> bool,
 >;
 
-#[repr(C)]
-pub struct CrowRpcCoStats {
-    pub total_ops: u64,
-    pub total_errors: u64,
-    pub total_latency_ns: u64,
-    pub min_latency_ns: u64,
-    pub max_latency_ns: u64,
-}
-
 extern "C" {
     pub fn crow_rpc_buffer_alloc(pool: crow_rpc_pool_t, capacity: u32) -> crow_rpc_buffer_t;
     pub fn crow_rpc_buffer_write(buf: crow_rpc_buffer_t, data: *const u8, len: u32);
@@ -154,25 +142,13 @@ extern "C" {
     pub fn crow_rpc_client_destroy(client: crow_rpc_client_t);
     pub fn crow_rpc_client_attach(client: crow_rpc_client_t, conn: crow_rpc_conn_t);
 
-    pub fn crow_rpc_client_call(
-        client: crow_rpc_client_t,
-        server: crow_rpc_server_t,
-        conn: crow_rpc_conn_t,
-        control: crow_rpc_buffer_t,
-        data: crow_rpc_buffer_t,
-        msg_type: u16,
-        on_complete: crow_rpc_on_complete,
-        user_data: *mut c_void,
-        out_request_id: *mut u64,
-    ) -> crow_rpc_status;
-
     pub fn crow_rpc_client_set_completion_pool_size(client: crow_rpc_client_t, max_in_flight: u32);
 
     pub fn crow_rpc_client_start_reaper(client: crow_rpc_client_t, timeout_ns: u64, scan_interval_ns: u64);
 
     pub fn crow_rpc_client_stop_reaper(client: crow_rpc_client_t);
 
-    pub fn crow_rpc_client_call_callback(
+    pub fn crow_rpc_client_send(
         client: crow_rpc_client_t,
         server: crow_rpc_server_t,
         conn: crow_rpc_conn_t,
@@ -182,15 +158,6 @@ extern "C" {
         msg_type: u16,
         on_complete: crow_rpc_on_complete,
         user_data: *mut c_void,
-    ) -> crow_rpc_status;
-
-    pub fn crow_rpc_client_call_one_way(
-        client: crow_rpc_client_t,
-        server: crow_rpc_server_t,
-        conn: crow_rpc_conn_t,
-        control: crow_rpc_buffer_t,
-        data: crow_rpc_buffer_t,
-        msg_type: u16,
     ) -> crow_rpc_status;
 
     pub fn crow_rpc_connect(server: crow_rpc_server_t, addr: *const c_char, port: c_int) -> crow_rpc_conn_t;
@@ -220,6 +187,4 @@ extern "C" {
         on_response: crow_rpc_co_on_response,
         ctx: *mut c_void,
     );
-
-    pub fn crow_rpc_co_get_stats(client: crow_rpc_client_t, out: *mut CrowRpcCoStats);
 }

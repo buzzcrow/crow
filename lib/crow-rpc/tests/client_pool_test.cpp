@@ -4,6 +4,7 @@
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
+#include "crow-rpc/client/rpc_client_metrics.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/pool.h"
 #include "crow-rpc/scheduled_executor.h"
@@ -21,10 +22,14 @@
 #include <thread>
 
 using crow::rpc::Buffer;
-using crow::rpc::CompletionCallback;
 using crow::rpc::Connection;
 using crow::rpc::Frame;
 using crow::rpc::OutFrame;
+using crow::rpc::reset_rpc_client_counters;
+using crow::rpc::rpc_reaped;
+using crow::rpc::rpc_resp_matched;
+using crow::rpc::rpc_resp_missed;
+using crow::rpc::rpc_slab_fallback;
 using crow::rpc::RpcClient;
 using crow::rpc::RpcError;
 using crow::rpc::ScheduledExecutor;
@@ -174,6 +179,24 @@ class CallerLoopbackTest : public ::testing::Test
     uint16_t port_      = 0;
 };
 
+// Callback state + C ABI callback for CallAndReceiveResponse test.
+struct CallState
+{
+    std::atomic<bool> got_response{false};
+    std::atomic<int>  recv_status{CROW_RPC_OK};
+};
+
+extern "C" void call_recv_cb(uint64_t /*request_id*/, crow_rpc_buffer_t /*control*/, crow_rpc_buffer_t data,
+                             crow_rpc_status status, void *user_data)
+{
+    auto *s = static_cast<CallState *>(user_data);
+    s->recv_status.store(status, std::memory_order_relaxed);
+    if (data != nullptr) {
+        crow_rpc_buffer_release(data);
+    }
+    s->got_response.store(true, std::memory_order_release);
+}
+
 TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
 {
     SocketTransport transport(1, 1);
@@ -216,9 +239,9 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
     auto client_conn              = std::make_shared<Connection>(100, "client", nullptr);
     client_conn->transport_handle = static_cast<uint64_t>(client_fd);
 
-    RpcClient         caller;
-    std::atomic<bool> got_response{false};
-    RpcError          recv_err = RpcError::Ok;
+    CallState state;
+    RpcClient caller;
+    caller.set_completion_pool_size(16);
 
     // Build a control buffer with the request.
     SystemBufferPool buf_pool;
@@ -229,16 +252,12 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
 
     // Submit the call — the callback fires when on_response is called.
     uint64_t req_id = caller.next_request_id();
-    uint64_t returned =
-        caller.call(&transport, client_conn.get(), req_id, ctrl, nullptr, 42, [&](Frame * /*response*/, RpcError err) {
-            recv_err = err;
-            got_response.store(true, std::memory_order_release);
-        });
+    bool     ok     = caller.send(&transport, client_conn.get(), req_id, ctrl, nullptr, 42, call_recv_cb, &state);
 
     // The request didn't actually go through the transport (client_conn
     // isn't registered with a worker), so we manually simulate the response
     // by calling on_response.
-    EXPECT_GT(returned, 0u);
+    EXPECT_TRUE(ok);
 
     // Build a fake response frame.
     auto *resp_frame             = new Frame;
@@ -251,8 +270,8 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
 
     caller.on_response(req_id, resp_frame);
 
-    EXPECT_TRUE(got_response.load(std::memory_order_acquire));
-    EXPECT_EQ(recv_err, RpcError::Ok);
+    EXPECT_TRUE(state.got_response.load(std::memory_order_acquire));
+    EXPECT_EQ(state.recv_status.load(), CROW_RPC_OK);
 
     // Late response (after the callback already fired) — should be discarded.
     auto *late_frame = new Frame;
@@ -330,6 +349,7 @@ TEST_F(CallerLoopbackTest, SlabFallbackToMapWhenSlotOccupied)
     RpcClient caller;
     caller.set_completion_pool_size(4); // pool_size=4, mask=3
     caller.attach(client_conn.get());
+    reset_rpc_client_counters();
 
     SlabCallbackState state1;
     SlabCallbackState state2;
@@ -350,14 +370,14 @@ TEST_F(CallerLoopbackTest, SlabFallbackToMapWhenSlotOccupied)
     uint64_t req2 = 5;
 
     // First call — occupies slot 1 (PENDING). No response yet.
-    bool ok1 = caller.call_callback(&transport, client_conn.get(), req1, ctrl1, nullptr, 42, slab_test_cb, &state1);
+    bool ok1 = caller.send(&transport, client_conn.get(), req1, ctrl1, nullptr, 42, slab_test_cb, &state1);
     EXPECT_TRUE(ok1);
 
     // Second call — slot 1 is occupied, should fall back to map.
-    bool ok2 = caller.call_callback(&transport, client_conn.get(), req2, ctrl2, nullptr, 42, slab_test_cb, &state2);
+    bool ok2 = caller.send(&transport, client_conn.get(), req2, ctrl2, nullptr, 42, slab_test_cb, &state2);
     EXPECT_TRUE(ok2);
 
-    EXPECT_EQ(caller.counters().slab_fallback.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(rpc_slab_fallback().window(), 1u);
 
     // Deliver response for req1 — slab path.
     auto *resp1            = new Frame;
@@ -377,8 +397,7 @@ TEST_F(CallerLoopbackTest, SlabFallbackToMapWhenSlotOccupied)
     EXPECT_EQ(state1.last_status.load(std::memory_order_relaxed), CROW_RPC_OK);
     EXPECT_EQ(state2.call_count.load(std::memory_order_acquire), 1);
     EXPECT_EQ(state2.last_status.load(std::memory_order_relaxed), CROW_RPC_OK);
-    EXPECT_EQ(caller.counters().resp_matched.load(std::memory_order_relaxed), 1u);
-    EXPECT_EQ(caller.counters().resp_map_matched.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(rpc_resp_matched().window(), 2u); // slab + map
 
     transport.stop();
     ::close(client_fd);
@@ -416,6 +435,7 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutSlabSlot)
     RpcClient caller;
     caller.set_completion_pool_size(4);
     caller.attach(client_conn.get());
+    reset_rpc_client_counters();
 
     // Start reaper: 50ms timeout, 10ms scan interval.
     caller.start_reaper(50 * 1000 * 1000, 10 * 1000 * 1000);
@@ -428,7 +448,7 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutSlabSlot)
     ctrl->write(ctrl->data, 32);
 
     // Submit a request — no response will arrive.
-    bool ok = caller.call_callback(&transport, client_conn.get(), 1, ctrl, nullptr, 42, slab_test_cb, &state);
+    bool ok = caller.send(&transport, client_conn.get(), 1, ctrl, nullptr, 42, slab_test_cb, &state);
     EXPECT_TRUE(ok);
 
     // Wait for the reaper to time it out (up to 200ms).
@@ -441,7 +461,7 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutSlabSlot)
 
     EXPECT_EQ(state.call_count.load(std::memory_order_acquire), 1);
     EXPECT_EQ(state.last_status.load(std::memory_order_relaxed), CROW_RPC_ERR_TIMEOUT);
-    EXPECT_EQ(caller.counters().reaped_slab.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(rpc_reaped().window(), 1u);
     EXPECT_EQ(caller.pending_count(), 0u);
 
     // Late response after timeout — should be dropped, no double-invoke.
@@ -452,7 +472,7 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutSlabSlot)
     caller.on_response(1, late_resp);
 
     EXPECT_EQ(state.call_count.load(std::memory_order_acquire), 1); // still 1
-    EXPECT_EQ(caller.counters().resp_dropped.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(rpc_resp_missed().window(), 1u);
 
     caller.stop_reaper();
     transport.stop();
@@ -490,6 +510,7 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutMapFallback)
     RpcClient caller;
     caller.set_completion_pool_size(4);
     caller.attach(client_conn.get());
+    reset_rpc_client_counters();
     caller.start_reaper(50 * 1000 * 1000, 10 * 1000 * 1000);
 
     SlabCallbackState state1;
@@ -506,11 +527,11 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutMapFallback)
     ctrl2->write(ctrl2->data, 32);
 
     // req_id=1 → slot 1 (occupied, no response).
-    caller.call_callback(&transport, client_conn.get(), 1, ctrl1, nullptr, 42, slab_test_cb, &state1);
+    caller.send(&transport, client_conn.get(), 1, ctrl1, nullptr, 42, slab_test_cb, &state1);
     // req_id=5 → slot 1 occupied → map fallback (no response).
-    caller.call_callback(&transport, client_conn.get(), 5, ctrl2, nullptr, 42, slab_test_cb, &state2);
+    caller.send(&transport, client_conn.get(), 5, ctrl2, nullptr, 42, slab_test_cb, &state2);
 
-    EXPECT_EQ(caller.counters().slab_fallback.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(rpc_slab_fallback().window(), 1u);
 
     // Wait for reaper to time out both (up to 200ms).
     for (int i = 0; i < 40; i++) {
@@ -525,8 +546,7 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutMapFallback)
     EXPECT_EQ(state1.last_status.load(std::memory_order_relaxed), CROW_RPC_ERR_TIMEOUT);
     EXPECT_EQ(state2.call_count.load(std::memory_order_acquire), 1);
     EXPECT_EQ(state2.last_status.load(std::memory_order_relaxed), CROW_RPC_ERR_TIMEOUT);
-    EXPECT_EQ(caller.counters().reaped_slab.load(std::memory_order_relaxed), 1u);
-    EXPECT_EQ(caller.counters().reaped_map.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(rpc_reaped().window(), 2u); // slab + map
     EXPECT_EQ(caller.pending_count(), 0u);
 
     caller.stop_reaper();
