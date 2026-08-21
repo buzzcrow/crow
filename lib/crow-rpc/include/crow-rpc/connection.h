@@ -40,7 +40,8 @@ class Connection
     using OnFrameCallback = std::function<void(Frame *, Connection *)>;
     using OnCloseCallback = std::function<void(Connection *)>;
 
-    Connection(int64_t id, std::string name, BufferPool *pool, uint32_t max_data_size = 4 << 20);
+    Connection(int64_t id, std::string name, BufferPool *pool, uint32_t max_data_size = 4 << 20,
+               uint32_t send_queue_capacity = 1024);
 
     int64_t id() const
     {

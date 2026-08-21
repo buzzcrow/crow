@@ -32,7 +32,7 @@ use flatbuffers::FlatBufferBuilder;
 use tokio::task::JoinHandle;
 
 use super::super::report::{OpOutcome, OpStats};
-use super::super::runner::BenchConfig;
+use super::super::runner::{BenchConfig, RpcWorkerMode};
 use super::super::worker::WorkerCounters;
 use super::super::workload::OpGen;
 use super::super::workload::OpKind;
@@ -220,6 +220,15 @@ impl BenchTarget for RpcTarget {
             cfg.io_engines,
             cfg.io_workers,
         ));
+        // Coroutine mode: submit+drain on same thread, queue never
+        // accumulates — small queue (256) minimizes cache pressure.
+        // Tokio mode: 512+ tasks burst-submit on scheduler wake,
+        // need larger queue (1024) to avoid SendQueueFull.
+        let sq_cap = match cfg.rpc_worker_mode {
+            RpcWorkerMode::Coroutine => 256,
+            RpcWorkerMode::Tokio => cfg.send_queue_capacity,
+        };
+        server.set_send_queue_capacity(sq_cap);
         server.start();
 
         // Connect to the external echo server. These connections live
@@ -329,7 +338,14 @@ impl BenchTarget for RpcTarget {
         deadline: std::time::Instant,
         counters: Vec<Arc<WorkerCounters>>,
     ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
-        self.run_cpp_coroutine_workers(clients, cfg, measure_start, deadline, counters)
+        match cfg.rpc_worker_mode {
+            super::super::runner::RpcWorkerMode::Coroutine => {
+                self.run_cpp_coroutine_workers(clients, cfg, measure_start, deadline, counters)
+            }
+            super::super::runner::RpcWorkerMode::Tokio => {
+                self.run_tokio_workers(clients, cfg, measure_start, deadline, counters)
+            }
+        }
     }
 }
 
@@ -447,6 +463,58 @@ impl RpcTarget {
             map
         });
         vec![handle]
+    }
+
+    /// Tokio mode: N tokio tasks, each calling `RpcClient::call()` in a
+    /// closed loop. Each call allocates a `Box<oneshot::Sender>`, submits
+    /// via the C++ slab, and awaits the `CallFuture` (tokio scheduler
+    /// wake + re-schedule per op). Measures the async FFI path overhead
+    /// vs the coroutine path.
+    #[allow(clippy::unused_self, reason = "matches BenchTarget::run_workers signature")]
+    fn run_tokio_workers(
+        &self,
+        clients: Vec<RpcBenchClient>,
+        cfg: &BenchConfig,
+        measure_start: std::time::Instant,
+        deadline: std::time::Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+    ) -> Vec<JoinHandle<BTreeMap<OpKind, OpStats>>> {
+        use super::super::worker::run_worker;
+        use super::super::workload::OpGen;
+
+        let mut handles = Vec::with_capacity(cfg.loader_num as usize);
+        for (worker_id, (client, counters)) in clients.into_iter().zip(counters).enumerate() {
+            let cfg2 = cfg.clone();
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "worker_id is bounded by cfg.loader_num which fits in u32"
+            )]
+            let worker_id = worker_id as u32;
+            let handle = tokio::spawn(async move {
+                let mut gen = OpGen::new(
+                    u64::from(worker_id) ^ 0x9E37_79B9_7F4A_7C15,
+                    cfg2.key_space,
+                    cfg2.value_size,
+                );
+                if let Some(count) = cfg2.pre_populate {
+                    if count > 0 {
+                        gen.set_read_key_space(count);
+                    }
+                }
+                run_worker(
+                    &client,
+                    &mut gen,
+                    &cfg2,
+                    measure_start,
+                    deadline,
+                    worker_id,
+                    &counters,
+                )
+                .await
+            });
+            handles.push(handle);
+        }
+        handles
     }
 }
 
