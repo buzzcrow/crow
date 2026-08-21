@@ -7,14 +7,13 @@
 #pragma once
 
 #include "disk/types.h"
+#include "engine/io_engine.h"
 
 #include <memory>
 #include <vector>
 
 namespace crow::diskio
 {
-
-class IoEngine;
 
 enum class DiskType {
     Block,
