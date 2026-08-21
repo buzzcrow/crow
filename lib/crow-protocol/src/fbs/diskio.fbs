@@ -1,0 +1,51 @@
+include "common_type.fbs";
+
+namespace crow.diskio.proto;
+
+// Return codes for diskio I/O operations.
+enum FBDiskIoRetCode : int16 {
+    Success = 0,
+    DiskNotExist = 1,
+    ZoneNotExist = 2,
+    IoError = 3,
+    PartialWrite = 4,
+    InvalidAlignment = 5,
+    ConnectionError = 6,
+}
+
+// Write request: disk_id + zone addressing + size. The data payload
+// follows the control message as raw bytes (data_size in the RPC header).
+table FBDiskWriteRequest {
+    disk_id:crow.rpc.proto.FBInt128;
+    zone_index:uint32;
+    zone_offset:uint64;
+    size:uint32;
+}
+
+table FBDiskWriteResponse {
+    ret_code:FBDiskIoRetCode;
+}
+
+// Read request. logical_object_offset is optional (0 = absent); when set,
+// MemDisk returns rule-based content incorporating the logical offset.
+table FBDiskReadRequest {
+    disk_id:crow.rpc.proto.FBInt128;
+    zone_index:uint32;
+    zone_offset:uint64;
+    size:uint32;
+    logical_object_offset:uint64;
+}
+
+// Read response. The data payload follows as raw bytes (data_size in the
+// RPC header).
+table FBDiskReadResponse {
+    ret_code:FBDiskIoRetCode;
+}
+
+table FBDiskFsyncRequest {
+    disk_id:crow.rpc.proto.FBInt128;
+}
+
+table FBDiskFsyncResponse {
+    ret_code:FBDiskIoRetCode;
+}

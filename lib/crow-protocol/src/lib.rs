@@ -105,6 +105,17 @@ mod common_msg_generated {
     )]
     include!(concat!(env!("OUT_DIR"), "/common_msg_generated.rs"));
 }
+mod diskio_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/diskio_generated.rs"));
+}
 
 /// Flatbuffer control-message types for the crow-rpc library (R104).
 ///
@@ -118,7 +129,32 @@ pub mod fb {
         FBRetCode, UnknownMessage,
     };
     pub use crate::common_type_generated::crow::rpc::proto::FBInt128;
+    pub use crate::diskio_generated::crow::diskio::proto::{
+        FBDiskFsyncRequest, FBDiskFsyncRequestArgs, FBDiskFsyncResponse, FBDiskFsyncResponseArgs,
+        FBDiskIoRetCode, FBDiskReadRequest, FBDiskReadRequestArgs, FBDiskReadResponse,
+        FBDiskReadResponseArgs, FBDiskWriteRequest, FBDiskWriteRequestArgs, FBDiskWriteResponse,
+        FBDiskWriteResponseArgs,
+    };
     pub use crate::msg_type_generated::crow::rpc::proto::FBMsgType;
+}
+
+/// Flatbuffer diskio control-message types (R105).
+///
+/// Re-exports the generated `crow::diskio::proto` namespace plus the
+/// `FBInt128` struct inlined from `common_type.fbs` via `--gen-all`. The
+/// diskio request/response tables reference `FBInt128` for `disk_id`; the
+/// `--gen-all` codegen emits a separate copy of `FBInt128` under the
+/// `crow::rpc::proto` namespace inside `diskio_generated`, which is
+/// type-distinct from `fb::FBInt128`. Use `diskio_fb::FBInt128` when
+/// constructing diskio request args.
+pub mod diskio_fb {
+    pub use crate::diskio_generated::crow::diskio::proto::{
+        FBDiskFsyncRequest, FBDiskFsyncRequestArgs, FBDiskFsyncResponse, FBDiskFsyncResponseArgs,
+        FBDiskIoRetCode, FBDiskReadRequest, FBDiskReadRequestArgs, FBDiskReadResponse,
+        FBDiskReadResponseArgs, FBDiskWriteRequest, FBDiskWriteRequestArgs, FBDiskWriteResponse,
+        FBDiskWriteResponseArgs,
+    };
+    pub use crate::diskio_generated::crow::rpc::proto::FBInt128;
 }
 
 pub mod diskdb_type_util;

@@ -21,6 +21,7 @@ fn main() {
         "src/fbs/msg_type.fbs",
         "src/fbs/common_type.fbs",
         "src/fbs/common_msg.fbs",
+        "src/fbs/diskio.fbs",
     ];
     for f in &fbs_files {
         println!("cargo:rerun-if-changed={f}");
@@ -53,6 +54,16 @@ fn main() {
         status.success(),
         "flatc --rust --gen-all failed for common_msg.fbs"
     );
+    // diskio: --gen-all inlines common_type.fbs so FBInt128 resolves.
+    let status = Command::new(&flatc)
+        .arg("--rust")
+        .arg("--gen-all")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("src/fbs/diskio.fbs")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run flatc at {}: {e}", flatc.display()));
+    assert!(status.success(), "flatc --rust --gen-all failed for diskio.fbs");
 
     let protos = [
         "src/proto/error_code.proto",
