@@ -541,7 +541,7 @@ health detection.
 
 ## 12. References
 
-- [`design-crow-diskdb.md`](design-crow-diskdb.md) §2 (Non-Goals: "No
+- [`design-crow-diskdb.md`](../diskdb/design-crow-diskdb.md) §2 (Non-Goals: "No
   data I/O") — diskdb allocates blocks; diskio reads/writes contents.
 - [`design-crow-chunkdb.md`](../chunkdb/design-crow-chunkdb.md) §5.1
   (Disk block — `Segment { node_id, disk_id, zone_index,

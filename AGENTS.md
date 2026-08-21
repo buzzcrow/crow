@@ -46,7 +46,7 @@ Rust workspace + C++ storage engine (via FFI).
 | --- | --- |
 | Write/modify code | `/coding` skill (conventions, doc-first) |
 | Write/modify E2E tests | `/console-ui-e2e` skill (console-ui-e2e) |
-| Design or architecture question | `doc/doc_index.md` → match row → open only that doc under `doc/design/{kv,tree,console,diskdb,protocol,rpc}/`, grep for `##` section |
+| Design or architecture question | `doc/doc_index.md` → match row → open only that doc under `doc/design/{kv,tree,console,diskdb,diskio,protocol,rpc}/`, grep for `##` section |
 | Write/modify docs | `/doc` skill (hierarchy, naming, formatting rules) → Doc Guides section dispatches to per-type guides: `/doc-design` (formal design docs), `/doc-backlog` (R** requirement docs), `/doc-working-design` (design drafts), `/doc-working-plan` (task plans) |
 | Commit changes | Hard Constraints above — no extra doc needed |
 | Debug a test failure | `/debug-test` skill (env check, log-first, data-first, add missing logs) |

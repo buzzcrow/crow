@@ -7,7 +7,7 @@ Implementation design draft for the diskio component. Covers the
 detailed design, change scope, complexity, and test case design.
 
 - **Backlog doc**: [`doc/backlog/R105-diskio-disk-io-engine.md`](../backlog/R105-diskio-disk-io-engine.md)
-- **Root design doc**: [`doc/design/diskdb/design-crow-diskio.md`](../design/diskdb/design-crow-diskio.md)
+- **Root design doc**: [`doc/design/diskio/design-crow-diskio.md`](../design/diskio/design-crow-diskio.md)
 - **Already landed**: R104 (crow-rpc — C++ `RpcServer` + handler
   registry, `crow-rpc-ffi` Rust facade), R72 (diskdb — `Segment` type,
   zone records), R85 (chunkdb — `DiskId` type, group-0
