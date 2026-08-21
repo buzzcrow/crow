@@ -106,7 +106,11 @@ target_include_directories(crow_tree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/t
 target_link_libraries(crow_tree_tests PRIVATE crow-tree GTest::gtest GTest::gtest_main)
 # GCC 13 -Warray-bounds/-Wstringop-overflow false positives: buffer::alloc
 # returns heap memory, but GCC thinks b.data() points into the stack object b.
-target_compile_options(crow_tree_tests PRIVATE -Wno-array-bounds -Wno-stringop-overflow)
+# These flags are GCC-specific (clang doesn't know -Wstringop-overflow); guard
+# so Apple clang / other compilers don't fail with -Werror=unknown-warning-option.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(crow_tree_tests PRIVATE -Wno-array-bounds -Wno-stringop-overflow)
+endif()
 # PRE_TEST: enumerate tests at ctest time, not build time. Required so sanitizer
 # builds (which can't run the binary at build time under restrictive ASLR) build
 # cleanly; the suite is then run via `setarch -R` (see Makefile).
