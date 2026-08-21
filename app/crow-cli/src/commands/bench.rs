@@ -182,6 +182,14 @@ pub struct RpcArgs {
     #[arg(long, default_value_t = 8)]
     pub loader_num: u32,
 
+    /// Worker execution model: `coroutine` (C++ coroutines on I/O
+    /// threads, default) or `tokio` (Rust tokio tasks calling
+    /// `RpcClient::call()` via oneshot channels). The tokio mode
+    /// measures the async FFI path overhead (Box<oneshot::Sender> +
+    /// scheduler wake/re-schedule per op).
+    #[arg(long, default_value = "coroutine")]
+    pub mode: String,
+
     /// Number of TCP connections to the echo server.
     #[arg(long, default_value_t = 4)]
     pub connections: u32,

@@ -16,11 +16,13 @@
 namespace crow::rpc
 {
 
-Connection::Connection(int64_t id, std::string name, BufferPool *pool, uint32_t max_data_size)
+Connection::Connection(int64_t id, std::string name, BufferPool *pool, uint32_t max_data_size,
+                       uint32_t send_queue_capacity)
     : id_(id),
       name_(std::move(name)),
       pool_(pool),
-      parser_(max_data_size)
+      parser_(max_data_size),
+      send_queue_(send_queue_capacity)
 {
     parser_.set_pool(pool);
 }

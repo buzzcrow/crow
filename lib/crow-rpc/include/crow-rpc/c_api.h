@@ -49,11 +49,15 @@ void            crow_rpc_pool_destroy(crow_rpc_pool_t pool);
 crow_rpc_server_t crow_rpc_server_create(crow_rpc_pool_t pool);
 crow_rpc_server_t crow_rpc_server_create_with_workers(crow_rpc_pool_t pool, uint32_t num_workers);
 crow_rpc_server_t crow_rpc_server_create_with_engines(crow_rpc_pool_t pool, uint32_t io_engines, uint32_t io_workers);
-void              crow_rpc_server_destroy(crow_rpc_server_t server);
-crow_rpc_status   crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port);
-void              crow_rpc_server_start(crow_rpc_server_t server);
-void              crow_rpc_server_stop(crow_rpc_server_t server);
-int               crow_rpc_server_port(crow_rpc_server_t server);
+// Set per-connection send queue capacity (backpressure bound). Must be
+// called before listen/connect creates connections. Default 1024.
+// Rounded up to next power of two internally.
+void            crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t capacity);
+void            crow_rpc_server_destroy(crow_rpc_server_t server);
+crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port);
+void            crow_rpc_server_start(crow_rpc_server_t server);
+void            crow_rpc_server_stop(crow_rpc_server_t server);
+int             crow_rpc_server_port(crow_rpc_server_t server);
 
 // Transport-level stats: syscall counts + latency histograms.
 // Aggregation ratios:
