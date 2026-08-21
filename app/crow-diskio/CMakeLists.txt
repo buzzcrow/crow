@@ -19,8 +19,9 @@ add_compile_options(-Wall -Wextra -Werror)
 # add crow-common separately here (avoids duplicate target collision).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-rpc crow-rpc-build)
 
-# ── Source files ──────────────────────────────────────────────────
+# ── Source files (exclude dio_main.cpp from the library) ──────────
 file(GLOB_RECURSE CROW_DISKIO_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+list(REMOVE_ITEM CROW_DISKIO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/dio_main.cpp)
 
 add_library(crow-diskio-lib STATIC ${CROW_DISKIO_SRC})
 target_include_directories(crow-diskio-lib
@@ -31,6 +32,14 @@ target_include_directories(crow-diskio-lib
 )
 find_package(Threads REQUIRED)
 target_link_libraries(crow-diskio-lib PUBLIC Threads::Threads crowcommon crow-rpc)
+
+# ── Binary ────────────────────────────────────────────────────────
+add_executable(crow-diskio ${CMAKE_CURRENT_SOURCE_DIR}/src/dio_main.cpp)
+target_include_directories(crow-diskio PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_BINARY_DIR}/crow-rpc-build/generated
+)
+target_link_libraries(crow-diskio PRIVATE crow-diskio-lib)
 
 # ── Tests ─────────────────────────────────────────────────────────
 enable_testing()
