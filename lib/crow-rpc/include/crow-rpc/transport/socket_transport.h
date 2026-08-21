@@ -297,14 +297,6 @@ class SocketTransport : public Transport
         return stats_;
     }
 
-    // Set the per-connection send queue capacity (must be called before
-    // connections are created). Default 1024. Rounded up to next power of
-    // two by MpscQueue.
-    void set_send_queue_capacity(uint32_t cap)
-    {
-        send_queue_capacity_ = cap;
-    }
-
   private:
     BufferPool                                *pool_;
     std::vector<std::unique_ptr<Worker>>       workers_;
@@ -314,9 +306,6 @@ class SocketTransport : public Transport
 
     // Aggregation-effect counters.
     TransportStats stats_;
-
-    // Per-connection send queue capacity (backpressure bound).
-    uint32_t send_queue_capacity_{1024};
 
     friend class Worker;
 };

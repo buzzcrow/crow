@@ -93,59 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .include(&common_include)
         .files(sources.iter().map(|p| p.as_path()).collect::<Vec<_>>());
 
-    // Generated flatbuffer headers. CMake generates these into
-    // build/generated/ during the C++ test build, but cargo clippy / cargo
-    // build may run before CMake. Generate them ourselves into OUT_DIR
-    // so the build is self-contained (doesn't depend on CMake having run).
-    let protocol_fbs_dir = engine
-        .parent()
-        .ok_or("engine dir must have a parent lib dir")?
-        .join("crow-protocol")
-        .join("src")
-        .join("fbs");
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
-    let gen_dir = out_dir.join("generated");
-    fs::create_dir_all(&gen_dir)?;
-
-    let fbs_files = [
-        "ret_code.fbs",
-        "msg_type.fbs",
-        "common_type.fbs",
-        "common_msg.fbs",
-    ];
-    let flatc = std::process::Command::new("flatc")
-        .arg("--cpp")
-        .arg("-o")
-        .arg(&gen_dir)
-        .args(fbs_files.iter().map(|f| protocol_fbs_dir.join(f)))
-        .output();
-    match flatc {
-        Ok(out) if out.status.success() => {
-            build.include(&gen_dir);
-        }
-        Ok(out) => {
-            // flatc failed — fall back to CMake-generated dir if it exists
-            // (local dev where CMake already ran).
-            let cmake_gen = engine.join("build").join("generated");
-            if cmake_gen.exists() {
-                build.include(&cmake_gen);
-            } else {
-                panic!(
-                    "flatc failed and no CMake-generated headers found. \
-                     flatc stderr: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-        }
-        Err(_) => {
-            // flatc not found — fall back to CMake-generated dir.
-            let cmake_gen = engine.join("build").join("generated");
-            if cmake_gen.exists() {
-                build.include(&cmake_gen);
-            } else {
-                panic!("flatc not found and no CMake-generated headers found");
-            }
-        }
+    // Generated flatbuffer headers (from CMake build dir).
+    let gen_dir = engine.join("build").join("generated");
+    if gen_dir.exists() {
+        build.include(&gen_dir);
     }
 
     // Find flatbuffers headers via pixi env (CONDA_PREFIX or pixi's env).
@@ -198,9 +149,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rerun-if-changed={}", include.display());
     println!("cargo:rerun-if-changed={}", common_include.display());
-    for f in &fbs_files {
-        println!("cargo:rerun-if-changed={}", protocol_fbs_dir.join(f).display());
-    }
 
     Ok(())
 }

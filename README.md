@@ -22,6 +22,8 @@ None of this pays off without a base worth building on, so that is what comes fi
 
 Not because the off-the-shelf parts are bad, but because a foundation that can't be redesigned isn't a foundation.
 
+> **Project started July 10, 2026.** Built by a single developer working with AI.
+
 ### Demos
 
 **Cluster Lifecycle** — bootstrap a 3-node cluster from scratch: add a rack, register nodes in the physical view, then switch to the logical view to create a store and a Paxos group with replicas on the selected target nodes. The topology canvas updates in real time as replicas come online and elect a leader.

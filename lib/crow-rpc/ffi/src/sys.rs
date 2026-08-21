@@ -133,7 +133,6 @@ extern "C" {
     pub fn crow_rpc_server_start(server: crow_rpc_server_t);
     pub fn crow_rpc_server_stop(server: crow_rpc_server_t);
     pub fn crow_rpc_server_port(server: crow_rpc_server_t) -> c_int;
-    pub fn crow_rpc_server_set_send_queue_capacity(server: crow_rpc_server_t, capacity: u32);
 
     pub fn crow_rpc_server_transport_stats(server: crow_rpc_server_t, out: *mut CrowRpcTransportStats);
 

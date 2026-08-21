@@ -33,22 +33,12 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
     cfg.value_size = args.value_size;
     cfg.io_engines = args.io_engines;
     cfg.io_workers = args.io_workers;
-    cfg.rpc_worker_mode = match args.mode.as_str() {
-        "tokio" => crate::bench::runner::RpcWorkerMode::Tokio,
-        "coroutine" => crate::bench::runner::RpcWorkerMode::Coroutine,
-        other => {
-            eprintln!("error: --mode must be 'coroutine' or 'tokio', got '{other}'");
-            return ExitCode::from(2);
-        }
-    };
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
 
     println!(
-        "running rpc echo for {}s (loaders={}, mode={})...",
-        args.duration_secs,
-        args.loader_num,
-        cfg.rpc_worker_mode.label()
+        "running rpc echo for {}s (loaders={})...",
+        args.duration_secs, args.loader_num
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 

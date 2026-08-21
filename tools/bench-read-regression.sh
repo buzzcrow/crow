@@ -25,9 +25,9 @@
 #
 # 11 runs × 10s ≈ 110s + pre-pop overhead.
 #
-# Reference platform: see doc/design/kv/kv-read-flow-analysis.md. After
-# a run, update the "Latest Benchmark Results" section there with the
-# results and CPU model — absolute read throughput is platform-dependent.
+# Reference platform: see doc/working/kv-read-flow-analysis.md. Always
+# record the CPU model in the baseline doc when publishing a run —
+# absolute read throughput is platform-dependent.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
@@ -80,11 +80,6 @@ run_bench() {
 }
 
 # --- regression sentinel configs ---
-#
-# Regression policy: only update the reference table below when a new
-# run is strictly better (higher ops/s, lower latency, fewer errors).
-# If a run is worse, do NOT update — investigate and fix the regression
-# first, otherwise silent performance regressions slip in.
 #
 # Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS 26.5):
 #   10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values.

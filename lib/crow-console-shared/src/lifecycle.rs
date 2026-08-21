@@ -733,7 +733,27 @@ pub async fn deploy_diskdb_local(
     let _ = std::fs::rename(&from, &to);
     // Detach: drop the Child handle so the process is not killed.
     std::mem::forget(child);
-    wait_for_http_ok(&mgmt_url, Duration::from_secs(15)).await?;
+    if wait_for_http_ok(&mgmt_url, Duration::from_secs(30))
+        .await
+        .is_err()
+    {
+        // Include the last log lines for diagnostics — the process may
+        // have crashed on startup (missing dep, config error, etc).
+        let log_tail = std::fs::read_to_string(&to)
+            .unwrap_or_default()
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let alive = process_is_alive(pid);
+        return Err(Error::UpstreamRpc {
+            node_id: mgmt_url.clone(),
+            status: format!(
+                "did not become healthy within 30s (pid={pid}, alive={alive})\n--- log tail ---\n{log_tail}"
+            ),
+        });
+    }
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
         mgmt_url,

@@ -140,14 +140,6 @@ crow_rpc_server_t crow_rpc_server_create_with_engines(crow_rpc_pool_t pool, uint
     return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, io_engines, io_workers)};
 }
 
-void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t capacity)
-{
-    if (server == nullptr || capacity == 0) {
-        return;
-    }
-    server->server->transport()->set_send_queue_capacity(capacity);
-}
-
 void crow_rpc_server_destroy(crow_rpc_server_t server)
 {
     if (server == nullptr) {

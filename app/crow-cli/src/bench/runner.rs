@@ -38,26 +38,6 @@ use super::target::BenchTarget;
 use super::worker::WorkerCounters;
 use super::workload::{MinSlotPolicy, OpKind, WorkloadKind};
 
-/// RPC worker execution model.
-/// - `Coroutine`: C++ coroutines on I/O worker threads (default, fast
-///   path). Direct callback dispatch, no tokio scheduler involvement.
-/// - `Tokio`: Rust tokio tasks calling `RpcClient::call()` (oneshot
-///   channel + Future). Measures the async FFI path overhead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RpcWorkerMode {
-    Coroutine,
-    Tokio,
-}
-
-impl RpcWorkerMode {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Coroutine => "coroutine",
-            Self::Tokio => "tokio",
-        }
-    }
-}
-
 /// Knobs controlling a single bench invocation.
 #[derive(Debug, Clone)]
 pub(crate) struct BenchConfig {
@@ -165,10 +145,6 @@ pub(crate) struct BenchConfig {
     /// `io_workers` / `io_engines`. 1 = single-worker (fast path, no
     /// ONESHOT). >1 per engine enables `EV_ONESHOT`/`EPOLLONESHOT`.
     pub(crate) io_workers: u32,
-    /// RPC worker execution model (RPC target only). Default = coroutine.
-    pub(crate) rpc_worker_mode: RpcWorkerMode,
-    /// Per-connection send queue capacity (RPC target only). Default 1024.
-    pub(crate) send_queue_capacity: u32,
 }
 
 impl BenchConfig {
@@ -204,8 +180,6 @@ impl BenchConfig {
             target: "kv".to_string(),
             io_engines: 1,
             io_workers: 1,
-            rpc_worker_mode: RpcWorkerMode::Coroutine,
-            send_queue_capacity: 1024,
         }
     }
 

@@ -147,7 +147,7 @@ pixi run test-console-ui
 
 # ── Coverage & LOC ───────────────────────────────────────────────
 coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-deps"] }
-loc = "tokei . .github --exclude swagger-ui --exclude 'lib/crow-tree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py' --exclude package-lock.json"
+loc = "tokei --exclude swagger-ui --exclude 'lib/crow-tree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py'"
 
 # ── Clean ────────────────────────────────────────────────────────
 # Removes all build/test/runtime artifacts, keeping only git-tracked

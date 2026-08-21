@@ -38,25 +38,12 @@ enum class RpcError : uint8_t {
 using CompletionCallback = std::function<void(Frame *response, RpcError err)>;
 
 // Slab slot states for the callback-based completion pool.
-// FREE → PENDING_CLAIMED (submitter CAS — slot reserved, fields not yet written)
-// PENDING_CLAIMED → PENDING_READY (submitter store-release — fields published)
-// PENDING_READY → DONE (on_response CAS — fields read before CAS) or
-//   FREE (reaper/fail_all CAS — fields read before CAS)
-// DONE → PENDING_CLAIMED (next send() reuses the slot)
-// The two-phase PENDING split eliminates the write-before-CAS race: the
-// loser of the CAS falls to the map before touching any slot fields, so
-// the winner's fields are never corrupted. PENDING_CLAIMED is invisible
-// to on_response and the reaper (they only act on PENDING_READY), so a
-// slot whose fields are still being written is never timed out or
-// dispatched prematurely. on_response/reaper read fields BEFORE the CAS
-// (while the slot is PENDING_READY, no concurrent writer can touch it),
-// then CAS directly to DONE/FREE — claim + release in one op, no extra
-// store. The callback uses locals, so a rapid DONE→PENDING_CLAIMED cycle
-// by the callback's send() cannot corrupt the already-read fields.
-constexpr uint8_t SLOT_FREE            = 0;
-constexpr uint8_t SLOT_PENDING_READY   = 1;
-constexpr uint8_t SLOT_DONE            = 2;
-constexpr uint8_t SLOT_PENDING_CLAIMED = 3;
+// FREE → PENDING (submitter sets before submit)
+// PENDING → DONE (I/O worker or reaper sets before invoking callback)
+// DONE → FREE (callback clears after processing, or reaper clears after timeout)
+constexpr uint8_t SLOT_FREE    = 0;
+constexpr uint8_t SLOT_PENDING = 1;
+constexpr uint8_t SLOT_DONE    = 2;
 
 // A pre-allocated completion slot for the callback-based call path.
 // Indexed by request_id & pool_mask (pool size = power of two). This
@@ -167,9 +154,6 @@ class RpcClient
     std::unique_ptr<CompletionSlot[]> completion_pool_;
     size_t                            pool_size_{0};
     size_t                            pool_mask_{0}; // pool_size - 1 (power of two)
-    // Guards the one-time pool allocation in set_completion_pool_size.
-    // Only contended during init (idempotent after first call).
-    std::mutex pool_mu_;
 
     // Pending map: oneshot call() entries (deadline=0) + slab-fallback
     // entries (deadline>0). folly::ConcurrentHashMap (striped locks)

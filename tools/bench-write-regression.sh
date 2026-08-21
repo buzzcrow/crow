@@ -6,8 +6,7 @@
 # WAL append count tracks coalescing efficiency. Results are appended
 # to doc/working/bench-write-regression.tsv and documented (with the
 # CPU type) in the "Regression sentinel" section of
-# doc/design/kv/kv-write-flow-analysis.md. After a run, update that
-# section with the results and CPU model.
+# doc/working/write-flow-analysis.md.
 #
 # Configurations:
 #   - Scaling: 1T:1C → 256T:32C, coalesce_max_keys=32,
@@ -17,7 +16,9 @@
 #
 # Reference platform (2026-08-19 run): Apple M5 Pro
 # (18 cores, arm64, macOS 26.5). Peak ~87K ops/s at 256T.
-# Linux (AMD 5950X) reaches ~124K — see doc/design/kv/kv-write-flow-analysis.md.
+# Linux (AMD 5950X) reaches ~124K — see kv-write-flow-analysis.md.
+# Always record the CPU model in the doc when publishing a run —
+# absolute write throughput is platform-dependent.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
@@ -62,11 +63,6 @@ run_bench() {
 }
 
 # --- regression sentinel configs ---
-#
-# Regression policy: only update the reference table below when a new
-# run is strictly better (higher ops/s, lower latency, fewer errors).
-# If a run is worse, do NOT update — investigate and fix the regression
-# first, otherwise silent performance regressions slip in.
 #
 # Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS 26.5):
 #   mi=32, coalesce=32, drain=1, 10s mem mode, 3-node cluster, 512B values, 1M keys

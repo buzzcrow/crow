@@ -406,7 +406,7 @@ Worker *SocketTransport::get_worker()
 std::shared_ptr<Connection> SocketTransport::create_connection(int fd, const std::string &name)
 {
     int64_t id             = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
-    auto    conn           = std::make_shared<Connection>(id, name, pool_, 4 << 20, send_queue_capacity_);
+    auto    conn           = std::make_shared<Connection>(id, name, pool_);
     conn->transport_handle = static_cast<uint64_t>(fd);
     Worker *w              = get_worker();
     if (w != nullptr) {

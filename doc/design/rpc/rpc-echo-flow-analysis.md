@@ -116,19 +116,11 @@ The `crow-rpc-ffi` crate exposes two client models:
 - **Callback (sync, zero-alloc hot path)** — `send()` stores
   the callback in a pre-allocated slab slot. The callback runs on the
   C++ I/O worker thread (must be non-blocking). Caller manages
-  `user_data` lifetime. Used by the RPC bench target's coroutine mode;
-  ~2x TPS vs oneshot. Not tokio-specific.
+  `user_data` lifetime. Used by the RPC bench target; ~2x TPS vs
+  oneshot. Not tokio-specific.
 
 Both models share the same `RpcClient`, `Connection`, `BufferPool`,
 and `RpcServer`.
-
-The bench CLI supports both via `--mode`:
-- `coroutine` (default) — C++ coroutines on I/O worker threads, direct
-  callback dispatch via `send()`. No tokio scheduler involvement.
-- `tokio` — Rust tokio tasks calling `call()` in a closed loop. Each
-  op: `Box<oneshot::Sender>` heap alloc → slab submit → tokio
-  scheduler wake → `CallFuture` poll. Measures the async FFI path
-  overhead vs the coroutine path.
 
 ### Buffer Lifecycle
 
@@ -156,7 +148,7 @@ Memory copy summary:
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
-### 2026-08-21 (Standalone Server, macOS)
+### 2026-08-22 (Standalone Server, macOS)
 
 Platform: **Apple M5 Pro** (18c, arm64, macOS 26/Darwin 25.5).
 Config: 128B values, 20s duration, standalone echo server, kqueue
@@ -181,9 +173,8 @@ server.
 
 Peak throughput is **928K ops/s** at 2e8w 512t8c. All six configurations
 completed with zero errors. The 16-worker configs improved +27% (1e16w)
-and +56% (2e16w) versus the pre-unification M5 Pro standalone run
-earlier on 2026-08-21 — removing per-instance counter atomics cut
-hot-path contention under high dispatch-thread counts.
+and +56% (2e16w) versus 2026-08-21 — removing per-instance counter
+atomics cut hot-path contention under high dispatch-thread counts.
 
 #### Multi-worker scaling
 
@@ -196,119 +187,6 @@ hot-path contention under high dispatch-thread counts.
   configs. The 1,000 dispatch threads still raise average latency above
   1ms, but the global counters eliminate the per-instance atomic
   contention that capped the 16-worker configs at 575K before.
-
-### 2026-08-21 (Standalone Server, Linux)
-
-Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
-Config: 128B values, 20s duration, standalone echo server, epoll
-loopback, pipeline_depth=1. After `send()` unification + global static
-counters (removed per-instance atomics from the hot path) — same
-codebase state as the 2026-08-21 macOS run, different platform.
-
-#### Full sweep (6 configs)
-
-| Eng | Wkr | T | C | ops/s | avg | p50 | p99 | p999 | raggr | saggr | err |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 1 | 54,503 | 17 | 17 | 22 | 31 | 1.0 | 1.0 | 0 |
-| 1 | 4 | 64 | 4 | 1,036,835 | 60 | 55 | 141 | 580 | 6.0 | 6.1 | 0 |
-| 1 | 8 | 512 | 8 | 1,990,216 | 255 | 235 | 391 | 2632 | 11.0 | 11.8 | 0 |
-| 2 | 8 | 512 | 8 | 1,839,681 | 276 | 250 | 360 | 420 | 7.5 | 7.8 | 0 |
-| 1 | 16 | 1000 | 32 | 2,213,973 | 448 | 330 | 1778 | 2646 | 9.3 | 9.6 | 0 |
-| 2 | 16 | 1000 | 16 | 2,404,670 | 412 | 362 | 1254 | 5012 | 8.8 | 9.9 | 0 |
-
-Eng=io_engines, Wkr=total io_workers per process (Eng × per-engine;
-client and server use the same config), T=client dispatch threads, and
-C=connections. raggr=frames per read and saggr=frames per writev on the
-server.
-
-Peak throughput is **2.40M ops/s** at 2e16w 1000t16c. All six
-configurations completed with zero errors. Cross-platform, the AMD
-epoll standalone server hits **2.6x** the M5 Pro kqueue result (928K)
-under the same codebase and config — epoll loopback on the 5950X
-sustains higher frame aggregation (raggr 11.0 vs 2.9 at 1e8w) and
-lower tail latency (p99 391 vs 1446 at 1e8w).
-
-#### Multi-worker scaling
-
-- 1w→4w: **19.0x** (55K→1.04M). The 5950X's 32 hardware threads keep
-  dispatch and I/O workers off each other's backs; aggregation kicks in
-  immediately (raggr 6.0, saggr 6.1).
-- 4w→1e8w: **+92%** (1.04M→1.99M). Eight workers on one epoll fd
-  saturate recv aggregation (raggr 11.0) — one `read()` pulls ~11
-  frames.
-- 1e8w→2e8w at 512T:8C: **-7.6%** (1.99M→1.84M). Splitting eight
-  workers across two engines costs aggregation (raggr 11.0→7.5); the
-  5950X has enough cores that a single epoll fd at 512T isn't the
-  bottleneck.
-- 2e16w 1000t16c reaches the 2.40M peak, **+8.6%** over 1e16w
-  1000t32c. At 1,000 dispatch threads the second engine finally pays
-  off — per-engine worker count drops to 8, matching the sweet spot.
-
-### 2026-08-21 (Coroutine vs Tokio Mode, Linux)
-
-Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
-Config: 128B values, 20s duration, standalone echo server, epoll
-loopback, pipeline_depth=1. Slab completion pool with two-phase
-PENDING (CLAIMED→READY) + read-before-CAS in on_response (no
-PROCESSING state). Coroutine mode uses send_queue=256 (same-thread
-submit+drain); tokio mode uses send_queue=1024 (burst-submit needs
-larger queue). Each config runs in both `--mode coroutine` (default)
-and `--mode tokio`.
-
-#### Full sweep (12 configs)
-
-| Eng | Wkr | T | C | Mode | ops/s | avg | p50 | p99 | p999 | raggr | saggr | err |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 1 | coroutine | 53,644 | 17 | 17 | 24 | 29 | 1.0 | 1.0 | 0 |
-| 1 | 1 | 1 | 1 | tokio | 24,849 | 39 | 44 | 59 | 71 | 1.0 | 1.0 | 0 |
-| 1 | 4 | 64 | 4 | coroutine | 964,072 | 65 | 61 | 145 | 613 | 6.0 | 6.0 | 0 |
-| 1 | 4 | 64 | 4 | tokio | 662,696 | 95 | 91 | 196 | 297 | 5.5 | 5.5 | 30 |
-| 1 | 8 | 512 | 8 | coroutine | 1,749,146 | 290 | 271 | 422 | 2568 | 10.1 | 10.7 | 0 |
-| 1 | 8 | 512 | 8 | tokio | 1,014,057 | 499 | 255 | 1446 | 41216 | 13.8 | 14.7 | 194 |
-| 2 | 8 | 512 | 8 | coroutine | 1,803,255 | 281 | 247 | 357 | 415 | 7.9 | 8.2 | 0 |
-| 2 | 8 | 512 | 8 | tokio | 1,038,462 | 485 | 278 | 1407 | 41152 | 11.9 | 12.3 | 295 |
-| 1 | 16 | 1000 | 32 | coroutine | 2,217,250 | 447 | 340 | 1707 | 2572 | 9.4 | 9.8 | 0 |
-| 1 | 16 | 1000 | 32 | tokio | 1,063,014 | 925 | 578 | 1832 | 41984 | 4.9 | 5.2 | 822 |
-| 2 | 16 | 1000 | 16 | coroutine | 2,348,192 | 422 | 363 | 1399 | 5584 | 9.2 | 10.3 | 0 |
-| 2 | 16 | 1000 | 16 | tokio | 1,071,921 | 917 | 713 | 1880 | 41632 | 5.8 | 6.4 | 879 |
-
-Mode=worker execution model (`--mode coroutine|tokio`). Coroutine =
-C++ coroutines on I/O threads (direct callback, zero tokio
-involvement). Tokio = Rust tokio tasks calling `call()` (oneshot
-channel + scheduler wake per op). Other columns same as above.
-
-#### Analysis
-
-The tokio mode (call() path) runs at **45-69% of coroutine throughput**
-and **1.5-2.2x latency** across all configs. The gap has three causes:
-
-- **Per-call heap alloc**: `Box<oneshot::Sender>` + `oneshot::channel()`
-  = 2 heap allocs/op that the coroutine path doesn't do. At 1M ops/s
-  that's 2M allocs/s.
-- **Scheduler round-trip**: each response goes C++ callback →
-  `Box::from_raw` → `tx.send()` → tokio wake → task re-schedule →
-  poll `Receiver`. The coroutine path dispatches the callback inline
-  on the I/O thread — no scheduler involvement.
-- **yield_now contention**: 512+ tokio tasks yield every 64 iterations,
-  contending with 511 other tasks for 32 worker threads.
-
-The tokio mode produces SendQueueFull errors (30-879) at 64+ loaders —
-the per-connection send queue (1024 frames) fills when 512+ tokio tasks
-burst-submit on scheduler wake. The coroutine mode has zero errors
-across all configs (same-thread submit+drain, queue=256 is sufficient).
-
-The slab completion pool provides 7-13% throughput benefit over a
-map-only path for `call()` (measured separately), so it's kept for
-both modes. The slab race fixes (init mutex, CAS-first claim with
-two-phase PENDING) eliminated the SIGSEGV that previously occurred at
-2+ engines with 4+ connections. The read-before-CAS pattern in
-on_response (read fields while PENDING_READY, then CAS directly to
-DONE) eliminates the PROCESSING state and saves 1 atomic store per
-response. The two-phase PENDING adds 1 atomic store per submit (the
-irreducible cost of the write-before-CAS race fix) — this accounts for
-the ~2-4% gap vs the pre-fix baseline. Send queue capacity is tuned
-per mode: 256 for coroutine (minimizes cache pressure, same-thread
-drain), 1024 for tokio (absorbs scheduler-burst submits).
 
 ### 2026-08-20 (Slab Fallback + Reaper, Linux)
 
@@ -365,26 +243,10 @@ all configs.
 - **2026-08-21 (M5 Pro, standalone server)**: 128B/20s two-process
   kqueue sweep peaked at 956K ops/s with 2 engines and 8 total workers.
   All six configurations completed without errors.
-- **2026-08-21 (M5 Pro, send() unification + global counters)**:
+- **2026-08-22 (M5 Pro, send() unification + global counters)**:
   unified the client call path to `send()` (removed `call()` /
   `call_one_way()` / `call_callback`), replaced 12 per-instance atomic
   counters with 6 global static `crow-common::metrics::Counter`
   instances. Peak 928K (2e8w). 16-worker configs improved +27% (1e16w)
   and +56% (2e16w) — removing per-instance atomics cut hot-path
   contention under 1,000 dispatch threads.
-- **2026-08-21 (AMD 5950X, standalone server)**: 128B/20s two-process
-  epoll sweep peaked at 2.40M ops/s (2e16w 1000t16c), 2.6x the M5 Pro
-  kqueue result under the same codebase. All six configs zero errors.
-- **2026-08-21 (AMD 5950X, slab race fixes + tokio mode)**: fixed three
-  slab completion pool races — init race (mutex), write-before-CAS
-  (two-phase PENDING_CLAIMED→PENDING_READY), slot reuse during callback
-  (read-before-CAS: read fields while PENDING_READY, CAS directly to
-  DONE, no PROCESSING state). Added `--mode coroutine|tokio` to bench
-  rpc. Coroutine peak 2.35M (2e16w), tokio peak 1.07M (45% of
-  coroutine). Tokio mode: 45-69% throughput, 1.5-2.2x latency,
-  SendQueueFull errors at 64+ loaders from burst-submit. Slab provides
-  7-13% benefit over map-only for call(), kept for both modes. Send
-  queue tuned per mode: 256 for coroutine (cache-friendly, same-thread
-  drain), 1024 for tokio (absorbs scheduler bursts). Two-phase PENDING
-  adds 1 store/submit (irreducible cost of write-before-CAS fix) —
-  ~2-4% gap vs pre-fix baseline.
