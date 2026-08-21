@@ -2,15 +2,16 @@
 # CrowRPC echo regression benchmark.
 # Usage: bash tools/bench-rpc-regression.sh
 #
-# macOS (2026-08-21): Apple M5 Pro, 18c, arm64, macOS 26, 128B, 20s,
-# standalone server over kqueue loopback.
+# macOS (2026-08-22): Apple M5 Pro, 18c, arm64, macOS 26, 128B, 20s,
+# standalone server over kqueue loopback. After send() unification +
+# global static counters (no per-instance atomics on hot path).
 #   Eng Wkr    T    C  ops/s      avg    p50    p99    p999   raggr  saggr  err
-#   1   1      1    1     53,600   17     17     27      47     1.0    1.0    0
-#   1   4     64    4    597,960  104     96    273     434     2.3    5.1    0
-#   1   8    512    8    886,967  571    563    741     843     5.2    7.9    0
-#   2   8    512    8    956,159  530    517    669     734     6.7    8.7    0
-#   1  16  1,000   32    565,808 1,760  1,781  4,026   8,104     9.1    9.7    0
-#   2  16  1,000   16    575,428 1,732  1,882  2,278   4,428    16.0   18.4    0
+#   1   1      1    1     49,445   19     19     29      49     1.0    1.0    0
+#   1   4     64    4    558,326  112    106    231     299     2.2    6.8    0
+#   1   8    512    8    900,017  564    503   1,446   3,938     2.9   12.5    0
+#   2   8    512    8    927,537  547    521     951   3,630     2.9   11.1    0
+#   1  16  1,000   32    722,644 1,372  1,009   5,484  14,384     7.2    9.3    0
+#   2  16  1,000   16    900,252 1,099    851   4,012   9,056     6.3   13.0    0
 #
 # AMD (2026-08-20): Ryzen 9 5950X, 16c/32t, Linux 6.8, 128B, 20s, epoll.
 #   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err

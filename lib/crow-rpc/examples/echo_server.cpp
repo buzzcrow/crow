@@ -93,7 +93,6 @@ int main(int argc, char *argv[])
 
     // Run until signaled.
     while (g_running.load()) {
-        std::atomic<bool> expected{true};
         // Busy-wait with a short sleep to avoid spinning.
         struct timespec ts;
         ts.tv_sec  = 0;

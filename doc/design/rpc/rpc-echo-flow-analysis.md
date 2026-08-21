@@ -5,7 +5,7 @@
 
 End-to-end trace of the CROW RPC echo path (standalone-server loopback
 benchmark). Mirrors the structure of
-[`kv-write-flow-analysis.md`](../design/kv/kv-write-flow-analysis.md).
+[`kv-write-flow-analysis.md`](../kv/kv-write-flow-analysis.md).
 
 The echo benchmark measures raw RPC transport throughput (epoll/kqueue
 + framing + request/response correlation) with no KV/storage layer. The
@@ -148,41 +148,45 @@ Memory copy summary:
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
-### 2026-08-21 (Standalone Server, macOS)
+### 2026-08-22 (Standalone Server, macOS)
 
 Platform: **Apple M5 Pro** (18c, arm64, macOS 26/Darwin 25.5).
 Config: 128B values, 20s duration, standalone echo server, kqueue
-loopback, pipeline_depth=1.
+loopback, pipeline_depth=1. After `send()` unification + global static
+counters (removed per-instance atomics from the hot path).
 
 #### Full sweep (6 configs)
 
 | Eng | Wkr | T | C | ops/s | avg | p50 | p99 | p999 | raggr | saggr | err |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 1 | 53,600 | 17 | 17 | 27 | 47 | 1.0 | 1.0 | 0 |
-| 1 | 4 | 64 | 4 | 597,960 | 104 | 96 | 273 | 434 | 2.3 | 5.1 | 0 |
-| 1 | 8 | 512 | 8 | 886,967 | 571 | 563 | 741 | 843 | 5.2 | 7.9 | 0 |
-| 2 | 8 | 512 | 8 | 956,159 | 530 | 517 | 669 | 734 | 6.7 | 8.7 | 0 |
-| 1 | 16 | 1000 | 32 | 565,808 | 1760 | 1781 | 4026 | 8104 | 9.1 | 9.7 | 0 |
-| 2 | 16 | 1000 | 16 | 575,428 | 1732 | 1882 | 2278 | 4428 | 16.0 | 18.4 | 0 |
+| 1 | 1 | 1 | 1 | 49,445 | 19 | 19 | 29 | 49 | 1.0 | 1.0 | 0 |
+| 1 | 4 | 64 | 4 | 558,326 | 112 | 106 | 231 | 299 | 2.2 | 6.8 | 0 |
+| 1 | 8 | 512 | 8 | 900,017 | 564 | 503 | 1446 | 3938 | 2.9 | 12.5 | 0 |
+| 2 | 8 | 512 | 8 | 927,537 | 547 | 521 | 951 | 3630 | 2.9 | 11.1 | 0 |
+| 1 | 16 | 1000 | 32 | 722,644 | 1372 | 1009 | 5484 | 14384 | 7.2 | 9.3 | 0 |
+| 2 | 16 | 1000 | 16 | 900,252 | 1099 | 851 | 4012 | 9056 | 6.3 | 13.0 | 0 |
 
 Eng=io_engines, Wkr=total io_workers per process (Eng × per-engine;
 client and server use the same config), T=client dispatch threads, and
 C=connections. raggr=frames per read and saggr=frames per writev on the
 server.
 
-Peak throughput is **956K ops/s** at 2e8w 512t8c. All six configurations
-completed with zero errors.
+Peak throughput is **928K ops/s** at 2e8w 512t8c. All six configurations
+completed with zero errors. The 16-worker configs improved +27% (1e16w)
+and +56% (2e16w) versus 2026-08-21 — removing per-instance counter
+atomics cut hot-path contention under high dispatch-thread counts.
 
 #### Multi-worker scaling
 
-- 1w→4w: **11.2x** (54K→598K). More dispatch threads, connections, and
+- 1w→4w: **11.3x** (49K→558K). More dispatch threads, connections, and
   I/O workers expose send and receive aggregation.
-- 4w→1e8w: **+48%** (598K→887K).
-- 1e8w→2e8w at 512T:8C: **+7.8%** (887K→956K). Splitting eight workers
-  across two kqueue engines improves throughput and tail latency.
-- Both 16-worker configurations regress to about 570K ops/s. The 1,000
-  dispatch threads raise average latency above 1.7ms, so this machine's
-  saturation point is the 2e8w 512t8c configuration.
+- 4w→1e8w: **+61%** (558K→900K).
+- 1e8w→2e8w at 512T:8C: **+3.1%** (900K→928K). Splitting eight workers
+  across two kqueue engines improves tail latency (p99 1446→951).
+- 2e16w 1000t16c holds at 900K — no longer regresses below the 8-worker
+  configs. The 1,000 dispatch threads still raise average latency above
+  1ms, but the global counters eliminate the per-instance atomic
+  contention that capped the 16-worker configs at 575K before.
 
 ### 2026-08-20 (Slab Fallback + Reaper, Linux)
 
@@ -239,15 +243,10 @@ all configs.
 - **2026-08-21 (M5 Pro, standalone server)**: 128B/20s two-process
   kqueue sweep peaked at 956K ops/s with 2 engines and 8 total workers.
   All six configurations completed without errors.
-
-### Deferred
-
-- **RDMA transport (R32)** — fully implemented (transport abstraction,
-  buffer pool, build wiring) but not exercised by the echo bench. Can
-  be removed if the TCP path suffices for production; kept behind the
-  transport abstraction so it does not burden the socket path.
-- **Flatbuffer reuse** — `ConnectionPingRequest` is rebuilt per op in
-  the Rust bench and the C++ server. The C++ load test already uses a
-  24-byte template + `memcpy` id patch. This optimization is
-  benchmark-only: production RPCs carry varying payloads that cannot
-  be patched in place, so the rebuild cost is unavoidable there.
+- **2026-08-22 (M5 Pro, send() unification + global counters)**:
+  unified the client call path to `send()` (removed `call()` /
+  `call_one_way()` / `call_callback`), replaced 12 per-instance atomic
+  counters with 6 global static `crow-common::metrics::Counter`
+  instances. Peak 928K (2e8w). 16-worker configs improved +27% (1e16w)
+  and +56% (2e16w) — removing per-instance atomics cut hot-path
+  contention under 1,000 dispatch threads.
