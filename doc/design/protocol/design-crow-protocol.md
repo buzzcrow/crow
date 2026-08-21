@@ -37,7 +37,9 @@ that keeps one source of truth across crates.
   whatever a component chooses; only keys are governed by the key
   encoding sub-design.
 - **No transport encoding.** RPC wire format is a separate concern;
-  keys do not travel over gRPC as serialized key messages.
+  keys do not travel over gRPC as serialized key messages. The RPC
+  engine lives in its own design area,
+  [`design-crow-rpc.md`](../rpc/design-crow-rpc.md).
 - **No protobuf service definitions.** `.proto` files and generated
   code live in `crow-protocol` for shared access, but their design is
   driven by each component's gRPC service doc, not here.

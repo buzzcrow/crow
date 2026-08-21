@@ -19,6 +19,13 @@ use serde::{Deserialize, Serialize};
 use super::workload::{OpKind, WorkloadKind};
 use crow_kv_client::ClientMetricsSnapshot;
 
+/// Default for `BenchReport::target` when deserializing historical
+/// reports that predate the field. Historical reports were all KV.
+#[must_use]
+fn default_target_kv() -> String {
+    "kv".to_string()
+}
+
 /// Latency percentiles (microseconds). Stored as `u64` because the
 /// histograms are recorded in microsecond units.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +97,7 @@ pub(crate) struct OpReport {
 /// Top-level bench result. Stored as JSON under
 /// `bench-runs/<run-id>.json` with a human-readable `.txt` companion.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_field_names)]
 pub(crate) struct BenchReport {
     pub(crate) run_id: String,
     pub(crate) started_at: DateTime<Utc>,
@@ -106,11 +114,15 @@ pub(crate) struct BenchReport {
     #[serde(default)]
     pub(crate) warmup_ms: u64,
     pub(crate) workload: WorkloadKind,
+    /// Target label: `kv`, `rpc`, etc. `#[serde(default)]` so
+    /// historical reports without this field deserialize as `kv`.
+    #[serde(default = "default_target_kv")]
+    pub(crate) target: String,
     /// Storage mode label: `mem`, `file`, or `block`.
     #[serde(default)]
     pub(crate) mode: String,
     pub(crate) connections: u32,
-    pub(crate) threads: u32,
+    pub(crate) loader_num: u32,
     pub(crate) key_space: u64,
     pub(crate) value_size: usize,
     pub(crate) target_endpoint: String,

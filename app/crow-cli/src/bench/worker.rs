@@ -4,19 +4,18 @@
 //! Per-worker counters and the closed-loop worker task.
 //!
 //! Each worker is a strict closed loop: issue one op via
-//! `kv.{get,put,delete,scan}().await`, await completion, record
-//! latency, repeat. There is no internal queue and no per-worker
-//! pipelining, so the number of in-flight requests at any instant is
-//! exactly bounded by `cfg.threads`.
+//! `BenchClient::issue_op`, await completion, record latency, repeat.
+//! Concurrency comes from having multiple workers (threads) each in
+//! closed-loop mode.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
 
 use crow_common::metrics::{Counter, MetricName};
-use crow_kv_client::{CrowkvClient, Error as ClientError, GetOutcome, WriteOutcome};
 use tracing::debug;
 
 use super::report::{OpOutcome, OpStats};
+use super::target::BenchClient;
 use super::workload::{OpGen, OpKind, WorkloadKind};
 use crate::bench::runner::BenchConfig;
 
@@ -24,10 +23,7 @@ use crate::bench::runner::BenchConfig;
 /// snapshotter and the metrics flusher. Workers bump these on every op
 /// via `Counter::inc` — there is no contention because each worker owns
 /// its `Arc<WorkerCounters>` exclusively. Per-op-kind ok/err counts let
-/// the metrics log distinguish successful from failed operations. The
-/// progress snapshotter reads cumulative totals via `snapshot().total`;
-/// the metrics flusher reads window deltas via `flush().count`, dropping
-/// its manual `prev_*` bookkeeping.
+/// the metrics log distinguish successful from failed operations.
 #[derive(Debug)]
 pub(crate) struct WorkerCounters {
     pub(crate) put_ok: Counter,
@@ -88,20 +84,12 @@ impl WorkerCounters {
 /// rather than aborting the worker.
 ///
 /// Closed loop: at most one in-flight RPC per worker at any instant.
-/// Combined across all workers, the runner-wide in-flight count is
-/// bounded by `cfg.threads` exactly (see module-level docs).
-///
-/// `counters` is the worker's own `WorkerCounters` (shared with the
-/// optional progress snapshotter). Both increments use `Relaxed` —
-/// ordering doesn't matter since the snapshotter only sums and prints,
-/// and the final report is computed from the returned `OpStats`.
 #[allow(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "per-op dispatch loop; splitting per-kind reduces readability"
 )]
-pub(crate) async fn run_worker(
-    kv: &CrowkvClient,
+pub(crate) async fn run_worker<C: BenchClient>(
+    client: &C,
     gen: &mut OpGen,
     cfg: &BenchConfig,
     measure_start: Instant,
@@ -117,139 +105,15 @@ pub(crate) async fn run_worker(
         if now_pre >= deadline {
             break;
         }
-        // `recording` is sticky-`true` once the warmup window passes.
-        // We re-evaluate per iteration to keep the implementation
-        // robust to clock skew, but in practice it just flips once.
         let recording = now_pre >= measure_start;
         iter = iter.wrapping_add(1);
 
-        let kind = match cfg.workload {
-            WorkloadKind::Read => OpKind::Read,
-            WorkloadKind::Write => OpKind::Write,
-            WorkloadKind::List => OpKind::List,
-            WorkloadKind::Mix => gen.pick_mix_kind(),
-        };
-
-        // Reads draw from the populated range (`next_read_key`) and
-        // carry the key_id for spot-check verification; other ops draw
-        // from the full `key_space`.
-        let (key, read_key_id) = if kind == OpKind::Read {
-            let (id, k) = gen.next_read_key();
-            (k, Some(id))
-        } else {
-            (gen.next_key(), None)
-        };
+        let kind = pick_kind(cfg, gen);
         let t0 = Instant::now();
-        let outcome = match kind {
-            OpKind::Read => {
-                let min_slot = cfg.min_slot_policy.to_min_slot();
-                match kv
-                    .get(cfg.store_id, cfg.group_id, &key, cfg.read_mode, min_slot)
-                    .await
-                {
-                    Ok(GetOutcome::Found { value, .. }) => {
-                        // Spot-check `verify_bytes` random offsets
-                        // against the deterministic formula. A
-                        // mismatch is a correctness error (distinct
-                        // from transport/NotLeader errors).
-                        let ok_verify = read_key_id
-                            .is_some_and(|id| gen.verify_value(id, value.as_ref(), cfg.verify_bytes));
-                        OpOutcome {
-                            ok: true,
-                            correctness_error: !ok_verify,
-                            ..Default::default()
-                        }
-                    }
-                    Ok(GetOutcome::NotFound) => OpOutcome {
-                        ok: true,
-                        not_found: true,
-                        ..Default::default()
-                    },
-                    Err(ClientError::NotLeader { .. }) => OpOutcome {
-                        no_leader: true,
-                        ..Default::default()
-                    },
-                    Err(_) => OpOutcome::default(),
-                }
-            }
-            OpKind::Write => {
-                let value = gen.make_value();
-                let client_id = u64::from(worker_id) + 1;
-                match kv
-                    .put(cfg.store_id, cfg.group_id, &key, &value, Some((client_id, iter)))
-                    .await
-                {
-                    Ok(WriteOutcome { .. }) => OpOutcome {
-                        ok: true,
-                        ..Default::default()
-                    },
-                    Err(ClientError::NotLeader { .. }) => OpOutcome {
-                        no_leader: true,
-                        ..Default::default()
-                    },
-                    Err(_) => OpOutcome::default(),
-                }
-            }
-            OpKind::Delete => {
-                let client_id = u64::from(worker_id) + 1;
-                match kv
-                    .delete(cfg.store_id, cfg.group_id, &key, Some((client_id, iter)))
-                    .await
-                {
-                    Ok(_) => OpOutcome {
-                        ok: true,
-                        ..Default::default()
-                    },
-                    Err(ClientError::NotLeader { .. }) => OpOutcome {
-                        no_leader: true,
-                        ..Default::default()
-                    },
-                    Err(_) => OpOutcome::default(),
-                }
-            }
-            OpKind::List => match kv
-                .scan(
-                    cfg.store_id,
-                    cfg.group_id,
-                    &cfg.scan_prefix,
-                    &cfg.scan_start_after,
-                    &[],
-                    cfg.scan_limit,
-                    cfg.read_mode,
-                    cfg.min_slot_policy.to_min_slot(),
-                    false,
-                    None,
-                )
-                .await
-            {
-                Ok(_) => OpOutcome {
-                    ok: true,
-                    ..Default::default()
-                },
-                Err(ClientError::NotLeader { .. }) => OpOutcome {
-                    no_leader: true,
-                    ..Default::default()
-                },
-                Err(_) => OpOutcome::default(),
-            },
-        };
-        // During the warmup window we drive the same RPC sequence so
-        // pool channels stay warm and OpGen state advances normally,
-        // but we throw the latency / error result away — neither the
-        // histogram, the per-kind counters, nor the live atomic
-        // counters are touched. This keeps cold-start spikes (TCP
-        // slow-start, channel handshake, server first-touch caches)
-        // out of the published percentiles.
+        let outcome = client.issue_op(kind, gen, cfg, worker_id, iter).await;
         if recording {
-            let lat_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
-            stats.entry(kind).or_default().record(lat_us, outcome);
-
-            // Live per-op counters: each worker owns its `WorkerCounters`
-            // so the increments are uncontended.
-            counters.record(kind, outcome.ok);
+            record_op(&mut stats, counters, kind, outcome, t0);
         }
-
-        // Yield periodically so heavy worker counts cooperate.
         if iter % 64 == 0 {
             tokio::task::yield_now().await;
         }
@@ -257,4 +121,27 @@ pub(crate) async fn run_worker(
 
     debug!(worker_id, total = iter, "bench: worker stop");
     stats
+}
+
+/// Pick the op kind for this iteration based on the workload config.
+fn pick_kind(cfg: &BenchConfig, gen: &mut OpGen) -> OpKind {
+    match cfg.workload {
+        WorkloadKind::Read => OpKind::Read,
+        WorkloadKind::Write => OpKind::Write,
+        WorkloadKind::List => OpKind::List,
+        WorkloadKind::Mix => gen.pick_mix_kind(),
+    }
+}
+
+/// Record one op's latency + outcome into stats + counters.
+fn record_op(
+    stats: &mut BTreeMap<OpKind, OpStats>,
+    counters: &WorkerCounters,
+    kind: OpKind,
+    outcome: OpOutcome,
+    t0: Instant,
+) {
+    let lat_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
+    stats.entry(kind).or_default().record(lat_us, outcome);
+    counters.record(kind, outcome.ok);
 }

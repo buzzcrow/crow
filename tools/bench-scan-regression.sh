@@ -60,9 +60,9 @@ run_bench() {
     fi
     echo ">>> $label (${threads}T:${connections}C) ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
         --mode mem --workload list --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$connections" \
+        --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
         --scan-limit "$limit" --scan-prefix "$prefix" --scan-start-after "$start_after" \
@@ -87,27 +87,27 @@ run_bench() {
 
 # --- regression sentinel configs ---
 #
-# Reference results (2026-08-10, AMD Ryzen 9 5950X, 16c/32t, Ubuntu 24.04):
+# Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS 26.5):
 #   10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values
 #   unless noted. Post-R67 (spawn_blocking maintenance).
 #
 #   label            limit   T:C   scans/s  avg_us  p99_us   err  notes
-#   bounded_10       10      1:1   5093     194     249      0    O(limit) headline
-#   bounded_1k       1000    1:1   1274     783     904      0    typical scan
-#   bounded_10k      10000   1:1   141      7113    8528     0    large bounded
-#   full_100k        100000  1:1   14       72244   96512    0    pagination
-#   deep_pag_10      10      1:1   5373     184     264      0    O(limit) pushdown
-#   mixed_1k         1000    1:1   330      3031    4116     0    64B:70%,1KiB:20%,16KiB:10%
-#   minslot_1k       1000    1:1   1292     772     925      0    MinSlot routing
-#   largeval_16k     1000    1:1   35       28362   46720    0    R67: 16KiB values
-#   lin_4t           1000    4:4   6999     569     1064     0    max leader throughput
-#   minslot_4t       1000    4:4   6586     605     1231     0    -5.9% vs lin
-#   lin_16t          1000    16:16 21247    750     1226     0
-#   minslot_16t      1000    16:16 20520    776     1309     0    -3.4% vs lin
-#   lin_32t          1000    32:32 27922    1139    2408     0
-#   minslot_32t      1000    32:32 28613    1111    2226     0    +2.5% throughput, -7.6% p99
+#   bounded_10       10      1:1   21320    46      73       0    O(limit) headline
+#   bounded_1k       1000    1:1   4708     211     239      0    typical scan
+#   bounded_10k      10000   1:1   562      1777    1911     0    large bounded
+#   full_100k        100000  1:1   49       20411   22864    0    pagination
+#   deep_pag_10      10      1:1   21003    46      66       0    O(limit) pushdown
+#   mixed_1k         1000    1:1   1043     957     1175     0    64B:70%,1KiB:20%,16KiB:10%
+#   minslot_1k       1000    1:1   4721     211     241      0    MinSlot routing
+#   largeval_16k     1000    1:1   101      9893    13496    0    R67: 16KiB values
+#   lin_4t           1000    4:4   15504    257     409      0    max leader throughput
+#   minslot_4t       1000    4:4   16232    245     358      0    +4.7% vs lin
+#   lin_16t          1000    16:16 32384    492     781      0
+#   minslot_16t      1000    16:16 32217    495     816      0    -0.5% vs lin
+#   lin_32t          1000    32:32 38859    820     2416     0
+#   minslot_32t      1000    32:32 36684    869     1416     0    -5.6% throughput, -41% p99
 #
-# Analysis: doc/working/kv-scan-flow-analysis.md § Latest Benchmark Results.
+# Analysis: doc/design/kv/kv-scan-flow-analysis.md § Latest Benchmark Results.
 
 echo -e "label\tlimit\tprefix\tstart_after\tvalue_size\tread_mode\tT:C\tscans_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 

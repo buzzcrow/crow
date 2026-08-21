@@ -20,7 +20,7 @@ triggers:
 ```
 doc_index.md                                (table of contents — the only file at doc root)
 design/
-    ├── {kv,tree,console,diskdb,protocol}/  (one subdir per component area)
+    ├── {kv,tree,console,diskdb,protocol,rpc}/  (one subdir per component area)
     │   ├── design-crow-<area>.md           (root design for that area)
     │   ├── design-crow-<area>-<topic>.md   (sub-design docs)
     │   └── kv-{read,scan,write}-flow-analysis.md  (KV only: long-lived flow analyses)
@@ -39,11 +39,11 @@ working/
 ## Naming
 
 - **Sub-design docs** — `design-crow-<area>-<topic>.md`, `lowercase-kebab-case`. Example: `design/kv/design-crow-kv-wal.md`.
-- **Backlog requirements** — `R**-<component>-<topic>.md`, where `<component>` is the owning crate/area (`kv`, `tree`, `console`, `client`, `server`, `diskdb`). A requirement is prefixed by the component that owns the work, not every component it touches — cross-component requirements take the prefix of the primary owner. See [`doc-backlog`](doc-backlog.md) for the full doc structure.
+- **Backlog requirements** — `R**-<component>-<topic>.md`, where `<component>` is the owning crate/area (`kv`, `tree`, `console`, `client`, `server`, `diskdb`). Prefix with the owning component, not every component it touches; cross-component requirements take the primary owner's prefix. See [`doc-backlog`](doc-backlog.md) for the full doc structure.
 
 ## Flow-Analysis Docs
 
-`kv-read-flow-analysis.md` / `kv-scan-flow-analysis.md` / `kv-write-flow-analysis.md` — long-lived per-path flow traces, benchmark results, and open issues. Not deleted after a single requirement. Live under `doc/design/kv/` (not `doc/working/`) because they are permanent design references.
+`kv-read-flow-analysis.md` / `kv-scan-flow-analysis.md` / `kv-write-flow-analysis.md` — long-lived per-path flow traces, benchmark results, and open issues. Permanent design references under `doc/design/kv/`, not `doc/working/`.
 
 ## Core Rules
 
@@ -55,12 +55,27 @@ working/
 6. **No temp docs in `doc_index.md`** — the index tracks long-lived permanent docs only. Backlog and working docs are self-indexed.
 7. **Working doc hygiene** — delete `plan-<topic>.md` and `design-<topic>.md` when the effort is complete.
 8. **Raw-readable formatting** — docs are read as raw markdown most times, not rendered. Prefer definition lists or nested bullets. Tables only for data/metric comparison; `doc_index.md` always uses tables.
-9. **Design docs describe current state, not change history** — no "pre-R**", "post-R**", "legacy", "supersedes", "before/after" narratives. No R-number references — backlog docs are deleted, making them dead links. Change history belongs in commit messages.
+9. **Design docs describe current state, not change history** — no "pre-R**", "post-R**", "legacy", "supersedes", "before/after" narratives. No R-number references (backlog docs are deleted → dead links). Change history belongs in commit messages.
 10. **Rebuild HTML when user-guide.md changes** — run `python3 doc/user-manual/build_html.py` in the same commit. Never hand-edit `user-guide.html` or use other markdown tools.
+11. **Write like a human, not a model** — docs are read by engineers, not graded for polish. Strip the tells that mark AI prose:
+    - **Em-dash overuse** — one per doc is plenty. A clause worth saying gets its own sentence or a comma.
+    - **Uniform short-sentence cadence** — vary length. A short sentence for emphasis is powerful; four in a row is a tic.
+    - **Stacked adjective triples** ("simple, efficient, modern") — pick one, or give each a reason.
+    - **Filler collection words** — "a family of", "a suite of", "a rich set of", "and more", "etc." as padding — cut them.
+    - **Grand connectors** — "Moreover", "Furthermore", "It's worth noting that". If the next sentence matters, just say it.
+    - **Rhetorical-question openers** ("Why build yet another KV?") — state the claim directly.
+    - **Symmetric bullet triples** with the same grammatical shape — break the pattern; let one bullet run longer.
+    - **Abstract over concrete** — "io_uring and NVMe moved the bottleneck once already" beats "recent hardware advances have shifted the performance landscape".
+    - **Category before differentiator** — lead with what the thing *is*, not "In modern distributed systems, ...".
+    - **Hedging** — state the tradeoff, take the side. "complexity in gap repair, but the throughput gain is worth it" is fine; "tradeoffs that should be carefully considered" is not.
+    - **Restating the rule as its own reason** — "Keeping them separate decouples consensus from election." Not: "This is achieved by keeping them separate, which provides the benefit of decoupling."
+    - **Philosophy paragraphs** — one quoted line captures a posture; a paragraph dilutes it.
+    - **Read it aloud** — if it sounds like a model wrote it, rewrite it.
+    - **Tight prose** — say it once, stop. No restating, no padding. A short doc that's all signal beats a long one that's half filler.
 
 ## Doc Guides
 
-Detailed writing guides for each doc kind. Open the matched guide before writing or revising that doc type:
+Open the matched guide before writing or revising that doc type:
 
 - **Formal design doc** (`doc/design/<area>/design-crow-<area>(-<topic>)?.md`) — see [`doc-design`](doc-design.md). Permanent, human-readable design record (root + sub-design); the target when folding working drafts back in.
 - **Backlog requirement doc** (`doc/backlog/R**-<component>-<topic>.md`) — see [`doc-backlog`](doc-backlog.md). Structure: Problem → Solution → Dependencies → Acceptance.

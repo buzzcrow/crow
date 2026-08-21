@@ -12,6 +12,7 @@
 
 pub mod async_tree;
 pub mod batch;
+pub mod cpp_global_metrics;
 pub mod crc;
 pub mod error;
 pub mod options;
@@ -25,6 +26,7 @@ pub mod write_handle;
 
 pub use async_tree::{AsyncCrowtree, GetOutcome, PinnedGetOutcome, ScanOutcome};
 pub use batch::{BatchOp, ExtOp};
+pub use cpp_global_metrics::{cpp_global_metrics_max_name_len, flush_cpp_global_metrics};
 pub use crc::{crc32c, crc32c_update};
 pub use error::CtError;
 pub use options::{Compression, Options, PageStoreBackend, SyncMode};

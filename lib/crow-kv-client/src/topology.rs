@@ -59,7 +59,10 @@ impl TopologyCache {
     ) -> Self {
         Self {
             seeds: RwLock::new(seeds),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             leaders: DashMap::new(),
             replicas: DashMap::new(),
             min_refresh_interval,

@@ -88,9 +88,9 @@ if [ "$SAMPLER" = "samply" ]; then
     echo ""
 
     samply record --save-only -o "$OUTPUT" -- \
-        "$CLI_BIN" bench run \
+        "$CLI_BIN" bench kv \
         --mode mem --workload write --duration-secs "$DURATION" \
-        --threads "$THREADS" --connections "$CONNECTIONS" \
+        --loader-num "$THREADS" --connections "$CONNECTIONS" \
         --max-inflight "$MAX_INFLIGHT" --inflight-queues 1 \
         --metrics-interval 1 \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
@@ -127,9 +127,9 @@ elif [ "$SAMPLER" = "perf" ]; then
     # If you see truncated stacks through pre-built libs, switch to:
     #   --call-graph dwarf
     perf record -F 999 -g --call-graph fp -o "$PERFDIR/perf.data" -- \
-        "$CLI_BIN" bench run \
+        "$CLI_BIN" bench kv \
         --mode mem --workload write --duration-secs "$DURATION" \
-        --threads "$THREADS" --connections "$CONNECTIONS" \
+        --loader-num "$THREADS" --connections "$CONNECTIONS" \
         --max-inflight "$MAX_INFLIGHT" --inflight-queues 1 \
         --metrics-interval 1 \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \

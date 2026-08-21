@@ -8,8 +8,8 @@ Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §8.1, §8.2
 
 This document specifies CROW's write-ahead log. **There is exactly one durable
 log per group: the replica's consensus log (the per-slot acceptor log).**
-Everything else — the KV state machine (`KVEngine`), future snapshots, the dedup
-cache, the chosen/applied watermarks — is a *derived projection* of that log.
+Everything else (the KV state machine (`KVEngine`), future snapshots, the dedup
+cache, the chosen/applied watermarks) is a *derived projection* of that log.
 The `Accepted` record carries the actual operation, so this single log doubles
 as the replicated command log (Raft-style) and the state-machine input; there is
 no separate "state-machine WAL" and no second write of the value.
@@ -72,7 +72,7 @@ A WAL record persists one of the messages an acceptor must remember durably. Con
 
 Records are self-describing and length-prefixed so a corruption in one record does not destroy the rest of the segment unless followed by a CRC failure (see §6).
 
-**Design note:** the `Accepted` record's payload IS the `PxLogEntry` — there is no separate "raft log" or "state machine log" structure. This keeps disk I/O minimal: one durable flush per accepted batch, no further logging.
+**Design note:** the `Accepted` record's payload IS the `PxLogEntry`; there is no separate "raft log" or "state machine log" structure. This keeps disk I/O minimal: one durable flush per accepted batch, no further logging.
 
 `Promised` records exist for safety: classical Paxos requires acceptors to remember promises across crashes. They are short (no payload).
 
@@ -90,7 +90,7 @@ handler replies (the ack contract, §5). The mapping is exhaustive:
 **`learn()` writes nothing.** Applying a chosen value to the `KVEngine` is a pure
 in-memory projection; its durability comes entirely from the `Accepted` records
 that a quorum already persisted. The state machine's KV state is **not** rebuilt
-from the WAL on restart — instead, the state machine will persist its own
+from the WAL on restart. Instead, the state machine will persist its own
 snapshot (with a slot index) to disk. On restart, the state machine loads its
 snapshot and the WAL replay only rebuilds acceptor state (promises + accepted
 values). The learner / `KVEngine` is repopulated by new-leader recovery (§6.4)
@@ -200,20 +200,20 @@ This gives low latency for a single record while still aggregating bursts natura
 The flush worker flushes when any of:
 
 - It is woken by a transition from empty queue to non-empty queue (`rx.recv().await`).
-- Pending bytes ≥ `wal_flush_batch_bytes` (default 64 KiB) — breaks the drain loop early.
-- The watchdog (`wal_flush_watchdog_ms`, default 100 ms) is a safety-net timer that wakes the idle writer every `watchdog` ms to drain any queued records in case of a missed wake (a defensive measure "just in case for bugs"). The idle wakeup does a `try_recv` drain and re-parks if nothing is queued — no I/O, no allocation, ~10 wakeups/s at the default 100 ms.
+- Pending bytes ≥ `wal_flush_batch_bytes` (default 64 KiB): breaks the drain loop early.
+- The watchdog (`wal_flush_watchdog_ms`, default 100 ms) is a safety-net timer that wakes the idle writer every `watchdog` ms to drain any queued records in case of a missed wake (a defensive measure "just in case for bugs"). The idle wakeup does a `try_recv` drain and re-parks if nothing is queued; no I/O, no allocation, ~10 wakeups/s at the default 100 ms.
 
 Default behavior is **wake-drain-flush**: a lone record flushes immediately, while a concurrent burst gets batched because the worker drains all immediately-ready records before issuing I/O. A coalescing budget (`wal_flush_coalesce_us`) was previously available but was removed after T3 benchmarking showed no gain over the wake-drain-flush baseline.
 
 ### 4.4 Async write completion
 
-Each `Accept` handler returns a future. The flush worker resolves the future with `Ok` after the backend durable flush completes; on disk error it resolves with `Err` (which the acceptor escalates per §8). The acceptor only emits the network `Accepted` response after the future resolves — this is the **ack contract** ([§5](#5-ack-contract-and-failure-modes)).
+Each `Accept` handler returns a future. The flush worker resolves the future with `Ok` after the backend durable flush completes; on disk error it resolves with `Err` (which the acceptor escalates per §8). The acceptor only emits the network `Accepted` response after the future resolves; this is the **ack contract** ([§5](#5-ack-contract-and-failure-modes)).
 
 The future-based interface decouples the acceptor's handler from disk timing and allows multiple in-flight `Accept`s to coalesce into one durable flush naturally.
 
 ### 4.5 Why this maps onto Multi-Paxos parallelism
 
-Different slots may be in flight on different disks at the same time. Slot N may be batching on disk 1 while slot N+1 batches on disk 2. Both durable flushes proceed in parallel. Aggregate flush throughput is `sum over disks of (1 / flush_latency)` — exactly the parallel benefit we want.
+Different slots may be in flight on different disks at the same time. Slot N may be batching on disk 1 while slot N+1 batches on disk 2. Both durable flushes proceed in parallel. Aggregate flush throughput is `sum over disks of (1 / flush_latency)`, exactly the parallel benefit we want.
 
 Crucially, the leader's **own** durable flush is not on the critical path of remote acceptors' durable flushes. The leader persists locally, then broadcasts; remote acceptors flush in parallel. Two durable flushes total in serial: leader's, and the slowest of the quorum. With multiple disks each durable flush can itself be parallelized internally, but the consensus-level parallelism is what dominates throughput.
 
@@ -233,7 +233,7 @@ enum with three variants:
 - **`BlockDevice(BlockDevice)`** — real file-backed block device. Always opens
   OS paths and does positional I/O (`pwrite`/`pread`) via `FileExt`.
   `fdatasync` calls `sync_data`. Whether the path is a regular file, a raw
-  block device, or a tmpfs file makes no difference — in Unix, a block device
+  block device, or a tmpfs file makes no difference; in Unix, a block device
   *is* a file.
 
 `BlockDevice` has two constructors selected by the `O_DIRECT` flag:
@@ -268,7 +268,7 @@ batch.
 The crow-tree C++ storage layer has a similar but cleaner separation:
 `TextPageStore` (debug text files), `MemPageStore` (in-memory), and
 `BlockPageStore` (real block device with `O_DIRECT`). Each is a distinct C++
-class — no flag-based branching. The Rust FFI `PageStoreBackend` enum (`File`,
+class; no flag-based branching. The Rust FFI `PageStoreBackend` enum (`File`,
 `Block`, `MemBlock`) maps to these. No structural change was needed on the
 crow-tree side for this refactor.
 
@@ -285,12 +285,12 @@ This is repeated from design-crow-kv.md §8.1](design-crow-kv.md) because everyt
 
 ### 5.2 Failure cases
 
-- **Crash before durable flush.** The record may or may not be on disk. Replay reads what is on disk; the slot may end up with no record on this acceptor. That is fine — the leader either had a quorum from other acceptors (slot is chosen) or not (slot will be repaired). In strict mode no client was acked for this acceptor's slot, so no expectation is violated; in early-ack mode (§5.4) the leader may have acked the client on the remote quorum alone, and the chosen-but-not-locally-durable slot is re-adopted by `repair_once` from the followers on restart.
+- **Crash before durable flush.** The record may or may not be on disk. Replay reads what is on disk; the slot may end up with no record on this acceptor. That is fine; the leader either had a quorum from other acceptors (slot is chosen) or not (slot will be repaired). In strict mode no client was acked for this acceptor's slot, so no expectation is violated; in early-ack mode (§5.4) the leader may have acked the client on the remote quorum alone, and the chosen-but-not-locally-durable slot is re-adopted by `repair_once` from the followers on restart.
 
   On restart, the new leader computes its recovery ceiling from durable state, not from an assumed contiguous log tail: `ceiling = max(local highest_seen_slot, peers' highest_seen_slot, persisted next_slot - 1 if present)`. Because parallel writes may leave holes inside `[floor+1, ceiling]`, the leader must run bulk Phase 1 over the whole open interval and fill empty slots with `NoOp`. It does **not** rely on `latest_slot + window_size` to discover hidden data; any value absent from every acceptor's durable state could not have formed a durable quorum and therefore could not have been acknowledged.
 
 - **Crash after durable flush, before sending `Accepted`.** Replay finds the record. After the acceptor rejoins the group, the leader observes the existing accept (via heartbeat / slot-status query) and includes this acceptor in the quorum.
-- **Crash after sending `Accepted`, before the leader acked the client.** Same as above — the record is on disk; if a quorum was reached, the slot is chosen; the new leader's bulk Phase-1 will see this and re-confirm.
+- **Crash after sending `Accepted`, before the leader acked the client.** Same as above; the record is on disk; if a quorum was reached, the slot is chosen; the new leader's bulk Phase-1 will see this and re-confirm.
 - **Durable-flush failure (returns `Err`).** Treated as a disk fault. The acceptor stops accepting new records on that disk and marks itself failed for the affected group; see §8.
 
 ### 5.3 What we never do
@@ -300,17 +300,17 @@ This is repeated from design-crow-kv.md §8.1](design-crow-kv.md) because everyt
 
 ### 5.4 Ack modes (`wal_early_ack`)
 
-The ack contract in §5.1 is the **strict** mode: every acceptor — including the leader — completes its WAL durable flush before its `Accepted` counts toward `Chosen`, and the client is acked only after the leader's own flush joins the quorum. `wal_early_ack` (default `true`, gated on `quorum > 1`) is a **relaxed** mode that drops the leader's local fsync off the write critical path:
+The ack contract in §5.1 is the **strict** mode: every acceptor (including the leader) completes its WAL durable flush before its `Accepted` counts toward `Chosen`, and the client is acked only after the leader's own flush joins the quorum. `wal_early_ack` (default `true`, gated on `quorum > 1`) is a **relaxed** mode that drops the leader's local fsync off the write critical path:
 
 - The leader runs `on_accept_inner` (the term-fence CAS + in-memory `acceptor.accept`) concurrently with the remote `send_accept` fan-out via `tokio::join!`.
 - `Chosen` is declared as soon as the **remote quorum** has durably flushed *and* the leader's local CAS has landed. The leader's own WAL `Accepted` record is appended by a fire-and-forget `tokio::spawn` (`spawn_accept_persist`) that runs off the critical path; its failure is logged and does not retract `Chosen`.
 - The client is acked at that point. The per-proposal critical path becomes the quorum RPC round-trip only (the local fsync, ~10–100 µs on NVMe, runs concurrently and is no longer on the path).
 
-**Crash-recovery guarantee.** A crash in the window between the leader's CAS landing and the deferred local persist is Paxos-safe: the value is chosen (remote quorum accepted durably), so the client's observed `Chosen` is not violated. The leader's acceptor state for that slot is lost on crash (the CAS was in memory, the WAL record never landed), but on restart `replay_group` rebuilds from durable state only and `repair_once` re-adopts the chosen value for the gap slot from the followers (classic prepare + accept re-runs and re-chooses the highest-ballot accepted value). A value the client observed as `Chosen` therefore remains readable after crash + restart — either the local WAL raced the kill and has it, or repair re-adopts it from the quorum.
+**Crash-recovery guarantee.** A crash in the window between the leader's CAS landing and the deferred local persist is Paxos-safe: the value is chosen (remote quorum accepted durably), so the client's observed `Chosen` is not violated. The leader's acceptor state for that slot is lost on crash (the CAS was in memory, the WAL record never landed), but on restart `replay_group` rebuilds from durable state only and `repair_once` re-adopts the chosen value for the gap slot from the followers (classic prepare + accept re-runs and re-chooses the highest-ballot accepted value). A value the client observed as `Chosen` therefore remains readable after crash + restart: either the local WAL raced the kill and has it, or repair re-adopts it from the quorum.
 
 **Single-node gate.** `wal_early_ack` defaults to `true` only when `quorum > 1`. A single-node group (quorum = 1) has no survivors to re-drive a chosen-but-not-locally-durable slot after a crash, so the leader's local fsync must stay on the critical path and the strict contract (§5.1) applies.
 
-**What is not relaxed.** The remote quorum's durable flush is still on the critical path in both modes — `Chosen` is never declared on in-memory-only remote accepts. The relaxation is strictly the leader's *own* durability ordering, recovered by `repair_once` rather than awaited inline.
+**What is not relaxed.** The remote quorum's durable flush is still on the critical path in both modes; `Chosen` is never declared on in-memory-only remote accepts. The relaxation is strictly the leader's *own* durability ordering, recovered by `repair_once` rather than awaited inline.
 
 ---
 
@@ -325,11 +325,11 @@ a steady state:
 - **6.4 Recovery** — a new leader re-confirms *chosen* values from a quorum and fills holes.
 - **6.5 Steady-state apply** — followers keep their state machine current from the leader's commit watermark.
 
-The split matters: replay/restore are purely *local* (this node's WAL), but `Accepted` ≠ `chosen` (a value is chosen only on a quorum). Restore therefore re-derives the acceptor's local view exactly as it was (Pass 1), then re-derives the learner's committed KV state from that *same locally-accepted* data (Pass 2) — which is safe precisely because `Accepted` records already carry a chosen-or-not-yet-known value idempotently (re-`learn()`ing a value that was never actually chosen by a quorum is harmless: it just sits in the engine until either superseded by a higher slot for the same key, or never observed as chosen by anyone else, in which case it was never visible to a client anyway). Slots this node never locally accepted are, separately, left to:
+The split matters: replay/restore are purely *local* (this node's WAL), but `Accepted` ≠ `chosen` (a value is chosen only on a quorum). Restore therefore re-derives the acceptor's local view exactly as it was (Pass 1), then re-derives the learner's committed KV state from that *same locally-accepted* data (Pass 2), which is safe precisely because `Accepted` records already carry a chosen-or-not-yet-known value idempotently (re-`learn()`ing a value that was never actually chosen by a quorum is harmless: it just sits in the engine until either superseded by a higher slot for the same key, or never observed as chosen by anyone else, in which case it was never visible to a client anyway). Slots this node never locally accepted are, separately, left to:
 
 - New-leader recovery / steady-state heartbeat catch-up re-learning the value from quorum-confirmed consensus (§6.4 / §6.5).
 
-**No `DurableCommitWatermark` WAL record.** The state machine owns its own persistence boundary — but that boundary is the *engine's* durability (crow-tree's on-disk snapshot), not a separate state-machine-level snapshot file; see §6.2 below and `design-crow-kv-state-machine.md §2.1`. The WAL does not duplicate this information.
+**No `DurableCommitWatermark` WAL record.** The state machine owns its own persistence boundary, but that boundary is the *engine's* durability (crow-tree's on-disk snapshot), not a separate state-machine-level snapshot file; see §6.2 below and `design-crow-kv-state-machine.md §2.1`. The WAL does not duplicate this information.
 
 ### 6.1 Replay — rebuild acceptor state (`replay_group`)
 
@@ -338,7 +338,7 @@ The split matters: replay/restore are purely *local* (this node's WAL), but `Acc
    On the first failure, **truncate that segment at the offset and stop** (a torn
    tail from a crash mid-write); later segments are still processed.
 3. Rebuild per-`(group, slot)` acceptor state keeping the **highest-ballot**
-   `Promised` / `Accepted` per slot (later/higher-ballot records win — Paxos rule).
+   `Promised` / `Accepted` per slot (later/higher-ballot records win, Paxos rule).
 4. `current_term` = max `term` across all records.
 5. `voted_for` = the node from the latest `VoteGranted` whose `term == current_term`. This is election safety state, not just debug metadata: after crash, the node must not grant a second vote in the same term.
 6. Dedup cache = the `(client_id, seq)` of every `Accepted` record (in-memory only, rebuilt from WAL on restart).
@@ -357,26 +357,26 @@ Pass 1 rebuilds acceptor state without assuming any local accept was ever chosen
 
 The learner / `KVEngine` is rebuilt in a second pass over the *same* replayed
 WAL records (`PxLocalReplica::restore_from_replay_with_engine`), not from a
-separate state-machine snapshot file — see
+separate state-machine snapshot file; see
 [`design-crow-kv-state-machine.md §2.1`](design-crow-kv-state-machine.md#21-state-machine-restart-engine-durability--wal-replay)
 for the full mechanics. In short:
 
 - Pass 2 walks every slot with an accepted entry (rebuilt in Pass 1 above)
   and `learn()`s it into the engine, in order. This alone is always
-  sufficient and correct — `KVEngine::apply` is idempotent
-  (highest-slot-wins per key) — so it works unconditionally, including for
+  sufficient and correct: `KVEngine::apply` is idempotent
+  (highest-slot-wins per key), so it works unconditionally, including for
   `InMemKV` which has no durable floor at all.
 - **Optimization for a durable engine:** before Pass 2, the engine reports
   its own durable floor via `KVEngine::resume_from_slot()` (crow-tree's
   `last_applied_slot`, restored from its on-disk snapshot). Pass 2 then
   starts just above that floor instead of at slot 1, and the learner's
-  frontier is fast-forwarded directly to it — skipping the redundant
+  frontier is fast-forwarded directly to it, skipping the redundant
   re-`learn()` of an already-durable prefix.
 - Slots above the local WAL's own highest accepted slot are left to §6.4 /
   §6.5 (heartbeat catch-up / new-leader bulk Phase 1) to re-learn from peers.
 
 This avoids resurrecting a value that was accepted locally but never chosen,
-and — via the resume-floor check — never re-applies a write below a point
+and, via the resume-floor check, never re-applies a write below a point
 the engine has already durably advanced past (crow-tree rejects such writes
 outright; see `../tree/design-crow-tree-engine.md`).
 
@@ -407,7 +407,7 @@ On winning election a leader sweeps slots `(floor, ceiling]`:
   is **re-confirmed, not overwritten**. This repairs a leader that restored an
   incomplete or merely-accepted prefix.
 
-(Steady-state gap repair below the frontier uses the same adopt-from-quorum logic, one slot at a time — see [`design-crow-kv-slot.md`](design-crow-kv-slot.md).)
+(Steady-state gap repair below the frontier uses the same adopt-from-quorum logic, one slot at a time; see [`design-crow-kv-slot.md`](design-crow-kv-slot.md).)
 
 Parallel slot assignment means holes are normal after crash / restart. Recovery resolves every slot in `(floor, ceiling]` independently:
 
@@ -477,8 +477,8 @@ GC runs at **segment granularity**, not record granularity. A whole segment is u
 
 GC is triggered by:
 
-- Periodic tick (default 30 s) — the GC worker checks each disk and unlinks eligible segments.
-- Disk-pressure signal (not yet implemented) — if any WAL disk's usage exceeds `wal_disk_high_watermark` (default 80%), GC would run immediately and may also force a snapshot to advance `snapshot_slot`.
+- Periodic tick (default 30 s): the GC worker checks each disk and unlinks eligible segments.
+- Disk-pressure signal (not yet implemented): if any WAL disk's usage exceeds `wal_disk_high_watermark` (default 80%), GC would run immediately and may also force a snapshot to advance `snapshot_slot`.
 
 ### 7.4 Interaction with leader change
 
@@ -531,7 +531,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 | `wal_aligned` | `wal_aligned` | false | Selects block-aligned I/O backend |
 | `wal_io_unit_bytes` | `wal_io_unit_bytes` | 4096 | IU size when `wal_aligned` is true |
 | `wal_record_format` | `wal_record_format` | Auto | Binary (zero-copy) or text-line |
-| `wal_early_ack` | `CROWConfig.wal_early_ack` | `true` (gated on `quorum > 1`) | Early-ack mode (§5.4): declare `Chosen` on remote quorum durable flush + leader CAS, deferring the leader's local WAL persist to a background spawn. Default `false` for single-node groups (quorum = 1) — no survivors to re-drive a chosen-but-not-locally-durable slot. |
+| `wal_early_ack` | `CROWConfig.wal_early_ack` | `true` (gated on `quorum > 1`) | Early-ack mode (§5.4): declare `Chosen` on remote quorum durable flush + leader CAS, deferring the leader's local WAL persist to a background spawn. Default `false` for single-node groups (quorum = 1); no survivors to re-drive a chosen-but-not-locally-durable slot. |
 
 **Choosing durable-flush batching:**
 

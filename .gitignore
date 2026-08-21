@@ -70,3 +70,10 @@ flamegraph.svg
 # ── IDE / OS ────────────────────────────────────────────────────
 .idea/
 .DS_Store
+
+# crow-rpc build + clangd cache
+lib/crow-rpc/build/
+lib/crow-rpc/build-asan/
+lib/crow-rpc/build-tsan/
+lib/crow-rpc/build*/
+lib/crow-rpc/.cache/

@@ -230,7 +230,9 @@ pub fn setup_engine_collector(
         }
     });
 
-    // Post-flush C++ callback: call flush_metrics_str per engine.
+    // Post-flush C++ callback: call flush_metrics_str per engine, then
+    // flush the C++ global registry (process-level metrics like
+    // rpc.client.*).
     let stores2 = Arc::clone(store_registry);
     runner.set_cpp_flush(
         move |writer, window_secs, timestamp, rust_width, count_w, tps_w| {
@@ -250,12 +252,26 @@ pub fn setup_engine_collector(
                     }
                 });
             }
+            // Flush C++ global registry (process-level metrics).
+            let global_max = crow_tree_ffi::cpp_global_metrics_max_name_len();
+            let shared_width = rust_width.max(global_max);
+            if let Some(str) = crow_tree_ffi::flush_cpp_global_metrics(
+                window_secs,
+                timestamp,
+                "cpp-metrics-global",
+                shared_width,
+                count_w,
+                tps_w,
+            ) {
+                let _ = std::io::Write::write_all(writer, str.as_bytes());
+            }
         },
     );
 
     // Pre-flush negotiate callback: query C++ for its preferred column
     // widths. Uses the first engine found (all engines share the same
-    // C++ formatting defaults).
+    // C++ formatting defaults). The C++ global registry uses the same
+    // defaults.
     let stores3 = Arc::clone(store_registry);
     runner.set_cpp_negotiate(move || {
         let mut result = (5, 7);
@@ -277,6 +293,7 @@ pub fn setup_engine_collector(
                 }
             });
         }
+        // C++ global registry uses the same column widths as per-engine.
         result
     });
 }

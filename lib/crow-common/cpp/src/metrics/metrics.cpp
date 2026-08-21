@@ -21,6 +21,12 @@ namespace crow::common::metrics
 
 // ── MetricsRegistry ─────────────────────────────────────────────
 
+MetricsRegistry &MetricsRegistry::global()
+{
+    static MetricsRegistry instance;
+    return instance;
+}
+
 MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)
 {
     stop();

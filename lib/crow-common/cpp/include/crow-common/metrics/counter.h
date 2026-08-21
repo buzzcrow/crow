@@ -49,6 +49,18 @@ class Counter
         return name_;
     }
 
+    // Read current window value without resetting (for ad-hoc debugging).
+    uint64_t window() const
+    {
+        return window_.load(std::memory_order_relaxed);
+    }
+
+    // Read cumulative total without flushing.
+    uint64_t total() const
+    {
+        return total_.load(std::memory_order_relaxed);
+    }
+
   private:
     std::string           name_;
     std::atomic<uint64_t> window_;

@@ -141,7 +141,7 @@ fn main() -> ExitCode {
     // client call inside `dispatch` will attach it as
     // `x-crow-kv-corr-id` and stamp it on every ops-log record.
     let cid = crow_console_shared::corr_id::generate();
-    runtime.block_on(async move { crow_console_shared::corr_id::scope(cid, dispatch(cli)).await })
+    runtime.block_on(async move { Box::pin(crow_console_shared::corr_id::scope(cid, dispatch(cli))).await })
 }
 
 async fn dispatch(mut cli: Cli) -> ExitCode {

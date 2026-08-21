@@ -26,9 +26,9 @@
   was specified in the same design draft but removed from the
   watch/notify extension's scope after the timer-task wiring proved
   incomplete (the spawned timer captured no registry/coalescer refs, so
-  buffered keys were silently dropped). No direct aioss analog — new
-  work; the reference model is etcd watch (which coalesces at the mvcc
-  backend, not the apply path).
+  buffered keys were silently dropped). New work; the reference model
+  is etcd watch (which coalesces at the mvcc backend, not the apply
+  path).
 - **Use scenarios** —
   - **Disk discovery burst** — diskdb runs a periodic discovery
     scan; one `batch_write` updates 10+ disk records under

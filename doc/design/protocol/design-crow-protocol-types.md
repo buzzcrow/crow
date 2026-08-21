@@ -61,8 +61,8 @@ and the conversion is a place for bugs.
 
 ### 3.1 Single home
 
-All cross-component protocol types — wire types, ID aliases, key
-types — live in `crow-protocol`. No other crate defines its own copy
+All cross-component protocol types (wire types, ID aliases, key
+types) live in `crow-protocol`. No other crate defines its own copy
 of a type that crosses a boundary. `crow-protocol` is the natural
 home: it already hosts the shared protobuf types and has no heavy
 dependencies.
@@ -102,7 +102,7 @@ pub use crow_protocol::mgmt::{
 This preserves downstream API names without rename churn while
 guaranteeing one struct definition per wire shape. If a consumer
 does not render some fields, serde populates them and the consumer
-ignores them — the fields are not dropped from the type.
+ignores them. The fields are not dropped from the type.
 
 ### 3.4 `schema` feature: optional `utoipa` derives
 

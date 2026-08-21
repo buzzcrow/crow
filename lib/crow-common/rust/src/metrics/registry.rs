@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::bandwidth::Bandwidth;
 use super::counter::{Counter, Gauge};
@@ -313,6 +313,75 @@ impl Default for MetricsRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── Global registry ──────────────────────────────────────────────
+
+/// Process-level singleton registry for unprefixed metrics (e.g.
+/// `rpc.client.*`, `disk.*`). Use `global_counter("name")` etc. from
+/// static variables to register without plumbing a registry through
+/// constructors. Per-instance metrics with dynamic prefixes
+/// (`s.{store_id}.g.{group_id}.*`) should continue to use a
+/// per-process `Arc<Mutex<MetricsRegistry>>` passed explicitly.
+pub fn global() -> &'static Mutex<MetricsRegistry> {
+    static REGISTRY: OnceLock<Mutex<MetricsRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(MetricsRegistry::new()))
+}
+
+/// Register a counter with the global registry. Idempotent — returns
+/// the existing handle if already registered.
+///
+/// # Panics
+/// Panics if the global registry mutex is poisoned.
+pub fn global_counter(name: impl Into<MetricName>) -> Arc<Counter> {
+    global()
+        .lock()
+        .expect("global metrics registry poisoned")
+        .register_counter(name)
+}
+
+/// Register a gauge with the global registry.
+///
+/// # Panics
+/// Panics if the global registry mutex is poisoned.
+pub fn global_gauge(name: impl Into<MetricName>) -> Arc<Gauge> {
+    global()
+        .lock()
+        .expect("global metrics registry poisoned")
+        .register_gauge(name)
+}
+
+/// Register a bandwidth metric with the global registry.
+///
+/// # Panics
+/// Panics if the global registry mutex is poisoned.
+pub fn global_bandwidth(name: impl Into<MetricName>) -> Arc<Bandwidth> {
+    global()
+        .lock()
+        .expect("global metrics registry poisoned")
+        .register_bandwidth(name)
+}
+
+/// Register a latency histogram with the global registry.
+///
+/// # Panics
+/// Panics if the global registry mutex is poisoned.
+pub fn global_histogram(name: impl Into<MetricName>) -> Arc<LatencyHistogram> {
+    global()
+        .lock()
+        .expect("global metrics registry poisoned")
+        .register_histogram(name)
+}
+
+/// Register a latency summary with the global registry.
+///
+/// # Panics
+/// Panics if the global registry mutex is poisoned.
+pub fn global_summary(name: impl Into<MetricName>) -> Arc<LatencySummary> {
+    global()
+        .lock()
+        .expect("global metrics registry poisoned")
+        .register_summary(name)
 }
 
 #[cfg(test)]

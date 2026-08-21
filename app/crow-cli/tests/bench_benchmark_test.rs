@@ -20,9 +20,8 @@ fn bench_lock() -> std::sync::MutexGuard<'static, ()> {
     BENCH_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
-/// `bench run --mode mem --duration-secs 3` runs end-to-end,
-/// exits 0, and prints a report path. The workspace is cleaned up
-/// automatically (no `--keep-workspace`).
+/// `bench kv --mode mem --duration-secs 3` runs end-to-end,
+/// exits 0, and prints a report path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_mem_end_to_end() {
     let _lock = bench_lock();
@@ -42,12 +41,12 @@ async fn bench_benchmark_mem_end_to_end() {
         0,
         &[
             "bench",
-            "run",
+            "kv",
             "--mode",
             "mem",
             "--duration-secs",
             "3",
-            "--threads",
+            "--loader-num",
             "2",
             "--connections",
             "2",
@@ -62,7 +61,7 @@ async fn bench_benchmark_mem_end_to_end() {
     assert!(stdout.contains("total_ops"), "stdout={stdout}");
 }
 
-/// `bench run --mode file --duration-secs 3` runs
+/// `bench kv --mode file --duration-secs 3` runs
 /// end-to-end with the crow-tree engine + file page store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_file_end_to_end() {
@@ -83,12 +82,12 @@ async fn bench_benchmark_file_end_to_end() {
         0,
         &[
             "bench",
-            "run",
+            "kv",
             "--mode",
             "file",
             "--duration-secs",
             "3",
-            "--threads",
+            "--loader-num",
             "2",
             "--connections",
             "2",
@@ -124,12 +123,12 @@ async fn bench_compare_two_reports() {
         0,
         &[
             "bench",
-            "run",
+            "kv",
             "--mode",
             "mem",
             "--duration-secs",
             "2",
-            "--threads",
+            "--loader-num",
             "1",
             "--connections",
             "1",
@@ -150,12 +149,12 @@ async fn bench_compare_two_reports() {
         0,
         &[
             "bench",
-            "run",
+            "kv",
             "--mode",
             "mem",
             "--duration-secs",
             "2",
-            "--threads",
+            "--loader-num",
             "1",
             "--connections",
             "1",
@@ -174,4 +173,43 @@ async fn bench_compare_two_reports() {
     assert!(stdout.contains("metric"), "stdout={stdout}");
     assert!(stdout.contains(&run_id_1), "stdout={stdout}");
     assert!(stdout.contains(&run_id_2), "stdout={stdout}");
+}
+
+/// `bench rpc --duration-secs 3` runs the 2-process RPC echo
+/// benchmark end-to-end. No KV cluster needed — the RPC target
+/// provisions its own server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_benchmark_rpc_end_to_end() {
+    let _lock = bench_lock();
+    let cli = crow_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crow_kv CLI binary not built ({})", cli.display());
+        return;
+    }
+
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "rpc",
+            "--duration-secs",
+            "3",
+            "--loader-num",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "64",
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("report (json):"), "stdout={stdout}");
+    assert!(stdout.contains("target          : rpc"), "stdout={stdout}");
+    assert!(stdout.contains("total_ops"), "stdout={stdout}");
+    // RPC echo should have zero errors.
+    assert!(stdout.contains("total_errors    : 0"), "stdout={stdout}");
 }

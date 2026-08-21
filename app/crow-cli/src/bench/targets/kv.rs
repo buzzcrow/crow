@@ -12,7 +12,7 @@
 //! Paxos replication group.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crow_console_shared::clients::console::{
     AddRackBody, ConsoleClient, CreateGroupBody, CreateStoreBody, DeployNodeServerBody,
@@ -22,8 +22,8 @@ use crow_console_shared::error::{Error, Result};
 use crow_console_shared::lifecycle::stop_pid_with_timeout;
 use crow_console_shared::test_ports::unique_test_port;
 
-use super::metrics_log::{aggregate_server_metrics, parse_metrics_log};
-use super::report::ServerMetrics;
+use super::super::metrics_log::{aggregate_server_metrics, parse_metrics_log};
+use super::super::report::ServerMetrics;
 
 /// Number of nodes (and racks, 1:1) provisioned by the fixture.
 const NODE_COUNT: usize = 3;
@@ -507,5 +507,368 @@ fn upstream_err(id: &str, op: &str, e: &Error) -> Error {
     Error::UpstreamRpc {
         node_id: id.to_string(),
         status: format!("{op}: {e}"),
+    }
+}
+
+// ── KvTarget + KvBenchClient: BenchTarget/BenchClient impls ───────
+
+use std::sync::Arc;
+
+use crow_kv_client::Error as ClientError;
+use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, WriteOutcome};
+use tokio::task::JoinHandle;
+
+use super::super::metrics_flusher::{spawn_metrics_flusher, spawn_progress_snapshotter};
+use super::super::report::OpOutcome;
+use super::super::runner::BenchConfig;
+use super::super::worker::WorkerCounters;
+use super::super::workload::{format_key, value_for, OpGen, OpKind};
+use super::{BenchClient, BenchTarget};
+
+/// KV bench target: provisions a 3-node cluster via `BenchFixture`,
+/// builds `CrowkvClient`-backed workers, and wires progress/metrics.
+pub(crate) struct KvTarget {
+    mode: BenchMode,
+    workspace_dir: PathBuf,
+    max_inflight: usize,
+    metrics_interval: u64,
+    node_config: Option<String>,
+    coalesce_max_keys: Option<usize>,
+    coalesce_drain_threshold: Option<usize>,
+    fixture: Option<BenchFixture>,
+    /// The shared client used by all workers + progress/metrics tasks.
+    client: Option<Arc<CrowkvClient>>,
+}
+
+impl KvTarget {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        mode: BenchMode,
+        workspace_dir: PathBuf,
+        max_inflight: usize,
+        metrics_interval: u64,
+        node_config: Option<String>,
+        coalesce_max_keys: Option<usize>,
+        coalesce_drain_threshold: Option<usize>,
+    ) -> Self {
+        Self {
+            mode,
+            workspace_dir,
+            max_inflight,
+            metrics_interval,
+            node_config,
+            coalesce_max_keys,
+            coalesce_drain_threshold,
+            fixture: None,
+            client: None,
+        }
+    }
+}
+
+impl BenchTarget for KvTarget {
+    type Client = KvBenchClient;
+
+    fn label(&self) -> &'static str {
+        "kv"
+    }
+
+    async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
+        let fixture = BenchFixture::new(
+            self.mode,
+            self.workspace_dir.clone(),
+            self.max_inflight,
+            self.metrics_interval,
+            self.node_config.clone(),
+            self.coalesce_max_keys,
+            self.coalesce_drain_threshold,
+        )
+        .await?;
+
+        // For distributed read policies, use the fixture's first mgmt URL
+        // as the topology seed so the client can fetch the full replica list.
+        let topology_seed = cfg.topology_seed.clone().or_else(|| {
+            if cfg.read_endpoint_policy.is_distributed() {
+                Some(fixture.node_mgmt_urls()[0].clone())
+            } else {
+                None
+            }
+        });
+
+        let mut client_config = ClientConfig::new(topology_seed.map(|s| vec![s]).unwrap_or_default());
+        client_config.pool_size_per_endpoint = cfg.connections as usize;
+        client_config.read_endpoint_policy = cfg.read_endpoint_policy;
+        let client = CrowkvClient::new(client_config);
+        client.seed_leader(cfg.store_id, cfg.group_id, fixture.leader_endpoint().to_string());
+        self.client = Some(Arc::new(client));
+        self.fixture = Some(fixture);
+        Ok(())
+    }
+
+    async fn build_client(&self) -> Result<KvBenchClient> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Config("kv target not provisioned".to_string()))?;
+        Ok(KvBenchClient {
+            client: Arc::clone(client),
+        })
+    }
+
+    async fn pre_populate(&self, _client: &KvBenchClient, cfg: &BenchConfig) -> Result<(u64, u64)> {
+        let Some(count) = cfg.pre_populate.filter(|c| *c > 0) else {
+            return Ok((0, 0));
+        };
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Config("kv target not provisioned".to_string()))?;
+        let pop_start = std::time::Instant::now();
+        let mut errors: u64 = 0;
+        for id in 0..count {
+            let key = format_key(id);
+            let vsize = cfg
+                .value_size_mix
+                .as_ref()
+                .map_or(cfg.value_size, |mix| mix.size_for(id));
+            let value = value_for(id, vsize);
+            let mut attempts = 0u32;
+            loop {
+                attempts += 1;
+                match client.put(cfg.store_id, cfg.group_id, &key, &value, None).await {
+                    Ok(_) => break,
+                    Err(ClientError::NotLeader { .. }) if attempts < 8 => {}
+                    Err(_) => {
+                        errors += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        let ms = u64::try_from(pop_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Ok((ms, errors))
+    }
+
+    async fn cleanup(&mut self) {
+        if let Some(f) = self.fixture.as_mut() {
+            f.cleanup().await;
+        }
+    }
+
+    fn spawn_progress(
+        &self,
+        interval: Duration,
+        started: Instant,
+        deadline: Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+    ) -> Option<JoinHandle<()>> {
+        let client = self.client.as_ref()?;
+        Some(spawn_progress_snapshotter(
+            interval,
+            started,
+            deadline,
+            counters,
+            Arc::clone(client),
+        ))
+    }
+
+    fn spawn_metrics_flusher(
+        &self,
+        started: Instant,
+        deadline: Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+        path: PathBuf,
+    ) -> Option<JoinHandle<()>> {
+        let client = self.client.as_ref()?;
+        Some(spawn_metrics_flusher(
+            Duration::from_secs(5),
+            started,
+            deadline,
+            counters,
+            Arc::clone(client),
+            path,
+        ))
+    }
+
+    fn client_metrics_snapshot(&self) -> crow_kv_client::ClientMetricsSnapshot {
+        self.client
+            .as_ref()
+            .map_or_else(crow_kv_client::ClientMetricsSnapshot::default, |c| c.metrics())
+    }
+
+    fn node_ids(&self) -> Vec<u64> {
+        self.fixture
+            .as_ref()
+            .map_or(Vec::new(), |f| f.node_ids().to_vec())
+    }
+
+    fn workspace_dir(&self) -> PathBuf {
+        self.fixture
+            .as_ref()
+            .map_or_else(|| PathBuf::from("."), |f| f.workspace_dir().to_path_buf())
+    }
+
+    fn endpoint_to_node_map(&self) -> std::collections::HashMap<String, String> {
+        self.fixture
+            .as_ref()
+            .map_or_else(std::collections::HashMap::new, BenchFixture::endpoint_to_node_map)
+    }
+
+    fn collect_artifacts(&mut self) -> (ServerMetrics, usize) {
+        let Some(f) = self.fixture.as_ref() else {
+            return (ServerMetrics::default(), 0);
+        };
+        let metrics = f.collect_metrics();
+        (metrics, 0)
+    }
+
+    fn flush_mgmt_urls(&self) -> Vec<String> {
+        self.fixture
+            .as_ref()
+            .map_or(Vec::new(), |f| f.node_mgmt_urls().to_vec())
+    }
+}
+
+impl KvTarget {
+    /// Copy every node's `log/` directory into `run_dir/node-<id>/`.
+    pub(crate) fn collect_logs(&self, run_dir: &Path) -> std::io::Result<()> {
+        self.fixture.as_ref().map_or(Ok(()), |f| f.collect_logs(run_dir))
+    }
+}
+
+/// KV bench client: wraps a shared `CrowkvClient` and dispatches ops.
+/// Cheaply cloneable (Arc handle).
+#[derive(Clone)]
+pub(crate) struct KvBenchClient {
+    client: Arc<CrowkvClient>,
+}
+
+impl BenchClient for KvBenchClient {
+    fn issue_op(
+        &self,
+        kind: OpKind,
+        gen: &mut OpGen,
+        cfg: &BenchConfig,
+        worker_id: u32,
+        iter: u64,
+    ) -> impl std::future::Future<Output = OpOutcome> + Send {
+        self.issue_op_inner(kind, gen, cfg, worker_id, iter)
+    }
+}
+
+impl KvBenchClient {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "per-op dispatch; splitting reduces readability"
+    )]
+    async fn issue_op_inner(
+        &self,
+        kind: OpKind,
+        gen: &mut OpGen,
+        cfg: &BenchConfig,
+        worker_id: u32,
+        iter: u64,
+    ) -> OpOutcome {
+        // Reads draw from the populated range (`next_read_key`) and
+        // carry the key_id for spot-check verification; other ops draw
+        // from the full `key_space`.
+        let (key, read_key_id) = if kind == OpKind::Read {
+            let (id, k) = gen.next_read_key();
+            (k, Some(id))
+        } else {
+            (gen.next_key(), None)
+        };
+        match kind {
+            OpKind::Read => {
+                let min_slot = cfg.min_slot_policy.to_min_slot();
+                match self
+                    .client
+                    .get(cfg.store_id, cfg.group_id, &key, cfg.read_mode, min_slot)
+                    .await
+                {
+                    Ok(GetOutcome::Found { value, .. }) => {
+                        let ok_verify = read_key_id
+                            .is_some_and(|id| gen.verify_value(id, value.as_ref(), cfg.verify_bytes));
+                        OpOutcome {
+                            ok: true,
+                            correctness_error: !ok_verify,
+                            ..Default::default()
+                        }
+                    }
+                    Ok(GetOutcome::NotFound) => OpOutcome {
+                        ok: true,
+                        not_found: true,
+                        ..Default::default()
+                    },
+                    Err(ClientError::NotLeader { .. }) => OpOutcome {
+                        no_leader: true,
+                        ..Default::default()
+                    },
+                    Err(_) => OpOutcome::default(),
+                }
+            }
+            OpKind::Write => {
+                let value = gen.make_value();
+                let client_id = u64::from(worker_id) + 1;
+                match self
+                    .client
+                    .put(cfg.store_id, cfg.group_id, &key, &value, Some((client_id, iter)))
+                    .await
+                {
+                    Ok(WriteOutcome { .. }) => OpOutcome {
+                        ok: true,
+                        ..Default::default()
+                    },
+                    Err(ClientError::NotLeader { .. }) => OpOutcome {
+                        no_leader: true,
+                        ..Default::default()
+                    },
+                    Err(_) => OpOutcome::default(),
+                }
+            }
+            OpKind::Delete => {
+                let client_id = u64::from(worker_id) + 1;
+                match self
+                    .client
+                    .delete(cfg.store_id, cfg.group_id, &key, Some((client_id, iter)))
+                    .await
+                {
+                    Ok(_) => OpOutcome {
+                        ok: true,
+                        ..Default::default()
+                    },
+                    Err(ClientError::NotLeader { .. }) => OpOutcome {
+                        no_leader: true,
+                        ..Default::default()
+                    },
+                    Err(_) => OpOutcome::default(),
+                }
+            }
+            OpKind::List => match self
+                .client
+                .scan(
+                    cfg.store_id,
+                    cfg.group_id,
+                    &cfg.scan_prefix,
+                    &cfg.scan_start_after,
+                    &[],
+                    cfg.scan_limit,
+                    cfg.read_mode,
+                    cfg.min_slot_policy.to_min_slot(),
+                    false,
+                    None,
+                )
+                .await
+            {
+                Ok(_) => OpOutcome {
+                    ok: true,
+                    ..Default::default()
+                },
+                Err(ClientError::NotLeader { .. }) => OpOutcome {
+                    no_leader: true,
+                    ..Default::default()
+                },
+                Err(_) => OpOutcome::default(),
+            },
+        }
     }
 }

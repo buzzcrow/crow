@@ -66,15 +66,15 @@ from diskdb, and persists all durable state to CROW KV. It holds no
 state that cannot be reconstructed from KV — on crash or restart it
 rebuilds in-memory structures from the KV records and group-0 metadata.
 
-Multiple chunkdb instances run across a cluster, providing fast chunk
-allocation and lifecycle management. chunkdb provides rack/node-aware
+Multiple chunkdb instances run across a cluster for fast chunk
+allocation and lifecycle management. chunkdb does rack/node-aware
 placement for fault tolerance, supports both mirror and EC strip types,
 and manages chunk state transitions (allocate → seal → delete). All
 state changes are durably persisted to CROW KV before being acknowledged
 to callers.
 
 chunkdb **manages chunk metadata**; it does **not** perform data I/O.
-Callers (a future object store, chunkio service, etc.) write to the
+Callers (a future object store, chunkio service) write to the
 allocated disk blocks themselves and tell chunkdb when chunks are sealed
 or deleted.
 
@@ -96,7 +96,7 @@ or deleted.
 **Design philosophy:** "chunkdb is a thin, stateless client of crow-kv and
 diskdb." All consensus, replication, and durability are delegated to
 crow-kv; block allocation is delegated to diskdb. chunkdb's job is chunk
-lifecycle management, placement policy, and EC coordination — nothing more.
+lifecycle management, placement policy, and EC coordination, nothing more.
 
 ## 2. Non-Goals (Design Envelope)
 
@@ -136,7 +136,7 @@ handles the complexity of block allocation, placement, and fault tolerance.
 A **strip** is the atomic unit of redundancy. Every strip is either a
 **mirror strip** (replicated across multiple nodes) or an **EC strip**
 (erasure-coded with data + parity blocks). Strip-level operations
-(allocation, EC encoding, recovery) are atomic — a strip is either fully
+(allocation, EC encoding, recovery) are atomic. A strip is either fully
 allocated or not at all.
 
 **Rationale:** Simplifies recovery and placement logic. When a disk fails,
@@ -204,8 +204,8 @@ allocator state) by replaying KV records and fetching fresh topology from
 group-0.
 
 **Rationale:** Simplifies operations (no local data to manage), enables
-crash recovery without local WAL, and leverages CROW KV's durability
-guarantees. Stateless design also makes scaling out easier — new instances
+crash recovery without local WAL, and relies on CROW KV's durability
+guarantees. Stateless design also makes scaling out easier. New instances
 can start without data migration.
 
 ### 3.7 Common protocol crate; gRPC now
@@ -239,7 +239,7 @@ Four chunk types are defined for CROW's storage hierarchy:
 
 **Rationale:** Different storage components have different redundancy and
 performance requirements. Chunk types allow optimization for each component's
-needs. Chunk type is independent of strip type — any chunk type can use
+needs. Chunk type is independent of strip type. Any chunk type can use
 either mirror or EC strips based on configuration and access patterns.
 
 ## 4. Architecture Overview
@@ -426,7 +426,7 @@ Example mapping:
 - Changes take effect immediately as chunkdb servers refresh their binding cache
 
 **Instance sharding:** The bucket space is also used to shard chunkdb
-instances — each instance owns a range of buckets and rejects requests
+instances. Each instance owns a range of buckets and rejects requests
 for chunks outside its range. See sub-design
 [`design-crow-chunkdb-range-binding.md`](design-crow-chunkdb-range-binding.md).
 
@@ -667,7 +667,7 @@ transitions. Last writer wins with validation.
 delete-range/update-strip) each perform a read-modify-write cycle on a
 chunk record. Without per-chunk serialization, two concurrent
 `AppendChunk` RPCs on the same chunk ID both read the chunk, both
-append strips, both `put_chunk` — the second overwrite loses the
+append strips, both `put_chunk`. The second overwrite loses the
 first's strips. A per-chunk mutex serializes the RMW cycle. A payload
 cache avoids the `get_chunk` store round-trip on every mutating RPC
 (the latest chunk is known in-process right after the previous
@@ -678,7 +678,7 @@ evict only when uncontended; payload: evict freely by
 recency/frequency), so they are separate structures. See
 [`design-crow-chunkdb-range-binding.md`](design-crow-chunkdb-range-binding.md)
 for the range guard that ensures a chunk reaches exactly one chunkdb
-instance — the per-chunk lock assumes that one-owner invariant.
+instance. The per-chunk lock assumes that one-owner invariant.
 
 ### 10.1 ChunkLockMap
 
@@ -766,7 +766,7 @@ impl Default for CacheHint {
   is still updated so the current operation sees the chunk.
 
 All mutating RPCs use `LockPolicy::default()` and `CacheHint::Cache`.
-These are internal in v1 — not exposed in the gRPC API.
+These are internal in v1, not exposed in the gRPC API.
 
 ### 10.3 ChunkGuard
 
@@ -795,7 +795,7 @@ pub struct ChunkGuard {
 
 `quick-cache = "0.7"` (`app/crow-chunkdb/Cargo.toml`). Default capacity
 10_000 entries (configurable via `lifecycle.cache_capacity`). The
-design supports 100_000+ — `quick_cache::Cache::new(capacity)` accepts
+design supports 100_000+. `quick_cache::Cache::new(capacity)` accepts
 any `usize`; the only constraint is memory (~1-2 KB per `Chunk` → 10k
 entries ≈ 10-20 MB, 100k entries ≈ 100-200 MB).
 
@@ -817,7 +817,7 @@ the map bounded by concurrent locks, not by chunks-ever-touched.
 `locks.reap_idle()` every `lifecycle.sweep_chunk_lock_interval_secs`
 (default 60s). Uses the same `watch::channel(false)` stop signal
 pattern as the topology refresh loop. `reap_idle` is a single
-`DashMap::retain` call — no allocation, no blocking.
+`DashMap::retain` call, no allocation, no blocking.
 
 ### 10.6 LifecycleHandler integration
 
@@ -859,7 +859,7 @@ LockTimeout,
 - `LifecycleError::LockBusy => Status::unavailable(e.to_string())`
 - `LifecycleError::LockTimeout => Status::unavailable(e.to_string())`
 
-Both map to `UNAVAILABLE` — the client's existing retry logic handles
+Both map to `UNAVAILABLE`. The client's existing retry logic handles
 this (same as `NotLeaderHint` transient errors).
 
 ### 10.8 Metrics + HTTP endpoints
@@ -1045,11 +1045,4 @@ Configuration is loaded from CLI args or config file at startup.
 
 ## 16. References
 
-References (other projects, not ports):
-
-- aioss chunkdb design: `/cpp/aioss/server/chunkdb/doc/design.md`
-- aioss chunkdb proto: `/cpp/aioss/libs/protocol/proto/chunkdb/chunkdb.proto`
-- Java reference: `/cpp/buzz-java/buzz-pods/buzz-chunk-db`
-- Original strip chunk: `/cpp/buzz-java/buzz-libs/buzz-proto/src/main/proto/strip_chunk.fbs`
-- isa-l EC wrapper: `/cpp/buzz-java/buzz-libs/buzz-ni/src/main/java/com/buzz/ni/EC.java`
 - CROW diskdb design: `doc/design/diskdb/design-crow-diskdb.md`

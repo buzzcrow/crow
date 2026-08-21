@@ -195,7 +195,7 @@ bottlenecked by server-side consensus, not gRPC framing.
 | 32 | 28,827 | 1,662 | 1,644 | 2,481 | 5,563 | 0 |
 | 64 | 28,920 | 1,657 | 1,638 | 2,509 | 5,067 | 0 |
 
-**Window is the primary TPS lever** — MI=1→16 gives 4.4× (6K→28K).
+**Window is the primary TPS lever**: MI=1→16 gives 4.4× (6K→28K).
 MI=16+ converges (consensus critical path is the hard ceiling). See
 [`design-slot.md` §4](../design/kv/design-crow-kv-slot.md#4-sliding-window-and-backpressure)
 for the sliding-window/backpressure design.
@@ -215,7 +215,7 @@ for the sliding-window/backpressure design.
 | 3 | 6 | 1:2 | 12,704 | 234 | 219 | 357 | 0 |
 
 At 1T, C has no effect (~2.8K, bounded by per-proposal latency ~350µs).
-At 2T, more connections help (6.3K→8.9K) — 2 threads sharing 1
+At 2T, more connections help (6.3K→8.9K): 2 threads sharing 1
 connection contend on the h2 lock. At 3T, 3C and 6C converge (~12.8K).
 
 ### macOS M5 Pro retest (2026-07-29)
@@ -237,7 +237,7 @@ Intel 50K→29K drop (07-21 → 07-24).
 claim. M5 Pro is faster at every config: single-thread 3.4× (9.5K vs
 2.8K), saturation 1.4-1.7× (~41-48K vs ~29K). The window-impact shape
 is identical across platforms (MI=1→64: 4-5× on both). The MI=1 run
-showed 48 errors with a 106 ms p999 tail — client-side timeouts under
+showed 48 errors with a 106 ms p999 tail, client-side timeouts under
 single-permit queue saturation, not consensus failures.
 
 ### Conclusions
@@ -274,7 +274,7 @@ mode (design:
 
 1T:1C +3.5% throughput, −3.4% avg latency. 48T:48C +7.7% throughput,
 −7.2% avg latency, −11.7% p999, but **p99 went up +6.7%** (2,206 →
-2,354) — the deferred persist shifts some tail mass from p999 into p99.
+2,354): the deferred persist shifts some tail mass from p999 into p99.
 
 **macOS (M5 Pro, arm64, no SMT) — 3 runs, averages:**
 
@@ -286,7 +286,7 @@ mode (design:
 | 48T:48C | early-ack off | 46,142 | 1,038 | 1,209 | 1,434 | 2,028 | 0 |
 
 **T4 conclusion (2026-08-05):** The AMD p99 uptick does **not**
-reproduce on M5 Pro — p99 is consistently *better* with early-ack on
+reproduce on M5 Pro. p99 is consistently *better* with early-ack on
 (−4.2% at 1T, −3.2% at 48T across 3 runs). All tail percentiles (p90,
 p99, p999) favor early-ack on M5 Pro. The AMD p99 shift is
 platform-specific, likely SMT scheduling contention: the deferred
@@ -315,7 +315,7 @@ design:
 | 200 | 29,452 | 1,627 | 1,614 | 2,376 | 4,872 | 0 |
 
 Throughput flat at ~29.2K (±1% noise); no non-zero value beat the
-wake-drain-flush baseline (coalesce = 0). **Decision: removed** —
+wake-drain-flush baseline (coalesce = 0). **Decision: removed.**
 `wal_flush_coalesce_us` and the coalesce arm in `pipeline_writer.rs`
 were deleted; `wal_flush_watchdog_ms` stays as the safety-net timer.
 
@@ -340,11 +340,32 @@ Run: 2026-08-04. Raw TSV: `doc/working/bench-write-regression.tsv`.
 | 256 | 32 | 123,745 | 116,944 | 2,058 | 1,911 | 4,392 | 14,976 | 0 |
 
 Coalescing lifts the saturation ceiling from ~29K (non-coalesced, see
-Phase 1 above) to ~124K at 256T — a 4.3× gain from batching single-key
+Phase 1 above) to ~124K at 256T, a 4.3× gain from batching single-key
 ops into one slot/round. WAL append count drops as load rises (90K→~110K
 WAL appends for 1.2M ops at 256T = ~11× amortization), confirming the
 `max_keys` overflow path produces full batches at high load. Zero errors
 across all configs.
+
+#### macOS M5 Pro retest (2026-08-19)
+
+Platform: **Apple M5 Pro** (18 cores, arm64, macOS 26.5).
+Same workload, same parameters.
+
+| Threads | Conn | Throughput (ops/s) | WAL append | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 10,144 | 304,358 | 97 | 95 | 153 | 211 | 0 |
+| 4 | 2 | 21,879 | 449,508 | 182 | 178 | 307 | 380 | 0 |
+| 16 | 4 | 47,260 | 276,795 | 337 | 330 | 523 | 619 | 0 |
+| 32 | 16 | 57,889 | 170,600 | 550 | 537 | 894 | 1,046 | 0 |
+| 64 | 32 | 69,908 | 104,777 | 912 | 888 | 1,440 | 1,745 | 0 |
+| 128 | 32 | 78,155 | 86,840 | 1,632 | 1,590 | 2,654 | 3,794 | 0 |
+| 256 | 32 | 87,448 | 86,619 | 2,919 | 2,870 | 4,704 | 7,004 | 0 |
+
+macOS peak ~87K at 256T (vs Linux ~124K). M5 Pro is faster at low
+concurrency (1T: 10K vs 3K, 3.4×) due to lower per-op overhead, but
+saturates earlier — the non-SMT 18-core has less headroom than the
+32-thread AMD. WAL amortization reaches ~30× at 256T (87K ops → 87K
+WAL appends for 874K ops). Zero errors across all configs.
 
 ---
 
@@ -376,7 +397,7 @@ of what remains:
 
 The per-proposal critical path, after R16b (early-ack) and R17 (async
 engine apply, gated by the R35 apply fence), is the quorum RPC
-round-trip only — the leader's local fsync and engine apply both run
+round-trip only. The leader's local fsync and engine apply both run
 off the critical path. Fan-out hardening (R43) shipped: quorum
 short-circuit, oneshot deadlines, phase metrics, backoff jitter (E4),
 heartbeat reserve (E5), `ReplyFold` refactor. No open items.

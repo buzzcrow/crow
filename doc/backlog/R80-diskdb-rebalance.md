@@ -65,11 +65,11 @@ status = `max(node, group, disk)`), §9 (Space Metrics — per-disk /
 per-disk-group / per-zone usage; keepalive-piggybacked
 `DiskGroupUsageKey` summary; gauges are derived snapshots), §10
 (Background Scanner — `ScannerTask` / `BgRunner` background-task
-pattern, KV-persisted progress, resume after restart). aioss analog:
-no direct aioss analog — CROW's caller-routed disk-group model (§3.2)
-makes cross-disk-group rebalance a caller concern, which is new; the
-per-disk load-aware allocation and the rebalance-planner-with-owner-
-hand-off are new work shaped on R76's placeholder-recovery precedent.
+pattern, KV-persisted progress, resume after restart). CROW's
+caller-routed disk-group model (§3.2) makes cross-disk-group rebalance
+a caller concern, which is new; the per-disk load-aware allocation and
+the rebalance-planner-with-owner-hand-off are new work shaped on R76's
+placeholder-recovery precedent.
 
 **Use scenarios**:
 - **New disk added to a hot disk-group** — a disk-group has 3 disks at

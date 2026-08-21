@@ -6,7 +6,7 @@
 Depends on: [`design-crow-kv.md`](design-crow-kv.md) §9.1, §9.2, [`design-crow-kv-leader-election.md`](design-crow-kv-leader-election.md)
 Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §9.1, §9.2
 
-This document specifies how a CROW group safely changes its membership while preserving consensus safety. The mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design-crow-kv.md` §3.3).
+This document specifies how a CROW group safely changes its membership while preserving consensus safety. The mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata, see `design-crow-kv.md` §3.3).
 
 ## Table of Contents
 
@@ -177,9 +177,9 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 Group 0 (store 0, group 0) is the system group that stores cluster
 topology metadata. It uses the same direct HTTP mutation +
 `membership_epoch` fence reconfiguration model (§2) as all other
-groups — no joint-consensus primitive is needed. Group 0 stores
+groups. No joint-consensus primitive is needed. Group 0 stores
 cluster topology as KV entries under text-path keys (`/hw/rack/...`,
-`/hw/node/...`, `/kv/store/...`, `/kv/group/...`, etc.) with JSON
+`/hw/node/...`, `/kv/store/...`, `/kv/group/...`) with JSON
 values, written by `HardwareClient` and `KVClusterMetaClient` in
 `crow-kv-client`. It is created via `POST /system/init`. See
 `design-crow-kv.md` §3.3, `design-crow-kv-group0.md`, and

@@ -98,7 +98,7 @@ There is no segment list, no delimiters, no recursive path structure.
 Tradeoff, accepted: a single scan cannot return "everything under
 node N regardless of kind" (disks + disk-groups + zones) in one
 prefix, because each kind has its own type tag. Cross-kind listing is
-done as one scan per kind. This is fine — every real query in diskdb
+done as one scan per kind. This is fine. Every real query in diskdb
 targets one kind at a time (list disks of a node, list zones of a
 disk, list busy blocks of a zone).
 
@@ -144,7 +144,7 @@ it work regardless of the id's value.
 Every key field is a fixed-width integer (`u64`, `u32`) or a
 fixed-width identifier (`DiskId` = 16 bytes). There are no
 variable-length fields. `instance_id` is a `u64` (assigned at
-registration), not a string — the human-readable endpoint/hostname
+registration), not a string. The human-readable endpoint/hostname
 lives in the value (`InstanceValue`), not the key. This makes the
 entire encoding uniform: the decoder reads a known number of bytes per
 field, no length prefixes, no terminators, no sort-order edge cases.
@@ -152,7 +152,7 @@ field, no length prefixes, no terminators, no sort-order edge cases.
 ### 3.6 String fields (reserved: null-termination)
 
 If a future key kind cannot avoid a UTF-8 string field, it is encoded
-as `utf8_bytes | 0x00` — the UTF-8 bytes followed by a single `0x00`
+as `utf8_bytes | 0x00`: the UTF-8 bytes followed by a single `0x00`
 terminator byte. This is the standard ordered-KV technique (used
 internally by LevelDB/RocksDB).
 
@@ -178,12 +178,12 @@ a terminator).
 lexicographic byte order match lexicographic string order:
 `"a"` (`61 00`) < `"ab"` (`61 62 00`) < `"b"` (`62 00`). This holds
 whether the string is the first field, a middle field, or the last
-field — mixed `int|string`, `string|int`, and `string|string`
+field, mixed `int|string`, `string|int`, and `string|string`
 combinations all sort correctly because the `0x00` byte (`0`) is
 lower than any valid UTF-8 data byte (`1`–`255`).
 
 **UTF-8 constraint:** the string must not contain `0x00`. UTF-8
-guarantees this for any non-null string — `0x00` only encodes the null
+guarantees this for any non-null string. `0x00` only encodes the null
 character, which does not appear in identifiers. If arbitrary bytes
 (including `0x00`) are ever needed, use byte escaping (`0x00` →
 `0x00 0x01`, terminator `0x00 0x00`) instead; not required for UTF-8
@@ -195,7 +195,7 @@ strings.
 
 1. The magic byte matches `CROW_KEY_MAGIC`.
 2. The type tag matches the kind's `TYPE_TAG`.
-3. The field bytes parse exactly — no leftover bytes, no short buffer.
+3. The field bytes parse exactly, no leftover bytes, no short buffer.
 
 Any mismatch returns `Err(KeyError)`. Decoders never guess and never
 silently truncate. This keeps a corrupted or misrouted key from being
@@ -246,7 +246,7 @@ to bytes:
   namespace from the start (`/hw`, `/srv`, `/kv`). The text magic set
   does not need to mirror the binary magic set.
 
-**This doc defines the encoding protocol** — the rules, the frozen
+**This doc defines the encoding protocol**: the rules, the frozen
 layouts, and the evolution policy. **Which keys are persisted where,
 their value types, and their scan patterns are defined in the
 persistence docs**: `doc/design/kv/design-crow-kv-group0.md` §3

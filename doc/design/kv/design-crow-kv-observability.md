@@ -67,7 +67,7 @@ handles cross the FFI boundary at runtime.
   `LatencyHistogram`. `1024` linear sub-buckets per power-of-2 magnitude
   (relative error ≤0.1%); pre-allocated range `0..=2^32 µs` (~71 min)
   makes `auto(true)` a no-op (no resize logic). `&mut self` methods
-  (`record`, `add`, `reset`) — every call site has exclusive access
+  (`record`, `add`, `reset`); every call site has exclusive access
   (`Mutex`-guarded in the client library, per-worker owned in the bench
   `OpStats`, owned by the flusher task for `CumulativeLatency`), so a
   lock-free impl is unnecessary. Tracks `count`/`sum`/`min`/`max` exactly
@@ -171,7 +171,7 @@ to parse log files to get metric values.
 
 C++ owns its own `MetricsRegistry` per `Crowtree` instance. Rust triggers C++
 to flush its metrics section into the same log file via FFI
-(`ct_flush_metrics_str`). No metric handles cross FFI at runtime — only a
+(`ct_flush_metrics_str`). No metric handles cross FFI at runtime, only a
 formatted string. Two log blocks per flush cycle: `[metrics]` (Rust) and
 `[cpp-metrics]` (C++). The existing `ct_get_stats` FFI call (used by
 `/topology` and the one remaining `snapshot.pages.c` delta bridge) is
@@ -186,7 +186,7 @@ unaffected.
   magnitude (e.g. entries moved, not calls made), (b) a different
   population/outcome (e.g. errors vs. all attempts), or (c) a cache-hit
   path where no latency is meaningful. A `Bandwidth` next to a `Latency` is
-  not redundant — they measure different dimensions (bytes vs. nanoseconds)
+  not redundant; they measure different dimensions (bytes vs. nanoseconds)
   of the same event.
 - **Latency Hierarchy** — For every flow, add latency at the thinnest layer
   (actual syscall / disk IO / RPC boundary) and at the feature layer above
@@ -229,7 +229,7 @@ engine-layer metrics.
   - `kv.get_forward_failed.c` — forward attempts that failed.
   - `read.minslot_fallback.c` — MinSlot reads redirected to leader
     because the local replica hasn't caught up.
-- **Gauges** (state, bridged on-demand at `resolve_read_point` — same
+- **Gauges** (state, bridged on-demand at `resolve_read_point`, same
   pattern as `inflight_slots.g`):
   - `read.lease_valid.g` — 1 if leader's read lease is valid at the most
     recent barrier, 0 otherwise.
@@ -238,7 +238,7 @@ engine-layer metrics.
 
 `read.lease_path.c + read.readindex_path.c` equals the total linearizable
 get count in the same window. The path counters are outcome counters (which
-path served the read), not call counters — `read.barrier.l` already carries
+path served the read), not call counters; `read.barrier.l` already carries
 the total call count. This follows the counter/summary non-redundancy
 principle (justified under "different population/outcome").
 
@@ -263,7 +263,7 @@ on `PxLocalReplica` (alongside the WAL handles) and observed in
 
 All five are `LatencySummary` (count + sum + max), matching the read-path
 `barrier` / `engine_get` pattern. Percentile precision is not needed for
-phase-level attribution — the bench client already has `PreciseHistogram`
+phase-level attribution. The bench client already has `PreciseHistogram`
 for client-observed p99. The `accept_quorum_rpc` timer is meaningful only
 after the quorum short-circuit (§6.1 of `design-crow-kv-rpc.md`); it records the
 quorum-th-fastest remote latency, not the full fan-out tail.
@@ -273,7 +273,7 @@ quorum-th-fastest remote latency, not the full fan-out tail.
 `crow-kv-client` exposes its own `ClientMetrics` (lock-free `AtomicU64`
 counters, snapshotted via `ClientMetricsSnapshot`) for retry, topology,
 and read-distribution observability. They are not part of the server's
-`MetricsRegistry` — the client is a separate process and has no C++
+`MetricsRegistry`. The client is a separate process and has no C++
 handle. Two counters cover follower-read distribution:
 
 - `read_endpoint_distributed` — incremented each time the `AnyReplica`
@@ -292,7 +292,7 @@ The client library also maintains per-op-kind window latency histograms
 for periodic flushing and merged into the bench runner's cumulative
 `bench.*.lh` histograms. These use `crow-common`'s `PreciseHistogram`
 (not the server's fixed-bucket `LatencyHistogram`) because the bench
-needs p50/p90/p99/p999/max at ≥3 significant digits — the same precision
+needs p50/p90/p99/p999/max at ≥3 significant digits, the same precision
 the bench's own `OpStats` and `CumulativeLatency` require. The bench
 runner's per-worker `WorkerCounters` use `crow-common`'s `Counter`
 (window delta via `flush().count`, cumulative total via
@@ -311,7 +311,7 @@ written to the log by the Rust `MetricsRunner` post-flush callback.
 ### 2.14 Rust/C++ Metric Deduplication
 
 Once C++ owns its registry, the Rust-side bridge (`engine_collector.rs`)
-no longer polls C++ cumulative counters and gauges — those metrics appear
+no longer polls C++ cumulative counters and gauges. Those metrics appear
 natively in `[cpp-metrics]`. The Rust `[metrics]` section keeps only
 Rust-native metrics (KV service, RPC, Paxos, WAL). The one exception is
 `snapshot.pages.c`, a magnitude counter with no paired latency in the C++

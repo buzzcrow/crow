@@ -6,7 +6,7 @@
 Depends on: [`design-crow-console.md`](design-crow-console.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §15.4.6
 Satisfies: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §15.4.6
 
-This document covers the **frontend SPA design decisions only** —
+This document covers the **frontend SPA design decisions only**:
 what we chose and why. Requirements (the *what*) live in
 `../kv/design-crow-kv.md`; backend API contracts live in `design-crow-console.md`.
 
@@ -40,6 +40,7 @@ what we chose and why. Requirements (the *what*) live in
   - [16.1 Rendering](#161-rendering)
   - [16.2 Color encoding](#162-color-encoding)
   - [16.3 Polling](#163-polling)
+  - [16.4 Scope dispatch and module structure](#164-scope-dispatch-and-module-structure)
 - [17. Console-Shared DiskDB Client + CLI](#17-console-shared-diskdb-client--cli)
   - [17.1 Console-shared client](#171-console-shared-client)
   - [17.2 CLI subcommands](#172-cli-subcommands)
@@ -61,7 +62,7 @@ what we chose and why. Requirements (the *what*) live in
   existing codebase; no framework migration.
 - **React Flow for topology** — slim usage only (custom nodes, pan, click
   select). Deliberately no minimap, zoom toolbar, layout selector, or edge
-  labels — the canvas is a navigation aid, not an analytics surface.
+  labels. The canvas is a navigation aid, not an analytics surface.
 - **React Context for state** — view-mode, selection, toasts, activity.
   No Redux; the state surface is small enough that Context + local hooks
   suffice.
@@ -100,11 +101,11 @@ Capacity / KV) selects which hierarchy every pane renders.
   wheel zooms (React Flow default), click selects. Selection is shared
   with the sidebar and inspector via `SelectionContext`. No floating
   toolbar.
-- **Center panel**: one of three modes, toggled from the header —
+- **Center panel**: one of three modes, toggled from the header:
   Topology canvas (default), Swagger panel, or KV Operator panel. The
   KV and Swagger toggles are mutually exclusive with the topology view;
   selecting one replaces the canvas.
-- **Inspector** (~320px, collapsible): tabs scoped to the selection —
+- **Inspector** (~320px, collapsible): tabs scoped to the selection:
   Details and Activity only. KV operations have moved to the center KV
   Operator panel (§6.1).
 
@@ -131,7 +132,7 @@ Single dark theme via CSS variables under `.crow-console` (existing
 tokens in `src/index.css`). Status colors: `--healthy`, `--degraded`,
 `--failed`, `--unknown`, plus `--remote` for remote-replica accent.
 
-Status is never color-only — every status row also carries a glyph
+Status is never color-only. Every status row also carries a glyph
 (✓ / ! / ✕ / ?). Leader replicas carry a crown badge. Remote replicas use
 a dashed border + `--remote` accent so peer-list mis-wirings are visible.
 
@@ -142,7 +143,7 @@ Animations are minimal (selection/hover transitions); honor
 
 One layout at a time, chosen by view-mode. Layout is computed by a small
 deterministic tree-layout pass in `topology/layout.ts` (columns by depth,
-rows by sibling index) — no dagre, no force simulation, no user-selectable
+rows by sibling index). No dagre, no force simulation, no user-selectable
 layouts.
 
 ### 5.1 Physical layout
@@ -220,7 +221,7 @@ scan API takes only prefix + limit (no `start_after`). Rather than
 modifying C++ immediately, `CrowTreeEngine` over-fetches with the
 original prefix, then filters out keys ≤ `start_after` in Rust before
 applying the limit. This is inefficient when `start_after` is deep into
-a large prefix range — a follow-up can push `start_after` into the C++
+a large prefix range. A follow-up can push `start_after` into the C++
 engine. When `start_after` is empty, the fast path is identical to the
 old behavior.
 
@@ -274,7 +275,7 @@ UI primitives), and `contexts/` (ViewMode, Selection, Toast, Activity).
 modules respectively.
 
 **Deleted from v1**: CommandPalette, favorites, fuzzy search, export
-utils, bulk action dialog, metrics history, theme context — none are
+utils, bulk action dialog, metrics history, theme context. None are
 needed for the lean surface.
 
 ## 11. Accessibility
@@ -303,7 +304,7 @@ single responsibility: Physical handles infrastructure + service
 management, Capacity handles disk-group/disk lifecycle + capacity
 visualization, and KV handles KV data-plane operations. Disk lifecycle
 actions (Add Disk Group, Add Disk) do not belong on the Physical view's
-Node context menu — they are capacity concerns, not infrastructure
+Node context menu. They are capacity concerns, not infrastructure
 concerns. Splitting them into a dedicated Capacity view also lets the
 Capacity center panel render capacity visualization without competing
 with the topology canvas.
@@ -356,12 +357,12 @@ Context menu on a `Server` node: Restart →
 `POST /api/nodes/:id/diskdb/restart` (DiskDB, §14). Stop →
 `POST /api/nodes/:id/server/stop` (KV) or
 `POST /api/nodes/:id/diskdb/stop` (DiskDB, §14). Labeled "Stop" not
-"Delete" — it stops the process but keeps the deployment record so
+"Delete". It stops the process but keeps the deployment record so
 Restart/Deploy can bring it back. If no server deployed: Deploy →
 opens `DeployServerDialog` (existing for KV) or `DeployDiskdbDialog`
 (new, §14).
 
-The Restart/Stop items on the Node menu are removed — server-process
+The Restart/Stop items on the Node menu are removed. Server-process
 ops belong on the Server node, not the Node. Node menu keeps only
 Ping + Delete Node (+ Deploy if no server).
 
@@ -376,7 +377,7 @@ Edge cases:
 ### 13.3 Capacity view sidebar + dialogs
 
 The Capacity view sidebar renders rack → node → disk-group → disk
-(no server nodes — infrastructure is visible in Physical). Disk
+(no server nodes; infrastructure is visible in Physical). Disk
 lifecycle dialogs (Add Disk Group, Add Disk, Remove, Move, Set Status)
 are only accessible here.
 
@@ -451,7 +452,7 @@ ops as KV Server (Restart, Stop, Deploy). The deploy/restart/stop
 handlers enable `AddNodeDialog` to auto-deploy DiskDB alongside KV,
 and the Server context menu works for both types.
 
-Deployment mechanism: SSH or local fork — same as KV. No Docker. The
+Deployment mechanism: SSH or local fork, same as KV. No Docker. The
 `crow-diskdb` binary is spawned via `ssh::deploy_via_ssh` or
 `lifecycle::deploy_local_in_dir`, on the paired ports from
 `ports.rs` (`DISKDB_GRPC_BASE` + `DISKDB_HTTP_BASE`).
@@ -550,7 +551,7 @@ Handlers:
 `read_all_diskdb_instances`, calls `query_capacity_stats` per
 instance, merges `DiskGroupInfo` entries by id (summing
 capacity/busy/free). A dead instance yields a degraded indicator,
-not a failed page — its contribution is skipped with a warning.
+not a failed page. Its contribution is skipped with a warning.
 
 `PUT /api/disks/:disk_id/status` resolves the disk's rack/node/dg
 from config, then calls `hw.set_disk_status`. 404 if the disk is
@@ -576,25 +577,40 @@ that scale causes layout thrash and jank.
 `CapacityPanel.tsx` renders when `viewMode === Capacity`. The panel
 content depends on the selected entity (from `SelectionContext`):
 
-- **Rack / Node selected** — hierarchical capacity summary. Rack →
-  Node → DiskGroup rows, each with capacity/busy/free bars. Disk
-  counts shown as an array icon + count (not per-disk boxes — too
-  many). Data from `GET /api/diskdb/usage` (cluster merge).
+- **Cluster (Datacenter or no selection)** — per-rack breakdown. One
+  row per rack with DG count, node count, and a capacity/busy/free
+  bar. The cluster-wide scan status summary + trigger
+  (`ScannerPanel`) renders here only. Data from
+  `GET /api/diskdb/usage` (cluster merge).
+- **Rack selected** — per-node breakdown within the rack. One row per
+  node with DG count and a capacity/busy/free bar. Data from
+  `GET /api/diskdb/usage` (cluster merge, client-filtered).
+- **Node selected** — per-DG breakdown. One row per DG on the node
+  with disk count (array icon + count, not per-disk boxes) and a
+  capacity/busy/free bar. Data from `GET /api/diskdb/usage` (cluster
+  merge, client-filtered).
 - **DiskGroup selected** — per-disk boxes. Each disk is a box with a
-  busy% gradient fill (green → amber → red, red = busy) + label.
-  Data from `GET /api/diskdb/usage?dg=<id>`.
-- **Disk selected** — zone grid. Each zone is a box in a square grid
-  (side = ceil(sqrt(zone_count))) with a green→amber→red gradient
-  based on busy%. Hover over a zone box shows a tooltip with the zone
-  id and usage percentage (from the brief per-zone entry already
-  loaded — no bitmap fetch). Click drills into the zone bitmap. A
-  "jump to zone #" input handles direct navigation (7000 zones cannot
-  be a dropdown). Data from
+  busy% gradient fill (green → amber → red, red = busy) + inline `%`
+  label + tooltip (disk id + busy%). Data from
+  `GET /api/diskdb/usage?dg=<id>`.
+- **Disk selected** — zone grid + per-disk actions. Each zone is a
+  box in a square grid (side = ceil(sqrt(zone_count))) with a
+  green→amber→red gradient based on busy%. Hover shows a tooltip
+  with zone id + usage %. A "jump to zone #" input handles direct
+  navigation (7000 zones cannot be a dropdown). All disk-scoped
+  actions are inline in the disk header: Scan and Recalc target the
+  disk's parent DG (`triggerDiskdbScan` / `recalcDiskdbUsage` with
+  the DG id); Compact, Rebuild, Up, and Down target the disk itself
+  (`compactDiskdbZones` / `rebuildDiskdbZoneBitmap` /
+  `setDiskStatus`). The per-DG recalc result (`RecalcPanel`) renders
+  here, scoped to the parent DG. Data from
   `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>` (brief per-zone
   entries, no bitmap).
-- **Zone selected** — zone bitmap. Canvas grid of the zone's
-  `usage_bitmap` (side = ceil(sqrt(unit_count))). Busy block = red
-  filled cell, free block = green filled cell. Data from
+- **Zone selected (in-panel, within the Disk view)** — zone bitmap.
+  Canvas grid of the zone's `usage_bitmap`
+  (side = ceil(sqrt(unit_count))). Busy block = red filled cell, free
+  block = green filled cell. Zone is not a sidebar entity; it is an
+  in-panel click state inside the Disk view. Data from
   `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` (full
   bitmap, on-demand only).
 
@@ -608,7 +624,7 @@ Canvas, not SVG/DOM, for all levels:
   (32K cells) — fast enough to not flicker.
 - On data refresh (3 s poll), retain the previous frame until the
   new one is fully drawn, then swap. No blank intermediate state.
-- No DOM reflow — the canvas is a single element; only its bitmap
+- No DOM reflow. The canvas is a single element; only its bitmap
   content changes.
 
 ### 16.2 Color encoding
@@ -644,6 +660,32 @@ Edge cases:
   pad with free (green) cells.
 - Poll response slower than 3 s → keep previous frame; next poll
   catches up. No spinner overlay (would flicker).
+
+### 16.4 Scope dispatch and module structure
+
+`CapacityPanel` derives a `CapacityScope` (`Cluster | Rack | Node |
+DiskGroup | Disk`) from the selected entity and renders one branch per
+scope. The header (title + totals cards) is common to all scopes; only
+the body branches. Each scope has a dedicated subview:
+
+- `ClusterView` — per-rack breakdown + `ScannerPanel` (cluster-wide
+  scan status + trigger).
+- `RackView` — per-node breakdown.
+- `NodeView` — per-DG breakdown.
+- `DiskGroupView` — per-disk box grid.
+- `DiskView` — zone grid (`ZoneGrid`) + zone bitmap (`ZoneBitmap`) +
+  jump-to-zone input + per-disk action buttons + `RecalcPanel`
+  (scoped to the parent DG).
+
+Shared color/format utilities live in `utils/capacity.ts`:
+- `busyColor(pct)` — green → amber → red gradient (4-step thresholds
+  30/60/85/100), shared by `DiskGroupView` disk boxes, `ZoneGrid`,
+  and the per-rack/per-node bars.
+- `busyPct`, `formatBytes` — formatting helpers.
+
+`useZoneBitmap(dg, disk, zone)` fetches the zone bitmap on demand
+when a zone is clicked and caches the last result; the 3 s poll
+refetches the focused zone via its `refresh` callback.
 
 ## 17. Console-Shared DiskDB Client + CLI
 

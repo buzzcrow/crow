@@ -1,0 +1,21 @@
+namespace crow.rpc.proto;
+
+// Single dispatch key for the crow-rpc framing layer. The framing header
+// carries msg_type as an opaque u16; the handler map dispatches on it.
+//
+// R104 ships only the common messages (unknown + connection ping). Each
+// service owns a numeric range and registers its own message types in its
+// own `.fbs` schema (diskio in R105, consensus in R32, etc.) — those
+// extend this enum in their own crate, not here. The ranges reserved for
+// future services are documented below but NOT enumerated:
+//   kv          1000s
+//   sys meta    2000s
+//   diskdb      3000s
+//   chunkdb     3300s
+//   disk io     3600s
+enum FBMsgType : int16 {
+    EUnknownRequest = 0,
+    EUnknownResponse = 1,
+    EConnectionPingRequest = 2,
+    EConnectionPingResponse = 3,
+}

@@ -1,13 +1,14 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Common protobuf definitions for CROW components.
+//! Common protocol definitions for CROW components.
 //!
-//! Hosts shared types (`crow.common`), the diskdb gRPC service
+//! Hosts shared protobuf types (`crow.common`), the diskdb gRPC service
 //! definitions (`crow.diskdb.rpc`), the chunkdb gRPC service
 //! definitions (`crow.chunkdb.rpc`), the diskio gRPC service stub
-//! (`crow.diskio.rpc`), and utility functions/extension traits for
-//! diskdb proto types (`diskdb_type_util`).
+//! (`crow.diskio.rpc`), the flatbuffer control-message schemas for
+//! crow-rpc (`fb`), and utility functions/extension traits for diskdb
+//! proto types (`diskdb_type_util`).
 
 pub mod common {
     #![allow(
@@ -61,6 +62,63 @@ pub mod diskio {
         )]
         include!(concat!(env!("OUT_DIR"), "/crow.diskio.rpc.rs"));
     }
+}
+
+// ── Flatbuffer control-message schemas (crow-rpc, R104) ──
+// `common_msg_generated` is built with `flatc --gen-all` so it inlines
+// `ret_code.fbs` (FBRetCode) into one self-contained file. `msg_type` and
+// `common_type` are standalone. Each is a top-level private module; the
+// `fb` module re-exports the nested `crow::rpc::proto` namespace as a flat
+// surface. The generated code is full of `unsafe` (flatbuffers runtime
+// accessors), so each module opts out of the workspace `unsafe_code =
+// "deny"` lint.
+mod msg_type_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/msg_type_generated.rs"));
+}
+mod common_type_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/common_type_generated.rs"));
+}
+mod common_msg_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/common_msg_generated.rs"));
+}
+
+/// Flatbuffer control-message types for the crow-rpc library (R104).
+///
+/// Re-exports the generated `crow::rpc::proto` namespace: `FBMsgType`,
+/// `FBRetCode`, the common messages (`ConnectionPingRequest`,
+/// `ConnectionPingResponse`, `UnknownMessage`), and the inline struct
+/// (`FBInt128`).
+pub mod fb {
+    pub use crate::common_msg_generated::crow::rpc::proto::{
+        ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, ConnectionPingResponseArgs,
+        FBRetCode, UnknownMessage,
+    };
+    pub use crate::common_type_generated::crow::rpc::proto::FBInt128;
+    pub use crate::msg_type_generated::crow::rpc::proto::FBMsgType;
 }
 
 pub mod diskdb_type_util;

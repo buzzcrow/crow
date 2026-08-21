@@ -1,0 +1,26 @@
+include "ret_code.fbs";
+
+namespace crow.rpc.proto;
+
+// Common control messages. Every request/response carries id (request_id,
+// matched by RemoteCaller) and rpc_create_nano (creation timestamp for
+// latency measurement — the framing header does not carry its own
+// timestamp, so the control message is the source of truth).
+
+table ConnectionPingRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+}
+
+table ConnectionPingResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret:FBRetCode;
+}
+
+// Sent back when a frame arrives with an unregistered msg_type, so the
+// caller learns the type is unsupported instead of timing out.
+table UnknownMessage {
+    id:uint64;
+    rpc_create_nano:uint64;
+}

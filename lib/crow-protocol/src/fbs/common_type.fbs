@@ -1,0 +1,15 @@
+namespace crow.rpc.proto;
+
+// Inline struct for the wide identifier types (DiskId, ChunkId) used by
+// service-specific control messages. flatbuffers structs are fixed-layout
+// inline (no vtable), so they embed directly into tables that reference
+// them. Service schemas include this file and use this struct.
+//
+// ChunkId is 128 bits today; if a wider ID is ever needed, add a new
+// struct here rather than widening this one (flatbuffers structs are
+// fixed-layout, not evolvable like tables).
+
+struct FBInt128 {
+    high:uint64;
+    low:uint64;
+}

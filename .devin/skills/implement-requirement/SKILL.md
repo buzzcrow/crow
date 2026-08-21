@@ -52,6 +52,8 @@ Non-server (no clean-env needed):
 
 - `pixi run test-tree-ct`
 - `pixi run test-tree-ffi`
+- `pixi run test-rpc-ct`
+- `pixi run test-rpc-ffi`
 - `pixi run test-common`
 - `pixi run test-protocol`
 - `pixi run test-kv-core`

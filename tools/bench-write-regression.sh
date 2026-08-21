@@ -14,18 +14,18 @@
 #
 # 7 runs × 10s ≈ 70s + deploy overhead.
 #
-# Reference platform (2026-08-04 run): AMD Ryzen 9 5950X
-# (16 cores / 32 threads, x86_64, Linux). Peak ~124K ops/s at 256T.
+# Reference platform (2026-08-19 run): Apple M5 Pro
+# (18 cores, arm64, macOS 26.5). Peak ~87K ops/s at 256T.
+# Linux (AMD 5950X) reaches ~124K — see kv-write-flow-analysis.md.
 # Always record the CPU model in the doc when publishing a run —
-# absolute write throughput is platform-dependent (see write-flow-
-# analysis.md § "macOS M5 Pro retest").
+# absolute write throughput is platform-dependent.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
 #   - release binary built (pixi run -- cargo build --release -p crow-cli -p crow-kv-server)
 set -euo pipefail
-cd /cjdata/cpp/crow
+cd "$(dirname "$0")/.."
 
 RESULTS_FILE="doc/working/bench-write-regression.tsv"
 DURATION=10
@@ -36,9 +36,9 @@ run_bench() {
     local threads="$1" conn="$2" mi="$3" coalesce="$4" drain="$5" label="$6"
     echo ">>> $label ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
         --mode mem --workload write --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$conn" \
+        --loader-num "$threads" --connections "$conn" \
         --max-inflight "$mi" \
         --coalesce-max-keys "$coalesce" \
         $([ "$drain" != "" ] && echo "--coalesce-drain-threshold $drain") \
@@ -64,20 +64,21 @@ run_bench() {
 
 # --- regression sentinel configs ---
 #
-# Reference results (2026-08-04, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
+# Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS 26.5):
 #   mi=32, coalesce=32, drain=1, 10s mem mode, 3-node cluster, 512B values, 1M keys
 #
 #   T    C    ops/s     WAL      avg    p50    p99    p999   err
-#   1    1    3,029     90,870   327    350    428    564    0
-#   4    2    12,681    274,197  313    300    496    826    0
-#   16   4    32,935    180,596  483    472    804    1,761  0
-#   32   16   52,688    141,915  604    576    1,180  3,708  0
-#   64   32   75,280    109,862  846    800    1,850  4,988  0
-#   128  32   105,779   105,226  1,204  1,124  2,592  9,632  0
-#   256  32   123,745   116,944  2,058  1,911  4,392  14,976 0
+#   1    1    10,144    304,358  97     95     153    211    0
+#   4    2    21,879    449,508  182    178    307    380    0
+#   16   4    47,260    276,795  337    330    523    619    0
+#   32   16   57,889    170,600  550    537    894    1,046  0
+#   64   32   69,908    104,777  912    888    1,440  1,745  0
+#   128  32   78,155    86,840   1,632  1,590  2,654  3,794  0
+#   256  32   87,448    86,619   2,919  2,870  4,704  7,004  0
 #
-# Coalescing lifts the ceiling from ~29K (non-coalesced) to ~124K at 256T.
-# WAL amortization reaches ~11x at 256T. Zero errors across all configs.
+# Coalescing lifts the ceiling from ~29K (non-coalesced) to ~87K at 256T.
+# WAL amortization reaches ~30x at 256T. Zero errors across all configs.
+# Linux (AMD 5950X) reaches ~124K at 256T — see kv-write-flow-analysis.md.
 
 echo -e "label\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 

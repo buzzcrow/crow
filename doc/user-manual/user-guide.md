@@ -3,12 +3,12 @@
 
 # CROW User Guide
 
-CROW is a storage platform — a foundation layer for building storage
-systems where you own the hot path all the way down to the metal. Its
-first component is **crow-kv**, a distributed key-value cluster built
-on Multi-Paxos. This guide covers crow-kv operations: starting a
-cluster, performing basic KV operations, managing topology, and
-running upgrades.
+CROW is a high-performance distributed storage platform, a foundation
+layer for building storage systems where you own the hot path all the
+way down to the metal. The foundation is **crow-kv**, a distributed
+key-value cluster built on multi-group Multi-Paxos. This guide covers
+crow-kv operations: starting a cluster, performing basic KV operations,
+managing topology, and running upgrades.
 
 crow-kv provides three interfaces for cluster management and data
 access:
@@ -71,7 +71,7 @@ Before following the steps below:
 
 Create a rack, add nodes, and deploy a server on each node. The
 `deploy` command starts `crow-kv-server` on the target node (via SSH
-if `ssh_user` is set, or as a local subprocess otherwise) — no manual
+if `ssh_user` is set, or as a local subprocess otherwise). No manual
 start needed.
 
 **CLI:**
@@ -286,7 +286,7 @@ CROW provides two range-read modes for different use cases:
 A snapshot scan pins a point-in-time view of the keyspace. Creating a
 snapshot flushes the in-memory write buffer (L0) into the durable tree
 (L1), then pins L1 at the current applied slot. The snapshot is a frozen,
-immutable view — iterating it is pure array traversal with no concurrency
+immutable view. Iterating it is pure array traversal with no concurrency
 concerns. Each snapshot has a server-side handle with a lease (default 5
 minutes); the handle is reaped if the client disconnects, preventing
 unbounded pin retention.
@@ -432,8 +432,8 @@ waits for a new leader, then removes the replica.
 1. Provision the new machine with the same node ID, management port,
    and gRPC port.
 2. Deploy the server via the service. The server auto-loads its
-   store/group configuration from `conf/node-config.json` on startup —
-   no `--stores`/`--groups` CLI args needed for normal restart:
+   store/group configuration from `conf/node-config.json` on startup.
+   No `--stores`/`--groups` CLI args needed for normal restart:
 
    **CLI:**
 
@@ -690,7 +690,7 @@ and `--json` for JSON output.
 | Health check | `GET /health` |
 | Metrics | `GET /metrics` |
 
-These endpoints are on the `crow-kv-server` management API (internal —
+These endpoints are on the `crow-kv-server` management API (internal,
 only called by `crow-kv-client`'s `KVClusterAdmin`). The console's
 `POST /api/cluster/init` orchestrates
 `/system/init` across nodes and auto-finalizes.

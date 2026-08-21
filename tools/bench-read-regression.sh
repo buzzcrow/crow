@@ -54,9 +54,9 @@ run_bench() {
     fi
     echo ">>> $display ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
         --mode mem --workload read --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$connections" \
+        --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
         --pre-populate "$KEYSPACE" --key-space "$KEYSPACE" \
@@ -81,23 +81,23 @@ run_bench() {
 
 # --- regression sentinel configs ---
 #
-# Reference results (2026-08-06, Apple M5 Pro, 18c, arm64, macOS 26.5):
+# Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS 26.5):
 #   10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values.
 #
 #   label              mode        T:C   ops/s    avg_us  p99_us  err  notes
-#   lin_1t             linearizable 1:1   20441    47      75      0    per-read cost
-#   minslot_1t         minslot      1:1   20478    47      73      0    same as lin (lease ~0)
-#   lin_6t             linearizable 6:6   68560    86      173     0    mid-concurrency
-#   minslot_6t         minslot      6:6   75158    78      150     0    +9.6% vs lin (distributed)
-#   lin_16t            linearizable 16:16 105613   149     254     0    high concurrency
-#   minslot_16t        minslot      16:16 106727   148     240     0    +1.1% vs lin (converging)
-#   lin_32t            linearizable 32:32 118390   267     428     0    saturation
-#   minslot_32t        minslot      32:32 112621   281     440     0    -5.1% vs lin (saturated)
-#   minslot_6t_2to1    minslot      6:3   73484    80      157     0    h2 lock, -2.2% vs 6:6
-#   lin_16t_verify     linearizable 16:16 104917   150     256     0    corr=0
-#   minslot_16t_verify minslot      16:16 104988   150     241     0    corr=0
+#   lin_1t             linearizable 1:1   21112    46      67      0    per-read cost
+#   minslot_1t         minslot      1:1   21691    45      66      0    same as lin (lease ~0)
+#   lin_6t             linearizable 6:6   70668    84      163     0    mid-concurrency
+#   minslot_6t         minslot      6:6   77622    76      142     0    +9.8% vs lin (distributed)
+#   lin_16t            linearizable 16:16 106399   148     251     0    high concurrency
+#   minslot_16t        minslot      16:16 107455   147     235     0    +1.0% vs lin (converging)
+#   lin_32t            linearizable 32:32 119473   265     418     0    saturation
+#   minslot_32t        minslot      32:32 113270   280     432     0    -5.2% vs lin (saturated)
+#   minslot_6t_2to1    minslot      6:3   74752    79      151     0    h2 lock, -3.7% vs 6:6
+#   lin_16t_verify     linearizable 16:16 105613   150     252     0    corr=0
+#   minslot_16t_verify minslot      16:16 106662   148     237     0    corr=0
 #
-# Analysis: doc/working/kv-read-flow-analysis.md § Latest Benchmark Results.
+# Analysis: doc/design/kv/kv-read-flow-analysis.md § Latest Benchmark Results.
 
 echo -e "label\tread_mode\tT:C\tverify\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tcorrectness_errors" > "$RESULTS_FILE"
 

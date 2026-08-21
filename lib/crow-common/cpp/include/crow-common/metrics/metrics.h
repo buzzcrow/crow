@@ -9,6 +9,13 @@
 // bandwidth.h, latency_histogram.h, latency_summary.h); this header
 // aggregates them and defines the MetricsRegistry that owns all
 // metric instances and drives the periodic flush.
+//
+// Two registry scopes:
+//   - global() — process-level singleton for unprefixed metrics
+//     (e.g. rpc.client.*). Use from function-local statics:
+//       static Counter *c = MetricsRegistry::global().register_counter("name");
+//   - per-instance — constructed by engines that need dynamic prefixes
+//     (e.g. s.{store_id}.g.{group_id}.buf.hits.c). Owned by the engine.
 #pragma once
 
 #include "crow-common/metrics/bandwidth.h"
@@ -39,6 +46,11 @@ class MetricsRegistry
 
     MetricsRegistry(const MetricsRegistry &)            = delete;
     MetricsRegistry &operator=(const MetricsRegistry &) = delete;
+
+    // Process-level singleton. Use for unprefixed metrics that are
+    // shared across all instances (e.g. rpc.client.*). Thread-safe
+    // (Meyers singleton, C++11+).
+    static MetricsRegistry &global();
 
     Counter          *register_counter(const std::string &name);
     Gauge            *register_gauge(const std::string &name);

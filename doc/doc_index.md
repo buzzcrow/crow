@@ -15,6 +15,7 @@ when a task touches a topic in its row.
 | `doc/design/diskdb/design-crow-diskdb.md` | Root diskdb design — read first for any diskdb design or architecture question. |
 | `doc/design/chunkdb/design-crow-chunkdb.md` | Root chunkdb design — read first for any chunkdb design or architecture question. |
 | `doc/design/tree/design-crow-tree.md` | Root tree design — read first for storage-engine work. |
+| `doc/design/rpc/design-crow-rpc.md` | Root RPC design — read first for `crow-rpc` engine, FFI, or transport questions. |
 | `doc/design/console/design-crow-console.md` | Root console design — read first for console work. |
 | `doc/user-manual/user-guide.md` | User guide: Web UI, CLI, REST API, quick start, cluster ops, upgrade. |
 
@@ -35,6 +36,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/kv/kv-read-flow-analysis.md` | KV point-read flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-scan-flow-analysis.md` | KV scan flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. |
+| `doc/design/rpc/rpc-echo-flow-analysis.md` | RPC echo transport flow trace, benchmarks, bottleneck analysis. |
 
 ## Project Files (repo root)
 
@@ -46,7 +48,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `SECURITY.md` | When reporting or handling a security vulnerability. |
 | `CODE_OF_CONDUCT.md` | Community behavior guidelines. |
 
-## Sub-Designs (`doc/design/{kv,tree,console,protocol,diskdb}/`)
+## Sub-Designs (`doc/design/{kv,tree,console,protocol,diskdb,rpc}/`)
 
 | Doc | Read when working on |
 | --- | --- |
@@ -74,6 +76,9 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, disk status management, space metrics, background scanner, crate layout, concurrency. |
 | `doc/design/diskdb/design-crow-diskdb-zone-management.md` | Zone management: record model, allocation algorithm, persist-only free, compaction-on-rotation, preparatory thread, crash recovery, zone-level concurrency, invariants. |
 | `doc/design/diskdb/design-crow-diskdb-space-metrics.md` | Space metrics component: usage accessors, `QueryCapacityStats` handler, per-disk counters, recalc verifier, reporting loop, keepalive piggyback, kv-client aggregation, `crow-diskdb-client` library. |
+| `doc/design/rpc/design-crow-rpc.md` | RPC root: architecture, Non-Goals, key design decisions (native buffer, 12-byte header, transport interface, pull-based parser, per-connection writer, folly CHM, worker timer, C ABI + oneshot FFI, flatbuffers), wire format diagram, control plane (pool + reconnect, `RpcClient` correlation, `ScheduledExecutor`, `RpcServer` + handler offload, backpressure Reject/Await), flatbuffer schema home + build matrix, sub-design map. |
+| `doc/design/rpc/design-crow-rpc-tcp.md` | TCP transport: `SocketTransport` shared base, worker loop, scatter-gather `writev` send, zero-copy receive, `EpollEngine` (Linux, level-triggered), `KqueueEngine` (macOS, `EV_CLEAR` write), multi-engine scaling (N engines × M workers). |
+| `doc/design/rpc/design-crow-rpc-rdma.md` | RDMA transport: `RdmaTransport`, CQ poll loop, `librdmacm` connection setup, pre-registered buffer pools. |
 
 ## How AI Should Use This Index
 

@@ -14,6 +14,7 @@ members = [
     "app/crow-web",
     "app/crow-cli",
     "lib/crow-tree/ffi",
+    "lib/crow-rpc/ffi",
 ]
 # : crow-tree/ffi moved from `exclude` into `members` now that
 # crow-kv depends on it (CrowTreeEngine) -- building crow-kv already triggers
@@ -39,6 +40,7 @@ tokio = { version = "1.40", default-features = false }
 crow-common = { path = "lib/crow-common/rust" }
 tonic = "0.12"
 prost = { version = "0.13", features = ["derive"] }
+flatbuffers = "25.12.19"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

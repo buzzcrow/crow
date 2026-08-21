@@ -50,9 +50,8 @@
   `chunkdb_service.proto` (`ChunkdbService` — `AllocateChunk` /
   `AppendChunk` / `SealChunk` / `DeleteChunk` / `UpdateChunkStrip` /
   `ListChunks`), `diskio_service.proto` (`DiskWrite` / `DiskRead`).
-  aioss analog: aioss disk-failure recovery rebuilds lost blocks from
-  mirror/EC at the chunk layer (the chunk manager drives rebuild I/O
-  and paces it); CROW's chunkdb is the analogous owner.
+  CROW's chunkdb owns disk-failure recovery: it rebuilds lost blocks
+  from mirror/EC at the chunk layer, driving rebuild I/O and pacing it.
 - **Use scenarios** —
   - **Mirror replica rebuild after disk failure** — a disk goes `Bad`;
     diskdb's R76 scan lists the impacted busy blocks + their

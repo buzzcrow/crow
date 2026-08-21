@@ -100,7 +100,7 @@ serialization. The scan path is zero-copy from packed buffer to client
 
 ---
 
-## Latest Benchmark Results — 2026-08-06 (post-R48+R50)
+## Latest Benchmark Results — 2026-08-19 (post-R48+R50)
 
 **Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5.
 **Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
@@ -110,17 +110,17 @@ Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
 | Label | Limit | Start_after | Val B | Mode | scans/s | avg us | p99 us | err |
 |-------|------:|-------------|------:|------|--------:|-------:|-------:|----:|
-| bounded_10 | 10 | | 64 | lin | 19558 | 50 | 79 | 0 |
-| bounded_1k | 1000 | | 64 | lin | 4339 | 229 | 258 | 0 |
-| bounded_10k | 10000 | | 64 | lin | 518 | 1929 | 2060 | 0 |
-| full_100k | 100000 | | 64 | lin | 50 | 20216 | 20848 | 0 |
-| deep_pag_10 | 10 | k...99989 | 64 | lin | 20681 | 47 | 66 | 0 |
-| mixed_1k | 1000 | | mixed | lin | 991 | 1007 | 1222 | 0 |
-| minslot_1k | 1000 | | 64 | minslot | 4293 | 232 | 262 | 0 |
+| bounded_10 | 10 | | 64 | lin | 21320 | 46 | 73 | 0 |
+| bounded_1k | 1000 | | 64 | lin | 4708 | 211 | 239 | 0 |
+| bounded_10k | 10000 | | 64 | lin | 562 | 1777 | 1911 | 0 |
+| full_100k | 100000 | | 64 | lin | 49 | 20411 | 22864 | 0 |
+| deep_pag_10 | 10 | k...99989 | 64 | lin | 21003 | 46 | 66 | 0 |
+| mixed_1k | 1000 | | mixed | lin | 1043 | 957 | 1175 | 0 |
+| minslot_1k | 1000 | | 64 | minslot | 4721 | 211 | 241 | 0 |
 
-`mixed_1k` uses `--value-size-mix 64:70,1024:20,16384:10` — 70% 64B,
+`mixed_1k` uses `--value-size-mix 64:70,1024:20,16384:10`: 70% 64B,
 20% 1KiB, 10% 16KiB values, deterministically assigned by key id. At
-991 scans/s it sits between the old `valuesize_1KiB` (1492) and
+1043 scans/s it sits between the old `valuesize_1KiB` (1492) and
 `valuesize_16KiB` (74), reflecting the weighted average of the three
 sizes with 0 errors (the 16KiB fraction is small enough to avoid the
 replication backpressure issue seen at 100% 16KiB).
@@ -129,28 +129,29 @@ replication backpressure issue seen at 100% 16KiB).
 
 | Label | Limit | Val B | Mode | T:C | scans/s | avg us | p99 us | err |
 |-------|------:|------:|------|-----|--------:|-------:|-------:|----:|
-| lin_4t | 1000 | 64 | lin | 4:4 | 14264 | 279 | 473 | 0 |
-| minslot_4t | 1000 | 64 | minslot | 4:4 | 14810 | 269 | 385 | 0 |
-| lin_16t | 1000 | 64 | lin | 16:16 | 30799 | 517 | 822 | 0 |
-| minslot_16t | 1000 | 64 | minslot | 16:16 | 33015 | 482 | 791 | 0 |
-| lin_32t | 1000 | 64 | lin | 32:32 | 37840 | 842 | 3600 | 0 |
-| minslot_32t | 1000 | 64 | minslot | 32:32 | 38256 | 830 | 2028 | 0 |
+| lin_4t | 1000 | 64 | lin | 4:4 | 15504 | 257 | 409 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 4:4 | 16232 | 245 | 358 | 0 |
+| lin_16t | 1000 | 64 | lin | 16:16 | 32384 | 492 | 781 | 0 |
+| minslot_16t | 1000 | 64 | minslot | 16:16 | 32217 | 495 | 816 | 0 |
+| lin_32t | 1000 | 64 | lin | 32:32 | 38859 | 820 | 2416 | 0 |
+| minslot_32t | 1000 | 64 | minslot | 32:32 | 36684 | 869 | 1416 | 0 |
 
-Linearizable scales well up to 16T (4339 → 30799, 7.1x) then saturates
-at 32T (37840) — the leader read barrier becomes the bottleneck.
-MinSlot shows a clear advantage:
-- **16T:16C**: +7.2% throughput (33015 vs 30799) — distributed read
+Linearizable scales well up to 16T (4708 → 32384, 6.9x) then saturates
+at 32T (38859): the leader read barrier becomes the bottleneck.
+MinSlot shows a clear advantage at 4T:
+- **4T:4C**: +4.7% throughput (16232 vs 15504), distributed read
   serving across 3 replicas scales better than single-leader.
-- **32T:32C**: throughput saturates for both (+1.1%), but MinSlot's
-  p99 is 44% better (2028us vs 3600us) — load distribution keeps tail
-  latency low even when throughput is capped by the engine.
+- **16T:16C**: modes converge (-0.5%, ~32K each).
+- **32T:32C**: Linearizable pulls ahead (+5.9% throughput), but
+  MinSlot's p99 is 41% better (1416us vs 2416us). Load distribution
+  keeps tail latency low even when throughput is capped by the engine.
 
 ### Linux results — 2026-08-10 (post-R67)
 
 **Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
 **Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
 Single-thread numbers are from one full regression run (post-R67 fix).
-macOS column is the 2026-08-06 baseline (unchanged).
+macOS column is the 2026-08-19 baseline (unchanged).
 Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
 #### Single-thread (1T:1C)
@@ -182,7 +183,7 @@ Linux is ~3.5x slower than macOS on single-thread bounded scans
 running under a slower single-core memory subsystem. Multi-thread
 scaling: 16T reaches 21247 scans/s, and 32T saturates at ~28k scans/s
 with p99 down to 2408 us for linearizable. MinSlot still does **not**
-show the throughput advantage seen on macOS — linearizable is faster at
+show the throughput advantage seen on macOS; linearizable is faster at
 4T and 16T on Linux. At 32T MinSlot edges ahead (28613 vs 27922, +2.5%)
 with p99 7.6% better (2226 vs 2408 us). The MinSlot advantage appears
 platform-dependent and may relate to the different cache hierarchy and
@@ -190,8 +191,8 @@ inter-core latency of x86_64 vs arm64.
 
 The `largeval_16k` config (100k × 16KiB = 1.6 GB values) is the R67
 regression sentinel: 35 scans/s with 0 errors post-fix (was 653-8111
-errors before the `spawn_blocking` fix). The low throughput is expected
-— each scan returns up to 1000 × 16KiB = 16 MB of data, and the
+errors before the `spawn_blocking` fix). The low throughput is expected;
+each scan returns up to 1000 × 16KiB = 16 MB of data, and the
 snapshot/flush/GC path now runs on blocking threads without stalling
 the election driver.
 
@@ -242,7 +243,7 @@ Four changes drove the improvement:
   drove the multi-thread throughput gains (32T: ~23k → ~28k scans/s)
   and the large-scan single-thread gains. Two small-bounded configs
   show a slight regression: `bounded_1k` -7% throughput (but p99
-  -13%) and `deep_pag_10` -9% throughput (p99 flat) — both verified
+  -13%) and `deep_pag_10` -9% throughput (p99 flat), both verified
   across 5 runs, consistent, and within acceptable noise for the
   per-scan fast path. The fast-path dispatch adds a small constant
   per-scan cost that slightly slows the small-scan path where
@@ -261,23 +262,23 @@ Two changes drove the 20-140x improvement on bounded scans:
 
 - **R48 (lazy `LeafChainCursor`)**: the old `resolve_chain_sorted`
   rebuilt each touched leaf's entire live entry set into a `std::map`
-  per scan — O(entries-per-leaf × log), not O(limit). 64B packs
+  per scan, O(entries-per-leaf × log), not O(limit). 64B packs
   ~640 entries per 64KiB leaf vs ~58 for 1 KiB, so each leaf resolve
   was far more expensive for 64B (this caused the 1 KiB anomaly where
   1 KiB was 3.8x faster than 64B despite returning 16x more data). The
   lazy cursor merges delta chain + base frame on demand, binary-searches
-  on seek, and emits only the entries the scan returns — cost tracks
+  on seek, and emits only the entries the scan returns. Cost tracks
   `limit`, not leaf fullness. Post-fix: 64B is 2.9x faster than 1 KiB
   (cost tracks bytes returned, not entries per leaf).
 - **R50 (epoch-protected MemTable)**: `MemTable::snapshot()` deep-copied
-  every live L0 entry on every scan — O(N_l0) regardless of limit.
+  every live L0 entry on every scan, O(N_l0) regardless of limit.
   Under concurrent write+scan this dominated scan time (82-94% per the
   Gate 2 microbench). Replaced with a `ConcurrentSkipList` (inline keys,
-  versioned cell pointers, epoch-deferred reclamation) — readers
+  versioned cell pointers, epoch-deferred reclamation). Readers
   traverse L0 lock-free under their existing epoch guard with zero copy;
   the cursor seeks directly and materializes only O(limit) entries.
 
-Deep pagination is flat (equal to from-start) — O(limit) confirmed.
+Deep pagination is flat (equal to from-start); O(limit) confirmed.
 
 ---
 
@@ -298,27 +299,27 @@ noted.
   +7.2% throughput advantage at 16T:16C (33015 vs 30799 scans/s) and
   44% better p99 at 32T:32C (2028us vs 3600us) on macOS. The throughput
   advantage peaks around 16T then both modes saturate near ~38k
-  scans/s at 32T on macOS — the crow-tree engine (C++ merge loop over L0
+  scans/s at 32T on macOS. The crow-tree engine (C++ merge loop over L0
   skip-list + L1 B+tree cursor) becomes the bottleneck, not the read
   barrier. On Linux (2026-08-09, post-R58) the 32T saturation point
   moved up to ~28k scans/s (was ~23k on 2026-08-06) with p99 down 37%
   for linearizable (2364 vs 3732 us), but the engine remains the
-  bottleneck — both modes still saturate with near-identical throughput
+  bottleneck: both modes still saturate with near-identical throughput
   at 32T. No code change needed for the read-mode split itself;
   profiling the engine bottleneck is the open work.
 - **[R60](../../backlog/R60-tree-scan-sibling-leaf-readahead.md) —
   No sibling-leaf readahead on cold scans**: the sync path
   demand-loads each leaf inline; the async path resolves one pending
   page per reactor round trip (`scan_async_attempt`). A scan knows its
-  next leaf (`right_sibling`) before finishing the current one —
-  issuing the next read ahead of the merge loop would overlap I/O with
+  next leaf (`right_sibling`) before finishing the current one.
+  Issuing the next read ahead of the merge loop would overlap I/O with
   merging on cold ranges.
 - **R67 — 16 KiB scan errors on Linux** — **Done (2026-08-10).** RCA:
   maintenance-loop `persist_snapshot` / `flush` / `collect_garbage`
   held the C++ `write_mutex_` and blocked the async runtime, starving
   the election driver (300-600ms timeout) when snapshots took 0.6-2.2s
   for 100k × 16KiB values (1.6 GB). Fix: all three calls now run via
-  `tokio::task::spawn_blocking` (single code path — no fire-and-forget,
+  `tokio::task::spawn_blocking` (single code path, no fire-and-forget,
   no in-flight guard); the election driver runs on a separate tokio
   task and is no longer blocked. `PxLearner.engine` changed from
   `Box<dyn KVEngine>` to `Arc<dyn KVEngine>` so the handle clones into

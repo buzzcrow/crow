@@ -44,10 +44,10 @@
   progress, resume after restart, admin RPCs `TriggerScan` /
   `GetScanStatus`). Proto surfaces: `chunkdb_type.proto` (`Chunk`,
   `ChunkStrip`, `MirrorStrip`, `EcStrip`, `Segment` reference),
-  `chunkdb_service.proto` (`ListChunks` — paginated chunk scan). aioss
-  analog: no direct aioss analog — CROW's disk-move model (R81) is
-  new, so the post-move chunk placement scanner is new work shaped on
-  diskdb's `ScannerTask` precedent.
+  `chunkdb_service.proto` (`ListChunks` — paginated chunk scan).
+  CROW's disk-move model (R81) is new, so the post-move chunk
+  placement scanner is new work shaped on diskdb's `ScannerTask`
+  precedent.
 - **Use scenarios** —
   - **Post-move placement verification** — an operator moves a disk
     from disk-group A to disk-group B (R81 Part 2). The move completes

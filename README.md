@@ -6,13 +6,21 @@
 [![CI](https://github.com/buzzcrow/crow/actions/workflows/ci.yml/badge.svg)](https://github.com/buzzcrow/crow/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-CROW is a storage platform — a foundation layer for building storage systems where you own the hot path all the way down to the metal. The first component is **crow-kv**, a distributed key-value cluster that takes Multi-Paxos seriously: not as a textbook exercise, but as a deliberate engineering choice to eliminate Raft's sequential commit bottleneck on the write hot path.
+CROW is a high-performance distributed storage platform — a foundation layer for building storage systems where you own the hot path all the way down to the metal.
+
+The foundation is **crow-kv**, a distributed key-value cluster built on multi-group Multi-Paxos. Where Raft serializes every commit through a single log, Multi-Paxos decides slots in parallel, turning the write hot path into a fully parallel commit. That is the consensus core. On top of it comes a chunk-based common storage layer, and on top of that, distributed data structures like KV and streams that scale out far beyond any single node's local limitation, with no node owning the data it serves.
 
 ## Why This Project
 
-A high-performance distributed KV store is the natural foundation layer: put one underneath a larger storage system and its overall architecture simplifies considerably. But that only works with full control over the KV itself — the freedom to make targeted optimizations as workloads demand. Off-the-shelf components don't offer that, so CROW builds one from scratch as its first component.
+Storage systems are usually assembled from off-the-shelf parts: a consensus library here, a KV engine there, a log component somewhere else. Each of those arrives with an architecture already decided, and once you build on top of one you live inside that decision. When it turns into the bottleneck, all you can do is work around it. CROW owns the whole flow instead — consensus, WAL, storage engine, I/O path — so every layer is ours to move.
 
-And since future performance gains are increasingly tied to hardware (io_uring, NVMe, CPU cache behavior), the platform is Rust + C++, keeping the hot paths close to the metal.
+That control matters because the ground under storage keeps shifting. io_uring and NVMe moved the bottleneck once already, and GPUDirect Storage, DMA paths that skip the CPU, high-bandwidth fabrics, and offload to accelerator cards will move it again. Adopting any of them is never a patch to a single module; it reaches through consensus, durability, and the data path at the same time, which only works if all three are yours.
+
+Workloads keep shifting too. Storage is no longer a short list of fixed protocols: AI training and inference ask for things that file and object were never shaped around, and what they ask for is still changing. A foundation layer either answers quickly or every system above it inherits the delay.
+
+None of this pays off without a base worth building on, so that is what comes first — a design simple enough to reason about, efficient enough to be worth the trouble, and stable enough to carry what comes later. Rust and C++, close to the metal. The hardware work follows. This is an early start, and most of the modern-hardware story is still ahead of us.
+
+Not because the off-the-shelf parts are bad, but because a foundation that can't be redesigned isn't a foundation.
 
 > **Project started July 10, 2026.** Built by a single developer working with AI.
 

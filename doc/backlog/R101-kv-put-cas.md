@@ -42,9 +42,6 @@ read-modify-write callers, not just chunkdb.
   (no change needed — CAS is checked at propose time, not apply time).
 - `lib/crow-kv-client/src/client.rs:500` — `put` method to extend with
   an optional `expected_revision`.
-- aioss analog: aioss metadb (MySQL InnoDB) uses `SELECT ... FOR UPDATE`
-  row-level locks; CROW's KV uses paxos consensus instead, so CAS is the
-  optimistic-concurrency equivalent.
 
 **Use scenarios**
 

@@ -11,19 +11,10 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R105** — Bump this line in the same commit when adding a new item.
+**Next R number: R109** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-- **[R104](R104-kv-server-group0-authoritative-restore.md)** — group-0
-  authoritative restore (toml bootstrap-only) — Area: server / kv —
-  Make the toml optional: on restart the server scans
-  `<root>/waldata` for local stores/groups, loads them from disk via
-  `create_group_with_wal`, then reads group 0 `/kv/replica/` records to
-  wire remote replicas. The toml is only needed for first-boot tunables
-  before group 0 exists. Implements the Phase 2 cutover from
-  `design-crow-kv-group0.md` §5.1. Adds `--root` CLI (fixed subdir
-  layout) and persists the node root to group 0 via `KvServerExtra`.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
@@ -91,6 +82,58 @@ complexity, and dependency. Before implementation, follow the
   writes. No `pipeline_writer` or `segment` API changes (drop-in async
   fn replacement). Linux + liburing only; tests skip on other platforms.
 
+### Data Path (diskio + chunk object writers + read flow)
+
+Dependency order: R105 → R93 → R94 → R106, R107. R32 depends
+on the RPC library but is in a separate area (KV consensus).
+
+- **[R105](R105-diskio-disk-io-engine.md)** — Disk IO engine — Area:
+  diskio — Per-node disk IO server (`crow-diskio`) using io_uring on
+  Linux (SQE/CQE for read/write/fsync, no `spawn_blocking`) with
+  `pwrite`/`pread` fallback on macOS for dev/testing. Uses R104 RPC
+  for control+data framing (control message = disk/zone/offset/size,
+  followed by raw data payload). The missing data-I/O component that
+  chunkdb, the writers (R94, R106), the read flow (R107), and recovery
+  (R83) all depend on. Reference: the reference's disk I/O engine
+  (libaio/SPDK engine shapes).
+- **[R93](R93-chunkdb-mirror-to-ec-conversion.md)** — Mirror-to-EC
+  conversion — Area: chunkdb — Background conversion of mirror strips
+  to EC strips in shared chunks. Reads mirror data via diskio (R105),
+  EC-encodes via isa-l, allocates EC strip blocks, writes via diskio,
+  and atomically swaps via `update_chunk_strip`. Reclaims 3×→1.5×
+  storage (8+4 EC) on shared chunks. Configurable policy (seal age,
+  strip count, manual trigger) + bandwidth throttling. Foundation
+  for R106's mirror-first write strategy.
+- **[R94](R94-chunkdb-large-object-writer.md)** — Large object writer
+  + chunk IO interface + Location — Area: chunkdb — Dedicated chunk
+  per large object (> EC strip size, e.g. > 8 MB for 8+4). Direct EC
+  strip writes, producer-consumer strip preallocation (object size
+  known upfront → strip count known), ~1 GB max chunk size with chunk
+  rotation for very large objects. **Defines the shared `ChunkIoWriter`
+  async interface** (`on_data`/`on_finish`/`on_error` + completion)
+  and the `Location` type (`chunk_id [offset, end)` + logical
+  offset/length, array for multi-chunk) that R106 and R107 depend on.
+  All writer code lives in `crow-chunkdb-client`. Reference: the reference's
+  `SObjSChunkWriter` / `SObjMChunkWriter`.
+- **[R106](R106-chunkdb-small-object-writer.md)** — Small object
+  shared chunk writer — Area: chunkdb — Shared 256 MB chunks for
+  small objects (< EC strip threshold). Dynamic pool of write
+  pipelines, each with a worker task that fetches queued buffers and
+  writes batches to shared chunks (aggregation for max TPS). Write
+  to 3 mirror strips first → return success → background mirror→EC
+  conversion (R93). Dynamic pipeline scale in/out based on queue
+  depth for max BW + aggregation. Implements `ChunkIoWriter` (R94).
+  Reference: the reference's `SharedObjWriter` + `Write2M1ECChunkHandler`.
+- **[R107](R107-chunkdb-chunk-read-flow.md)** — Chunk object read
+  flow — Area: chunkdb — Reconstructs object bytes from a `Location`
+  array (R94). Queries chunk strip layout via `query_chunk`, maps
+  offsets to strips, reads blocks via diskio (R105). Handles EC
+  decode (for missing blocks, ≤ `code_num`) and mirror fallback (for
+  failed replicas). Multi-chunk assembly in `logical_offset` order.
+  Partial range reads (`read_range`). Streaming read for large
+  objects (memory-bounded `ChunkReadStream`). Transparent across
+  mirror→EC conversion (R93).
+
 ### Medium Priority
 
 - **[R83](R83-chunkdb-complete-recovery-flow.md)** — chunkdb
@@ -129,20 +172,14 @@ complexity, and dependency. Before implementation, follow the
   rebuild. Triggered on move via watch/notify (R78) with a periodic
   safety net. Blocked on the chunkdb server component (unlanded) and
   R81 Part 2.
-- **[R32](R32-kv-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
-  RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
-  connection-level userspace lock (HPACK table, frame buffer,
-  flow-control windows); measured cost is ~17% at 2T:1C, zero at
-  1T:1C. A custom `[len][req_id][protobuf]`-over-raw-TCP transport
-  removes the userspace funnel — the kernel TCP lock is the only
-  serialization point. **Deferred until** read throughput is the
-  primary constraint AND the h2 lock is profiled as the hot spot; until
-  then write-path (R16a/R17) and disk-I/O work take precedence.
-  High complexity (2–4K lines: framing, pool, reconnect, timeout,
-  cancellation, backpressure, TLS). Scope is the internal
-  replica-to-replica path only; management API stays on Axum/HTTP.
-  Reference implementations: protosocket (Momento), Volo (CloudWeGo),
-  Cap'n Proto RPC.
+- **[R32](R32-kv-custom-rust-rpc.md)** — KV consensus hot path →
+  `crow-rpc` — Area: kv / RPC — Migrate the internal replica-to-replica
+  Paxos path from gRPC/tonic to the `crow-rpc` flatbuffer RPC library.
+  Recovers the ~17% h2-lock throughput loss at 2T:1C
+  (measured in `kv-read-flow-analysis.md`). Protocol semantics
+  preserved (same request/response shapes, `NotLeaderHint`, error
+  codes); only the transport changes. Depends on `crow-rpc` (RPC lib).
+  Management API stays on Axum/HTTP. Reference: the reference's RPC engine.
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
   scan error spike by wrapping the maintenance loop's `flush` /
@@ -247,3 +284,7 @@ understand → design → plan → implement → merge design → cleanup.
 
 After the PR is merged, all obsolete working docs (design draft, plan doc)
 must be deleted — see the workflow's Post-merge cleanup section.
+
+---
+
+<!-- Reference implementation details: see ~/.codeium/windsurf/memories/global_rules.md -->

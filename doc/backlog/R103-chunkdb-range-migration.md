@@ -14,7 +14,6 @@ R99 stubbed the chunkdb instance range migration flow. The `ChunkdbRangeMigratio
 - `doc/design/chunkdb/design-crow-chunkdb.md` §3.6 — stateless with KV persistence.
 - `doc/backlog/R99-kv-dynamic-range-binding-framework.md` — binding framework, `ChunkdbRangeMigrationValue`.
 - `doc/design/kv/design-crow-kv-group0.md` §2.6 — monitoring models.
-- aioss analog: aioss has no chunkdb instance sharding (all instances share metadb); CROW's range migration is new work.
 
 ### Use scenarios
 

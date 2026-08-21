@@ -11,7 +11,7 @@ server-side notify handler, and the client endpoint cache proactive
 refresh that together replace fixed-interval polling as the primary
 change-detection mechanism for group-0 sysdata. The notify is a
 **client-pulled `WatchNotify` bidi stream**: diskdb opens the stream to
-the group-0 leader and subscribes to prefixes; the leader pushes
+the group-0 leader and subscribes to prefixes, and the leader pushes
 notifies over that stream. No separate notify-endpoint registration is
 needed for notify delivery. Polling stays as a safety net at a raised
 interval. Architecture decisions and rationale live here; the root
@@ -62,7 +62,7 @@ change-detection mechanism available to external components is polling
 stream from the group-0 leader to each watcher, fired when a watched
 prefix is written. The `LearnerStream` bidi pattern is the existing
 precedent for a long-lived gRPC bidi stream multiplexing frames between
-a leader and a peer; `WatchNotify` follows the same shape but serves
+a leader and a peer. `WatchNotify` follows the same shape but serves
 client-to-leader watch subscriptions rather than replica-to-leader
 consensus traffic.
 
@@ -200,8 +200,8 @@ d. The outbound stream is `ReceiverStream::new(rx)` boxed, returned to
 
 ### 2.1 Why
 
-The notify trigger fires on the leader's **apply path** — after a
-value is Paxos-chosen AND applied to the engine — not on the proposal
+The notify trigger fires on the leader's **apply path** (after a
+value is Paxos-chosen AND applied to the engine), not on the proposal
 path. This is the etcd model: watchers are fed from the apply stream,
 not the proposal path. The proposal path only fires for slots the
 leader proposes itself; slots the leader learns via heartbeat catch-up
@@ -215,8 +215,8 @@ three entry points:
   `known_commit_slot` advance or gap-fill.
 
 The apply path's central function is `PxLearner::apply_entry`, which
-decodes `entry.payload` via `Batch::decode` into `Batch { ops: Vec<BatchOp> }`
-— the changed keys are already extracted there, so the notify trigger
+decodes `entry.payload` via `Batch::decode` into `Batch { ops: Vec<BatchOp> }`.
+The changed keys are already extracted there, so the notify trigger
 incurs no extra decode. The registry therefore lives on `PxLearner` (set
 via a setter at group construction) so the trigger fires from one hook
 point with no cross-struct lookup.
@@ -282,15 +282,15 @@ impl WatchRegistry {
   `registry.has_watchers()` (one `Acquire` load of an `AtomicBool`)
   before decoding or matching. When no watchers are registered (the
   common case in tests and non-diskdb clusters), the cost is one
-  predicted-not-taken branch. This is cheaper than a trie-emptiness
-  scan and is the true zero-overhead gate. `has_watchers` is set to
-  `true` on the first `subscribe` and recomputed on `unsubscribe` /
-  `remove_all` / `clear`.
+  predicted-not-taken branch, cheaper than a trie-emptiness scan and
+  the true zero-overhead gate. `has_watchers` is set to `true` on the
+  first `subscribe` and recomputed on `unsubscribe` / `remove_all` /
+  `clear`.
 - **Trie-based prefix index** — `WatchRegistry` is backed by a
   byte-level prefix trie (`PrefixTrie`) instead of a
   `DashMap<Vec<u8>, Vec<(u64, Watcher)>>`. `emit` walks each changed
   key through the trie once (`O(key_len)` per key), collecting
-  watchers at every node whose prefix matches — reducing the per-apply
+  watchers at every node whose prefix matches, reducing the per-apply
   cost from `O(watchers × keys)` to `O(key_len × keys)`. No mature
   crate provided the exact "find all registered prefixes that are a
   prefix of this key" API, so a hand-rolled trie was the natural
@@ -355,17 +355,17 @@ if let Some((group_id, registry)) = self.watch_registry.read().unwrap().as_ref()
 - **Fires on ALL apply paths** — `apply_entry` is called from `learn`
   (sync), `spawn_learn_chosen` (async), and `apply_loop_task`
   (catch-up). All three paths trigger the hook, covering leader
-  proposals, follower learn, heartbeat catch-up, and gap-fill repair.
-  This is the etcd model.
+  proposals, follower learn, heartbeat catch-up, and gap-fill repair:
+  the etcd model.
 - **Followers don't emit** — followers also call `apply_entry`, but
   their `WatchRegistry` is empty (cleared on step-down, or never
   populated if they were never leader). `has_watchers()` returns false
   → no emit. Only the leader (which holds the client streams) emits.
-  No explicit leader check needed in the hook — the registry's
-  emptiness is the gate.
+  The registry's emptiness is the gate, so no explicit leader check is
+  needed in the hook.
 - **Re-wire on group rebuild** — without the `RwLock<Option<...>>`
   (vs `OnceLock`), subscribes would go to the new registry while
-  `emit` fired on the old (orphaned) registry — notifies never reached
+  `emit` fired on the old (orphaned) registry, and notifies never reached
   the client. `inherit_local_state_from` calls `set_watch_registry`
   after constructing the inherited replica.
 
@@ -418,7 +418,7 @@ notify on the proposal path:
 The apply-path hook covers all three with one code point. The cost is
 that `apply_entry` runs on followers too (where the registry is empty),
 but the `has_watchers()` atomic check makes this a single predicted-
-not-taken branch — zero overhead.
+not-taken branch, zero overhead.
 
 ## 3. Coalescing (deferred)
 
@@ -427,7 +427,7 @@ via `batch_write`) generate one notify per write. A debounce window
 would coalesce writes to the same prefix into one notify, reducing
 watcher wakeup + re-read amplification under burst load.
 
-The watch/notify extension ships without coalescing — `apply_entry`
+The watch/notify extension ships without coalescing. `apply_entry`
 calls `registry.emit` directly (one notify per changed key per matching
 prefix). Coalescing is deferred to a follow-up requirement (see
 `doc/backlog/backlog.md` — watch/notify coalescing / debounce). The
@@ -440,8 +440,8 @@ coalescing is a load optimization, not a correctness gap.
 
 diskdb (and future clients) need a reusable client that opens the
 `WatchNotify` stream to the group leader, subscribes to prefixes,
-and delivers notify frames via a channel. This is the client-side
-mirror of §1's server handler.
+and delivers notify frames via a channel: the client-side mirror of
+§1's server handler.
 
 ### 4.2 WatchNotifyClient
 
@@ -522,7 +522,7 @@ f. `WatchSubscription::drop` sends `WatchUnsubscribe` (if the stream
   `LearnerStream`'s reconnect policy (`design-crow-kv-rpc.md` §6).
 - **Proactive topology refresh on reconnect** — the reader loop calls
   `topology.refresh()` unconditionally at the top of every (re)connect
-  iteration, before looking up the leader endpoint — instead of only
+  iteration, before looking up the leader endpoint, instead of only
   refreshing when the cached leader was `None`. This avoids connecting
   to a stale leader cached before a leader change that happened during
   the disconnect gap. The reactive `not_leader_hint` path is kept as a
@@ -657,8 +657,8 @@ e. On `stop.notified()`, drop all subscriptions (which closes the
   re-scans and filters to this instance. An irrelevant change (another
   instance's ownership) causes a cheap no-op re-scan. Per-node prefixes
   would be more selective but require knowing `rack_id`/`node_id`
-  before the first sync — the diskdb discovers its node identity from
-  the ownership map, not from config. Global prefixes avoid this
+  before the first sync. The diskdb discovers its node identity from
+  the ownership map, not from config, so global prefixes avoid this
   bootstrapping dependency.
 - **Not a `BackgroundTask`** — `NotifyHandler` is a long-lived task
   with its own `run` method, not a `BgRunner` cycle task. It is spawned

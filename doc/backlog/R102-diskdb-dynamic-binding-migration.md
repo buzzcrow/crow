@@ -58,10 +58,6 @@ shared between disk-group bind change and disk move.
 - `doc/backlog/R99-kv-dynamic-range-binding-framework.md` — common
   binding framework (`RangeBindingClient`, binding monitor,
   reject-and-retry protocol).
-- aioss analog: aioss uses manual metadb partition binding (operator
-  assigns chunks to metadb partitions); CROW adds a safe migration
-  flow + binding client/enforcement + imbalance warnings (R102),
-  with rebinding operator-triggered (not auto-rebalanced).
 
 ### Use scenarios
 
