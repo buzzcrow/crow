@@ -264,7 +264,24 @@ void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buff
     if (frame == nullptr) {
         return;
     }
-    // Control fields are extracted during parse — no control buffer.
+    // Control: raw bytes from frame->control (flatbuffer). Wrap in a
+    // malloc'd Buffer with ref == nullptr so crow_rpc_buffer_release frees
+    // the data + Buffer directly (no pool recycle).
+    if (!frame->control.empty()) {
+        auto *buf  = new Buffer;
+        buf->data  = static_cast<uint8_t *>(std::malloc(frame->control.size()));
+        if (buf->data != nullptr) {
+            std::memcpy(buf->data, frame->control.data(), frame->control.size());
+            buf->len      = static_cast<uint32_t>(frame->control.size());
+            buf->capacity = buf->len;
+            buf->ref      = nullptr;
+            buf->pool     = nullptr;
+            *out_ctrl     = new crow_rpc_buffer_s{buf};
+        }
+        else {
+            delete buf;
+        }
+    }
     // Data is a pool Buffer — ref_clone so the frame's release doesn't free.
     *out_data = wrap_pool_buffer(frame->data_buf);
     delete frame;

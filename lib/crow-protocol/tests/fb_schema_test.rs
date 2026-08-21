@@ -104,6 +104,8 @@ fn disk_write_request_round_trip() {
     let req = FBDiskWriteRequest::create(
         &mut fbb,
         &FBDiskWriteRequestArgs {
+            id: 1001,
+            rpc_create_nano: 0,
             disk_id: Some(&disk_id),
             zone_index: 2,
             zone_offset: 4096,
@@ -116,6 +118,7 @@ fn disk_write_request_round_trip() {
     let parsed_id = parsed.disk_id().expect("disk_id present");
     assert_eq!(parsed_id.high(), 0xAABB);
     assert_eq!(parsed_id.low(), 0xCCDD);
+    assert_eq!(parsed.id(), 1001);
     assert_eq!(parsed.zone_index(), 2);
     assert_eq!(parsed.zone_offset(), 4096);
     assert_eq!(parsed.size(), 4096);
@@ -131,6 +134,8 @@ fn disk_read_request_round_trip() {
     let req = FBDiskReadRequest::create(
         &mut fbb,
         &FBDiskReadRequestArgs {
+            id: 2002,
+            rpc_create_nano: 0,
             disk_id: Some(&disk_id),
             zone_index: 5,
             zone_offset: 8192,
@@ -144,6 +149,7 @@ fn disk_read_request_round_trip() {
     let parsed_id = parsed.disk_id().expect("disk_id present");
     assert_eq!(parsed_id.high(), 1);
     assert_eq!(parsed_id.low(), 2);
+    assert_eq!(parsed.id(), 2002);
     assert_eq!(parsed.zone_index(), 5);
     assert_eq!(parsed.zone_offset(), 8192);
     assert_eq!(parsed.size(), 2048);
@@ -160,6 +166,8 @@ fn disk_fsync_request_round_trip() {
     let req = FBDiskFsyncRequest::create(
         &mut fbb,
         &FBDiskFsyncRequestArgs {
+            id: 3003,
+            rpc_create_nano: 0,
             disk_id: Some(&disk_id),
         },
     );
@@ -169,4 +177,5 @@ fn disk_fsync_request_round_trip() {
     let parsed_id = parsed.disk_id().expect("disk_id present");
     assert_eq!(parsed_id.high(), 99);
     assert_eq!(parsed_id.low(), 100);
+    assert_eq!(parsed.id(), 3003);
 }
