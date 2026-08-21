@@ -763,6 +763,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crow-diskio-client"
+version = "0.1.0"
+dependencies = [
+ "crow-protocol",
+ "crow-rpc-ffi",
+ "flatbuffers",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "crow-kv"
 version = "0.1.0"
 dependencies = [

@@ -101,6 +101,25 @@ void crow_rpc_buffer_release(crow_rpc_buffer_t buf)
     delete buf;
 }
 
+crow_rpc_buffer_t crow_rpc_buffer_create(const uint8_t *data, uint32_t len)
+{
+    if (data == nullptr || len == 0) {
+        return nullptr;
+    }
+    auto *buf  = new crow::rpc::Buffer;
+    buf->data  = static_cast<uint8_t *>(std::malloc(len));
+    if (buf->data == nullptr) {
+        delete buf;
+        return nullptr;
+    }
+    std::memcpy(buf->data, data, len);
+    buf->len      = len;
+    buf->capacity = len;
+    buf->ref      = nullptr;
+    buf->pool     = nullptr;
+    return new crow_rpc_buffer_s{buf};
+}
+
 // ── Pool ──────────────────────────────────────────────────────────
 
 crow_rpc_pool_t crow_rpc_pool_create(uint32_t max_buffers)

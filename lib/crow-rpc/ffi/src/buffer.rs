@@ -64,6 +64,23 @@ impl Buffer {
     pub fn from_raw(handle: sys::crow_rpc_buffer_t) -> Self {
         Buffer { handle }
     }
+
+    /// Create a standalone buffer (not pool-allocated) from raw bytes.
+    /// The buffer owns a malloc'd copy; Drop releases it.
+    pub fn from_bytes(data: &[u8]) -> Self {
+        let handle = unsafe { sys::crow_rpc_buffer_create(data.as_ptr(), data.len() as u32) };
+        Buffer { handle }
+    }
+
+    /// Create a standalone buffer from a Vec (copies into malloc'd memory).
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        Self::from_bytes(&data)
+    }
+
+    /// Read-only access to the buffer's data as a byte slice.
+    pub fn as_slice(&self) -> &[u8] {
+        self.bytes()
+    }
 }
 
 impl Drop for Buffer {

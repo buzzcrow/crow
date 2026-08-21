@@ -40,6 +40,10 @@ const uint8_t    *crow_rpc_buffer_data(crow_rpc_buffer_t buf);
 uint32_t          crow_rpc_buffer_len(crow_rpc_buffer_t buf);
 crow_rpc_buffer_t crow_rpc_buffer_ref(crow_rpc_buffer_t buf);
 void              crow_rpc_buffer_release(crow_rpc_buffer_t buf);
+// Create a standalone buffer (not pool-allocated) from raw bytes. The
+// buffer owns a malloc'd copy of the data; release frees it. Used by
+// client-side code to build control messages without a pool reference.
+crow_rpc_buffer_t crow_rpc_buffer_create(const uint8_t *data, uint32_t len);
 
 // ── Pool ──────────────────────────────────────────────────────────
 crow_rpc_pool_t crow_rpc_pool_create(uint32_t max_buffers);

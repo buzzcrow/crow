@@ -113,6 +113,7 @@ extern "C" {
     pub fn crow_rpc_buffer_len(buf: crow_rpc_buffer_t) -> u32;
     pub fn crow_rpc_buffer_ref(buf: crow_rpc_buffer_t) -> crow_rpc_buffer_t;
     pub fn crow_rpc_buffer_release(buf: crow_rpc_buffer_t);
+    pub fn crow_rpc_buffer_create(data: *const u8, len: u32) -> crow_rpc_buffer_t;
 
     pub fn crow_rpc_pool_create(max_buffers: u32) -> crow_rpc_pool_t;
     pub fn crow_rpc_pool_destroy(pool: crow_rpc_pool_t);
