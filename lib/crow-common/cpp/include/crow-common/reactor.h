@@ -136,6 +136,10 @@ class Reactor
     // Hybrid: consecutive empty busy-poll iterations counter (run() thread only).
     unsigned busy_poll_count_ = 0;
 
+    // Batched submission: set by submit_locked() when a SQE is queued,
+    // checked and cleared by run() to batch io_uring_submit() calls.
+    std::atomic<bool> pending_submit_{false};
+
     std::mutex                                             mu_; // guards ring_ SQ-side + callbacks_
     std::unordered_map<uint64_t, std::function<void(int)>> callbacks_;
     uint64_t                                               next_op_id_ = 1;

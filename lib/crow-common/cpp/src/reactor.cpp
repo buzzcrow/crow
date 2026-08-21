@@ -88,6 +88,7 @@ uint64_t Reactor::submit_locked(std::function<void(int)> on_complete, const Prep
         std::lock_guard<std::mutex> lk(mu_);
         struct io_uring_sqe        *sqe = ::io_uring_get_sqe(&ring_);
         for (int attempt = 0; sqe == nullptr && attempt < 4; ++attempt) {
+            // SQ full: submit to flush pending SQEs and free slots.
             ::io_uring_submit(&ring_);
             sqe = ::io_uring_get_sqe(&ring_);
         }
@@ -96,7 +97,9 @@ uint64_t Reactor::submit_locked(std::function<void(int)> on_complete, const Prep
             prep(sqe);
             ::io_uring_sqe_set_data64(sqe, op_id);
             callbacks_.emplace(op_id, std::move(on_complete));
-            ::io_uring_submit(&ring_);
+            // Deferred submit: set flag so run() batches io_uring_submit()
+            // for all queued SQEs in one syscall.
+            pending_submit_.store(true, std::memory_order_release);
             ok = true;
         }
     }
@@ -188,6 +191,12 @@ void Reactor::run()
         return;
     }
     while (!stopped_.load(std::memory_order_acquire)) {
+        // Batched submission: flush all pending SQEs in one io_uring_submit()
+        // call at the top of each iteration, instead of per-SQE in submit_locked().
+        if (pending_submit_.exchange(false, std::memory_order_acq_rel)) {
+            ::io_uring_submit(&ring_);
+        }
+
         struct io_uring_cqe *cqe            = nullptr;
         bool                 dispatched_any = false;
 
