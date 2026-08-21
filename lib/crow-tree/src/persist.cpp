@@ -835,7 +835,7 @@ void Crowtree::snapshot_async(
         on_done(Status::invalid_argument("snapshot: no page_store"), 0);
         return;
     }
-#ifdef CROW_TREE_HAVE_LIBURING
+#ifdef CROW_HAVE_LIBURING
     if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
         acquire_snapshot_slot();
         auto   prepared = std::make_shared<PreparedSnapshot>();
@@ -864,9 +864,9 @@ void Crowtree::snapshot_write_next_async(                      // NOLINT(readabi
     std::shared_ptr<PreparedSnapshot> prepared,                // NOLINT(performance-unnecessary-value-param)
     size_t idx, std::function<void(Status, uint64_t)> on_done) // NOLINT(performance-unnecessary-value-param)
 {
-#ifndef CROW_TREE_HAVE_LIBURING
+#ifndef CROW_HAVE_LIBURING
     // Unreachable: snapshot_async()'s only call site for this helper is
-    // itself #ifdef CROW_TREE_HAVE_LIBURING-gated. Kept defined (rather than
+    // itself #ifdef CROW_HAVE_LIBURING-gated. Kept defined (rather than
     // #ifdef-ing the whole function out) so the declaration in crow-tree.h
     // stays unconditional, matching get_async_attempt's style.
     (void)prepared;

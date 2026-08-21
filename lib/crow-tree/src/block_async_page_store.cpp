@@ -1,9 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#include "crow-common/reactor.h"
 #include "crow-tree/async_page_store.h"
 #include "crow-tree/block_page_store.h"
-#include "crow-tree/reactor.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -82,7 +82,9 @@ class AlignedIoBuf
 
 // ── BlockAsyncPageStore ───────────────────────────────────────────
 
-BlockAsyncPageStore::BlockAsyncPageStore(BlockPageStore *store, Reactor *reactor) : store_(store), reactor_(reactor)
+BlockAsyncPageStore::BlockAsyncPageStore(BlockPageStore *store, ::crow::common::Reactor *reactor)
+    : store_(store),
+      reactor_(reactor)
 {
 }
 

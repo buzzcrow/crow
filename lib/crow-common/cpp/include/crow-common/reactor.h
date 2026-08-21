@@ -2,20 +2,17 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Reactor: a dedicated io_uring event-loop thread that submits read/write/
-// fsync SQEs and dispatches CQE completions to per-op callbacks. One
-// instance per `Crowtree`; it runs no
+// fsync SQEs and dispatches CQE completions to per-op callbacks. It runs no
 // application logic of its own -- only kernel I/O completion dispatch.
 //
 // Linux-only (io_uring is a Linux kernel interface): this header is guarded
-// by CROW_TREE_HAVE_LIBURING, which crow-tree/CMakeLists.txt defines only
-// when liburing was found (never on macOS). Nothing in the rest of crow-tree
-// includes this header yet -- Phase 1 is fully additive;
-// a later phase wires it into resident()/flush()/snapshot() via
-// AsyncPageStore (async_page_store.h).
+// by CROW_HAVE_LIBURING, which crow-common/cpp/CMakeLists.txt defines only
+// when liburing was found (never on macOS). Shared by the crow-tree btree
+// page store and the diskio engine.
 #pragma once
 
-#ifndef CROW_TREE_HAVE_LIBURING
-#    error "crow-tree/reactor.h requires CROW_TREE_HAVE_LIBURING (liburing not found by CMake; io_uring is Linux-only)"
+#ifndef CROW_HAVE_LIBURING
+#    error "crow-common/reactor.h requires CROW_HAVE_LIBURING (liburing not found by CMake; io_uring is Linux-only)"
 #endif
 
 #include <liburing.h>
@@ -27,7 +24,7 @@
 #include <thread>
 #include <unordered_map>
 
-namespace crow::tree
+namespace crow::common
 {
 
 // Submits read/write/fsync SQEs on a shared io_uring instance and dispatches
@@ -101,4 +98,4 @@ class Reactor
     uint64_t                                               next_op_id_ = 1;
 };
 
-} // namespace crow::tree
+} // namespace crow::common

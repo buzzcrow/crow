@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-tree/reactor.h"
+#include "crow-common/reactor.h"
 
 #include "crow-common/log.h"
 
@@ -12,7 +12,7 @@
 #include <cstring>
 #include <utility>
 
-namespace crow::tree
+namespace crow::common
 {
 
 Reactor::Reactor(unsigned ring_entries)
@@ -109,7 +109,7 @@ void Reactor::cancel(uint64_t op_id)
 
 void Reactor::run()
 {
-    crow::common::set_current_thread_name("ct-reactor");
+    crow::common::set_current_thread_name("cr-reactor");
     if (!valid_) {
         return;
     }
@@ -155,4 +155,4 @@ void Reactor::run()
     }
 }
 
-} // namespace crow::tree
+} // namespace crow::common

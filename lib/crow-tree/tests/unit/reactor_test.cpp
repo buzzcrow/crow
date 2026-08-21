@@ -3,10 +3,10 @@
 
 // plan-tree #11: Reactor (io_uring event loop) + BlockAsyncPageStore.
 // Only built when CMake found liburing (see CMakeLists.txt's
-// CROW_TREE_HAVE_LIBURING gate) -- io_uring is Linux-only.
+// CROW_HAVE_LIBURING gate) -- io_uring is Linux-only.
+#include "crow-common/reactor.h"
 #include "crow-tree/async_page_store.h"
 #include "crow-tree/block_page_store.h"
-#include "crow-tree/reactor.h"
 #include "test_tmp.h"
 
 #include <fcntl.h>
@@ -24,6 +24,7 @@
 #include <vector>
 
 using namespace crow::tree;
+using crow::common::Reactor;
 
 namespace
 {

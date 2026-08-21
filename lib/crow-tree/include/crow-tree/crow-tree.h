@@ -42,8 +42,8 @@ using crow::common::metrics::Gauge;
 using crow::common::metrics::LatencySummary;
 using crow::common::metrics::MetricsRegistry;
 
-#ifdef CROW_TREE_HAVE_LIBURING
-class Reactor;
+#ifdef CROW_HAVE_LIBURING
+using crow::common::Reactor;
 class AsyncPageStore;
 #endif
 

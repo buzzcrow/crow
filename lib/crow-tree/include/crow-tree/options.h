@@ -7,6 +7,10 @@
 
 #include "crow-tree/compressor.h"
 
+#ifdef CROW_HAVE_LIBURING
+#    include "crow-common/reactor.h"
+#endif
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -15,8 +19,7 @@ namespace crow::tree
 {
 
 class PageStore;
-#ifdef CROW_TREE_HAVE_LIBURING
-class Reactor;
+#ifdef CROW_HAVE_LIBURING
 class AsyncPageStore;
 #endif
 
@@ -103,7 +106,7 @@ struct Options
     // state and open() recovers it.
     PageStore *page_store = nullptr;
 
-#ifdef CROW_TREE_HAVE_LIBURING
+#ifdef CROW_HAVE_LIBURING
     // ── Async I/O ──
     // Both non-owning; the caller (c_api.cpp's ct_open) owns and outlives
     // the Crowtree. Either left null (e.g. a MemPageStore-backed tree, or
@@ -114,8 +117,8 @@ struct Options
     // (see Crowtree::get_async's doc comment). One Reactor per Crowtree
     // instance; async_page_store must be backed by the
     // *same* durable store as `page_store` (see BlockAsyncPageStore).
-    Reactor        *async_reactor    = nullptr;
-    AsyncPageStore *async_page_store = nullptr;
+    ::crow::common::Reactor *async_reactor    = nullptr;
+    AsyncPageStore          *async_page_store = nullptr;
 #endif
 
     // ── Buffer pool ──

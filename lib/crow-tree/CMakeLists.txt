@@ -20,16 +20,16 @@ if(CROW_TREE_SANITIZER)
   add_link_options(-fsanitize=${CROW_TREE_SANITIZER})
 endif()
 
-# ── liburing (io_uring reactor, plan-tree #11 Phase 0/1) ──────────
-# Linux-only kernel interface -- no macOS build exists, so Reactor /
-# AsyncPageStore / BlockAsyncPageStore are excluded from the build entirely
-# (not compiled to no-ops) when not found, matching
-# design-crow-tree-async.md §10's macOS dev-path note. Probed before the
-# source glob below so the exclusion list can be applied pre-add_library.
+# ── liburing (io_uring reactor) ────────────────────────────────────
+# The reactor now lives in crow-common; crow-tree gets liburing
+# transitively via the crowcommon PUBLIC link (CROW_HAVE_LIBURING
+# compile definition + liburing library). We still need to probe
+# liburing here to decide whether to compile block_async_page_store.cpp
+# (which uses the reactor directly).
 find_path(LIBURING_INCLUDE_DIR liburing.h)
 find_library(LIBURING_LIB NAMES uring)
 
-# ── crow-common (shared utils: crc32c, log, gzip, metrics) ────────
+# ── crow-common (shared utils: crc32c, log, gzip, metrics, reactor) ──
 # Built in-tree via add_subdirectory so a single `cmake -S crow-tree`
 # invocation produces both libcrowcommon.a and libcrow-tree.a. crow-tree
 # links crowcommon PUBLIC because its public headers (frame_page.h,
@@ -40,7 +40,6 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../crow-common/cpp crow-common-buil
 file(GLOB_RECURSE CROW_TREE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROW_TREE_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/reactor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/block_async_page_store.cpp
   )
 endif()
@@ -48,15 +47,6 @@ add_library(crow-tree STATIC ${CROW_TREE_SRC})
 target_include_directories(crow-tree PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(Threads REQUIRED)
 target_link_libraries(crow-tree PUBLIC Threads::Threads crowcommon)
-
-if(LIBURING_INCLUDE_DIR AND LIBURING_LIB)
-  message(STATUS "crow-tree liburing: ${LIBURING_LIB} (${LIBURING_INCLUDE_DIR})")
-  target_include_directories(crow-tree SYSTEM PRIVATE ${LIBURING_INCLUDE_DIR})
-  target_compile_definitions(crow-tree PUBLIC CROW_TREE_HAVE_LIBURING=1)
-  target_link_libraries(crow-tree PUBLIC ${LIBURING_LIB})
-else()
-  message(STATUS "crow-tree liburing: not found (io_uring reactor disabled)")
-endif()
 
 # ── Abseil (MemTable ordered map: absl::btree_map, plan-tree #9) ───
 find_package(absl REQUIRED)

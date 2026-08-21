@@ -12,12 +12,32 @@ endif()
 
 add_compile_options(-Wall -Wextra -Werror)
 
+# ── liburing (io_uring reactor, shared by crow-tree and diskio) ────
+# Linux-only kernel interface -- no macOS build exists, so Reactor is
+# excluded from the build entirely (not compiled to a no-op) when not
+# found. Probed before the source glob below so the exclusion list can
+# be applied pre-add_library.
+find_path(LIBURING_INCLUDE_DIR liburing.h)
+find_library(LIBURING_LIB NAMES uring)
+
 # ── Library ───────────────────────────────────────────────────────
 file(GLOB_RECURSE CROWCOMMON_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
+  list(REMOVE_ITEM CROWCOMMON_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/reactor.cpp)
+endif()
 add_library(crowcommon STATIC ${CROWCOMMON_SRC})
 target_include_directories(crowcommon PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(Threads REQUIRED)
 target_link_libraries(crowcommon PUBLIC Threads::Threads)
+
+if(LIBURING_INCLUDE_DIR AND LIBURING_LIB)
+  message(STATUS "crow-common liburing: ${LIBURING_LIB} (${LIBURING_INCLUDE_DIR})")
+  target_include_directories(crowcommon SYSTEM PRIVATE ${LIBURING_INCLUDE_DIR})
+  target_compile_definitions(crowcommon PUBLIC CROW_HAVE_LIBURING=1)
+  target_link_libraries(crowcommon PUBLIC ${LIBURING_LIB})
+else()
+  message(STATUS "crow-common liburing: not found (io_uring reactor disabled)")
+endif()
 
 # ── spdlog logging ────────────────────────────────────────────────
 # Gated behind CROW_HAVE_SPDLOG (PUBLIC so includers of log.h see the

@@ -15,6 +15,10 @@
 #include "crow-tree/buffer_pool.h" // PageAddr
 #include "crow-tree/status.h"
 
+#ifdef CROW_HAVE_LIBURING
+#    include "crow-common/reactor.h"
+#endif
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -22,8 +26,6 @@
 
 namespace crow::tree
 {
-
-class Reactor;
 
 class AsyncPageStore
 {
@@ -62,7 +64,7 @@ class BlockAsyncPageStore : public AsyncPageStore
 
     // `store` and `reactor` are both non-owning; caller must keep them alive
     // for at least as long as this object.
-    BlockAsyncPageStore(BlockPageStore *store, Reactor *reactor);
+    BlockAsyncPageStore(BlockPageStore *store, ::crow::common::Reactor *reactor);
 
     uint64_t submit_read(PageAddr addr, void *buf, size_t len, std::function<void(Status)> on_complete) override;
     uint64_t submit_write(PageAddr addr, const void *buf, size_t len, std::function<void(Status)> on_complete) override;
@@ -70,8 +72,8 @@ class BlockAsyncPageStore : public AsyncPageStore
     void     cancel(uint64_t op_id) override;
 
   private:
-    BlockPageStore *store_;
-    Reactor        *reactor_;
+    BlockPageStore          *store_;
+    ::crow::common::Reactor *reactor_;
 };
 
 } // namespace crow::tree
