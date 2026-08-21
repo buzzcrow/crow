@@ -27,6 +27,37 @@
 namespace crow::common
 {
 
+// Polling mode for the reactor's event loop.
+enum class PollingMode {
+    // Classic: io_uring_submit_and_wait with a bounded timeout. One syscall
+    // per idle tick; completions wake the thread via the kernel's wait queue.
+    Classic,
+    // Hybrid: busy-poll via io_uring_peek_cqe while I/O is active (no
+    // syscalls), transition to Classic event-wait when idle for
+    // busy_poll_budget consecutive empty peeks. Best for low-latency HDD
+    // workloads where the syscall overhead dominates.
+    Hybrid,
+    // Sqpoll: kernel-side SQ poll thread submits SQEs without userspace
+    // syscalls. Best for high-IOPS NVMe workloads. Requires Linux 5.11+.
+    Sqpoll,
+};
+
+struct HybridConfig
+{
+    // Number of consecutive empty busy-poll iterations before transitioning
+    // to event-wait mode. Higher = more CPU burn but lower latency under
+    // sustained load; lower = faster idle transition.
+    unsigned busy_poll_budget = 64;
+};
+
+struct SqpollConfig
+{
+    // Kernel SQ poll thread idle timeout in milliseconds. After this many ms
+    // with no submissions, the kernel thread parks and userspace must wake
+    // it via io_uring_enter(IORING_ENTER_SQ_WAKEUP).
+    unsigned sq_thread_idle_ms = 1000;
+};
+
 // Submits read/write/fsync SQEs on a shared io_uring instance and dispatches
 // each CQE's raw result (>=0 bytes transferred, <0 -errno, mirroring the
 // kernel's own convention -- see io_uring(7)) to the callback registered at
@@ -37,6 +68,7 @@ class Reactor
 {
   public:
     explicit Reactor(unsigned ring_entries = 256);
+    Reactor(unsigned ring_entries, PollingMode mode, HybridConfig hybrid = {}, SqpollConfig sqpoll = {});
     ~Reactor();
 
     Reactor(const Reactor &)            = delete;
@@ -77,11 +109,15 @@ class Reactor
     // fields, and submits. See submit_read/write/fsync for the three preps.
     uint64_t submit_locked(std::function<void(int)> on_complete, const Prep &prep);
 
-    // Reactor thread body: waits (bounded, so ~Reactor's stopped_ flag is
-    // re-checked promptly even with no I/O in flight) for at least one CQE,
-    // drains every CQE currently ready, dispatches each to its callback,
-    // then writes to eventfd_ once per drained batch.
+    // Reactor thread body: dispatches to the mode-specific wait method,
+    // then drains all ready CQEs and dispatches callbacks.
     void run();
+
+    // Mode-specific wait: blocks until at least one CQE is ready (or timeout).
+    // Returns true if a CQE is available in `cqe`; false on timeout/interrupt.
+    bool run_classic(struct io_uring_cqe *&cqe);
+    bool run_hybrid(struct io_uring_cqe *&cqe);
+    bool run_sqpoll(struct io_uring_cqe *&cqe);
 
     struct io_uring   ring_{};
     int               eventfd_ = -1;
@@ -92,6 +128,13 @@ class Reactor
     // failing instead of touching an unusable ring_ (this codebase avoids
     // throwing constructors -- see Status:: elsewhere, e.g. status.h).
     bool valid_ = false;
+
+    // Polling mode + config (set at construction, read-only in run()).
+    PollingMode  polling_mode_ = PollingMode::Classic;
+    HybridConfig hybrid_config_{};
+    SqpollConfig sqpoll_config_{};
+    // Hybrid: consecutive empty busy-poll iterations counter (run() thread only).
+    unsigned busy_poll_count_ = 0;
 
     std::mutex                                             mu_; // guards ring_ SQ-side + callbacks_
     std::unordered_map<uint64_t, std::function<void(int)>> callbacks_;

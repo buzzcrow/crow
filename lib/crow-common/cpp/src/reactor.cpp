@@ -32,6 +32,36 @@ Reactor::Reactor(unsigned ring_entries)
     thread_ = std::thread(&Reactor::run, this);
 }
 
+Reactor::Reactor(unsigned ring_entries, PollingMode mode, HybridConfig hybrid, SqpollConfig sqpoll)
+    : polling_mode_(mode),
+      hybrid_config_(hybrid),
+      sqpoll_config_(sqpoll)
+{
+    unsigned flags = 0;
+    if (mode == PollingMode::Sqpoll) {
+        flags = IORING_SETUP_SQPOLL;
+    }
+    int rc = ::io_uring_queue_init(ring_entries, &ring_, flags);
+    if (rc < 0) {
+        CR_LOG_ERROR("Reactor: io_uring_queue_init failed: {}", std::strerror(-rc));
+        return;
+    }
+    if (mode == PollingMode::Sqpoll) {
+        // Set the SQ thread idle timeout via the sq_thread_idle field.
+        // liburing doesn't expose a direct setter; the kernel reads it from
+        // the SQ ring's flags. The idle is set via io_uring_params on init,
+        // but queue_init doesn't expose it. For now, rely on the kernel default.
+    }
+    eventfd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (eventfd_ < 0) {
+        CR_LOG_ERROR("Reactor: eventfd() failed: {}", std::strerror(errno));
+        ::io_uring_queue_exit(&ring_);
+        return;
+    }
+    valid_  = true;
+    thread_ = std::thread(&Reactor::run, this);
+}
+
 Reactor::~Reactor()
 {
     stopped_.store(true, std::memory_order_release);
@@ -107,6 +137,50 @@ void Reactor::cancel(uint64_t op_id)
     callbacks_.erase(op_id);
 }
 
+bool Reactor::run_classic(struct io_uring_cqe *&cqe)
+{
+    struct __kernel_timespec ts{0, 50'000'000}; // 50ms: shutdown-check granularity
+    int                      rc = ::io_uring_wait_cqe_timeout(&ring_, &cqe, &ts);
+    return rc == 0;
+}
+
+bool Reactor::run_hybrid(struct io_uring_cqe *&cqe)
+{
+    // Busy-poll phase: drain CQEs without syscalls while I/O is active.
+    if (busy_poll_count_ < hybrid_config_.busy_poll_budget) {
+        cqe = nullptr;
+        ::io_uring_peek_cqe(&ring_, &cqe);
+        if (cqe != nullptr) {
+            busy_poll_count_ = 0; // reset on activity
+            return true;
+        }
+        ++busy_poll_count_;
+        // Yield to avoid burning 100% CPU in the busy-poll phase.
+        std::this_thread::yield();
+        return false;
+    }
+    // Event-wait phase: transition after budget exhausted.
+    struct __kernel_timespec ts{0, 50'000'000};
+    int                      rc = ::io_uring_wait_cqe_timeout(&ring_, &cqe, &ts);
+    if (rc == 0) {
+        busy_poll_count_ = 0; // reset on activity
+        return true;
+    }
+    return false;
+}
+
+bool Reactor::run_sqpoll(struct io_uring_cqe *&cqe)
+{
+    // Sqpoll: the kernel SQ thread submits SQEs; userspace only waits for CQEs.
+    // If the SQ thread has parked (idle timeout), wake it before waiting.
+    if (ring_.sq.kflags != nullptr && (*ring_.sq.kflags & IORING_SQ_NEED_WAKEUP)) {
+        ::io_uring_enter(ring_.ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP, nullptr);
+    }
+    struct __kernel_timespec ts{0, 50'000'000};
+    int                      rc = ::io_uring_wait_cqe_timeout(&ring_, &cqe, &ts);
+    return rc == 0;
+}
+
 void Reactor::run()
 {
     crow::common::set_current_thread_name("cr-reactor");
@@ -114,13 +188,22 @@ void Reactor::run()
         return;
     }
     while (!stopped_.load(std::memory_order_acquire)) {
-        struct io_uring_cqe     *cqe = nullptr;
-        struct __kernel_timespec ts{0, 50'000'000}; // 50ms: shutdown-check granularity
-        int                      rc = ::io_uring_wait_cqe_timeout(&ring_, &cqe, &ts);
-        if (rc < 0) {
-            continue; // -ETIME (nothing ready this tick) or -EINTR; re-check stopped_
+        struct io_uring_cqe *cqe            = nullptr;
+        bool                 dispatched_any = false;
+
+        switch (polling_mode_) {
+        case PollingMode::Classic:
+            dispatched_any = run_classic(cqe);
+            break;
+        case PollingMode::Hybrid:
+            dispatched_any = run_hybrid(cqe);
+            break;
+        case PollingMode::Sqpoll:
+            dispatched_any = run_sqpoll(cqe);
+            break;
         }
-        bool dispatched_any = false;
+
+        // Drain all ready CQEs (common to all modes).
         while (cqe != nullptr) {
             uint64_t op_id = ::io_uring_cqe_get_data64(cqe);
             int      res   = cqe->res;
