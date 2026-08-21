@@ -74,6 +74,11 @@ endif()
 if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
   list(REMOVE_ITEM CROW_RPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/transport/kqueue/kqueue_engine.cpp)
 endif()
+# ── crow-common (shared utils: crc32c, log, gzip, metrics) ────────
+# Built in-tree via add_subdirectory so crow-rpc can link
+# MetricsRegistry::global() and other crow-common symbols.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../crow-common/cpp crow-common-build)
+
 add_library(crow-rpc STATIC ${CROW_RPC_SRC})
 target_include_directories(crow-rpc
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -81,7 +86,7 @@ target_include_directories(crow-rpc
   PRIVATE ${CROW_RPC_PROTO_GEN_DIR}
 )
 find_package(Threads REQUIRED)
-target_link_libraries(crow-rpc PUBLIC Threads::Threads)
+target_link_libraries(crow-rpc PUBLIC Threads::Threads crowcommon)
 
 # flatbuffers C++ runtime headers (header-only, no link needed).
 find_path(FLATBUFFERS_INCLUDE_DIR flatbuffers/flatbuffers.h)

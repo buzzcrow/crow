@@ -25,7 +25,9 @@ pub use histogram::{HistogramSnapshot, LatencyHistogram};
 pub use name::MetricName;
 pub use point::MetricPoint;
 pub use precise::PreciseHistogram;
-pub use registry::MetricsRegistry;
+pub use registry::{
+    global, global_bandwidth, global_counter, global_gauge, global_histogram, global_summary, MetricsRegistry,
+};
 pub use runner::MetricsRunner;
 pub use summary::{LatencySummary, SummarySnapshot};
 pub use system::{flush_system, SystemCollector, SystemMetrics};

@@ -269,4 +269,16 @@ extern "C" {
     pub fn ct_max_name_len(t: *const ct_tree) -> usize;
     pub fn ct_negotiate_widths(t: *const ct_tree, input: ct_column_widths, out: *mut ct_column_widths);
     pub fn ct_free_string(s: *mut c_char);
+
+    // ── C++ global metrics registry (crow-common) ────────────────
+    pub fn crow_common_metrics_global_flush(
+        window_secs: f64,
+        timestamp: *const c_char,
+        section_label: *const c_char,
+        width: usize,
+        count_w: usize,
+        tps_w: usize,
+    ) -> *mut c_char;
+    pub fn crow_common_metrics_global_max_name_len() -> usize;
+    pub fn crow_common_metrics_global_free(s: *mut c_char);
 }

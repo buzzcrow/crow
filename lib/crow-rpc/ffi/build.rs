@@ -39,6 +39,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sources = Vec::new();
     collect_cpp(&src, &mut sources)?;
 
+    // crow-common metrics + gzip sources. MetricsRegistry::global()
+    // and the C ABI flush function live in metrics/. metrics.cpp's
+    // check_rotate() calls gzip_compress_file(), so gzip.cpp is also
+    // needed (even though the file-based flush path is not used in
+    // production — the linker still needs the symbol).
+    let common_src = engine
+        .parent()
+        .ok_or("engine dir must have a parent lib dir")?
+        .join("crow-common")
+        .join("cpp")
+        .join("src");
+    collect_cpp(&common_src.join("metrics"), &mut sources)?;
+    sources.push(common_src.join("gzip.cpp"));
+
     // Exclude platform-specific engines that don't compile on this OS.
     let target = std::env::var("TARGET").unwrap_or_default();
     let is_linux = target.contains("linux");
@@ -120,10 +134,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         let cmake_dir = format!("{prefix}/lib/cmake/folly");
         if Path::new(&cmake_dir).exists() {
+            println!("cargo:rustc-link-search={prefix}/lib");
             println!("cargo:rustc-link-lib=folly");
             println!("cargo:rustc-link-lib=glog");
         }
     }
+
+    // zlib for gzip_compress_file (used by metrics check_rotate).
+    println!("cargo:rustc-link-lib=z");
 
     // Rerun if any source or header changes.
     for src in &sources {
