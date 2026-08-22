@@ -16,6 +16,7 @@
 #pragma once
 
 #include "crow-rpc/scheduled_executor.h"
+#include "dio_config.h"
 #include "disk/disk_set.h"
 #include "disk/types.h"
 
@@ -28,14 +29,16 @@ namespace crow::diskio
 
 struct Group0SyncConfig
 {
-    std::vector<std::string> kv_seeds;
-    uint64_t                 instance_id      = 0;
-    uint64_t                 rack_id          = 0;
-    uint64_t                 node_id          = 0;
-    uint64_t                 dg_id            = 0;
-    uint32_t                 sync_interval_ms = 5000;
-    std::string              grpc_endpoint; // e.g. "127.0.0.1:50051"
-    bool                     auto_discover_disks = false;
+    std::vector<std::string>      kv_seeds;
+    uint64_t                      instance_id      = 0;
+    uint64_t                      rack_id          = 0;
+    uint64_t                      node_id          = 0;
+    uint64_t                      dg_id            = 0;
+    uint32_t                      sync_interval_ms = 5000;
+    std::string                   grpc_endpoint; // e.g. "127.0.0.1:50051"
+    bool                          auto_discover_disks = false;
+    DummyDiskType                 dummy_disk_type     = DummyDiskType::Null;
+    std::optional<DiskProperties> dummy_props;
 };
 
 class Group0Sync

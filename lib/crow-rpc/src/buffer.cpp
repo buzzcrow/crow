@@ -34,9 +34,17 @@ void Buffer::release()
         return; // already released or never allocated
     }
     if (ref->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        // Last reference — recycle to pool.
+        // Last reference — recycle to pool or free standalone.
         if (pool != nullptr) {
             pool->recycle(this);
+        }
+        else {
+            // Standalone buffer (created via crow_rpc_buffer_create):
+            // free data, refcount, and Buffer struct. Callers must not
+            // access the Buffer after calling release().
+            std::free(data);
+            delete ref;
+            delete this;
         }
     }
 }

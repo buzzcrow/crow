@@ -196,8 +196,14 @@ void Group0Sync::reconcile_disks(const std::string &json)
 
         std::shared_ptr<Disk> disk;
         if (device_path.empty()) {
-            // No device path — dummy disk (NullDisk for benchmarks).
-            disk = std::make_shared<NullDisk>(did, engine_, std::move(zones), std::nullopt);
+            // No device path — dummy disk. Use the configured type
+            // (NullDisk for benchmarks, MemDisk for correctness tests).
+            if (cfg_.dummy_disk_type == DummyDiskType::Mem) {
+                disk = std::make_shared<MemDisk>(did, engine_, std::move(zones), cfg_.dummy_props);
+            }
+            else {
+                disk = std::make_shared<NullDisk>(did, engine_, std::move(zones), cfg_.dummy_props);
+            }
         }
         else {
             // Real block device.

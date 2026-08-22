@@ -95,6 +95,11 @@ int main(int argc, char *argv[])
 {
     using namespace crow::diskio;
 
+    // Disable stdout/stderr buffering so output is immediately visible
+    // when captured via pipes/files (e.g. in integration tests).
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
     DioConfig   cfg;
     std::string err;
     if (!DioConfig::parse_args(argc, argv, cfg, err)) {
@@ -154,6 +159,8 @@ int main(int argc, char *argv[])
         g0_cfg.sync_interval_ms    = cfg.sync_interval_ms;
         g0_cfg.grpc_endpoint       = cfg.bind_address + ":" + std::to_string(actual_port);
         g0_cfg.auto_discover_disks = cfg.auto_discover_disks;
+        g0_cfg.dummy_disk_type     = cfg.dummy_disk_type;
+        g0_cfg.dummy_props         = cfg.dummy_props;
         group0_sync                = std::make_unique<Group0Sync>(std::move(g0_cfg), disk_set, engine, scheduler);
         group0_sync->start();
         std::printf("group-0 sync started (interval=%ums, dg=%llu)\n", cfg.sync_interval_ms,

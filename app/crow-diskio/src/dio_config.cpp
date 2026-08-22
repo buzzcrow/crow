@@ -161,6 +161,7 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
         }
         else if (arg == "--disk" && i + 1 < argc) {
             // Format: --disk <hex_id>:<path>[:<zone_capacity>]
+            // hex_id is either "high:low" or just "low" (hex).
             // Multiple --disk args allowed. Empty path = dummy disk.
             std::string spec        = argv[++i];
             size_t      first_colon = spec.find(':');
@@ -168,8 +169,35 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
                 err = "--disk expects <hex_id>:<path>[:<capacity>]";
                 return false;
             }
-            std::string id_str = spec.substr(0, first_colon);
-            std::string rest   = spec.substr(first_colon + 1);
+
+            // Determine the ID portion: if the first two colon-separated
+            // parts are both valid hex, treat as "high:low"; otherwise
+            // treat just the first part as "low".
+            std::string id_str;
+            std::string rest;
+            size_t      second_colon = spec.find(':', first_colon + 1);
+            if (second_colon != std::string::npos) {
+                // Check if the part between first and second colon is
+                // valid hex (potential "low" part of "high:low").
+                std::string mid = spec.substr(first_colon + 1, second_colon - first_colon - 1);
+                char       *end = nullptr;
+                std::strtoull(mid.c_str(), &end, 16);
+                if (end == mid.c_str() + mid.size() && !mid.empty()) {
+                    // "high:low:path[:capacity]"
+                    id_str = spec.substr(0, second_colon);
+                    rest   = spec.substr(second_colon + 1);
+                }
+                else {
+                    // "low:path[:capacity]"
+                    id_str = spec.substr(0, first_colon);
+                    rest   = spec.substr(first_colon + 1);
+                }
+            }
+            else {
+                // No second colon — "low:path" (no capacity).
+                id_str = spec.substr(0, first_colon);
+                rest   = spec.substr(first_colon + 1);
+            }
 
             DiskEntry entry;
             if (!parse_disk_id(id_str.c_str(), entry.id)) {
@@ -241,6 +269,7 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
                         "[--fault-latency <min_ms>:<max_ms>] "
                         "[--fault-error-rate <0.0..1.0>] "
                         "[--disk <hex_id>:<path>[:<capacity>]]... "
+                        "  (hex_id = high:low or just low, both hex) "
                         "[--kv-seeds <url1>,<url2>...] "
                         "[--instance-id N] [--rack-id N] [--dg-id N] "
                         "[--sync-interval-ms N] [--auto-discover-disks]\n"

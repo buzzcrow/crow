@@ -118,15 +118,16 @@ impl DiskdbClient {
 
     /// Get or create a gRPC channel for the given endpoint.
     fn channel_for(&self, endpoint: &str) -> Result<Channel> {
-        if let Some(ch) = self.channels.get(endpoint) {
+        let normalized = normalize_endpoint(endpoint);
+        if let Some(ch) = self.channels.get(&normalized) {
             return Ok(ch.clone());
         }
-        let ch = Channel::from_shared(endpoint.to_string())
+        let ch = Channel::from_shared(normalized.clone())
             .map_err(|e| DiskdbClientError::Unreachable(format!("invalid endpoint {endpoint}: {e}")))?
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
             .connect_lazy();
-        self.channels.insert(endpoint.to_string(), ch.clone());
+        self.channels.insert(normalized, ch.clone());
         Ok(ch)
     }
 
@@ -496,6 +497,18 @@ fn map_status(status: &tonic::Status) -> DiskdbClientError {
     }
 }
 
+/// Normalize a service-registry endpoint for tonic `Channel`:
+/// prepend `http://` if no scheme is present, and rewrite `0.0.0.0`
+/// to `127.0.0.1` so the channel connects to a loopback address.
+fn normalize_endpoint(endpoint: &str) -> String {
+    let with_scheme = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    };
+    with_scheme.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +560,23 @@ mod tests {
         let disk_id = DiskId { high: 0, low: 1 };
         let err = client.rebuild_zone_bitmap(disk_id, 0).await.unwrap_err();
         assert!(matches!(err, DiskdbClientError::Unreachable(_)));
+    }
+
+    #[test]
+    fn normalize_endpoint_adds_scheme() {
+        assert_eq!(normalize_endpoint("127.0.0.1:9941"), "http://127.0.0.1:9941");
+    }
+
+    #[test]
+    fn normalize_endpoint_rewrites_wildcard() {
+        assert_eq!(normalize_endpoint("0.0.0.0:9941"), "http://127.0.0.1:9941");
+    }
+
+    #[test]
+    fn normalize_endpoint_preserves_scheme() {
+        assert_eq!(
+            normalize_endpoint("http://127.0.0.1:9941"),
+            "http://127.0.0.1:9941"
+        );
     }
 }

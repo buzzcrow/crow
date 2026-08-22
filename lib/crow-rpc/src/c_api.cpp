@@ -106,8 +106,8 @@ crow_rpc_buffer_t crow_rpc_buffer_create(const uint8_t *data, uint32_t len)
     if (data == nullptr || len == 0) {
         return nullptr;
     }
-    auto *buf  = new crow::rpc::Buffer;
-    buf->data  = static_cast<uint8_t *>(std::malloc(len));
+    auto *buf = new crow::rpc::Buffer;
+    buf->data = static_cast<uint8_t *>(std::malloc(len));
     if (buf->data == nullptr) {
         delete buf;
         return nullptr;
@@ -115,8 +115,11 @@ crow_rpc_buffer_t crow_rpc_buffer_create(const uint8_t *data, uint32_t len)
     std::memcpy(buf->data, data, len);
     buf->len      = len;
     buf->capacity = len;
-    buf->ref      = nullptr;
-    buf->pool     = nullptr;
+    // Allocate a standalone refcount so ref_clone() works (the transport
+    // calls ref_clone on send). Pool-allocated buffers get their ref from
+    // the pool; standalone buffers need their own.
+    buf->ref  = new std::atomic<int32_t>(1);
+    buf->pool = nullptr;
     return new crow_rpc_buffer_s{buf};
 }
 
@@ -287,8 +290,8 @@ void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buff
     // malloc'd Buffer with ref == nullptr so crow_rpc_buffer_release frees
     // the data + Buffer directly (no pool recycle).
     if (!frame->control.empty()) {
-        auto *buf  = new Buffer;
-        buf->data  = static_cast<uint8_t *>(std::malloc(frame->control.size()));
+        auto *buf = new Buffer;
+        buf->data = static_cast<uint8_t *>(std::malloc(frame->control.size()));
         if (buf->data != nullptr) {
             std::memcpy(buf->data, frame->control.data(), frame->control.size());
             buf->len      = static_cast<uint32_t>(frame->control.size());

@@ -756,6 +756,9 @@ dependencies = [
  "crow-kv-client",
  "crow-protocol",
  "dashmap",
+ "reqwest",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -766,9 +769,13 @@ dependencies = [
 name = "crow-diskio-client"
 version = "0.1.0"
 dependencies = [
+ "crow-kv-client",
  "crow-protocol",
  "crow-rpc-ffi",
  "flatbuffers",
+ "reqwest",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

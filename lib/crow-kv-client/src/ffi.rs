@@ -94,7 +94,7 @@ where
             }
             Err(err) => {
                 cb_fn(-1, ptr::null(), ud_ptr);
-                eprintln!("crow-kv-client-ffi: op failed: {err}");
+                eprintln!("crow-kv-client (ffi): op failed: {err}");
             }
         }
     });

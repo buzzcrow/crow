@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// C ABI for crow-kv-client-ffi: exposes HardwareClient and
+// C ABI for crow-kv-client (ffi feature): exposes HardwareClient and
 // ServiceRegistryClient operations to C++ consumers (crow-diskio).
 //
 // Async operations use a callback pattern: the caller provides a
