@@ -140,7 +140,7 @@ fn disk_read_request_round_trip() {
             zone_index: 5,
             zone_offset: 8192,
             size: 2048,
-            logical_object_offset: 0x1234,
+            test_pattern_offset: 0x1234,
         },
     );
     fbb.finish(req, None);
@@ -153,7 +153,7 @@ fn disk_read_request_round_trip() {
     assert_eq!(parsed.zone_index(), 5);
     assert_eq!(parsed.zone_offset(), 8192);
     assert_eq!(parsed.size(), 2048);
-    assert_eq!(parsed.logical_object_offset(), 0x1234);
+    assert_eq!(parsed.test_pattern_offset(), 0x1234);
 }
 
 #[test]

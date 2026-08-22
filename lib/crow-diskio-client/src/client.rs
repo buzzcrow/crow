@@ -157,9 +157,15 @@ impl DiskioClient {
     /// Send a disk read request. Returns a `CallFuture` that resolves to
     /// the response (`ret_code` + data).
     ///
+    /// `test_pattern_offset` is used by `NullDisk` for deterministic content
+    /// generation (testing only); real engines ignore it. Pass the physical
+    /// offset (`zone_index * zone_size + zone_offset`) for raw disk reads,
+    /// or a logical object offset for object reads.
+    ///
     /// # Errors
     ///
     /// Returns `DiskioError::Rpc` if the send fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn read(
         &self,
         server: &RpcServer,
@@ -168,6 +174,7 @@ impl DiskioClient {
         zone_index: u32,
         zone_offset: u64,
         size: u32,
+        test_pattern_offset: u64,
     ) -> Result<CallFuture, DiskioError> {
         let req_id = self.next_id();
         let mut fbb = FlatBufferBuilder::new();
@@ -181,7 +188,7 @@ impl DiskioClient {
                 zone_index,
                 zone_offset,
                 size,
-                logical_object_offset: 0,
+                test_pattern_offset,
             },
         );
         fbb.finish(off, None);

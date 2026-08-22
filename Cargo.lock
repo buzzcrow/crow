@@ -755,6 +755,7 @@ dependencies = [
  "bytes",
  "crow-kv-client",
  "crow-protocol",
+ "crow-test-harness",
  "dashmap",
  "reqwest",
  "serde_json",
@@ -772,6 +773,7 @@ dependencies = [
  "crow-kv-client",
  "crow-protocol",
  "crow-rpc-ffi",
+ "crow-test-harness",
  "flatbuffers",
  "reqwest",
  "serde_json",
@@ -884,6 +886,21 @@ dependencies = [
  "cc",
  "crow-protocol",
  "flatbuffers",
+ "tokio",
+]
+
+[[package]]
+name = "crow-test-harness"
+version = "0.1.0"
+dependencies = [
+ "crow-diskdb-client",
+ "crow-diskio-client",
+ "crow-kv-client",
+ "crow-protocol",
+ "crow-rpc-ffi",
+ "reqwest",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 

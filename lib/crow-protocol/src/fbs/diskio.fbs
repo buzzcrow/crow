@@ -34,8 +34,9 @@ table FBDiskWriteResponse {
     ret_code:FBDiskIoRetCode;
 }
 
-// Read request. logical_object_offset is optional (0 = absent); when set,
-// MemDisk returns rule-based content incorporating the logical offset.
+// Read request. test_pattern_offset is used by NullDisk to generate
+// deterministic content for testing (0 = start of disk/object). Real
+// engines ignore it and read from phys_offset.
 table FBDiskReadRequest {
     id:uint64;
     rpc_create_nano:uint64;
@@ -43,7 +44,7 @@ table FBDiskReadRequest {
     zone_index:uint32;
     zone_offset:uint64;
     size:uint32;
-    logical_object_offset:uint64;
+    test_pattern_offset:uint64;
 }
 
 // Read response. The data payload follows as raw bytes (data_size in the

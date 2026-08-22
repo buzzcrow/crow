@@ -21,6 +21,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 crow-kv-client = { path = "../crow-kv-client" }
+crow-test-harness = { path = "../crow-test-harness", features = ["diskio"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"

@@ -154,7 +154,7 @@ int main(int argc, char *argv[])
         g0_cfg.kv_seeds            = cfg.kv_seeds;
         g0_cfg.instance_id         = cfg.instance_id;
         g0_cfg.rack_id             = cfg.rack_id;
-        g0_cfg.node_id             = cfg.node_id_low; // TODO: full NodeId
+        g0_cfg.node_id             = cfg.node_id;
         g0_cfg.dg_id               = cfg.dg_id;
         g0_cfg.sync_interval_ms    = cfg.sync_interval_ms;
         g0_cfg.grpc_endpoint       = cfg.bind_address + ":" + std::to_string(actual_port);

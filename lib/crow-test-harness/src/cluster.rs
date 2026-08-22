@@ -1,12 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Shared cluster harness for diskio-client integration tests.
-//!
-//! Starts a real 3-node `crow-kv-server` cluster with store 0,
-//! group 0 (system) and group 1 (data), wires topology, waits for
-//! leader election, and provides helpers to seed hardware metadata
-//! into group 0. No diskdb dependency.
+//! KvCluster: starts a real kv-server cluster, wires topology, and
+//! discovers group leaders. No service-specific dependencies — only
+//! reqwest + serde_json + tempfile.
 
 use std::io as std_io;
 use std::path::PathBuf;
@@ -15,8 +12,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use serde_json::Value;
+
+#[cfg(feature = "kv-client")]
+use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 
 // ── process management ──────────────────────────────────────────
 
@@ -76,7 +75,6 @@ impl Drop for ServerHandle {
 }
 
 /// One kv-server node in the test cluster.
-#[allow(dead_code)]
 pub struct KvNode {
     handle: ServerHandle,
     pub node_id: u64,
@@ -90,7 +88,7 @@ impl KvNode {
 }
 
 /// Find the crow-kv-server binary.
-fn crow_kv_server_bin() -> Option<PathBuf> {
+pub fn crow_kv_server_bin() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("CROW_KV_SERVER_BIN") {
         let path = PathBuf::from(p);
         if path.exists() {
@@ -116,12 +114,12 @@ fn crow_kv_server_bin() -> Option<PathBuf> {
 
 // ── topology helpers ────────────────────────────────────────────
 
-fn client() -> reqwest::Client {
+fn http_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
 async fn topology(node: &KvNode) -> Value {
-    client()
+    http_client()
         .get(format!("{}/topology", node.base_url()))
         .send()
         .await
@@ -166,7 +164,7 @@ async fn combined_topology(nodes: &[KvNode]) -> Value {
 async fn wire_topology(nodes: &[KvNode], group_id: u64) {
     let combined = combined_topology(nodes).await;
     for node in nodes {
-        let resp = client()
+        let resp = http_client()
             .post(format!(
                 "{}/stores/{}/groups/{group_id}/remotes/batch",
                 node.base_url(),
@@ -218,10 +216,9 @@ async fn leader_endpoint(nodes: &[KvNode], group_id: u64) -> String {
 
 // ── cluster ─────────────────────────────────────────────────────
 
-/// A running 3-node kv-server cluster with group 0 (system) and
-/// group 1 (data).
+/// A running kv-server cluster with group 0 (system) and
+/// group 1 (data). A single replica elects itself leader immediately.
 pub struct KvCluster {
-    #[allow(dead_code)]
     pub nodes: Vec<KvNode>,
     pub group0_leader_endpoint: String,
     pub group1_leader_endpoint: String,
@@ -233,8 +230,6 @@ pub struct KvCluster {
 
 impl KvCluster {
     /// Start a 1-node cluster with store 0, groups 0 and 1.
-    /// A single replica elects itself leader immediately — no need
-    /// for 3 nodes in a diskio smoke test.
     pub async fn start() -> Self {
         let mut nodes = Vec::new();
         let node = start_kv_node_with_groups(0, &[0, 1], 1)
@@ -255,6 +250,7 @@ impl KvCluster {
     }
 
     /// Build a `HardwareClient` seeded with the group-0 leader endpoint.
+    #[cfg(feature = "kv-client")]
     #[must_use]
     pub fn make_hardware_client(&self) -> HardwareClient {
         let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
@@ -263,6 +259,7 @@ impl KvCluster {
     }
 
     /// Build a `ServiceRegistryClient` seeded with the group-0 leader.
+    #[cfg(feature = "kv-client")]
     #[must_use]
     pub fn make_service_registry_client(&self) -> ServiceRegistryClient {
         let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));

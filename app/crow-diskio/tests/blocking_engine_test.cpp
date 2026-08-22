@@ -134,7 +134,7 @@ TEST(BlockingEngine, WriteReadRoundTrip)
 
     std::vector<uint8_t> out(in.size(), 0);
     done.store(false);
-    engine.submit_read(&disk, 0, out.data(), out.size(), [&](int res) {
+    engine.submit_read(&disk, 0, out.data(), out.size(), 0, [&](int res) {
         got_res.store(res, std::memory_order_relaxed);
         done.store(true, std::memory_order_release);
     });

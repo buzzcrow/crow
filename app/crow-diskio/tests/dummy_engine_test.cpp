@@ -71,10 +71,10 @@ TEST(NullDisk, ReadReturnsDeterministicContent)
     std::vector<uint8_t> out2(4096, 0);
     std::atomic<int>     res1{-1};
     std::atomic<int>     res2{-1};
-    disk->engine()->submit_read(disk.get(), 0, out1.data(), out1.size(),
+    disk->engine()->submit_read(disk.get(), 0, out1.data(), out1.size(), 0,
                                 [&](int r) { res1.store(r, std::memory_order_relaxed); });
     wait_for([&] { return res1.load() != -1; });
-    disk->engine()->submit_read(disk.get(), 0, out2.data(), out2.size(),
+    disk->engine()->submit_read(disk.get(), 0, out2.data(), out2.size(), 0,
                                 [&](int r) { res2.store(r, std::memory_order_relaxed); });
     wait_for([&] { return res2.load() != -1; });
     EXPECT_EQ(res1.load(), 4096);
@@ -91,8 +91,8 @@ TEST(NullDisk, DifferentDiskIdsProduceDifferentContent)
     std::vector<uint8_t> out2(4096, 0);
     std::atomic<bool>    done1{false};
     std::atomic<bool>    done2{false};
-    disk1->engine()->submit_read(disk1.get(), 0, out1.data(), out1.size(), [&](int) { done1.store(true); });
-    disk2->engine()->submit_read(disk2.get(), 0, out2.data(), out2.size(), [&](int) { done2.store(true); });
+    disk1->engine()->submit_read(disk1.get(), 0, out1.data(), out1.size(), 0, [&](int) { done1.store(true); });
+    disk2->engine()->submit_read(disk2.get(), 0, out2.data(), out2.size(), 0, [&](int) { done2.store(true); });
     wait_for([&] { return done1.load() && done2.load(); });
     EXPECT_NE(out1, out2);
 }
@@ -125,7 +125,7 @@ TEST(MemDisk, WriteAndReadBack)
 
     std::vector<uint8_t> out(4096, 0);
     std::atomic<int>     read_res{-1};
-    disk->engine()->submit_read(disk.get(), 0, out.data(), out.size(),
+    disk->engine()->submit_read(disk.get(), 0, out.data(), out.size(), 0,
                                 [&](int r) { read_res.store(r, std::memory_order_relaxed); });
     wait_for([&] { return read_res.load() != -1; });
     EXPECT_EQ(read_res.load(), 4096);

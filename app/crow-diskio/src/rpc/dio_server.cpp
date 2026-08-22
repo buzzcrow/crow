@@ -156,11 +156,11 @@ crow::rpc::OutFrame *DiskioServer::handle_read(crow::rpc::Frame *request, crow::
         send_error_response(conn, req_id, create_nano, msg_type, static_cast<int16_t>(dproto::FBDiskIoRetCode_IoError));
         return nullptr;
     }
-    DiskId   did                = parse_disk_id(fb_req->disk_id());
-    uint32_t zone_index         = fb_req->zone_index();
-    uint64_t zone_offset        = fb_req->zone_offset();
-    uint32_t size               = fb_req->size();
-    uint64_t logical_obj_offset = fb_req->logical_object_offset();
+    DiskId   did                 = parse_disk_id(fb_req->disk_id());
+    uint32_t zone_index          = fb_req->zone_index();
+    uint64_t zone_offset         = fb_req->zone_offset();
+    uint32_t size                = fb_req->size();
+    uint64_t test_pattern_offset = fb_req->test_pattern_offset();
 
     auto disk = disk_set_->find_disk(did);
     if (disk == nullptr) {
@@ -189,12 +189,8 @@ crow::rpc::OutFrame *DiskioServer::handle_read(crow::rpc::Frame *request, crow::
 
     delete request;
 
-    // logical_object_offset is used by MemDisk for deterministic reads.
-    // The engine interface doesn't expose it yet — TODO for future phase.
-    (void)logical_obj_offset;
-
     Disk *disk_ptr = disk.get();
-    disk_ptr->engine()->submit_read(disk_ptr, phys_offset, read_buf->data, size,
+    disk_ptr->engine()->submit_read(disk_ptr, phys_offset, read_buf->data, size, test_pattern_offset,
                                     [this, conn, req_id, create_nano, msg_type, read_buf, size](int res) {
                                         int16_t ret_code        = static_cast<int16_t>(dproto::FBDiskIoRetCode_Success);
                                         crow::rpc::Buffer *data = nullptr;

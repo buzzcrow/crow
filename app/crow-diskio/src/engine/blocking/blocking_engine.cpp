@@ -59,7 +59,7 @@ void BlockingEngine::submit_write(Disk *disk, off_t phys_offset, const uint8_t *
 }
 
 void BlockingEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
-                                 std::function<void(int)> on_complete)
+                                 uint64_t /*test_pattern_offset*/, std::function<void(int)> on_complete)
 {
     if (disk == nullptr || disk->fd() < 0) {
         if (on_complete) {

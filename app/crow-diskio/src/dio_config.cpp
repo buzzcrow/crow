@@ -103,7 +103,7 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
             out.listen_port = static_cast<int>(p);
         }
         else if (arg == "--node-id" && i + 1 < argc) {
-            if (!parse_u64(argv[++i], out.node_id_low)) {
+            if (!parse_u64(argv[++i], out.node_id)) {
                 err = "invalid --node-id value";
                 return false;
             }

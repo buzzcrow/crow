@@ -87,16 +87,9 @@ void crow_rpc_buffer_release(crow_rpc_buffer_t buf)
     if (buf == nullptr || buf->buf == nullptr) {
         return;
     }
-    // If the buffer has a refcount (pool-allocated), release via the
-    // normal path (decrement ref, recycle on 0). If ref is null
-    // (raw wrapper from a response Frame), free the data + Buffer directly.
-    if (buf->buf->ref != nullptr) {
-        buf->buf->release();
-    }
-    else {
-        std::free(buf->buf->data);
-        delete buf->buf;
-    }
+    // All buffers now have a refcount (pool-allocated or standalone).
+    // release() decrements and frees on last reference.
+    buf->buf->release();
     buf->buf = nullptr;
     delete buf;
 }
@@ -287,8 +280,8 @@ void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buff
         return;
     }
     // Control: raw bytes from frame->control (flatbuffer). Wrap in a
-    // malloc'd Buffer with ref == nullptr so crow_rpc_buffer_release frees
-    // the data + Buffer directly (no pool recycle).
+    // malloc'd Buffer with a standalone refcount so release() and
+    // ref_clone() work normally (no pool recycle on last ref).
     if (!frame->control.empty()) {
         auto *buf = new Buffer;
         buf->data = static_cast<uint8_t *>(std::malloc(frame->control.size()));
@@ -296,7 +289,7 @@ void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buff
             std::memcpy(buf->data, frame->control.data(), frame->control.size());
             buf->len      = static_cast<uint32_t>(frame->control.size());
             buf->capacity = buf->len;
-            buf->ref      = nullptr;
+            buf->ref      = new std::atomic<int32_t>(1);
             buf->pool     = nullptr;
             *out_ctrl     = new crow_rpc_buffer_s{buf};
         }

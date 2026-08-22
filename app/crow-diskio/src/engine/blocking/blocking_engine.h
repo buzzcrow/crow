@@ -28,7 +28,7 @@ class BlockingEngine : public IoEngine
 
     void submit_write(Disk *disk, off_t phys_offset, const uint8_t *data, size_t size,
                       std::function<void(int)> on_complete) override;
-    void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
+    void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size, uint64_t test_pattern_offset,
                      std::function<void(int)> on_complete) override;
     void submit_fsync(Disk *disk, std::function<void(int)> on_complete) override;
 

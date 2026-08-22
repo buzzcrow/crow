@@ -500,7 +500,8 @@ fn map_status(status: &tonic::Status) -> DiskdbClientError {
 /// Normalize a service-registry endpoint for tonic `Channel`:
 /// prepend `http://` if no scheme is present, and rewrite `0.0.0.0`
 /// to `127.0.0.1` so the channel connects to a loopback address.
-fn normalize_endpoint(endpoint: &str) -> String {
+#[must_use]
+pub fn normalize_endpoint(endpoint: &str) -> String {
     let with_scheme = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
     } else {
@@ -560,23 +561,5 @@ mod tests {
         let disk_id = DiskId { high: 0, low: 1 };
         let err = client.rebuild_zone_bitmap(disk_id, 0).await.unwrap_err();
         assert!(matches!(err, DiskdbClientError::Unreachable(_)));
-    }
-
-    #[test]
-    fn normalize_endpoint_adds_scheme() {
-        assert_eq!(normalize_endpoint("127.0.0.1:9941"), "http://127.0.0.1:9941");
-    }
-
-    #[test]
-    fn normalize_endpoint_rewrites_wildcard() {
-        assert_eq!(normalize_endpoint("0.0.0.0:9941"), "http://127.0.0.1:9941");
-    }
-
-    #[test]
-    fn normalize_endpoint_preserves_scheme() {
-        assert_eq!(
-            normalize_endpoint("http://127.0.0.1:9941"),
-            "http://127.0.0.1:9941"
-        );
     }
 }

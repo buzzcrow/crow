@@ -135,7 +135,7 @@ TEST(SqFullBackpressureTest, BlockingEngineReadBackUnderLoad)
         auto    buf      = std::make_shared<std::vector<uint8_t>>(DATA_SIZE, 0);
         off_t   offset   = static_cast<off_t>(i * DATA_SIZE);
         uint8_t expected = static_cast<uint8_t>(i % 256);
-        engine->submit_read(disk.get(), offset, buf->data(), DATA_SIZE,
+        engine->submit_read(disk.get(), offset, buf->data(), DATA_SIZE, 0,
                             [buf, expected, &read_completed, &read_ok, DATA_SIZE](int result) {
                                 if (result == DATA_SIZE) {
                                     read_ok.fetch_add(1, std::memory_order_relaxed);
@@ -295,10 +295,11 @@ TEST(SqFullBackpressureTest, UringEngineGoodDiskIsolation)
     std::vector<uint8_t> read_buf(DATA_SIZE, 0);
     std::atomic<bool>    read_done{false};
     std::atomic<int>     read_result{-1};
-    engine->submit_read(disk2.get(), 0, read_buf.data(), DATA_SIZE, [&read_done, &read_result, DATA_SIZE](int result) {
-        read_result.store(result, std::memory_order_release);
-        read_done.store(true, std::memory_order_release);
-    });
+    engine->submit_read(disk2.get(), 0, read_buf.data(), DATA_SIZE, 0,
+                        [&read_done, &read_result, DATA_SIZE](int result) {
+                            read_result.store(result, std::memory_order_release);
+                            read_done.store(true, std::memory_order_release);
+                        });
     for (int i = 0; i < 300 && !read_done.load(std::memory_order_acquire); i++) {
         std::this_thread::sleep_for(10ms);
     }

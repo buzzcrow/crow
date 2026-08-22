@@ -216,11 +216,15 @@ void Group0Sync::reconcile_disks(const std::string &json)
     }
 
     // Remove disks that are no longer in group-0.
-    // TODO: implement DiskSet::remove_disk(did) for this.
-    // For now, log a warning if the count differs.
-    if (disk_set_->size() != seen_ids.size()) {
-        std::fprintf(stderr, "warning: disk set size (%zu) != group-0 disk count (%zu)\n", disk_set_->size(),
-                     seen_ids.size());
+    // In-flight IO on removed disks completes safely (shared_ptr keeps
+    // the Disk alive); new requests get DiskNotExist.
+    for (const auto &existing_id : disk_set_->disk_ids()) {
+        if (seen_ids.find(existing_id) == seen_ids.end()) {
+            disk_set_->remove_disk(existing_id);
+            std::printf("group-0: removed disk {%llu,%llu} (no longer in group-0)\n",
+                        static_cast<unsigned long long>(existing_id.high),
+                        static_cast<unsigned long long>(existing_id.low));
+        }
     }
 }
 

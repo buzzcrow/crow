@@ -37,7 +37,7 @@ class DummyDiskEngine : public IoEngine
 
     void submit_write(Disk *disk, off_t phys_offset, const uint8_t *data, size_t size,
                       std::function<void(int)> on_complete) override;
-    void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
+    void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size, uint64_t test_pattern_offset,
                      std::function<void(int)> on_complete) override;
     void submit_fsync(Disk *disk, std::function<void(int)> on_complete) override;
 
@@ -47,8 +47,8 @@ class DummyDiskEngine : public IoEngine
     std::optional<DiskProperties> props_;
 
     // Fill buf with deterministic pattern data for the given disk_id +
-    // offset. Used by NullDisk read hack.
-    static void fill_pattern(DiskId disk_id, off_t phys_offset, uint8_t *buf, size_t size);
+    // test_pattern_offset. Used by NullDisk read hack.
+    static void fill_pattern(DiskId disk_id, uint64_t test_pattern_offset, uint8_t *buf, size_t size);
 
     // Draw a random latency from [props_.latency_min_ms, latency_max_ms].
     uint32_t draw_latency() const;

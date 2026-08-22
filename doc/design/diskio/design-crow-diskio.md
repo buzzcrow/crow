@@ -450,8 +450,8 @@ handle three message types. Message type IDs are in the diskio range
 (3600s) of crow-rpc's `msg_type` enum.
 
 Each request's control message is a flatbuffer with
-`{disk_id, zone_index, zone_offset, size}` (read also has optional
-`logical_object_offset`); the write request also carries a raw data
+`{disk_id, zone_index, zone_offset, size}` (read also has
+`test_pattern_offset`); the write request also carries a raw data
 payload of `size` bytes. The handler:
 1. Resolves `disk_id` to a `Disk` via `DiskSet`.
 2. Computes the physical offset: `zone.base_offset + zone_offset`.
@@ -467,8 +467,9 @@ read response includes the raw data payload.
 Flatbuffer schemas (`diskio.fbs`):
 - `DiskWriteRequest { disk_id, zone_index, zone_offset, size }`
 - `DiskWriteResponse { ret_code }`
-- `DiskReadRequest { disk_id, zone_index, zone_offset, size, logical_object_offset }`
-  (`logical_object_offset` optional, default absent)
+- `DiskReadRequest { disk_id, zone_index, zone_offset, size, test_pattern_offset }`
+  (`test_pattern_offset` used by NullDisk for deterministic content;
+  default 0 = start of disk/object)
 - `DiskReadResponse { ret_code }` (data payload follows the control
   message)
 - `DiskFsyncRequest { disk_id }`
@@ -481,7 +482,7 @@ with typed methods:
 
 ```
 async fn write(&self, segment: &Segment, data: Bytes) -> Result<(), IoError>
-async fn read(&self, segment: &Segment, logical_object_offset: Option<u64>) -> Result<Bytes, IoError>
+async fn read(&self, segment: &Segment, test_pattern_offset: u64) -> Result<Bytes, IoError>
 async fn fsync(&self, disk_id: &DiskId) -> Result<(), IoError>
 ```
 

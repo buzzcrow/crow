@@ -14,13 +14,13 @@
 //! to JSON for transport across the C ABI boundary.
 
 #![allow(clippy::missing_safety_doc, clippy::needless_pass_by_value)]
-#![allow(non_camel_case_types, non_snake_case, static_mut_refs)]
+#![allow(non_camel_case_types, non_snake_case)]
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::DiskGroupUsageSummary;
@@ -52,24 +52,19 @@ struct FfiRuntime {
 }
 
 impl FfiRuntime {
-    fn new() -> Self {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create tokio runtime");
-        Self { rt }
+    fn new() -> Result<Self, std::io::Error> {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        Ok(Self { rt })
     }
 }
 
-static mut G_RUNTIME: Option<Arc<FfiRuntime>> = None;
+static G_RUNTIME: OnceLock<Result<Arc<FfiRuntime>, std::io::Error>> = OnceLock::new();
 
-fn runtime() -> Arc<FfiRuntime> {
-    unsafe {
-        if G_RUNTIME.is_none() {
-            G_RUNTIME = Some(Arc::new(FfiRuntime::new()));
-        }
-        let opt_ref = &*std::ptr::addr_of!(G_RUNTIME);
-        Arc::clone(opt_ref.as_ref().unwrap())
+fn runtime() -> Result<Arc<FfiRuntime>, String> {
+    let result = G_RUNTIME.get_or_init(|| FfiRuntime::new().map(Arc::new));
+    match result {
+        Ok(rt) => Ok(Arc::clone(rt)),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -82,7 +77,14 @@ where
 {
     let cb = SendCallback(callback as usize);
     let ud = SendPtr(user_data as usize);
-    let rt = runtime();
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("crow-kv-client (ffi): runtime unavailable: {e}");
+            callback(-1, ptr::null(), user_data);
+            return;
+        }
+    };
     rt.rt.spawn(async move {
         let result = f().await;
         let cb_fn: crow_kv_on_complete = unsafe { std::mem::transmute(cb.0) };
@@ -301,11 +303,12 @@ pub unsafe extern "C" fn crow_svc_heartbeat_diskio(
 
 /// Shut down the FFI tokio runtime. Call this before process exit
 /// (after destroying all client handles).
+///
+/// The runtime is stored in a `OnceLock` and cannot be taken out, so
+/// this is a no-op — the runtime's background threads are cleaned up
+/// by process exit. This is safe because all client handles must be
+/// destroyed before calling this.
 #[no_mangle]
 pub unsafe extern "C" fn crow_kv_ffi_shutdown() {
-    let opt = std::ptr::read(std::ptr::addr_of!(G_RUNTIME));
-    std::ptr::write(std::ptr::addr_of_mut!(G_RUNTIME), None);
-    if let Some(rt) = opt {
-        drop(rt);
-    }
+    // No-op: OnceLock holds the runtime for the process lifetime.
 }

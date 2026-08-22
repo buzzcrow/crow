@@ -39,7 +39,7 @@ DummyDiskEngine::DummyDiskEngine(std::shared_ptr<IoEngine> inner, bool hack_read
 {
 }
 
-void DummyDiskEngine::fill_pattern(DiskId disk_id, off_t phys_offset, uint8_t *buf, size_t size)
+void DummyDiskEngine::fill_pattern(DiskId disk_id, uint64_t test_pattern_offset, uint8_t *buf, size_t size)
 {
     if (size == 0) {
         return;
@@ -47,7 +47,7 @@ void DummyDiskEngine::fill_pattern(DiskId disk_id, off_t phys_offset, uint8_t *b
     // Generate deterministic pattern on the fly.
     uint64_t state = hash_seed(disk_id);
     // Advance the PRNG to the start of this offset (8 bytes at a time).
-    uint64_t skip = static_cast<uint64_t>(phys_offset) / sizeof(uint64_t);
+    uint64_t skip = test_pattern_offset / sizeof(uint64_t);
     for (uint64_t i = 0; i < skip; ++i) {
         xorshift64(state);
     }
@@ -113,7 +113,7 @@ void DummyDiskEngine::submit_write(Disk *disk, off_t phys_offset, const uint8_t 
 }
 
 void DummyDiskEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
-                                  std::function<void(int)> on_complete)
+                                  uint64_t test_pattern_offset, std::function<void(int)> on_complete)
 {
     if (draw_error()) {
         uint32_t latency_ms = draw_latency();
@@ -129,18 +129,18 @@ void DummyDiskEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, s
     }
     DiskId   did        = (disk != nullptr) ? disk->id() : DiskId{};
     uint32_t latency_ms = draw_latency();
-    auto     wrapped    = [this, did, phys_offset, buf, latency_ms, cb = std::move(on_complete)](int res) {
+    auto     wrapped    = [this, did, test_pattern_offset, buf, latency_ms, cb = std::move(on_complete)](int res) {
         if (latency_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
         }
         if (res > 0 && hack_reads_) {
-            fill_pattern(did, phys_offset, buf, static_cast<size_t>(res));
+            fill_pattern(did, test_pattern_offset, buf, static_cast<size_t>(res));
         }
         if (cb) {
             cb(res);
         }
     };
-    inner_->submit_read(disk, phys_offset, buf, size, std::move(wrapped));
+    inner_->submit_read(disk, phys_offset, buf, size, test_pattern_offset, std::move(wrapped));
 }
 
 void DummyDiskEngine::submit_fsync(Disk *disk, std::function<void(int)> on_complete)

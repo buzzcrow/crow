@@ -23,9 +23,11 @@ class IoEngine
 
     // Submit a write/read/fsync. `on_complete` is invoked exactly once with
     // the raw result: >=0 bytes transferred, <0 negative -errno.
+    // `test_pattern_offset` is used by NullDisk for deterministic content
+    // generation (testing only); real engines ignore it.
     virtual void submit_write(Disk *disk, off_t phys_offset, const uint8_t *data, size_t size,
                               std::function<void(int)> on_complete)             = 0;
-    virtual void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
+    virtual void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size, uint64_t test_pattern_offset,
                              std::function<void(int)> on_complete)              = 0;
     virtual void submit_fsync(Disk *disk, std::function<void(int)> on_complete) = 0;
 

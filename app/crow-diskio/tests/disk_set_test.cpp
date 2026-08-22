@@ -136,7 +136,7 @@ TEST(BlockDisk, WriteReadRoundTripViaEngine)
 
     std::vector<uint8_t> out(4096, 0);
     done.store(false);
-    engine_ptr->submit_read(disk.get(), 0, out.data(), out.size(), [&](int res) {
+    engine_ptr->submit_read(disk.get(), 0, out.data(), out.size(), 0, [&](int res) {
         got_res.store(res, std::memory_order_relaxed);
         done.store(true, std::memory_order_release);
     });

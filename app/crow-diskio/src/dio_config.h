@@ -37,9 +37,8 @@ struct DioConfig
     std::string bind_address = "127.0.0.1";
     int         listen_port  = 0;
 
-    // Node identity.
-    uint64_t node_id_high = 0;
-    uint64_t node_id_low  = 0;
+    // Node identity (64-bit; each diskio service manages one node).
+    uint64_t node_id = 0;
 
     // Dummy disk type (used when disk path is empty).
     DummyDiskType dummy_disk_type = DummyDiskType::Null;
