@@ -16,10 +16,6 @@ The io_uring reactor is a generic event loop that also serves the
 crow-tree btree page store. It lives in `crow-common` and is shared by
 both consumers.
 
-Architecture decisions and rationale are here; implementation detail
-(file paths, struct definitions, test design) lives in the working
-design draft.
-
 ## Table of Contents
 
 - [1. Overview](#1-overview)
@@ -35,8 +31,8 @@ design draft.
 - [5. IoEngine Abstraction](#5-ioengine-abstraction)
   - [5.1 UringEngine](#51-uringengine)
   - [5.2 BlockingEngine](#52-blockingengine)
-  - [5.3 DummyEngine](#53-dummyengine)
-  - [5.4 SimulatedEngine](#54-simulatedengine)
+  - [5.3 DummyDiskEngine](#53-dummydiskengine)
+  - [5.4 NullDisk and MemDisk](#54-nulldisk-and-memdisk)
 - [6. Disk Model](#6-disk-model)
 - [7. Reactor](#7-reactor)
   - [7.1 Polling Modes](#71-polling-modes)
