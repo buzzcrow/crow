@@ -13,6 +13,7 @@
 #    include "crow-common/reactor.h"
 #endif
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -34,7 +35,7 @@ class UringEngine : public IoEngine
 
     void submit_write(Disk *disk, off_t phys_offset, const uint8_t *data, size_t size,
                       std::function<void(int)> on_complete) override;
-    void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
+    void submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size, uint64_t test_pattern_offset,
                      std::function<void(int)> on_complete) override;
     void submit_fsync(Disk *disk, std::function<void(int)> on_complete) override;
     void cancel_disk(DiskId disk_id) override;
@@ -43,10 +44,25 @@ class UringEngine : public IoEngine
     size_t in_flight_count(DiskId disk_id);
 
   private:
-    crow::common::Reactor reactor_;
+    // Sharded by DiskId hash so writes to different disks don't contend.
+    // Each shard owns its own map, so inserts on different shards never race
+    // on shared bucket/rehash state. One shard lock covers a disk's whole
+    // entry, keeping cancel_disk atomic.
+    static constexpr size_t kInFlightShards = 16;
 
-    std::mutex                                                           mu_;
-    std::unordered_map<DiskId, std::unordered_set<uint64_t>, DiskIdHash> in_flight_;
+    struct InFlightShard
+    {
+        std::mutex                                                           mu;
+        std::unordered_map<DiskId, std::unordered_set<uint64_t>, DiskIdHash> ops;
+    };
+
+    InFlightShard &shard(DiskId d)
+    {
+        return shards_[DiskIdHash{}(d) % kInFlightShards];
+    }
+
+    crow::common::Reactor                      reactor_;
+    std::array<InFlightShard, kInFlightShards> shards_;
 };
 
 #endif // CROW_HAVE_LIBURING

@@ -44,9 +44,10 @@ void UringEngine::submit_write(Disk *disk, off_t phys_offset, const uint8_t *dat
     auto                     op_id_ptr  = std::make_shared<uint64_t>(0);
     std::function<void(int)> wrapped_cb = [this, did, op_id_ptr, cb = std::move(on_complete)](int res) {
         {
-            std::lock_guard<std::mutex> lk(mu_);
-            auto                        it = in_flight_.find(did);
-            if (it != in_flight_.end()) {
+            auto                       &s = shard(did);
+            std::lock_guard<std::mutex> lk(s.mu);
+            auto                        it = s.ops.find(did);
+            if (it != s.ops.end()) {
                 it->second.erase(*op_id_ptr);
             }
         }
@@ -57,13 +58,14 @@ void UringEngine::submit_write(Disk *disk, off_t phys_offset, const uint8_t *dat
     uint64_t op_id = reactor_.submit_write(disk->fd(), data, size, phys_offset, std::move(wrapped_cb));
     *op_id_ptr     = op_id;
     if (op_id != 0) {
-        std::lock_guard<std::mutex> lk(mu_);
-        in_flight_[did].insert(op_id);
+        auto                       &s = shard(did);
+        std::lock_guard<std::mutex> lk(s.mu);
+        s.ops[did].insert(op_id);
     }
 }
 
 void UringEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
-                              std::function<void(int)> on_complete)
+                              uint64_t /*test_pattern_offset*/, std::function<void(int)> on_complete)
 {
     if (disk == nullptr || disk->fd() < 0) {
         if (on_complete) {
@@ -83,9 +85,10 @@ void UringEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_
     auto                     op_id_ptr  = std::make_shared<uint64_t>(0);
     std::function<void(int)> wrapped_cb = [this, did, op_id_ptr, cb = std::move(on_complete)](int res) {
         {
-            std::lock_guard<std::mutex> lk(mu_);
-            auto                        it = in_flight_.find(did);
-            if (it != in_flight_.end()) {
+            auto                       &s = shard(did);
+            std::lock_guard<std::mutex> lk(s.mu);
+            auto                        it = s.ops.find(did);
+            if (it != s.ops.end()) {
                 it->second.erase(*op_id_ptr);
             }
         }
@@ -96,8 +99,9 @@ void UringEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_
     uint64_t op_id = reactor_.submit_read(disk->fd(), buf, size, phys_offset, std::move(wrapped_cb));
     *op_id_ptr     = op_id;
     if (op_id != 0) {
-        std::lock_guard<std::mutex> lk(mu_);
-        in_flight_[did].insert(op_id);
+        auto                       &s = shard(did);
+        std::lock_guard<std::mutex> lk(s.mu);
+        s.ops[did].insert(op_id);
     }
 }
 
@@ -116,11 +120,12 @@ void UringEngine::cancel_disk(DiskId disk_id)
 {
     std::unordered_set<uint64_t> ops;
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto                        it = in_flight_.find(disk_id);
-        if (it != in_flight_.end()) {
+        auto                       &s = shard(disk_id);
+        std::lock_guard<std::mutex> lk(s.mu);
+        auto                        it = s.ops.find(disk_id);
+        if (it != s.ops.end()) {
             ops = std::move(it->second);
-            in_flight_.erase(it);
+            s.ops.erase(it);
         }
     }
     for (uint64_t op_id : ops) {
@@ -130,9 +135,10 @@ void UringEngine::cancel_disk(DiskId disk_id)
 
 size_t UringEngine::in_flight_count(DiskId disk_id)
 {
-    std::lock_guard<std::mutex> lk(mu_);
-    auto                        it = in_flight_.find(disk_id);
-    if (it == in_flight_.end()) {
+    auto                       &s = shard(disk_id);
+    std::lock_guard<std::mutex> lk(s.mu);
+    auto                        it = s.ops.find(disk_id);
+    if (it == s.ops.end()) {
         return 0;
     }
     return it->second.size();

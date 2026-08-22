@@ -20,9 +20,8 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <mutex>
+#include <memory>
 #include <thread>
-#include <unordered_map>
 
 namespace crow::common
 {
@@ -62,8 +61,13 @@ struct SqpollConfig
 // each CQE's raw result (>=0 bytes transferred, <0 -errno, mirroring the
 // kernel's own convention -- see io_uring(7)) to the callback registered at
 // submission time. Exactly one dedicated thread (run()) waits on and drains
-// completions; submit_*() may be called concurrently from any thread (the
-// SQ-side production and the callback map are both guarded by mu_).
+// completions; submit_*() may be called concurrently from any thread.
+//
+// Lock-free submit: SQE slots are claimed via an atomic shadow tail
+// (sq_tail_) with per-slot ready flags (sqe_ready_). The reactor publishes
+// only contiguous filled slots to the kernel. Callback pointers are embedded
+// in SQE user_data — CQE dispatch reads them directly, no map lookup. A
+// sharded op_id→entry map (callback_shards_) exists only for cancel lookup.
 class Reactor
 {
   public:
@@ -104,10 +108,30 @@ class Reactor
   private:
     using Prep = std::function<void(struct io_uring_sqe *)>;
 
-    // Common submit path: acquires mu_, gets a SQE, allocates+registers the
-    // callback under a fresh op id, lets `prep` fill in the op-specific
-    // fields, and submits. See submit_read/write/fsync for the three preps.
-    uint64_t submit_locked(std::function<void(int)> on_complete, const Prep &prep);
+    // Callback entry: allocated on submit, freed on CQE dispatch. The
+    // pointer is embedded in the SQE's user_data AND returned as the op_id
+    // to the caller. This makes cancel a direct pointer dereference — no
+    // map, no locks on either the dispatch or cancel path.
+    //
+    // Lifetime: the reactor thread defers deletion to the next iteration's
+    // drain, so a concurrent cancel() (single atomic store) completes before
+    // the entry is freed — no use-after-free.
+    struct CallbackEntry
+    {
+        std::function<void(int)> cb;
+        std::atomic<bool>        cancelled{false};
+        std::atomic<bool>        dispatched{false};
+        CallbackEntry           *next_free{nullptr}; // reactor-only: deferred-delete list
+    };
+
+    // Lock-free submit: claims an SQE slot via atomic shadow tail, fills
+    // it, and marks the per-slot ready flag. See submit_read/write/fsync
+    // for the three preps.
+    uint64_t submit_lockfree(std::function<void(int)> on_complete, const Prep &prep);
+
+    // Publishes contiguous filled SQE slots to the kernel. Called by run()
+    // at the top of each iteration when pending_submit_ is set.
+    void publish_ready_sqes();
 
     // Reactor thread body: dispatches to the mode-specific wait method,
     // then drains all ready CQEs and dispatches callbacks.
@@ -136,13 +160,23 @@ class Reactor
     // Hybrid: consecutive empty busy-poll iterations counter (run() thread only).
     unsigned busy_poll_count_ = 0;
 
-    // Batched submission: set by submit_locked() when a SQE is queued,
-    // checked and cleared by run() to batch io_uring_submit() calls.
+    // Batched submission: set by submit_lockfree() when a SQE is queued,
+    // checked and cleared by run() to batch kernel submissions.
     std::atomic<bool> pending_submit_{false};
 
-    std::mutex                                             mu_; // guards ring_ SQ-side + callbacks_
-    std::unordered_map<uint64_t, std::function<void(int)>> callbacks_;
-    uint64_t                                               next_op_id_ = 1;
+    // Lock-free SQE claiming: atomic shadow tail + per-slot ready flags.
+    // RPC threads claim slots via CAS on sq_tail_; the reactor publishes
+    // only contiguous filled slots (sqe_ready_ == true) to the kernel
+    // via publish_ready_sqes().
+    std::atomic<unsigned>                sq_tail_{0};
+    std::unique_ptr<std::atomic<bool>[]> sqe_ready_;
+    unsigned                             sqe_head_{0}; // reactor-only: last published position
+    unsigned                             sq_shift_{0}; // SQE index shift (0 for 64B, 1 for 128B)
+
+    // Deferred-delete list: entries freed during CQE dispatch are linked
+    // here and deleted at the top of the next iteration, after any
+    // concurrent cancel() (a single atomic store) has completed.
+    CallbackEntry *free_list_{nullptr}; // reactor-only
 };
 
 } // namespace crow::common
