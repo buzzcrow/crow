@@ -17,8 +17,8 @@
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
 #include "dio_config.h"
+#include "disk/block_disk.h"
 #include "disk/disk_set.h"
-#include "disk/file_disk.h"
 #include "disk/mem_disk.h"
 #include "disk/null_disk.h"
 #include "engine/blocking/blocking_engine.h"
@@ -58,8 +58,8 @@ static std::shared_ptr<crow::diskio::IoEngine> create_engine(const crow::diskio:
 }
 
 // Build the DiskSet from config. Disks with a non-empty path are
-// FileDisk (or BlockDisk); disks with an empty path are dummy disks
-// (NullDisk or MemDisk per config).
+// BlockDisk (O_DIRECT block device); disks with an empty path are
+// dummy disks (NullDisk or MemDisk per config).
 static std::shared_ptr<crow::diskio::DiskSet> build_disk_set(const crow::diskio::DioConfig          &cfg,
                                                              std::shared_ptr<crow::diskio::IoEngine> engine)
 {
@@ -79,8 +79,9 @@ static std::shared_ptr<crow::diskio::DiskSet> build_disk_set(const crow::diskio:
             }
         }
         else {
-            // Real file-backed disk.
-            auto disk = std::make_shared<FileDisk>(entry.id, entry.path, engine, std::vector<Zone>(entry.zones));
+            // Real block device.
+            auto disk = std::make_shared<BlockDisk>(entry.id, entry.path, engine, std::vector<Zone>(entry.zones),
+                                                    cfg.o_direct);
             disk_set->add(disk);
         }
     }

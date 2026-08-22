@@ -209,8 +209,8 @@ Components:
 - **DiskSet** — holds `HashMap<DiskId, shared_ptr<Disk>>`, opened at
   startup from the node's disk list. Resolves `disk_id` to a `Disk`.
 - **Disk** — virtual base with subclasses: `BlockDisk` (real block
-  device, `O_DIRECT`), `FileDisk` (regular file), `NullDisk` (memfd,
-  drop-write + pattern read), `MemDisk` (memfd, store + read-back).
+  device, `O_DIRECT`), `NullDisk` (memfd, drop-write + pattern read),
+  `MemDisk` (memfd, store + read-back).
   Each `Disk` shares the node's `IoEngine` instance; dummy disks wrap
   it with a `DummyDiskEngine` for read-content hack and optional fault
   injection.
@@ -274,8 +274,8 @@ size, default 4 threads per disk) with `pwrite`/`pread` and
 configurable `fdatasync`/`fsync`. Each I/O operation is submitted to
 the pool; the worker thread performs the blocking syscall and invokes
 the completion callback. Correct semantics, lower performance (thread
-hop per I/O). Also the `FileDisk` engine (pwrite to a regular file at
-an offset).
+hop per I/O). Also used for `BlockDisk` without `O_DIRECT` (pwrite to
+a block device at an offset).
 
 ### 5.3 DummyDiskEngine
 
@@ -322,9 +322,6 @@ injection on either type.
   (Linux). Aligned I/O only. The primary production disk type for
   NVMe/SATA SSDs and HDDs. The device path comes from the
   `device_path` field in `DiskValue` (group-0 sysdata).
-- **FileDisk** — regular file, `pwrite`/`pread` at offset. Works on
-  all platforms. Used for testing and for disks backed by filesystem
-  files.
 - **NullDisk** — memfd-backed dummy disk. Writes discarded; reads
   return deterministic pattern data via `DummyDiskEngine` wrapper.
   Default dummy disk type. For benchmark tests.
@@ -416,7 +413,7 @@ answer is fewer rings, not shared CQs. Topology by disk type:
 this flag makes them share the kernel's io-wq (async worker pool)
 instead of each ring creating its own (~8 kernel threads per pool).
 For `O_DIRECT` on block devices, I/O almost always completes inline
-and io-wq is rarely involved; for `FileDisk` (regular files) io-wq
+and io-wq is rarely involved; for `BlockDisk` without `O_DIRECT` io-wq
 may be used. `ATTACH_WQ` reduces kernel thread count from
 `N_rings × 8` to `8` shared.
 

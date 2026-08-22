@@ -248,8 +248,8 @@ on.
    inline during SQ processing — e.g., buffered reads needing page
    faults, inode lock contention, VFS blocking. For `O_DIRECT` on
    block devices (CROW's `BlockDisk`), I/O almost always completes
-   inline and io-wq is rarely involved; for `FileDisk` (regular files)
-   io-wq may be used. Note: io-wq does NOT pull the SQ (that's done by
+   inline and io-wq is rarely involved; for `BlockDisk` without
+   `O_DIRECT` io-wq may be used. Note: io-wq does NOT pull the SQ (that's done by
    `io_uring_submit()` in regular mode or the kernel `io_sq_thread` in
    SQPOLL mode) and does NOT poll the CQ (that's the reactor thread's
    job) — it only executes blocking I/O on behalf of the submission

@@ -8,7 +8,7 @@
 // 2. Good-disk isolation: a slow disk doesn't block a good disk.
 // 3. Cancellation frees SQ slots.
 // 4. BlockingEngine backpressure analog: more jobs than threads.
-#include "disk/file_disk.h"
+#include "disk/block_disk.h"
 #include "disk/types.h"
 #include "engine/blocking/blocking_engine.h"
 #include "engine/io_engine.h"
@@ -54,11 +54,11 @@ std::string temp_file(int64_t size)
     return std::string(buf.data());
 }
 
-std::shared_ptr<FileDisk> make_file_disk(DiskId id, const std::string &path, int64_t zone_cap)
+std::shared_ptr<BlockDisk> make_block_disk(DiskId id, const std::string &path, int64_t zone_cap)
 {
     std::vector<Zone> zones;
     zones.push_back({0, 0, zone_cap});
-    return std::make_shared<FileDisk>(id, path, nullptr, std::move(zones));
+    return std::make_shared<BlockDisk>(id, path, nullptr, std::move(zones), false);
 }
 
 } // namespace
@@ -67,7 +67,7 @@ std::shared_ptr<FileDisk> make_file_disk(DiskId id, const std::string &path, int
 TEST(SqFullBackpressureTest, BlockingEngineMoreJobsThanThreads)
 {
     std::string path = temp_file(1 << 20);
-    auto        disk = make_file_disk({0, 1}, path, 1 << 24);
+    auto        disk = make_block_disk({0, 1}, path, 1 << 24);
 
     // Tiny thread pool (1 thread) — submit 100 concurrent writes.
     auto engine = std::make_shared<BlockingEngine>(1);
@@ -102,7 +102,7 @@ TEST(SqFullBackpressureTest, BlockingEngineMoreJobsThanThreads)
 TEST(SqFullBackpressureTest, BlockingEngineReadBackUnderLoad)
 {
     std::string path = temp_file(1 << 20);
-    auto        disk = make_file_disk({0, 2}, path, 1 << 24);
+    auto        disk = make_block_disk({0, 2}, path, 1 << 24);
 
     auto engine = std::make_shared<BlockingEngine>(2);
 
@@ -169,7 +169,7 @@ TEST(SqFullBackpressureTest, BlockingEngineReadBackUnderLoad)
 TEST(SqFullBackpressureTest, BlockingEngineMixedWriteFsync)
 {
     std::string path = temp_file(1 << 20);
-    auto        disk = make_file_disk({0, 3}, path, 1 << 24);
+    auto        disk = make_block_disk({0, 3}, path, 1 << 24);
 
     auto engine = std::make_shared<BlockingEngine>(4);
 
@@ -212,7 +212,7 @@ TEST(SqFullBackpressureTest, BlockingEngineMixedWriteFsync)
 TEST(SqFullBackpressureTest, UringEngineTinySqManyWrites)
 {
     std::string path = temp_file(1 << 20);
-    auto        disk = make_file_disk({0, 10}, path, 1 << 24);
+    auto        disk = make_block_disk({0, 10}, path, 1 << 24);
 
     // Tiny SQ (8 entries) — submit 100 writes. The reactor should
     // handle backpressure: submissions that don't fit in the SQ ring
@@ -250,8 +250,8 @@ TEST(SqFullBackpressureTest, UringEngineGoodDiskIsolation)
 {
     std::string path1 = temp_file(1 << 20);
     std::string path2 = temp_file(1 << 20);
-    auto        disk1 = make_file_disk({0, 11}, path1, 1 << 24);
-    auto        disk2 = make_file_disk({0, 12}, path2, 1 << 24);
+    auto        disk1 = make_block_disk({0, 11}, path1, 1 << 24);
+    auto        disk2 = make_block_disk({0, 12}, path2, 1 << 24);
 
     auto engine = std::make_shared<UringEngine>(32);
 
@@ -322,7 +322,7 @@ TEST(SqFullBackpressureTest, UringEngineGoodDiskIsolation)
 TEST(SqFullBackpressureTest, UringEngineCancellationFreesSlots)
 {
     std::string path = temp_file(1 << 20);
-    auto        disk = make_file_disk({0, 13}, path, 1 << 24);
+    auto        disk = make_block_disk({0, 13}, path, 1 << 24);
 
     // Small SQ to make slot pressure more visible.
     auto engine = std::make_shared<UringEngine>(16);

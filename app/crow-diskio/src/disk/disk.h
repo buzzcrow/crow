@@ -3,8 +3,8 @@
 
 // Disk virtual base: per-disk handle. Each disk owns (or shares) an
 // IoEngine instance via its subclass. Subclasses: BlockDisk (O_DIRECT
-// block device), FileDisk (regular file), NullDisk (memfd, drop-write
-// + pattern read), MemDisk (memfd, store + read-back).
+// block device), NullDisk (memfd, drop-write + pattern read), MemDisk
+// (memfd, store + read-back).
 #pragma once
 
 #include "disk/types.h"
@@ -18,7 +18,6 @@ namespace crow::diskio
 
 enum class DiskType {
     Block,
-    File,
     Null,
     Mem,
 };

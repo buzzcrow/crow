@@ -1,10 +1,10 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// DiskSet + FileDisk tests: add/find_disk, unknown disk returns nullptr,
+// DiskSet + BlockDisk tests: add/find_disk, unknown disk returns nullptr,
 // shutdown clears the map.
+#include "disk/block_disk.h"
 #include "disk/disk_set.h"
-#include "disk/file_disk.h"
 #include "disk/types.h"
 #include "engine/blocking/blocking_engine.h"
 
@@ -56,7 +56,8 @@ TEST(DiskSet, AddAndFindDisk)
     auto                            engine = std::make_shared<crow::diskio::BlockingEngine>(2);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path, engine, std::move(zones));
+    auto disk =
+        std::make_shared<crow::diskio::BlockDisk>(crow::diskio::DiskId{1, 1}, path, engine, std::move(zones), false);
 
     crow::diskio::DiskSet set;
     set.add(disk);
@@ -65,7 +66,7 @@ TEST(DiskSet, AddAndFindDisk)
     auto found = set.find_disk({1, 1});
     ASSERT_NE(found, nullptr);
     EXPECT_EQ(found->id(), (crow::diskio::DiskId{1, 1}));
-    EXPECT_EQ(found->type(), crow::diskio::DiskType::File);
+    EXPECT_EQ(found->type(), crow::diskio::DiskType::Block);
 
     set.shutdown();
     EXPECT_EQ(set.size(), 0u);
@@ -91,8 +92,8 @@ TEST(DiskSet, MultipleDisksAllFindable)
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
 
-    auto disk1 = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path1, engine1, zones);
-    auto disk2 = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{2, 2}, path2, engine2, zones);
+    auto disk1 = std::make_shared<crow::diskio::BlockDisk>(crow::diskio::DiskId{1, 1}, path1, engine1, zones, false);
+    auto disk2 = std::make_shared<crow::diskio::BlockDisk>(crow::diskio::DiskId{2, 2}, path2, engine2, zones, false);
 
     crow::diskio::DiskSet set;
     set.add(disk1);
@@ -108,7 +109,7 @@ TEST(DiskSet, MultipleDisksAllFindable)
     std::remove(path2.c_str());
 }
 
-TEST(FileDisk, WriteReadRoundTripViaEngine)
+TEST(BlockDisk, WriteReadRoundTripViaEngine)
 {
     std::string path = temp_path();
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
@@ -117,7 +118,8 @@ TEST(FileDisk, WriteReadRoundTripViaEngine)
     auto                           *engine_ptr = engine.get();
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{5, 5}, path, engine, std::move(zones));
+    auto disk =
+        std::make_shared<crow::diskio::BlockDisk>(crow::diskio::DiskId{5, 5}, path, engine, std::move(zones), false);
 
     std::vector<uint8_t> in(4096);
     for (size_t i = 0; i < in.size(); ++i) {
@@ -145,7 +147,7 @@ TEST(FileDisk, WriteReadRoundTripViaEngine)
     std::remove(path.c_str());
 }
 
-TEST(FileDisk, FindZoneReturnsCorrectZone)
+TEST(BlockDisk, FindZoneReturnsCorrectZone)
 {
     std::string path = temp_path();
     ASSERT_EQ(::truncate(path.c_str(), 4096), 0);
@@ -156,7 +158,8 @@ TEST(FileDisk, FindZoneReturnsCorrectZone)
     zones.push_back({1, 4096, 4096});
     zones.push_back({2, 8192, 4096});
 
-    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{6, 6}, path, engine, std::move(zones));
+    auto disk =
+        std::make_shared<crow::diskio::BlockDisk>(crow::diskio::DiskId{6, 6}, path, engine, std::move(zones), false);
 
     auto *z0 = disk->find_zone(0);
     auto *z1 = disk->find_zone(1);

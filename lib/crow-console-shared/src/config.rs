@@ -258,6 +258,8 @@ pub struct DiskEntry {
     pub capacity_bytes: u64,
     pub zone_size_bytes: u64,
     pub unit_size_bytes: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_path: String,
 }
 
 /// Discriminator for console-deployed server entries. `Kv` is the
@@ -366,6 +368,8 @@ struct PersistedDiskEntry {
     capacity_bytes: u64,
     zone_size_bytes: u64,
     unit_size_bytes: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    device_path: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -989,6 +993,7 @@ impl ConsoleConfig {
                         capacity_bytes: entry.capacity_bytes,
                         zone_size_bytes: entry.zone_size_bytes,
                         unit_size_bytes: entry.unit_size_bytes,
+                        device_path: entry.device_path.clone(),
                     },
                 )
             })
@@ -1086,6 +1091,7 @@ impl ConsoleConfig {
                 capacity_bytes: entry.capacity_bytes,
                 zone_size_bytes: entry.zone_size_bytes,
                 unit_size_bytes: entry.unit_size_bytes,
+                device_path: entry.device_path,
             })
             .collect();
         disks.sort_by(|a, b| a.disk_id.cmp(&b.disk_id));

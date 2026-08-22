@@ -50,10 +50,10 @@ template <typename Pred> bool wait_for(Pred pred, int max_iters = 200, int sleep
 }
 
 // Minimal Disk implementation for testing — a regular file (no O_DIRECT).
-class TestFileDisk : public crow::diskio::Disk
+class TestDisk : public crow::diskio::Disk
 {
   public:
-    TestFileDisk(crow::diskio::DiskId id, const std::string &path, crow::diskio::IoEngine *engine)
+    TestDisk(crow::diskio::DiskId id, const std::string &path, crow::diskio::IoEngine *engine)
         : id_(id),
           fd_(::open(path.c_str(), O_RDWR)),
           engine_(engine)
@@ -61,7 +61,7 @@ class TestFileDisk : public crow::diskio::Disk
         zones_.push_back({0, 0, 1 << 24}); // one zone covering the whole file
     }
 
-    ~TestFileDisk() override
+    ~TestDisk() override
     {
         if (fd_ >= 0) {
             ::close(fd_);
@@ -70,7 +70,7 @@ class TestFileDisk : public crow::diskio::Disk
 
     crow::diskio::DiskType type() const override
     {
-        return crow::diskio::DiskType::File;
+        return crow::diskio::DiskType::Block;
     }
 
     int fd() const override
@@ -121,7 +121,7 @@ TEST(UringEngine, WriteReadRoundTrip)
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
 
     crow::diskio::UringEngine engine(256);
-    TestFileDisk              disk({1, 1}, path, &engine);
+    TestDisk                  disk({1, 1}, path, &engine);
 
     std::vector<uint8_t> in(4096);
     for (size_t i = 0; i < in.size(); ++i) {
@@ -155,7 +155,7 @@ TEST(UringEngine, FsyncAfterWrite)
     ASSERT_EQ(::truncate(path.c_str(), 4096), 0);
 
     crow::diskio::UringEngine engine(64);
-    TestFileDisk              disk({2, 2}, path, &engine);
+    TestDisk                  disk({2, 2}, path, &engine);
 
     std::vector<uint8_t> in(4096, 0xAB);
     std::atomic<bool>    write_done{false};
@@ -181,7 +181,7 @@ TEST(UringEngine, MultipleConcurrentWritesAllComplete)
     ASSERT_EQ(::truncate(path.c_str(), 100 * 4096), 0);
 
     crow::diskio::UringEngine engine(256);
-    TestFileDisk              disk({3, 3}, path, &engine);
+    TestDisk                  disk({3, 3}, path, &engine);
 
     constexpr int        kOps = 50;
     std::atomic<int>     completed{0};
@@ -212,7 +212,7 @@ TEST(UringEngine, InFlightTrackingIncrementsAndDecrements)
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
 
     crow::diskio::UringEngine engine(256);
-    TestFileDisk              disk({4, 4}, path, &engine);
+    TestDisk                  disk({4, 4}, path, &engine);
 
     crow::diskio::DiskId did = disk.id();
     EXPECT_EQ(engine.in_flight_count(did), 0u);
@@ -233,7 +233,7 @@ TEST(UringEngine, CancelDiskSuppressesCallback)
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
 
     crow::diskio::UringEngine engine(64);
-    TestFileDisk              disk({5, 5}, path, &engine);
+    TestDisk                  disk({5, 5}, path, &engine);
 
     std::atomic<bool>    callback_fired{false};
     std::vector<uint8_t> in(4096, 0xEF);

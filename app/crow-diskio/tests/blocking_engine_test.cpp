@@ -46,10 +46,10 @@ template <typename Pred> bool wait_for(Pred pred, int max_iters = 200, int sleep
     return pred();
 }
 
-class TestFileDisk : public crow::diskio::Disk
+class TestDisk : public crow::diskio::Disk
 {
   public:
-    TestFileDisk(crow::diskio::DiskId id, const std::string &path, crow::diskio::IoEngine *engine)
+    TestDisk(crow::diskio::DiskId id, const std::string &path, crow::diskio::IoEngine *engine)
         : id_(id),
           fd_(::open(path.c_str(), O_RDWR)),
           engine_(engine)
@@ -57,7 +57,7 @@ class TestFileDisk : public crow::diskio::Disk
         zones_.push_back({0, 0, 1 << 24});
     }
 
-    ~TestFileDisk() override
+    ~TestDisk() override
     {
         if (fd_ >= 0) {
             ::close(fd_);
@@ -66,7 +66,7 @@ class TestFileDisk : public crow::diskio::Disk
 
     crow::diskio::DiskType type() const override
     {
-        return crow::diskio::DiskType::File;
+        return crow::diskio::DiskType::Block;
     }
 
     int fd() const override
@@ -117,7 +117,7 @@ TEST(BlockingEngine, WriteReadRoundTrip)
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
 
     crow::diskio::BlockingEngine engine(4);
-    TestFileDisk                 disk({1, 1}, path, &engine);
+    TestDisk                     disk({1, 1}, path, &engine);
 
     std::vector<uint8_t> in(4096);
     for (size_t i = 0; i < in.size(); ++i) {
@@ -152,7 +152,7 @@ TEST(BlockingEngine, FsyncAfterWrite)
     ASSERT_EQ(::truncate(path.c_str(), 4096), 0);
 
     crow::diskio::BlockingEngine engine(2);
-    TestFileDisk                 disk({2, 2}, path, &engine);
+    TestDisk                     disk({2, 2}, path, &engine);
 
     std::vector<uint8_t> in(4096, 0xAB);
     std::atomic<bool>    write_done{false};
@@ -179,7 +179,7 @@ TEST(BlockingEngine, ConcurrentWritesAllComplete)
     ASSERT_EQ(::truncate(path.c_str(), 100 * 4096), 0);
 
     crow::diskio::BlockingEngine engine(4);
-    TestFileDisk                 disk({3, 3}, path, &engine);
+    TestDisk                     disk({3, 3}, path, &engine);
 
     constexpr int        kOps = 50;
     std::atomic<int>     completed{0};
@@ -220,7 +220,7 @@ TEST(BlockingEngine, StopJoinsAllThreads)
 
     {
         crow::diskio::BlockingEngine engine(4);
-        TestFileDisk                 disk({4, 4}, path, &engine);
+        TestDisk                     disk({4, 4}, path, &engine);
         std::vector<uint8_t>         in(4096, 0xCD);
         std::atomic<bool>            done{false};
         engine.submit_write(&disk, 0, in.data(), in.size(), [&](int) { done.store(true, std::memory_order_release); });

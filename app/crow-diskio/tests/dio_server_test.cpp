@@ -3,7 +3,7 @@
 
 // DiskioServer loopback tests: start an RPC server with DiskioServer
 // handlers, connect a client, send write/read/fsync requests, verify
-// responses. Uses BlockingEngine + FileDisk for real I/O.
+// responses. Uses BlockingEngine + BlockDisk for real I/O.
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
@@ -11,7 +11,7 @@
 #include "crow-rpc/server/message.h"
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
-#include "disk/file_disk.h"
+#include "disk/block_disk.h"
 #include "disk/types.h"
 #include "engine/blocking/blocking_engine.h"
 #include "rpc/dio_server.h"
@@ -172,7 +172,8 @@ TEST(DiskioServerTest, WriteAndReadRoundTrip)
     auto                            engine = std::make_shared<crow::diskio::BlockingEngine>(2);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path, engine, std::move(zones));
+    auto disk =
+        std::make_shared<crow::diskio::BlockDisk>(crow::diskio::DiskId{1, 1}, path, engine, std::move(zones), false);
 
     auto disk_set = std::make_shared<crow::diskio::DiskSet>();
     disk_set->add(disk);
@@ -249,7 +250,8 @@ TEST(DiskioServerTest, FsyncRoundTrip)
     auto                            engine = std::make_shared<crow::diskio::BlockingEngine>(1);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{2, 2}, path, engine, std::move(zones));
+    auto disk =
+        std::make_shared<crow::diskio::BlockDisk>(crow::diskio::DiskId{2, 2}, path, engine, std::move(zones), false);
 
     auto disk_set = std::make_shared<crow::diskio::DiskSet>();
     disk_set->add(disk);

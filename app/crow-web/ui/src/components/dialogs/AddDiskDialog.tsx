@@ -31,6 +31,7 @@ function randomDiskId(): string {
 interface DiskRow {
   disk_id: string;
   disk_type: string;
+  device_path: string;
 }
 
 export function AddDiskDialog({
@@ -40,7 +41,7 @@ export function AddDiskDialog({
   dgId,
   onSuccess,
 }: AddDiskDialogProps) {
-  const [rows, setRows] = useState<DiskRow[]>([{ disk_id: randomDiskId(), disk_type: 'Ssd' }]);
+  const [rows, setRows] = useState<DiskRow[]>([{ disk_id: randomDiskId(), disk_type: 'Ssd', device_path: '' }]);
   const [capacityTiB, setCapacityTiB] = useState(String(DEFAULT_CAPACITY_TIB));
   const [zoneSizeGiB, setZoneSizeGiB] = useState(String(DEFAULT_ZONE_SIZE_GIB));
   const [isLoading, setIsLoading] = useState(false);
@@ -49,7 +50,7 @@ export function AddDiskDialog({
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
-      setRows([{ disk_id: randomDiskId(), disk_type: 'Ssd' }]);
+      setRows([{ disk_id: randomDiskId(), disk_type: 'Ssd', device_path: '' }]);
       setCapacityTiB(String(DEFAULT_CAPACITY_TIB));
       setZoneSizeGiB(String(DEFAULT_ZONE_SIZE_GIB));
     }
@@ -62,7 +63,8 @@ export function AddDiskDialog({
     && isPositiveInt(capacityTiB)
     && isPositiveInt(zoneSizeGiB);
 
-  const addRow = () => setRows((prev) => [...prev, { disk_id: randomDiskId(), disk_type: 'Ssd' }]);
+  const addRow = () =>
+    setRows((prev) => [...prev, { disk_id: randomDiskId(), disk_type: 'Ssd', device_path: '' }]);
   const removeRow = (idx: number) => setRows((prev) => prev.filter((_, i) => i !== idx));
   const updateRow = (idx: number, patch: Partial<DiskRow>) =>
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
@@ -79,6 +81,7 @@ export function AddDiskDialog({
         capacity_bytes: capacityBytes,
         zone_size_bytes: zoneSizeBytes,
         unit_size_bytes: DEFAULT_UNIT_SIZE_BYTES,
+        device_path: r.device_path.trim() || undefined,
       }));
       const result = await addDisksBatch(nodeId, dgId, { disks });
       const sysdataErrs = result.sysdata_errors?.length ?? 0;
@@ -145,6 +148,14 @@ export function AddDiskDialog({
                 <option value="Ssd">Ssd</option>
                 <option value="Hdd">Hdd</option>
               </Select>
+            </div>
+            <div className="tw-flex-1">
+              <Input
+                label={idx === 0 ? 'Device Path (optional)' : undefined}
+                placeholder="/dev/nvme0n1"
+                value={row.device_path}
+                onChange={(e) => updateRow(idx, { device_path: e.target.value })}
+              />
             </div>
             {rows.length > 1 && (
               <Button
