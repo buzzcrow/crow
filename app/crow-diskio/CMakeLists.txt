@@ -19,23 +19,24 @@ add_compile_options(-Wall -Wextra -Werror)
 # add crow-common separately here (avoids duplicate target collision).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-rpc crow-rpc-build)
 
-# ── crow-kv-client-ffi (Rust cdylib: HardwareClient/ServiceRegistryClient C ABI) ──
-# The FFI crate is built by cargo (via pixi) into a shared library.
-# We build it with a custom command and link the resulting .so.
-set(CROW_KV_CLIENT_FFI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-kv-client-ffi)
+# ── crow-kv-client FFI (Rust cdylib with --features ffi) ──────────
+# crow-kv-client produces both an rlib (for Rust dependents) and a
+# cdylib (for C++ consumers). The cdylib exports C ABI symbols only
+# when built with the `ffi` feature.
+set(CROW_KV_CLIENT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-kv-client)
 set(CROW_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
   set(CARGO_PROFILE release)
 else()
   set(CARGO_PROFILE debug)
 endif()
-set(CROW_KV_CLIENT_FFI_LIB ${CROW_ROOT_DIR}/target/${CARGO_PROFILE}/libcrow_kv_client_ffi.so)
+set(CROW_KV_CLIENT_FFI_LIB ${CROW_ROOT_DIR}/target/${CARGO_PROFILE}/libcrow_kv_client.so)
 add_custom_command(
   OUTPUT ${CROW_KV_CLIENT_FFI_LIB}
-  COMMAND pixi run cargo build -p crow-kv-client-ffi
+  COMMAND pixi run cargo build -p crow-kv-client --features ffi
           $<$<STREQUAL:${CARGO_PROFILE},release>:--release>
   WORKING_DIRECTORY ${CROW_ROOT_DIR}
-  COMMENT "Building crow-kv-client-ffi (Rust cdylib)"
+  COMMENT "Building crow-kv-client (Rust cdylib with ffi feature)"
   VERBATIM
 )
 add_custom_target(crow-kv-client-ffi DEPENDS ${CROW_KV_CLIENT_FFI_LIB})
@@ -49,7 +50,7 @@ target_include_directories(crow-diskio-lib
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
          ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-common/cpp/include
          ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-rpc/include
-         ${CROW_KV_CLIENT_FFI_DIR}/include
+         ${CROW_KV_CLIENT_DIR}/include
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/crow-rpc-build/generated
 )
 find_package(Threads REQUIRED)

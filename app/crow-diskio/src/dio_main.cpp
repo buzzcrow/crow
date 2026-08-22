@@ -15,6 +15,7 @@
 // are dummy disks (NullDisk by default, MemDisk with --dummy-disk mem).
 
 #include "crow-kv-client/c_api.h"
+#include "crow-rpc/scheduled_executor.h"
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
 #include "dio_config.h"
@@ -137,6 +138,10 @@ int main(int argc, char *argv[])
 
     server.start();
 
+    // Scheduled executor for periodic tasks (group-0 sync, etc.).
+    // The main loop polls run_due_tasks() every ~100ms.
+    crow::rpc::ScheduledExecutor scheduler;
+
     // Start group-0 sync if kv_seeds are configured.
     std::unique_ptr<Group0Sync> group0_sync;
     if (!cfg.kv_seeds.empty()) {
@@ -149,15 +154,16 @@ int main(int argc, char *argv[])
         g0_cfg.sync_interval_ms    = cfg.sync_interval_ms;
         g0_cfg.grpc_endpoint       = cfg.bind_address + ":" + std::to_string(actual_port);
         g0_cfg.auto_discover_disks = cfg.auto_discover_disks;
-        group0_sync                = std::make_unique<Group0Sync>(std::move(g0_cfg), disk_set, engine);
+        group0_sync                = std::make_unique<Group0Sync>(std::move(g0_cfg), disk_set, engine, scheduler);
         group0_sync->start();
         std::printf("group-0 sync started (interval=%ums, dg=%llu)\n", cfg.sync_interval_ms,
                     static_cast<unsigned long long>(cfg.dg_id));
     }
 
-    // Run until signaled.
+    // Run until signaled. Poll the scheduler every 100ms.
     while (g_running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        scheduler.run_due_tasks();
     }
 
     if (group0_sync != nullptr) {

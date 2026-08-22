@@ -8,15 +8,13 @@
 #include "disk/mem_disk.h"
 #include "disk/null_disk.h"
 
-#include <chrono>
+#include <folly/dynamic.h>
+#include <folly/json.h>
+
 #include <cstdio>
 #include <cstring>
 #include <thread>
-
-// Minimal JSON parser for the FFI responses. We only need to extract
-// disk_id (high/low), device_path, capacity, zone_size, unit_size,
-// and zone_count from the DiskValue. Using a simple string search
-// since we control the JSON format from the FFI side.
+#include <unordered_set>
 
 namespace crow::diskio
 {
@@ -53,10 +51,12 @@ static bool wait_for_ctx(SyncCallbackCtx &ctx, uint32_t timeout_ms = 10000)
 
 // ── Group0Sync ────────────────────────────────────────────────────
 
-Group0Sync::Group0Sync(Group0SyncConfig cfg, std::shared_ptr<DiskSet> disk_set, std::shared_ptr<IoEngine> engine)
+Group0Sync::Group0Sync(Group0SyncConfig cfg, std::shared_ptr<DiskSet> disk_set, std::shared_ptr<IoEngine> engine,
+                       crow::rpc::ScheduledExecutor &executor)
     : cfg_(std::move(cfg)),
       disk_set_(std::move(disk_set)),
-      engine_(std::move(engine))
+      engine_(std::move(engine)),
+      executor_(executor)
 {
 }
 
@@ -86,33 +86,26 @@ void Group0Sync::start()
         return;
     }
 
-    running_.store(true);
-    thread_ = std::thread([this] { run_loop(); });
+    // Schedule the first sync immediately (delay=0).
+    schedule_next_sync();
 }
 
 void Group0Sync::stop()
 {
-    running_.store(false);
-    if (thread_.joinable()) {
-        thread_.join();
+    if (sync_task_id_ != 0) {
+        executor_.cancel(sync_task_id_);
+        sync_task_id_ = 0;
     }
 }
 
-void Group0Sync::run_loop()
+void Group0Sync::schedule_next_sync()
 {
-    // Initial sync (blocking).
-    do_sync();
-
-    // Periodic sync.
-    while (running_.load()) {
-        for (uint32_t i = 0; i < cfg_.sync_interval_ms / 100 && running_.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (!running_.load()) {
-            break;
-        }
-        do_sync();
-    }
+    sync_task_id_ = executor_.schedule(
+        [this] {
+            do_sync();
+            schedule_next_sync();
+        },
+        cfg_.sync_interval_ms);
 }
 
 void Group0Sync::do_sync()
@@ -140,14 +133,89 @@ void Group0Sync::fetch_disks_from_group0()
         return;
     }
 
-    // Parse the JSON response and reconcile the disk set.
-    // The JSON is an array of {"disk_id": {"high": N, "low": N}, "value": {...}}.
-    // For now, log the result. Full reconciliation (adding/removing disks
-    // from the DiskSet based on group-0 state) will be implemented in a
-    // follow-up — it requires parsing the JSON and creating BlockDisk/
-    // NullDisk instances from the DiskValue fields.
-    std::printf("group-0: fetched disk list for dg=%llu (%zu bytes)\n", static_cast<unsigned long long>(cfg_.dg_id),
-                ctx.json_result.size());
+    reconcile_disks(ctx.json_result);
+}
+
+void Group0Sync::reconcile_disks(const std::string &json)
+{
+    // Parse the JSON array of {"disk_id": {"high": N, "low": N}, "value": {...}}.
+    folly::dynamic parsed;
+    try {
+        parsed = folly::parseJson(json);
+    }
+    catch (const std::exception &e) {
+        std::fprintf(stderr, "warning: group-0 disk list JSON parse error: %s\n", e.what());
+        return;
+    }
+
+    if (!parsed.isArray()) {
+        std::fprintf(stderr, "warning: group-0 disk list is not a JSON array\n");
+        return;
+    }
+
+    // Collect the disk IDs from group-0 and create/update disks.
+    std::unordered_set<DiskId, DiskIdHash> seen_ids;
+    for (const auto &entry : parsed) {
+        if (!entry.isObject()) {
+            continue;
+        }
+        const auto &did_obj = entry["disk_id"];
+        const auto &val_obj = entry["value"];
+        if (!did_obj.isObject() || !val_obj.isObject()) {
+            continue;
+        }
+
+        DiskId did;
+        did.high = did_obj["high"].asInt();
+        did.low  = did_obj["low"].asInt();
+        seen_ids.insert(did);
+
+        // Check if this disk already exists in the DiskSet.
+        auto existing = disk_set_->find_disk(did);
+        if (existing != nullptr) {
+            // Disk already present — no update needed (disks are immutable
+            // once opened; zone layout doesn't change at runtime).
+            continue;
+        }
+
+        // Create a new disk from the DiskValue fields.
+        std::string device_path     = val_obj["device_path"].asString();
+        uint64_t    zone_size_units = val_obj["zone_size_units"].asInt();
+        uint32_t    unit_size       = static_cast<uint32_t>(val_obj["unit_size_bytes"].asInt());
+        uint32_t    zone_count      = static_cast<uint32_t>(val_obj["zone_count"].asInt());
+
+        // Build zones: one zone covering the full capacity (simple layout).
+        std::vector<Zone> zones;
+        for (uint32_t i = 0; i < zone_count; ++i) {
+            Zone z;
+            z.zone_index  = i;
+            z.base_offset = static_cast<int64_t>(i) * static_cast<int64_t>(zone_size_units * unit_size);
+            z.capacity    = static_cast<int64_t>(zone_size_units * unit_size);
+            zones.push_back(z);
+        }
+
+        std::shared_ptr<Disk> disk;
+        if (device_path.empty()) {
+            // No device path — dummy disk (NullDisk for benchmarks).
+            disk = std::make_shared<NullDisk>(did, engine_, std::move(zones), std::nullopt);
+        }
+        else {
+            // Real block device.
+            disk = std::make_shared<BlockDisk>(did, device_path, engine_, std::move(zones), true);
+        }
+        disk_set_->add(disk);
+        std::printf("group-0: added disk {%llu,%llu} path=%s zones=%u\n", static_cast<unsigned long long>(did.high),
+                    static_cast<unsigned long long>(did.low), device_path.empty() ? "(null)" : device_path.c_str(),
+                    zone_count);
+    }
+
+    // Remove disks that are no longer in group-0.
+    // TODO: implement DiskSet::remove_disk(did) for this.
+    // For now, log a warning if the count differs.
+    if (disk_set_->size() != seen_ids.size()) {
+        std::fprintf(stderr, "warning: disk set size (%zu) != group-0 disk count (%zu)\n", disk_set_->size(),
+                     seen_ids.size());
+    }
 }
 
 void Group0Sync::heartbeat()
@@ -156,7 +224,6 @@ void Group0Sync::heartbeat()
         return;
     }
 
-    // Build owned dg_ids JSON array.
     std::string dg_ids_json = "[" + std::to_string(cfg_.dg_id) + "]";
 
     SyncCallbackCtx ctx;
@@ -168,7 +235,6 @@ void Group0Sync::heartbeat()
     }
     if (ctx.status.load() != 0) {
         std::fprintf(stderr, "warning: group-0 heartbeat failed\n");
-        return;
     }
 }
 

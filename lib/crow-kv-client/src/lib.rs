@@ -34,6 +34,11 @@ mod space_usage;
 mod topology;
 mod watch_notify;
 
+// FFI module — only compiled with the `ffi` feature. Produces C ABI
+// exports for HardwareClient/ServiceRegistryClient (used by crow-diskio).
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 pub use binding_framework::{BindingMonitor, BindingStrategy, MonitorTickResult};
 pub use chunkdb_binding_strategy::{
     compute_sub_range_assignment, ChunkdbRangeStrategy, DEFAULT_SUB_RANGE_COUNT,

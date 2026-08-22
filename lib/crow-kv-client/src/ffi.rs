@@ -13,15 +13,16 @@
 //! Complex types (`DiskValue`, `DiskdbOwnerEntry`, etc.) are serialized
 //! to JSON for transport across the C ABI boundary.
 
-#![allow(clippy::missing_safety_doc, clippy::needless_pass_by_value, unsafe_code)]
+#![allow(clippy::missing_safety_doc, clippy::needless_pass_by_value)]
 #![allow(non_camel_case_types, non_snake_case, static_mut_refs)]
+#![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::Arc;
 
-use crow_kv_client::{CrowkvClient, HardwareClient, ServiceRegistryClient};
+use crate::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::DiskGroupUsageSummary;
 
 // ── Opaque handle types ───────────────────────────────────────────
@@ -126,7 +127,7 @@ pub unsafe extern "C" fn crow_hw_client_create(
     if seed_vec.is_empty() {
         return ptr::null_mut();
     }
-    let kv = CrowkvClient::new(crow_kv_client::ClientConfig::new(seed_vec));
+    let kv = CrowkvClient::new(ClientConfig::new(seed_vec));
     let hw = HardwareClient::from_shared(Arc::new(kv));
     Box::into_raw(Box::new(hw)) as crow_hw_client_t
 }
@@ -235,7 +236,7 @@ pub unsafe extern "C" fn crow_svc_client_create(
     if seed_vec.is_empty() {
         return ptr::null_mut();
     }
-    let kv = CrowkvClient::new(crow_kv_client::ClientConfig::new(seed_vec));
+    let kv = CrowkvClient::new(ClientConfig::new(seed_vec));
     let svc = ServiceRegistryClient::from_shared(Arc::new(kv));
     Box::into_raw(Box::new(svc)) as crow_svc_client_t
 }

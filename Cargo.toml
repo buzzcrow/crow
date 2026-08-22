@@ -16,7 +16,6 @@ members = [
     "lib/crow-tree/ffi",
     "lib/crow-rpc/ffi",
     "lib/crow-diskio-client",
-    "lib/crow-kv-client-ffi",
 ]
 # : crow-tree/ffi moved from `exclude` into `members` now that
 # crow-kv depends on it (CrowTreeEngine) -- building crow-kv already triggers
