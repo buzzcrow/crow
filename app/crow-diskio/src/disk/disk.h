@@ -1,9 +1,10 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Disk virtual base: per-disk handle owning its IoEngine instance.
-// Subclasses: BlockDisk (O_DIRECT block device), FileDisk (regular file),
-// MemDisk (drop-write + rule-based read), SimulatedDisk (wrap + fault props).
+// Disk virtual base: per-disk handle. Each disk owns (or shares) an
+// IoEngine instance via its subclass. Subclasses: BlockDisk (O_DIRECT
+// block device), FileDisk (regular file), NullDisk (memfd, drop-write
+// + pattern read), MemDisk (memfd, store + read-back).
 #pragma once
 
 #include "disk/types.h"
@@ -18,8 +19,8 @@ namespace crow::diskio
 enum class DiskType {
     Block,
     File,
+    Null,
     Mem,
-    Simulated,
 };
 
 class Disk
@@ -36,8 +37,7 @@ class Disk
     virtual Zone     *find_zone(uint32_t zone_index) = 0;
 
   protected:
-    std::vector<Zone>         zones_;
-    std::unique_ptr<IoEngine> engine_;
+    std::vector<Zone> zones_;
 };
 
 } // namespace crow::diskio

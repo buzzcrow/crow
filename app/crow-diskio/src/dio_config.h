@@ -5,29 +5,28 @@
 // Parsed from CLI args; validated before startup.
 #pragma once
 
+#include "disk/disk_properties.h"
 #include "disk/types.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace crow::diskio
 {
 
-// Engine type selection.
-enum class EngineType {
-    Auto,      // uring on Linux+liburing, blocking otherwise
-    Uring,     // io_uring (Linux only)
-    Blocking,  // thread-pool pwrite/pread
-    Dummy,     // in-memory drop-write
-    Simulated, // fault-injection wrapper
+// Disk type for dummy disks (when no real block device is configured).
+enum class DummyDiskType {
+    Null, // memfd, drop-write + pattern read (default, for benchmarks)
+    Mem,  // memfd, store + read-back (for correctness tests)
 };
 
 // A disk entry from config: path + zone layout.
 struct DiskEntry
 {
     DiskId            id;
-    std::string       path;
+    std::string       path; // block device path (empty = dummy disk)
     std::vector<Zone> zones;
 };
 
@@ -42,15 +41,15 @@ struct DioConfig
     uint64_t node_id_high = 0;
     uint64_t node_id_low  = 0;
 
-    // Engine.
-    EngineType engine           = EngineType::Auto;
-    uint32_t   thread_pool_size = 4;
+    // Dummy disk type (used when disk path is empty).
+    DummyDiskType dummy_disk_type = DummyDiskType::Null;
 
-    // Reactor / uring tuning.
-    uint32_t sq_entries        = 256;
-    uint32_t busy_poll_budget  = 16;
-    uint32_t sq_thread_idle    = 1000; // ms
-    uint32_t linked_timeout_ms = 30000;
+    // Engine tuning (auto-detected: uring if available, blocking otherwise).
+    uint32_t thread_pool_size = 4;
+    uint32_t sq_entries       = 256;
+
+    // Optional fault injection for dummy disks.
+    std::optional<DiskProperties> dummy_props;
 
     // O_DIRECT for block devices.
     bool o_direct = true;
@@ -59,15 +58,14 @@ struct DioConfig
     std::vector<DiskEntry> disks;
 
     // Parse CLI args. Returns true on success, false on error (msg in err).
-    // Static so dio_main can call it without a pre-built config.
     static bool parse_args(int argc, char *argv[], DioConfig &out, std::string &err);
 
     // Validate the parsed config. Returns true on success.
     bool validate(std::string &err) const;
 };
 
-// Parse an engine type string ("auto", "uring", "blocking", "dummy", "simulated").
+// Parse a dummy disk type string ("null", "mem").
 // Returns true on success.
-bool parse_engine_type(const std::string &s, EngineType &out);
+bool parse_dummy_disk_type(const std::string &s, DummyDiskType &out);
 
 } // namespace crow::diskio

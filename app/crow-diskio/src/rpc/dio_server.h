@@ -6,16 +6,15 @@
 // the transport when I/O completes.
 #pragma once
 
-#include "disk/disk_set.h"
-#include "disk/types.h"
-#include "engine/io_engine.h"
-
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/connection.h"
 #include "crow-rpc/framing.h"
 #include "crow-rpc/server/handler.h"
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport.h"
+#include "disk/disk_set.h"
+#include "disk/types.h"
+#include "engine/io_engine.h"
 
 #include <cstdint>
 #include <memory>
@@ -23,15 +22,16 @@
 namespace crow::diskio
 {
 
-// DiskioServer holds the DiskSet + IoEngine and provides handler
-// functions for the three diskio msg_types (write/read/fsync).
+// DiskioServer holds the DiskSet and provides handler functions for
+// the three diskio msg_types (write/read/fsync). Each disk owns its
+// engine (shared uring/blocking, or a wrapper for dummy disks); the
+// handler resolves the disk and calls disk->engine()->submit_*.
 // The handlers are async: they return nullptr and submit the response
 // via transport->submit_inline when the I/O completes.
 class DiskioServer
 {
   public:
-    DiskioServer(std::shared_ptr<DiskSet> disk_set, std::shared_ptr<IoEngine> engine,
-                 crow::rpc::SocketTransport *transport);
+    DiskioServer(std::shared_ptr<DiskSet> disk_set, crow::rpc::SocketTransport *transport);
 
     // Handler functions (registered with RpcServer::register_handler).
     // Each parses the flatbuffer control from the Frame, looks up the
@@ -45,15 +45,14 @@ class DiskioServer
     void register_handlers(crow::rpc::RpcServer &server);
 
   private:
-    std::shared_ptr<DiskSet>     disk_set_;
-    std::shared_ptr<IoEngine>    engine_;
-    crow::rpc::SocketTransport  *transport_;
+    std::shared_ptr<DiskSet>    disk_set_;
+    crow::rpc::SocketTransport *transport_;
 
     // Build a response control buffer for a diskio response msg_type.
     // ret_code is a proto::FBDiskIoRetCode value (int16_t to avoid
     // pulling the generated header into this .h).
-    crow::rpc::Buffer *build_response_ctrl(crow::rpc::BufferPool *pool, uint64_t request_id,
-                                           uint64_t rpc_create_nano, int16_t ret_code, uint16_t msg_type);
+    crow::rpc::Buffer *build_response_ctrl(crow::rpc::BufferPool *pool, uint64_t request_id, uint64_t rpc_create_nano,
+                                           int16_t ret_code, uint16_t msg_type);
 
     // Send an error response synchronously (disk not found, parse error).
     void send_error_response(crow::rpc::Connection *conn, uint64_t request_id, uint64_t rpc_create_nano,

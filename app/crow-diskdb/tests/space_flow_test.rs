@@ -35,6 +35,7 @@ fn make_disk_value() -> DiskValue {
         unit_size_bytes: UNIT_SIZE,
         zone_count: ZONE_COUNT,
         status: 0,
+        device_path: String::new(),
     }
 }
 

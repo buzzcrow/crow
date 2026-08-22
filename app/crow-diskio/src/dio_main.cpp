@@ -3,17 +3,24 @@
 
 // crow-diskio: the disk I/O server binary.
 //
-// Parses config from CLI args, creates DiskSet + IoEngine, registers
-// diskio RPC handlers, and serves until SIGTERM/SIGINT.
+// Parses config from CLI args, auto-detects the I/O engine (io_uring
+// on Linux with liburing, blocking thread-pool otherwise), creates
+// DiskSet + IoEngine, registers diskio RPC handlers, and serves until
+// SIGTERM/SIGINT.
 //
-// Usage: crow-diskio --port <port> [--bind <addr>] [--engine ...]
-//   [--disk <hex_id>:<path>[:<capacity>]]...
+// Usage: crow-diskio --port <port> [--bind <addr>]
+//   [--dummy-disk null|mem] [--disk <hex_id>:<path>[:<capacity>]]...
+//
+// Engine is auto-detected — no --engine flag. Disks with an empty path
+// are dummy disks (NullDisk by default, MemDisk with --dummy-disk mem).
 
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
 #include "dio_config.h"
 #include "disk/disk_set.h"
 #include "disk/file_disk.h"
+#include "disk/mem_disk.h"
+#include "disk/null_disk.h"
 #include "engine/blocking/blocking_engine.h"
 #include "rpc/dio_server.h"
 
@@ -33,52 +40,49 @@ static void on_signal(int)
     g_running.store(false);
 }
 
-// Create the IoEngine based on config. Returns nullptr on error.
+// Auto-detect the IoEngine: try UringEngine first (Linux with liburing),
+// fall back to BlockingEngine. Returns nullptr on error.
 static std::shared_ptr<crow::diskio::IoEngine> create_engine(const crow::diskio::DioConfig &cfg)
 {
     using namespace crow::diskio;
-    EngineType type = cfg.engine;
-    if (type == EngineType::Auto) {
 #ifdef CROW_HAVE_LIBURING
-        type = EngineType::Uring;
-#else
-        type = EngineType::Blocking;
-#endif
+    try {
+        auto engine = std::make_shared<UringEngine>(cfg.sq_entries);
+        return engine;
     }
-
-    switch (type) {
-    case EngineType::Uring:
-#ifdef CROW_HAVE_LIBURING
-        return std::make_shared<UringEngine>(cfg.sq_entries);
-#else
-        std::fprintf(stderr, "error: uring engine not available (built without liburing)\n");
-        return nullptr;
-#endif
-    case EngineType::Blocking:
-        return std::make_shared<BlockingEngine>(cfg.thread_pool_size);
-    case EngineType::Dummy:
-        // DummyEngine is for testing; not wired in the binary.
-        std::fprintf(stderr, "error: dummy engine not supported in production binary\n");
-        return nullptr;
-    case EngineType::Simulated:
-        std::fprintf(stderr, "error: simulated engine not supported in production binary\n");
-        return nullptr;
-    default:
-        return nullptr;
+    catch (const std::exception &e) {
+        std::fprintf(stderr, "warning: uring engine creation failed (%s), falling back to blocking\n", e.what());
     }
+#endif
+    return std::make_shared<BlockingEngine>(cfg.thread_pool_size);
 }
 
-// Build the DiskSet from config: open each disk file and add to the set.
-static std::shared_ptr<crow::diskio::DiskSet> build_disk_set(const crow::diskio::DioConfig &cfg,
-                                                             crow::diskio::IoEngine * /*engine*/)
+// Build the DiskSet from config. Disks with a non-empty path are
+// FileDisk (or BlockDisk); disks with an empty path are dummy disks
+// (NullDisk or MemDisk per config).
+static std::shared_ptr<crow::diskio::DiskSet> build_disk_set(const crow::diskio::DioConfig          &cfg,
+                                                             std::shared_ptr<crow::diskio::IoEngine> engine)
 {
     using namespace crow::diskio;
     auto disk_set = std::make_shared<DiskSet>();
     for (const auto &entry : cfg.disks) {
-        // The binary uses FileDisk (regular files). BlockDisk requires
-        // O_DIRECT block devices — not wired in the minimal binary.
-        auto disk = std::make_shared<FileDisk>(entry.id, entry.path, nullptr, std::vector<Zone>(entry.zones));
-        disk_set->add(disk);
+        if (entry.path.empty()) {
+            // Dummy disk (NullDisk or MemDisk).
+            auto zones = std::vector<Zone>(entry.zones);
+            if (cfg.dummy_disk_type == DummyDiskType::Mem) {
+                auto disk = std::make_shared<MemDisk>(entry.id, engine, std::move(zones), cfg.dummy_props);
+                disk_set->add(disk);
+            }
+            else {
+                auto disk = std::make_shared<NullDisk>(entry.id, engine, std::move(zones), cfg.dummy_props);
+                disk_set->add(disk);
+            }
+        }
+        else {
+            // Real file-backed disk.
+            auto disk = std::make_shared<FileDisk>(entry.id, entry.path, engine, std::vector<Zone>(entry.zones));
+            disk_set->add(disk);
+        }
     }
     return disk_set;
 }
@@ -101,14 +105,14 @@ int main(int argc, char *argv[])
     std::signal(SIGTERM, on_signal);
     std::signal(SIGINT, on_signal);
 
-    // Create the engine.
+    // Auto-detect and create the engine.
     auto engine = create_engine(cfg);
     if (engine == nullptr) {
         return 1;
     }
 
-    // Build the disk set.
-    auto disk_set = build_disk_set(cfg, engine.get());
+    // Build the disk set (disks share the engine).
+    auto disk_set = build_disk_set(cfg, engine);
     if (disk_set == nullptr) {
         return 1;
     }
@@ -125,7 +129,7 @@ int main(int argc, char *argv[])
     std::fflush(stdout);
 
     auto *transport  = server.transport();
-    auto  dio_server = std::make_unique<DiskioServer>(disk_set, engine, transport);
+    auto  dio_server = std::make_unique<DiskioServer>(disk_set, transport);
     dio_server->register_handlers(server);
 
     server.start();

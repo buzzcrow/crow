@@ -1,15 +1,24 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// MemDisk: drop-write + rule-based read. No storage; reads return
-// deterministic content from a cached pattern buffer. Used for throughput
-// benches that measure the full RPC + engine path without real disk limits.
+// MemDisk: dummy block device backed by memfd_create. Unlike NullDisk,
+// MemDisk stores written data and reads it back — for end-to-end
+// correctness tests that verify I/O data integrity.
+//
+// The full uring or blocking I/O path executes (real pwrite/pread on
+// the memfd). No real disk I/O — tmpfs is RAM.
+//
+// Optional DiskProperties enable fault injection (latency, error rate).
+// When fault injection is active, a DummyDiskEngine wrapper is used;
+// otherwise the shared engine is used directly (no read-content hack).
 #pragma once
 
 #include "disk/disk.h"
+#include "disk/disk_properties.h"
 #include "disk/types.h"
+#include "engine/io_engine.h"
 
-#include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -19,7 +28,9 @@ namespace crow::diskio
 class MemDisk : public Disk
 {
   public:
-    MemDisk(DiskId id, std::vector<Zone> zones, size_t max_read_size);
+    MemDisk(DiskId id, std::shared_ptr<IoEngine> engine, std::vector<Zone> zones,
+            std::optional<DiskProperties> props = std::nullopt);
+    ~MemDisk() override;
 
     DiskType type() const override
     {
@@ -28,7 +39,7 @@ class MemDisk : public Disk
 
     int fd() const override
     {
-        return -1;
+        return fd_;
     }
 
     bool is_o_direct() const override
@@ -53,21 +64,10 @@ class MemDisk : public Disk
 
     Zone *find_zone(uint32_t zone_index) override;
 
-    // Read: memcpy from pattern_buf_ with wrap-around.
-    // Write: drop (no-op), return success.
-    int read(off_t phys_offset, uint8_t *buf, size_t size, std::optional<uint64_t> logical_object_offset);
-
-    int write(off_t /*phys_offset*/, const uint8_t * /*data*/, size_t size)
-    {
-        return static_cast<int>(size); // drop-write: immediate success
-    }
-
   private:
-    void generate_pattern(uint64_t seed);
-
-    DiskId               id_;
-    size_t               pattern_len_;
-    std::vector<uint8_t> pattern_buf_; // size = 2 * max_read_size
+    DiskId                    id_;
+    int                       fd_;
+    std::shared_ptr<IoEngine> engine_;
 };
 
 } // namespace crow::diskio

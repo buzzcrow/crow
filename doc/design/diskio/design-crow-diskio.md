@@ -197,7 +197,7 @@ Caller (Rust)                     crow-diskio Server (Node X, C++)
      │                    │ crow::common::Reactor        │ thread pool
      │                    │ SQE submit → CQE completion  │ pwrite → callback
      │                    └─────────┬────────────────────┘
-     │                              │ (also: DummyEngine, SimulatedEngine)
+     │                              │ (also: DummyDiskEngine wrapper for dummy disks)
      │                                    │
      │                          on_complete → crow_rpc_server_submit_response
      │                          crow-rpc response: [hdr][DiskWriteResp]
@@ -209,15 +209,17 @@ Components:
 - **DiskSet** — holds `HashMap<DiskId, shared_ptr<Disk>>`, opened at
   startup from the node's disk list. Resolves `disk_id` to a `Disk`.
 - **Disk** — virtual base with subclasses: `BlockDisk` (real block
-  device, `O_DIRECT`), `FileDisk` (regular file), `MemDisk`
-  (drop-write + rule-based read), `SimulatedDisk` (wraps a disk +
-  fault properties). Each `Disk` owns its `IoEngine` instance.
+  device, `O_DIRECT`), `FileDisk` (regular file), `NullDisk` (memfd,
+  drop-write + pattern read), `MemDisk` (memfd, store + read-back).
+  Each `Disk` shares the node's `IoEngine` instance; dummy disks wrap
+  it with a `DummyDiskEngine` for read-content hack and optional fault
+  injection.
 - **Zone** — `{zone_index, base_offset, capacity, state}`. The
   physical offset for an I/O is `zone.base_offset + zone_offset`.
 - **IoEngine** — virtual base: `submit_write`/`submit_read`/
   `submit_fsync` taking a disk handle, physical offset, buffer, size,
   and a completion callback. Implementations: `UringEngine`,
-  `BlockingEngine`, `DummyEngine`, `SimulatedEngine`.
+  `BlockingEngine`, `DummyDiskEngine` (wrapper for dummy disks).
 - **Reactor** — the shared io_uring event loop in `crow-common`. One
   dedicated thread per reactor instance; submits SQEs and dispatches
   CQEs to per-op callbacks.
@@ -275,27 +277,42 @@ the completion callback. Correct semantics, lower performance (thread
 hop per I/O). Also the `FileDisk` engine (pwrite to a regular file at
 an offset).
 
-### 5.3 DummyEngine
+### 5.3 DummyDiskEngine
 
-The throughput-bench path. `MemDisk` receives writes and drops them
-(no storage); reads return deterministic content from a repeating
-pattern in a cached buffer. The pattern is generated once (seeded by
-`disk_id` + zone, mixed with `logical_object_offset` when present)
-into a buffer of size `2 × max_read_size`. Any read range is served by
-`memcpy` from the cached buffer with wrap-around
-(`offset % pattern_len`) — no per-read generation cost, no storage per
-disk, memory-speed reads. Read verification: the caller regenerates
-the same pattern with the same seed + offset and compares.
+The dummy-disk wrapper. `DummyDiskEngine` wraps a real `IoEngine`
+(`UringEngine` or `BlockingEngine`) and provides two features:
 
-### 5.4 SimulatedEngine
+- **Read-content hack** (NullDisk): after the inner engine completes
+  a `pread`, the wrapper overwrites the buffer with deterministic
+  pattern data generated from `disk_id` + `phys_offset` (xorshift64
+  PRNG). The full uring/blocking `pwrite`/`pread` syscall path
+  executes against a `memfd_create` backing — no real disk I/O, but
+  the ring mechanics, syscall cost, and reactor batching all run.
+  Used for benchmark tests that measure uring overhead without
+  storage.
+- **Fault injection** (NullDisk + MemDisk): per-I/O random latency
+  (uniform draw from `latency_min_ms`..`latency_max_ms`, sleep before
+  completing) and errors (return `-EIO` at the configured
+  `error_rate`). Configured via `DiskProperties` on the dummy disk.
+  Merged from the former `SimulatedEngine` — no separate wrapper
+  engine needed.
 
-The fault-injection test path. `SimulatedDisk` carries
-`DiskProperties` (`latency_min_ms`, `latency_max_ms`, `error_rate`,
-throughput cap). `SimulatedEngine` wraps another `IoEngine` (real or
-mem) and injects per-I/O random latency (uniform draw from
-`latency_min_ms`..`latency_max_ms`, sleep before completing) and
-errors (return `-EIO` at the configured `error_rate`). Per-disk
-configurable; no per-I/O-type differentiation in v1.
+### 5.4 NullDisk and MemDisk
+
+Two dummy disk types, both backed by `memfd_create` (tmpfs):
+
+- **NullDisk** — the default dummy disk. Writes go to tmpfs (discarded
+  — NullDisk never reads them back). Reads execute the full `pread`
+  path, then the `DummyDiskEngine` wrapper overwrites the buffer with
+  pattern data. For benchmark tests: measures uring/blocking overhead
+  without real disk I/O or storage capacity limits.
+- **MemDisk** — stores written data and reads it back. For end-to-end
+  correctness tests that verify I/O data integrity. The full
+  `pwrite`/`pread` path executes against the memfd; no real disk I/O.
+
+Both dummy disks share the node's `IoEngine` instance (uring or
+blocking, auto-detected). Optional `DiskProperties` enable fault
+injection on either type.
 
 ## 6. Disk Model
 
@@ -303,20 +320,21 @@ configurable; no per-I/O-type differentiation in v1.
 
 - **BlockDisk** — real block device, opened with `O_DIRECT | O_RDWR`
   (Linux). Aligned I/O only. The primary production disk type for
-  NVMe/SATA SSDs and HDDs.
+  NVMe/SATA SSDs and HDDs. The device path comes from the
+  `device_path` field in `DiskValue` (group-0 sysdata).
 - **FileDisk** — regular file, `pwrite`/`pread` at offset. Works on
   all platforms. Used for testing and for disks backed by filesystem
   files.
-- **MemDisk** — drop-write + rule-based read. No storage; reads
-  return deterministic content from a cached pattern buffer. Used for
-  throughput benches that measure the full RPC + engine path without
-  real disk capacity limits.
-- **SimulatedDisk** — wraps a real or mem disk + `DiskProperties`
-  (latency, error rate). Used for fault-injection tests.
+- **NullDisk** — memfd-backed dummy disk. Writes discarded; reads
+  return deterministic pattern data via `DummyDiskEngine` wrapper.
+  Default dummy disk type. For benchmark tests.
+- **MemDisk** — memfd-backed dummy disk. Stores written data and
+  reads it back. For end-to-end correctness tests.
 
-Each `Disk` owns its `IoEngine` instance, selected by disk type +
-platform: uring on Linux block/file, blocking on macOS, dummy for mem,
-simulated wraps another.
+Each `Disk` shares the node's `IoEngine` instance (auto-detected:
+uring on Linux with liburing, blocking otherwise). Dummy disks
+(`NullDisk`, `MemDisk`) wrap the shared engine with a
+`DummyDiskEngine` for read-content hack and optional fault injection.
 
 `Zone` holds `{zone_index, base_offset, capacity, state}`. The
 physical offset for an I/O is `zone.base_offset + zone_offset`. Zone
@@ -518,11 +536,13 @@ the same data.
 - **node_id** — the node's ID (from group-0 sysdata).
 - **bind_address** — crow-rpc listen address + port.
 - **disk_list** — explicit disk list, or auto-discover from group-0
-  via `HardwareClient`.
-- **engine** — `auto` (uring on Linux with liburing, blocking
-  otherwise), `uring`, `blocking`, `dummy`, `simulated`.
-- **thread_pool_size** — blocking engine thread count per disk
-  (default 4).
+  via `HardwareClient`. Disks with an empty `device_path` are dummy
+  disks (`NullDisk` or `MemDisk`).
+- **dummy_disk_type** — `null` (default, drop-write + pattern read)
+  or `mem` (store + read-back). Used when `device_path` is empty.
+- **engine** — auto-detected: `UringEngine` on Linux with liburing,
+  `BlockingEngine` otherwise. No user-configurable engine selection.
+- **thread_pool_size** — blocking engine thread count (default 4).
 - **o_direct** — toggle `O_DIRECT` for `BlockDisk` (default on).
 - **polling_mode** — reactor polling mode: `wait`, `hybrid`,
   `sqpoll` (default `hybrid` for `UringEngine`).
@@ -532,8 +552,10 @@ the same data.
 - **linked_timeout_ms** — per-I/O linked timeout (default 30000).
 - **sq_entries** — SQ ring size (default 256; 1024+ for high-IOPS SSD
   rings; 2048+ for shared HDD rings with linked timeouts).
-- **per_disk_properties** — `SimulatedDisk` properties (latency,
-  error rate) for testing.
+- **fault_latency** — `min_ms:max_ms` latency injection for dummy
+  disks (testing only).
+- **fault_error_rate** — `0.0..1.0` error injection rate for dummy
+  disks (testing only).
 
 The server registers with the group-0 service registry on startup,
 reporting the diskio service is alive. Other services use this for

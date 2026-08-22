@@ -130,7 +130,7 @@ impl ZoneLoader {
         let mut max_freed_ts_in_dg: u64 = 0;
 
         for (disk_id, disk_value) in disks {
-            let mut disk = DdbDisk::new(*disk_id, dg_id, node_id, rack_id, *disk_value);
+            let mut disk = DdbDisk::new(*disk_id, dg_id, node_id, rack_id, disk_value.clone());
             // Attach per-disk hot-path counters (R74 §3).
             disk.metrics = Some(Arc::new(DiskMetrics::new()));
             let disk = Arc::new(disk);

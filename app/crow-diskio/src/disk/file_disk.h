@@ -18,7 +18,7 @@ namespace crow::diskio
 class FileDisk : public Disk
 {
   public:
-    FileDisk(DiskId id, const std::string &path, std::unique_ptr<IoEngine> engine, std::vector<Zone> zones);
+    FileDisk(DiskId id, const std::string &path, std::shared_ptr<IoEngine> engine, std::vector<Zone> zones);
     ~FileDisk() override;
 
     DiskType type() const override
@@ -56,7 +56,7 @@ class FileDisk : public Disk
   private:
     DiskId                    id_;
     int                       fd_;
-    std::unique_ptr<IoEngine> engine_;
+    std::shared_ptr<IoEngine> engine_;
 };
 
 } // namespace crow::diskio

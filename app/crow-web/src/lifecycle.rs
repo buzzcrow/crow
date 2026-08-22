@@ -1717,6 +1717,7 @@ fn validate_disk_input(
         zone_size_units,
         unit_size_bytes: body.unit_size_bytes,
         zone_count,
+        device_path: String::new(),
     };
     Ok((entry, disk_id_proto, value))
 }

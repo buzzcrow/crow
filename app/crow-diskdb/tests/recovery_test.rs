@@ -99,6 +99,7 @@ async fn seed_hardware(hw: &HardwareClient) {
                 unit_size_bytes: UNIT_SIZE_BYTES,
                 zone_count: ZONE_COUNT,
                 status: HwStatus::Up as i32,
+                device_path: String::new(),
             },
         )
         .await
@@ -469,7 +470,7 @@ async fn recovery_strategy2_journal_replay() {
         let disks_guard = dg2.disks.read().unwrap();
         disks_guard
             .iter()
-            .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
+            .map(|d| (d.disk_id, d.disk_value.read().unwrap().clone()))
             .collect()
     };
     let recovery_kv = Arc::new(cluster.make_ddb_kv_client());
@@ -1016,7 +1017,7 @@ async fn recovery_persist_only_is_idempotent() {
         let disks = dg.disks.read().unwrap();
         disks
             .iter()
-            .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
+            .map(|d| (d.disk_id, d.disk_value.read().unwrap().clone()))
             .collect()
     };
 

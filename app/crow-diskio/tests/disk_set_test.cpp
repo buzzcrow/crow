@@ -5,10 +5,8 @@
 // shutdown clears the map.
 #include "disk/disk_set.h"
 #include "disk/file_disk.h"
-#include "disk/mem_disk.h"
 #include "disk/types.h"
 #include "engine/blocking/blocking_engine.h"
-#include "engine/dummy/dummy_engine.h"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -55,11 +53,10 @@ TEST(DiskSet, AddAndFindDisk)
     std::string path = temp_path();
     ASSERT_EQ(::truncate(path.c_str(), 4096), 0);
 
-    auto                            engine = std::make_unique<crow::diskio::BlockingEngine>(2);
+    auto                            engine = std::make_shared<crow::diskio::BlockingEngine>(2);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk =
-        std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path, std::move(engine), std::move(zones));
+    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path, engine, std::move(zones));
 
     crow::diskio::DiskSet set;
     set.add(disk);
@@ -89,13 +86,13 @@ TEST(DiskSet, MultipleDisksAllFindable)
     ASSERT_EQ(::truncate(path1.c_str(), 4096), 0);
     ASSERT_EQ(::truncate(path2.c_str(), 4096), 0);
 
-    auto                            engine1 = std::make_unique<crow::diskio::BlockingEngine>(2);
-    auto                            engine2 = std::make_unique<crow::diskio::BlockingEngine>(2);
+    auto                            engine1 = std::make_shared<crow::diskio::BlockingEngine>(2);
+    auto                            engine2 = std::make_shared<crow::diskio::BlockingEngine>(2);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
 
-    auto disk1 = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path1, std::move(engine1), zones);
-    auto disk2 = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{2, 2}, path2, std::move(engine2), zones);
+    auto disk1 = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path1, engine1, zones);
+    auto disk2 = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{2, 2}, path2, engine2, zones);
 
     crow::diskio::DiskSet set;
     set.add(disk1);
@@ -116,12 +113,11 @@ TEST(FileDisk, WriteReadRoundTripViaEngine)
     std::string path = temp_path();
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
 
-    auto                            engine     = std::make_unique<crow::diskio::BlockingEngine>(4);
+    auto                            engine     = std::make_shared<crow::diskio::BlockingEngine>(4);
     auto                           *engine_ptr = engine.get();
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk =
-        std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{5, 5}, path, std::move(engine), std::move(zones));
+    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{5, 5}, path, engine, std::move(zones));
 
     std::vector<uint8_t> in(4096);
     for (size_t i = 0; i < in.size(); ++i) {
@@ -154,14 +150,13 @@ TEST(FileDisk, FindZoneReturnsCorrectZone)
     std::string path = temp_path();
     ASSERT_EQ(::truncate(path.c_str(), 4096), 0);
 
-    auto                            engine = std::make_unique<crow::diskio::BlockingEngine>(1);
+    auto                            engine = std::make_shared<crow::diskio::BlockingEngine>(1);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 4096});
     zones.push_back({1, 4096, 4096});
     zones.push_back({2, 8192, 4096});
 
-    auto disk =
-        std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{6, 6}, path, std::move(engine), std::move(zones));
+    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{6, 6}, path, engine, std::move(zones));
 
     auto *z0 = disk->find_zone(0);
     auto *z1 = disk->find_zone(1);

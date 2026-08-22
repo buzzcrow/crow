@@ -4,11 +4,6 @@
 // DiskioServer loopback tests: start an RPC server with DiskioServer
 // handlers, connect a client, send write/read/fsync requests, verify
 // responses. Uses BlockingEngine + FileDisk for real I/O.
-#include "disk/file_disk.h"
-#include "disk/types.h"
-#include "engine/blocking/blocking_engine.h"
-#include "rpc/dio_server.h"
-
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
@@ -16,21 +11,24 @@
 #include "crow-rpc/server/message.h"
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
+#include "disk/file_disk.h"
+#include "disk/types.h"
+#include "engine/blocking/blocking_engine.h"
+#include "rpc/dio_server.h"
 
 #include <diskio_generated.h>
+#include <fcntl.h>
 #include <flatbuffers/flatbuffers.h>
-#include <msg_type_generated.h>
-
 #include <gtest/gtest.h>
+#include <msg_type_generated.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <thread>
-#include <unistd.h>
 
 using crow::rpc::Buffer;
 using crow::rpc::BufferPool;
@@ -70,11 +68,11 @@ Buffer *build_write_request(BufferPool *pool, uint64_t req_id, crow::diskio::Dis
                             uint64_t zone_offset, uint32_t size)
 {
     flatbuffers::FlatBufferBuilder fbb(128);
-    crow::rpc::proto::FBInt128 fb_disk_id(disk_id.high, disk_id.low);
-    auto off        = dproto::CreateFBDiskWriteRequest(fbb, req_id, 0, &fb_disk_id, zone_index, zone_offset, size);
+    crow::rpc::proto::FBInt128     fb_disk_id(disk_id.high, disk_id.low);
+    auto off = dproto::CreateFBDiskWriteRequest(fbb, req_id, 0, &fb_disk_id, zone_index, zone_offset, size);
     fbb.Finish(off);
-    uint32_t sz = fbb.GetSize();
-    auto   *buf = pool->alloc(sz);
+    uint32_t sz  = fbb.GetSize();
+    auto    *buf = pool->alloc(sz);
     if (buf == nullptr) {
         return nullptr;
     }
@@ -87,11 +85,11 @@ Buffer *build_read_request(BufferPool *pool, uint64_t req_id, crow::diskio::Disk
                            uint64_t zone_offset, uint32_t size)
 {
     flatbuffers::FlatBufferBuilder fbb(128);
-    crow::rpc::proto::FBInt128 fb_disk_id(disk_id.high, disk_id.low);
-    auto off        = dproto::CreateFBDiskReadRequest(fbb, req_id, 0, &fb_disk_id, zone_index, zone_offset, size, 0);
+    crow::rpc::proto::FBInt128     fb_disk_id(disk_id.high, disk_id.low);
+    auto off = dproto::CreateFBDiskReadRequest(fbb, req_id, 0, &fb_disk_id, zone_index, zone_offset, size, 0);
     fbb.Finish(off);
-    uint32_t sz = fbb.GetSize();
-    auto   *buf = pool->alloc(sz);
+    uint32_t sz  = fbb.GetSize();
+    auto    *buf = pool->alloc(sz);
     if (buf == nullptr) {
         return nullptr;
     }
@@ -103,11 +101,11 @@ Buffer *build_read_request(BufferPool *pool, uint64_t req_id, crow::diskio::Disk
 Buffer *build_fsync_request(BufferPool *pool, uint64_t req_id, crow::diskio::DiskId disk_id)
 {
     flatbuffers::FlatBufferBuilder fbb(128);
-    crow::rpc::proto::FBInt128 fb_disk_id(disk_id.high, disk_id.low);
-    auto off        = dproto::CreateFBDiskFsyncRequest(fbb, req_id, 0, &fb_disk_id);
+    crow::rpc::proto::FBInt128     fb_disk_id(disk_id.high, disk_id.low);
+    auto                           off = dproto::CreateFBDiskFsyncRequest(fbb, req_id, 0, &fb_disk_id);
     fbb.Finish(off);
-    uint32_t sz = fbb.GetSize();
-    auto   *buf = pool->alloc(sz);
+    uint32_t sz  = fbb.GetSize();
+    auto    *buf = pool->alloc(sz);
     if (buf == nullptr) {
         return nullptr;
     }
@@ -174,13 +172,10 @@ TEST(DiskioServerTest, WriteAndReadRoundTrip)
     auto                            engine = std::make_shared<crow::diskio::BlockingEngine>(2);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path, nullptr, std::move(zones));
+    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{1, 1}, path, engine, std::move(zones));
 
     auto disk_set = std::make_shared<crow::diskio::DiskSet>();
     disk_set->add(disk);
-
-    // The disk's engine is nullptr (FileDisk owns it separately). We pass
-    // the engine to DiskioServer which uses it for all disks.
 
     // Start the RPC server.
     RpcServer server;
@@ -188,8 +183,8 @@ TEST(DiskioServerTest, WriteAndReadRoundTrip)
     int port = server.listen_port();
     ASSERT_GT(port, 0);
 
-    auto *transport = server.transport();
-    auto  dio_server = std::make_unique<crow::diskio::DiskioServer>(disk_set, engine, transport);
+    auto *transport  = server.transport();
+    auto  dio_server = std::make_unique<crow::diskio::DiskioServer>(disk_set, transport);
     dio_server->register_handlers(server);
 
     server.start();
@@ -208,7 +203,7 @@ TEST(DiskioServerTest, WriteAndReadRoundTrip)
     BufferPool *pool = client_transport.pool() != nullptr ? client_transport.pool() : server.pool();
 
     // Write 4096 bytes.
-    constexpr uint32_t DATA_SIZE = 4096;
+    constexpr uint32_t   DATA_SIZE = 4096;
     std::vector<uint8_t> payload(DATA_SIZE);
     for (uint32_t i = 0; i < DATA_SIZE; i++) {
         payload[i] = static_cast<uint8_t>(i % 256);
@@ -221,8 +216,7 @@ TEST(DiskioServerTest, WriteAndReadRoundTrip)
 
     DioState write_state;
     ASSERT_TRUE(caller.send(&client_transport, conn.get(), write_req_id, write_ctrl, write_data,
-                            static_cast<uint16_t>(rproto::FBMsgType_EDiskWriteRequest), dio_on_complete,
-                            &write_state));
+                            static_cast<uint16_t>(rproto::FBMsgType_EDiskWriteRequest), dio_on_complete, &write_state));
 
     ASSERT_TRUE(wait_for(write_state));
     EXPECT_EQ(write_state.recv_request_id, write_req_id);
@@ -234,8 +228,7 @@ TEST(DiskioServerTest, WriteAndReadRoundTrip)
 
     DioState read_state;
     ASSERT_TRUE(caller.send(&client_transport, conn.get(), read_req_id, read_ctrl, nullptr,
-                            static_cast<uint16_t>(rproto::FBMsgType_EDiskReadRequest), dio_on_complete,
-                            &read_state));
+                            static_cast<uint16_t>(rproto::FBMsgType_EDiskReadRequest), dio_on_complete, &read_state));
 
     ASSERT_TRUE(wait_for(read_state));
     EXPECT_EQ(read_state.recv_request_id, read_req_id);
@@ -256,7 +249,7 @@ TEST(DiskioServerTest, FsyncRoundTrip)
     auto                            engine = std::make_shared<crow::diskio::BlockingEngine>(1);
     std::vector<crow::diskio::Zone> zones;
     zones.push_back({0, 0, 1 << 24});
-    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{2, 2}, path, nullptr, std::move(zones));
+    auto disk = std::make_shared<crow::diskio::FileDisk>(crow::diskio::DiskId{2, 2}, path, engine, std::move(zones));
 
     auto disk_set = std::make_shared<crow::diskio::DiskSet>();
     disk_set->add(disk);
@@ -266,8 +259,8 @@ TEST(DiskioServerTest, FsyncRoundTrip)
     int port = server.listen_port();
     ASSERT_GT(port, 0);
 
-    auto *transport = server.transport();
-    auto  dio_server = std::make_unique<crow::diskio::DiskioServer>(disk_set, engine, transport);
+    auto *transport  = server.transport();
+    auto  dio_server = std::make_unique<crow::diskio::DiskioServer>(disk_set, transport);
     dio_server->register_handlers(server);
 
     server.start();
@@ -302,16 +295,15 @@ TEST(DiskioServerTest, FsyncRoundTrip)
 // ── Disk not found error ──────────────────────────────────────────
 TEST(DiskioServerTest, DiskNotExist)
 {
-    auto          engine   = std::make_shared<crow::diskio::BlockingEngine>(1);
-    auto          disk_set = std::make_shared<crow::diskio::DiskSet>();
+    auto disk_set = std::make_shared<crow::diskio::DiskSet>();
 
     RpcServer server;
     ASSERT_TRUE(server.listen("127.0.0.1", 0));
     int port = server.listen_port();
     ASSERT_GT(port, 0);
 
-    auto *transport = server.transport();
-    auto  dio_server = std::make_unique<crow::diskio::DiskioServer>(disk_set, engine, transport);
+    auto *transport  = server.transport();
+    auto  dio_server = std::make_unique<crow::diskio::DiskioServer>(disk_set, transport);
     dio_server->register_handlers(server);
 
     server.start();

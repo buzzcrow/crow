@@ -71,6 +71,9 @@ message DiskValue {
   uint32   unit_size_bytes = 4;
   uint32   zone_count      = 5;
   crow.common.HwStatus status = 6;
+  // Block device path on the node (e.g. /dev/nvme0n1).
+  // Empty for dummy disks (NullDisk/MemDisk).
+  string   device_path     = 7;
 }
 
 // ── DiskGroup value ─────────────────────────────────────────────
@@ -170,6 +173,8 @@ message DiskInfo {
   // Brief per-zone entries (disk-level query only; empty at disk-group
   // level). Each entry carries counts only — no `usage_bitmap` bytes.
   repeated ZoneUsage zone_usages       = 17;
+  // From DiskValue.device_path.
+  string             device_path       = 18;
 }
 
 // Recovery scan progress — stored at RecoveryScanProgressKey on the

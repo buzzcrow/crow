@@ -113,6 +113,7 @@ impl DiskdbService {
             free_bytes: usage.free_bytes,
             active_zone_count: usage.active_zone_count,
             zone_usages,
+            device_path: dv.device_path.clone(),
         }
     }
 
@@ -609,7 +610,7 @@ impl DiskdbServiceTrait for DiskdbService {
                         disks
                             .iter()
                             .find(|d| d.disk_id == disk_id)
-                            .map(|d| (*d.disk_value.read().unwrap(), d.disk_id))
+                            .map(|d| (d.disk_value.read().unwrap().clone(), d.disk_id))
                     };
                     if let Some((dv, did)) = dv_clone {
                         found = Some((n, dv, did));

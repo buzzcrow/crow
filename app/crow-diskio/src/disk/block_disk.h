@@ -19,7 +19,7 @@ namespace crow::diskio
 class BlockDisk : public Disk
 {
   public:
-    BlockDisk(DiskId id, const std::string &path, std::unique_ptr<IoEngine> engine, std::vector<Zone> zones,
+    BlockDisk(DiskId id, const std::string &path, std::shared_ptr<IoEngine> engine, std::vector<Zone> zones,
               bool o_direct);
     ~BlockDisk() override;
 
@@ -60,7 +60,7 @@ class BlockDisk : public Disk
     int                       fd_;
     bool                      o_direct_;
     size_t                    block_size_;
-    std::unique_ptr<IoEngine> engine_;
+    std::shared_ptr<IoEngine> engine_;
 };
 
 } // namespace crow::diskio

@@ -10,22 +10,13 @@
 namespace crow::diskio
 {
 
-bool parse_engine_type(const std::string &s, EngineType &out)
+bool parse_dummy_disk_type(const std::string &s, DummyDiskType &out)
 {
-    if (s == "auto") {
-        out = EngineType::Auto;
+    if (s == "null") {
+        out = DummyDiskType::Null;
     }
-    else if (s == "uring") {
-        out = EngineType::Uring;
-    }
-    else if (s == "blocking") {
-        out = EngineType::Blocking;
-    }
-    else if (s == "dummy") {
-        out = EngineType::Dummy;
-    }
-    else if (s == "simulated") {
-        out = EngineType::Simulated;
+    else if (s == "mem") {
+        out = DummyDiskType::Mem;
     }
     else {
         return false;
@@ -84,6 +75,18 @@ static bool parse_u64(const char *s, uint64_t &out)
     return true;
 }
 
+// Parse a double from argv.
+static bool parse_double(const char *s, double &out)
+{
+    char  *end = nullptr;
+    double v   = std::strtod(s, &end);
+    if (end == s || *end != '\0') {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
 bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &err)
 {
     for (int i = 1; i < argc; i++) {
@@ -105,9 +108,9 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
                 return false;
             }
         }
-        else if (arg == "--engine" && i + 1 < argc) {
-            if (!parse_engine_type(argv[++i], out.engine)) {
-                err = "invalid --engine value (auto|uring|blocking|dummy|simulated)";
+        else if (arg == "--dummy-disk" && i + 1 < argc) {
+            if (!parse_dummy_disk_type(argv[++i], out.dummy_disk_type)) {
+                err = "invalid --dummy-disk value (null|mem)";
                 return false;
             }
         }
@@ -123,15 +126,44 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
                 return false;
             }
         }
+        else if (arg == "--fault-latency" && i + 1 < argc) {
+            // Format: --fault-latency <min_ms>:<max_ms>
+            std::string spec  = argv[++i];
+            auto        colon = spec.find(':');
+            if (colon == std::string::npos) {
+                err = "--fault-latency expects <min_ms>:<max_ms>";
+                return false;
+            }
+            uint32_t lo, hi;
+            if (!parse_u32(spec.substr(0, colon).c_str(), lo) || !parse_u32(spec.substr(colon + 1).c_str(), hi)) {
+                err = "invalid --fault-latency value";
+                return false;
+            }
+            if (!out.dummy_props.has_value()) {
+                out.dummy_props = DiskProperties{};
+            }
+            out.dummy_props->latency_min_ms = lo;
+            out.dummy_props->latency_max_ms = hi;
+        }
+        else if (arg == "--fault-error-rate" && i + 1 < argc) {
+            double rate;
+            if (!parse_double(argv[++i], rate) || rate < 0.0 || rate > 1.0) {
+                err = "invalid --fault-error-rate value (0.0..1.0)";
+                return false;
+            }
+            if (!out.dummy_props.has_value()) {
+                out.dummy_props = DiskProperties{};
+            }
+            out.dummy_props->error_rate = rate;
+        }
         else if (arg == "--no-o-direct") {
             out.o_direct = false;
         }
         else if (arg == "--disk" && i + 1 < argc) {
             // Format: --disk <hex_id>:<path>[:<zone_capacity>]
-            // Multiple --disk args allowed.
-            std::string spec = argv[++i];
-            // Split on ':' — id:path[:capacity]
-            size_t first_colon = spec.find(':');
+            // Multiple --disk args allowed. Empty path = dummy disk.
+            std::string spec        = argv[++i];
+            size_t      first_colon = spec.find(':');
             if (first_colon == std::string::npos) {
                 err = "--disk expects <hex_id>:<path>[:<capacity>]";
                 return false;
@@ -174,9 +206,13 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
         }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-diskio --port <port> [--bind <addr>] "
-                        "[--engine auto|uring|blocking|dummy|simulated] "
+                        "[--dummy-disk null|mem] "
                         "[--threads N] [--sq-entries N] [--no-o-direct] "
-                        "[--disk <hex_id>:<path>[:<capacity>]]...\n");
+                        "[--fault-latency <min_ms>:<max_ms>] "
+                        "[--fault-error-rate <0.0..1.0>] "
+                        "[--disk <hex_id>:<path>[:<capacity>]]...\n"
+                        "  Engine is auto-detected: uring if available, blocking otherwise.\n"
+                        "  Empty path in --disk creates a dummy disk (null or mem).\n");
             std::exit(0);
         }
         else {
@@ -202,10 +238,6 @@ bool DioConfig::validate(std::string &err) const
         return false;
     }
     for (const auto &d : disks) {
-        if (d.path.empty()) {
-            err = "disk path is empty";
-            return false;
-        }
         if (d.id.is_zero()) {
             err = "disk id is zero";
             return false;
@@ -214,6 +246,7 @@ bool DioConfig::validate(std::string &err) const
             err = "disk has no zones";
             return false;
         }
+        // path can be empty (dummy disk)
     }
     return true;
 }

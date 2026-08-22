@@ -9,7 +9,7 @@
 namespace crow::diskio
 {
 
-FileDisk::FileDisk(DiskId id, const std::string &path, std::unique_ptr<IoEngine> engine, std::vector<Zone> zones)
+FileDisk::FileDisk(DiskId id, const std::string &path, std::shared_ptr<IoEngine> engine, std::vector<Zone> zones)
     : id_(id),
       fd_(::open(path.c_str(), O_RDWR)),
       engine_(std::move(engine))

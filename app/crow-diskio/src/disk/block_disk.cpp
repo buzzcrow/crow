@@ -28,7 +28,7 @@ size_t query_block_size(int fd)
 }
 } // namespace
 
-BlockDisk::BlockDisk(DiskId id, const std::string &path, std::unique_ptr<IoEngine> engine, std::vector<Zone> zones,
+BlockDisk::BlockDisk(DiskId id, const std::string &path, std::shared_ptr<IoEngine> engine, std::vector<Zone> zones,
                      bool o_direct)
     : id_(id),
       o_direct_(o_direct),

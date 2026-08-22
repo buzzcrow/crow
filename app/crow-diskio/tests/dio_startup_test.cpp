@@ -179,8 +179,7 @@ TEST(DiskioStartupTest, WriteReadRoundTrip)
         // --disk format: <hex_id>:<path>[:<capacity>]
         // hex_id is "high:low" or just "low". Use "1" (low=1, high=0).
         std::string disk_arg = "1:" + disk_path + ":" + std::to_string(1 << 24);
-        execl(binary.c_str(), "crow-diskio", "--port", "0", "--engine", "blocking", "--disk", disk_arg.c_str(),
-              nullptr);
+        execl(binary.c_str(), "crow-diskio", "--port", "0", "--disk", disk_arg.c_str(), nullptr);
         // If exec fails:
         std::fprintf(stderr, "exec failed: %s\n", std::strerror(errno));
         _exit(127);

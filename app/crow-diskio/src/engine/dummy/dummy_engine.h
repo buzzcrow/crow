@@ -1,31 +1,39 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// DummyEngine: IoEngine for MemDisk. Writes are dropped (immediate success);
-// reads return deterministic content from MemDisk's pattern buffer.
-// Used for throughput benches that measure RPC + engine overhead at
-// memory speed.
+// DummyDiskEngine: wrapper around a real IoEngine (UringEngine or
+// BlockingEngine) that provides dummy-disk semantics:
+// - Optional read-content hack: after the inner engine completes a
+//   pread, overwrites the buffer with deterministic pattern data
+//   (for NullDisk benchmarks — the full uring/blocking flow executes
+//   but read content is predesigned, not stored data).
+// - Optional fault injection: per-I/O random latency and errors based
+//   on DiskProperties (merged from the former SimulatedEngine).
+//
+// The inner engine submits real I/O to the dummy disk's memfd, so the
+// full io_uring SQE→CQE round-trip (or blocking pwrite/pread) executes.
 #pragma once
 
+#include "disk/disk_properties.h"
 #include "disk/types.h"
 #include "engine/io_engine.h"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 
 namespace crow::diskio
 {
 
-class MemDisk;
-
-class DummyEngine : public IoEngine
+class DummyDiskEngine : public IoEngine
 {
   public:
-    explicit DummyEngine(std::optional<uint64_t> logical_object_offset = std::nullopt)
-        : logical_offset_(logical_object_offset)
-    {
-    }
+    // Construct with a shared inner engine (UringEngine or BlockingEngine).
+    // If hack_reads is true, read completions overwrite the buffer with
+    // pattern data (NullDisk). DiskProperties enables fault injection.
+    DummyDiskEngine(std::shared_ptr<IoEngine> inner, bool hack_reads,
+                    std::optional<DiskProperties> props = std::nullopt);
 
     void submit_write(Disk *disk, off_t phys_offset, const uint8_t *data, size_t size,
                       std::function<void(int)> on_complete) override;
@@ -34,7 +42,18 @@ class DummyEngine : public IoEngine
     void submit_fsync(Disk *disk, std::function<void(int)> on_complete) override;
 
   private:
-    std::optional<uint64_t> logical_offset_;
+    std::shared_ptr<IoEngine>     inner_;
+    bool                          hack_reads_;
+    std::optional<DiskProperties> props_;
+
+    // Fill buf with deterministic pattern data for the given disk_id +
+    // offset. Used by NullDisk read hack.
+    static void fill_pattern(DiskId disk_id, off_t phys_offset, uint8_t *buf, size_t size);
+
+    // Draw a random latency from [props_.latency_min_ms, latency_max_ms].
+    uint32_t draw_latency() const;
+    // Draw a random double; if < error_rate, inject an error.
+    bool draw_error() const;
 };
 
 } // namespace crow::diskio
