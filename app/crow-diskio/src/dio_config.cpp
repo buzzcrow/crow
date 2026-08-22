@@ -204,15 +204,49 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
             }
             out.disks.push_back(std::move(entry));
         }
+        else if (arg == "--kv-seeds" && i + 1 < argc) {
+            // Comma-separated list of kv-server management endpoints.
+            // e.g. --kv-seeds http://127.0.0.1:9910,http://127.0.0.1:9911
+            std::string seeds = argv[++i];
+            size_t      pos   = 0;
+            while (pos < seeds.size()) {
+                size_t comma = seeds.find(',', pos);
+                if (comma == std::string::npos) {
+                    out.kv_seeds.push_back(seeds.substr(pos));
+                    break;
+                }
+                out.kv_seeds.push_back(seeds.substr(pos, comma - pos));
+                pos = comma + 1;
+            }
+        }
+        else if (arg == "--instance-id" && i + 1 < argc) {
+            out.instance_id = std::strtoull(argv[++i], nullptr, 10);
+        }
+        else if (arg == "--rack-id" && i + 1 < argc) {
+            out.rack_id = std::strtoull(argv[++i], nullptr, 10);
+        }
+        else if (arg == "--dg-id" && i + 1 < argc) {
+            out.dg_id = std::strtoull(argv[++i], nullptr, 10);
+        }
+        else if (arg == "--sync-interval-ms" && i + 1 < argc) {
+            out.sync_interval_ms = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+        }
+        else if (arg == "--auto-discover-disks") {
+            out.auto_discover_disks = true;
+        }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-diskio --port <port> [--bind <addr>] "
                         "[--dummy-disk null|mem] "
                         "[--threads N] [--sq-entries N] [--no-o-direct] "
                         "[--fault-latency <min_ms>:<max_ms>] "
                         "[--fault-error-rate <0.0..1.0>] "
-                        "[--disk <hex_id>:<path>[:<capacity>]]...\n"
+                        "[--disk <hex_id>:<path>[:<capacity>]]... "
+                        "[--kv-seeds <url1>,<url2>...] "
+                        "[--instance-id N] [--rack-id N] [--dg-id N] "
+                        "[--sync-interval-ms N] [--auto-discover-disks]\n"
                         "  Engine is auto-detected: uring if available, blocking otherwise.\n"
-                        "  Empty path in --disk creates a dummy disk (null or mem).\n");
+                        "  Empty path in --disk creates a dummy disk (null or mem).\n"
+                        "  With --kv-seeds, diskio syncs with group-0 and heartbeats.\n");
             std::exit(0);
         }
         else {

@@ -19,6 +19,27 @@ add_compile_options(-Wall -Wextra -Werror)
 # add crow-common separately here (avoids duplicate target collision).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-rpc crow-rpc-build)
 
+# ── crow-kv-client-ffi (Rust cdylib: HardwareClient/ServiceRegistryClient C ABI) ──
+# The FFI crate is built by cargo (via pixi) into a shared library.
+# We build it with a custom command and link the resulting .so.
+set(CROW_KV_CLIENT_FFI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-kv-client-ffi)
+set(CROW_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  set(CARGO_PROFILE release)
+else()
+  set(CARGO_PROFILE debug)
+endif()
+set(CROW_KV_CLIENT_FFI_LIB ${CROW_ROOT_DIR}/target/${CARGO_PROFILE}/libcrow_kv_client_ffi.so)
+add_custom_command(
+  OUTPUT ${CROW_KV_CLIENT_FFI_LIB}
+  COMMAND pixi run cargo build -p crow-kv-client-ffi
+          $<$<STREQUAL:${CARGO_PROFILE},release>:--release>
+  WORKING_DIRECTORY ${CROW_ROOT_DIR}
+  COMMENT "Building crow-kv-client-ffi (Rust cdylib)"
+  VERBATIM
+)
+add_custom_target(crow-kv-client-ffi DEPENDS ${CROW_KV_CLIENT_FFI_LIB})
+
 # ── Source files (exclude dio_main.cpp from the library) ──────────
 file(GLOB_RECURSE CROW_DISKIO_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 list(REMOVE_ITEM CROW_DISKIO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/dio_main.cpp)
@@ -28,6 +49,7 @@ target_include_directories(crow-diskio-lib
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
          ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-common/cpp/include
          ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crow-rpc/include
+         ${CROW_KV_CLIENT_FFI_DIR}/include
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/crow-rpc-build/generated
 )
 find_package(Threads REQUIRED)
@@ -39,7 +61,11 @@ target_include_directories(crow-diskio PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/crow-rpc-build/generated
 )
-target_link_libraries(crow-diskio PRIVATE crow-diskio-lib)
+target_link_libraries(crow-diskio PRIVATE crow-diskio-lib ${CROW_KV_CLIENT_FFI_LIB} ${CMAKE_DL_LIBS})
+add_dependencies(crow-diskio crow-kv-client-ffi)
+set_target_properties(crow-diskio PROPERTIES
+  BUILD_RPATH ${CROW_ROOT_DIR}/target/${CARGO_PROFILE}
+)
 
 # ── Tests ─────────────────────────────────────────────────────────
 enable_testing()

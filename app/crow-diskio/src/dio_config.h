@@ -57,6 +57,15 @@ struct DioConfig
     // Disk list.
     std::vector<DiskEntry> disks;
 
+    // Group-0 sync (optional). When kv_seeds is non-empty, diskio
+    // connects to group-0, fetches its disk list, and heartbeats.
+    std::vector<std::string> kv_seeds;
+    uint64_t                 instance_id         = 0;
+    uint64_t                 rack_id             = 0;
+    uint64_t                 dg_id               = 0;
+    uint32_t                 sync_interval_ms    = 5000; // keepalive period
+    bool                     auto_discover_disks = false;
+
     // Parse CLI args. Returns true on success, false on error (msg in err).
     static bool parse_args(int argc, char *argv[], DioConfig &out, std::string &err);
 

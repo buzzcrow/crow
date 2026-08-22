@@ -14,6 +14,7 @@
 // Engine is auto-detected — no --engine flag. Disks with an empty path
 // are dummy disks (NullDisk by default, MemDisk with --dummy-disk mem).
 
+#include "crow-kv-client/c_api.h"
 #include "crow-rpc/server/server.h"
 #include "crow-rpc/transport/socket_transport.h"
 #include "dio_config.h"
@@ -22,6 +23,7 @@
 #include "disk/mem_disk.h"
 #include "disk/null_disk.h"
 #include "engine/blocking/blocking_engine.h"
+#include "group0/group0_sync.h"
 #include "rpc/dio_server.h"
 
 #include <atomic>
@@ -80,8 +82,8 @@ static std::shared_ptr<crow::diskio::DiskSet> build_disk_set(const crow::diskio:
         }
         else {
             // Real block device.
-            auto disk = std::make_shared<BlockDisk>(entry.id, entry.path, engine, std::vector<Zone>(entry.zones),
-                                                    cfg.o_direct);
+            auto disk =
+                std::make_shared<BlockDisk>(entry.id, entry.path, engine, std::vector<Zone>(entry.zones), cfg.o_direct);
             disk_set->add(disk);
         }
     }
@@ -135,17 +137,43 @@ int main(int argc, char *argv[])
 
     server.start();
 
+    // Start group-0 sync if kv_seeds are configured.
+    std::unique_ptr<Group0Sync> group0_sync;
+    if (!cfg.kv_seeds.empty()) {
+        Group0SyncConfig g0_cfg;
+        g0_cfg.kv_seeds            = cfg.kv_seeds;
+        g0_cfg.instance_id         = cfg.instance_id;
+        g0_cfg.rack_id             = cfg.rack_id;
+        g0_cfg.node_id             = cfg.node_id_low; // TODO: full NodeId
+        g0_cfg.dg_id               = cfg.dg_id;
+        g0_cfg.sync_interval_ms    = cfg.sync_interval_ms;
+        g0_cfg.grpc_endpoint       = cfg.bind_address + ":" + std::to_string(actual_port);
+        g0_cfg.auto_discover_disks = cfg.auto_discover_disks;
+        group0_sync                = std::make_unique<Group0Sync>(std::move(g0_cfg), disk_set, engine);
+        group0_sync->start();
+        std::printf("group-0 sync started (interval=%ums, dg=%llu)\n", cfg.sync_interval_ms,
+                    static_cast<unsigned long long>(cfg.dg_id));
+    }
+
     // Run until signaled.
     while (g_running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    if (group0_sync != nullptr) {
+        group0_sync->stop();
+    }
     server.stop();
     disk_set->shutdown();
 
     // Stop the engine (BlockingEngine has a stop() method).
     if (auto *be = dynamic_cast<BlockingEngine *>(engine.get())) {
         be->stop();
+    }
+
+    // Shut down the FFI tokio runtime (if it was initialized).
+    if (!cfg.kv_seeds.empty()) {
+        crow_kv_ffi_shutdown();
     }
 
     return 0;
