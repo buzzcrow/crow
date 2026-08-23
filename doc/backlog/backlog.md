@@ -11,9 +11,19 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R109** — Bump this line in the same commit when adding a new item.
+**Next R number: R110** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
+
+- **[R109](R109-common-diskio-uring.md)** — Multi-pipeline io_uring
+  engine (`DiskIOUring`) — Area: common / diskio / tree — Replace
+  `Reactor` (single-ring wrapper) with `DiskIOUring`: fd→pipeline
+  routing, shared polling threads across CQs, batched SQE submission,
+  kernel-level cancel-by-fd (`IORING_ASYNC_CANCEL_FD`, kernel 6.0+),
+  client-side callback suppression. Eliminates `UringEngine`'s 16-shard
+  mutex-guarded in-flight map and all `Reactor`-side cancel atomics.
+  Both diskio and btree use `DiskIOUring` as their I/O interface.
+  R66 (WAL io_uring backend) depends on this refactor.
 
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full

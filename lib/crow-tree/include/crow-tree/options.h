@@ -8,7 +8,7 @@
 #include "crow-tree/compressor.h"
 
 #ifdef CROW_HAVE_LIBURING
-#    include "crow-common/reactor.h"
+#    include "crow-common/diskio_uring.h"
 #endif
 
 #include <cstddef>
@@ -113,12 +113,12 @@ struct Options
     // any tree that never calls the *_async methods) means get_async's
     // genuine-miss case and flush_async/snapshot_async fall back to
     // completing synchronously in the caller's stack frame instead of
-    // touching a reactor -- no MemAsyncPageStore needed
-    // (see Crowtree::get_async's doc comment). One Reactor per Crowtree
+    // touching a uring -- no MemAsyncPageStore needed
+    // (see Crowtree::get_async's doc comment). One DiskIOUring per Crowtree
     // instance; async_page_store must be backed by the
     // *same* durable store as `page_store` (see BlockAsyncPageStore).
-    ::crow::common::Reactor *async_reactor    = nullptr;
-    AsyncPageStore          *async_page_store = nullptr;
+    ::crow::common::DiskIOUring *async_uring      = nullptr;
+    AsyncPageStore              *async_page_store = nullptr;
 #endif
 
     // ── Buffer pool ──

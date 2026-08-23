@@ -10,7 +10,7 @@
 #include "crow-tree/leaf_cursor.h"
 #include "crow-tree/mapping_slot.h"
 #ifdef CROW_HAVE_LIBURING
-#    include "crow-common/reactor.h"
+#    include "crow-common/diskio_uring.h"
 #    include "crow-tree/async_page_store.h"
 #endif
 
@@ -1788,7 +1788,7 @@ void Crowtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::fu
     }
 
 #ifdef CROW_HAVE_LIBURING
-    if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
+    if (opt_.async_uring != nullptr && opt_.async_page_store != nullptr) {
         // Re-verify under load_mutex_ before unpacking the unloaded
         // descriptor from the slot word (see try_get_view_no_load's doc
         // comment on crow-tree.h): the word may be concurrently replaced by
@@ -2924,7 +2924,7 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
     size_t remaining_limit = (limit > accumulated_count) ? (limit - accumulated_count) : 0;
 
 #ifdef CROW_HAVE_LIBURING
-    if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
+    if (opt_.async_uring != nullptr && opt_.async_page_store != nullptr) {
         uint64_t addr           = 0;
         uint32_t plen           = 0;
         bool     still_unloaded = false;

@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-common/reactor.h"
+#include "crow-common/diskio_uring.h"
 #include "crow-tree/async_page_store.h"
 #include "crow-tree/block_page_store.h"
 
@@ -19,7 +19,7 @@ namespace crow::tree
 
 namespace
 {
-// Maps a Reactor callback's raw CQE `res` (>=0 bytes transferred, <0
+// Maps a DiskIOUring callback's raw CQE `res` (>=0 bytes transferred, <0
 // -errno) to a Status, treating a short read/write (res >= 0 but < the
 // requested `len`) as an io_error too -- a single-shot op per
 // submit_read/write call, unlike the synchronous stores' internal
@@ -82,9 +82,9 @@ class AlignedIoBuf
 
 // ── BlockAsyncPageStore ───────────────────────────────────────────
 
-BlockAsyncPageStore::BlockAsyncPageStore(BlockPageStore *store, ::crow::common::Reactor *reactor)
+BlockAsyncPageStore::BlockAsyncPageStore(BlockPageStore *store, ::crow::common::DiskIOUring *uring)
     : store_(store),
-      reactor_(reactor)
+      uring_(uring)
 {
 }
 
@@ -98,11 +98,12 @@ uint64_t BlockAsyncPageStore::submit_read(PageAddr addr, void *buf, size_t len, 
         }
         return 0;
     }
-    return reactor_->submit_read(fd, buf, len, static_cast<off_t>(local), [len, cb = std::move(on_complete)](int res) {
+    uring_->submit_read(fd, buf, len, static_cast<off_t>(local), [len, cb = std::move(on_complete)](int res) {
         if (cb) {
             cb(result_to_status(res, len, "read"));
         }
     });
+    return 0;
 }
 
 uint64_t BlockAsyncPageStore::submit_write(PageAddr addr, const void *buf, size_t len,
@@ -185,7 +186,7 @@ uint64_t BlockAsyncPageStore::submit_write(PageAddr addr, const void *buf, size_
                 }
 
                 state->pending++;
-                reactor_->submit_write(fd, write_buf, chunk, static_cast<off_t>(local), [state, chunk](int res) {
+                uring_->submit_write(fd, write_buf, chunk, static_cast<off_t>(local), [state, chunk](int res) {
                     if (res < 0 || static_cast<size_t>(res) < chunk) {
                         Status s = result_to_status(res, chunk, "write");
                         if (state->first_error.ok()) {
@@ -226,12 +227,13 @@ uint64_t BlockAsyncPageStore::submit_write(PageAddr addr, const void *buf, size_
     }
     // Capture ab in the callback lambda to keep the aligned buffer alive
     // until the io_uring completion fires.
-    return reactor_->submit_write(fd, write_buf, len, static_cast<off_t>(local),
-                                  [len, cb = std::move(on_complete), ab](int res) {
-                                      if (cb) {
-                                          cb(result_to_status(res, len, "write"));
-                                      }
-                                  });
+    uring_->submit_write(fd, write_buf, len, static_cast<off_t>(local),
+                         [len, cb = std::move(on_complete), ab](int res) {
+                             if (cb) {
+                                 cb(result_to_status(res, len, "write"));
+                             }
+                         });
+    return 0;
 }
 
 Status BlockAsyncPageStore::submit_fsync(std::function<void(Status)> on_complete)
@@ -246,7 +248,7 @@ Status BlockAsyncPageStore::submit_fsync(std::function<void(Status)> on_complete
 
     // Chain fsync across all dirty fds: each completion submits the next;
     // the last one invokes on_complete. A shared_ptr keeps the state alive
-    // across the async chain (completions run on the Reactor thread).
+    // across the async chain (completions run on the poll thread).
     struct FsyncState
     {
         std::vector<int>            fds;
@@ -267,7 +269,7 @@ Status BlockAsyncPageStore::submit_fsync(std::function<void(Status)> on_complete
             return;
         }
         int fd = state->fds[state->idx++];
-        reactor_->submit_fsync(fd, [this, state, chain](int res) {
+        uring_->submit_fsync(fd, [this, state, chain](int res) {
             if (res < 0) {
                 if (state->cb) {
                     state->cb(Status::io_error(std::string("fsync: ") + std::strerror(-res)));
@@ -282,9 +284,10 @@ Status BlockAsyncPageStore::submit_fsync(std::function<void(Status)> on_complete
     return Status::Ok();
 }
 
-void BlockAsyncPageStore::cancel(uint64_t op_id)
+void BlockAsyncPageStore::cancel(uint64_t /*op_id*/)
 {
-    reactor_->cancel(op_id);
+    // No-op — per-op cancel is removed. Use DiskIOUring::cancel_fd for
+    // fd-level cancellation.
 }
 
 } // namespace crow::tree

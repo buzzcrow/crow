@@ -62,12 +62,17 @@ static std::shared_ptr<crow::diskio::IoEngine> create_engine(const crow::diskio:
 
 // Build the DiskSet from config. Disks with a non-empty path are
 // BlockDisk (O_DIRECT block device); disks with an empty path are
-// dummy disks (NullDisk or MemDisk per config).
+// dummy disks (NullDisk or MemDisk per config). For UringEngine, real
+// block device fds are registered with the uring for fd→pipeline routing.
 static std::shared_ptr<crow::diskio::DiskSet> build_disk_set(const crow::diskio::DioConfig          &cfg,
                                                              std::shared_ptr<crow::diskio::IoEngine> engine)
 {
     using namespace crow::diskio;
     auto disk_set = std::make_shared<DiskSet>();
+#ifdef CROW_HAVE_LIBURING
+    // If the engine is a UringEngine, register each real disk's fd with it.
+    auto uring_engine = std::dynamic_pointer_cast<UringEngine>(engine);
+#endif
     for (const auto &entry : cfg.disks) {
         if (entry.path.empty()) {
             // Dummy disk (NullDisk or MemDisk).
@@ -85,6 +90,12 @@ static std::shared_ptr<crow::diskio::DiskSet> build_disk_set(const crow::diskio:
             // Real block device.
             auto disk =
                 std::make_shared<BlockDisk>(entry.id, entry.path, engine, std::vector<Zone>(entry.zones), cfg.o_direct);
+#ifdef CROW_HAVE_LIBURING
+            // Register the disk's fd with the uring for fd→pipeline routing.
+            if (uring_engine != nullptr && disk->fd() >= 0) {
+                uring_engine->uring().register_fd(disk->fd());
+            }
+#endif
             disk_set->add(disk);
         }
     }

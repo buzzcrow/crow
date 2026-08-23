@@ -1,24 +1,22 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// UringEngine: IoEngine backed by crow::common::Reactor (io_uring).
-// Linux-only (CROW_HAVE_LIBURING). Wraps the reactor's submit_read/write/
-// fsync with per-disk in-flight tracking for bad-disk cancellation.
+// UringEngine: IoEngine backed by crow::common::DiskIOUring (io_uring).
+// Linux-only (CROW_HAVE_LIBURING). Wraps the uring engine's submit_read/
+// write/fsync with O_DIRECT alignment validation. Per-disk in-flight
+// tracking and cancel are handled by DiskIOUring (cancel_fd).
 #pragma once
 
 #include "disk/types.h"
 #include "engine/io_engine.h"
 
 #ifdef CROW_HAVE_LIBURING
-#    include "crow-common/reactor.h"
+#    include "crow-common/diskio_uring.h"
 #endif
 
-#include <array>
 #include <cstdint>
 #include <functional>
-#include <mutex>
-#include <unordered_map>
-#include <unordered_set>
+#include <memory>
 
 namespace crow::diskio
 {
@@ -40,29 +38,14 @@ class UringEngine : public IoEngine
     void submit_fsync(Disk *disk, std::function<void(int)> on_complete) override;
     void cancel_disk(DiskId disk_id) override;
 
-    // For testing: number of in-flight ops for a disk.
-    size_t in_flight_count(DiskId disk_id);
-
-  private:
-    // Sharded by DiskId hash so writes to different disks don't contend.
-    // Each shard owns its own map, so inserts on different shards never race
-    // on shared bucket/rehash state. One shard lock covers a disk's whole
-    // entry, keeping cancel_disk atomic.
-    static constexpr size_t kInFlightShards = 16;
-
-    struct InFlightShard
+    // Access the underlying DiskIOUring (for fd registration by the server).
+    crow::common::DiskIOUring &uring()
     {
-        std::mutex                                                           mu;
-        std::unordered_map<DiskId, std::unordered_set<uint64_t>, DiskIdHash> ops;
-    };
-
-    InFlightShard &shard(DiskId d)
-    {
-        return shards_[DiskIdHash{}(d) % kInFlightShards];
+        return *uring_;
     }
 
-    crow::common::Reactor                      reactor_;
-    std::array<InFlightShard, kInFlightShards> shards_;
+  private:
+    std::unique_ptr<crow::common::DiskIOUring> uring_;
 };
 
 #endif // CROW_HAVE_LIBURING

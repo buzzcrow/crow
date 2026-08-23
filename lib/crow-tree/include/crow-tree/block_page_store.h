@@ -186,11 +186,17 @@ class BlockPageStore : public PageStore
     Status ensure_extents(uint64_t off, size_t len);
 
     // Returns fds of all dirty, non-deleted extents (array-of-blocks) or the
-    // single medium's fd (single-file mode), for async fsync via Reactor.
+    // single medium's fd (single-file mode), for async fsync via DiskIOUring.
     // Clears the dirty flag on each returned extent (mirroring sync()).
     // Returns an empty vector if no fd is fsync-able (e.g. MemoryMedium or
     // SyncMode::kSkip).
     std::vector<int> dirty_fds();
+
+    // Returns fds of all live, non-deleted extents (array-of-blocks) or the
+    // single medium's fd (single-file mode), for fd registration with
+    // DiskIOUring at startup. Unlike dirty_fds(), does not clear the dirty
+    // flag. Returns an empty vector if no fd is usable (e.g. MemoryMedium).
+    std::vector<int> all_extent_fds() const;
 
     // Number of live block files in an array-of-blocks store (0 for single-medium).
     [[nodiscard]] size_t num_extents() const

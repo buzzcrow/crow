@@ -1,10 +1,10 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// plan-tree #11: Reactor (io_uring event loop) + BlockAsyncPageStore.
+// plan-tree #11: DiskIOUring (io_uring event loop) + BlockAsyncPageStore.
 // Only built when CMake found liburing (see CMakeLists.txt's
 // CROW_HAVE_LIBURING gate) -- io_uring is Linux-only.
-#include "crow-common/reactor.h"
+#include "crow-common/diskio_uring.h"
 #include "crow-tree/async_page_store.h"
 #include "crow-tree/block_page_store.h"
 #include "test_tmp.h"
@@ -24,7 +24,10 @@
 #include <vector>
 
 using namespace crow::tree;
-using crow::common::Reactor;
+using crow::common::DiskIOUring;
+using crow::common::PipelineConfig;
+using crow::common::PollingMode;
+using crow::common::Topology;
 
 namespace
 {
@@ -43,6 +46,17 @@ std::string temp_path()
     return buf.data();
 }
 
+// Build a single-pipeline DiskIOUring (the common case for tree tests).
+DiskIOUring make_uring()
+{
+    Topology       topo;
+    PipelineConfig cfg;
+    cfg.entries = 256;
+    cfg.mode    = PollingMode::Hybrid;
+    topo.pipelines.push_back(cfg);
+    return DiskIOUring(std::move(topo));
+}
+
 // Bounded poll for a background-thread-set flag, matching the style already
 // used in other tests: no condvar wiring for the test's own synchronization,
 // just a short sleep loop with a generous overall deadline.
@@ -58,7 +72,7 @@ template <typename Pred> bool wait_for(Pred pred, int max_iters = 200, int sleep
 }
 } // namespace
 
-TEST(Reactor, SubmitReadCompletesViaCallback)
+TEST(DiskIOUring, SubmitReadCompletesViaCallback)
 {
     std::string path = temp_path();
     int         fd   = ::open(path.c_str(), O_RDWR);
@@ -66,11 +80,12 @@ TEST(Reactor, SubmitReadCompletesViaCallback)
     std::vector<uint8_t> expected{10, 20, 30, 40, 50, 60, 70, 80};
     ASSERT_EQ(::pwrite(fd, expected.data(), expected.size(), 0), static_cast<ssize_t>(expected.size()));
 
-    Reactor              r;
+    DiskIOUring uring = make_uring();
+    uring.register_fd(fd);
     std::atomic<bool>    done{false};
     std::atomic<int>     got_res{-1};
     std::vector<uint8_t> buf(expected.size(), 0);
-    r.submit_read(fd, buf.data(), buf.size(), 0, [&](int res) {
+    uring.submit_read(fd, buf.data(), buf.size(), 0, [&](int res) {
         got_res.store(res, std::memory_order_relaxed);
         done.store(true, std::memory_order_release);
     });
@@ -83,26 +98,27 @@ TEST(Reactor, SubmitReadCompletesViaCallback)
     std::remove(path.c_str());
 }
 
-TEST(Reactor, SubmitWriteThenReadRoundTrips)
+TEST(DiskIOUring, SubmitWriteThenReadRoundTrips)
 {
     std::string path = temp_path();
     int         fd   = ::open(path.c_str(), O_RDWR);
     ASSERT_GE(fd, 0);
 
-    Reactor              r;
+    DiskIOUring uring = make_uring();
+    uring.register_fd(fd);
     std::atomic<bool>    done{false};
     std::atomic<int>     got_res{-1};
     std::vector<uint8_t> in{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-    r.submit_write(fd, in.data(), in.size(), 100, [&](int res) {
+    uring.submit_write(fd, in.data(), in.size(), 100, [&](int res) {
         got_res.store(res, std::memory_order_relaxed);
         done.store(true, std::memory_order_release);
     });
     ASSERT_TRUE(wait_for([&] { return done.load(std::memory_order_acquire); }));
     EXPECT_EQ(got_res.load(), static_cast<int>(in.size()));
 
-    // Confirms the reactor thread actually performed the write (not just
+    // Confirms the poll thread actually performed the write (not just
     // invoked the callback with a fabricated success) -- read back with a
-    // plain pread, bypassing the reactor entirely.
+    // plain pread, bypassing the uring entirely.
     std::vector<uint8_t> out(in.size(), 0);
     ASSERT_EQ(::pread(fd, out.data(), out.size(), 100), static_cast<ssize_t>(out.size()));
     EXPECT_EQ(out, in);
@@ -111,7 +127,7 @@ TEST(Reactor, SubmitWriteThenReadRoundTrips)
     std::remove(path.c_str());
 }
 
-TEST(Reactor, MultipleConcurrentSubmitsAllComplete)
+TEST(DiskIOUring, MultipleConcurrentSubmitsAllComplete)
 {
     constexpr int kOps = 64;
     std::string   path = temp_path();
@@ -119,7 +135,8 @@ TEST(Reactor, MultipleConcurrentSubmitsAllComplete)
     ASSERT_GE(fd, 0);
     ASSERT_EQ(::ftruncate(fd, static_cast<off_t>(kOps) * 16), 0);
 
-    Reactor          r;
+    DiskIOUring uring = make_uring();
+    uring.register_fd(fd);
     std::atomic<int> completed{0};
     std::vector<int> results(kOps, -1);
     // Each op writes a distinct 16-byte pattern at a distinct offset so a
@@ -130,7 +147,7 @@ TEST(Reactor, MultipleConcurrentSubmitsAllComplete)
         patterns[i].assign(16, static_cast<uint8_t>(i));
     }
     for (int i = 0; i < kOps; ++i) {
-        r.submit_write(fd, patterns[i].data(), patterns[i].size(), static_cast<off_t>(i) * 16, [&, i](int res) {
+        uring.submit_write(fd, patterns[i].data(), patterns[i].size(), static_cast<off_t>(i) * 16, [&, i](int res) {
             results[i] = res;
             completed.fetch_add(1, std::memory_order_acq_rel);
         });
@@ -151,38 +168,13 @@ TEST(Reactor, MultipleConcurrentSubmitsAllComplete)
     std::remove(path.c_str());
 }
 
-TEST(Reactor, CancelBeforeCompletionSuppressesCallback)
-{
-    std::string path = temp_path();
-    int         fd   = ::open(path.c_str(), O_RDWR);
-    ASSERT_GE(fd, 0);
-    // A larger buffer than the other tests widens the window between kernel
-    // completion and the reactor thread's dispatch, making the immediately-
-    // following cancel() reliably win the race in practice (see class
-    // comment on Reactor::cancel for why this is best-effort,
-    // not a hard guarantee, in general).
-    std::vector<uint8_t> buf(1 << 16, 0);
-    ASSERT_EQ(::ftruncate(fd, static_cast<off_t>(buf.size())), 0);
-
-    Reactor           r;
-    std::atomic<bool> fired{false};
-    uint64_t          op_id =
-        r.submit_read(fd, buf.data(), buf.size(), 0, [&](int) { fired.store(true, std::memory_order_release); });
-    r.cancel(op_id);
-
-    // Bounded wait: give the reactor plenty of opportunity to (wrongly)
-    // dispatch before concluding it never will.
-    EXPECT_FALSE(wait_for([&] { return fired.load(std::memory_order_acquire); }, /*max_iters=*/40));
-
-    ::close(fd);
-    std::remove(path.c_str());
-}
-
-TEST(Reactor, DestructorStopsThreadCleanly)
+TEST(DiskIOUring, DestructorStopsThreadCleanly)
 {
     {
-        Reactor r;
-        EXPECT_GE(r.eventfd(), 0);
+        DiskIOUring uring = make_uring();
+        int32_t     efd   = -1;
+        EXPECT_EQ(uring.eventfds(&efd, 1), 1u);
+        EXPECT_GE(efd, 0);
     }
     SUCCEED();
 }
@@ -191,11 +183,15 @@ TEST(Reactor, DestructorStopsThreadCleanly)
 
 TEST(BlockAsyncPageStore, WriteThenReadRoundTrips)
 {
-    std::string                     path = temp_path();
-    Reactor                         r;
+    std::string                     path  = temp_path();
+    DiskIOUring                     uring = make_uring();
     std::unique_ptr<BlockPageStore> bs;
     ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
-    BlockAsyncPageStore s(bs.get(), &r);
+    // Register the store's fd with the uring.
+    for (int fd : bs->all_extent_fds()) {
+        uring.register_fd(fd);
+    }
+    BlockAsyncPageStore s(bs.get(), &uring);
 
     // O_DIRECT requires aligned offset/length/buffer; use 4096-aligned I/O.
     std::vector<uint8_t> in(4096, 0);
@@ -227,11 +223,14 @@ TEST(BlockAsyncPageStore, WriteThenReadRoundTrips)
 
 TEST(BlockAsyncPageStore, ReadPastEndSurfacesAsError)
 {
-    std::string                     path = temp_path();
-    Reactor                         r;
+    std::string                     path  = temp_path();
+    DiskIOUring                     uring = make_uring();
     std::unique_ptr<BlockPageStore> bs;
     ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
-    BlockAsyncPageStore s(bs.get(), &r);
+    for (int fd : bs->all_extent_fds()) {
+        uring.register_fd(fd);
+    }
+    BlockAsyncPageStore s(bs.get(), &uring);
 
     // Read from an offset far past the file end (aligned to keep O_DIRECT happy
     // for the offset, but there's no data there).
@@ -250,11 +249,14 @@ TEST(BlockAsyncPageStore, ReadPastEndSurfacesAsError)
 
 TEST(BlockAsyncPageStore, FsyncCompletes)
 {
-    std::string                     path = temp_path();
-    Reactor                         r;
+    std::string                     path  = temp_path();
+    DiskIOUring                     uring = make_uring();
     std::unique_ptr<BlockPageStore> bs;
     ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
-    BlockAsyncPageStore s(bs.get(), &r);
+    for (int fd : bs->all_extent_fds()) {
+        uring.register_fd(fd);
+    }
+    BlockAsyncPageStore s(bs.get(), &uring);
 
     // Write something first so the single-medium fd is dirty
     std::vector<uint8_t> in(4096, 0xAB);
@@ -272,5 +274,17 @@ TEST(BlockAsyncPageStore, FsyncCompletes)
     ASSERT_TRUE(wait_for([&] { return done.load(std::memory_order_acquire); }));
     EXPECT_TRUE(status.ok()) << status.to_string();
 
+    std::remove(path.c_str());
+}
+
+TEST(BlockAsyncPageStore, AllExtentFdsReturnsAllLiveFds)
+{
+    std::string                     path = temp_path();
+    std::unique_ptr<BlockPageStore> bs;
+    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    std::vector<int> fds = bs->all_extent_fds();
+    // Single-medium mode: exactly one fd.
+    EXPECT_EQ(fds.size(), 1u);
+    EXPECT_GE(fds[0], 0);
     std::remove(path.c_str());
 }

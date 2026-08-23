@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -218,6 +219,7 @@ TEST(SqFullBackpressureTest, UringEngineTinySqManyWrites)
     // handle backpressure: submissions that don't fit in the SQ ring
     // should be queued and submitted as slots free up.
     auto engine = std::make_shared<UringEngine>(8);
+    engine->uring().register_fd(disk->fd());
 
     constexpr int NUM_IOS   = 100;
     constexpr int DATA_SIZE = 4096;
@@ -254,6 +256,8 @@ TEST(SqFullBackpressureTest, UringEngineGoodDiskIsolation)
     auto        disk2 = make_block_disk({0, 12}, path2, 1 << 24);
 
     auto engine = std::make_shared<UringEngine>(32);
+    engine->uring().register_fd(disk1->fd());
+    engine->uring().register_fd(disk2->fd());
 
     constexpr int NUM_IOS   = 50;
     constexpr int DATA_SIZE = 4096;
@@ -327,6 +331,7 @@ TEST(SqFullBackpressureTest, UringEngineCancellationFreesSlots)
 
     // Small SQ to make slot pressure more visible.
     auto engine = std::make_shared<UringEngine>(16);
+    engine->uring().register_fd(disk->fd());
 
     constexpr int    DATA_SIZE = 4096;
     std::atomic<int> completed{0};
@@ -347,20 +352,22 @@ TEST(SqFullBackpressureTest, UringEngineCancellationFreesSlots)
     }
     EXPECT_EQ(completed.load(std::memory_order_acquire), 10);
 
-    // Submit more writes, then cancel them.
+    // Submit more writes, then cancel them. The cancelled batch's callbacks
+    // may fire with -ECANCELED (kernel cancel) or DATA_SIZE (if the op
+    // completed before cancel took effect) — both are acceptable.
     std::atomic<int> batch2_completed{0};
     for (int i = 0; i < 10; i++) {
         auto  data   = std::make_shared<std::vector<uint8_t>>(DATA_SIZE, 0xEF);
         off_t offset = static_cast<off_t>((10 + i) * DATA_SIZE);
         engine->submit_write(disk.get(), offset, data->data(), DATA_SIZE,
                              [data, &batch2_completed, DATA_SIZE](int result) {
-                                 EXPECT_EQ(result, DATA_SIZE);
+                                 EXPECT_TRUE(result == DATA_SIZE || result == -ECANCELED) << "result=" << result;
                                  batch2_completed.fetch_add(1, std::memory_order_release);
                              });
     }
 
-    // Cancel all in-flight for this disk.
-    engine->cancel_disk({0, 13});
+    // Cancel all in-flight for this disk via cancel_fd.
+    engine->uring().cancel_fd(disk->fd());
 
     // After cancellation, new I/O should work (slots were freed).
     std::atomic<bool> new_write_done{false};

@@ -836,7 +836,7 @@ void Crowtree::snapshot_async(
         return;
     }
 #ifdef CROW_HAVE_LIBURING
-    if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
+    if (opt_.async_uring != nullptr && opt_.async_page_store != nullptr) {
         acquire_snapshot_slot();
         auto   prepared = std::make_shared<PreparedSnapshot>();
         Status ps;

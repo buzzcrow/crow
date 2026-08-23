@@ -43,7 +43,7 @@ using crow::common::metrics::LatencySummary;
 using crow::common::metrics::MetricsRegistry;
 
 #ifdef CROW_HAVE_LIBURING
-using crow::common::Reactor;
+using crow::common::DiskIOUring;
 class AsyncPageStore;
 #endif
 
@@ -383,7 +383,7 @@ class Crowtree
     Status snapshot(uint64_t *out_last_applied = nullptr);
 
     // Async twin of snapshot(). Always genuinely
-    // async from *this* caller's perspective when Options::async_reactor/
+    // async from *this* caller's perspective when Options::async_uring/
     // async_page_store are wired (flush/snapshot are
     // *always* slow-path, unlike get/scan): snapshot_async() returns
     // immediately after kicking off the walk + first I/O submission, and
@@ -535,7 +535,7 @@ class Crowtree
     [[nodiscard]] GetView get_view(Slice key) const;
 
     // Async twin of get(). Fast path (every page needed to resolve `key` is already
-    // resident, or no async backend is wired -- see Options::async_reactor/
+    // resident, or no async backend is wired -- see Options::async_uring/
     // async_page_store) invokes on_done synchronously, before this call
     // returns, exactly like get(). A genuine miss on the L1 descent (some
     // base page along the root->leaf path is tagged unloaded) submits

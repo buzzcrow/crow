@@ -249,7 +249,7 @@ extern "C" {
         out_value: *mut ct_buf,
     ) -> c_int;
     pub fn ct_future_free(f: *mut ct_future);
-    pub fn ct_reactor_eventfd(t: *const ct_tree) -> i32;
+    pub fn ct_uring_eventfds(t: *const ct_tree, out_fds: *mut i32, max_fds: usize) -> usize;
 
     // Metrics FFI
     pub fn ct_flush_metrics_str(

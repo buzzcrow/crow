@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // UringEngine tests: write/read/fsync round-trip, in-flight tracking,
-// cancellation, O_DIRECT alignment check.
+// cancel_fd, O_DIRECT alignment check.
 #include "engine/uring/uring_engine.h"
 
 #ifdef CROW_HAVE_LIBURING
@@ -58,7 +58,7 @@ class TestDisk : public crow::diskio::Disk
           fd_(::open(path.c_str(), O_RDWR)),
           engine_(engine)
     {
-        zones_.push_back({0, 0, 1 << 24}); // one zone covering the whole file
+        zones_.push_back({0, 0, 1 << 24});
     }
 
     ~TestDisk() override
@@ -122,6 +122,7 @@ TEST(UringEngine, WriteReadRoundTrip)
 
     crow::diskio::UringEngine engine(256);
     TestDisk                  disk({1, 1}, path, &engine);
+    engine.uring().register_fd(disk.fd());
 
     std::vector<uint8_t> in(4096);
     for (size_t i = 0; i < in.size(); ++i) {
@@ -156,6 +157,7 @@ TEST(UringEngine, FsyncAfterWrite)
 
     crow::diskio::UringEngine engine(64);
     TestDisk                  disk({2, 2}, path, &engine);
+    engine.uring().register_fd(disk.fd());
 
     std::vector<uint8_t> in(4096, 0xAB);
     std::atomic<bool>    write_done{false};
@@ -182,6 +184,7 @@ TEST(UringEngine, MultipleConcurrentWritesAllComplete)
 
     crow::diskio::UringEngine engine(256);
     TestDisk                  disk({3, 3}, path, &engine);
+    engine.uring().register_fd(disk.fd());
 
     constexpr int        kOps = 50;
     std::atomic<int>     completed{0};
@@ -196,7 +199,6 @@ TEST(UringEngine, MultipleConcurrentWritesAllComplete)
     }
     ASSERT_TRUE(wait_for([&] { return completed.load(std::memory_order_acquire) == kOps; }, 400));
 
-    // Verify data integrity.
     for (int i = 0; i < kOps; ++i) {
         std::vector<uint8_t> out(4096, 0);
         ASSERT_EQ(::pread(disk.fd(), out.data(), out.size(), static_cast<off_t>(i) * 4096), 4096);
@@ -206,46 +208,52 @@ TEST(UringEngine, MultipleConcurrentWritesAllComplete)
     std::remove(path.c_str());
 }
 
-TEST(UringEngine, InFlightTrackingIncrementsAndDecrements)
+TEST(UringEngine, InFlightCountViaUringEngine)
 {
     std::string path = temp_path();
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
 
     crow::diskio::UringEngine engine(256);
     TestDisk                  disk({4, 4}, path, &engine);
+    engine.uring().register_fd(disk.fd());
 
-    crow::diskio::DiskId did = disk.id();
-    EXPECT_EQ(engine.in_flight_count(did), 0u);
+    EXPECT_EQ(engine.uring().in_flight_count(disk.fd()), 0u);
 
     std::vector<uint8_t> in(4096, 0xCD);
     std::atomic<bool>    done{false};
     engine.submit_write(&disk, 0, in.data(), in.size(), [&](int) { done.store(true, std::memory_order_release); });
-    // After completion, in_flight should be 0.
     ASSERT_TRUE(wait_for([&] { return done.load(std::memory_order_acquire); }));
-    EXPECT_EQ(engine.in_flight_count(did), 0u);
+    EXPECT_EQ(engine.uring().in_flight_count(disk.fd()), 0u);
 
     std::remove(path.c_str());
 }
 
-TEST(UringEngine, CancelDiskSuppressesCallback)
+TEST(UringEngine, CancelFdViaUringEngine)
 {
     std::string path = temp_path();
     ASSERT_EQ(::truncate(path.c_str(), 1 << 16), 0);
 
     crow::diskio::UringEngine engine(64);
     TestDisk                  disk({5, 5}, path, &engine);
+    engine.uring().register_fd(disk.fd());
 
+    // Submit a write, then cancel via cancel_fd.
+    std::atomic<int>     callback_res{1};
     std::atomic<bool>    callback_fired{false};
     std::vector<uint8_t> in(4096, 0xEF);
-    engine.submit_write(&disk, 0, in.data(), in.size(),
-                        [&](int) { callback_fired.store(true, std::memory_order_release); });
-    // Cancel immediately — best-effort, the callback may or may not fire.
-    engine.cancel_disk(disk.id());
-    // Wait a bit to see if the callback fires (it shouldn't if cancel worked).
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    // The callback might have already fired before cancel. Just verify
-    // no crash and in_flight is 0 after cancel.
-    EXPECT_EQ(engine.in_flight_count(disk.id()), 0u);
+    engine.submit_write(&disk, 0, in.data(), in.size(), [&](int res) {
+        callback_res.store(res, std::memory_order_relaxed);
+        callback_fired.store(true, std::memory_order_release);
+    });
+    // cancel_fd is best-effort — the callback may fire with success or -ECANCELED.
+    int rc = engine.uring().cancel_fd(disk.fd());
+    // rc may be 0 (cancel submitted) or -ENOSYS (kernel < 6.0).
+    EXPECT_TRUE(rc == 0 || rc == -ENOSYS) << "cancel_fd returned " << rc;
+
+    // Wait for the callback to fire (either success or -ECANCELED).
+    ASSERT_TRUE(wait_for([&] { return callback_fired.load(std::memory_order_acquire); }));
+    // After callback, in_flight should be 0.
+    EXPECT_EQ(engine.uring().in_flight_count(disk.fd()), 0u);
 
     std::remove(path.c_str());
 }
@@ -260,7 +268,6 @@ TEST(UringEngine, NullDiskReturnsError)
 
 #else
 
-// Non-liburing platforms: no UringEngine to test.
 TEST(UringEngine, NotAvailableOnThisPlatform)
 {
     SUCCEED() << "UringEngine requires CROW_HAVE_LIBURING (Linux only)";

@@ -23,7 +23,9 @@ find_library(LIBURING_LIB NAMES uring)
 # ── Library ───────────────────────────────────────────────────────
 file(GLOB_RECURSE CROWCOMMON_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
-  list(REMOVE_ITEM CROWCOMMON_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/reactor.cpp)
+  list(REMOVE_ITEM CROWCOMMON_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/diskio_uring.cpp
+  )
 endif()
 add_library(crowcommon STATIC ${CROWCOMMON_SRC})
 target_include_directories(crowcommon PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

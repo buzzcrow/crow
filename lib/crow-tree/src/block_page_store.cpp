@@ -797,4 +797,28 @@ std::vector<int> BlockPageStore::dirty_fds()
     return fds;
 }
 
+std::vector<int> BlockPageStore::all_extent_fds() const
+{
+    std::vector<int> fds;
+    if (extents_.empty()) {
+        // Single-medium mode
+        auto *fm = dynamic_cast<FileMedium *>(medium_.get());
+        if (fm != nullptr && fm->fd() >= 0) {
+            fds.push_back(fm->fd());
+        }
+        return fds;
+    }
+    // Array-of-blocks mode: collect all non-deleted extent fds
+    for (const auto &ext : extents_) {
+        if (ext.deleted) {
+            continue;
+        }
+        auto *fm = dynamic_cast<FileMedium *>(ext.medium.get());
+        if (fm != nullptr && fm->fd() >= 0) {
+            fds.push_back(fm->fd());
+        }
+    }
+    return fds;
+}
+
 } // namespace crow::tree

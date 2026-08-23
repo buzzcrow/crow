@@ -8,19 +8,32 @@
 #    include "disk/disk.h"
 
 #    include <cerrno>
-#    include <memory>
+#    include <utility>
 
 namespace crow::diskio
 {
 
-UringEngine::UringEngine(unsigned ring_entries) : reactor_(ring_entries, crow::common::PollingMode::Hybrid)
+UringEngine::UringEngine(unsigned ring_entries)
 {
+    crow::common::Topology       topo;
+    crow::common::PipelineConfig cfg;
+    cfg.entries = ring_entries;
+    cfg.mode    = crow::common::PollingMode::Hybrid;
+    topo.pipelines.push_back(cfg);
+    uring_ = std::make_unique<crow::common::DiskIOUring>(std::move(topo));
 }
 
 UringEngine::UringEngine(unsigned ring_entries, crow::common::PollingMode mode, crow::common::HybridConfig hybrid,
                          crow::common::SqpollConfig sqpoll)
-    : reactor_(ring_entries, mode, hybrid, sqpoll)
 {
+    crow::common::Topology       topo;
+    crow::common::PipelineConfig cfg;
+    cfg.entries = ring_entries;
+    cfg.mode    = mode;
+    cfg.hybrid  = hybrid;
+    cfg.sqpoll  = sqpoll;
+    topo.pipelines.push_back(cfg);
+    uring_ = std::make_unique<crow::common::DiskIOUring>(std::move(topo));
 }
 
 void UringEngine::submit_write(Disk *disk, off_t phys_offset, const uint8_t *data, size_t size,
@@ -40,28 +53,7 @@ void UringEngine::submit_write(Disk *disk, off_t phys_offset, const uint8_t *dat
             return;
         }
     }
-    DiskId                   did        = disk->id();
-    auto                     op_id_ptr  = std::make_shared<uint64_t>(0);
-    std::function<void(int)> wrapped_cb = [this, did, op_id_ptr, cb = std::move(on_complete)](int res) {
-        {
-            auto                       &s = shard(did);
-            std::lock_guard<std::mutex> lk(s.mu);
-            auto                        it = s.ops.find(did);
-            if (it != s.ops.end()) {
-                it->second.erase(*op_id_ptr);
-            }
-        }
-        if (cb) {
-            cb(res);
-        }
-    };
-    uint64_t op_id = reactor_.submit_write(disk->fd(), data, size, phys_offset, std::move(wrapped_cb));
-    *op_id_ptr     = op_id;
-    if (op_id != 0) {
-        auto                       &s = shard(did);
-        std::lock_guard<std::mutex> lk(s.mu);
-        s.ops[did].insert(op_id);
-    }
+    uring_->submit_write(disk->fd(), data, size, phys_offset, std::move(on_complete));
 }
 
 void UringEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_t size,
@@ -81,28 +73,7 @@ void UringEngine::submit_read(Disk *disk, off_t phys_offset, uint8_t *buf, size_
             return;
         }
     }
-    DiskId                   did        = disk->id();
-    auto                     op_id_ptr  = std::make_shared<uint64_t>(0);
-    std::function<void(int)> wrapped_cb = [this, did, op_id_ptr, cb = std::move(on_complete)](int res) {
-        {
-            auto                       &s = shard(did);
-            std::lock_guard<std::mutex> lk(s.mu);
-            auto                        it = s.ops.find(did);
-            if (it != s.ops.end()) {
-                it->second.erase(*op_id_ptr);
-            }
-        }
-        if (cb) {
-            cb(res);
-        }
-    };
-    uint64_t op_id = reactor_.submit_read(disk->fd(), buf, size, phys_offset, std::move(wrapped_cb));
-    *op_id_ptr     = op_id;
-    if (op_id != 0) {
-        auto                       &s = shard(did);
-        std::lock_guard<std::mutex> lk(s.mu);
-        s.ops[did].insert(op_id);
-    }
+    uring_->submit_read(disk->fd(), buf, size, phys_offset, std::move(on_complete));
 }
 
 void UringEngine::submit_fsync(Disk *disk, std::function<void(int)> on_complete)
@@ -113,35 +84,15 @@ void UringEngine::submit_fsync(Disk *disk, std::function<void(int)> on_complete)
         }
         return;
     }
-    reactor_.submit_fsync(disk->fd(), std::move(on_complete));
+    uring_->submit_fsync(disk->fd(), std::move(on_complete));
 }
 
-void UringEngine::cancel_disk(DiskId disk_id)
+void UringEngine::cancel_disk(DiskId /*disk_id*/)
 {
-    std::unordered_set<uint64_t> ops;
-    {
-        auto                       &s = shard(disk_id);
-        std::lock_guard<std::mutex> lk(s.mu);
-        auto                        it = s.ops.find(disk_id);
-        if (it != s.ops.end()) {
-            ops = std::move(it->second);
-            s.ops.erase(it);
-        }
-    }
-    for (uint64_t op_id : ops) {
-        reactor_.cancel(op_id);
-    }
-}
-
-size_t UringEngine::in_flight_count(DiskId disk_id)
-{
-    auto                       &s = shard(disk_id);
-    std::lock_guard<std::mutex> lk(s.mu);
-    auto                        it = s.ops.find(disk_id);
-    if (it == s.ops.end()) {
-        return 0;
-    }
-    return it->second.size();
+    // cancel_disk is called with a DiskId, but DiskIOUring::cancel_fd takes
+    // an fd. The caller (diskio server) should call uring().cancel_fd(fd)
+    // directly for bad-disk cancellation. This override is a no-op — the
+    // server-level monitor handles bad-disk detection and cancellation.
 }
 
 } // namespace crow::diskio
