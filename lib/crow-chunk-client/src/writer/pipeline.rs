@@ -21,6 +21,7 @@ use crate::traits::{BlockWriter, ChunkAllocator};
 use crate::{IoError, Location, Result};
 use crow_common::ec::{encode_parity_from_shards, EcScheme};
 use crow_diskio_client::DiskId as DiskioDiskId;
+use crow_protocol::chunk_id::CHUNK_TYPE_REPO;
 use crow_protocol::chunkdb::rpc::{DeleteChunkRequest, SealChunkRequest};
 use crow_protocol::common::ChunkId;
 
@@ -147,6 +148,7 @@ async fn write_strip_with_retry<A, W>(
     ec_scheme: EcScheme,
     placement: &mut StripPlacement,
     block_rx: &mut mpsc::Receiver<Bytes>,
+    first_block: Option<Bytes>,
 ) -> Result<(Vec<Bytes>, bool)>
 where
     A: ChunkAllocator,
@@ -159,12 +161,18 @@ where
     let mut attempts: u32 = 0;
     let mut got_eof = false;
 
+    // Seed with the first block if provided (on-demand allocation case:
+    // we consumed a block from the channel to detect remaining data).
+    if let Some(b) = first_block {
+        data_shards.push(b.clone());
+    }
+
     loop {
         // All data_num blocks written → strip data complete.
         if next_to_write >= data_num {
             break;
         }
-        // Get the block to write: buffered (retry) or from the channel.
+        // Get the block to write: buffered (retry/seed) or from channel.
         let bytes = if next_to_write < data_shards.len() {
             data_shards[next_to_write].clone()
         } else if let Some(b) = block_rx.recv().await {
@@ -220,6 +228,40 @@ where
     Ok((data_shards, got_eof))
 }
 
+/// Allocate a strip on-demand when the prealloc task has finished but
+/// more data remains. Appends to the current chunk if it has room,
+/// otherwise allocates a new chunk.
+async fn allocate_on_demand<A: ChunkAllocator>(
+    chunkdb: &A,
+    ec_scheme: EcScheme,
+    current_chunk_id: Option<ChunkId>,
+    strips_in_current_chunk: u32,
+    strips_per_chunk: u32,
+    write_granularity_kb: u32,
+) -> Result<StripPlacement> {
+    match current_chunk_id {
+        Some(cid) if strips_in_current_chunk < strips_per_chunk => {
+            crate::prefetch::append_strip(
+                chunkdb,
+                cid,
+                ec_scheme,
+                strips_in_current_chunk,
+                write_granularity_kb,
+            )
+            .await
+        }
+        _ => {
+            crate::prefetch::allocate_new_chunk_public(
+                chunkdb,
+                ec_scheme,
+                write_granularity_kb,
+                CHUNK_TYPE_REPO,
+            )
+            .await
+        }
+    }
+}
+
 /// Run the main write task: receives strip placements from the
 /// prealloc channel and data blocks from the fetch channel, writes
 /// data blocks to disk, hands off parity per strip, and handles chunk
@@ -229,7 +271,7 @@ pub(crate) async fn run_main_write_task<A, W>(
     chunkdb: Arc<A>,
     diskio: Arc<W>,
     ec_scheme: EcScheme,
-    _max_chunk_size: u64,
+    max_chunk_size: u64,
     parity_depth: usize,
     unit_bytes: u64,
     mut prealloc_rx: mpsc::Receiver<Result<StripPlacement>>,
@@ -242,35 +284,66 @@ where
 {
     let parity_sem = Arc::new(tokio::sync::Semaphore::new(parity_depth));
     let mut state = MainWriteState::new();
+    let write_granularity_kb = (unit_bytes / 1024) as u32;
+    let strip_data_capacity = ec_scheme.data_num as u64 * unit_bytes;
+    let strips_per_chunk = (max_chunk_size / strip_data_capacity).max(1) as u32;
+    let mut strips_in_current_chunk: u32 = 0;
 
     loop {
-        // 1. Await next strip placement.
-        let mut placement = match prealloc_rx.recv().await {
-            Some(Ok(p)) => p,
+        // 1. Await next strip placement. When prealloc is done (None),
+        //    check if more data remains — if so, allocate on-demand.
+        let (mut placement, first_block) = match prealloc_rx.recv().await {
+            Some(Ok(p)) => (p, None),
             Some(Err(e)) => {
                 abort_and_cleanup(&chunkdb, &diskio, &mut state).await;
                 return Err(e);
             }
-            None => break, // prealloc done (all strips allocated)
+            None => {
+                // Prealloc done. Peek at block_rx: if no data, we're
+                // done; if data remains, allocate a strip on-demand.
+                let Ok(first) = block_rx.try_recv() else {
+                    break;
+                };
+                let p = allocate_on_demand(
+                    &chunkdb,
+                    ec_scheme,
+                    state.current_chunk_id,
+                    strips_in_current_chunk,
+                    strips_per_chunk,
+                    write_granularity_kb,
+                )
+                .await?;
+                (p, Some(first))
+            }
         };
 
         // 2. Check for chunk rotation.
         if let Some(old_id) = state.current_chunk_id {
             if placement.chunk_id != old_id {
                 rotate_chunk(&chunkdb, &mut state, unit_bytes).await?;
+                strips_in_current_chunk = 0;
             }
         }
         state.current_chunk_id = Some(placement.chunk_id);
+        strips_in_current_chunk += 1;
 
         // 3. Receive + write data blocks with whole-strip retry.
-        let (data_shards, got_eof) =
-            match write_strip_with_retry(&chunkdb, &diskio, ec_scheme, &mut placement, &mut block_rx).await {
-                Ok(r) => r,
-                Err(e) => {
-                    abort_and_cleanup(&chunkdb, &diskio, &mut state).await;
-                    return Err(e);
-                }
-            };
+        let (data_shards, got_eof) = match write_strip_with_retry(
+            &chunkdb,
+            &diskio,
+            ec_scheme,
+            &mut placement,
+            &mut block_rx,
+            first_block,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                abort_and_cleanup(&chunkdb, &diskio, &mut state).await;
+                return Err(e);
+            }
+        };
 
         if data_shards.is_empty() {
             // EOF with no blocks for this strip — don't write it.

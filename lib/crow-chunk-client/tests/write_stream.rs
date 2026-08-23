@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crow_chunk_client::{
     BlockWriter, ChunkAllocator, ChunkIoWriter, FeedStatus, IoError, LargeObjectWriter, Result, WriterConfig,
+    WriterPool,
 };
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskId;
@@ -738,4 +739,185 @@ async fn push_mode_backpressure() {
     let locs = writer.on_finish().await.unwrap();
     assert_eq!(locs.len(), 1);
     assert_eq!(locs[0].length, 6 * 4096);
+}
+
+// ── Size hint mismatch tests ─────────────────────────────────────
+
+#[tokio::test]
+async fn write_stream_size_hint_fewer_bytes() {
+    // Hint 8*4096 but stream only 5*4096 → seals at 5*4096, 1 partial
+    // strip (1 full strip + 1 block partial).
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
+
+    let data = vec![0xABu8; 5 * 4096];
+    let locs = writer
+        .write_stream(data.as_slice(), Some(8 * 4096_u64))
+        .await
+        .unwrap();
+
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 5 * 4096);
+}
+
+#[tokio::test]
+async fn write_stream_size_hint_more_bytes() {
+    // Hint 4*4096 but stream 8*4096 → seals at 8*4096, 2 strips.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
+
+    let data = vec![0xCDu8; 8 * 4096];
+    let locs = writer
+        .write_stream(data.as_slice(), Some(4 * 4096_u64))
+        .await
+        .unwrap();
+
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 8 * 4096);
+    let st = chunkdb.snapshot();
+    assert_eq!(st.append_calls, 1); // 2 strips → 1 allocate + 1 append
+}
+
+#[tokio::test]
+async fn write_stream_exact_strip_capacity() {
+    // 4*4096 = exactly 1 full strip (4 data blocks * 4096). No partial
+    // EC, no extra strip.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
+
+    let data = vec![0xEFu8; 4 * 4096];
+    let locs = writer
+        .write_stream(data.as_slice(), Some(4 * 4096_u64))
+        .await
+        .unwrap();
+
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 4 * 4096);
+    let st = chunkdb.snapshot();
+    assert_eq!(st.allocate_calls, 1);
+    assert_eq!(st.append_calls, 0); // exactly 1 strip → no appends
+    assert_eq!(st.seal_calls, 1);
+}
+
+// ── Bounded preallocation test ───────────────────────────────────
+
+#[tokio::test]
+async fn write_stream_bounded_prealloc() {
+    // prealloc_depth = 2, 12 strips (48 blocks * 4096). The prealloc
+    // task should allocate at most 2 strips ahead. With 12 strips:
+    // 1 allocate (chunk, strip_count=1) + 11 append_chunk calls.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let config = WriterConfig {
+        max_chunk_size: 1024 * 1024 * 1024,
+        prealloc_depth: 2,
+        parity_depth: 2,
+        chunk_prefetch_depth: 1,
+        read_buffer_size: 4096,
+        max_cached_buffer: 4 * 4096,
+    };
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio, ec, config);
+
+    let data = vec![0x42u8; 48 * 4096];
+    let locs = writer
+        .write_stream(data.as_slice(), Some(48 * 4096_u64))
+        .await
+        .unwrap();
+
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 48 * 4096);
+    let st = chunkdb.snapshot();
+    assert_eq!(st.allocate_calls, 1);
+    assert_eq!(st.append_calls, 11); // 12 strips total, 1 from allocate
+    assert_eq!(st.seal_calls, 1);
+}
+
+// ── Drop mid-write test ──────────────────────────────────────────
+
+#[tokio::test]
+async fn push_mode_drop_mid_write_deletes_partial() {
+    // Push 6 blocks (1 full strip + 2 partial), then drop the writer
+    // without calling on_finish/on_error. Drop should signal cancel +
+    // delete the partial chunk. The full strip's chunk is not sealed
+    // (only 1 chunk, still partial at 6 blocks).
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
+
+    for i in 0..6u8 {
+        writer.on_data(block(i, 4096)).await.unwrap();
+    }
+
+    // Drop the writer — Drop sends cancel + drops block_tx. The main
+    // write task sees cancel, aborts parity, deletes the partial chunk.
+    // The task is detached (JoinHandle dropped), so we must wait for
+    // it to process the cancel + delete.
+    drop(writer);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let st = chunkdb.snapshot();
+    // The partial chunk (6 blocks, not sealed) should be deleted.
+    assert_eq!(st.delete_calls, 1);
+    assert_eq!(st.seal_calls, 0); // nothing sealed — all was partial
+}
+
+// ── WriterPool budget tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn writer_pool_budget_rejects_over_budget() {
+    // per_writer_memory = max_cached_buffer + block + parity_depth *
+    // total_blocks * block = 4MB + 1MB + 2*5*1MB = 15MB. Budget = 30MB
+    // → 2 writers fit, 3rd rejected.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let config = WriterConfig {
+        max_chunk_size: 1024 * 1024 * 1024,
+        prealloc_depth: 2,
+        parity_depth: 2,
+        chunk_prefetch_depth: 1,
+        read_buffer_size: 1024 * 1024, // 1 MB
+        max_cached_buffer: 4 * 1024 * 1024,
+    };
+    let pool = WriterPool::new(chunkdb, diskio, ec, config, 30 * 1024 * 1024);
+
+    let w1 = pool.try_acquire();
+    assert!(w1.is_ok());
+    let w2 = pool.try_acquire();
+    assert!(w2.is_ok());
+    let w3 = pool.try_acquire();
+    assert!(matches!(w3, Err(IoError::MemoryBudgetExhausted)));
+
+    // Drop w1 → budget freed → can acquire again.
+    drop(w1);
+    let w4 = pool.try_acquire();
+    assert!(w4.is_ok());
+}
+
+#[tokio::test]
+async fn writer_pool_per_writer_memory() {
+    // per_writer_memory = max_cached_buffer + block + parity_depth *
+    // total_blocks * block = 4MB + 1MB + 2*5*1MB = 15MB.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let config = WriterConfig {
+        max_chunk_size: 1024 * 1024 * 1024,
+        prealloc_depth: 2,
+        parity_depth: 2,
+        chunk_prefetch_depth: 1,
+        read_buffer_size: 1024 * 1024,
+        max_cached_buffer: 4 * 1024 * 1024,
+    };
+    let writer = LargeObjectWriter::new(chunkdb, diskio, ec, config);
+    let mem = writer.per_writer_memory();
+    assert_eq!(mem, 15 * 1024 * 1024);
 }

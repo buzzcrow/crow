@@ -92,6 +92,16 @@ async fn send_placement(tx: &mpsc::Sender<Result<StripPlacement>>, placement: St
 }
 
 /// Allocate a new chunk with 1 strip and return its placement.
+pub(crate) async fn allocate_new_chunk_public<A: ChunkAllocator>(
+    chunkdb: &A,
+    ec_scheme: EcScheme,
+    write_granularity_kb: u32,
+    chunk_type_byte: u8,
+) -> Result<StripPlacement> {
+    allocate_new_chunk(chunkdb, ec_scheme, write_granularity_kb, chunk_type_byte).await
+}
+
+/// Allocate a new chunk with 1 strip and return its placement.
 async fn allocate_new_chunk<A: ChunkAllocator>(
     chunkdb: &A,
     ec_scheme: EcScheme,
@@ -176,7 +186,9 @@ async fn run_prealloc<A: ChunkAllocator>(
     let strip_data_capacity = ec_scheme.data_num as u64 * unit_bytes;
     let strips_per_chunk = (max_chunk_size / strip_data_capacity).max(1) as u32;
 
-    // Plan total strips if size is known.
+    // Plan total strips if size is known. The prealloc task allocates
+    // exactly the planned count; if the stream exceeds the hint, the
+    // main write task allocates additional strips on-demand.
     let total_strips = object_size.map(|s| (s.div_ceil(strip_data_capacity)) as usize);
 
     let mut allocated = 0usize;
@@ -184,7 +196,6 @@ async fn run_prealloc<A: ChunkAllocator>(
     let mut strips_in_current_chunk: u32 = 0;
 
     loop {
-        // Check if we've allocated all planned strips.
         if let Some(total) = total_strips {
             if allocated >= total {
                 break;
