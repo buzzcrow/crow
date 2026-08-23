@@ -83,3 +83,4 @@ lib/crow-rpc/.cache/
 # crow-diskio build
 app/crow-diskio/build/
 app/crow-diskio/build*/
+lib/crow-chunk-client/log/

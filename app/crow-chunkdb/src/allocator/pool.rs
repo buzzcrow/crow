@@ -84,15 +84,16 @@ impl DiskdbClientPool {
     }
 
     fn get_or_create_channel(&self, endpoint: &str) -> Result<Channel, String> {
-        if let Some(ch) = self.channels.get(endpoint) {
+        let normalized = crow_diskdb_client::normalize_endpoint(endpoint);
+        if let Some(ch) = self.channels.get(&normalized) {
             return Ok(ch.clone());
         }
-        let ch = Channel::from_shared(endpoint.to_string())
-            .map_err(|e| format!("invalid endpoint {endpoint}: {e}"))?
+        let ch = Channel::from_shared(normalized.clone())
+            .map_err(|e| format!("invalid endpoint {normalized}: {e}"))?
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(30))
             .connect_lazy();
-        self.channels.insert(endpoint.to_string(), ch.clone());
+        self.channels.insert(normalized, ch.clone());
         Ok(ch)
     }
 

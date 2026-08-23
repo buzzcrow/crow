@@ -19,6 +19,7 @@
     clippy::doc_markdown
 )]
 
+pub mod diskio_writer;
 pub mod error;
 pub mod io;
 pub mod location;
@@ -26,6 +27,7 @@ pub mod prefetch;
 pub mod traits;
 pub mod writer;
 
+pub use diskio_writer::DiskioBlockWriter;
 pub use error::{IoError, Result};
 pub use io::{BackpressurePolicy, ChunkIoWriter, FeedStatus};
 pub use location::Location;

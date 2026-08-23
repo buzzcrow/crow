@@ -611,6 +611,7 @@ dependencies = [
  "bytes",
  "crow-chunkdb-client",
  "crow-common",
+ "crow-diskdb-client",
  "crow-diskio-client",
  "crow-kv-client",
  "crow-protocol",
@@ -913,6 +914,7 @@ dependencies = [
 name = "crow-test-harness"
 version = "0.1.0"
 dependencies = [
+ "crow-chunkdb-client",
  "crow-diskdb-client",
  "crow-diskio-client",
  "crow-kv-client",

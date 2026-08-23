@@ -439,7 +439,14 @@ impl LifecycleHandler {
         };
 
         let constraints = PlacementConstraints::new();
-        let unit_count = write_granularity_kb;
+        // Convert write_granularity (KB) to unit_count using the unit
+        // size from the topology snapshot. Fall back to treating KB as
+        // units if unit_size_bytes is unavailable (0).
+        let unit_size_kb = snap.unit_size_bytes() / 1024;
+        let unit_count = write_granularity_kb
+            .checked_div(unit_size_kb)
+            .unwrap_or(write_granularity_kb)
+            .max(1);
 
         let mut strips = Vec::with_capacity(strip_count as usize);
         for seq in 0..strip_count {

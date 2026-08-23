@@ -41,3 +41,6 @@ pub mod diskio;
 
 #[cfg(feature = "diskdb")]
 pub mod diskdb;
+
+#[cfg(feature = "chunkdb")]
+pub mod chunkdb;

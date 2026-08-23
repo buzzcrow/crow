@@ -76,3 +76,27 @@ impl<T: BlockWriter + ?Sized> BlockWriter for Arc<T> {
         (**self).fsync(disk_id).await
     }
 }
+
+// ── Concrete impl for ChunkdbClient ──────────────────────────────
+
+#[async_trait]
+impl ChunkAllocator for crow_chunkdb_client::ChunkdbClient {
+    async fn allocate_chunk(&self, req: AllocateChunkRequest) -> Result<AllocateChunkResponse> {
+        Ok(crow_chunkdb_client::ChunkdbClient::allocate_chunk(self, req).await?)
+    }
+    async fn append_chunk(&self, req: AppendChunkRequest) -> Result<AppendChunkResponse> {
+        Ok(crow_chunkdb_client::ChunkdbClient::append_chunk(self, req).await?)
+    }
+    async fn seal_chunk(&self, req: SealChunkRequest) -> Result<SealChunkResponse> {
+        Ok(crow_chunkdb_client::ChunkdbClient::seal_chunk(self, req).await?)
+    }
+    async fn delete_chunk(&self, req: DeleteChunkRequest) -> Result<DeleteChunkResponse> {
+        Ok(crow_chunkdb_client::ChunkdbClient::delete_chunk(self, req).await?)
+    }
+    async fn update_chunk_strip(&self, req: UpdateChunkStripRequest) -> Result<UpdateChunkStripResponse> {
+        Ok(crow_chunkdb_client::ChunkdbClient::update_chunk_strip(self, req).await?)
+    }
+    async fn query_chunk(&self, req: QueryChunkRequest) -> Result<QueryChunkResponse> {
+        Ok(crow_chunkdb_client::ChunkdbClient::query_chunk(self, req).await?)
+    }
+}

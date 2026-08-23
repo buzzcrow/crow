@@ -21,6 +21,8 @@ hardware = ["kv-client", "dep:crow-protocol"]
 diskio = ["hardware", "dep:crow-diskio-client", "dep:crow-rpc-ffi"]
 # Diskdb test harness (DiskdbProcess, etc.). Implies hardware.
 diskdb = ["hardware", "dep:crow-diskdb-client"]
+# Chunkdb test harness (ChunkdbProcess, etc.). Implies hardware.
+chunkdb = ["hardware", "dep:crow-chunkdb-client"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json"] }
@@ -34,3 +36,4 @@ crow-protocol = { path = "../crow-protocol", optional = true }
 crow-diskio-client = { path = "../crow-diskio-client", optional = true }
 crow-rpc-ffi = { path = "../crow-rpc/ffi", optional = true }
 crow-diskdb-client = { path = "../crow-diskdb-client", optional = true }
+crow-chunkdb-client = { path = "../crow-chunkdb-client", optional = true }

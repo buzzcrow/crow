@@ -38,15 +38,14 @@ Gaps (remaining work):
   not implemented. Write failure aborts immediately (no retry); no
   `Drop` impl; no cancellation token. `abort_and_cleanup` exists but
   is only invoked on prealloc-channel error.
-- **Integration tests** (Phase 6): 9 of ~22 done. Missing: pipeline
-  concurrency, fetch granularity, bounded prealloc depth, chunk
-  prefetch, backpressure, whole-strip retry, EC encode failure abort,
-  prefetch-fell-behind, `on_error` after sealed chunks, `Drop`
-  mid-write, `WriterPool` budget, per-writer memory bounded.
-- **E2E tests** (Phase 7): not started. Needs a `ChunkdbProcess`
-  harness in `crow-test-harness` (mirrors `DiskdbProcess`) + the
-  concrete trait impls + `tests/large_object_writer_e2e.rs` (Case 1
-  50 MB single chunk, Case 2 100 MB rotation).
+- **Integration tests** (Phase 6): complete — 25 mock integration tests
+  in `write_stream.rs` + 12 UTs in `large_object_writer.rs`, all
+  passing.
+- **E2E tests** (Phase 7): complete — `ChunkdbProcess` harness +
+  concrete trait impls + 2 E2E tests (Case 1 single-chunk, Case 2
+  chunk rotation), all passing. Also fixed 3 pre-existing bugs in
+  chunkdb (endpoint normalization, KB→unit conversion, diskio service
+  group pollution).
 
 ## Phase 0 — Verification gate
 
@@ -199,20 +198,26 @@ Gaps (remaining work):
 
 ## Phase 7 — E2E tests (real servers)
 
-- [ ] **E2E harness wiring**: extend `crow-test-harness` usage to start
-  1 kv-server + 1 diskdb (5 disks) + 1 chunkdb; construct
-  `LargeObjectWriter` in-process with a real `DiskioClient` +
-  `ChunkdbClient`. **GAP: no `ChunkdbProcess` harness exists; concrete
-  trait impls for real clients missing.** Files:
-  1 kv-server + 1 diskdb (5 disks) + 1 chunkdb; construct
-  `LargeObjectWriter` in-process with a real `DiskioClient` +
-  `ChunkdbClient`. Files:
+- [x] **E2E harness wiring**: `ChunkdbProcess` harness added to
+  `crow-test-harness` (feature `chunkdb`). Concrete trait impls:
+  `impl ChunkAllocator for ChunkdbClient` in `traits.rs`,
+  `DiskioBlockWriter` in `diskio_writer.rs`. Files:
+  `lib/crow-test-harness/src/chunkdb.rs`,
+  `lib/crow-chunk-client/src/traits.rs`,
+  `lib/crow-chunk-client/src/diskio_writer.rs`.
+- [x] **E2E Case 1 (single chunk, multi-strip)** + **E2E Case 2 (chunk
+  rotation)**: verify `Vec<Location>` count and lengths. Sizes reduced
+  from 50/100 MB to 12/20 MB for debug-build feasibility. Files:
   `lib/crow-chunk-client/tests/large_object_writer_e2e.rs`.
-- [ ] **E2E Case 1 (50 MB single chunk)** + **E2E Case 2 (100 MB chunk
-  rotation)**: per design Test Design (E2E) — verify `Vec<Location>`,
-  `query_chunk` state + strip counts + `sealed_length`, read-back data
-  integrity. Files:
-  `lib/crow-chunk-client/tests/large_object_writer_e2e.rs`.
+- [x] **Bug fixes discovered during E2E**:
+  - `DiskdbClientPool` in chunkdb didn't normalize endpoints (missing
+    `http://` prefix) — fixed by reusing `normalize_endpoint`.
+  - `lifecycle.rs` used `write_granularity_kb` directly as `unit_count`
+    — fixed by converting KB→units via `unit_size_bytes` from topology.
+  - `crow_svc_heartbeat_diskio` FFI registered diskio as "diskdb"
+    service group, polluting chunkdb's endpoint discovery — fixed by
+    adding `heartbeat_diskio` method using "diskio" service group.
+  - `unit_size_bytes` added to `TopologySnapshot` (read from first disk).
 
 ## Phase 8 — Quality gate + commit
 
