@@ -14,8 +14,9 @@ use crate::config::ChunkClientConfig;
 use crate::disk_io::DiskWriter;
 use crate::io::{ChunkIoWriter, FeedStatus};
 use crate::traits::ChunkAllocator;
-use crate::{IoError, Location, Result};
+use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
+use crow_protocol::chunkdb::rpc::Location as ProtoLocation;
 
 /// Small-object writer — placeholder (R106).
 pub struct SmallObjectWriter {
@@ -48,11 +49,11 @@ impl ChunkIoWriter for SmallObjectWriter {
         Err(IoError::Internal("SmallObjectWriter not yet implemented".into()))
     }
 
-    async fn on_finish(&mut self) -> Result<Vec<Location>> {
+    async fn on_finish(&mut self) -> Result<Vec<ProtoLocation>> {
         Err(IoError::Internal("SmallObjectWriter not yet implemented".into()))
     }
 
-    async fn on_error(&mut self) -> Result<Vec<Location>> {
+    async fn on_error(&mut self) -> Result<Vec<ProtoLocation>> {
         Err(IoError::Internal("SmallObjectWriter not yet implemented".into()))
     }
 

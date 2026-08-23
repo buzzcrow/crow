@@ -22,9 +22,9 @@ use crate::config::ChunkClientConfig;
 use crate::disk_io::DiskWriter;
 use crate::io::{ChunkIoWriter, FeedStatus};
 use crate::traits::ChunkAllocator;
-use crate::{IoError, Location, Result};
+use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
-use crow_protocol::chunkdb::rpc::Chunk;
+use crow_protocol::chunkdb::rpc::{Chunk, Location as ProtoLocation};
 
 /// Large-object writer — non-blocking stream. Owns the chunk-level
 /// drive loop; strip-level rotation is in `ChunkWriter::push`.
@@ -36,7 +36,7 @@ pub struct LargeObjectWriter {
     pub(crate) chunk_writer: Option<ChunkWriter>,
     pub(crate) chunk_prefetch_rx: Option<mpsc::Receiver<Result<Chunk>>>,
     pub(crate) chunk_prefetch_handle: Option<JoinHandle<()>>,
-    pub(crate) locations: Vec<Location>,
+    pub(crate) locations: Vec<ProtoLocation>,
     pub(crate) logical_offset: u64,
     pub(crate) object_size: Option<u64>,
     pub(crate) finished: bool,
@@ -135,7 +135,7 @@ impl LargeObjectWriter {
             let location = cw.seal().await?;
             let bytes = location.length;
             if bytes > 0 {
-                self.locations.push(Location {
+                self.locations.push(ProtoLocation {
                     logical_offset: self.logical_offset,
                     logical_length: bytes,
                     ..location
@@ -147,12 +147,12 @@ impl LargeObjectWriter {
     }
 
     /// Finish: seal the current chunk, return all Locations.
-    pub(crate) async fn finish_pipeline(&mut self) -> Result<Vec<Location>> {
+    pub(crate) async fn finish_pipeline(&mut self) -> Result<Vec<ProtoLocation>> {
         if let Some(mut cw) = self.chunk_writer.take() {
             let location = cw.seal().await?;
             let bytes = location.length;
             if bytes > 0 {
-                self.locations.push(Location {
+                self.locations.push(ProtoLocation {
                     logical_offset: self.logical_offset,
                     logical_length: bytes,
                     ..location
@@ -167,7 +167,7 @@ impl LargeObjectWriter {
     }
 
     /// Abort: cancel in-flight, return already-sealed Locations.
-    pub(crate) async fn abort_pipeline(&mut self) -> Result<Vec<Location>> {
+    pub(crate) async fn abort_pipeline(&mut self) -> Result<Vec<ProtoLocation>> {
         if let Some(mut cw) = self.chunk_writer.take() {
             let _ = cw.abort().await;
         }
@@ -212,7 +212,7 @@ impl ChunkIoWriter for LargeObjectWriter {
         Ok(status)
     }
 
-    async fn on_finish(&mut self) -> Result<Vec<Location>> {
+    async fn on_finish(&mut self) -> Result<Vec<ProtoLocation>> {
         if self.finished {
             return Err(IoError::Finished);
         }
@@ -220,7 +220,7 @@ impl ChunkIoWriter for LargeObjectWriter {
         self.finish_pipeline().await
     }
 
-    async fn on_error(&mut self) -> Result<Vec<Location>> {
+    async fn on_error(&mut self) -> Result<Vec<ProtoLocation>> {
         self.finished = true;
         self.abort_pipeline().await
     }

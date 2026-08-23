@@ -6,7 +6,8 @@
 
 use bytes::Bytes;
 
-use crate::{Location, Result};
+use crate::Result;
+use crow_protocol::chunkdb::rpc::Location as ProtoLocation;
 
 /// Result of `on_data` — does the writer need more data?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,9 +56,9 @@ pub trait ChunkIoWriter: Send {
     /// Push a data buffer. Always stores (awaits capacity if needed).
     async fn on_data(&mut self, buffer: Bytes) -> Result<FeedStatus>;
     /// End of input: flush, seal, return the `Location` array.
-    async fn on_finish(&mut self) -> Result<Vec<Location>>;
+    async fn on_finish(&mut self) -> Result<Vec<ProtoLocation>>;
     /// Abort: return `Location`s of already-sealed chunks for cleanup.
-    async fn on_error(&mut self) -> Result<Vec<Location>>;
+    async fn on_error(&mut self) -> Result<Vec<ProtoLocation>>;
     /// Non-async pre-check: `true` if `on_data` would not block now.
     fn require_data(&self) -> bool;
 }

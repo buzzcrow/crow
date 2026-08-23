@@ -1,13 +1,11 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `ChunkPrefetch` — pre-create chunks + append strips ahead of the
-//! write cursor.
+//! `ChunkPrefetch` — chunk-level prefetch for the object layer.
 //!
-//! Streams the full cumulative `Chunk` protobuf (one per strip-append)
-//! to the object layer. `ChunkWriter` holds `Arc<Chunk>` and shares it
-//! with `EcStripWriter` directly — no `StripPlacement` bridge. Strip
-//! planning stays here until Phase 3.2 moves it into `ChunkWriter`.
+//! Pre-allocates chunks (each with 1 strip) ahead of the write cursor.
+//! `ChunkWriter` holds `Arc<Chunk>` and shares it with `EcStripWriter`
+//! directly. Strip-level prefetch is internal to `ChunkWriter`.
 
 use std::sync::Arc;
 
@@ -18,8 +16,7 @@ use crate::config::ChunkClientConfig;
 use crate::traits::ChunkAllocator;
 use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
-use crow_protocol::chunkdb::rpc::{AllocateChunkRequest, AppendChunkRequest, Chunk, ChunkType, StripType};
-use crow_protocol::common::ChunkId;
+use crow_protocol::chunkdb::rpc::{AllocateChunkRequest, Chunk, ChunkType, StripType};
 
 /// Chunk preallocation + strip prefetch.
 pub struct ChunkPrefetch {
@@ -142,28 +139,4 @@ pub(crate) async fn allocate_new_chunk(
     let resp = chunkdb.allocate_chunk(req).await?;
     resp.chunk
         .ok_or_else(|| IoError::AllocationFailed("allocate_chunk response missing chunk".into()))
-}
-
-/// Append 1 strip to an existing chunk and return the full cumulative
-/// `Chunk`.
-pub(crate) async fn append_strip(
-    chunkdb: &dyn ChunkAllocator,
-    chunk_id: ChunkId,
-    ec_scheme: EcScheme,
-    strip_index_in_chunk: u32,
-    write_granularity_kb: u32,
-) -> Result<Chunk> {
-    let req = AppendChunkRequest {
-        chunk_id: Some(chunk_id),
-        strip_size: ec_scheme.data_num as u32,
-        strip_count: 1,
-        strip_type: StripType::Ec as i32,
-        data_num: ec_scheme.data_num as u32,
-        code_num: ec_scheme.code_num as u32,
-        copy_count: 0,
-    };
-    let _ = (write_granularity_kb, strip_index_in_chunk);
-    let resp = chunkdb.append_chunk(req).await?;
-    resp.chunk
-        .ok_or_else(|| IoError::AllocationFailed("append_chunk response missing chunk".into()))
 }

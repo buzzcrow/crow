@@ -24,4 +24,4 @@ pub use chunk_prefetch::ChunkPrefetch;
 pub use chunk_writer::ChunkWriter;
 pub use ec_strip_writer::EcStripWriter;
 pub use mirror_strip_writer::MirrorStripWriter;
-pub use strip::{StripPlacement, StripResult, StripWriter};
+pub use strip::{StripResult, StripWriter};

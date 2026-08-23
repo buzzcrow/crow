@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Unit tests for the chunk data path: `Location`, `ChunkIoWriter`,
+//! Unit tests for the chunk data path: `ProtoLocation`, `ChunkIoWriter`,
 //! `WriterConfig`, EC `encode_parity_from_shards` integration.
 
 #![allow(
@@ -12,38 +12,39 @@
 
 use bytes::Bytes;
 use crow_chunk_client::{
-    BackpressurePolicy, ChunkClientConfig, ChunkIoWriter, FeedStatus, IoError, Location,
+    BackpressurePolicy, ChunkClientConfig, ChunkIoWriter, FeedStatus, IoError, ProtoLocation,
 };
 use crow_common::ec::{decode, encode_parity_from_shards, EcScheme};
 use crow_protocol::common::ChunkId;
+use prost::Message;
 
-// ── Location tests ───────────────────────────────────────────────
+// ── ProtoLocation tests ──────────────────────────────────────────
 
 #[test]
 fn location_proto_round_trip_single() {
-    let loc = Location {
-        chunk_id: ChunkId {
+    let loc = ProtoLocation {
+        chunk_id: Some(ChunkId {
             high: 0x1234,
             low: 0x5678,
-        },
+        }),
         offset: 1024,
         length: 50 * 1024 * 1024,
         logical_offset: 0,
         logical_length: 50 * 1024 * 1024,
     };
-    let proto = loc.to_proto();
-    let back = Location::from_proto(&proto);
+    let bytes = loc.encode_to_vec();
+    let back = ProtoLocation::decode(bytes.as_slice()).unwrap();
     assert_eq!(loc, back);
 }
 
 #[test]
 fn location_proto_bytes_round_trip_3_entries() {
-    let locs: Vec<Location> = (0..3)
-        .map(|i| Location {
-            chunk_id: ChunkId {
+    let locs: Vec<ProtoLocation> = (0..3)
+        .map(|i| ProtoLocation {
+            chunk_id: Some(ChunkId {
                 high: 100 + i,
                 low: 200 + i,
-            },
+            }),
             offset: 0,
             length: 8 * 1024 * 1024,
             logical_offset: i * 8 * 1024 * 1024,
@@ -51,52 +52,12 @@ fn location_proto_bytes_round_trip_3_entries() {
         })
         .collect();
 
-    let encoded: Vec<Vec<u8>> = locs.iter().map(Location::to_proto_bytes).collect();
-    let decoded: Vec<Location> = encoded
+    let encoded: Vec<Vec<u8>> = locs.iter().map(ProtoLocation::encode_to_vec).collect();
+    let decoded: Vec<ProtoLocation> = encoded
         .iter()
-        .map(|b| Location::from_proto_bytes(b).unwrap())
+        .map(|b| ProtoLocation::decode(b.as_slice()).unwrap())
         .collect();
     assert_eq!(locs, decoded);
-}
-
-#[test]
-fn location_binary_size_under_64() {
-    let loc = Location {
-        chunk_id: ChunkId {
-            high: u64::MAX,
-            low: u64::MAX,
-        },
-        offset: u64::MAX,
-        length: u64::MAX,
-        logical_offset: u64::MAX,
-        logical_length: u64::MAX,
-    };
-    let bytes = loc.to_bytes();
-    assert_eq!(bytes.len(), 48);
-    assert!(bytes.len() < 64);
-}
-
-#[test]
-fn location_binary_round_trip() {
-    let loc = Location {
-        chunk_id: ChunkId {
-            high: 0xDEAD,
-            low: 0xBEEF,
-        },
-        offset: 4096,
-        length: 100_000,
-        logical_offset: 200_000,
-        logical_length: 100_000,
-    };
-    let bytes = loc.to_bytes();
-    let back = Location::from_bytes(&bytes).unwrap();
-    assert_eq!(loc, back);
-}
-
-#[test]
-fn location_binary_bad_length() {
-    let result = Location::from_bytes(&[0u8; 40]);
-    assert!(result.is_err());
 }
 
 // ── ChunkClientConfig defaults ───────────────────────────────────
@@ -139,7 +100,7 @@ impl ChunkIoWriter for MockWriter {
         Ok(FeedStatus::Continue)
     }
 
-    async fn on_finish(&mut self) -> Result<Vec<Location>, IoError> {
+    async fn on_finish(&mut self) -> Result<Vec<ProtoLocation>, IoError> {
         if self.finished {
             return Err(IoError::Finished);
         }
@@ -147,7 +108,7 @@ impl ChunkIoWriter for MockWriter {
         Ok(Vec::new())
     }
 
-    async fn on_error(&mut self) -> Result<Vec<Location>, IoError> {
+    async fn on_error(&mut self) -> Result<Vec<ProtoLocation>, IoError> {
         Ok(Vec::new())
     }
 

@@ -25,9 +25,11 @@ use crate::config::ChunkClientConfig;
 use crate::disk_io::DiskWriter;
 use crate::io::FeedStatus;
 use crate::traits::ChunkAllocator;
-use crate::{IoError, Location, Result};
+use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
-use crow_protocol::chunkdb::rpc::{Chunk, DeleteChunkRequest, SealChunkRequest};
+use crow_protocol::chunkdb::rpc::{
+    AppendChunkRequest, Chunk, DeleteChunkRequest, Location as ProtoLocation, SealChunkRequest, StripType,
+};
 use crow_protocol::common::ChunkId;
 
 /// Chunk wrapper + write ability. Owns `Arc<Chunk>`; the strip-level
@@ -275,7 +277,7 @@ impl ChunkWriter {
                     continue;
                 }
                 let write_granularity_kb = (config.read_buffer_size / 1024) as u32;
-                let result = crate::chunk::chunk_prefetch::append_strip(
+                let result = append_strip(
                     &*allocator,
                     chunk_id,
                     ec_scheme,
@@ -341,15 +343,14 @@ impl ChunkWriter {
 
     /// Append a new strip to the current chunk via `append_chunk` RPC.
     /// Returns the full cumulative `Chunk` (with the new strip
-    /// appended). Not used by the current drive loop (it goes through
-    /// `ChunkPrefetch::on_demand`); kept for the Phase 3 internal
-    /// strip prefetch.
+    /// appended). Used by the internal strip prefetch + the inline
+    /// fallback in `open_next_strip`.
     pub async fn append_strip(&mut self) -> Result<Chunk> {
         let chunk_id = self
             .current_chunk_id()
             .ok_or_else(|| IoError::Internal("append_strip with no open chunk".into()))?;
         let write_granularity_kb = (self.config.read_buffer_size / 1024) as u32;
-        crate::chunk::chunk_prefetch::append_strip(
+        append_strip(
             &*self.allocator,
             chunk_id,
             self.ec_scheme,
@@ -364,7 +365,7 @@ impl ChunkWriter {
     /// RPC, return the chunk's Location. Parity writes from all strips
     /// in this chunk are joined here (decoupled from strip finish in
     /// Phase 3.1).
-    pub async fn seal(&mut self) -> Result<Location> {
+    pub async fn seal(&mut self) -> Result<ProtoLocation> {
         // Stop the strip-prefetch task (drop receiver → task exits).
         self.stop_prefetch();
         // Finish the current strip if it's open (the last strip may
@@ -392,8 +393,8 @@ impl ChunkWriter {
                         seal_length: sealed_length_units,
                     })
                     .await?;
-                Location {
-                    chunk_id: cid,
+                ProtoLocation {
+                    chunk_id: Some(cid),
                     offset: 0,
                     length: bytes_in_chunk,
                     logical_offset: 0,
@@ -406,8 +407,8 @@ impl ChunkWriter {
                     .allocator
                     .delete_chunk(DeleteChunkRequest { chunk_id: Some(cid) })
                     .await;
-                Location {
-                    chunk_id: cid,
+                ProtoLocation {
+                    chunk_id: Some(cid),
                     offset: 0,
                     length: 0,
                     logical_offset: 0,
@@ -493,4 +494,29 @@ fn compute_strips_remaining(
     let strip_data_capacity = ec_scheme.data_num as u64 * unit_bytes;
     let total_strips = total.div_ceil(strip_data_capacity) as usize;
     Some(total_strips)
+}
+
+/// Append 1 strip to an existing chunk and return the full cumulative
+/// `Chunk`. Used by `ChunkWriter`'s internal strip prefetch + the
+/// inline fallback in `open_next_strip`.
+async fn append_strip(
+    chunkdb: &dyn ChunkAllocator,
+    chunk_id: ChunkId,
+    ec_scheme: EcScheme,
+    strip_index_in_chunk: u32,
+    write_granularity_kb: u32,
+) -> Result<Chunk> {
+    let req = AppendChunkRequest {
+        chunk_id: Some(chunk_id),
+        strip_size: ec_scheme.data_num as u32,
+        strip_count: 1,
+        strip_type: StripType::Ec as i32,
+        data_num: ec_scheme.data_num as u32,
+        code_num: ec_scheme.code_num as u32,
+        copy_count: 0,
+    };
+    let _ = (write_granularity_kb, strip_index_in_chunk);
+    let resp = chunkdb.append_chunk(req).await?;
+    resp.chunk
+        .ok_or_else(|| IoError::AllocationFailed("append_chunk response missing chunk".into()))
 }

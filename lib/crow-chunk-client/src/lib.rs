@@ -25,22 +25,19 @@ pub mod config;
 pub mod disk_io;
 pub mod error;
 pub mod io;
-pub mod location;
 pub mod traits;
 pub mod worker;
 pub mod writer;
 
-pub use chunk::{
-    ChunkPrefetch, ChunkWriter, EcStripWriter, MirrorStripWriter, StripPlacement, StripResult, StripWriter,
-};
+pub use chunk::{ChunkPrefetch, ChunkWriter, EcStripWriter, MirrorStripWriter, StripResult, StripWriter};
 pub use config::ChunkClientConfig;
 pub use disk_io::{DiskWriter, DiskioBlockWriter};
 pub use error::{IoError, Result};
 pub use io::{BackpressurePolicy, ChunkIoWriter, FeedStatus};
-pub use location::Location;
 pub use traits::ChunkAllocator;
 pub use worker::{EcWorker, HashWorker};
 pub use writer::{LargeAsyncObjectWriter, LargeObjectWriter, PooledWriter, SmallObjectWriter, WriterPool};
 
 // Re-export key protocol types for convenience.
+pub use crow_protocol::chunkdb::rpc::Location as ProtoLocation;
 pub use crow_protocol::common::ChunkId;

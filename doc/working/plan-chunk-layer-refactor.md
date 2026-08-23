@@ -147,10 +147,10 @@ avoids any throwaway bridge code — the helper already exists.
 
 ## Phase 4: Delete `StripPlacement` + `Location`
 
-- [ ] **4.1 Delete `StripPlacement` from `strip.rs`.** Remove the
+- [x] **4.1 Delete `StripPlacement` from `strip.rs`.** Remove the
   struct + methods. `StripWriter` enum + `StripResult` stay in
   `strip.rs` (§9 decision). Files: `src/chunk/strip.rs`.
-- [ ] **4.2 Move `append_strip` out of `chunk_prefetch.rs`.** The
+- [x] **4.2 Move `append_strip` out of `chunk_prefetch.rs`.** The
   `append_strip` free function (used by `ChunkWriter`'s internal
   strip prefetch) moves to `chunk_writer.rs` (or private
   `chunk/alloc.rs`). `ChunkPrefetch` class stays in
@@ -159,7 +159,7 @@ avoids any throwaway bridge code — the helper already exists.
   `extract_placement_from_chunk` is removed (no longer needed —
   `ChunkPrefetch` sends the full `Chunk`). Files:
   `src/chunk/chunk_prefetch.rs`, `src/chunk/chunk_writer.rs`.
-- [ ] **4.3 Replace `Location` with `ProtoLocation`.** Delete
+- [x] **4.3 Replace `Location` with `ProtoLocation`.** Delete
   `src/location.rs`. Update `ChunkIoWriter` trait to return
   `Vec<ProtoLocation>`. Update `ChunkWriter::seal` to return
   `ProtoLocation`. Move compact encoding (`to_bytes` / `from_bytes`)
@@ -167,34 +167,34 @@ avoids any throwaway bridge code — the helper already exists.
   (§9 decision — `Location` is a protocol type, passed over RPC by
   other services). Files: `src/location.rs` (deleted), `src/io.rs`,
   `src/chunk/chunk_writer.rs`, `src/lib.rs`, `lib/crow-protocol/`.
-- [ ] **4.4 Update `lib.rs` re-exports.** Remove `Location`,
+- [x] **4.4 Update `lib.rs` re-exports.** Remove `Location`,
   `StripPlacement`. Keep `ChunkPrefetch`. Re-export `ProtoLocation`
   from `crow-protocol`. Files: `src/lib.rs`.
-- [ ] **Checkpoint: `pixi run cargo build -p crow-chunk-client`.**
+- [x] **Checkpoint: `pixi run cargo build -p crow-chunk-client`.**
   Old types gone. Tests will fail (reference old API) — fixed in
   Phase 5.
 
 ## Phase 5: Update tests
 
-- [ ] **5.1 Update `tests/large_object_writer.rs`.** Replace
+- [x] **5.1 Update `tests/large_object_writer.rs`.** Replace
   `Location` → `ProtoLocation`. Remove `StripPlacement` construction.
   Update `LargeObjectWriter` usage (no placement stream). Files:
   `tests/large_object_writer.rs`.
-- [ ] **5.2 Update `tests/write_stream.rs`.** Same migration. Update
+- [x] **5.2 Update `tests/write_stream.rs`.** Same migration. Update
   `LargeAsyncObjectWriter::write_stream` usage. Replace
   `Location` assertions with `ProtoLocation`. Files:
   `tests/write_stream.rs`.
-- [ ] **5.3 Update `tests/large_object_writer_e2e.rs`.** Replace
+- [x] **5.3 Update `tests/large_object_writer_e2e.rs`.** Replace
   `Location` → `ProtoLocation`. Update writer construction. Files:
   `tests/large_object_writer_e2e.rs`.
-- [ ] **5.4 Delete `tests/strip_test.rs`.** Tests `StripPlacement`
+- [x] **5.4 Delete `tests/strip_test.rs`.** Tests `StripPlacement`
   methods, which no longer exist. Replace with `EcStripWriter`
   accessor tests if coverage is needed. Files: `tests/strip_test.rs`
   (deleted).
-- [ ] **5.5 Update `tests/common/mod.rs` if needed.** `LocalFileDiskWriter`
+- [x] **5.5 Update `tests/common/mod.rs` if needed.** `LocalFileDiskWriter`
   implements `DiskWriter` — unaffected. Check for `Location` /
   `StripPlacement` references. Files: `tests/common/mod.rs`.
-- [ ] **Checkpoint: `pixi run cargo test -p crow-chunk-client
+- [x] **Checkpoint: `pixi run cargo test -p crow-chunk-client
   --all-targets`.** All tests pass against the new API.
 
 ## Phase 6: New unit tests for `ChunkWriter` drive loop

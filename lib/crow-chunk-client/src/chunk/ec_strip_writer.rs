@@ -14,8 +14,7 @@
 //! Holds `Arc<Chunk>` + `strip_index` — shares the protobuf with
 //! `ChunkWriter` by ref count. Accessor methods (`unit_bytes`,
 //! `segment`, `disk_id`, `zone_offset`) read directly from
-//! `self.chunk.strips[self.strip_index]`; no parallel `StripPlacement`
-//! struct.
+//! `self.chunk.strips[self.strip_index]`.
 
 use std::sync::Arc;
 
