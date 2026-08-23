@@ -609,6 +609,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "crow-chunk-client",
  "crow-chunkdb-client",
  "crow-common",
  "crow-diskdb-client",

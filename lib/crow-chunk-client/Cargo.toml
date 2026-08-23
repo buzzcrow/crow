@@ -12,6 +12,7 @@ autobenches = false
 workspace = true
 
 [features]
+test-util = []
 
 [dependencies]
 crow-chunkdb-client = { path = "../crow-chunkdb-client" }
@@ -27,6 +28,9 @@ tracing = { workspace = true }
 async-trait = "0.1"
 
 [dev-dependencies]
+# Self dev-dependency: auto-enables the `test-util` feature for this
+# crate's own integration tests.
+crow-chunk-client = { path = ".", features = ["test-util"] }
 crow-test-harness = { path = "../crow-test-harness", features = ["diskio", "diskdb", "chunkdb"] }
 crow-kv-client = { path = "../crow-kv-client" }
 crow-diskdb-client = { path = "../crow-diskdb-client" }

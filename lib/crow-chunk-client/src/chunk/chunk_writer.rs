@@ -4,12 +4,9 @@
 //! `ChunkWriter` — chunk wrapper + write ability.
 //!
 //! Owns the current `Chunk` protobuf (in `Arc`, shared with
-//! `EcStripWriter` once Phase 2 lands). The drive loop
-//! (`LargeObjectWriter`) controls strip + chunk rotation by feeding
-//! cumulative `Chunk` values; `ChunkWriter` pushes blocks to the
-//! current strip and finishes strips on demand. Does NOT own the
-//! drive loop yet (Phase 3). All chunkdb chunk operations (seal,
-//! delete, append) go through this class.
+//! `EcStripWriter`). Owns the strip-level drive loop in `push`
+//! (auto-rotates strips: finish + open next when full). All chunkdb
+//! chunk operations (seal, delete, append) go through this class.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -115,7 +112,7 @@ impl ChunkWriter {
     /// cumulative `Chunk` protobuf (from `append_chunk` response) with
     /// the next strip appended. Arc-swaps `self.chunk` and opens the
     /// strip at `write_cursor + 1`.
-    pub fn continue_strip(&mut self, chunk: Chunk) -> Result<()> {
+    pub(crate) fn continue_strip(&mut self, chunk: Chunk) -> Result<()> {
         let new_id = chunk
             .id
             .ok_or_else(|| IoError::AllocationFailed("continue_strip: chunk missing id".into()))?;
@@ -183,15 +180,14 @@ impl ChunkWriter {
             .as_ref()
             .ok_or_else(|| IoError::Internal("open_next_strip with no chunk".into()))?;
         if (next_index as usize) < chunk.strips.len() {
-            // Next strip is pre-appended — open it directly.
-            let chunk = Arc::clone(chunk);
+            // Next strip is pre-appended — open it directly. No
+            // Arc-swap needed; the chunk is the same Arc.
             let strip = EcStripWriter::new(
-                Arc::clone(&chunk),
+                Arc::clone(chunk),
                 next_index,
                 self.disk_writer.clone(),
                 self.ec_scheme,
             );
-            self.chunk = Some(chunk);
             self.write_cursor = next_index;
             self.write_cursor_shared.store(next_index, Ordering::Relaxed);
             self.current_strip = Some(StripWriter::Ec(strip));
@@ -323,16 +319,11 @@ impl ChunkWriter {
     }
 
     /// Is the current strip full (all data_num blocks written)?
-    pub fn is_strip_full(&self) -> bool {
+    pub(crate) fn is_strip_full(&self) -> bool {
         match &self.current_strip {
             Some(s) => !s.ready(),
             None => true,
         }
-    }
-
-    /// Is there no current strip?
-    pub fn current_strip_is_none(&self) -> bool {
-        self.current_strip.is_none()
     }
 
     /// Is the chunk full (bytes written >= max_chunk_size)? The object
@@ -345,7 +336,7 @@ impl ChunkWriter {
     /// Returns the full cumulative `Chunk` (with the new strip
     /// appended). Used by the internal strip prefetch + the inline
     /// fallback in `open_next_strip`.
-    pub async fn append_strip(&mut self) -> Result<Chunk> {
+    pub(crate) async fn append_strip(&mut self) -> Result<Chunk> {
         let chunk_id = self
             .current_chunk_id()
             .ok_or_else(|| IoError::Internal("append_strip with no open chunk".into()))?;
@@ -485,8 +476,8 @@ impl ChunkWriter {
 }
 
 /// Compute the number of strips not yet allocated for a known-size
-/// object. Returns `None` for unknown-size objects. No behavior in
-/// Phase 1 (used by the Phase 3.2 internal strip prefetch).
+/// object. Returns `None` for unknown-size objects. Used by the
+/// internal strip prefetch task for planning.
 fn compute_strips_remaining(
     object_size: Option<u64>,
     ec_scheme: &EcScheme,

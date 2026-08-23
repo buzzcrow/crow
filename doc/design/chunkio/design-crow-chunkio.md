@@ -33,8 +33,8 @@ model, and the design choices that make a 1 TB upload cost the same
 
 - **No small-object writer.** Shared-chunk packing for many small
   objects is a separate component. The `ChunkIoWriter` trait and
-  `Location` type are designed for reuse, but the packing policy is not
-  part of this design.
+  `ProtoLocation` type are designed for reuse, but the packing policy
+  is not part of this design.
 - **No reader.** The read path (location resolution, strip fetch, EC
   decode, range reads) is a separate component.
 - **No single-block replacement on write failure.** The error path
@@ -83,87 +83,106 @@ model, and the design choices that make a 1 TB upload cost the same
   4+1 EC, 1 MB blocks, defaults), so `max_concurrent = budget /
   per-writer-footprint` — a 1 TB and a 50 MB upload cost the same RAM.
 - **Two trait seams for testability.** `LargeObjectWriter` is generic
-  over one chunk-lifecycle seam and one block-IO seam, so integration
-  tests inject mock impls without real servers; E2E tests use real
-  clients. The seams are not a runtime polymorphism optimization —
-  they exist so the pipeline can be tested in isolation.
+  over one chunk-lifecycle seam (`ChunkAllocator`) and one block-IO
+  seam (`DiskWriter`), so integration tests inject mock impls without
+  real servers; E2E tests use real clients. The seams are not a runtime
+  polymorphism optimization — they exist so the pipeline can be tested
+  in isolation.
+- **Drive loop in `ChunkWriter`, not the object layer.** The
+  strip-level drive loop (push block → write to disk → auto-rotate
+  strips when full → spawn parity) lives inside `ChunkWriter::push`.
+  The object layer calls `push` + `is_full` + `seal` — it does not
+  track strip boundaries, block indices, or parity handoff. This
+  eliminates the `StripPlacement` bridge type and keeps the object
+  layer thin.
+- **Own protobuf types directly.** `ChunkWriter` owns `Arc<Chunk>`,
+  `EcStripWriter` holds `Arc<Chunk>` + strip index, and `seal()`
+  returns `ProtoLocation` directly. No parallel wrapper structs
+  (`StripPlacement`, `Location`) — the protobuf types are the canonical
+  representation throughout the write path.
 
 ## 3. Write Flow
 
-The writer runs four concurrent stages: a fetch stage, a main write
-task, a bounded pool of background parity tasks, and a background
-prealloc task. `LargeObjectWriter` exposes two driving modes over the
-same pipeline — stream mode (`write_stream`, pulling from an `AsyncRead`)
-and push mode (the `ChunkIoWriter` trait, §2). In stream mode a fetch
-stage pulls from `AsyncRead`; in push mode the caller's bytes go
-directly to the block channel. The main write and parity tasks are
-identical in both modes.
+The writer runs three concurrent stages: a fetch stage, a
+`ChunkWriter` (which owns the strip-level drive loop + internal strip
+prefetch), and a bounded pool of background parity tasks.
+`LargeObjectWriter` exposes two driving modes over the same pipeline —
+stream mode (`write_stream`, pulling from an `AsyncRead`) and push mode
+(the `ChunkIoWriter` trait, §2). In stream mode a fetch stage pulls
+from `AsyncRead`; in push mode the caller's bytes go directly to the
+block channel. The `ChunkWriter` drive loop is identical in both modes.
 
 ```
                     ┌────────────────────┐
-                    │  Prealloc Task    │  background, bounded:
-                    │  depth = 2 strips │  at most 2 strips + 1 chunk
-                    │  + 1 chunk ahead  │  allocated ahead of cursor
+                    │  ChunkPrefetch     │  background, bounded:
+                    │  1 chunk ahead     │  pre-allocates next Chunk
+                    │  (1 strip each)    │  (1 strip) for rotation
                     └─────────────┬──────────┘
-                             │ allocated strips/chunks
+                             │ pre-allocated Chunk
                              ▼
-  AsyncRead ──► [Fetch] ──► block_buf ──► [Main Write Task] ───────► disk (data)
+  AsyncRead ──► [Fetch] ──► block_buf ──► [ChunkWriter::push] ─────► disk (data)
              read ≤1MB    (1 MB per     │  write 1 data block → 1 disk
              per-block       block)        │  (immediately, no EC wait)
              send to write                  │
              max_cached_buffer              │  when all 4 blocks of strip N written:
-             = 4 MB (default)               ├──── hand off ─────────────────────────
+             = 4 MB (default)               ├──── spawn parity ────────────────────
              (backpressure if full)         │                     ▼
                                           │   [Parity Task N] (background)
                                           │   EC encode → 1 parity block
                                           │   write parity → 5th disk
                                           │   fsync all 5 disks
-                                          │   (bounded: parity_depth=2)
+                                          │   (no join — handles collected)
                                           ▼
-                                     advance to strip N+1, block 0
+                                     auto-rotate to strip N+1, block 0
                                      (no wait for parity)
+                                          │
+                                          │  internal strip prefetch:
+                                          │   append_chunk ahead of cursor
+                                          │   (bounded: prealloc_depth=2)
 ```
 
 The flow, step by step:
 
 - **Fetch.** Reads from the `AsyncRead` stream in ≤ 1 MB per call (one
   data block). A single socket read may return less (64 KB, 512 KB);
-  the fetch stage accumulates to 1 MB, then sends the block to the main
-  write task immediately — it does not wait for the full 4 MB strip.
-  The fetch stage sends sequential `Bytes` blocks and does not track
-  block indices or strip boundaries; the main write task owns indexing.
+  the fetch stage accumulates to 1 MB, then sends the block to
+  `ChunkWriter::push` immediately — it does not wait for the full 4 MB
+  strip. The fetch stage sends sequential `Bytes` blocks and does not
+  track block indices or strip boundaries; `ChunkWriter` owns indexing.
   On EOF with a partial last block, the partial block is sent.
-- **Main write.** The central coordinator. At the start of each new
-  strip it awaits the strip's placement from the prealloc channel
-  (blocks if prealloc fell behind). It receives 1 MB blocks one at a
-  time, tracks the block index within the current strip
-  (`count % data_num`, 0–3 for 4+1), and writes each to the strip's
-  corresponding data segment via `BlockWriter::write` — one disk per
-  block, no EC wait. When all `data_num` blocks of strip N are written,
-  it hands the strip's data blocks off to a background parity task
-  (bounded by `parity_depth`; blocks at hand-off if the pool is full),
-  records the parity task handle in the current chunk's handle list,
-  and **immediately advances to strip N+1, block 0** — it does not wait
-  for EC compute, parity write, or fsync. On chunk full it triggers
-  rotation (§6).
+- **ChunkWriter::push (drive loop).** The central coordinator. It
+  owns `Arc<Chunk>` and shares it with `EcStripWriter` by ref count.
+  On each `push`, if the current strip is full, it finishes the strip
+  (spawns parity writes + fsyncs as background tasks, collects handles,
+  no join), checks `is_full()` (chunk-level), and either returns
+  `Pause` (chunk full — caller rotates chunks) or opens the next strip
+  (from `chunk.strips` if pre-appended by the internal strip prefetch,
+  or via inline `append_chunk` RPC). It then pushes the block to the
+  new strip's data segment via `DiskWriter::write` — one disk per
+  block, no EC wait. Strip N+1's data writes overlap with strip N's
+  parity writes + fsyncs.
 - **Parity.** One background task per strip. It receives the strip's
   data blocks, EC-encodes via `encode_parity_from_shards` (§5) into
   `code_num` parity blocks, writes them to the remaining segments via
-  `BlockWriter::write`, and `fsync`s all disks via `BlockWriter::fsync`.
-  While strip N's parity task computes + writes parity, the main write
-  task is already writing strip N+1's data blocks and strip N+2's
-  blocks are being fetched.
-- **Preallocation.** Allocates the first chunk with **1 strip** (the
-  minimum to start writing immediately), then appends remaining strips
-  via `append_chunk` ahead of the write cursor, up to `prealloc_depth`
-  (default 2) strips ahead. If the object size is known, it
-  pre-calculates total strip/chunk count for planning but still only
-  pre-allocates `prealloc_depth` ahead. It pre-allocates the next chunk
-  (via `ChunkPrefetch`, 1 strip) when the current chunk is within
-  `prealloc_depth` strips of `max_chunk_size`, up to
-  `chunk_prefetch_depth` ahead, and delivers the new `ChunkId` via a
-  oneshot channel. If prealloc falls behind the cursor, the main write
-  task blocks on the bounded strip channel (backpressure).
+  `DiskWriter::write`, and `fsync`s all disks via `DiskWriter::fsync`.
+  Parity handles are collected by `ChunkWriter` and joined at `seal`
+  time (not at strip finish) — this decouples parity durability from
+  strip rotation, allowing strip N+1's data writes to start before
+  strip N's parity completes.
+- **Strip prefetch (internal to ChunkWriter).** A background task
+  appends strips to the current chunk via `append_chunk` ahead of the
+  write cursor, bounded by `prealloc_depth` (default 2). The
+  `append_chunk` response replaces `self.chunk` (Arc-swap — old Arc in
+  any in-flight `EcStripWriter` stays alive). For known-size objects,
+  the prefetch stops after enough strips are allocated; for
+  unknown-size objects, it stays `prealloc_depth` ahead.
+- **Chunk prefetch (ChunkPrefetch, object layer).** Pre-allocates the
+  next `Chunk` (1 strip each) ahead of rotation, up to
+  `chunk_prefetch_depth` ahead. On chunk rotation, the object layer
+  pulls the next `Chunk` from the prefetch receiver (fast path —
+  pre-allocated) or calls `on_demand` (slow path — prefetch fell
+  behind). The `Chunk` is passed to `ChunkWriter::open`, which wraps it
+  in `Arc` and starts the internal strip prefetch.
 
 ### 3.1 Partial Last Strip
 
@@ -243,24 +262,26 @@ Edge cases:
 Very large objects (`> max_chunk_size`) span multiple chunks. Chunk
 size is always a multiple of strip data capacity — the writer only
 appends whole strips — so rotation happens at strip boundaries, never
-mid-strip. After completing a full strip, if the chunk's accumulated
-size ≥ `max_chunk_size`, the main write task joins in-flight parity
-tasks for the current chunk, calls `seal_chunk`, records a `Location`
-entry, and switches to the prefetched next chunk (blocking if not
-ready). The `Location` array accumulates one entry per rotated chunk,
-ordered by `logical_offset`.
+mid-strip. When `ChunkWriter::push` finishes a strip and `is_full()`
+returns true, it returns `FeedStatus::Pause` without pushing the
+buffer. The object layer then calls `seal()` (joins all in-flight
+parity handles, `seal_chunk` RPC, returns `ProtoLocation`), records
+the location, pulls the next `Chunk` from `ChunkPrefetch`, and opens a
+new `ChunkWriter`. The buffer is re-pushed to the new chunk. The
+`ProtoLocation` array accumulates one entry per rotated chunk, ordered
+by `logical_offset`.
 
 ### 6.1 Location
 
-A `Location` records which chunk holds a contiguous byte range of an
-object, the byte range within that chunk, and the object-level logical
-offset/length so a multi-chunk object reads back as one contiguous
-stream. An object spanning N chunks has N locations ordered by logical
-offset, contiguous and non-overlapping. The within-chunk offset is
-always 0 for the large-object writer (dedicated chunks filled from the
-start); it exists for future shared-chunk packing and range reads.
-Serialization is protobuf for KV storage and a compact binary form for
-inline embedding in object metadata.
+`ProtoLocation` (from `crow-protocol::chunkdb::rpc::Location`) records
+which chunk holds a contiguous byte range of an object, the byte range
+within that chunk, and the object-level logical offset/length so a
+multi-chunk object reads back as one contiguous stream. An object
+spanning N chunks has N locations ordered by logical offset, contiguous
+and non-overlapping. The within-chunk offset is always 0 for the
+large-object writer (dedicated chunks filled from the start); it
+exists for future shared-chunk packing and range reads. Serialization
+is protobuf via prost's `Message` trait (`encode_to_vec` / `decode`).
 
 Edge cases:
 
@@ -273,21 +294,25 @@ Edge cases:
 
 ## 7. Completion and Error Handling
 
-`write_stream` must seal the final chunk and return the `Location`
+`write_stream` must seal the final chunk and return the `ProtoLocation`
 array on success. On error or abort it must not leak partial chunks and
-must return already-sealed `Location`s for caller cleanup.
+must return already-sealed `ProtoLocation`s for caller cleanup.
 
-- **Completion** — join all parity tasks → `seal_chunk` → return
-  `Vec<Location>`.
+- **Completion** — `ChunkWriter::seal()`: finish the current strip if
+  it has data (spawn partial parity, no join), join all in-flight
+  parity handles, `seal_chunk` RPC, return `ProtoLocation`. If the
+  chunk is empty (0 bytes written), `delete_chunk` instead of
+  `seal_chunk`.
 - **Error / abort** (`on_error` or `Drop`) — cancel in-flight pipeline
-  tasks via a cancellation token, free partial (non-sealed) chunks via
-  `delete_chunk`, return `Location`s of already-sealed chunks.
+  tasks, `ChunkWriter::abort()`: stop strip prefetch, abort current
+  strip, drop parity handles, `delete_chunk` on the partial chunk,
+  return `ProtoLocation`s of already-sealed chunks.
 - **Whole-strip retry** — on a diskio write failure for any block of a
   strip, retry the whole strip: `append_chunk` a new strip with a fresh
   placement, re-write all data + parity, free the failed strip's
   segments. Up to 3 retries; on exhaustion, `IoError::WriteFailed` with
-  the partial `Location` array. The abort/cleanup paths are integration
-  points for future single-block replacement.
+  the partial `ProtoLocation` array. The abort/cleanup paths are
+  integration points for future single-block replacement.
 - **`Drop`** — calls abort as a safety net if the caller drops the
   writer without `on_finish` / `on_error`.
 
@@ -315,7 +340,7 @@ Edge cases:
 - **crow-common EC** — `encode_parity_from_shards` is the shard-based +
   partial-encode entry point used by parity tasks.
 - **crow-protocol** — `ChunkId`, `*ChunkRequest` types, `Segment`,
-  `Location` message.
+  `Chunk`, `Location` (`ProtoLocation`) message.
 
 ## 9. Tunables and Defaults
 

@@ -153,7 +153,9 @@ impl EcStripWriter {
         let block_len = u64::try_from(buffer.len()).unwrap_or(0);
         let is_partial = block_len < unit_bytes;
 
-        // Write the data block to disk.
+        // Write the data block to disk. Clone is required: disk_writer
+        // takes ownership, but buffer is also borrowed by ec_worker below.
+        // Bytes::clone is an Arc bump — no data copy.
         let seg = self.segment(self.next_block)?;
         self.disk_writer.write(seg, unit_bytes, buffer.clone()).await?;
 
@@ -233,111 +235,28 @@ impl EcStripWriter {
     pub fn ready(&self) -> bool {
         !self.finished && !self.is_full()
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use crow_protocol::chunkdb::rpc::{ChunkStrip, ChunkType, StripType};
-    use crow_protocol::common::{ChunkId, DiskId as ProtoDiskId};
+    // ── test-util accessors ──────────────────────────────────────
+    // Private accessors exposed via `#[cfg(feature = "test-util")]`
+    // for integration tests. Not part of the public API.
 
-    /// No-op `DiskWriter` for accessor tests (no IO performed).
-    struct NoopDiskWriter;
-    #[async_trait]
-    impl DiskWriter for NoopDiskWriter {
-        async fn write(&self, _seg: &Segment, _unit_bytes: u64, _data: Bytes) -> Result<()> {
-            Ok(())
-        }
-        async fn fsync(&self, _id: DiskId) -> Result<()> {
-            Ok(())
-        }
+    #[cfg(feature = "test-util")]
+    pub fn unit_bytes_for_tests(&self) -> u64 {
+        self.unit_bytes()
     }
 
-    /// Build a `Chunk` with one EC strip of `num_segments` segments.
-    fn make_chunk(unit_kb: u32, num_segments: usize) -> Arc<Chunk> {
-        let segments: Vec<Segment> = (0..num_segments)
-            .map(|i| Segment {
-                disk_id: Some(ProtoDiskId {
-                    high: 1000 + i as u64,
-                    low: i as u64,
-                }),
-                zone_index: i as u32,
-                unit_offset: i as u64 * 10,
-                unit_count: 1,
-                owner_chunk: Some(ChunkId { high: 1, low: 1 }),
-            })
-            .collect();
-        let strip = ChunkStrip {
-            chunk_offset: 0,
-            strip_sequence: 0,
-            unit_kb,
-            capacity: num_segments as u32,
-            create_ts_ms: 0,
-            sealed_ts_ms: 0,
-            sealed_length: 0,
-            strip_type: StripType::Ec as i32,
-            strip: Some(StripOneof::EcStrip(EcStrip {
-                data_num: 4,
-                code_num: 1,
-                ec_state: 0,
-                segments,
-            })),
-            usage_bitmap: Vec::new(),
-        };
-        Arc::new(Chunk {
-            id: Some(ChunkId { high: 1, low: 1 }),
-            state: 1,
-            create_ts_ms: 0,
-            sealed_ts_ms: 0,
-            capacity: num_segments as u32,
-            sealed_length: 0,
-            strips: vec![strip],
-            chunk_type: ChunkType::Repo as i32,
-        })
+    #[cfg(feature = "test-util")]
+    pub fn segment_for_tests(&self, i: usize) -> Result<&Segment> {
+        self.segment(i)
     }
 
-    fn make_writer(unit_kb: u32, num_segments: usize) -> EcStripWriter {
-        EcStripWriter::new(
-            make_chunk(unit_kb, num_segments),
-            0,
-            Arc::new(NoopDiskWriter),
-            EcScheme::new(4, 1),
-        )
+    #[cfg(feature = "test-util")]
+    pub fn disk_id_for_tests(&self, i: usize) -> Result<DiskId> {
+        self.disk_id(i)
     }
 
-    #[test]
-    fn accessor_unit_bytes() {
-        let w = make_writer(4, 5);
-        assert_eq!(w.unit_bytes(), 4096);
-        let w = make_writer(1, 5);
-        assert_eq!(w.unit_bytes(), 1024);
-    }
-
-    #[test]
-    fn accessor_segment_bounds() {
-        let w = make_writer(4, 5);
-        assert!(w.segment(0).is_ok());
-        assert!(w.segment(4).is_ok());
-        assert!(w.segment(5).is_err());
-    }
-
-    #[test]
-    fn accessor_disk_id() {
-        let w = make_writer(4, 5);
-        let did = w.disk_id(0).unwrap();
-        assert_eq!(did.high, 1000);
-        assert_eq!(did.low, 0);
-        let did = w.disk_id(3).unwrap();
-        assert_eq!(did.high, 1003);
-        assert_eq!(did.low, 3);
-    }
-
-    #[test]
-    fn accessor_zone_offset() {
-        let w = make_writer(4, 5);
-        assert_eq!(w.zone_offset(0).unwrap(), 0);
-        assert_eq!(w.zone_offset(1).unwrap(), 40960);
-        assert_eq!(w.zone_offset(2).unwrap(), 81920);
+    #[cfg(feature = "test-util")]
+    pub fn zone_offset_for_tests(&self, i: usize) -> Result<u64> {
+        self.zone_offset(i)
     }
 }
