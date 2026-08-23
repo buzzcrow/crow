@@ -9,6 +9,7 @@
 #include "crow-rpc/transport/socket_transport.h"
 
 #include <atomic>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -40,6 +41,7 @@ class RpcServer
     void register_handler(uint16_t msg_type, HandlerFn handler);
 
     // Start the server: spawns worker threads + acceptor thread.
+    // Blocks until the acceptor is ready to accept connections.
     void start();
 
     // Stop the server: closes listener, signals workers, joins threads.
@@ -68,7 +70,7 @@ class RpcServer
     std::atomic<bool> running_{false};
     std::thread       acceptor_thread_;
 
-    void acceptor_loop();
+    void acceptor_loop(std::promise<void> ready);
     void dispatch(Frame *frame, Connection *conn);
 };
 

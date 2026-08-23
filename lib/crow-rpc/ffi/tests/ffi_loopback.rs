@@ -18,8 +18,7 @@ fn server_create_listen_start_stop() {
     assert!(port > 0, "server should have a valid port");
 
     server.start();
-    // Give the acceptor thread time to start.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // start() blocks until the acceptor is ready — no sleep needed.
     server.stop();
 }
 
@@ -39,7 +38,6 @@ fn server_connect_to_peer() {
     assert!(port > 0);
 
     server.start();
-    std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Connect to ourselves (loopback).
     let conn = server.connect("127.0.0.1", port);
@@ -60,7 +58,6 @@ async fn ping_loopback() {
     assert!(port > 0);
 
     server.start();
-    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let conn = server.connect("127.0.0.1", port).expect("connect failed");
 
@@ -120,7 +117,6 @@ async fn ping_loopback_with_data() {
     assert!(port > 0);
 
     server.start();
-    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let conn = server.connect("127.0.0.1", port).expect("connect failed");
 
@@ -187,7 +183,6 @@ async fn echo_handler_loopback() {
     server.register_echo_handler(ECHO_MSG_TYPE);
 
     server.start();
-    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let conn = server.connect("127.0.0.1", port).expect("connect failed");
 

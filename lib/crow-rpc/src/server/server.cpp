@@ -98,7 +98,13 @@ void RpcServer::start()
         return;
     }
     transport_->start();
-    acceptor_thread_ = std::thread([this] { acceptor_loop(); });
+    // Block until the acceptor is ready to accept connections.
+    // This eliminates the race where callers connect before the
+    // acceptor thread has entered its poll() loop.
+    std::promise<void> ready;
+    auto               ready_future = ready.get_future();
+    acceptor_thread_ = std::thread([this, ready = std::move(ready)]() mutable { acceptor_loop(std::move(ready)); });
+    ready_future.wait();
 }
 
 void RpcServer::stop()
@@ -121,7 +127,7 @@ void RpcServer::stop()
     transport_->stop();
 }
 
-void RpcServer::acceptor_loop()
+void RpcServer::acceptor_loop(std::promise<void> ready)
 {
     // Make the listen socket non-blocking and use poll() with a short
     // timeout. On Linux, close(listen_fd) from another thread does NOT
@@ -129,6 +135,10 @@ void RpcServer::acceptor_loop()
     // timeout lets the acceptor check running_ periodically for shutdown.
     int lflags = fcntl(listen_fd_, F_GETFL, 0);
     fcntl(listen_fd_, F_SETFL, lflags | O_NONBLOCK);
+
+    // Signal readiness after the listen fd is non-blocking — the acceptor
+    // is now ready to poll() + accept() connections.
+    ready.set_value();
 
     while (running_.load(std::memory_order_relaxed)) {
         struct pollfd pfd;

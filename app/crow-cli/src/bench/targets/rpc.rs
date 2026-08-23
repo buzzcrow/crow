@@ -221,7 +221,6 @@ impl BenchTarget for RpcTarget {
             cfg.io_workers,
         ));
         server.start();
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Connect to the external echo server. These connections live
         // on the local transport's epoll fd.
