@@ -18,7 +18,6 @@ use crate::config::ChunkClientConfig;
 use crate::traits::ChunkAllocator;
 use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
-use crow_protocol::chunk_id::CHUNK_TYPE_REPO;
 use crow_protocol::chunkdb::rpc::{AllocateChunkRequest, AppendChunkRequest, Chunk, ChunkType, StripType};
 use crow_protocol::common::ChunkId;
 
@@ -61,66 +60,44 @@ impl ChunkPrefetch {
         (rx, handle)
     }
 
-    /// Run the prealloc loop. Allocates chunks + strips ahead of the
-    /// write cursor, bounded by the channel capacity. Sends the full
-    /// cumulative `Chunk` after each strip-append.
+    /// Run the chunk-prefetch loop. Pre-allocates chunks (each with 1
+    /// strip) ahead of the write cursor, bounded by the channel
+    /// capacity. Each `Chunk` sent has 1 strip — `ChunkWriter`'s
+    /// internal strip prefetch appends more as needed. For known-size
+    /// objects, pre-allocates enough chunks to hold the entire object;
+    /// for unknown-size objects, pre-allocates `prefetch_chunk_count`
+    /// chunks ahead.
     async fn run(self, object_size: Option<u64>, tx: &mpsc::Sender<Result<Chunk>>) -> Result<()> {
         let write_granularity_kb = (self.config.read_buffer_size / 1024) as u32;
         let unit_bytes = u64::from(write_granularity_kb) * 1024;
         let strip_data_capacity = self.ec_scheme.data_num as u64 * unit_bytes;
         let strips_per_chunk = (self.config.max_chunk_size / strip_data_capacity).max(1) as u32;
+        let chunk_data_capacity = strip_data_capacity * u64::from(strips_per_chunk);
 
-        let total_strips = object_size.map(|s| (s.div_ceil(strip_data_capacity)) as usize);
+        let total_chunks = object_size.map(|s| (s.div_ceil(chunk_data_capacity)) as usize);
+        let prefetch_count = self.config.prefetch_chunk_count.max(1);
 
         let mut allocated = 0usize;
-        let mut current_chunk_id: Option<ChunkId> = None;
-        let mut strips_in_current_chunk: u32 = 0;
-
         loop {
-            if let Some(total) = total_strips {
+            // Stop conditions:
+            // - known-size and all chunks allocated
+            if let Some(total) = total_chunks {
                 if allocated >= total {
                     break;
                 }
             }
+            // - unknown-size and prefetch_count chunks allocated
+            if total_chunks.is_none() && allocated >= prefetch_count {
+                break;
+            }
 
-            let chunk = match current_chunk_id {
-                None => {
-                    let c = allocate_new_chunk(
-                        &self.allocator,
-                        self.ec_scheme,
-                        write_granularity_kb,
-                        self.chunk_type_byte,
-                    )
-                    .await?;
-                    current_chunk_id = c.id;
-                    strips_in_current_chunk = 1;
-                    c
-                }
-                Some(_) if strips_in_current_chunk >= strips_per_chunk => {
-                    let c = allocate_new_chunk(
-                        &self.allocator,
-                        self.ec_scheme,
-                        write_granularity_kb,
-                        self.chunk_type_byte,
-                    )
-                    .await?;
-                    current_chunk_id = c.id;
-                    strips_in_current_chunk = 1;
-                    c
-                }
-                Some(cid) => {
-                    let c = append_strip(
-                        &self.allocator,
-                        cid,
-                        self.ec_scheme,
-                        strips_in_current_chunk,
-                        write_granularity_kb,
-                    )
-                    .await?;
-                    strips_in_current_chunk += 1;
-                    c
-                }
-            };
+            let chunk = allocate_new_chunk(
+                &self.allocator,
+                self.ec_scheme,
+                write_granularity_kb,
+                self.chunk_type_byte,
+            )
+            .await?;
 
             tx.send(Ok(chunk))
                 .await
@@ -130,41 +107,17 @@ impl ChunkPrefetch {
         Ok(())
     }
 
-    /// On-demand strip allocation when the prefetch task has finished
-    /// but more data remains. Appends to the current chunk if it has
-    /// room, otherwise allocates a new chunk. Returns the full
-    /// cumulative `Chunk`.
-    pub async fn on_demand(
-        &self,
-        current_chunk_id: Option<ChunkId>,
-        strips_in_current_chunk: u32,
-    ) -> Result<Chunk> {
+    /// On-demand chunk allocation when the prefetch task has finished
+    /// but more data remains. Allocates a new chunk with 1 strip.
+    pub async fn on_demand(&self) -> Result<Chunk> {
         let write_granularity_kb = (self.config.read_buffer_size / 1024) as u32;
-        let unit_bytes = u64::from(write_granularity_kb) * 1024;
-        let strip_data_capacity = self.ec_scheme.data_num as u64 * unit_bytes;
-        let strips_per_chunk = (self.config.max_chunk_size / strip_data_capacity).max(1) as u32;
-
-        match current_chunk_id {
-            Some(cid) if strips_in_current_chunk < strips_per_chunk => {
-                append_strip(
-                    &self.allocator,
-                    cid,
-                    self.ec_scheme,
-                    strips_in_current_chunk,
-                    write_granularity_kb,
-                )
-                .await
-            }
-            _ => {
-                allocate_new_chunk(
-                    &self.allocator,
-                    self.ec_scheme,
-                    write_granularity_kb,
-                    CHUNK_TYPE_REPO,
-                )
-                .await
-            }
-        }
+        allocate_new_chunk(
+            &self.allocator,
+            self.ec_scheme,
+            write_granularity_kb,
+            self.chunk_type_byte,
+        )
+        .await
     }
 }
 

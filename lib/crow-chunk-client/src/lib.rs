@@ -31,8 +31,7 @@ pub mod worker;
 pub mod writer;
 
 pub use chunk::{
-    ChunkPrefetch, ChunkWriter, EcStripWriter, MirrorStripWriter, ParityBatch, StripPlacement, StripResult,
-    StripWriter,
+    ChunkPrefetch, ChunkWriter, EcStripWriter, MirrorStripWriter, StripPlacement, StripResult, StripWriter,
 };
 pub use config::ChunkClientConfig;
 pub use disk_io::{DiskWriter, DiskioBlockWriter};

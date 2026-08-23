@@ -95,7 +95,7 @@ avoids any throwaway bridge code — the helper already exists.
 
 ## Phase 3: Move drive loop into `ChunkWriter`
 
-- [ ] **3.1 Add strip-level drive loop to `ChunkWriter::push` +
+- [x] **3.1 Add strip-level drive loop to `ChunkWriter::push` +
   decouple parity join.** `push` auto-rotates strips: if
   `current_strip` is full, finish it, advance `write_cursor`, open
   the next strip (from `chunk.strips` or via `append_chunk`). The
@@ -113,7 +113,7 @@ avoids any throwaway bridge code — the helper already exists.
   `parity_batch.rs`). Files: `src/chunk/chunk_writer.rs`,
   `src/chunk/ec_strip_writer.rs`, `src/chunk/parity_batch.rs` →
   `src/chunk/parity_writer.rs`.
-- [ ] **3.2 Add strip prefetch to `ChunkWriter`.** Internal
+- [x] **3.2 Add strip prefetch to `ChunkWriter`.** Internal
   background task that appends strips to `self.chunk` ahead of
   `write_cursor`, bounded by `prealloc_depth`. Uses `object_size` +
   `strips_remaining` for planning: known-size objects stop
@@ -122,7 +122,7 @@ avoids any throwaway bridge code — the helper already exists.
   `strips_per_chunk`. The `append_chunk` response replaces
   `self.chunk` (Arc-swap). `ChunkWriter` owns `prefetch_handle` +
   `prefetch_rx`. Files: `src/chunk/chunk_writer.rs`.
-- [ ] **3.3 Simplify `LargeObjectWriter::on_data`.** Remove
+- [x] **3.3 Simplify `LargeObjectWriter::on_data`.** Remove
   `ensure_open_strip`, `next_placement`, `start_pipeline`. `on_data`
   becomes: ensure `ChunkWriter` open (pull first `Chunk` from
   `ChunkPrefetch`, pass `object_size`), `push(buffer)`, check
@@ -130,18 +130,18 @@ avoids any throwaway bridge code — the helper already exists.
   remaining size). Keep `chunk_prefetch` + `chunk_prefetch_rx` +
   `chunk_prefetch_handle` (now chunk-level, receiving `Chunk`).
   Files: `src/writer/large_object.rs`.
-- [ ] **3.4 Simplify `LargeAsyncObjectWriter::on_data` +
+- [x] **3.4 Simplify `LargeAsyncObjectWriter::on_data` +
   `write_stream`.** Remove `apply_placement`,
   `on_demand_placement`, `receive_and_push`. The drive loop uses the
   simpler `push` + `is_full` → rotate flow (pull next `Chunk` from
   `ChunkPrefetch` on rotation, pass `object_size` / remaining size to
   `ChunkWriter::open`). The fetch stage stays (`run_fetch_stage`).
   Files: `src/writer/large_async_object.rs`.
-- [ ] **3.5 Update `finish_pipeline` / `abort_pipeline`.** Simplify
+- [x] **3.5 Update `finish_pipeline` / `abort_pipeline`.** Simplify
   — abort `chunk_prefetch_handle` (object layer) + strip-prefetch
   task inside `ChunkWriter`. `seal_current` stays. Files:
   `src/writer/large_object.rs`, `src/writer/large_async_object.rs`.
-- [ ] **Checkpoint: `pixi run cargo build -p crow-chunk-client`.**
+- [x] **Checkpoint: `pixi run cargo build -p crow-chunk-client`.**
   Drive loop is in `ChunkWriter`. Object layer is simplified. Tests
   will need migration (Phase 4).
 

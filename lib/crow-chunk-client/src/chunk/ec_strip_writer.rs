@@ -4,9 +4,12 @@
 //! `EcStripWriter` — owns one EC strip's data + parity write.
 //!
 //! `push` writes a data block to disk via `DiskWriter` and feeds the
-//! buffer to `EcWorker` for streaming compute. `finish` writes the
-//! pre-computed parity shards in parallel via `ParityBatch` + fsyncs.
-//! Each disk block (data + parity) can be written in parallel.
+//! buffer to `EcWorker` for streaming compute. `finish` spawns the
+//! pre-computed parity shards + deduplicated fsyncs in parallel via
+//! `parity_writer::spawn_parity_writes` and returns the handles
+//! **without joining** — `ChunkWriter` collects them and joins at
+//! `seal()` time. Each disk block (data + parity) can be written in
+//! parallel.
 //!
 //! Holds `Arc<Chunk>` + `strip_index` — shares the protobuf with
 //! `ChunkWriter` by ref count. Accessor methods (`unit_bytes`,
@@ -14,13 +17,11 @@
 //! `self.chunk.strips[self.strip_index]`; no parallel `StripPlacement`
 //! struct.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::task::JoinHandle;
 
-use crate::chunk::parity_batch::ParityBatch;
+use crate::chunk::parity_writer::spawn_parity_writes;
 use crate::chunk::strip::StripResult;
 use crate::disk_io::DiskWriter;
 use crate::io::FeedStatus;
@@ -43,7 +44,6 @@ pub struct EcStripWriter {
     pub(crate) data_blocks_written: u32,
     pub(crate) bytes_written: u64,
     pub(crate) partial: bool,
-    pub(crate) parity_batch: ParityBatch,
     pub(crate) finished: bool,
 }
 
@@ -66,7 +66,6 @@ impl EcStripWriter {
             data_blocks_written: 0,
             bytes_written: 0,
             partial: false,
-            parity_batch: ParityBatch::new(),
             finished: false,
         }
     }
@@ -177,8 +176,12 @@ impl EcStripWriter {
         Ok(status)
     }
 
-    /// End of strip: write the pre-computed parity shards in parallel
-    /// + fsync, return the strip result.
+    /// End of strip: spawn parity writes + fsyncs in parallel (no
+    /// join) and return the strip result with parity handles. The
+    /// caller (`ChunkWriter`) collects the handles and joins them at
+    /// `seal()` time — strip N+1's data writes overlap with strip N's
+    /// parity writes + fsyncs.
+    #[allow(clippy::unused_async)] // signature matches MirrorStripWriter for enum dispatch
     pub async fn finish(&mut self) -> Result<StripResult> {
         if self.finished {
             return Err(IoError::Finished);
@@ -187,42 +190,15 @@ impl EcStripWriter {
 
         // Finalize EC compute — get parity shards.
         let parity = self.ec_worker.finish()?;
-        let unit_bytes = self.unit_bytes();
-        let data_num = self.ec_scheme.data_num;
 
-        // Spawn parallel parity write tasks.
-        for (i, parity_block) in parity.iter().enumerate() {
-            let seg_index = data_num + i;
-            let seg = *self.segment(seg_index)?;
-            let data = Bytes::from(parity_block.clone());
-            let disk_writer = self.disk_writer.clone();
-            let seg_clone = seg;
-            let ub = unit_bytes;
-            let handle: JoinHandle<Result<()>> =
-                tokio::spawn(async move { disk_writer.write(&seg_clone, ub, data).await });
-            self.parity_batch.spawn(handle);
-        }
-
-        // Spawn parallel fsync tasks (deduplicated by disk_id).
-        let mut fsynced: HashSet<(u64, u64)> = HashSet::new();
-        let segments = self.ec_strip()?.segments.clone();
-        for seg in &segments {
-            if let Some(did) = seg.disk_id.as_ref() {
-                let key = (did.high, did.low);
-                if fsynced.insert(key) {
-                    let did_clone = *did;
-                    let disk_writer = self.disk_writer.clone();
-                    let handle: JoinHandle<Result<()>> = tokio::spawn(async move {
-                        let id = crow_diskio_client::DiskId::new(did_clone.high, did_clone.low);
-                        disk_writer.fsync(id).await
-                    });
-                    self.parity_batch.spawn(handle);
-                }
-            }
-        }
-
-        // Join all writes.
-        self.parity_batch.join_all().await?;
+        // Spawn parallel parity write + fsync tasks (no join).
+        let parity_handles = spawn_parity_writes(
+            &self.chunk,
+            self.strip_index,
+            parity,
+            &self.disk_writer,
+            &self.ec_scheme,
+        )?;
 
         // Reset the EC worker for reuse.
         self.ec_worker.reset();
@@ -233,14 +209,15 @@ impl EcStripWriter {
             data_blocks_written: self.data_blocks_written,
             bytes_written: self.bytes_written,
             partial: self.partial,
-            parity_handles: Vec::new(), // already joined
+            parity_handles,
         })
     }
 
     /// Abort: drop in-flight writes, return already-durable state.
+    /// No parity tasks are spawned (abort is called instead of
+    /// `finish`), so no handles to abort.
     pub fn abort(&mut self) -> Result<StripResult> {
         self.finished = true;
-        self.parity_batch.abort_all();
         self.ec_worker.reset();
         Ok(StripResult {
             chunk_id: self.chunk.id.unwrap_or_default(),

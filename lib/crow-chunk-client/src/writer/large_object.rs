@@ -1,13 +1,14 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `LargeObjectWriter` (non-blocking stream) — owns the drive loop.
+//! `LargeObjectWriter` (non-blocking stream) — chunk-level drive loop.
 //!
-//! Accepts a non-blocking stream (data already in buffer). Owns the
-//! drive loop: gets placements from `ChunkPrefetch`, rotates chunks
-//! when the placement's chunk_id changes, pushes data_num blocks per
-//! strip, finishes strips, seals chunks at EOF. Implements
-//! `ChunkIoWriter` for push mode.
+//! Accepts a non-blocking stream (data already in buffer). The
+//! strip-level drive loop is in `ChunkWriter::push` (auto-rotates
+//! strips). This writer owns the chunk-level drive loop: pulls `Chunk`
+//! values from `ChunkPrefetch`, opens `ChunkWriter` with `object_size`,
+//! pushes blocks, rotates chunks when `is_full()`, seals at EOF.
+//! Implements `ChunkIoWriter` for push mode.
 
 use std::sync::Arc;
 
@@ -25,17 +26,19 @@ use crate::{IoError, Location, Result};
 use crow_common::ec::EcScheme;
 use crow_protocol::chunkdb::rpc::Chunk;
 
-/// Large-object writer — non-blocking stream. Owns the drive loop.
+/// Large-object writer — non-blocking stream. Owns the chunk-level
+/// drive loop; strip-level rotation is in `ChunkWriter::push`.
 pub struct LargeObjectWriter {
     pub(crate) allocator: Arc<dyn ChunkAllocator>,
     pub(crate) disk_writer: Arc<dyn DiskWriter>,
     pub(crate) ec_scheme: EcScheme,
     pub(crate) config: Arc<ChunkClientConfig>,
     pub(crate) chunk_writer: Option<ChunkWriter>,
-    pub(crate) prefetch_rx: Option<mpsc::Receiver<Result<Chunk>>>,
-    pub(crate) prefetch_handle: Option<JoinHandle<()>>,
+    pub(crate) chunk_prefetch_rx: Option<mpsc::Receiver<Result<Chunk>>>,
+    pub(crate) chunk_prefetch_handle: Option<JoinHandle<()>>,
     pub(crate) locations: Vec<Location>,
     pub(crate) logical_offset: u64,
+    pub(crate) object_size: Option<u64>,
     pub(crate) finished: bool,
 }
 
@@ -53,10 +56,11 @@ impl LargeObjectWriter {
             ec_scheme,
             config,
             chunk_writer: None,
-            prefetch_rx: None,
-            prefetch_handle: None,
+            chunk_prefetch_rx: None,
+            chunk_prefetch_handle: None,
             locations: Vec::new(),
             logical_offset: 0,
+            object_size: None,
             finished: false,
         }
     }
@@ -66,8 +70,9 @@ impl LargeObjectWriter {
         self.config.per_writer_memory(&self.ec_scheme)
     }
 
-    /// Start the pipeline: spawn prefetch.
+    /// Start the chunk-level prefetch pipeline.
     pub(crate) fn start_pipeline(&mut self, object_size: Option<u64>) {
+        self.object_size = object_size;
         let prefetch = ChunkPrefetch::new(
             self.allocator.clone(),
             self.ec_scheme,
@@ -75,92 +80,57 @@ impl LargeObjectWriter {
             crow_protocol::chunk_id::CHUNK_TYPE_REPO,
         );
         let (rx, handle) = prefetch.spawn(object_size);
-        self.prefetch_rx = Some(rx);
-        self.prefetch_handle = Some(handle);
+        self.chunk_prefetch_rx = Some(rx);
+        self.chunk_prefetch_handle = Some(handle);
     }
 
-    /// Get the next chunk (from prefetch or on-demand).
+    /// Pull the next `Chunk` from the prefetch channel (or on-demand
+    /// if the channel is exhausted).
     pub(crate) async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        if let Some(rx) = self.prefetch_rx.as_mut() {
+        if let Some(rx) = self.chunk_prefetch_rx.as_mut() {
             match rx.recv().await {
                 Some(Ok(c)) => return Ok(Some(c)),
                 Some(Err(e)) => return Err(e),
                 None => {
-                    self.prefetch_rx = None;
+                    self.chunk_prefetch_rx = None;
                 }
             }
         }
-        // On-demand allocation.
-        let chunk_id = self.chunk_writer.as_ref().and_then(ChunkWriter::current_chunk_id);
-        let strips = self.chunk_writer.as_ref().map_or(0, ChunkWriter::strips_in_chunk);
+        // On-demand allocation (prefetch channel exhausted).
         let pf = ChunkPrefetch::new(
             self.allocator.clone(),
             self.ec_scheme,
             self.config.clone(),
             crow_protocol::chunk_id::CHUNK_TYPE_REPO,
         );
-        let chunk = pf.on_demand(chunk_id, strips).await?;
+        let chunk = pf.on_demand().await?;
         Ok(Some(chunk))
     }
 
-    /// Ensure an open strip: get chunk, rotate chunk if needed.
-    pub(crate) async fn ensure_open_strip(&mut self) -> Result<()> {
-        let need_open = self
-            .chunk_writer
-            .as_ref()
-            .map_or(true, |cw| cw.is_strip_full() || cw.current_strip_is_none());
-
-        if !need_open {
+    /// Ensure a `ChunkWriter` is open. If the current chunk is full,
+    /// seal it + pull the next `Chunk` + open a new `ChunkWriter`.
+    pub(crate) async fn ensure_open(&mut self) -> Result<()> {
+        if self.chunk_writer.is_some() {
             return Ok(());
         }
-
         let chunk = self
             .next_chunk()
             .await?
             .ok_or_else(|| IoError::Internal("no chunk available".into()))?;
-
-        let chunk_id = chunk.id;
-        let need_rotate = match &self.chunk_writer {
-            None => true,
-            Some(cw) => cw.current_chunk_id() != chunk_id,
-        };
-        if need_rotate {
-            if let Some(mut cw) = self.chunk_writer.take() {
-                let location = cw.seal().await?;
-                let bytes = location.length;
-                if bytes > 0 {
-                    self.locations.push(Location {
-                        logical_offset: self.logical_offset,
-                        logical_length: bytes,
-                        ..location
-                    });
-                    self.logical_offset += bytes;
-                }
-            }
-            let mut cw = ChunkWriter::new(
-                self.allocator.clone(),
-                self.disk_writer.clone(),
-                self.ec_scheme,
-                self.config.clone(),
-            );
-            cw.open(chunk, None)?;
-            self.chunk_writer = Some(cw);
-        } else {
-            let cw = self.chunk_writer.as_mut().unwrap();
-            cw.continue_strip(chunk)?;
-        }
+        let mut cw = ChunkWriter::new(
+            self.allocator.clone(),
+            self.disk_writer.clone(),
+            self.ec_scheme,
+            self.config.clone(),
+        );
+        cw.open(chunk, self.object_size)?;
+        self.chunk_writer = Some(cw);
         Ok(())
     }
 
-    /// Finish: seal the current chunk, return all Locations.
-    pub(crate) async fn finish_pipeline(&mut self) -> Result<Vec<Location>> {
-        // Finish current strip if has data.
-        if let Some(cw) = self.chunk_writer.as_mut() {
-            if !cw.is_strip_full() && cw.ready() {
-                let _ = cw.finish_strip().await?;
-            }
-        }
-
+    /// Rotate: seal the current chunk, pull the next `Chunk`, open a
+    /// new `ChunkWriter`.
+    pub(crate) async fn rotate_chunk(&mut self) -> Result<()> {
         if let Some(mut cw) = self.chunk_writer.take() {
             let location = cw.seal().await?;
             let bytes = location.length;
@@ -173,7 +143,24 @@ impl LargeObjectWriter {
                 self.logical_offset += bytes;
             }
         }
-        if let Some(handle) = self.prefetch_handle.take() {
+        self.ensure_open().await
+    }
+
+    /// Finish: seal the current chunk, return all Locations.
+    pub(crate) async fn finish_pipeline(&mut self) -> Result<Vec<Location>> {
+        if let Some(mut cw) = self.chunk_writer.take() {
+            let location = cw.seal().await?;
+            let bytes = location.length;
+            if bytes > 0 {
+                self.locations.push(Location {
+                    logical_offset: self.logical_offset,
+                    logical_length: bytes,
+                    ..location
+                });
+                self.logical_offset += bytes;
+            }
+        }
+        if let Some(handle) = self.chunk_prefetch_handle.take() {
             handle.abort();
         }
         Ok(std::mem::take(&mut self.locations))
@@ -184,7 +171,7 @@ impl LargeObjectWriter {
         if let Some(mut cw) = self.chunk_writer.take() {
             let _ = cw.abort().await;
         }
-        if let Some(handle) = self.prefetch_handle.take() {
+        if let Some(handle) = self.chunk_prefetch_handle.take() {
             handle.abort();
         }
         Ok(std::mem::take(&mut self.locations))
@@ -197,25 +184,31 @@ impl ChunkIoWriter for LargeObjectWriter {
         if self.finished {
             return Err(IoError::Finished);
         }
-        if self.prefetch_rx.is_none() && self.chunk_writer.is_none() {
+        // Start pipeline on first data.
+        if self.chunk_prefetch_rx.is_none() && self.chunk_writer.is_none() {
             self.start_pipeline(None);
         }
-
-        // Ensure we have an open strip.
-        self.ensure_open_strip().await?;
-
-        // Push the block.
-        let cw = self
-            .chunk_writer
-            .as_mut()
-            .ok_or_else(|| IoError::Internal("no chunk writer".into()))?;
-        let status = cw.push(buffer).await?;
-
-        // If strip is now full, finish it.
-        if cw.is_strip_full() {
-            let _ = cw.finish_strip().await?;
+        // Ensure a ChunkWriter is open.
+        self.ensure_open().await?;
+        // Push the block. If the chunk is full (Pause), rotate to a
+        // new chunk and re-push. Bytes is ref-counted, so clone is cheap.
+        let buffer = buffer;
+        let status;
+        loop {
+            let s = {
+                let cw = self
+                    .chunk_writer
+                    .as_mut()
+                    .ok_or_else(|| IoError::Internal("no chunk writer".into()))?;
+                cw.push(buffer.clone()).await?
+            };
+            if s == FeedStatus::Pause {
+                self.rotate_chunk().await?;
+                continue;
+            }
+            status = s;
+            break;
         }
-
         Ok(status)
     }
 

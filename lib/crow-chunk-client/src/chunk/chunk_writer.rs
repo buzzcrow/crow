@@ -11,9 +11,12 @@
 //! drive loop yet (Phase 3). All chunkdb chunk operations (seal,
 //! delete, append) go through this class.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::chunk::ec_strip_writer::EcStripWriter;
@@ -27,9 +30,13 @@ use crow_common::ec::EcScheme;
 use crow_protocol::chunkdb::rpc::{Chunk, DeleteChunkRequest, SealChunkRequest};
 use crow_protocol::common::ChunkId;
 
-/// Chunk wrapper + write ability. Owns `Arc<Chunk>`; the drive loop
-/// still controls strip + chunk rotation (Phase 3 moves the strip
-/// drive loop in here).
+/// Chunk wrapper + write ability. Owns `Arc<Chunk>`; the strip-level
+/// drive loop is in `push` (auto-rotates strips). Collects parity
+/// write + fsync handles from each `finish_strip` and joins them at
+/// `seal` time — strip N+1's data writes overlap with strip N's
+/// parity writes + fsyncs. Runs an internal strip-prefetch task that
+/// appends strips ahead of `write_cursor`, bounded by
+/// `prealloc_depth`.
 pub struct ChunkWriter {
     pub(crate) allocator: Arc<dyn ChunkAllocator>,
     pub(crate) disk_writer: Arc<dyn DiskWriter>,
@@ -41,6 +48,10 @@ pub struct ChunkWriter {
     pub(crate) object_size: Option<u64>,
     pub(crate) strips_remaining: Option<usize>,
     pub(crate) current_strip: Option<StripWriter>,
+    pub(crate) parity_handles: Vec<JoinHandle<Result<()>>>,
+    pub(crate) prefetch_handle: Option<JoinHandle<()>>,
+    pub(crate) prefetch_rx: Option<mpsc::Receiver<Result<Chunk>>>,
+    pub(crate) write_cursor_shared: Arc<AtomicU32>,
 }
 
 impl ChunkWriter {
@@ -62,13 +73,21 @@ impl ChunkWriter {
             object_size: None,
             strips_remaining: None,
             current_strip: None,
+            parity_handles: Vec::new(),
+            prefetch_handle: None,
+            prefetch_rx: None,
+            write_cursor_shared: Arc::new(AtomicU32::new(0)),
         }
     }
 
     /// Open a chunk from a pre-allocated `Chunk` protobuf. Wraps it in
     /// `Arc`, opens the first strip (already present from
-    /// `allocate_chunk`). `object_size` is stored for strip-prefetch
-    /// planning (used in Phase 3.2; no behavior yet).
+    /// `allocate_chunk`), and starts the internal strip-prefetch task
+    /// that appends strips ahead of `write_cursor` (bounded by
+    /// `prealloc_depth`). `object_size` drives prefetch planning:
+    /// known-size objects stop pre-appending when enough strips are
+    /// allocated; unknown-size objects pre-append up to
+    /// `strips_per_chunk`.
     pub fn open(&mut self, chunk: Chunk, object_size: Option<u64>) -> Result<()> {
         if chunk.id.is_none() {
             return Err(IoError::AllocationFailed("open: chunk missing id".into()));
@@ -82,8 +101,11 @@ impl ChunkWriter {
         let strip = EcStripWriter::new(Arc::clone(&chunk), 0, self.disk_writer.clone(), self.ec_scheme);
         self.chunk = Some(chunk);
         self.write_cursor = 0;
+        self.write_cursor_shared.store(0, Ordering::Relaxed);
         self.bytes_in_chunk = 0;
         self.current_strip = Some(StripWriter::Ec(strip));
+        // Start the internal strip-prefetch task.
+        self.start_strip_prefetch();
         Ok(())
     }
 
@@ -109,22 +131,183 @@ impl ChunkWriter {
         );
         self.chunk = Some(chunk);
         self.write_cursor = next_index;
+        self.write_cursor_shared.store(next_index, Ordering::Relaxed);
         self.current_strip = Some(StripWriter::Ec(strip));
         Ok(())
     }
 
-    /// Push a data block to the current strip. Does NOT auto-rotate
-    /// strips — the drive loop calls `finish_strip` + `continue_strip`
-    /// / `open` when the strip is full.
+    /// Push a data block to the current strip. Auto-rotates strips:
+    /// if the current strip is full, finishes it, advances
+    /// `write_cursor`, opens the next strip (from `chunk.strips` if
+    /// pre-appended, or via `append_chunk` RPC), then pushes the
+    /// block to the new strip. Returns `Pause` if the chunk is full
+    /// after finishing the current strip — the block is NOT pushed
+    /// (caller rotates chunks, then re-pushes).
     pub async fn push(&mut self, buffer: Bytes) -> Result<FeedStatus> {
+        if self.current_strip.is_none() {
+            return Err(IoError::Internal("push with no open strip".into()));
+        }
+        // Auto-rotate: if the current strip is full, finish it + check
+        // if the chunk is now full. If so, return Pause without pushing
+        // — the caller rotates chunks and re-pushes this buffer.
+        if self.is_strip_full() {
+            self.finish_strip().await?;
+            if self.is_full() {
+                return Ok(FeedStatus::Pause);
+            }
+            self.open_next_strip().await?;
+        }
         let strip = self
             .current_strip
             .as_mut()
-            .ok_or_else(|| IoError::Internal("push with no open strip".into()))?;
-        strip.push(buffer).await
+            .ok_or_else(|| IoError::Internal("push: strip vanished after rotate".into()))?;
+        // Push to the strip. The strip's Pause (strip full) is handled
+        // internally by auto-rotate on the next push — we always return
+        // Continue after a successful push (only chunk-full returns Pause).
+        strip.push(buffer).await?;
+        Ok(FeedStatus::Continue)
     }
 
-    /// Finish the current strip. Records bytes written.
+    /// Open the next strip on the current chunk. First drains the
+    /// prefetch channel (non-blocking) to pick up any pre-appended
+    /// chunks. If the next strip is in `chunk.strips`, opens it
+    /// directly. Otherwise falls back to inline `append_chunk` RPC.
+    async fn open_next_strip(&mut self) -> Result<()> {
+        let next_index = self.write_cursor + 1;
+        // Drain prefetch channel (non-blocking) — pick up latest chunk.
+        self.drain_prefetch();
+        let chunk = self
+            .chunk
+            .as_ref()
+            .ok_or_else(|| IoError::Internal("open_next_strip with no chunk".into()))?;
+        if (next_index as usize) < chunk.strips.len() {
+            // Next strip is pre-appended — open it directly.
+            let chunk = Arc::clone(chunk);
+            let strip = EcStripWriter::new(
+                Arc::clone(&chunk),
+                next_index,
+                self.disk_writer.clone(),
+                self.ec_scheme,
+            );
+            self.chunk = Some(chunk);
+            self.write_cursor = next_index;
+            self.write_cursor_shared.store(next_index, Ordering::Relaxed);
+            self.current_strip = Some(StripWriter::Ec(strip));
+        } else {
+            // Prefetch fell behind — append a new strip inline.
+            let new_chunk = self.append_strip().await?;
+            self.continue_strip(new_chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Drain the prefetch channel (non-blocking) and Arc-swap to the
+    /// latest cumulative `Chunk` from the prefetch task.
+    fn drain_prefetch(&mut self) {
+        if let Some(rx) = self.prefetch_rx.as_mut() {
+            while let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(new_chunk) => {
+                        self.chunk = Some(Arc::new(new_chunk));
+                    }
+                    Err(e) => {
+                        warn!("strip prefetch error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop the strip-prefetch task: drop the receiver (task's
+    /// `tx.send` fails → task exits) + abort the handle.
+    fn stop_prefetch(&mut self) {
+        self.prefetch_rx.take();
+        if let Some(handle) = self.prefetch_handle.take() {
+            handle.abort();
+        }
+    }
+
+    /// Start the internal strip-prefetch background task. Appends
+    /// strips to the chunk ahead of `write_cursor`, bounded by
+    /// `prealloc_depth`. Known-size objects stop when
+    /// `strips_remaining` hits 0; unknown-size objects pre-append up
+    /// to `strips_per_chunk`. Sends cumulative `Chunk` values via a
+    /// channel; `drain_prefetch` picks them up.
+    fn start_strip_prefetch(&mut self) {
+        let Some(chunk_id) = self.current_chunk_id() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel::<Result<Chunk>>(8);
+        self.prefetch_rx = Some(rx);
+        let allocator = Arc::clone(&self.allocator);
+        let ec_scheme = self.ec_scheme;
+        let config = Arc::clone(&self.config);
+        let prealloc_depth = config.prealloc_depth as u32;
+        let max_chunk_size = config.max_chunk_size;
+        let unit_bytes = u64::from((config.read_buffer_size / 1024) as u32) * 1024;
+        let strip_data_bytes = ec_scheme.data_num as u64 * unit_bytes;
+        let strips_per_chunk = (max_chunk_size / strip_data_bytes) as u32;
+        let mut strips_remaining = self.strips_remaining;
+        let mut next_strip_index = self.write_cursor + 1;
+        let write_cursor_shared = Arc::clone(&self.write_cursor_shared);
+        let handle: JoinHandle<()> = tokio::spawn(async move {
+            loop {
+                // Stop conditions:
+                // - known-size and all strips allocated
+                if let Some(remaining) = strips_remaining {
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+                // - chunk full (enough strips for max_chunk_size)
+                if next_strip_index >= strips_per_chunk {
+                    break;
+                }
+                // - prealloc_depth satisfied: stop appending when the
+                //   lag (allocated - written) >= prealloc_depth.
+                let written = write_cursor_shared.load(Ordering::Relaxed);
+                let lag = next_strip_index.saturating_sub(written);
+                if lag >= prealloc_depth {
+                    // Wait a bit for the writer to catch up before
+                    // re-checking.
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    continue;
+                }
+                let write_granularity_kb = (config.read_buffer_size / 1024) as u32;
+                let result = crate::chunk::chunk_prefetch::append_strip(
+                    &*allocator,
+                    chunk_id,
+                    ec_scheme,
+                    next_strip_index,
+                    write_granularity_kb,
+                )
+                .await;
+                match result {
+                    Ok(chunk) => {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            // Receiver dropped — ChunkWriter was
+                            // sealed/aborted. Stop.
+                            break;
+                        }
+                        next_strip_index += 1;
+                        if let Some(remaining) = strips_remaining.as_mut() {
+                            *remaining = remaining.saturating_sub(1);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+        self.prefetch_handle = Some(handle);
+    }
+
+    /// Finish the current strip. Records bytes written + collects
+    /// parity write/fsync handles (joined at `seal` time, not here —
+    /// strip N+1's data writes overlap with strip N's parity writes).
     pub async fn finish_strip(&mut self) -> Result<StripResult> {
         let mut strip = self
             .current_strip
@@ -132,8 +315,8 @@ impl ChunkWriter {
             .ok_or_else(|| IoError::Internal("finish_strip with no open strip".into()))?;
         let mut strip_result = strip.finish().await?;
         self.bytes_in_chunk += strip_result.bytes_written;
-        // Transfer parity handles to the caller.
-        strip_result.parity_handles = Vec::new(); // already joined in EcStripWriter::finish
+        // Collect parity handles for seal-time join.
+        self.parity_handles.append(&mut strip_result.parity_handles);
         Ok(strip_result)
     }
 
@@ -176,14 +359,31 @@ impl ChunkWriter {
         .await
     }
 
-    /// Seal the chunk: seal_chunk RPC, return the chunk's Location.
-    /// The current strip should already be finished.
+    /// Seal the chunk: finish the current strip (if open with data),
+    /// join all in-flight parity writes + fsyncs, then `seal_chunk`
+    /// RPC, return the chunk's Location. Parity writes from all strips
+    /// in this chunk are joined here (decoupled from strip finish in
+    /// Phase 3.1).
     pub async fn seal(&mut self) -> Result<Location> {
+        // Stop the strip-prefetch task (drop receiver → task exits).
+        self.stop_prefetch();
+        // Finish the current strip if it's open (the last strip may
+        // be partial or full — push doesn't auto-finish on EOF).
+        if self.current_strip.is_some() {
+            self.finish_strip().await?;
+        }
         let chunk_id = self.current_chunk_id();
         let bytes_in_chunk = self.bytes_in_chunk;
 
         let location = match chunk_id {
             Some(cid) if bytes_in_chunk > 0 => {
+                // Join all in-flight parity writes + fsyncs before sealing.
+                let handles = std::mem::take(&mut self.parity_handles);
+                for handle in handles {
+                    handle
+                        .await
+                        .map_err(|e| IoError::Internal(format!("parity task panicked: {e}")))??;
+                }
                 let unit_bytes = u64::from((self.config.read_buffer_size / 1024) as u32) * 1024;
                 let sealed_length_units = (bytes_in_chunk / unit_bytes) as u32;
                 self.allocator
@@ -222,12 +422,18 @@ impl ChunkWriter {
         Ok(location)
     }
 
-    /// Abort: cancel in-flight, delete the partial (unsealed) chunk.
+    /// Abort: cancel in-flight parity writes, stop the strip-prefetch
+    /// task, drop the current strip, delete the partial (unsealed)
+    /// chunk.
     pub async fn abort(&mut self) -> Result<()> {
+        self.stop_prefetch();
         let had_strip = self.current_strip.is_some();
         if let Some(mut strip) = self.current_strip.take() {
             let _ = strip.abort().await;
         }
+        // Drop in-flight parity handles (abort_all semantics — tasks
+        // continue but we ignore their results; the chunk is deleted).
+        self.parity_handles.clear();
         // Delete the chunk if it was opened and has any data — either
         // finished strips (bytes_in_chunk > 0), an in-progress strip
         // (had_strip), or prior finished strips (write_cursor > 0).

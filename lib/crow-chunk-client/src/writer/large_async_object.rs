@@ -1,14 +1,16 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `LargeAsyncObjectWriter` — async stream variant, owns the drive
+//! `LargeAsyncObjectWriter` — async stream variant, chunk-level drive
 //! loop.
 //!
 //! Accepts an `AsyncRead` stream — a more complex flow with a fetch
-//! stage + backpressure. Owns the drive loop: gets placements from
-//! `ChunkPrefetch`, rotates chunks when the placement's chunk_id
-//! changes, pushes data_num blocks per strip, finishes strips, seals
-//! chunks at EOF. Implements `ChunkIoWriter` for push mode.
+//! stage + backpressure. The strip-level drive loop is in
+//! `ChunkWriter::push` (auto-rotates strips). This writer owns the
+//! chunk-level drive loop: pulls `Chunk` values from `ChunkPrefetch`,
+//! opens `ChunkWriter` with `object_size`, pushes blocks, rotates
+//! chunks when `is_full()`, seals at EOF. Implements `ChunkIoWriter`
+//! for push mode.
 
 use std::sync::Arc;
 
@@ -27,18 +29,19 @@ use crate::{IoError, Location, Result};
 use crow_common::ec::EcScheme;
 use crow_protocol::chunkdb::rpc::Chunk;
 
-/// Large-object writer — async stream. Owns the drive loop + fetch
-/// stage.
+/// Large-object writer — async stream. Owns the chunk-level drive
+/// loop + fetch stage; strip-level rotation is in `ChunkWriter::push`.
 pub struct LargeAsyncObjectWriter {
     pub(crate) allocator: Arc<dyn ChunkAllocator>,
     pub(crate) disk_writer: Arc<dyn DiskWriter>,
     pub(crate) ec_scheme: EcScheme,
     pub(crate) config: Arc<ChunkClientConfig>,
     pub(crate) chunk_writer: Option<ChunkWriter>,
-    pub(crate) prefetch_rx: Option<mpsc::Receiver<Result<Chunk>>>,
-    pub(crate) prefetch_handle: Option<JoinHandle<()>>,
+    pub(crate) chunk_prefetch_rx: Option<mpsc::Receiver<Result<Chunk>>>,
+    pub(crate) chunk_prefetch_handle: Option<JoinHandle<()>>,
     pub(crate) locations: Vec<Location>,
     pub(crate) logical_offset: u64,
+    pub(crate) object_size: Option<u64>,
     pub(crate) finished: bool,
 }
 
@@ -56,10 +59,11 @@ impl LargeAsyncObjectWriter {
             ec_scheme,
             config,
             chunk_writer: None,
-            prefetch_rx: None,
-            prefetch_handle: None,
+            chunk_prefetch_rx: None,
+            chunk_prefetch_handle: None,
             locations: Vec::new(),
             logical_offset: 0,
+            object_size: None,
             finished: false,
         }
     }
@@ -70,7 +74,7 @@ impl LargeAsyncObjectWriter {
     }
 
     /// Seal the current chunk (if any) and record its Location.
-    async fn seal_current(&mut self) -> Result<()> {
+    pub(crate) async fn seal_current(&mut self) -> Result<()> {
         if let Some(mut cw) = self.chunk_writer.take() {
             let location = cw.seal().await?;
             let bytes = location.length;
@@ -86,73 +90,60 @@ impl LargeAsyncObjectWriter {
         Ok(())
     }
 
-    /// Apply a chunk: rotate chunk if needed, then open/continue the
-    /// strip.
-    async fn apply_chunk(&mut self, chunk: Chunk) -> Result<()> {
-        let chunk_id = chunk.id;
-        let need_rotate = match &self.chunk_writer {
-            None => true,
-            Some(cw) => cw.current_chunk_id() != chunk_id,
-        };
-        if need_rotate {
-            self.seal_current().await?;
-            let mut cw = ChunkWriter::new(
-                self.allocator.clone(),
-                self.disk_writer.clone(),
-                self.ec_scheme,
-                self.config.clone(),
-            );
-            cw.open(chunk, None)?;
-            self.chunk_writer = Some(cw);
-        } else {
-            let cw = self.chunk_writer.as_mut().unwrap();
-            cw.continue_strip(chunk)?;
+    /// Pull the next `Chunk` from the prefetch channel (or on-demand
+    /// if the channel is exhausted).
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
+        if let Some(rx) = self.chunk_prefetch_rx.as_mut() {
+            match rx.recv().await {
+                Some(Ok(c)) => return Ok(Some(c)),
+                Some(Err(e)) => return Err(e),
+                None => {
+                    self.chunk_prefetch_rx = None;
+                }
+            }
         }
-        Ok(())
-    }
-
-    /// On-demand chunk allocation when prefetch is exhausted.
-    async fn on_demand_chunk(&self) -> Result<Chunk> {
-        let chunk_id = self.chunk_writer.as_ref().and_then(ChunkWriter::current_chunk_id);
-        let strips = self.chunk_writer.as_ref().map_or(0, ChunkWriter::strips_in_chunk);
+        // On-demand allocation (prefetch channel exhausted).
         let pf = ChunkPrefetch::new(
             self.allocator.clone(),
             self.ec_scheme,
             self.config.clone(),
             crow_protocol::chunk_id::CHUNK_TYPE_REPO,
         );
-        pf.on_demand(chunk_id, strips).await
+        let chunk = pf.on_demand().await?;
+        Ok(Some(chunk))
     }
 
-    /// Receive and push `data_num` blocks for the current strip.
-    /// Returns the number of blocks received (0 = EOF before any
-    /// block).
-    async fn receive_and_push(
-        &mut self,
-        block_rx: &mut mpsc::Receiver<Bytes>,
-        data_num: usize,
-    ) -> Result<usize> {
-        let mut received = 0usize;
-        for _ in 0..data_num {
-            match block_rx.recv().await {
-                Some(buffer) => {
-                    let cw = self.chunk_writer.as_mut().unwrap();
-                    cw.push(buffer).await?;
-                    received += 1;
-                }
-                None => break,
-            }
+    /// Ensure a `ChunkWriter` is open. If none, pull the next `Chunk`
+    /// + open a new `ChunkWriter` with `object_size`.
+    pub(crate) async fn ensure_open(&mut self) -> Result<()> {
+        if self.chunk_writer.is_some() {
+            return Ok(());
         }
-        Ok(received)
+        let chunk = self
+            .next_chunk()
+            .await?
+            .ok_or_else(|| IoError::Internal("no chunk available".into()))?;
+        let mut cw = ChunkWriter::new(
+            self.allocator.clone(),
+            self.disk_writer.clone(),
+            self.ec_scheme,
+            self.config.clone(),
+        );
+        cw.open(chunk, self.object_size)?;
+        self.chunk_writer = Some(cw);
+        Ok(())
     }
 
-    /// Async stream write. Runs fetch stage + drive loop concurrently.
-    ///
-    /// # Panics
-    ///
-    /// Does not panic directly, but calls `unwrap` on
-    /// `chunk_writer.as_mut()` after `apply_placement` guarantees it
-    /// is `Some`.
+    /// Rotate: seal the current chunk, pull the next `Chunk`, open a
+    /// new `ChunkWriter`.
+    pub(crate) async fn rotate_chunk(&mut self) -> Result<()> {
+        self.seal_current().await?;
+        self.ensure_open().await
+    }
+
+    /// Async stream write. Runs fetch stage + chunk-level drive loop
+    /// concurrently. The strip-level drive loop is in
+    /// `ChunkWriter::push` (auto-rotates strips).
     pub async fn write_stream(
         &mut self,
         reader: impl tokio::io::AsyncRead + Unpin + Send,
@@ -167,63 +158,52 @@ impl LargeAsyncObjectWriter {
             return Ok(Vec::new());
         }
 
+        self.object_size = object_size;
+
         let prefetch = ChunkPrefetch::new(
             self.allocator.clone(),
             self.ec_scheme,
             self.config.clone(),
             crow_protocol::chunk_id::CHUNK_TYPE_REPO,
         );
-        let (mut chunk_rx, prefetch_handle) = prefetch.spawn(object_size);
+        let (chunk_rx, prefetch_handle) = prefetch.spawn(object_size);
+        self.chunk_prefetch_rx = Some(chunk_rx);
+        self.chunk_prefetch_handle = Some(prefetch_handle);
 
         let channel_cap = (self.config.max_cached_buffer / self.config.read_buffer_size).max(1);
         let (block_tx, mut block_rx) = mpsc::channel::<Bytes>(channel_cap);
         let fetch_fut = run_fetch_stage(reader, block_tx, self.config.read_buffer_size);
 
-        let data_num = self.ec_scheme.data_num;
-        let mut got_eof = false;
-
         let drive_fut = async {
             loop {
-                let chunk = match chunk_rx.recv().await {
-                    Some(Ok(c)) => c,
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        // Prefetch done — check if more data remains.
-                        let Ok(Some(first_block)) =
-                            tokio::time::timeout(std::time::Duration::from_millis(10), block_rx.recv()).await
-                        else {
-                            break;
-                        };
-                        // On-demand allocation for the extra strip.
-                        let chunk = self.on_demand_chunk().await?;
-                        self.apply_chunk(chunk).await?;
-                        // Push the first block we already consumed.
-                        let cw = self.chunk_writer.as_mut().unwrap();
-                        cw.push(first_block).await?;
-                        // Receive remaining blocks.
-                        let extra = self.receive_and_push(&mut block_rx, data_num - 1).await?;
-                        let total = 1 + extra;
-                        if total > 0 {
-                            let cw = self.chunk_writer.as_mut().unwrap();
-                            cw.finish_strip().await?;
-                        }
-                        if extra < data_num - 1 {
-                            got_eof = true;
+                // Ensure a ChunkWriter is open.
+                self.ensure_open().await?;
+                // Receive the next block from the fetch stage.
+                match block_rx.recv().await {
+                    Some(buffer) => {
+                        // Push the block. If the chunk is full (Pause),
+                        // rotate to a new chunk and re-push. Bytes is
+                        // ref-counted, so clone is cheap.
+                        let buffer = buffer;
+                        loop {
+                            let status = {
+                                let cw = self
+                                    .chunk_writer
+                                    .as_mut()
+                                    .ok_or_else(|| IoError::Internal("no chunk writer".into()))?;
+                                cw.push(buffer.clone()).await?
+                            };
+                            if status == FeedStatus::Pause {
+                                self.rotate_chunk().await?;
+                                continue;
+                            }
                             break;
                         }
-                        continue;
                     }
-                };
-
-                self.apply_chunk(chunk).await?;
-                let received = self.receive_and_push(&mut block_rx, data_num).await?;
-                if received > 0 {
-                    let cw = self.chunk_writer.as_mut().unwrap();
-                    cw.finish_strip().await?;
-                }
-                if received < data_num {
-                    got_eof = true;
-                    break;
+                    None => {
+                        // EOF — break out, seal the current chunk.
+                        break;
+                    }
                 }
             }
             Ok::<(), IoError>(())
@@ -233,7 +213,9 @@ impl LargeAsyncObjectWriter {
         drive_result?;
 
         self.seal_current().await?;
-        prefetch_handle.abort();
+        if let Some(handle) = self.chunk_prefetch_handle.take() {
+            handle.abort();
+        }
 
         Ok(std::mem::take(&mut self.locations))
     }
@@ -243,7 +225,7 @@ impl LargeAsyncObjectWriter {
         if let Some(mut cw) = self.chunk_writer.take() {
             let _ = cw.abort().await;
         }
-        if let Some(handle) = self.prefetch_handle.take() {
+        if let Some(handle) = self.chunk_prefetch_handle.take() {
             handle.abort();
         }
         Ok(std::mem::take(&mut self.locations))
@@ -257,7 +239,7 @@ impl ChunkIoWriter for LargeAsyncObjectWriter {
             return Err(IoError::Finished);
         }
         // Lazy-start prefetch on first push.
-        if self.prefetch_rx.is_none() && self.chunk_writer.is_none() {
+        if self.chunk_prefetch_rx.is_none() && self.chunk_writer.is_none() {
             let prefetch = ChunkPrefetch::new(
                 self.allocator.clone(),
                 self.ec_scheme,
@@ -265,45 +247,21 @@ impl ChunkIoWriter for LargeAsyncObjectWriter {
                 crow_protocol::chunk_id::CHUNK_TYPE_REPO,
             );
             let (rx, handle) = prefetch.spawn(None);
-            self.prefetch_rx = Some(rx);
-            self.prefetch_handle = Some(handle);
+            self.chunk_prefetch_rx = Some(rx);
+            self.chunk_prefetch_handle = Some(handle);
         }
-
-        // Ensure we have an open chunk + strip.
-        let need_open = self
-            .chunk_writer
-            .as_ref()
-            .map_or(true, |cw| cw.is_strip_full() || cw.current_strip_is_none());
-
-        if need_open {
-            let chunk = if let Some(rx) = self.prefetch_rx.as_mut() {
-                match rx.recv().await {
-                    Some(Ok(c)) => Some(c),
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        self.prefetch_rx = None;
-                        Some(self.on_demand_chunk().await?)
-                    }
-                }
-            } else {
-                None
-            };
-
-            if let Some(chunk) = chunk {
-                self.apply_chunk(chunk).await?;
-            }
-        }
-
+        // Ensure a ChunkWriter is open.
+        self.ensure_open().await?;
+        // Push the block (auto-rotates strips internally).
         let cw = self
             .chunk_writer
             .as_mut()
             .ok_or_else(|| IoError::Internal("no chunk writer".into()))?;
         let status = cw.push(buffer).await?;
-
-        if cw.is_strip_full() {
-            cw.finish_strip().await?;
+        // If the chunk is full, rotate to a new chunk.
+        if cw.is_full() {
+            self.rotate_chunk().await?;
         }
-
         Ok(status)
     }
 
@@ -312,20 +270,10 @@ impl ChunkIoWriter for LargeAsyncObjectWriter {
             return Err(IoError::Finished);
         }
         self.finished = true;
-
-        // Finish current strip if has data.
-        if let Some(cw) = self.chunk_writer.as_mut() {
-            if !cw.is_strip_full() && cw.ready() {
-                cw.finish_strip().await?;
-            }
-        }
-
         self.seal_current().await?;
-
-        if let Some(handle) = self.prefetch_handle.take() {
+        if let Some(handle) = self.chunk_prefetch_handle.take() {
             handle.abort();
         }
-
         Ok(std::mem::take(&mut self.locations))
     }
 
