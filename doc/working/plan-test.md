@@ -14,6 +14,39 @@ itself remains as the ongoing test task backlog. This overrides the
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
 For test strategy, layer scope, and coverage details, see [`design/kv/design-crow-kv-test.md`](../design/kv/design-crow-kv-test.md).
 
+## CI Job Grouping Guide
+
+CI splits tests into 6 parallel jobs. Each job pays a fixed setup overhead
+(~2 min: checkout, apt-get, setup-pixi, rust-cache restore), so jobs run
+in parallel to minimize wall-clock time. The critical path is the slowest
+job, not the sum.
+
+**Assignment rule:** a test task's job is determined by two questions:
+1. Does it need CMake-built C++ binaries (ctest)? → **CppTests**
+2. Does it spawn real subprocesses (crow-kv-server, crow-diskdb, crow-diskio)?
+   - No → **UnitTests** (pure Rust, in-memory)
+   - Yes, and it's a console/CLI test → **ConsoleTests**
+   - Yes, and it's a server/storage test → **ServerTests**
+3. Is it a Playwright browser test? → **UITests**
+4. Is it a lint check (fmt, clippy)? → **Lint**
+
+| Job | Pixi tasks | Build dep | Rule |
+| --- | --- | --- | --- |
+| **Lint** | `cargo fmt --check`, `cargo clippy` | none | Fast feedback; fails without blocking tests |
+| **CppTests** | `test-tree-ct`, `test-common-ct`, `test-rpc-ct`, `test-diskio-ct`, `test-tree-ffi`, `test-rpc-ffi` | `build-cpp` + `build-tests` | C++ ctest needs CMake; FFI tests are Rust but test C++ via cc::Build |
+| **UnitTests** | `test-common`, `test-protocol`, `test-kv-core`, `test-kv-client`, `test-chunkdb-client` | `build-tests` | Pure Rust, no subprocess spawning |
+| **ServerTests** | `test-kv-server`, `test-diskdb`, `test-diskdb-client`, `test-chunkdb`, `test-diskio-client` | `build-tests` | Spawns crow-kv-server / crow-diskdb / crow-diskio subprocesses |
+| **ConsoleTests** | `test-console-shared`, `test-console-cli`, `test-console-server` | `build-tests` | Spawns crow-kv-server via lifecycle::deploy_local |
+| **UITests** | `test-console-ui` | `build-tests` + `install-ui-deps` | Playwright browser E2E + subprocess spawning |
+
+**Adding a new test task:**
+1. Add the task to `pixi.toml` under `# ── Test ──` with the right `depends-on`:
+   - C++ ctest → `depends-on = ["build-cpp"]`
+   - Rust test (no subprocess) → no `depends-on`
+   - Rust test (spawns subprocess) → add `cargo build -p crow-kv-server` to the cmd
+2. Assign it to the matching CI job in `.github/workflows/ci.yml` using the table above.
+3. If the job doesn't already run `build-tests`, add a `Build all Rust test binaries` step.
+
 ## Suite Timing
 
 Measured on 2026-08-17 (warm build, macOS) and 2026-08-17 (warm build, Linux, build 1m32s).

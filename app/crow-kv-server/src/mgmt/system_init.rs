@@ -101,9 +101,13 @@ pub(super) async fn system_init(
         |Json(r)| r,
     );
 
-    // Create store 0 if it does not exist.
+    // Create store 0 if it does not exist. Use the shared port resolver so
+    // store 0 consumes the port pool port deterministically — using
+    // `0.0.0.0:0` here lets the OS pick a random port that may collide with
+    // a future pool allocation (e.g. `add_store` for store 1).
     if !state.stores.contains_key(&SYSTEM_STORE_ID) {
-        let addr: SocketAddr = "0.0.0.0:0"
+        let port = super::resolve_store_port(&state, None, SYSTEM_STORE_ID).await;
+        let addr: SocketAddr = format!("0.0.0.0:{port}")
             .parse()
             .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
         let mut store = PxKvStore::new(SYSTEM_STORE_ID, addr);

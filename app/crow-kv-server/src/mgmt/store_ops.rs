@@ -16,7 +16,7 @@ use crow_kv::cluster::px_kv_store::PxKvStore;
 use crow_kv::common::config::ServerConfig;
 use crow_protocol::mgmt::{AddStoreRequest, StoreDetail, StoreListResponse, StoreSummary};
 
-use super::{err_json, persisted_port_for_store, ErrorResponse, RegistryArc};
+use super::{err_json, ErrorResponse, RegistryArc};
 
 #[utoipa::path(
         get,
@@ -103,17 +103,10 @@ pub(super) async fn add_store(
     }
 
     // Port priority: explicit request > port pool (--ports) > persisted
-    // config file > OS-assigned (0).
-    let port = req.port.filter(|&p| p > 0);
-    let port = if port.is_none() {
-        match state.next_port() {
-            Some(p) => Some(p),
-            None => persisted_port_for_store(&state.config.config_root, req.store_id).await,
-        }
-    } else {
-        port
-    };
-    let addr: SocketAddr = format!("0.0.0.0:{}", port.unwrap_or(0))
+    // config file > OS-assigned (0). Delegated to `resolve_store_port` so
+    // `/system/init` and `POST /stores` stay consistent.
+    let port = super::resolve_store_port(&state, req.port, req.store_id).await;
+    let addr: SocketAddr = format!("0.0.0.0:{port}")
         .parse()
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
 

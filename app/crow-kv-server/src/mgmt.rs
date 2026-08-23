@@ -48,6 +48,24 @@ pub(super) fn err_json(
     (status, Json(ErrorResponse { error: msg.into() }))
 }
 
+/// Resolve the listen port for a new store using the shared priority:
+/// explicit port > port pool (`--ports`) > persisted config > OS-assigned (0).
+/// Centralized so `/system/init` and `POST /stores` stay consistent — if
+/// store 0 used `0.0.0.0:0` while the port pool still held a port, the OS
+/// could assign the pool port to store 0, causing a later `add_store` to
+/// collide with it.
+pub(crate) async fn resolve_store_port(state: &RegistryArc, explicit: Option<u16>, store_id: u64) -> u16 {
+    if let Some(p) = explicit.filter(|&p| p > 0) {
+        return p;
+    }
+    if let Some(p) = state.next_port() {
+        return p;
+    }
+    persisted_port_for_store(&state.config.config_root, store_id)
+        .await
+        .unwrap_or(0)
+}
+
 /// Resolve the persisted listen port for `store_id` from the on-disk
 /// node config. Checks `node-config.json` first (the primary format),
 /// then falls back to legacy `store{S}_group{G}.json` files for

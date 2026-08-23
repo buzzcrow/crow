@@ -60,11 +60,18 @@ rdma-core = "*"
 [tasks]
 
 # ── Build ────────────────────────────────────────────────────────
+# C++ libraries only (crow-tree, crow-rpc, crow-diskio). Needed by C++
+# ctest tasks. Rust FFI crates compile their own C++ via cc::Build in
+# build.rs, so Rust tests do NOT depend on this.
+build-cpp = { cmd = "cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-tree/build -j && cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-rpc/build -j && cmake -S app/crow-diskio -B app/crow-diskio/build -DCMAKE_BUILD_TYPE=Release && cmake --build app/crow-diskio/build -j" }
+# npm deps only (for UI tests and ts-lint). Separated from install-deps
+# so test-console-ui doesn't trigger cargo installs of profiling tools.
+install-ui-deps = "test -d app/crow-web/ui/node_modules || (cd app/crow-web/ui && npm ci)"
 install-deps = '''
 bash -c '
 set -e
 git config core.hooksPath .githooks
-test -d app/crow-web/ui/node_modules || (cd app/crow-web/ui && npm ci)
+pixi run install-ui-deps
 cargo install cargo-tarpaulin || echo "Warning: cargo-tarpaulin install failed (expected on macOS)"
 cargo install --locked samply || echo "Warning: samply install failed"
 cargo install --locked inferno || echo "Warning: inferno install failed"
@@ -76,8 +83,10 @@ find lib/crow-tree/src lib/crow-tree/include lib/crow-tree/tests lib/crow-tree/b
 tree-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"
 rs-lint = "cargo clippy --all-targets -- -D warnings"
-ts-lint = { cmd = "cd app/crow-web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-deps"] }
-build = { cmd = "cargo build --release --workspace --exclude crow-kv-client && cargo build --release -p crow-kv-client --features ffi && cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-tree/build -j && cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-rpc/build -j && cmake -S app/crow-diskio -B app/crow-diskio/build -DCMAKE_BUILD_TYPE=Release && cmake --build app/crow-diskio/build -j && cd app/crow-web/ui && npm run build", depends-on = ["install-deps"] }
+ts-lint = { cmd = "cd app/crow-web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-ui-deps"] }
+# Full build: C++ libs + release Rust binaries + frontend. Used by
+# run/bench/profile. Tests use build-cpp (C++ tests) or nothing (Rust tests).
+build = { cmd = "cargo build --release --workspace --exclude crow-kv-client && cargo build --release -p crow-kv-client --features ffi && cd app/crow-web/ui && npm run build", depends-on = ["build-cpp", "install-ui-deps"] }
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
@@ -97,57 +106,89 @@ bench-compare = { cmd = "cargo run --release -p crow-cli -- bench compare", depe
 profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
+# Tasks are grouped by CI job (see doc/working/plan-test.md § "CI Job
+# Grouping Guide"). Each group maps 1:1 to a parallel CI job. Run
+# `pixi run build-tests` once before any test task to pre-build all
+# Rust test binaries; C++ ctest tasks need `pixi run build-cpp`.
 clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
-test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
-test-common-ct = { cmd = "lib/crow-tree/build/crow-common-build/crowcommon_tests", depends-on = ["build"] }
-test-rpc-ct = { cmd = "ctest --test-dir lib/crow-rpc/build --output-on-failure", depends-on = ["build"] }
-test-diskio-ct = { cmd = "ctest --test-dir app/crow-diskio/build --output-on-failure", depends-on = ["build"] }
-test-rpc-ffi = { cmd = "cargo test -p crow-rpc-ffi --all-targets", depends-on = ["build"] }
-test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
-test-common = { cmd = "cargo test -p crow-common --all-targets", depends-on = ["build"] }
-test-protocol = { cmd = "cargo test -p crow-protocol --all-targets", depends-on = ["build"] }
-test-kv-core = { cmd = "cargo test -p crow-kv --all-targets", depends-on = ["build"] }
-test-kv-client = { cmd = "cargo test -p crow-kv-client --all-targets", depends-on = ["build"] }
-test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets", depends-on = ["build"] }
-test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets", depends-on = ["build"] }
-test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets", depends-on = ["build"] }
-test-diskio-client = { cmd = "cargo test -p crow-diskio-client --all-targets", depends-on = ["build"] }
-test-chunkdb = { cmd = "cargo test -p crow-chunkdb --all-targets", depends-on = ["build"] }
-test-chunkdb-client = { cmd = "cargo test -p crow-chunkdb-client --all-targets", depends-on = ["build"] }
-test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets", depends-on = ["build"] }
-test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
-test-console-server = { cmd = "cargo test -p crow-web --all-targets", depends-on = ["build"] }
-test-console-ui = { cmd = "cargo build -p crow-kv-server -p crow-diskdb && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
-# Full workspace test suite, grouped by domain. clean-env only runs at start
-# and before the console block (server-spawning tests with the heaviest
-# process/log footprint); non-spawning and self-cleaning tests run back-to-back.
+# Pre-build ALL Rust test binaries + bin targets in one parallel cargo
+# invocation. Run this once at the start of a CI job so every subsequent
+# `cargo test -p <crate>` step just executes the pre-built binaries
+# without recompiling. Also builds the crow-kv-server / crow-diskdb
+# debug binaries that subprocess-spawning tests (crow-web, crow-console-shared)
+# need at target/debug/.
+build-tests = "cargo test --workspace --all-targets --no-run"
+
+# ── Lint job ──
+# (uses rs-fmt / rs-lint / tree-lint defined above, no separate test-* tasks)
+
+# ── CppTests job: C++ ctest (needs build-cpp) + Rust FFI (cc::Build) ──
+test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build-cpp"] }
+test-common-ct = { cmd = "lib/crow-tree/build/crow-common-build/crowcommon_tests", depends-on = ["build-cpp"] }
+test-rpc-ct = { cmd = "ctest --test-dir lib/crow-rpc/build --output-on-failure", depends-on = ["build-cpp"] }
+test-diskio-ct = { cmd = "ctest --test-dir app/crow-diskio/build --output-on-failure", depends-on = ["build-cpp"] }
+test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets" }
+test-rpc-ffi = { cmd = "cargo test -p crow-rpc-ffi --all-targets" }
+
+# ── UnitTests job: pure Rust, no subprocess spawning ──
+test-common = { cmd = "cargo test -p crow-common --all-targets" }
+test-protocol = { cmd = "cargo test -p crow-protocol --all-targets" }
+test-kv-core = { cmd = "cargo test -p crow-kv --all-targets" }
+test-kv-client = { cmd = "cargo test -p crow-kv-client --all-targets" }
+test-chunkdb-client = { cmd = "cargo test -p crow-chunkdb-client --all-targets" }
+
+# ── ServerTests job: spawns crow-kv-server / crow-diskdb / crow-diskio ──
+test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets" }
+test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets" }
+test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets" }
+test-chunkdb = { cmd = "cargo test -p crow-chunkdb --all-targets" }
+test-diskio-client = { cmd = "cargo test -p crow-diskio-client --all-targets" }
+
+# ── ConsoleTests job: spawns crow-kv-server via lifecycle::deploy_local ──
+# Build the debug binary explicitly so tests find it at target/debug/.
+test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets" }
+test-console-cli = { cmd = "cargo test -p crow-cli --all-targets" }
+test-console-server = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-web --all-targets" }
+
+# ── UITests job: Playwright browser E2E + subprocess spawning ──
+test-console-ui = { cmd = "cargo build -p crow-kv-server -p crow-diskdb && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-ui-deps"] }
+
+# ── Full local suite (not a CI job; runs everything in one process) ──
+# Grouped by CI job order. clean-env runs at start and before the
+# subprocess-spawning blocks to reset test-logs.
 test-suite = { cmd = '''
 bash -c '
 set -e
 pixi run clean-env
+# CppTests
 pixi run test-tree-ct
 pixi run test-tree-ffi
 pixi run test-rpc-ct
 pixi run test-rpc-ffi
 pixi run test-diskio-ct
+# UnitTests
 pixi run test-common
 pixi run test-protocol
 pixi run test-kv-core
 pixi run test-kv-client
-pixi run test-diskdb-client
 pixi run test-chunkdb-client
+# ServerTests
+pixi run clean-env
 pixi run test-kv-server
 pixi run test-diskdb
+pixi run test-diskdb-client
 pixi run test-chunkdb
 pixi run test-diskio-client
+# ConsoleTests
 pixi run clean-env
 pixi run test-console-shared
 pixi run test-console-cli
 pixi run test-console-server
+# UITests
 pixi run clean-env
 pixi run test-console-ui
 '
-''', depends-on = ["build", "install-deps"] }
+''', depends-on = ["build-cpp", "install-ui-deps"] }
 
 # ── Coverage & LOC ───────────────────────────────────────────────
 coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-deps"] }
