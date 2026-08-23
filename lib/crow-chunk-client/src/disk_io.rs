@@ -4,14 +4,10 @@
 //! Block-IO layer — the `DiskWriter` seam.
 //!
 //! `DiskWriter` is the single test-injection point for block IO.
-//! Production impl (`DiskioBlockWriter`) wraps `DiskioClient`; test
-//! impl (`LocalFileDiskWriter`, behind `test-util`) writes to local
-//! files. Replaces the old `BlockWriter` trait.
+//! Production impl (`DiskioBlockWriter`) wraps `DiskioClient`. Test
+//! impls live in `tests/common/`. Replaces the old `BlockWriter`
+//! trait.
 
 pub mod disk_writer;
-#[cfg(feature = "test-util")]
-pub mod local_file;
 
 pub use disk_writer::{DiskWriter, DiskioBlockWriter};
-#[cfg(feature = "test-util")]
-pub use local_file::LocalFileDiskWriter;

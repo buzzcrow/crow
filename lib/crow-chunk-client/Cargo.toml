@@ -12,9 +12,6 @@ autobenches = false
 workspace = true
 
 [features]
-# Enables test-only seams (LocalFileDiskWriter) for UT-level write-flow
-# tests without the diskio/diskdb harness.
-test-util = []
 
 [dependencies]
 crow-chunkdb-client = { path = "../crow-chunkdb-client" }

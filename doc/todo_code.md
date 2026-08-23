@@ -26,3 +26,22 @@ when adding or resolving a tracked item.
 - **`lib/crow-tree/include/crow-tree/mapping_table.h:120`** —
   `Options::mapping_segment_slots` is fixed at `kSegmentSize`; needs
   parameterization for variable segment slot counts.
+
+## crow-chunk-client
+
+- **`lib/crow-chunk-client/tests/common/mod.rs`** — `LocalFileDiskWriter`
+  uses synchronous `std::fs` I/O inside async `DiskWriter` methods (blocks
+  the executor). Acceptable for tests; if tests need true async I/O, wrap
+  in `spawn_blocking`. Also: `fsync` silently skips non-existent files
+  (partial strips where not all disks were written). The production
+  `DiskioBlockWriter` should handle this correctly via the diskio server.
+- **`lib/crow-chunk-client/tests/write_stream.rs`** — `write_stream_whole_strip_retry`
+  test no longer injects failures (the old `MockDiskWriter.with_fail_once`
+  was removed). Whole-strip retry logic needs to be re-implemented in
+  `EcStripWriter` and tested with a `LocalFileDiskWriter` variant that
+  can inject failures.
+- **`lib/crow-chunk-client/tests/write_stream.rs`** —
+  `push_mode_drop_mid_write_deletes_partial` has no assertion on
+  `delete_calls` — `LargeObjectWriter` doesn't implement `Drop` cleanup
+  yet. Need a `Drop` impl that aborts the pipeline + deletes partial
+  chunks.

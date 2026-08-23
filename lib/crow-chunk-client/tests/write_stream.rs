@@ -3,7 +3,7 @@
 
 //! Integration tests for `LargeAsyncObjectWriter::write_stream` and
 //! `LargeObjectWriter` push mode, using mock `ChunkAllocator` +
-//! `DiskWriter` implementations.
+//! `LocalFileDiskWriter` (real file I/O, write-then-read verification).
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -12,14 +12,16 @@
     clippy::similar_names
 )]
 
+mod common;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use crow_chunk_client::{
-    ChunkAllocator, ChunkClientConfig, ChunkIoWriter, DiskWriter, IoError, LargeAsyncObjectWriter,
-    LargeObjectWriter, Result, WriterPool,
+    ChunkAllocator, ChunkClientConfig, ChunkIoWriter, IoError, LargeAsyncObjectWriter, LargeObjectWriter,
+    Result, WriterPool,
 };
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskId;
@@ -31,6 +33,13 @@ use crow_protocol::chunkdb::rpc::{
 };
 use crow_protocol::common::DiskId as ProtoDiskId;
 use crow_protocol::diskdb::rpc::Segment;
+
+use common::LocalFileDiskWriter;
+
+const UNIT_BYTES: u64 = 4096;
+const DATA_NUM: usize = 4;
+const CODE_NUM: usize = 1;
+const TOTAL: usize = DATA_NUM + CODE_NUM;
 
 // ── Mock ChunkAllocator ──────────────────────────────────────────
 
@@ -212,53 +221,6 @@ impl ChunkAllocator for MockChunkAllocator {
     }
 }
 
-// ── Mock DiskWriter ──────────────────────────────────────────────
-
-#[derive(Debug, Clone, Default)]
-struct MockDiskWriter {
-    writes: Arc<Mutex<Vec<MockWrite>>>,
-    fsyncs: Arc<Mutex<Vec<(u64, u64)>>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MockWrite {
-    disk_high: u64,
-    disk_low: u64,
-    zone_index: u32,
-    zone_offset: u64,
-    data: Vec<u8>,
-}
-
-impl MockDiskWriter {
-    fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[async_trait]
-impl DiskWriter for MockDiskWriter {
-    async fn write(&self, seg: &Segment, unit_bytes: u64, data: Bytes) -> Result<()> {
-        let disk_id = seg
-            .disk_id
-            .as_ref()
-            .ok_or_else(|| IoError::Internal("segment missing disk_id".into()))?;
-        let zone_offset = seg.unit_offset * unit_bytes;
-        self.writes.lock().unwrap().push(MockWrite {
-            disk_high: disk_id.high,
-            disk_low: disk_id.low,
-            zone_index: seg.zone_index,
-            zone_offset,
-            data: data.to_vec(),
-        });
-        Ok(())
-    }
-
-    async fn fsync(&self, disk_id: DiskId) -> Result<()> {
-        self.fsyncs.lock().unwrap().push((disk_id.high, disk_id.low));
-        Ok(())
-    }
-}
-
 // ── Helpers ──────────────────────────────────────────────────────
 
 fn test_config(max_chunk_size: u64) -> Arc<ChunkClientConfig> {
@@ -280,7 +242,7 @@ fn ec_4_1() -> EcScheme {
 
 fn make_writer(
     chunkdb: MockChunkAllocator,
-    diskio: MockDiskWriter,
+    diskio: LocalFileDiskWriter,
     ec: EcScheme,
     config: Arc<ChunkClientConfig>,
 ) -> LargeAsyncObjectWriter {
@@ -289,11 +251,51 @@ fn make_writer(
 
 fn make_push_writer(
     chunkdb: MockChunkAllocator,
-    diskio: MockDiskWriter,
+    diskio: LocalFileDiskWriter,
     ec: EcScheme,
     config: Arc<ChunkClientConfig>,
 ) -> LargeObjectWriter {
     LargeObjectWriter::new(Arc::new(chunkdb), Arc::new(diskio), ec, config)
+}
+
+/// Read a data shard from disk. The mock allocator assigns shard `i`
+/// of strip `s` to disk `1000+i` at unit_offset `s*TOTAL + i`.
+fn read_data_shard(diskio: &LocalFileDiskWriter, strip: usize, shard: usize) -> Vec<u8> {
+    let unit_offset = (strip * TOTAL + shard) as u64;
+    let zone_offset = unit_offset * UNIT_BYTES;
+    let disk_id = DiskId::new(1000 + shard as u64, shard as u64);
+    diskio
+        .read_block(disk_id, zone_offset, UNIT_BYTES as usize)
+        .unwrap_or_default()
+}
+
+/// Read a parity shard from disk. Parity shard `i` of strip `s` is on
+/// disk `1000+data_num+i` at unit_offset `s*TOTAL + data_num + i`.
+fn read_parity_shard(diskio: &LocalFileDiskWriter, strip: usize, parity_idx: usize) -> Vec<u8> {
+    let unit_offset = (strip * TOTAL + DATA_NUM + parity_idx) as u64;
+    let zone_offset = unit_offset * UNIT_BYTES;
+    let disk_id = DiskId::new(
+        1000 + DATA_NUM as u64 + parity_idx as u64,
+        DATA_NUM as u64 + parity_idx as u64,
+    );
+    diskio
+        .read_block(disk_id, zone_offset, UNIT_BYTES as usize)
+        .unwrap_or_default()
+}
+
+/// Reconstruct original data from data shards across all strips.
+fn reconstruct_data(diskio: &LocalFileDiskWriter, num_strips: usize) -> Vec<u8> {
+    let mut reconstructed = Vec::new();
+    for s in 0..num_strips {
+        for i in 0..DATA_NUM {
+            let shard = read_data_shard(diskio, s, i);
+            // Trim trailing zeros for partial last strip — the writer
+            // pads partial shards to unit_bytes. We only know the real
+            // length from the Location, so callers trim as needed.
+            reconstructed.extend_from_slice(&shard);
+        }
+    }
+    reconstructed
 }
 
 // ── write_stream tests ───────────────────────────────────────────
@@ -301,7 +303,8 @@ fn make_push_writer(
 #[tokio::test]
 async fn write_stream_empty_object() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
     let data: Vec<u8> = Vec::new();
@@ -312,7 +315,8 @@ async fn write_stream_empty_object() {
 #[tokio::test]
 async fn write_stream_single_block_4mb() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -335,17 +339,15 @@ async fn write_stream_single_block_4mb() {
     assert_eq!(st.seal_calls, 1);
     assert_eq!(st.delete_calls, 0);
 
-    let writes = diskio.writes.lock().unwrap();
-    assert_eq!(writes.len(), 5);
-    for w in writes.iter() {
-        assert_eq!(w.data.len(), 4096);
-    }
+    // 4 data writes + 1 parity write = 5 writes.
+    assert_eq!(diskio.write_count(), 5);
 }
 
 #[tokio::test]
 async fn write_stream_partial_strip_3_blocks() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -358,19 +360,15 @@ async fn write_stream_partial_strip_3_blocks() {
     assert_eq!(locs.len(), 1);
     assert_eq!(locs[0].length, 3 * 4096);
 
-    let writes = diskio.writes.lock().unwrap();
     // 3 data writes + 1 parity write = 4 writes.
-    assert_eq!(writes.len(), 4);
-    for w in writes.iter().take(3) {
-        assert_eq!(w.data.len(), 4096);
-    }
-    assert_eq!(writes[3].data.len(), 4096);
+    assert_eq!(diskio.write_count(), 4);
 }
 
 #[tokio::test]
 async fn write_stream_multi_strip_same_chunk() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -388,14 +386,15 @@ async fn write_stream_multi_strip_same_chunk() {
     assert_eq!(st.append_calls, 1);
     assert_eq!(st.seal_calls, 1);
 
-    let writes = diskio.writes.lock().unwrap();
-    assert_eq!(writes.len(), 10);
+    // 8 data + 2 parity = 10 writes.
+    assert_eq!(diskio.write_count(), 10);
 }
 
 #[tokio::test]
 async fn write_stream_chunk_rotation() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(4 * 4096));
 
@@ -415,14 +414,15 @@ async fn write_stream_chunk_rotation() {
     assert_eq!(st.allocate_calls, 2);
     assert_eq!(st.seal_calls, 2);
 
-    let writes = diskio.writes.lock().unwrap();
-    assert_eq!(writes.len(), 10);
+    // 8 data + 2 parity = 10 writes.
+    assert_eq!(diskio.write_count(), 10);
 }
 
 #[tokio::test]
 async fn write_stream_unknown_size_streaming() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -436,7 +436,8 @@ async fn write_stream_unknown_size_streaming() {
 #[tokio::test]
 async fn write_stream_data_integrity() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -450,11 +451,8 @@ async fn write_stream_data_integrity() {
         .unwrap();
     assert_eq!(locs.len(), 1);
 
-    let writes = diskio.writes.lock().unwrap();
-    let mut reconstructed = Vec::new();
-    for w in writes.iter().take(4) {
-        reconstructed.extend_from_slice(&w.data);
-    }
+    // Read back data shards from disk and reconstruct.
+    let reconstructed = reconstruct_data(&diskio, 1);
     assert_eq!(reconstructed, data);
 }
 
@@ -463,7 +461,8 @@ async fn write_stream_parity_correctness() {
     use crow_common::ec::{decode, encode_parity_from_shards};
 
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -473,16 +472,28 @@ async fn write_stream_parity_correctness() {
         .await
         .unwrap();
 
-    let writes = diskio.writes.lock().unwrap();
-    let data_shards: Vec<&[u8]> = writes.iter().take(4).map(|w| w.data.as_slice()).collect();
-    let expected_parity = encode_parity_from_shards(ec, &data_shards).unwrap();
-    assert_eq!(writes[4].data, expected_parity[0]);
+    // Read back data shards + parity shard from disk.
+    let data_shards: Vec<Vec<u8>> = {
+        let mut v = Vec::new();
+        for i in 0..DATA_NUM {
+            v.push(read_data_shard(&diskio, 0, i));
+        }
+        v
+    };
+    let parity_shard = read_parity_shard(&diskio, 0, 0);
 
-    let mut blocks: Vec<Option<Vec<u8>>> = writes.iter().take(5).map(|w| Some(w.data.clone())).collect();
+    // Compare with direct encode.
+    let shard_refs: Vec<&[u8]> = data_shards.iter().map(Vec::as_slice).collect();
+    let expected_parity = encode_parity_from_shards(ec, &shard_refs).unwrap();
+    assert_eq!(parity_shard, expected_parity[0]);
+
+    // Decode round-trip: lose data shard 0, reconstruct.
+    let mut blocks: Vec<Option<Vec<u8>>> = data_shards.into_iter().map(Some).collect();
+    blocks.push(Some(parity_shard));
     blocks[0] = None;
     let recovered = decode(ec, blocks).unwrap();
     let mut reconstructed = Vec::new();
-    for shard in recovered.iter().take(4) {
+    for shard in recovered.iter().take(DATA_NUM) {
         reconstructed.extend_from_slice(shard);
     }
     assert_eq!(reconstructed, data);
@@ -491,7 +502,8 @@ async fn write_stream_parity_correctness() {
 #[tokio::test]
 async fn write_stream_fsync_per_strip() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -501,17 +513,18 @@ async fn write_stream_fsync_per_strip() {
         .await
         .unwrap();
 
-    let fsyncs = diskio.fsyncs.lock().unwrap();
-    assert_eq!(fsyncs.len(), 5);
+    // 1 strip → 5 unique disks (4 data + 1 parity) → 5 fsyncs.
+    assert_eq!(diskio.fsync_count(), 5);
 }
 
 #[tokio::test]
 async fn write_stream_whole_strip_retry() {
     // The new EcStripWriter doesn't have whole-strip retry yet (the
-    // retry logic was in the old pipeline). This test is adjusted to
-    // verify basic 2-strip write without injected failure.
+    // retry logic was in the old pipeline). This test verifies basic
+    // 2-strip write without injected failure.
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -529,8 +542,8 @@ async fn write_stream_whole_strip_retry() {
     assert_eq!(st.append_calls, 1);
     assert_eq!(st.seal_calls, 1);
 
-    let writes = diskio.writes.lock().unwrap();
-    assert_eq!(writes.len(), 10);
+    // 8 data + 2 parity = 10 writes.
+    assert_eq!(diskio.write_count(), 10);
 }
 
 // ── Push mode (ChunkIoWriter) tests ──────────────────────────────
@@ -542,7 +555,8 @@ fn block(value: u8, size: usize) -> Bytes {
 #[tokio::test]
 async fn push_mode_basic_one_strip() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -564,7 +578,8 @@ async fn push_mode_basic_one_strip() {
 #[tokio::test]
 async fn push_mode_empty_object() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
 
@@ -575,7 +590,8 @@ async fn push_mode_empty_object() {
 #[tokio::test]
 async fn push_mode_on_data_after_finish() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
 
@@ -588,7 +604,8 @@ async fn push_mode_on_data_after_finish() {
 #[tokio::test]
 async fn push_mode_on_finish_twice() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
 
@@ -601,7 +618,8 @@ async fn push_mode_on_finish_twice() {
 #[tokio::test]
 async fn push_mode_on_error_no_sealed() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
 
@@ -612,7 +630,8 @@ async fn push_mode_on_error_no_sealed() {
 #[tokio::test]
 async fn push_mode_on_error_after_sealed_chunk() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb.clone(), diskio, ec, test_config(4 * 4096));
 
@@ -632,7 +651,8 @@ async fn push_mode_on_error_after_sealed_chunk() {
 #[tokio::test]
 async fn push_mode_data_integrity() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
 
@@ -646,23 +666,16 @@ async fn push_mode_data_integrity() {
     assert_eq!(locs.len(), 1);
     assert_eq!(locs[0].length, 8 * 4096);
 
-    let writes = diskio.writes.lock().unwrap();
-    let mut data_writes: Vec<&MockWrite> = writes
-        .iter()
-        .filter(|w| (1000..=1003).contains(&w.disk_high))
-        .collect();
-    data_writes.sort_by_key(|w| w.zone_offset);
-    let mut reconstructed = Vec::new();
-    for w in data_writes {
-        reconstructed.extend_from_slice(&w.data);
-    }
+    // Read back data shards from 2 strips and reconstruct.
+    let reconstructed = reconstruct_data(&diskio, 2);
     assert_eq!(reconstructed, data);
 }
 
 #[tokio::test]
 async fn push_mode_backpressure() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
         max_chunk_size: 1024 * 1024,
@@ -689,7 +702,8 @@ async fn push_mode_backpressure() {
 #[tokio::test]
 async fn write_stream_size_hint_fewer_bytes() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
 
@@ -706,7 +720,8 @@ async fn write_stream_size_hint_fewer_bytes() {
 #[tokio::test]
 async fn write_stream_size_hint_more_bytes() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
 
@@ -725,7 +740,8 @@ async fn write_stream_size_hint_more_bytes() {
 #[tokio::test]
 async fn write_stream_exact_strip_capacity() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
 
@@ -748,7 +764,8 @@ async fn write_stream_exact_strip_capacity() {
 #[tokio::test]
 async fn write_stream_bounded_prealloc() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
         max_chunk_size: 1024 * 1024 * 1024,
@@ -785,7 +802,8 @@ async fn push_mode_drop_mid_write_deletes_partial() {
     // verifies the API is sound — drop doesn't panic. Full drop-cleanup
     // is a future task.
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
 
@@ -803,7 +821,8 @@ async fn push_mode_drop_mid_write_deletes_partial() {
 #[tokio::test]
 async fn writer_pool_budget_rejects_over_budget() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
         max_chunk_size: 1024 * 1024 * 1024,
@@ -832,7 +851,8 @@ async fn writer_pool_budget_rejects_over_budget() {
 #[tokio::test]
 async fn writer_pool_per_writer_memory() {
     let chunkdb = MockChunkAllocator::new();
-    let diskio = MockDiskWriter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
         max_chunk_size: 1024 * 1024 * 1024,
