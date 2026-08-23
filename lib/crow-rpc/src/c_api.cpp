@@ -454,6 +454,52 @@ void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t ms
     server->server->register_handler(msg_type, echo_handler);
 }
 
+// ── Custom handler dispatch (R115: Rust server handlers) ──────────
+
+// Wraps a C dispatch callback as a C++ HandlerFn. Extracts the
+// correlation fields + control/data byte slices from the frame, invokes
+// the C callback, then releases the frame. Always returns nullptr
+// (async) — the callback submits the response later via
+// crow_rpc_server_submit_response. The callback + user_data are captured
+// by value in the lambda; user_data lifetime is owned by the caller
+// (the Rust FFI box, freed when the handler is re-registered or the
+// server is dropped).
+static crow::rpc::OutFrame *c_handler_trampoline(crow::rpc::Frame *request, crow::rpc::Connection *conn,
+                                                 crow_rpc_handler_fn callback, void *user_data)
+{
+    uint64_t       req_id      = request->request_id;
+    uint64_t       create_nano = request->rpc_create_nano;
+    uint16_t       msg_type    = request->header.msg_type;
+    const uint8_t *ctrl_ptr    = request->control.empty() ? nullptr : request->control.data();
+    uint32_t       ctrl_len    = static_cast<uint32_t>(request->control.size());
+    const uint8_t *data_ptr    = nullptr;
+    uint32_t       data_len    = 0;
+    if (request->data_buf != nullptr && request->data_buf->len > 0) {
+        data_ptr = request->data_buf->data;
+        data_len = request->data_buf->len;
+    }
+    void *conn_handle = static_cast<void *>(conn);
+
+    // Invoke the C callback with borrowed pointers (frame is released
+    // after the callback returns — the callback must copy what it needs).
+    callback(req_id, create_nano, msg_type, ctrl_ptr, ctrl_len, data_ptr, data_len, conn_handle, user_data);
+
+    delete request;
+    return nullptr; // async — callback submits the response later.
+}
+
+void crow_rpc_server_register_handler(crow_rpc_server_t server, uint16_t msg_type, crow_rpc_handler_fn callback,
+                                      void *user_data)
+{
+    if (server == nullptr || callback == nullptr) {
+        return;
+    }
+    server->server->register_handler(msg_type,
+                                     [callback, user_data](crow::rpc::Frame *req, crow::rpc::Connection *conn) {
+                                         return c_handler_trampoline(req, conn, callback, user_data);
+                                     });
+}
+
 crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *conn_handle, const uint8_t *control,
                                                 uint32_t control_len, const uint8_t *data, uint32_t data_len,
                                                 uint16_t msg_type, uint64_t request_id)

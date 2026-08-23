@@ -85,6 +85,21 @@ pub type crow_rpc_on_complete = Option<
     ),
 >;
 
+// ── Custom server handler dispatch (R115: Rust server handlers) ──
+pub type crow_rpc_handler_fn = Option<
+    unsafe extern "C" fn(
+        request_id: u64,
+        rpc_create_nano: u64,
+        msg_type: u16,
+        control: *const u8,
+        control_len: u32,
+        data: *const u8,
+        data_len: u32,
+        conn_handle: *mut c_void,
+        user_data: *mut c_void,
+    ),
+>;
+
 // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────────
 pub type crow_rpc_co_build_request = Option<
     unsafe extern "C" fn(
@@ -165,6 +180,13 @@ extern "C" {
     pub fn crow_rpc_connect(server: crow_rpc_server_t, addr: *const c_char, port: c_int) -> crow_rpc_conn_t;
 
     pub fn crow_rpc_server_register_echo_handler(server: crow_rpc_server_t, msg_type: u16);
+
+    pub fn crow_rpc_server_register_handler(
+        server: crow_rpc_server_t,
+        msg_type: u16,
+        callback: crow_rpc_handler_fn,
+        user_data: *mut c_void,
+    );
 
     pub fn crow_rpc_server_submit_response(
         server: crow_rpc_server_t,

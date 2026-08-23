@@ -115,6 +115,37 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_register_echo_handler(self.handle, msg_type) };
     }
 
+    /// Register a custom Rust dispatch handler for the given msg_type.
+    /// The handler is invoked on the C++ I/O worker thread for every
+    /// incoming frame with that msg_type. It receives a `ServerRequest`
+    /// carrying the correlation fields, the control + data byte slices
+    /// (borrowed for the duration of the call only — copy what must
+    /// outlive the call), and the `conn_handle` to pass back to
+    /// `submit_response`.
+    ///
+    /// The handler must be non-blocking: spawn async work (e.g. onto a
+    /// tokio runtime) and return; submit the response later via
+    /// `submit_response`. This mirrors the C++ async-handler pattern
+    /// (return nullptr, submit later). Re-registering the same msg_type
+    /// replaces the prior handler (the old closure is leaked — there is
+    /// no unregister API; handlers live for the server's lifetime, which
+    /// for a server registered once at startup is the process lifetime).
+    pub fn register_handler<F>(&self, msg_type: u16, handler: F)
+    where
+        F: Fn(ServerRequest<'_>) + Send + 'static,
+    {
+        let box_ptr: *mut Box<dyn Fn(ServerRequest<'_>) + Send + 'static> =
+            Box::into_raw(Box::new(Box::new(handler)));
+        unsafe {
+            sys::crow_rpc_server_register_handler(
+                self.handle,
+                msg_type,
+                Some(rust_handler_trampoline),
+                box_ptr.cast::<std::ffi::c_void>(),
+            );
+        }
+    }
+
     /// Submit a response on a server-side connection. Thread-safe — may
     /// be called from any thread (e.g. a Rust thread pool worker).
     /// conn_handle is the raw pointer passed to the dispatch callback.
@@ -239,6 +270,24 @@ impl RpcError {
             other => RpcError::Unknown(other),
         }
     }
+
+    // Transport-level retryable classification shared by all service
+    // migrations (R115/R116/R117/R32). Returns true for transient
+    // failures where retrying on a fresh connection is reasonable;
+    // false for configuration/registration errors that won't recover
+    // by retrying the same call. `ConnectionError` is retryable (a
+    // generic connect/reset failure); `Unknown` is not (caller must
+    // inspect the raw code).
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            RpcError::ConnectionClosed
+                | RpcError::Timeout
+                | RpcError::SendQueueFull
+                | RpcError::ConnectionError
+        )
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -258,3 +307,67 @@ impl std::fmt::Display for RpcError {
 }
 
 impl std::error::Error for RpcError {}
+
+// ── Custom Rust dispatch handlers (R115: Rust server handlers) ──────
+
+/// A borrowed view of an incoming server request, passed to a handler
+/// registered via `RpcServer::register_handler`. All byte slices are
+/// borrowed for the duration of the handler call only — copy what must
+/// outlive the call. `conn_handle` is the opaque connection pointer to
+/// pass back to `RpcServer::submit_response` when the response is ready.
+pub struct ServerRequest<'a> {
+    pub request_id: u64,
+    pub rpc_create_nano: u64,
+    pub msg_type: u16,
+    pub control: &'a [u8],
+    pub data: Option<&'a [u8]>,
+    pub conn_handle: *mut std::ffi::c_void,
+}
+
+// Safety: conn_handle is a raw pointer to a C++ Connection owned by the
+// transport. It is safe to send across threads (the transport's send
+// queue is mutex-protected); the handler stores it and later passes it
+// to submit_response from any thread.
+unsafe impl Send for ServerRequest<'_> {}
+
+// Trampoline invoked by the C++ dispatch layer. Reconstructs the borrowed
+// byte slices, builds a ServerRequest, and invokes the boxed Rust closure.
+// The closure box pointer is the user_data registered with the handler.
+#[allow(clippy::borrowed_box)] // FFI: borrowing a Box<dyn Fn> stored behind a raw pointer
+unsafe extern "C" fn rust_handler_trampoline(
+    request_id: u64,
+    rpc_create_nano: u64,
+    msg_type: u16,
+    control: *const u8,
+    control_len: u32,
+    data: *const u8,
+    data_len: u32,
+    conn_handle: *mut std::ffi::c_void,
+    user_data: *mut std::ffi::c_void,
+) {
+    if user_data.is_null() {
+        return;
+    }
+    let boxed: &Box<dyn Fn(ServerRequest<'_>) + Send + 'static> =
+        unsafe { &*(user_data.cast::<Box<dyn Fn(ServerRequest<'_>) + Send + 'static>>()) };
+    let closure: &(dyn Fn(ServerRequest<'_>) + Send + 'static) = &**boxed;
+    let control_slice = if control.is_null() || control_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(control, control_len as usize) }
+    };
+    let data_slice = if data.is_null() || data_len == 0 {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(data, data_len as usize) })
+    };
+    let req = ServerRequest {
+        request_id,
+        rpc_create_nano,
+        msg_type,
+        control: control_slice,
+        data: data_slice,
+        conn_handle,
+    };
+    closure(req);
+}

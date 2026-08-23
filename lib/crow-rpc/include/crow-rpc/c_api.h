@@ -160,6 +160,36 @@ crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int
 // smoke tests without writing a C++ handler.
 void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t msg_type);
 
+// ── Custom handler dispatch (R115: Rust server handlers) ──────────
+
+// Dispatch callback invoked on the C++ I/O worker thread when a frame
+// with a registered msg_type arrives. The callback receives the
+// correlation fields (request_id, rpc_create_nano, msg_type), the
+// control + data byte slices, the connection handle (to pass back to
+// crow_rpc_server_submit_response), and the user_data pointer registered
+// with the handler.
+//
+// The callback MUST treat the control/data pointers as borrowed only for
+// the duration of the call — the frame is released after the callback
+// returns. Copy any bytes that must outlive the call. The callback is
+// non-blocking from the dispatch thread's perspective: spawn async work
+// (e.g. onto a tokio runtime) and return; submit the response later via
+// crow_rpc_server_submit_response using the conn_handle. This mirrors
+// the C++ async-handler pattern (return nullptr, submit later).
+//
+// data is null (data_len == 0) for control-only requests.
+typedef void (*crow_rpc_handler_fn)(uint64_t request_id, uint64_t rpc_create_nano, uint16_t msg_type,
+                                    const uint8_t *control, uint32_t control_len, const uint8_t *data,
+                                    uint32_t data_len, void *conn_handle, void *user_data);
+
+// Register a custom dispatch callback for the given msg_type. The
+// callback is invoked for every incoming frame with that msg_type. This
+// lets a Rust (or other non-C++) server register handlers without writing
+// a C++ HandlerFn. Re-registering the same msg_type replaces the prior
+// handler.
+void crow_rpc_server_register_handler(crow_rpc_server_t server, uint16_t msg_type, crow_rpc_handler_fn callback,
+                                      void *user_data);
+
 // Submit a response on a server-side connection. Allocates buffers from
 // the pool, builds an OutFrame, and calls transport->submit (enqueue +
 // try_send). Thread-safe — may be called from any thread (e.g. a Rust
