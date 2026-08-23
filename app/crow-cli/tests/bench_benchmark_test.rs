@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::console::{crow_cli_bin, run};
+use common::console::{crow_cli_bin, crow_rpc_echo_server_bin, run};
 use crow_console_shared::lifecycle;
 use std::sync::{Mutex, OnceLock};
 
@@ -184,6 +184,13 @@ async fn bench_benchmark_rpc_end_to_end() {
     let cli = crow_cli_bin();
     if !cli.exists() {
         eprintln!("skipping: crow_kv CLI binary not built ({})", cli.display());
+        return;
+    }
+    // `bench rpc` spawns the CMake-built `crow-rpc-echo-server` binary.
+    // Skip when C++ libs haven't been built (e.g. bare `cargo test -p
+    // crow-cli` without `pixi run build-cpp`).
+    if crow_rpc_echo_server_bin().is_none_or(|p| !p.exists()) {
+        eprintln!("skipping: crow-rpc-echo-server binary not built (run `pixi run build-cpp`)");
         return;
     }
 

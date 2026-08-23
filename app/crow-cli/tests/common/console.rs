@@ -57,6 +57,37 @@ pub fn crow_cli_bin() -> PathBuf {
     p
 }
 
+/// Locate the CMake-built `crow-rpc-echo-server` binary. Mirrors the
+/// search order in `bench/targets/rpc.rs::echo_server_bin`:
+///
+/// 1. `$CROW_RPC_ECHO_SERVER_BIN`
+/// 2. `lib/crow-rpc/build/crow-rpc-echo-server` relative to the
+///    workspace root (pixi `build-cpp` output)
+///
+/// Returns `None` when not found (e.g. C++ libs not built).
+#[must_use]
+pub fn crow_rpc_echo_server_bin() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CROW_RPC_ECHO_SERVER_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    let cli = crow_cli_bin();
+    let mut dir = cli.parent()?.to_path_buf();
+    for _ in 0..5 {
+        let candidate = dir
+            .join("lib")
+            .join("crow-rpc")
+            .join("build")
+            .join("crow-rpc-echo-server");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
 /// A real `crow-kv-server` process forked on loopback.
 pub struct Upstream {
     pub pid: u32,
