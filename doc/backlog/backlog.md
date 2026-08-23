@@ -84,7 +84,7 @@ complexity, and dependency. Before implementation, follow the
 
 ### Data Path (diskio + chunk object writers + read flow)
 
-Dependency order: R93 → R94, R106, R107 → R110, R111, R112
+Dependency order: R93 → R106, R107 → R110, R111, R112
 (R110/R112 reuse R110's negative list; R111 reuses R110's negative
 list + degraded-strip tracking). R32 depends on the RPC library but
 is in a separate area (KV consensus).
@@ -97,17 +97,6 @@ is in a separate area (KV consensus).
   storage (8+4 EC) on shared chunks. Configurable policy (seal age,
   strip count, manual trigger) + bandwidth throttling. Foundation
   for R106's mirror-first write strategy.
-- **[R94](R94-chunkdb-large-object-writer.md)** — Large object writer
-  + chunk IO interface + Location — Area: chunkdb — Dedicated chunk
-  per large object (> EC strip size, e.g. > 8 MB for 8+4). Direct EC
-  strip writes, producer-consumer strip preallocation (object size
-  known upfront → strip count known), ~1 GB max chunk size with chunk
-  rotation for very large objects. **Defines the shared `ChunkIoWriter`
-  async interface** (`on_data`/`on_finish`/`on_error` + completion)
-  and the `Location` type (`chunk_id [offset, end)` + logical
-  offset/length, array for multi-chunk) that R106 and R107 depend on.
-  All writer code lives in `crow-chunk-client`. Reference: the reference's
-  `SObjSChunkWriter` / `SObjMChunkWriter`.
 - **[R106](R106-chunkdb-small-object-writer.md)** — Small object
   shared chunk writer — Area: chunkdb — Shared 256 MB chunks for
   small objects (< EC strip threshold). Dynamic pool of write
