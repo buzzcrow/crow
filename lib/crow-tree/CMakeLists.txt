@@ -26,8 +26,10 @@ endif()
 # compile definition + liburing library). We still need to probe
 # liburing here to decide whether to compile block_async_page_store.cpp
 # (which uses the reactor directly).
-find_path(LIBURING_INCLUDE_DIR liburing.h)
-find_library(LIBURING_LIB NAMES uring)
+# HINTS ENV CONDA_PREFIX: prefer the pixi/conda env's liburing (see
+# crow-common/cpp/CMakeLists.txt for rationale).
+find_path(LIBURING_INCLUDE_DIR liburing.h HINTS ENV CONDA_PREFIX PATH_SUFFIXES include)
+find_library(LIBURING_LIB NAMES uring HINTS ENV CONDA_PREFIX PATH_SUFFIXES lib)
 
 # ── crow-common (shared utils: crc32c, log, gzip, metrics, reactor) ──
 # Built in-tree via add_subdirectory so a single `cmake -S crow-tree`

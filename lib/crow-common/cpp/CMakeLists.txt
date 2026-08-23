@@ -17,8 +17,11 @@ add_compile_options(-Wall -Wextra -Werror)
 # excluded from the build entirely (not compiled to a no-op) when not
 # found. Probed before the source glob below so the exclusion list can
 # be applied pre-add_library.
-find_path(LIBURING_INCLUDE_DIR liburing.h)
-find_library(LIBURING_LIB NAMES uring)
+# HINTS ENV CONDA_PREFIX: prefer the pixi/conda env's liburing over any stale
+# system copy (e.g. /usr/local) — the env ships a newer liburing whose headers
+# declare io_uring_sqe_shift / io_uring_load_sq_head used by diskio_uring.cpp.
+find_path(LIBURING_INCLUDE_DIR liburing.h HINTS ENV CONDA_PREFIX PATH_SUFFIXES include)
+find_library(LIBURING_LIB NAMES uring HINTS ENV CONDA_PREFIX PATH_SUFFIXES lib)
 
 # ── Library ───────────────────────────────────────────────────────
 file(GLOB_RECURSE CROWCOMMON_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)

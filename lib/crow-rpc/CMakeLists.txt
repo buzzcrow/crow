@@ -90,10 +90,26 @@ find_package(Threads REQUIRED)
 target_link_libraries(crow-rpc PUBLIC Threads::Threads crowcommon)
 
 # flatbuffers C++ runtime headers (header-only, no link needed).
-find_path(FLATBUFFERS_INCLUDE_DIR flatbuffers/flatbuffers.h)
+# HINTS ENV CONDA_PREFIX: prefer the pixi/conda env's flatbuffers over any
+# stale system copy (e.g. /usr/local) — generated schemas are emitted by the
+# env's flatc and assert a matching FLATBUFFERS_VERSION_MAJOR.
+find_path(FLATBUFFERS_INCLUDE_DIR flatbuffers/flatbuffers.h HINTS ENV CONDA_PREFIX PATH_SUFFIXES include)
 if(FLATBUFFERS_INCLUDE_DIR)
   target_include_directories(crow-rpc SYSTEM PRIVATE ${FLATBUFFERS_INCLUDE_DIR})
 endif()
+
+# ── Boost (force the pixi/conda libboost, not a stale /opt/boost) ──
+# folly-config.cmake calls find_package(Boost ... COMPONENTS ...). A broken
+# /opt/boost (built against a newer glibc than the conda toolchain) ships a
+# Boost CMake config that wins by default and causes undefined-reference link
+# errors. Force CMake's FindBoost module (CMP0167=OLD) at the conda prefix and
+# ignore /opt/boost so folly links the same libboost 1.90.0 it was built
+# against. Set before find_package(folly) so folly's internal Boost lookup
+# inherits these.
+cmake_policy(SET CMP0167 OLD)
+set(BOOST_ROOT $ENV{CONDA_PREFIX})
+set(Boost_NO_BOOST_CMAKE ON)
+list(APPEND CMAKE_IGNORE_PATH /opt/boost)
 
 # ── folly (ConcurrentHashMap for pending map) ─────────────────────
 # Required: the pending map uses folly::ConcurrentHashMap (striped locks)
