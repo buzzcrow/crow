@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R110** — Bump this line in the same commit when adding a new item.
+**Next R number: R113** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -84,8 +84,10 @@ complexity, and dependency. Before implementation, follow the
 
 ### Data Path (diskio + chunk object writers + read flow)
 
-Dependency order: R93 → R94, R106, R107. R32 depends
-on the RPC library but is in a separate area (KV consensus).
+Dependency order: R93 → R94, R106, R107 → R110, R111, R112
+(R110/R112 reuse R110's negative list; R111 reuses R110's negative
+list + degraded-strip tracking). R32 depends on the RPC library but
+is in a separate area (KV consensus).
 
 - **[R93](R93-chunkdb-mirror-to-ec-conversion.md)** — Mirror-to-EC
   conversion — Area: chunkdb — Background conversion of mirror strips
@@ -104,7 +106,7 @@ on the RPC library but is in a separate area (KV consensus).
   async interface** (`on_data`/`on_finish`/`on_error` + completion)
   and the `Location` type (`chunk_id [offset, end)` + logical
   offset/length, array for multi-chunk) that R106 and R107 depend on.
-  All writer code lives in `crow-chunkdb-client`. Reference: the reference's
+  All writer code lives in `crow-chunk-client`. Reference: the reference's
   `SObjSChunkWriter` / `SObjMChunkWriter`.
 - **[R106](R106-chunkdb-small-object-writer.md)** — Small object
   shared chunk writer — Area: chunkdb — Shared 256 MB chunks for
@@ -124,6 +126,59 @@ on the RPC library but is in a separate area (KV consensus).
   Partial range reads (`read_range`). Streaming read for large
   objects (memory-bounded `ChunkReadStream`). Transparent across
   mirror→EC conversion (R93).
+
+- **[R110](R110-chunkdb-chunkio-error-handling.md)** — Large-write
+  IO error handling (write path) — Area: chunkdb / diskdb / diskio
+  — In-line error handler for the large-write data path (R94),
+  spanning three services: chunkdb (strip metadata,
+  `update_chunk_strip`), diskdb (block allocation with disk
+  exclusion), diskio (write/fsync error detection). Single-block
+  replacement on write failure (not whole-strip retry): keep
+  successful blocks, re-allocate the failed block on a healthy
+  disk via diskdb, `update_chunk_strip` to replace the segment in
+  chunkdb. Negative list (TTL-based) temporarily blocks bad disks
+  from new allocations across diskdb — shared with R111 (read) and
+  R112 (small-write). Degraded strip tracking (parity missing,
+  data durable). Escalation to R83 recovery when inline retries
+  are exhausted. Read-path error handling is a separate requirement
+  (R111); R110 defines the negative list and degraded-strip
+  tracking that R111 and R112 reuse.
+- **[R111](R111-chunkdb-read-io-error-handling.md)** — Chunk read
+  IO error handling (unified read path) — Area: chunkdb / diskdb /
+  diskio — In-line error handler for the read path (R107), which
+  is unified across large objects (EC strips, R94) and small
+  objects (mirror strips, R106, before R93 conversion). EC decode
+  fallback for failed EC blocks (read surviving data + parity,
+  isa-l decode the missing block, within `code_num` tolerance);
+  mirror replica fallback for failed mirror strips (read next
+  replica). Background rebuild + replace after a successful
+  fallback (allocate new block via diskdb, write reconstructed
+  data via diskio, `update_chunk_strip` to repair the strip so
+  future reads don't pay the fallback cost). Degraded strip read
+  tolerance (parity missing — readable for full-data, partial
+  result + R83 escalation on data block failure). Partial read
+  results with explicit failed byte ranges (no silent corruption —
+  applies to both `read_range` and `ChunkReadStream`). Escalation
+  to R83 when inline fallback is unrecoverable. Reuses R110's
+  negative list and degraded-strip tracking.
+- **[R112](R112-chunkdb-small-write-io-error-handling.md)** —
+  Small-write IO error handling (multi-service cooperation) — Area:
+  chunkdb / diskdb / diskio — In-line error handler for the
+  small-write data path (R106), spanning the same three services
+  as R110. Reuses R110's negative list and escalation reporting,
+  but adds batch-aware per-object retry (a single diskio write
+  carries a batch of N small objects — a partial failure must
+  track which objects were written and retry only the unwritten
+  ones) and mirror-replica replacement specific to the shared-
+  chunk writer (R106 writes 3 mirror replicas first, then R93
+  converts to EC in the background — a single replica failure is
+  tolerated but must be re-allocated + `update_chunk_strip` to
+  restore 3-replica durability). Shared chunk rotation safety
+  (mid-rotation failure must not corrupt the sealed portion or
+  span a corrupted boundary). Clear boundary with R93's mirror→EC
+  conversion (R112 handles write-path failures; R93 handles
+  conversion-path failures). Escalation to R83 when inline retries
+  are exhausted.
 
 ### Medium Priority
 

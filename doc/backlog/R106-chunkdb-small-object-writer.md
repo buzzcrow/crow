@@ -109,7 +109,7 @@ pipeline scale in/out for max BW + TPS.
 **Numbered work items**:
 
 1. **`SmallObjectWriter`**
-   (`lib/crow-chunkdb-client/src/writer/small_object.rs`) — implements
+   (`lib/crow-chunk-client/src/writer/small_object.rs`) — implements
    `ChunkIoWriter` (R94). The entry point for small-object writes.
    Constructor takes `ec_scheme`, `mirror_copy_count` (default 3),
    `shared_chunk_size` (default 256 MB), `pipeline_config`. The
@@ -120,7 +120,7 @@ pipeline scale in/out for max BW + TPS.
    object's data.
 
 2. **`PipelineManager`**
-   (`lib/crow-chunkdb-client/src/writer/pipeline.rs`) — manages a
+   (`lib/crow-chunk-client/src/writer/pipeline.rs`) — manages a
    dynamic pool of `WritePipeline`s. Each pipeline has:
    - An inbound queue (`tokio::sync::mpsc` or a lock-free MPSC) of
      `PendingWrite` entries (object data + completion `oneshot`).
@@ -198,13 +198,16 @@ pipeline scale in/out for max BW + TPS.
 
 7. **Backpressure** (`writer/pipeline.rs`) — if all pipelines' queues
    are full (each queue has a configurable capacity, default 256
-   pending writes), `on_data` returns `false` from `require_data()`
-   or blocks (configurable). The caller (object store HTTP handler)
-   applies backpressure to the upstream (e.g. HTTP 503 or TCP flow
-   control). This prevents unbounded memory growth under extreme
-   load. When queues drain, `require_data()` returns `true` again.
+   pending writes), `require_data()` returns `false` and `on_data`
+   returns `FeedStatus::Pause`. The caller (object store HTTP
+   handler) applies backpressure to the upstream (e.g. HTTP 503 or
+   TCP flow control) — see R94's `BackpressurePolicy` (blocking vs
+   non-blocking caller strategies). This prevents unbounded memory
+   growth under extreme load. When queues drain, `require_data()`
+   returns `true` and `on_data` returns `FeedStatus::Continue`
+   again.
 
-8. **Metrics** (`lib/crow-chunkdb-client/src/writer/metrics.rs`) —
+8. **Metrics** (`lib/crow-chunk-client/src/writer/metrics.rs`) —
    `WriterMetrics` with counters: `objects_written`,
    `bytes_written`, `batches_submitted`, `avg_batch_size`,
    `pipelines_active`, `pipelines_scaled_out`,
@@ -357,10 +360,11 @@ Caller E (16KB) ─┘                          │                   │
   `on_finish` calls succeed. Integration test.
 
 **Backpressure**:
-- All pipelines' queues full → `require_data()` returns `false`.
-  Integration test (fill queues, verify backpressure signal).
-- After queues drain → `require_data()` returns `true`. Integration
-  test.
+- All pipelines' queues full → `require_data()` returns `false`,
+  `on_data` returns `FeedStatus::Pause`. Integration test (fill
+  queues, verify backpressure signal).
+- After queues drain → `require_data()` returns `true`, `on_data`
+  returns `FeedStatus::Continue`. Integration test.
 
 **Error handling**:
 - One mirror replica write fails → worker retries with new block.

@@ -20,11 +20,17 @@ Rust workspace + C++ storage engine (via FFI).
 
 - All build/test/run commands run under **pixi** — never bare `cargo`, `clang-format`, or `cargo run`. Pixi provides system deps (e.g. `isa-l` headers) that bare cargo can't find.
 - `unsafe_code = deny` (except `crow-tree-ffi` and `crow-kv-client` `ffi` feature); Clippy `pedantic = warn`.
+- **Prefer lock-free flow** — use lock-free structures (atomics, lock-free MPSC/SPSC channels, `Bytes` ref counts, EBR) for hot data paths. If a mutex, `RwLock`, or other blocking lock is needed, **stop and raise it** — analyze why lock-free is insufficient (contention pattern, ordering requirement, complexity tradeoff) and let the user decide. Do not add locks silently.
 - Markdown is read as raw text — prefer bullet or definition lists; tables allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results). `doc_index.md` always uses tables.
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
 - Commit messages: single-line subject only — no body, no trailers (e.g. `Co-Authored-By`, `Generated with`), no doc references, no task numbers (R-numbers). Code comments: single line, no doc references or task numbers.
 - **One commit per task** — a "task" is a coherent unit of work (e.g. "restructure docs", "add CLI rename", "implement R7"). Small, closely-related changes may be merged into one commit. For continuous interactive changes, accumulate and commit only when asked. Before pushing, squash unpushed commits from the same task into one (soft reset to remote tip, re-commit). Before committing, verify no temp/generated files are staged; add to `.gitignore` if needed.
-- **Never `git reset --hard`** — it destroys uncommitted work with no trace. To set aside uncommitted changes, use `git stash` (or `git stash -u` for untracked files). To experiment on a branch, create a temp branch (`git switch -c tmp/...`) instead of resetting. Soft/mixed resets (`git reset` / `git reset --soft`) are fine for squashing.
+- **Never silently lose or revert code** — the `d24c0dd` incident (a commit silently reverted 22 files of a prior commit under an unrelated message) showed file-level restores are as dangerous as resets. Banned without explicit user approval:
+  - `git reset --hard` — destroys uncommitted work.
+  - `git revert <commit>` — undoes a prior commit.
+  - `git checkout <commit> -- <files>` / `git restore --source=<commit> -- <files>` — a revert in disguise.
+  - `git reset` / `git reset --mixed` outside the squashing workflow.
+  To set aside changes: `git stash` (or `git stash -u`). To try an old commit: commit or stash current work, then `git switch -c tmp/<name> <old-commit>`, verify there, delete when done — never restore old files onto the current branch. If a prior commit genuinely needs undoing, ASK THE USER first and document it in the commit message (e.g. `revert: <subject> — <reason>`). Soft/mixed resets (`git reset --soft` / `git reset`) are allowed ONLY for squashing unpushed commits from the same task into one.
 - **Pre-commit quality gate — do not skip:**
   - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `tree-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
   - Tests: run only relevant tests (Rust or `test-tree-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
