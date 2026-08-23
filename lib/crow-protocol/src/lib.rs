@@ -116,6 +116,17 @@ mod diskio_generated {
     )]
     include!(concat!(env!("OUT_DIR"), "/diskio_generated.rs"));
 }
+mod diskdb_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/diskdb_generated.rs"));
+}
 
 /// Flatbuffer control-message types for the crow-rpc library (R104).
 ///
@@ -155,6 +166,21 @@ pub mod diskio_fb {
         FBDiskWriteResponseArgs,
     };
     pub use crate::diskio_generated::crow::rpc::proto::FBInt128;
+}
+
+/// Flatbuffer diskdb control-message types (R115).
+///
+/// Re-exports the generated `crow::diskdb::proto` namespace plus the
+/// `FBInt128` struct inlined from `common_type.fbs` via `--gen-all`. The
+/// diskdb request/response tables reference `FBInt128` for `disk_id` /
+/// `owner_chunk`; the `--gen-all` codegen emits a separate copy of
+/// `FBInt128` under the `crow::rpc::proto` namespace inside
+/// `diskdb_generated`, type-distinct from `fb::FBInt128` and
+/// `diskio_fb::FBInt128`. Use `diskdb_fb::FBInt128` when constructing
+/// diskdb request/response args.
+pub mod diskdb_fb {
+    pub use crate::diskdb_generated::crow::diskdb::proto::*;
+    pub use crate::diskdb_generated::crow::rpc::proto::FBInt128;
 }
 
 pub mod diskdb_type_util;
