@@ -13,7 +13,7 @@ when a task touches a topic in its row.
 | `doc/design/kv/design-crow-kv.md` | Root KV design — read first for any KV design or architecture question. |
 | `doc/design/protocol/design-crow-protocol.md` | Root protocol design — read first for protocol or key encoding questions. |
 | `doc/design/diskdb/design-crow-diskdb.md` | Root diskdb design — read first for any diskdb design or architecture question. |
-| `doc/design/diskio/design-crow-diskio.md` | Root diskio design — per-node data I/O engine (io_uring + pwrite/pread fallback), IoEngine abstraction, reactor topology, bad-disk isolation, RPC service + Rust client. |
+| `doc/design/diskio/design-crow-diskio.md` | Root diskio design — per-node data I/O engine (io_uring + pwrite/pread fallback), IoEngine abstraction, DiskIOUring multi-pipeline topology, bad-disk cancel-by-fd, RPC service + Rust client. |
 | `doc/design/chunkdb/design-crow-chunkdb.md` | Root chunkdb design — read first for any chunkdb design or architecture question. |
 | `doc/design/tree/design-crow-tree.md` | Root tree design — read first for storage-engine work. |
 | `doc/design/rpc/design-crow-rpc.md` | Root RPC design — read first for `crow-rpc` engine, FFI, or transport questions. |
@@ -77,7 +77,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, disk status management, space metrics, background scanner, crate layout, concurrency. |
 | `doc/design/diskdb/design-crow-diskdb-zone-management.md` | Zone management: record model, allocation algorithm, persist-only free, compaction-on-rotation, preparatory thread, crash recovery, zone-level concurrency, invariants. |
 | `doc/design/diskdb/design-crow-diskdb-space-metrics.md` | Space metrics component: usage accessors, `QueryCapacityStats` handler, per-disk counters, recalc verifier, reporting loop, keepalive piggyback, kv-client aggregation, `crow-diskdb-client` library. |
-| `doc/design/diskio/design-crow-diskio.md` | diskio root: per-node data I/O engine, IoEngine abstraction (UringEngine/BlockingEngine/DummyDiskEngine), disk model (BlockDisk/NullDisk/MemDisk), shared reactor in crow-common, reactor topology + polling modes, bad-disk SQ isolation, RPC service + Rust client. |
+| `doc/design/diskio/design-crow-diskio.md` | diskio root: per-node data I/O engine, IoEngine abstraction (UringEngine/BlockingEngine/DummyDiskEngine), disk model (BlockDisk/NullDisk/MemDisk), shared DiskIOUring in crow-common (multi-pipeline, fd routing, polling thread groups, batch submit, cancel-by-fd), RPC service + Rust client. |
 | `doc/design/rpc/design-crow-rpc.md` | RPC root: architecture, Non-Goals, key design decisions (native buffer, 12-byte header, transport interface, pull-based parser, per-connection writer, folly CHM, worker timer, C ABI + oneshot FFI, flatbuffers), wire format diagram, control plane (pool + reconnect, `RpcClient` correlation, `ScheduledExecutor`, `RpcServer` + handler offload, backpressure Reject/Await), flatbuffer schema home + build matrix, sub-design map. |
 | `doc/design/rpc/design-crow-rpc-tcp.md` | TCP transport: `SocketTransport` shared base, worker loop, scatter-gather `writev` send, zero-copy receive, `EpollEngine` (Linux, level-triggered), `KqueueEngine` (macOS, `EV_CLEAR` write), multi-engine scaling (N engines × M workers). |
 | `doc/design/rpc/design-crow-rpc-rdma.md` | RDMA transport: `RdmaTransport`, CQ poll loop, `librdmacm` connection setup, pre-registered buffer pools. |

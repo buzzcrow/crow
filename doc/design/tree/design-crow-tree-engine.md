@@ -734,7 +734,7 @@ thread pools, no C++ coroutine dependency.**
   a small completion object plus a notification fd.
 - **epoll is only the readiness fallback.** io_uring handles disk/block I/O;
   `eventfd` handles C++→Rust wakeup, and Tokio already integrates that fd via
-  `AsyncFd` (epoll internally), so no separate epoll reactor for storage I/O.
+  `AsyncFd` (epoll internally), so no separate epoll event loop for storage I/O.
 
 ### 3.2 Architecture
 
@@ -747,7 +747,7 @@ thread pools, no C++ coroutine dependency.**
   │     │ pending    │◄──done=0───────│  submit io_uring SQE     │
   │     │ register   │                │  return pending          │
   │     │ waker on   │                │                          │
-  │     │ AsyncFd    │                │  Reactor thread (1)      │
+  │     │ AsyncFd    │                │  polling thread (1)      │
   │     │ (eventfd)  │◄──eventfd──────│  io_uring_enter loop     │
   │     │ wake       │                │  CQE → callback          │
   │  .poll() again   │──poll()───────►│  ct_future_poll → done=1 │
@@ -755,7 +755,7 @@ thread pools, no C++ coroutine dependency.**
   └──────────────────┘                └──────────────────────────┘
 ```
 
-One reactor per `Crowtree` instance, on a dedicated C++ thread: it calls
+One DiskIOUring per `Crowtree` instance, on a dedicated C++ thread: it calls
 `io_uring_enter` (blocking until a CQE arrives or a timeout fires), peeks
 CQEs, dispatches each completion callback, then writes to its `eventfd` to
 wake the Rust side. The Rust side wraps that `eventfd` in Tokio's `AsyncFd`;
@@ -774,11 +774,11 @@ path) an `EpochManager::Guard` keeping the frame resident (§3.4).
 
 The C++ engine determines the path internally: if the operation can complete
 without I/O, it fills the future synchronously (`state = kDone`) and returns;
-otherwise it submits SQE(s) to the reactor (`state = kPending`) and the
-reactor completes the future when I/O finishes. A `CtFuture`'s first
+otherwise it submits SQE(s) to the DiskIOUring (`state = kPending`) and the
+DiskIOUring completes the future when I/O finishes. A `CtFuture`'s first
 `poll()` on the fast path resolves immediately, zero scheduling overhead,
 no thread switch; on the slow path it registers a waker on `AsyncFd` and
-resolves on the next reactor-driven wakeup.
+resolves on the next DiskIOUring-driven wakeup.
 
 ### 3.4 Zero-Copy Value Across FFI
 
@@ -798,7 +798,7 @@ resolves on the next reactor-driven wakeup.
 - **Slow path:** the I/O read fills a C++-owned buffer; on completion
   the future returns it as an owned `ct_buf` (C++ allocates, Rust
   frees). For frame-borrowed values, the zero-copy path replaces the copy with a per-page
-  refcount pin: the reactor thread pins the leaf base page(s) under its
+  refcount pin: the polling thread pins the leaf base page(s) under its
   epoch guard, releases the guard, and hands the `GetView` (still borrowing
   the frame) across threads; `ct_future_free` unpins from the dropping
   thread. `materialize_owned` remains only for overflow-chain values
@@ -823,7 +823,7 @@ resolves on the next reactor-driven wakeup.
 | ID | Decision | Rationale |
 |----|----------|-----------|
 | D-Async1 | **Async FFI via io_uring + completion-based futures.** No `spawn_blocking`, no large thread pools, no C++ coroutine/Folly dependency. | A `ct_future` handle is the correct FFI abstraction for Rust polling; C++ coroutine and Folly executor state must not cross the C ABI. Fast path completes synchronously with zero scheduling overhead. |
-| D-Async2 | **One reactor thread per `Crowtree`.** | Each tree has its own buffer pool and I/O; a per-tree reactor keeps I/O completions local and avoids cross-tree coordination. The reactor does no application logic — only CQE dispatch. |
+| D-Async2 | **One polling thread per `Crowtree`.** | Each tree has its own buffer pool and I/O; a per-tree DiskIOUring keeps I/O completions local and avoids cross-tree coordination. The DiskIOUring does no application logic — only CQE dispatch. |
 | D-Async3 | **`eventfd` for Rust↔C++ notification.** | Simplest kernel-level notification: one `write(8 bytes)` wakes Tokio's `AsyncFd`. Level-triggered, no missed events. Falls back to a pipe + `kqueue` on macOS. |
 | D-Async4 | **macOS dev path: in-memory store, no io_uring.** | io_uring is Linux-only. For dev/testing on macOS, the in-memory store completes synchronously (fast path only). Production runs on Linux with real io_uring. |
 
@@ -843,9 +843,9 @@ resolves on the next reactor-driven wakeup.
 `KVEngine` is consumed as `Box<dyn KVEngine>` (`PxLearner::engine`), chosen at
 runtime via a CLI flag (`--kv-engine {memory,crow-tree}`). Its `get`/`scan`/
 `apply` need an async-capable return type so that a genuine I/O path
-(crow-tree demand-load miss, served by the io_uring reactor, §3 "Async FFI
+(crow-tree demand-load miss, served by the io_uring engine, §3 "Async FFI
 Bridge") can suspend instead of blocking a Tokio worker thread on a
-synchronous `pread`. That is the exact anti-pattern the reactor exists to
+synchronous `pread`. That is the exact anti-pattern the DiskIOUring exists to
 avoid at the C++/FFI layer, which would otherwise resurface immediately one
 layer up in Rust.
 
@@ -856,7 +856,7 @@ that with runtime engine selection:
 
 | Option | Cost |
 | --- | --- |
-| **(a) `async-trait` crate** | Boxes every async call into a `Pin<Box<dyn Future>>` via macro, one heap allocation **per call, including the fast in-memory path with no I/O**. Undoes the reactor's "fast path costs nothing" property one layer up. |
+| **(a) `async-trait` crate** | Boxes every async call into a `Pin<Box<dyn Future>>` via macro, one heap allocation **per call, including the fast in-memory path with no I/O**. Undoes the DiskIOUring's "fast path costs nothing" property one layer up. |
 | **(b) Generic `PxLearner<E: KVEngine>`** | Zero overhead, but `E` would need to propagate through `PxLocalReplica`, `PxGroup`, `PxKvStore`, and `DashMap<GroupId, PxGroup>`, too invasive for an engine chosen at runtime. |
 | **(c) Hybrid fast-path/slow-path future (chosen)** | Plain (non-`async`) `fn`s return a small custom future enum that resolves immediately (no allocation) for the fast path and only boxes a real future for the rare slow (I/O) path. Fully `dyn`-compatible; mirrors the exact fast/slow split the C++ layer already makes. |
 
@@ -890,7 +890,7 @@ pub trait KVEngine: Send + Sync {
 (`lib/crow-kv/src/kv/crow_tree_engine.rs`) does the same fast-path check the C++
 layer does first, via `crow_tree_ffi::AsyncCrowtree::try_get`; on a resident
 hit/miss it returns `Ready` at zero extra cost, and only on a genuine
-demand-load miss does it construct `Pending`, wrapping the reactor-driven
+demand-load miss does it construct `Pending`, wrapping the DiskIOUring-driven
 future `try_get` already builds. `CrowTreeEngine::scan`/`apply` always
 resolve `Ready` today (no async `scan`/`apply` C API exists yet, an honest
 gap, not an oversight; see `CrowTreeEngine`'s doc comment).

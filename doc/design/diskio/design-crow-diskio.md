@@ -12,9 +12,9 @@ server uses the crow-rpc C++ engine directly; Rust callers
 (chunkdb writers, recovery, rebalance) use a typed client crate that
 wraps `crow-rpc-ffi`.
 
-The io_uring reactor is a generic event loop that also serves the
-crow-tree btree page store. It lives in `crow-common` and is shared by
-both consumers.
+The io_uring engine (`DiskIOUring`) is a multi-pipeline io_uring
+wrapper that also serves the crow-tree btree page store. It lives in
+`crow-common` and is shared by both consumers.
 
 ## Table of Contents
 
@@ -26,7 +26,7 @@ both consumers.
   - [3.3 Control + data separation in the RPC frame](#33-control--data-separation-in-the-rpc-frame)
   - [3.4 No disk status tracking](#34-no-disk-status-tracking)
   - [3.5 Partial writes are errors, not retried internally](#35-partial-writes-are-errors-not-retried-internally)
-  - [3.6 Shared reactor in crow-common](#36-shared-reactor-in-crow-common)
+  - [3.6 Shared DiskIOUring in crow-common](#36-shared-diskiouring-in-crow-common)
 - [4. Architecture Overview](#4-architecture-overview)
 - [5. IoEngine Abstraction](#5-ioengine-abstraction)
   - [5.1 UringEngine](#51-uringengine)
@@ -34,11 +34,15 @@ both consumers.
   - [5.3 DummyDiskEngine](#53-dummydiskengine)
   - [5.4 NullDisk and MemDisk](#54-nulldisk-and-memdisk)
 - [6. Disk Model](#6-disk-model)
-- [7. Reactor](#7-reactor)
-  - [7.1 Polling Modes](#71-polling-modes)
-  - [7.2 Batched SQE Submission](#72-batched-sqe-submission)
-  - [7.3 Reactor Topology](#73-reactor-topology)
-  - [7.4 Bad-Disk SQ Isolation](#74-bad-disk-sq-isolation)
+- [7. DiskIOUring](#7-diskiouring)
+  - [7.1 Architecture](#71-architecture)
+  - [7.2 fd → Pipeline Routing](#72-fd--pipeline-routing)
+  - [7.3 Polling Modes](#73-polling-modes)
+  - [7.4 Batched SQE Submission](#74-batched-sqe-submission)
+  - [7.5 Pipeline Topology](#75-pipeline-topology)
+  - [7.6 Bad-Disk Cancel by fd](#76-bad-disk-cancel-by-fd)
+  - [7.7 Lock-Free Design](#77-lock-free-design)
+  - [7.8 FFI Multi-Eventfd Pump](#78-ffi-multi-eventfd-pump)
 - [8. RPC Service](#8-rpc-service)
 - [9. Client Library](#9-client-library)
 - [10. Invariants](#10-invariants)
@@ -63,12 +67,12 @@ thread-pool `pwrite`/`pread` (macOS, non-liburing Linux).
 **Core goals:**
 - **Low-latency data path** — io_uring on Linux with no
   `spawn_blocking`, no thread hop, no Rust→C++ round-trip on the data
-  path. The entire I/O path is async: RPC receive → reactor submit →
+  path. The entire I/O path is async: RPC receive → DiskIOUring submit →
   CQE completion → RPC response.
 - **Cross-platform dev/test** — thread-pool `pwrite`/`pread` fallback
   on macOS gives the same semantics at lower performance, so the test
   suite runs everywhere.
-- **Shared reactor** — the io_uring event loop lives in `crow-common`
+- **Shared DiskIOUring** — the io_uring engine lives in `crow-common`
   and is shared by the btree page store and the diskio engine. One
   implementation, two consumers.
 - **Testability** — `MemDisk` (drop-write + rule-based read) for
@@ -99,7 +103,7 @@ thread-pool `pwrite`/`pread` (macOS, non-liburing Linux).
 
 ### 3.1 C++ server, Rust client
 
-The diskio server is C++ because the io_uring reactor and the
+The diskio server is C++ because the io_uring engine and the
 crow-rpc server engine are C++. Running the server in C++ means the
 data path has no FFI boundary: RPC receive, frame decode, I/O submit,
 CQE completion, and response submit all happen in C++ without a
@@ -162,14 +166,16 @@ retry would complicate the completion callback path (resubmit for
 remaining bytes, track partial progress, handle retry-failure) for no
 benefit.
 
-### 3.6 Shared reactor in crow-common
+### 3.6 Shared DiskIOUring in crow-common
 
-The io_uring reactor is a generic event loop: it submits
-read/write/fsync SQEs and dispatches CQE completions to per-op
-callbacks. It is not specific to the btree page store. It lives in
-`crow-common` so both the btree page store (`crow-tree`) and the
-diskio engine share one implementation. The WAL's io_uring integration
-later builds Rust async submit wrappers over the same reactor C ABI.
+`DiskIOUring` is a multi-pipeline io_uring engine: it maps file
+descriptors to pipelines (one `io_uring` instance each), shares
+polling threads across CQs, batches SQE submission, and cancels
+in-flight I/O by fd via `IORING_ASYNC_CANCEL_FD`. It is not specific
+to the btree page store. It lives in `crow-common` so both the btree
+page store (`crow-tree`) and the diskio engine share one
+implementation. The WAL's io_uring integration later builds Rust
+async submit wrappers over the same C ABI.
 
 ## 4. Architecture Overview
 
@@ -190,8 +196,9 @@ Caller (Rust)                     crow-diskio Server (Node X, C++)
      │                              │
      │                    ┌─────────┴────────────────────┐
      │                    │ UringEngine (Linux)          │ BlockingEngine (macOS)
-     │                    │ crow::common::Reactor        │ thread pool
-     │                    │ SQE submit → CQE completion  │ pwrite → callback
+     │                    │ crow::common::DiskIOUring    │ thread pool
+     │                    │ fd→pipeline, SQE submit      │ pwrite → callback
+     │                    │ → CQE completion             │
      │                    └─────────┬────────────────────┘
      │                              │ (also: DummyDiskEngine wrapper for dummy disks)
      │                                    │
@@ -216,9 +223,11 @@ Components:
   `submit_fsync` taking a disk handle, physical offset, buffer, size,
   and a completion callback. Implementations: `UringEngine`,
   `BlockingEngine`, `DummyDiskEngine` (wrapper for dummy disks).
-- **Reactor** — the shared io_uring event loop in `crow-common`. One
-  dedicated thread per reactor instance; submits SQEs and dispatches
-  CQEs to per-op callbacks.
+- **DiskIOUring** — the shared multi-pipeline io_uring engine in
+  `crow-common`. Maps fds to pipelines (one `io_uring` instance per
+  pipeline); polling threads drain CQs and submit pending SQEs.
+  Lock-free on the hot path (SQE claim via atomic CAS, fd→pipeline
+  lookup via direct-indexed array).
 - **RPC handler** — dispatches `DiskWriteRequest`/
   `DiskReadRequest`/`DiskFsyncRequest` to the `IoEngine`; the
   completion callback builds the response and submits it via
@@ -252,16 +261,17 @@ resolves the request and calls `crow_rpc_server_submit_response`.
 
 ### 5.1 UringEngine
 
-Linux only (`CROW_HAVE_LIBURING`). Wraps `crow::common::Reactor`.
-`O_DIRECT` aligned writes (configurable, default on for data blocks).
-The entire I/O path is async — no `spawn_blocking`, no thread hop.
+Linux only (`CROW_HAVE_LIBURING`). Owns a `crow::common::DiskIOUring`
+instance (one engine per diskio server). `O_DIRECT` aligned writes
+(configurable, default on for data blocks). The entire I/O path is
+async — no `spawn_blocking`, no thread hop.
 
-Each `UringEngine` selects `PollingMode::Hybrid` by default (or
-`Sqpoll` if configured for sustained-IOPS workloads like recovery
-scan). See §7.1.
-
-Per-disk in-flight tracking (`HashMap<DiskId, HashSet<user_data>>`)
-supports explicit cancellation when a disk fails — see §7.4.
+`UringEngine` is a thin adapter: it validates the disk handle and
+`O_DIRECT` alignment, then delegates to `DiskIOUring::submit_*` with
+the disk's fd. `cancel_disk` looks up the disk's fd via `DiskSet` and
+calls `DiskIOUring::cancel_fd` — one SQE cancels all in-flight I/O on
+that fd via `IORING_ASYNC_CANCEL_FD` (kernel 6.0+). No per-disk
+in-flight tracking map; the kernel does the cancel lookup. See §7.6.
 
 ### 5.2 BlockingEngine
 
@@ -283,7 +293,7 @@ The dummy-disk wrapper. `DummyDiskEngine` wraps a real `IoEngine`
   pattern data generated from `disk_id` + `phys_offset` (xorshift64
   PRNG). The full uring/blocking `pwrite`/`pread` syscall path
   executes against a `memfd_create` backing — no real disk I/O, but
-  the ring mechanics, syscall cost, and reactor batching all run.
+  the ring mechanics, syscall cost, and DiskIOUring batching all run.
   Used for benchmark tests that measure uring overhead without
   storage.
 - **Fault injection** (NullDisk + MemDisk): per-I/O random latency
@@ -337,111 +347,233 @@ records come from diskdb's allocation.
 from the node's disk list (via `HardwareClient` / diskdb). `DiskId`
 is the 128-bit id from diskdb.
 
-## 7. Reactor
+## 7. DiskIOUring
 
-The reactor is a dedicated io_uring event-loop thread. It submits
-read/write/fsync SQEs and dispatches each CQE's raw result to the
-callback registered at submission time. One thread per reactor
-instance; `submit_*()` may be called concurrently from any thread
-(the SQ-side production and the callback map are mutex-guarded).
+`DiskIOUring` is a multi-pipeline io_uring engine. It maps file
+descriptors to pipelines (one `io_uring` instance per pipeline),
+shares polling threads across CQs, batches SQE submission, and is
+fully lock-free on the hot path. Both diskio and btree use
+`DiskIOUring` as their I/O interface.
 
-The reactor lives in `crow-common` (`crow::common::Reactor`), guarded
-by `CROW_HAVE_LIBURING`. It is Linux-only. On macOS and non-liburing
-Linux builds, the reactor is absent and `BlockingEngine` is used
-instead.
+`DiskIOUring` lives in `crow-common` (`crow::common::DiskIOUring`),
+guarded by `CROW_HAVE_LIBURING`. It is Linux-only. On macOS and
+non-liburing Linux builds, `DiskIOUring` is absent and
+`BlockingEngine` is used instead.
 
-### 7.1 Polling Modes
+### 7.1 Architecture
 
-A `PollingMode` config per reactor instance:
+```
+                    DiskIOUring
+                    ┌─────────────────────────────────────────────┐
+                    │  fd_table[fd] → pipeline_index (read-only)   │
+                    │                                             │
+submit_read(fd) ──► │  Pipeline 0        Pipeline 1        ...     │
+submit_write(fd) ─► │  ┌──────────┐     ┌──────────┐              │
+submit_fsync(fd) ─► │  │ io_uring │     │ io_uring │              │
+cancel_fd(fd) ────► │  │ SQ + CQ  │     │ SQ + CQ  │              │
+                    │  └────┬─────┘     └────┬─────┘              │
+                    │       │                │                     │
+                    │  ┌────┴────────────────┘                     │
+                    │  │  PollThread 0 (busy-poll or epoll-wait)   │
+                    │  │  drains CQ-0 + CQ-1, submits pending SQEs │
+                    │  └───────────────────────────────────────────┘
+                    └─────────────────────────────────────────────┘
+```
 
-- **Wait** — current behavior: `io_uring_wait_cqe_timeout` every
-  iteration, 50ms timeout. Default for backward compatibility.
-  Existing crow-tree callers use this mode with no regression.
+Components:
+- **Pipeline** — one `io_uring` instance: one SQ + one CQ in shared
+  memory. The low-level uring wrapper (lock-free SQE claim, CQE
+  drain). Internal to `DiskIOUring`; not exposed to callers.
+- **PollThread** — one OS thread that polls a group of pipelines' CQs
+  and submits their pending SQEs. Multiple CQs share one polling
+  thread (no one-thread-per-CQ requirement). Configurable grouping.
+- **fd_table** — direct-indexed `std::vector<size_t>` mapping fd →
+  pipeline_index. Populated at `register_fd` time, read-only during
+  I/O. No synchronization needed (concurrent reads of an immutable
+  array).
+- **CallbackEntry** — allocated per submit, freed after CQE dispatch
+  via deferred-delete (polling-thread-only). Holds the callback; no
+  atomics, no cancel flags, no hazard pointers. Callback suppression
+  is client-side (§7.7): the caller wraps the callback with a shared
+  cancel flag.
+
+### 7.2 fd → Pipeline Routing
+
+`fd_table` is direct-indexed by fd number. fds are small integers
+(typically < 1024). The vector is sized once at construction to
+`ulimit -n` (capped at 4096) and never grows — no reallocation, no
+data race on concurrent reads. Each slot defaults to `SIZE_MAX`
+(sentinel: "not registered"). Looking up `fd_table[fd]` is a single
+memory load — no hash, no collision, no atomic, no lock.
+
+Two registration modes:
+- **Auto-assignment** (`register_fd(fd)`) — `DiskIOUring` picks the
+  pipeline with the lowest in-flight count and sticks the fd to it.
+  Used by btree (single pipeline) and uniform-disk diskio topologies.
+  Sticky: once assigned, all future submits for that fd go to the
+  same pipeline (required for `cancel_fd` correctness — cancel targets
+  the ring where the fd's SQEs were submitted).
+- **Explicit assignment** (`register_fd(fd, pipeline_index)`) — caller
+  pins the fd to a specific pipeline. Used when the caller built a
+  disk-class-aware topology (NVMe → pipeline 0, HDD → pipeline 2) and
+  needs deterministic routing.
+
+### 7.3 Polling Modes
+
+A `PollingMode` config per pipeline:
+
+- **Classic** — `io_uring_wait_cqe_timeout` every iteration, 50ms
+  timeout. Simplest mode; used by crow-tree's single-pipeline
+  topology.
 - **Hybrid** `{ busy_poll_budget }` — busy-poll the CQ ring's shared
   memory via `io_uring_peek_cqe` with no syscall while I/O is active.
   After `busy_poll_budget` consecutive empty peeks, transition to
-  `io_uring_wait_cqe_timeout` event-wait mode. Any CQE resets the
-  counter, returning to busy-poll. Gives sub-µs CQE dispatch during
-  I/O bursts, sleeps when idle, no core burned at idle. Default for
-  `UringEngine` and opt-in for crow-tree's `BlockAsyncPageStore`
-  (read-heavy workloads).
+  `epoll_wait` on the pipeline's eventfd. Any CQE resets the counter,
+  returning to busy-poll. Gives sub-µs CQE dispatch during I/O bursts,
+  sleeps when idle, no core burned at idle. Default for `UringEngine`.
 - **Sqpoll** `{ sq_thread_idle }` — opt-in for sustained high-IOPS:
   `IORING_SETUP_SQPOLL` eliminates submit syscalls via a kernel
-  SQ-poll thread. Requires root/CAP_SYS_NOPRIV. The reactor sets
-  `IORING_SQ_NEED_WAKEUP` + calls `io_uring_enter()` once when
-  transitioning from idle to active. Useful for recovery scan and
-  bulk rebalance.
+  SQ-poll thread. Requires root/CAP_SYS_NOPRIV. Useful for recovery
+  scan and bulk rebalance.
 
-### 7.2 Batched SQE Submission
+When multiple Hybrid-mode pipelines share a poll thread, the thread
+uses the **minimum** `busy_poll_budget` across its assigned Hybrid
+pipelines — the most conservative budget wins.
 
-The reactor batches SQEs and submits once per loop iteration (or
-`io_uring_submit_and_wait` in wait phase) instead of per-SQE. SQEs
-are filled under the lock without immediately calling
-`io_uring_submit`; the reactor loop submits once per iteration or
-when the SQ is N entries full. In `Hybrid` wait phase,
-`io_uring_submit_and_wait(&ring, wait_nr)` combines submit +
-wait-for-completions in one syscall.
+### 7.4 Batched SQE Submission
 
-The `submit_read`/`submit_write`/`submit_fsync` API stays stable for
-crow-tree (which uses `Wait` mode where per-SQE submit is fine for
-its lower IOPS); batching is an internal optimization that `Hybrid`
-mode exercises more.
+Client threads fill SQE slots (lock-free CAS on shadow tail + per-slot
+ready flags) and set a `pending_submit` atomic flag. The polling
+thread submits all pending SQEs in one `io_uring_enter` per iteration
+— batching N SQEs into one syscall. Clients never call
+`io_uring_enter`; only the polling thread does.
 
-### 7.3 Reactor Topology
+In busy-poll mode (I/O active), SQEs are submitted within <1µs of
+being filled. In event-wait mode (idle), the first client to fill an
+SQE after the thread sleeps writes the pipeline's eventfd (waking the
+thread); subsequent clients in the same burst skip the eventfd write
+via a `thread_sleeping` CAS — at most one eventfd write per sleep
+cycle. For N=32 SQEs in a burst: batching = 2 syscalls, unbatched =
+32. **16× reduction.**
+
+### 7.5 Pipeline Topology
 
 io_uring does not support sharing a CQ ring across separate
 `io_uring` instances — each `io_uring_queue_init` creates its own SQ +
 CQ pair. But one ring can submit I/O for any number of fds, so the
 answer is fewer rings, not shared CQs. Topology by disk type:
 
-- **NVMe SSD** (100k+ IOPS/disk): one `Reactor` per disk. High IOPS
+- **NVMe SSD** (100k+ IOPS/disk): one pipeline per disk. High IOPS
   needs SQ headroom; per-disk isolates SQ/CQ backpressure so one busy
   disk's full SQ doesn't block another.
-- **SATA SSD** (10k-100k IOPS/disk): one `Reactor` per 4-8 disks
-  (grouping). Medium IOPS; grouping reduces reactor thread count
+- **SATA SSD** (10k-100k IOPS/disk): one pipeline per 4-8 disks
+  (grouping). Medium IOPS; grouping reduces polling thread count
   while keeping SQ headroom. For 24-30 SSDs this gives 3-8 rings, not
   24-30.
-- **HDD** (100-200 IOPS/disk): one shared `Reactor` for all HDDs. Low
-  IOPS; one ring's SQ handles 30 HDDs trivially. Bad-disk isolation
-  requires explicit cancellation and linked timeouts (§7.4).
+- **HDD** (100-200 IOPS/disk): one shared pipeline for all HDDs. Low
+  IOPS; one ring's SQ handles 30 HDDs trivially. `entries = 2048`.
 
-`IORING_SETUP_ATTACH_WQ` (Linux 5.18+): when using multiple rings,
-this flag makes them share the kernel's io-wq (async worker pool)
-instead of each ring creating its own (~8 kernel threads per pool).
-For `O_DIRECT` on block devices, I/O almost always completes inline
-and io-wq is rarely involved; for `BlockDisk` without `O_DIRECT` io-wq
-may be used. `ATTACH_WQ` reduces kernel thread count from
-`N_rings × 8` to `8` shared.
+Poll thread grouping:
+- **1 thread, all pipelines** (default, simple): one thread
+  busy-polls all CQs. Best for low pipeline count.
+- **1 thread per pipeline** (max isolation): each CQ has its own
+  thread. Best for high-IOPS NVMe where CQ drain latency matters.
+- **Grouped by disk class** (balanced): `{ {0,1,2}, {3,4,5} }`. 2
+  threads for 6 pipelines. Best for SATA SSD farms.
+- **Grouped by NUMA node**: pipelines whose disks are on NUMA node 0
+  → thread 0 (pinned to node 0 core); node 1 → thread 1.
 
-### 7.4 Bad-Disk SQ Isolation
+`IORING_SETUP_ATTACH_WQ` (Linux 5.18+): when `Topology::attach_wq` is
+true and there are ≥2 pipelines, subsequent pipelines share the
+kernel's io-wq pool (8 kernel threads total instead of N×8). For
+`O_DIRECT` on block devices, I/O almost always completes inline and
+io-wq is rarely involved; `attach_wq` matters most for non-`O_DIRECT`
+file I/O. Default: `false` (opt-in).
 
-On a shared ring, a bad disk's in-flight I/O holds SQ slots. If the SQ
-fills, good disks' I/O is rejected with `-ENOMEM`. Two-layer fix:
+### 7.6 Bad-Disk Cancel by fd
 
-1. **Explicit cancellation** (primary): when a disk fails, the engine
-   submits `IORING_OP_ASYNC_CANCEL` SQEs for all in-flight I/O on that
-   disk. Per-disk in-flight tracking
-   (`HashMap<DiskId, HashSet<user_data>>` in `UringEngine`) records
-   which I/Os to cancel. Each cancel references the original I/O's
-   `user_data`; the kernel posts a CQE (`-ECANCELED` if canceled, or
-   the original result if already done). Frees SQ slots immediately.
-   Cancellation is best-effort for I/O already in the device queue —
-   the linked timeout is the reliable bound.
+`cancel_fd(fd)` cancels all in-flight I/O for an fd with one SQE:
+`IORING_OP_ASYNC_CANCEL` with `flags = IORING_ASYNC_CANCEL_FD |
+IORING_ASYNC_CANCEL_ALL` and `addr = fd` (kernel 6.0+). The kernel
+cancels all matching ops and posts CQEs (`-ECANCELED` for each
+cancelled op, or the original result if already completed). No
+per-fd in-flight tracking needed — the kernel does the lookup. Zero
+overhead on the hot path.
 
-2. **Linked timeouts** (safety net): `io_uring_prep_link_timeout`
-   links a timeout SQE to each I/O SQE. If the I/O doesn't complete
-   within N ms (configurable per disk, default 30s), the kernel
-   cancels it and posts CQEs (`-ECANCELED` for the I/O, `-ETIME` for
-   the timeout). Bounds the time an SQ slot is held by a slow disk
-   even if the failure hasn't been noticed yet (hardware hang with no
-   error reporting). Cost: 2 SQE slots per I/O (halves effective SQ
-   capacity) — size the SQ accordingly (2048+ for shared HDD ring
-   with 30 disks × queue depth 32 = 960 in-flight × 2 = 1920 slots).
+On a shared pipeline, a bad disk's in-flight I/O holds SQ slots. If
+the SQ fills, good disks' I/O is rejected with `-ENOMEM`.
+`cancel_fd` frees SQ slots immediately by cancelling all of the bad
+fd's in-flight ops. The SQ ring's capacity check is
+`tail - head >= entries`, where `head` is the kernel's consumed SQ
+head — in-flight I/O is in the block layer, not the SQ ring, so the
+SQ has space for the cancel SQE even when all of the fd's I/O is
+in-flight.
 
-CQEs are independent — the reactor drains all ready CQEs each
+**Kernels < 6.0** (no `IORING_ASYNC_CANCEL_FD`): `cancel_fd` returns
+`-ENOSYS`. The caller (diskio's `cancel_disk`) logs a warning and
+falls back to waiting for in-flight I/O to complete naturally (the
+bad-disk path has a timeout). macOS never compiles `DiskIOUring`;
+`BlockingEngine` is the non-uring path.
+
+CQEs are independent — the polling thread drains all ready CQEs each
 iteration, so a slow disk's CQE arriving late doesn't block CQ drain
-for others. The SQ slot hold is the real risk, and the two-layer fix
-addresses it.
+for others.
+
+### 7.7 Lock-Free Design
+
+The hot path (submit + CQE completion) uses no mutexes, no locks, no
+blocking:
+
+- **SQE claim**: atomic CAS on shadow tail + per-slot ready flags.
+  Multi-threaded clients claim slots concurrently with no contention
+  beyond CAS retries.
+- **fd → pipeline lookup**: direct array index, read-only. No
+  synchronization.
+- **Batch submit coordination**: `pending_submit` atomic flag,
+  `pending_count` atomic counter, `thread_sleeping` atomic flag. All
+  single-word atomics.
+- **CQ drain**: polling thread only (single-threaded per CQ). No
+  concurrency, no synchronization.
+- **Callback dispatch**: polling thread only. `CallbackEntry` holds
+  just the callback — no `cancelled`/`dispatched` atomics. The
+  dispatch path calls `entry->cb(res)` unconditionally; if the client
+  wants to suppress the callback, it checks a shared cancel flag
+  inside the callback itself (client-side cancel). The CQE always
+  arrives, the callback always fires, the SQ slot is always freed —
+  only the callback body is skipped via the flag. A `shared_ptr` keeps
+  the cancel state alive until the CQE arrives (no UAF).
+- **CallbackEntry lifetime**: deferred-delete on the polling thread.
+  The polling thread is the sole toucher of `CallbackEntry` after
+  `submit_*` returns — no concurrent access, no hazard pointers, no
+  generation counters.
+
+**Kernel-internal locks** (not controllable from userspace):
+
+| I/O path | Lock | Hold duration | Contention scope |
+| --- | --- | --- | --- |
+| SQE fill / CQE drain | None | — | — |
+| `O_DIRECT` block device (diskio `BlockDisk`) | `blk-mq` per-HW-queue spinlock | µs (queue insertion) | per-HW-queue |
+| `O_DIRECT` regular file write (btree block files) | `i_rwsem` exclusive | full I/O latency | per-inode |
+| `O_DIRECT` regular file read | `i_rwsem` shared | full I/O latency | per-inode (concurrent reads OK) |
+
+io_uring never blocks the userspace submitter on `i_rwsem` — when an
+inline execution would block, io_uring punts to `io_wq` (kernel worker
+pool). The design's per-fd pipeline isolation aligns with the kernel's
+per-device / per-inode lock scope: if one fd's I/O contends on a
+kernel lock, it is on its own pipeline with its own polling thread.
+Both consumers avoid same-inode write contention by design: btree
+uses one file per extent (different inodes), diskio writes to block
+devices (no `i_rwsem`).
+
+### 7.8 FFI Multi-Eventfd Pump
+
+Each pipeline registers its eventfd via
+`IORING_REGISTER_EVENTFD`. The Rust FFI layer
+(`lib/crow-tree/ffi/src/reactor.rs`) spawns one `EventfdPump` per
+pipeline eventfd, all sharing one `Arc<Notify>`. Any pipeline's CQE
+completion wakes all waiting `drive_ct_future` calls. The C ABI
+function `ct_uring_eventfds` returns the pipeline eventfds; the Rust
+wrapper spawns one pump per fd.
 
 ## 8. RPC Service
 
@@ -494,7 +626,7 @@ group-0). Connection pooling is handled by `crow-rpc-ffi`'s
 
 A connection drop during a write is similar to a timeout: the client
 does not know the result (the I/O may still complete on the server —
-reactor submission is already in flight). The client treats it as a
+DiskIOUring submission is already in flight). The client treats it as a
 failure and retries; idempotent write to the same offset is safe for
 the same data.
 
@@ -509,18 +641,18 @@ the same data.
 - **I3 (offset correctness)**: The physical offset for an I/O is
   `zone.base_offset + zone_offset`, where `zone` is looked up by
   `zone_index` from the `Disk`'s zone records.
-- **I4 (no silent drop)**: The reactor does not drop I/O requests. If
-  the SQ is full, `submit_locked` enters bounded retry waiting for a
-  slot. If the ring is invalid, the completion callback is invoked
-  synchronously with `-EIO`.
+- **I4 (no silent drop)**: `DiskIOUring` does not drop I/O requests.
+  If the SQ is full, the lock-free SQE claim enters bounded retry
+  waiting for a slot. If the ring is invalid, the completion callback
+  is invoked synchronously with `-EIO`.
 - **I5 (completion guarantee)**: `on_complete` is invoked exactly
-  once per `submit_*` call — either from the reactor thread (CQE
-  dispatched) or synchronously (submission failure). Cancellation
-  (`IORING_OP_ASYNC_CANCEL`) replaces the original callback with a
-  `-ECANCELED` CQE.
+  once per `submit_*` call — either from the polling thread (CQE
+  dispatched) or synchronously (submission failure). `cancel_fd`
+  replaces the original callback with a `-ECANCELED` CQE.
 - **I6 (bad-disk isolation)**: A bad disk's in-flight I/O does not
-  permanently block good disks' I/O on a shared ring. Explicit
-  cancellation frees SQ slots; linked timeouts bound the hold time.
+  permanently block good disks' I/O on a shared pipeline.
+  `cancel_fd(fd)` cancels all in-flight ops on the bad fd with one
+  SQE, freeing SQ slots immediately.
 - **I7 (partial write is error)**: A short write returns
   `IoError::PartialWrite` immediately. No internal retry. The caller
   decides the next action.
@@ -538,14 +670,15 @@ the same data.
   `BlockingEngine` otherwise. No user-configurable engine selection.
 - **thread_pool_size** — blocking engine thread count (default 4).
 - **o_direct** — toggle `O_DIRECT` for `BlockDisk` (default on).
-- **polling_mode** — reactor polling mode: `wait`, `hybrid`,
+- **polling_mode** — pipeline polling mode: `classic`, `hybrid`,
   `sqpoll` (default `hybrid` for `UringEngine`).
 - **busy_poll_budget** — consecutive empty peeks before transitioning
   to event-wait in `Hybrid` mode.
 - **sq_thread_idle** — idle timeout for `Sqpoll` mode.
-- **linked_timeout_ms** — per-I/O linked timeout (default 30000).
 - **sq_entries** — SQ ring size (default 256; 1024+ for high-IOPS SSD
-  rings; 2048+ for shared HDD rings with linked timeouts).
+  pipelines; 2048+ for shared HDD pipelines).
+- **attach_wq** — share kernel io-wq across pipelines (default
+  `false`; opt-in when ≥2 NVMe or ≥2 SATA pipelines).
 - **fault_latency** — `min_ms:max_ms` latency injection for dummy
   disks (testing only).
 - **fault_error_rate** — `0.0..1.0` error injection rate for dummy
@@ -566,4 +699,4 @@ health detection.
   Design Decisions: control + data separation, native buffer, C ABI +
   oneshot FFI) — the RPC engine diskio builds on.
 - [`design-crow-tree.md`](../tree/design-crow-tree.md) — the btree
-  page store that shares the reactor.
+  page store that shares `DiskIOUring`.

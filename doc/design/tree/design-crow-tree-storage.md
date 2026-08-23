@@ -43,7 +43,7 @@ of crow-tree that does I/O, and it is page-granular and **always asynchronous**
 [`../kv/design-crow-kv-wal.md`](../kv/design-crow-kv-wal.md)).
 The upper layer always uses the async API, regardless of whether the
 underlying platform has `io_uring` (Linux) or not (macOS/fallback). On
-Linux, `BlockAsyncPageStore` + `Reactor` submit genuine `io_uring` SQEs;
+Linux, `BlockAsyncPageStore` + `DiskIOUring` submit genuine `io_uring` SQEs;
 on macOS or without liburing, the `*_async` methods fall back to
 synchronous blocking I/O wrapped as immediately-ready completions, so the
 upper layer has a **unified async interface** with no sync/async split.
@@ -77,22 +77,22 @@ null/empty, an in-memory `BlockPageStore` with IU=1 is used (test path).
 ### 2.3 Async I/O Architecture
 
 `BlockPageStore` has an async twin, `BlockAsyncPageStore`, that submits all
-I/O through a `Reactor` (io_uring event loop). The async path is used by
+I/O through a `DiskIOUring` (io_uring event loop). The async path is used by
 `ct_get_async`, `ct_flush_async`, and `ct_snapshot_async`.
 
 | Platform | Mechanism | Status |
 | --- | --- | --- |
-| Linux (liburing) | `BlockAsyncPageStore` + `Reactor` (io_uring SQE/CQE) | Production |
+| Linux (liburing) | `BlockAsyncPageStore` + `DiskIOUring` (io_uring SQE/CQE) | Production |
 | macOS / no liburing | Synchronous fallback (blocking `pwrite`/`pread`/`fdatasync` wrapped as immediately-ready completions) | Dev |
 
 **Linux (liburing)**: `BlockAsyncPageStore` maps global byte offsets to
 per-extent fds via `BlockPageStore::fd_for_offset()`, then submits
-`io_uring` SQEs through the `Reactor`. Writes spanning multiple extents are
+`io_uring` SQEs through the `DiskIOUring`. Writes spanning multiple extents are
 split and chained; fsync chains across all dirty extent fds. Requires
 `CROW_TREE_HAVE_LIBURING` build flag.
 
 **macOS / no liburing**: `CROW_TREE_HAVE_LIBURING` is not defined. `ct_open`
-does not wire a `Reactor` or `AsyncPageStore`. The `*_async` C API methods
+does not wire a `DiskIOUring` or `AsyncPageStore`. The `*_async` C API methods
 fall back to completing synchronously (blocking I/O wrapped as an
 immediately-ready completion). The upper-layer API is identical regardless
 of platform.
