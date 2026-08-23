@@ -145,3 +145,48 @@ pub fn decode_data(scheme: EcScheme, blocks: Vec<Option<Vec<u8>>>) -> Result<Vec
     }
     Ok(data)
 }
+
+/// Encode parity from pre-split data shards.
+///
+/// `data_shards.len()` must be `data_num` for a full strip, or `< data_num`
+/// for a partial strip (last strip of an object). All present shards must
+/// be equal length; missing shards (indices `len..data_num`) are treated
+/// as zero — no padding is written to disk, only parity is. Returns
+/// `code_num` parity shards, each the same length as a data shard.
+pub fn encode_parity_from_shards(scheme: EcScheme, data_shards: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+    if scheme.data_num == 0 || scheme.code_num == 0 {
+        return Err(EcError::InvalidScheme {
+            data_num: scheme.data_num,
+            code_num: scheme.code_num,
+        });
+    }
+    if data_shards.is_empty() {
+        return Err(EcError::Backend("no data shards provided".into()));
+    }
+    if data_shards.len() > scheme.data_num {
+        return Err(EcError::Backend(format!(
+            "too many shards: {} > data_num {}",
+            data_shards.len(),
+            scheme.data_num
+        )));
+    }
+
+    let shard_size = data_shards[0].len();
+    if data_shards[1..].iter().any(|s| s.len() != shard_size) {
+        return Err(EcError::Backend("data shards must all be the same length".into()));
+    }
+
+    // Build full data_num shards: present + zero-filled placeholders.
+    let mut full: Vec<Vec<u8>> = Vec::with_capacity(scheme.data_num);
+    for i in 0..scheme.data_num {
+        if i < data_shards.len() {
+            full.push(data_shards[i].to_vec());
+        } else {
+            full.push(vec![0u8; shard_size]);
+        }
+    }
+
+    let mut data_refs: Vec<&mut [u8]> = full.iter_mut().map(Vec::as_mut_slice).collect();
+    let parity = isal_encode(&mut data_refs, scheme.data_num, scheme.code_num);
+    Ok(parity)
+}

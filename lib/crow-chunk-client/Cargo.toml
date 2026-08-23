@@ -1,0 +1,31 @@
+[package]
+name = "crow-chunk-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client library for CROW chunk data path: large-object writer, ChunkIoWriter interface, Location type."
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crow-chunkdb-client = { path = "../crow-chunkdb-client" }
+crow-diskio-client = { path = "../crow-diskio-client" }
+crow-common = { path = "../crow-common/rust" }
+crow-protocol = { path = "../crow-protocol" }
+crow-rpc-ffi = { path = "../crow-rpc/ffi" }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "io-util", "macros", "time"] }
+bytes = "1"
+prost = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+crow-test-harness = { path = "../crow-test-harness", features = ["diskio"] }
+crow-kv-client = { path = "../crow-kv-client" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
+tempfile = "3"
