@@ -117,7 +117,7 @@ async fn allocate_new_chunk<A: ChunkAllocator>(
 }
 
 /// Append 1 strip to an existing chunk and return its placement.
-async fn append_strip<A: ChunkAllocator>(
+pub(crate) async fn append_strip<A: ChunkAllocator>(
     chunkdb: &A,
     chunk_id: ChunkId,
     ec_scheme: EcScheme,

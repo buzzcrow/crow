@@ -133,6 +133,93 @@ impl MainWriteState {
     }
 }
 
+/// Write one strip's data blocks with whole-strip retry. Receives
+/// blocks from `block_rx`, writing each to its segment. On a diskio
+/// write failure, allocates a fresh strip placement via `append_chunk`
+/// on the same chunk and re-writes all buffered blocks to the new
+/// placement, then continues receiving the remaining blocks. Up to
+/// `MAX_RETRIES` attempts; on exhaustion returns `IoError::WriteFailed`.
+/// The failed strip's segments are leaked (R94 coarse; R110 refines to
+/// single-block replacement).
+async fn write_strip_with_retry<A, W>(
+    chunkdb: &A,
+    diskio: &W,
+    ec_scheme: EcScheme,
+    placement: &mut StripPlacement,
+    block_rx: &mut mpsc::Receiver<Bytes>,
+) -> Result<(Vec<Bytes>, bool)>
+where
+    A: ChunkAllocator,
+    W: BlockWriter,
+{
+    const MAX_RETRIES: u32 = 3;
+    let data_num = ec_scheme.data_num;
+    let mut data_shards: Vec<Bytes> = Vec::with_capacity(data_num);
+    let mut next_to_write: usize = 0;
+    let mut attempts: u32 = 0;
+    let mut got_eof = false;
+
+    loop {
+        // All data_num blocks written → strip data complete.
+        if next_to_write >= data_num {
+            break;
+        }
+        // Get the block to write: buffered (retry) or from the channel.
+        let bytes = if next_to_write < data_shards.len() {
+            data_shards[next_to_write].clone()
+        } else if let Some(b) = block_rx.recv().await {
+            data_shards.push(b.clone());
+            b
+        } else {
+            got_eof = true;
+            break;
+        };
+
+        let strip_unit_bytes = u64::from(placement.unit_kb) * 1024;
+        let seg = placement
+            .segments
+            .get(next_to_write)
+            .ok_or_else(|| IoError::Internal(format!("segment {next_to_write} missing")))?;
+        let disk_id = seg
+            .disk_id
+            .as_ref()
+            .ok_or_else(|| IoError::Internal("segment missing disk_id".into()))?;
+        let zone_offset = seg.unit_offset * strip_unit_bytes;
+
+        match diskio
+            .write(to_diskio_id(disk_id), seg.zone_index, zone_offset, bytes)
+            .await
+        {
+            Ok(()) => {
+                next_to_write += 1;
+            }
+            Err(e) => {
+                attempts += 1;
+                if attempts >= MAX_RETRIES {
+                    return Err(IoError::WriteFailed(format!(
+                        "strip write failed after {MAX_RETRIES} retries: {e}"
+                    )));
+                }
+                warn!(
+                    attempt = attempts,
+                    "strip data write failed, retrying with new placement"
+                );
+                *placement = crate::prefetch::append_strip(
+                    chunkdb,
+                    placement.chunk_id,
+                    ec_scheme,
+                    placement.strip_index_in_chunk + attempts,
+                    0,
+                )
+                .await?;
+                next_to_write = 0;
+            }
+        }
+    }
+
+    Ok((data_shards, got_eof))
+}
+
 /// Run the main write task: receives strip placements from the
 /// prealloc channel and data blocks from the fetch channel, writes
 /// data blocks to disk, hands off parity per strip, and handles chunk
@@ -145,20 +232,20 @@ pub(crate) async fn run_main_write_task<A, W>(
     _max_chunk_size: u64,
     parity_depth: usize,
     unit_bytes: u64,
-    prealloc_rx: &mut mpsc::Receiver<Result<StripPlacement>>,
+    mut prealloc_rx: mpsc::Receiver<Result<StripPlacement>>,
     mut block_rx: mpsc::Receiver<Bytes>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Vec<Location>>
 where
     A: ChunkAllocator + 'static,
     W: BlockWriter + 'static,
 {
-    let data_num = ec_scheme.data_num;
     let parity_sem = Arc::new(tokio::sync::Semaphore::new(parity_depth));
     let mut state = MainWriteState::new();
 
     loop {
         // 1. Await next strip placement.
-        let placement = match prealloc_rx.recv().await {
+        let mut placement = match prealloc_rx.recv().await {
             Some(Ok(p)) => p,
             Some(Err(e)) => {
                 abort_and_cleanup(&chunkdb, &diskio, &mut state).await;
@@ -175,33 +262,15 @@ where
         }
         state.current_chunk_id = Some(placement.chunk_id);
 
-        let strip_unit_bytes = u64::from(placement.unit_kb) * 1024;
-        let segments = placement.segments;
-
-        // 3. Receive data_num blocks for this strip.
-        let mut data_shards: Vec<Bytes> = Vec::with_capacity(data_num);
-        let mut got_eof = false;
-
-        for block_idx in 0..data_num {
-            if let Some(bytes) = block_rx.recv().await {
-                let seg = segments
-                    .get(block_idx)
-                    .ok_or_else(|| IoError::Internal(format!("segment {block_idx} missing")))?;
-                let disk_id = seg
-                    .disk_id
-                    .as_ref()
-                    .ok_or_else(|| IoError::Internal("segment missing disk_id".into()))?;
-                let zone_offset = seg.unit_offset * strip_unit_bytes;
-                diskio
-                    .write(to_diskio_id(disk_id), seg.zone_index, zone_offset, bytes.clone())
-                    .await
-                    .map_err(|e| IoError::WriteFailed(e.to_string()))?;
-                data_shards.push(bytes);
-            } else {
-                got_eof = true;
-                break;
-            }
-        }
+        // 3. Receive + write data blocks with whole-strip retry.
+        let (data_shards, got_eof) =
+            match write_strip_with_retry(&chunkdb, &diskio, ec_scheme, &mut placement, &mut block_rx).await {
+                Ok(r) => r,
+                Err(e) => {
+                    abort_and_cleanup(&chunkdb, &diskio, &mut state).await;
+                    return Err(e);
+                }
+            };
 
         if data_shards.is_empty() {
             // EOF with no blocks for this strip — don't write it.
@@ -209,6 +278,7 @@ where
         }
 
         // 4. Hand off to parity task (bounded by semaphore).
+        let strip_unit_bytes = u64::from(placement.unit_kb) * 1024;
         let strip_data_blocks = data_shards.len() as u64;
         let permit = parity_sem
             .clone()
@@ -219,7 +289,7 @@ where
             diskio.clone(),
             ec_scheme,
             data_shards,
-            segments.clone(),
+            placement.segments.clone(),
             strip_unit_bytes,
         );
         state.parity_handles.push(handle);
@@ -238,7 +308,25 @@ where
         }
     }
 
-    // 5. Drain: join all parity tasks, seal current chunk, return.
+    // 5. Drain: on clean finish, join parity + seal the current chunk.
+    //    On abort (cancel), drop parity handles + delete the partial
+    //    chunk; return the already-sealed Locations for caller cleanup.
+    if *cancel_rx.borrow() {
+        for h in state.parity_handles.drain(..) {
+            h.abort();
+        }
+        if let Some(chunk_id) = state.current_chunk_id {
+            if state.current_chunk_bytes > 0 {
+                warn!("abort: deleting partial chunk");
+                let _ = chunkdb
+                    .delete_chunk(DeleteChunkRequest {
+                        chunk_id: Some(chunk_id),
+                    })
+                    .await;
+            }
+        }
+        return Ok(state.locations);
+    }
     finish_and_seal(&chunkdb, &mut state, unit_bytes).await?;
     Ok(state.locations)
 }

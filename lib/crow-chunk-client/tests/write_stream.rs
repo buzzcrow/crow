@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use crow_chunk_client::{BlockWriter, ChunkAllocator, LargeObjectWriter, Result, WriterConfig};
+use crow_chunk_client::{
+    BlockWriter, ChunkAllocator, ChunkIoWriter, FeedStatus, IoError, LargeObjectWriter, Result, WriterConfig,
+};
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskId;
 use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
@@ -222,11 +224,22 @@ impl ChunkAllocator for MockChunkAllocator {
 struct MockBlockWriter {
     writes: Arc<Mutex<Vec<MockWrite>>>,
     fsyncs: Arc<Mutex<Vec<(u64, u64)>>>,
+    /// When set, the first `write` whose `zone_offset` matches fails
+    /// once (then the slot is cleared). Used to inject a strip write
+    /// failure for whole-strip retry tests.
+    fail_zone_offset: Arc<Mutex<Option<u64>>>,
 }
 
 impl MockBlockWriter {
     fn new() -> Self {
         Self::default()
+    }
+
+    fn with_fail_once(zone_offset: u64) -> Self {
+        Self {
+            fail_zone_offset: Arc::new(Mutex::new(Some(zone_offset))),
+            ..Self::default()
+        }
     }
 }
 
@@ -242,6 +255,17 @@ struct MockWrite {
 #[async_trait]
 impl BlockWriter for MockBlockWriter {
     async fn write(&self, disk_id: DiskId, zone_index: u32, zone_offset: u64, data: Bytes) -> Result<()> {
+        {
+            let mut fail = self.fail_zone_offset.lock().unwrap();
+            if let Some(zo) = *fail {
+                if zo == zone_offset {
+                    *fail = None;
+                    return Err(IoError::WriteFailed(format!(
+                        "injected failure at zone_offset {zone_offset}"
+                    )));
+                }
+            }
+        }
         self.writes.lock().unwrap().push(MockWrite {
             disk_high: disk_id.high,
             disk_low: disk_id.low,
@@ -509,4 +533,209 @@ async fn write_stream_fsync_per_strip() {
     // 1 strip → 5 unique disks (4 data + 1 parity) → 5 fsyncs.
     let fsyncs = diskio.fsyncs.lock().unwrap();
     assert_eq!(fsyncs.len(), 5);
+}
+
+#[tokio::test]
+async fn write_stream_whole_strip_retry() {
+    // 2 strips (8 blocks). The mock allocator assigns each segment a
+    // fresh unit_offset: strip 0 → offsets 0-4, strip 1 → 5-9. Inject
+    // a failure on strip 1's first data block (unit_offset 5 →
+    // zone_offset 5*4096 = 20480). The writer retries the whole strip
+    // via append_chunk (new placement with fresh offsets) and succeeds.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::with_fail_once(5 * 4096);
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
+
+    let data = vec![0x88u8; 8 * 4096];
+    let locs = writer
+        .write_stream(data.as_slice(), Some(data.len() as u64))
+        .await
+        .unwrap();
+
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 8 * 4096);
+
+    // 1 allocate (chunk) + 1 append (prealloc strip 1) + 1 append
+    // (retry replacement strip) = 2 appends.
+    let st = chunkdb.snapshot();
+    assert_eq!(st.allocate_calls, 1);
+    assert_eq!(st.append_calls, 2);
+    assert_eq!(st.seal_calls, 1);
+
+    // 8 data writes + 2 parity writes = 10. The failed attempt's
+    // write is not recorded (the mock returns Err before pushing).
+    let writes = diskio.writes.lock().unwrap();
+    assert_eq!(writes.len(), 10);
+
+    // Data integrity: collect data writes (disks 0-3 = data, disk 4 =
+    // parity), sort by zone_offset, concatenate → original bytes.
+    let mut data_writes: Vec<&MockWrite> = writes
+        .iter()
+        .filter(|w| w.disk_high == 1000 || w.disk_high == 1001 || w.disk_high == 1002 || w.disk_high == 1003)
+        .collect();
+    data_writes.sort_by_key(|w| w.zone_offset);
+    let mut reconstructed = Vec::new();
+    for w in data_writes {
+        reconstructed.extend_from_slice(&w.data);
+    }
+    assert_eq!(reconstructed, data);
+}
+
+// ── Push mode (ChunkIoWriter) tests ──────────────────────────────
+
+fn block(value: u8, size: usize) -> Bytes {
+    Bytes::from(vec![value; size])
+}
+
+#[tokio::test]
+async fn push_mode_basic_one_strip() {
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
+
+    assert!(writer.require_data());
+    for i in 0..4u8 {
+        let status = writer.on_data(block(i, 4096)).await.unwrap();
+        assert_eq!(status, FeedStatus::Continue);
+    }
+    let locs = writer.on_finish().await.unwrap();
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 4 * 4096);
+    assert!(!writer.require_data());
+
+    let st = chunkdb.snapshot();
+    assert_eq!(st.allocate_calls, 1);
+    assert_eq!(st.seal_calls, 1);
+}
+
+#[tokio::test]
+async fn push_mode_empty_object() {
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb, diskio, ec, test_config(1024 * 1024));
+
+    let locs = writer.on_finish().await.unwrap();
+    assert!(locs.is_empty());
+}
+
+#[tokio::test]
+async fn push_mode_on_data_after_finish() {
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb, diskio, ec, test_config(1024 * 1024));
+
+    writer.on_data(block(0, 4096)).await.unwrap();
+    writer.on_finish().await.unwrap();
+    let result = writer.on_data(block(1, 4096)).await;
+    assert!(matches!(result, Err(IoError::Finished)));
+}
+
+#[tokio::test]
+async fn push_mode_on_finish_twice() {
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb, diskio, ec, test_config(1024 * 1024));
+
+    writer.on_data(block(0, 4096)).await.unwrap();
+    writer.on_finish().await.unwrap();
+    let result = writer.on_finish().await;
+    assert!(matches!(result, Err(IoError::Finished)));
+}
+
+#[tokio::test]
+async fn push_mode_on_error_no_sealed() {
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb, diskio, ec, test_config(1024 * 1024));
+
+    let locs = writer.on_error().await.unwrap();
+    assert!(locs.is_empty());
+}
+
+#[tokio::test]
+async fn push_mode_on_error_after_sealed_chunk() {
+    // max_chunk_size = 4*4096 (1 strip/chunk). Push 10 blocks (2 full
+    // strips + 1 partial 2-block strip): chunk 1 + chunk 2 sealed via
+    // rotation, chunk 3 partial. on_error → returns 2 Locations
+    // (chunks 1-2), deletes the partial chunk 3.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb.clone(), diskio, ec, test_config(4 * 4096));
+
+    for i in 0..10u8 {
+        writer.on_data(block(i, 4096)).await.unwrap();
+    }
+    let locs = writer.on_error().await.unwrap();
+    assert_eq!(locs.len(), 2);
+    assert_eq!(locs[0].length, 4 * 4096);
+    assert_eq!(locs[1].length, 4 * 4096);
+
+    let st = chunkdb.snapshot();
+    assert_eq!(st.seal_calls, 2); // chunks 1-2 sealed at rotation
+    assert_eq!(st.delete_calls, 1); // partial chunk 3 deleted
+}
+
+#[tokio::test]
+async fn push_mode_data_integrity() {
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let mut writer = LargeObjectWriter::new(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
+
+    let mut data = Vec::new();
+    for i in 0..8u8 {
+        let block_data = vec![i; 4096];
+        data.extend_from_slice(&block_data);
+        writer.on_data(Bytes::from(block_data)).await.unwrap();
+    }
+    let locs = writer.on_finish().await.unwrap();
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 8 * 4096);
+
+    // Reconstruct from data writes (disks 1000-1003), sorted by offset.
+    let writes = diskio.writes.lock().unwrap();
+    let mut data_writes: Vec<&MockWrite> = writes
+        .iter()
+        .filter(|w| (1000..=1003).contains(&w.disk_high))
+        .collect();
+    data_writes.sort_by_key(|w| w.zone_offset);
+    let mut reconstructed = Vec::new();
+    for w in data_writes {
+        reconstructed.extend_from_slice(&w.data);
+    }
+    assert_eq!(reconstructed, data);
+}
+
+#[tokio::test]
+async fn push_mode_backpressure() {
+    // max_cached_buffer = 2*4096 → channel capacity = 2. With an
+    // instant mock BlockWriter the channel drains concurrently, so
+    // Pause is not guaranteed. Verify the API is sound: on_data always
+    // stores, returns a FeedStatus, and on_finish seals correctly.
+    let chunkdb = MockChunkAllocator::new();
+    let diskio = MockBlockWriter::new();
+    let ec = ec_4_1();
+    let config = WriterConfig {
+        max_chunk_size: 1024 * 1024,
+        prealloc_depth: 2,
+        parity_depth: 2,
+        chunk_prefetch_depth: 1,
+        read_buffer_size: 4096,
+        max_cached_buffer: 2 * 4096,
+    };
+    let mut writer = LargeObjectWriter::new(chunkdb, diskio, ec, config);
+
+    for i in 0..6u8 {
+        let _status = writer.on_data(block(i, 4096)).await.unwrap();
+    }
+    let locs = writer.on_finish().await.unwrap();
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].length, 6 * 4096);
 }

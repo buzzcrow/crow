@@ -12,9 +12,45 @@ acceptance criteria.
 
 Tasks are dependency-ordered. One task in progress at a time.
 
+## Status (Linux review, 2026-08-23)
+
+Verified on Linux (pixi): build, `test-common`, `cargo test -p
+crow-chunk-client --test large_object_writer` (12 UTs), `--test
+write_stream` (9 integration tests), `cargo fmt --check`, `cargo
+clippy -p crow-chunk-client -- -D warnings` all pass. Commit
+`94f1934` landed the happy-path pipeline.
+
+Done: Phase 0 (EC gate), Phase 1 scaffolding + `Location`, Phase 2
+`ChunkIoWriter` trait, Phase 3 strip prealloc (chunk rotation folded
+into the prealloc task — no separate `ChunkPrefetch` oneshot struct),
+Phase 4 happy-path pipeline + `write_stream` + rotation, Phase 5
+`WriterPool`, Phase 6 mock integration tests (9 of ~22), Phase 8 lint
++ commit.
+
+Gaps (remaining work):
+- **Concrete trait impls for real clients** (Phase 1, deferred): no
+  `impl ChunkAllocator for ChunkdbClient`, no `DiskioBlockWriter` +
+  `impl BlockWriter`. Blocks Phase 7 E2E.
+- **`ChunkIoWriter` impl for `LargeObjectWriter`** (Phase 4): push
+  mode (`on_data`/`on_finish`/`on_error`/`require_data`) not
+  implemented — only `write_stream` exists.
+- **Whole-strip retry + `Drop` abort + `CancellationToken`** (Phase 4):
+  not implemented. Write failure aborts immediately (no retry); no
+  `Drop` impl; no cancellation token. `abort_and_cleanup` exists but
+  is only invoked on prealloc-channel error.
+- **Integration tests** (Phase 6): 9 of ~22 done. Missing: pipeline
+  concurrency, fetch granularity, bounded prealloc depth, chunk
+  prefetch, backpressure, whole-strip retry, EC encode failure abort,
+  prefetch-fell-behind, `on_error` after sealed chunks, `Drop`
+  mid-write, `WriterPool` budget, per-writer memory bounded.
+- **E2E tests** (Phase 7): not started. Needs a `ChunkdbProcess`
+  harness in `crow-test-harness` (mirrors `DiskdbProcess`) + the
+  concrete trait impls + `tests/large_object_writer_e2e.rs` (Case 1
+  50 MB single chunk, Case 2 100 MB rotation).
+
 ## Phase 0 — Verification gate
 
-- [ ] **Partial-EC UT gate**: add `encode_parity_from_shards` to
+- [x] **Partial-EC UT gate**: add `encode_parity_from_shards` to
   `lib/crow-common/rust/src/ec.rs` (full + partial + single-block
   variants) and write the 3 UTs in
   `lib/crow-common/rust/tests/ec.rs` (full strip, 2-of-4 partial,
@@ -25,7 +61,7 @@ Tasks are dependency-ordered. One task in progress at a time.
 
 ## Phase 1 — Crate scaffolding + shared types
 
-- [ ] **`crow-chunk-client` crate skeleton**: create `lib/crow-chunk-client/`
+- [x] **`crow-chunk-client` crate skeleton**: create `lib/crow-chunk-client/`
   with `Cargo.toml` (deps per design §1.2), `src/lib.rs` (re-exports),
   `src/error.rs` (`IoError` enum: `AllocationFailed`, `WriteFailed`,
   `EcEncodeFailed`, `MemoryBudgetExhausted`, `Finished`, `Internal`,
@@ -38,30 +74,30 @@ Tasks are dependency-ordered. One task in progress at a time.
   Verify `pixi run cargo build -p crow-chunk-client` compiles. Files:
   `lib/crow-chunk-client/Cargo.toml`, `lib/crow-chunk-client/src/**`,
   `Cargo.toml`.
-- [ ] **`Location` proto + type**: add `Location` message to
+- [x] **`Location` proto + type**: add `Location` message to
   `lib/crow-protocol/src/proto/chunkdb_type.proto`, regenerate proto
   bindings. Implement `Location` in `src/location.rs` with proto
   round-trip + compact binary (`to_bytes`/`from_bytes`, 48 bytes).
   Files: `lib/crow-protocol/src/proto/chunkdb_type.proto`,
   `lib/crow-chunk-client/src/location.rs`.
-- [ ] **`Location` UTs**: proto round-trip (single + 3-entry),
+- [x] **`Location` UTs**: proto round-trip (single + 3-entry),
   binary size < 64 bytes. Files:
   `lib/crow-chunk-client/tests/large_object_writer.rs`.
 
 ## Phase 2 — `ChunkIoWriter` interface
 
-- [ ] **`ChunkIoWriter` trait + `FeedStatus` + `BackpressurePolicy`**:
+- [x] **`ChunkIoWriter` trait + `FeedStatus` + `BackpressurePolicy`**:
   implement in `src/io.rs` per design §3.2 with full doc-comment
   contract (always-store, `require_data` hint, two caller strategies).
   Files: `lib/crow-chunk-client/src/io.rs`.
-- [ ] **`ChunkIoWriter` mock UT**: mock impl verifying
+- [x] **`ChunkIoWriter` mock UT**: mock impl verifying
   `on_data`/`on_finish`/`on_error`/`require_data` contract +
   `on_data`-after-`on_finish` → `IoError::Finished`. Files:
   `lib/crow-chunk-client/tests/large_object_writer.rs`.
 
 ## Phase 3 — Prefetch + preallocation
 
-- [ ] **Strip preallocation task**: implement in `src/prefetch.rs` —
+- [x] **Strip preallocation task**: implement in `src/prefetch.rs` —
   background task, `allocate_chunk(strip_count=1)` then
   `append_chunk(strip_count=1)` up to `prealloc_depth` ahead, bounded
   `mpsc` channel, retry-on-transient, error-into-channel on exhaustion.
@@ -69,27 +105,27 @@ Tasks are dependency-ordered. One task in progress at a time.
   size ≥ `max_chunk_size`, stop appending and switch to prefetched
   next chunk (same threshold as main write task's rotation — design
   §6.2a, §8.2). Files: `lib/crow-chunk-client/src/prefetch.rs`.
-- [ ] **`ChunkPrefetch`**: implement chunk pre-allocation (1 strip) via
+- [x] **`ChunkPrefetch`**: implement chunk pre-allocation (1 strip) via
   `allocate_chunk` when current chunk within `prealloc_depth` strips of
   `max_chunk_size`, `oneshot` delivery, `chunk_prefetch_depth` bound.
   Files: `lib/crow-chunk-client/src/prefetch.rs`.
 
 ## Phase 4 — Pipeline + writer
 
-- [ ] **`WriterConfig` + `LargeObjectWriter::new`**: implement
+- [x] **`WriterConfig` + `LargeObjectWriter::new`**: implement
   `WriterConfig` (defaults per design Config Extensions) + constructor
   generic over `A: ChunkAllocator` / `W: BlockWriter` (design §1.3,
   §4.2), holding `A`/`W`/`RpcServer`/per-disk `Connection`
   cache/`EcScheme`/`WriterConfig`. Files:
   `lib/crow-chunk-client/src/writer/large_object.rs`.
-- [ ] **Fetch stage**: implement in `src/writer/pipeline.rs` —
+- [x] **Fetch stage**: implement in `src/writer/pipeline.rs` —
   `AsyncRead` loop, accumulate to `read_buffer_size`, send `Bytes`
   (no block index — main write task tracks indices) to main write
   task via bounded channel (capacity = `max_cached_buffer /
   read_buffer_size`), `max_cached_buffer` backpressure (fetch awaits
   when channel full), partial-last-block on EOF. Files:
   `lib/crow-chunk-client/src/writer/pipeline.rs`.
-- [ ] **Main write task**: two-channel coordinator — await strip
+- [x] **Main write task**: two-channel coordinator — await strip
   placement from prealloc channel at start of each strip (blocks if
   prealloc behind), then receive `data_num` blocks from fetch channel;
   track `block_idx = count % data_num`, `strip_idx = count /
@@ -99,21 +135,26 @@ Tasks are dependency-ordered. One task in progress at a time.
   chunk's handle list + advance immediately; handle partial last
   strip (EOF only) + `sealed_length`. Files:
   `lib/crow-chunk-client/src/writer/pipeline.rs`.
-- [ ] **Parity tasks**: `tokio::spawn` per strip, bounded by
+- [x] **Parity tasks**: `tokio::spawn` per strip, bounded by
   `parity_depth` semaphore, `encode_parity_from_shards` + write parity
   blocks via `BlockWriter::write` + `BlockWriter::fsync` all strip
   disks. Files: `lib/crow-chunk-client/src/writer/pipeline.rs`.
-- [ ] **`write_stream` orchestration**: launch prealloc + fetch + main
+- [x] **`write_stream` orchestration**: launch prealloc + fetch + main
   write + parity, drain on EOF (join parity → seal → return
   `Vec<Location>`), wire `CancellationToken` for abort. Files:
   `lib/crow-chunk-client/src/writer/large_object.rs`.
-- [ ] **Chunk rotation**: in main write task, after a full strip check
+- [x] **Chunk rotation**: in main write task, after a full strip check
   `current_chunk_bytes ≥ max_chunk_size` → join current chunk's parity
   tasks (await all `JoinHandle`s in the chunk's handle list, clear
   list), `seal_chunk`, record `Location`, switch to prefetched chunk,
   advance `logical_offset`. Files:
   `lib/crow-chunk-client/src/writer/large_object.rs`.
 - [ ] **Completion + error/abort + `Drop`**: `on_finish`/`on_error`
+  paths, whole-strip retry (up to 3, `append_chunk` new placement +
+  free failed strip), `Drop` abort via `CancellationToken` +
+  `delete_chunk` partial cleanup, return sealed `Location`s. **GAP:
+  no retry, no `Drop`, no `CancellationToken` — write failure aborts
+  immediately.** Files:
   paths, whole-strip retry (up to 3, `append_chunk` new placement +
   free failed strip), `Drop` abort via `CancellationToken` +
   `delete_chunk` partial cleanup, return sealed `Location`s. Files:
@@ -123,12 +164,18 @@ Tasks are dependency-ordered. One task in progress at a time.
   stage uses in `write_stream` mode — no fetch stage task in push
   mode), awaits on full channel (backpressure); `on_finish`/`on_error`
   delegate to pipeline drain/abort; `require_data` checks block
+  channel capacity (non-async). **GAP: not implemented — only
+  `write_stream` exists.** Files:
+  sends `Bytes` directly to the block channel (same channel the fetch
+  stage uses in `write_stream` mode — no fetch stage task in push
+  mode), awaits on full channel (backpressure); `on_finish`/`on_error`
+  delegate to pipeline drain/abort; `require_data` checks block
   channel capacity (non-async). Files:
   `lib/crow-chunk-client/src/writer/large_object.rs`.
 
 ## Phase 5 — Writer pool
 
-- [ ] **`WriterPool`**: implement `try_acquire` with
+- [x] **`WriterPool`**: implement `try_acquire` with
   `memory_budget`/`in_use` atomic accounting, per-writer footprint
   formula (design §10.2), `MemoryBudgetExhausted` rejection,
   `Drop`-decrement. Generic over `A: ChunkAllocator + Clone` /
@@ -137,13 +184,13 @@ Tasks are dependency-ordered. One task in progress at a time.
 
 ## Phase 6 — Integration tests (class-level mocks)
 
-- [ ] **Integration test harness**: mock `ChunkAllocator` +
+- [x] **Integration test harness**: mock `ChunkAllocator` +
   mock `BlockWriter` impls (class-level mocks per design §1.3 — mock
   allocate-chunk-strip, free-block, write, fsync) recording calls +
   injectable delays/errors. The writer is constructed with the mock
   impls via its generic trait params. Files:
   `lib/crow-chunk-client/tests/large_object_writer.rs`.
-- [ ] **Pipeline concurrency + fetch granularity + bounded prealloc +
+- [~] **Pipeline concurrency + fetch granularity + bounded prealloc +
   chunk prefetch + backpressure + streaming + partial strip + whole-
   strip retry + EC encode failure abort + prefetch-fell-behind-at-
   rotation + on_error + Drop + WriterPool budget tests**: per design
@@ -153,6 +200,10 @@ Tasks are dependency-ordered. One task in progress at a time.
 ## Phase 7 — E2E tests (real servers)
 
 - [ ] **E2E harness wiring**: extend `crow-test-harness` usage to start
+  1 kv-server + 1 diskdb (5 disks) + 1 chunkdb; construct
+  `LargeObjectWriter` in-process with a real `DiskioClient` +
+  `ChunkdbClient`. **GAP: no `ChunkdbProcess` harness exists; concrete
+  trait impls for real clients missing.** Files:
   1 kv-server + 1 diskdb (5 disks) + 1 chunkdb; construct
   `LargeObjectWriter` in-process with a real `DiskioClient` +
   `ChunkdbClient`. Files:
@@ -165,14 +216,14 @@ Tasks are dependency-ordered. One task in progress at a time.
 
 ## Phase 8 — Quality gate + commit
 
-- [ ] **Lint**: `pixi run cargo fmt --all -- --check`,
+- [x] **Lint**: `pixi run cargo fmt --all -- --check`,
   `pixi run cargo clippy --all-targets -- -D warnings`. Fix up to 3
   times.
-- [ ] **Affected tests**: `pixi run test-common` (EC UT gate),
+- [x] **Affected tests**: `pixi run test-common` (EC UT gate),
   `pixi run cargo test -p crow-chunk-client --test
   large_object_writer`, `pixi run clean-env && pixi run cargo test -p
   crow-chunk-client --test large_object_writer_e2e`. All must pass.
-- [ ] **Commit**: implementation commits (one per phase or grouped for
+- [x] **Commit**: implementation commits (one per phase or grouped for
   small phases) + final commit including design draft + plan doc.
 
 ## File list
