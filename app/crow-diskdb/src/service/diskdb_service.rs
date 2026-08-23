@@ -36,7 +36,7 @@ use crate::recovery::{unit_capacity_for_zone, ZoneLoader};
 use crate::scanner::ScanState;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
-const MAX_ALLOCATE_COUNT: u32 = 1024;
+pub(crate) const MAX_ALLOCATE_COUNT: u32 = 1024;
 
 /// `u32::MAX` sentinel for "all zones on the disk".
 const ALL_ZONES: u32 = u32::MAX;

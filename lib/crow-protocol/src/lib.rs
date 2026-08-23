@@ -222,6 +222,6 @@ pub use bitmap::{create_usage_bitmap, UsageBitmap};
 
 pub mod ports;
 pub use ports::{
-    ServicePort, CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE,
+    ServicePort, CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, DISKDB_RPC_BASE,
     KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
 };

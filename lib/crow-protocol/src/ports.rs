@@ -13,6 +13,8 @@
 //!
 //! - `9910`–`9919` — crow-kv-server HTTP management API (stride 1)
 //! - `9920`–`9929` — crow-web HTTP service (stride 1)
+//! - `9931`–`9940` — crow-diskdb crow-rpc listener (R115 migration,
+//!   stride 1; instance `i` uses `9931 + i`)
 //! - `9941`–`9960` — crow-diskdb gRPC + HTTP management (paired,
 //!   stride 2; instance `i` uses gRPC `9941 + 2i`, HTTP `9942 + 2i`)
 //! - `9971`–`9990` — crow-chunkdb gRPC + HTTP management (paired,
@@ -34,6 +36,11 @@ pub const DISKDB_GRPC_BASE: u16 = 9941;
 
 /// crow-diskdb HTTP management API — base port.
 pub const DISKDB_HTTP_BASE: u16 = 9942;
+
+/// crow-diskdb crow-rpc listener — base port (R115 migration). Separate
+/// from the gRPC port so both servers run simultaneously during the
+/// mixed-rollout window. Stride 1 (one port per instance).
+pub const DISKDB_RPC_BASE: u16 = 9931;
 
 /// crow-chunkdb gRPC listener — base port.
 pub const CHUNKDB_GRPC_BASE: u16 = 9971;
