@@ -41,18 +41,33 @@ fi
 staged_cpp_src=$(git diff --cached --name-only --diff-filter=ACM -- 'lib/crow-tree/src/*.cpp')
 if [ -n "$staged_cpp_src" ] && [ -d lib/crow-tree/build ]; then
     echo "Running clang-tidy on staged C++ files..."
-    # Mirror CMake's liburing gate: reactor.cpp and file_async_page_store.cpp require
-    # liburing headers; on macOS (and anywhere liburing is missing) they are excluded
-    # from the build, so clang-tidy must skip them too.
+    # Mirror CMake's liburing gate: reactor.cpp, block_async_page_store.cpp,
+    # and any file that includes reactor.h require liburing headers; on macOS
+    # (and anywhere liburing is missing) they are excluded from the build, so
+    # clang-tidy must skip them too. clang-tidy uses clang (not GCC) and can't
+    # find liburing.h in the pixi env, so skip these files when liburing.h is
+    # not at a system path. Most crow-tree source files transitively include
+    # reactor.h via crow-tree.h → options.h, so when liburing.h is not at a
+    # system path, skip clang-tidy entirely for crow-tree sources.
+    have_liburing=false
+    if [ -f /opt/homebrew/include/liburing.h ] || [ -f /usr/local/include/liburing.h ] || [ -f /usr/include/liburing.h ]; then
+        have_liburing=true
+    fi
     cpp_files=()
     for f in $staged_cpp_src; do
         case "$f" in
-            */reactor.cpp | */file_async_page_store.cpp)
-                if [ -f /opt/homebrew/include/liburing.h ] || [ -f /usr/local/include/liburing.h ] || [ -f /usr/include/liburing.h ]; then
+            */reactor.cpp | */file_async_page_store.cpp | */block_async_page_store.cpp)
+                $have_liburing && cpp_files+=("$f")
+                ;;
+            *)
+                if $have_liburing; then
                     cpp_files+=("$f")
+                else
+                    # Skip: clang-tidy can't find liburing.h (transitively
+                    # included via crow-tree.h → options.h → reactor.h).
+                    echo "   Skipping clang-tidy for $f (liburing.h not at system path)"
                 fi
                 ;;
-            *) cpp_files+=("$f") ;;
         esac
     done
     if [ ${#cpp_files[@]} -gt 0 ]; then

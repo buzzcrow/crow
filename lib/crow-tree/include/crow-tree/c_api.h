@@ -350,7 +350,7 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const u
 
 // Non-blocking poll.
 // *done == 0: still pending; f remains valid, poll again later (e.g. after
-//   the Rust side's AsyncFd wakes on ct_reactor_eventfd()).
+//   the Rust side's AsyncFd wakes on ct_uring_eventfds()).
 // *done == 1: the returned ct_status is the underlying operation's result
 //   (mirrors what ct_get/ct_flush/ct_snapshot/ct_scan would have returned).
 //   - ct_flush_async/ct_snapshot_async/ct_scan_async: f has been freed by
@@ -381,14 +381,16 @@ ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64
 // this after a resolved poll, never before).
 void ct_future_free(ct_future *f);
 
-// The tree's Reactor eventfd, for the Rust side to register with
-// tokio::io::AsyncFd: it becomes readable after the Reactor
-// dispatches a batch of completions, so re-polling every pending future at
-// that point will observe any that just finished. Returns -1 if this tree
-// has no Reactor wired (in-memory tree, or a build without liburing) --
-// ct_*_async calls still work in that case, they just always complete
-// synchronously (nothing to wait on). Reactor-owned; do not close it.
-int32_t ct_reactor_eventfd(const ct_tree *t);
+// The tree's DiskIOUring eventfds, for the Rust side to register with
+// tokio::io::AsyncFd: each becomes readable after the poll thread
+// dispatches a batch of completions on its pipeline, so re-polling every
+// pending future at that point will observe any that just finished.
+// Fills `out_fds` (caller-allocated, up to `max_fds`) and returns the
+// count. Returns 0 if this tree has no DiskIOUring wired (in-memory tree,
+// or a build without liburing) -- ct_*_async calls still work in that
+// case, they just always complete synchronously (nothing to wait on).
+// DiskIOUring-owned; do not close the fds.
+size_t ct_uring_eventfds(const ct_tree *t, int32_t *out_fds, size_t max_fds);
 
 // Range scan over `prefix` (empty = whole keyspace), up to `limit` (0 = all).
 // `start_after` (null or salen = 0 = start from beginning) is an exclusive

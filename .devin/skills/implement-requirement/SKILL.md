@@ -54,6 +54,7 @@ Non-server (no clean-env needed):
 - `pixi run test-tree-ffi`
 - `pixi run test-rpc-ct`
 - `pixi run test-rpc-ffi`
+- `pixi run test-diskio-ct`
 - `pixi run test-common`
 - `pixi run test-protocol`
 - `pixi run test-kv-core`
@@ -64,6 +65,7 @@ Server-spawning (prefix with `pixi run clean-env &&`):
 
 - `pixi run test-kv-server`
 - `pixi run test-diskdb`
+- `pixi run test-diskio-client`
 - `pixi run test-console-shared`
 - `pixi run test-console-cli`
 - `pixi run test-console-server`

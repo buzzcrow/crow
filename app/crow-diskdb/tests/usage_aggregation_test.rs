@@ -23,6 +23,7 @@ fn make_disk_value(zone_count: u32) -> DiskValue {
         unit_size_bytes: UNIT_SIZE,
         zone_count,
         status: HwStatus::Up as i32,
+        device_path: String::new(),
     }
 }
 

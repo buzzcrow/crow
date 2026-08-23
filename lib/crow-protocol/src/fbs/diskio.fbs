@@ -1,0 +1,68 @@
+include "common_type.fbs";
+
+namespace crow.diskio.proto;
+
+// Return codes for diskio I/O operations.
+enum FBDiskIoRetCode : int16 {
+    Success = 0,
+    DiskNotExist = 1,
+    ZoneNotExist = 2,
+    IoError = 3,
+    PartialWrite = 4,
+    InvalidAlignment = 5,
+    ConnectionError = 6,
+}
+
+// All diskio control messages carry id + rpc_create_nano as their first
+// two fields (same as common messages) so the RPC framework can extract
+// request_id and rpc_create_nano during parse for correlation.
+
+// Write request: disk_id + zone addressing + size. The data payload
+// follows the control message as raw bytes (data_size in the RPC header).
+table FBDiskWriteRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    disk_id:crow.rpc.proto.FBInt128;
+    zone_index:uint32;
+    zone_offset:uint64;
+    size:uint32;
+}
+
+table FBDiskWriteResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskIoRetCode;
+}
+
+// Read request. test_pattern_offset is used by NullDisk to generate
+// deterministic content for testing (0 = start of disk/object). Real
+// engines ignore it and read from phys_offset.
+table FBDiskReadRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    disk_id:crow.rpc.proto.FBInt128;
+    zone_index:uint32;
+    zone_offset:uint64;
+    size:uint32;
+    test_pattern_offset:uint64;
+}
+
+// Read response. The data payload follows as raw bytes (data_size in the
+// RPC header).
+table FBDiskReadResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskIoRetCode;
+}
+
+table FBDiskFsyncRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    disk_id:crow.rpc.proto.FBInt128;
+}
+
+table FBDiskFsyncResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskIoRetCode;
+}

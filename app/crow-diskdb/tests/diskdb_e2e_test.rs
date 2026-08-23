@@ -125,6 +125,7 @@ async fn seed_hardware(hw: &HardwareClient) {
                 unit_size_bytes: UNIT_SIZE_BYTES,
                 zone_count: ZONE_COUNT,
                 status: HwStatus::Up as i32,
+                device_path: String::new(),
             },
         )
         .await
@@ -1014,6 +1015,7 @@ async fn diskdb_e2e_suspect_rediscovery() {
             unit_size_bytes: UNIT_SIZE_BYTES,
             zone_count: ZONE_COUNT,
             status: HwStatus::Up as i32,
+            device_path: String::new(),
         },
     )
     .await

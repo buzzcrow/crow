@@ -1,0 +1,28 @@
+[package]
+name = "crow-diskio-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client library for CROW diskio: async disk write/read/fsync via RPC."
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crow-protocol = { path = "../crow-protocol" }
+crow-rpc-ffi = { path = "../crow-rpc/ffi" }
+flatbuffers = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+crow-kv-client = { path = "../crow-kv-client" }
+crow-test-harness = { path = "../crow-test-harness", features = ["diskio"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+tempfile = "3"

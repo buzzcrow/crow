@@ -1621,6 +1621,8 @@ pub struct AddDiskBody {
     capacity_bytes: u64,
     zone_size_bytes: u64,
     unit_size_bytes: u32,
+    #[serde(default)]
+    device_path: String,
 }
 
 /// Validate a single disk-add input, producing the `DiskEntry`, proto
@@ -1709,6 +1711,7 @@ fn validate_disk_input(
         capacity_bytes: body.capacity_bytes,
         zone_size_bytes: body.zone_size_bytes,
         unit_size_bytes: body.unit_size_bytes,
+        device_path: body.device_path.clone(),
     };
     let value = crow_protocol::diskdb::rpc::DiskValue {
         status: crow_protocol::common::HwStatus::Up as i32,
@@ -1717,6 +1720,7 @@ fn validate_disk_input(
         zone_size_units,
         unit_size_bytes: body.unit_size_bytes,
         zone_count,
+        device_path: body.device_path.clone(),
     };
     Ok((entry, disk_id_proto, value))
 }
@@ -1763,6 +1767,7 @@ pub async fn http_list_disks_in_group(
                                     capacity_bytes: val.capacity_units * unit_size,
                                     zone_size_bytes: val.zone_size_units * unit_size,
                                     unit_size_bytes: val.unit_size_bytes,
+                                    device_path: val.device_path,
                                 }
                             })
                             .collect();
@@ -2285,6 +2290,7 @@ pub async fn http_move_disk(
             capacity_bytes: disk_entry.capacity_bytes,
             zone_size_bytes: disk_entry.zone_size_bytes,
             unit_size_bytes: disk_entry.unit_size_bytes,
+            device_path: disk_entry.device_path,
         };
         cfg.add_disk(new_entry.clone()).map_err(map_config_err)?;
         new_entry

@@ -18,8 +18,8 @@
 #include "crow-tree/page_store.h"
 #include "crow-tree/snapshot_io.h"
 #include "crow-tree/text_page_store.h"
-#ifdef CROW_TREE_HAVE_LIBURING
-#    include "crow-tree/reactor.h"
+#ifdef CROW_HAVE_LIBURING
+#    include "crow-common/diskio_uring.h"
 #endif
 
 #include <atomic>
@@ -115,15 +115,15 @@ struct ct_tree
 {
     std::unique_ptr<PageStore> store; // null for pure in-memory engine
     std::unique_ptr<Crowtree>  tree;
-#ifdef CROW_TREE_HAVE_LIBURING
+#ifdef CROW_HAVE_LIBURING
     // Both null for an in-memory tree, or if opening the async twin failed
     // (see ct_open) -- get_async/flush_async/snapshot_async then fall back
-    // to completing synchronously. Declared so `reactor`
-    // outlives `async_store` (async_store is non-owning re: reactor,
+    // to completing synchronously. Declared so `uring`
+    // outlives `async_store` (async_store is non-owning re: uring,
     // mirroring Options' own comment) and both outlive `tree`, which is
     // what actually calls into them.
-    std::unique_ptr<Reactor>        reactor;
-    std::unique_ptr<AsyncPageStore> async_store;
+    std::unique_ptr<crow::common::DiskIOUring> uring;
+    std::unique_ptr<AsyncPageStore>            async_store;
 #endif
 };
 
@@ -326,15 +326,24 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         bs->set_sync_mode(sm);
         h->store     = std::move(bs);
         o.page_store = h->store.get();
-#ifdef CROW_TREE_HAVE_LIBURING
-        // Wire a Reactor + BlockAsyncPageStore so get_async's demand-load
-        // miss path completes off the Reactor thread instead of blocking
+#ifdef CROW_HAVE_LIBURING
+        // Wire a DiskIOUring + BlockAsyncPageStore so get_async's demand-load
+        // miss path completes off the poll thread instead of blocking
         // the caller. The async_store borrows both the store (h->store)
-        // and the reactor (h->reactor), both owned by h and outliving tree.
-        h->reactor = std::make_unique<Reactor>();
+        // and the uring (h->uring), both owned by h and outliving tree.
+        crow::common::Topology       uring_topo;
+        crow::common::PipelineConfig uring_cfg;
+        uring_cfg.entries = 256;
+        uring_cfg.mode    = crow::common::PollingMode::Hybrid;
+        uring_topo.pipelines.push_back(uring_cfg);
+        h->uring = std::make_unique<crow::common::DiskIOUring>(std::move(uring_topo));
+        // Register all extent fds with the uring so submit_* can route.
+        for (int fd : static_cast<BlockPageStore *>(h->store.get())->all_extent_fds()) {
+            h->uring->register_fd(fd);
+        }
         h->async_store =
-            std::make_unique<BlockAsyncPageStore>(static_cast<BlockPageStore *>(h->store.get()), h->reactor.get());
-        o.async_reactor    = h->reactor.get();
+            std::make_unique<BlockAsyncPageStore>(static_cast<BlockPageStore *>(h->store.get()), h->uring.get());
+        o.async_uring      = h->uring.get();
         o.async_page_store = h->async_store.get();
 #endif
         std::unique_ptr<Crowtree> t;
@@ -895,16 +904,18 @@ void ct_future_free(ct_future *f)
     delete reinterpret_cast<ct_future_handle *>(f);
 }
 
-int32_t ct_reactor_eventfd(const ct_tree *t)
+size_t ct_uring_eventfds(const ct_tree *t, int32_t *out_fds, size_t max_fds)
 {
-#ifdef CROW_TREE_HAVE_LIBURING
-    if (t != nullptr && t->reactor != nullptr) {
-        return t->reactor->eventfd();
+#ifdef CROW_HAVE_LIBURING
+    if (t != nullptr && t->uring != nullptr) {
+        return t->uring->eventfds(out_fds, max_fds);
     }
 #else
     (void)t;
+    (void)out_fds;
+    (void)max_fds;
 #endif
-    return -1;
+    return 0;
 }
 
 ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,

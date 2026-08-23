@@ -36,6 +36,8 @@ jobs:
       run: pixi run test-tree-ffi
     - name: Run RPC C++ tests
       run: pixi run test-rpc-ct
+    - name: Run diskio C++ tests
+      run: pixi run test-diskio-ct
     - name: Run RPC FFI tests
       run: pixi run test-rpc-ffi
     - name: Run common tests
@@ -73,6 +75,8 @@ jobs:
       run: pixi run test-diskdb
     - name: Run chunkdb tests
       run: pixi run test-chunkdb
+    - name: Run diskio-client tests
+      run: pixi run test-diskio-client
     - name: Run console-shared tests
       run: pixi run test-console-shared
     - name: Run CLI tests

@@ -34,6 +34,7 @@ set(CROW_RPC_FBS_FILES
   ${CROW_PROTOCOL_FBS_DIR}/msg_type.fbs
   ${CROW_PROTOCOL_FBS_DIR}/common_type.fbs
   ${CROW_PROTOCOL_FBS_DIR}/common_msg.fbs
+  ${CROW_PROTOCOL_FBS_DIR}/diskio.fbs
 )
 execute_process(
   COMMAND ${FLATC_BIN} --cpp -o ${CROW_RPC_PROTO_GEN_DIR} ${CROW_RPC_FBS_FILES}

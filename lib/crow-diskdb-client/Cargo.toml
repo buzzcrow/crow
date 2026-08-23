@@ -20,3 +20,11 @@ bytes = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 dashmap = "6"
+
+[dev-dependencies]
+crow-kv-client = { path = "../crow-kv-client" }
+crow-test-harness = { path = "../crow-test-harness", features = ["diskdb"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+tempfile = "3"

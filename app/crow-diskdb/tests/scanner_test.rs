@@ -102,6 +102,7 @@ async fn seed_hardware(hw: &HardwareClient) {
                 unit_size_bytes: UNIT_SIZE_BYTES,
                 zone_count: ZONE_COUNT,
                 status: HwStatus::Up as i32,
+                device_path: String::new(),
             },
         )
         .await

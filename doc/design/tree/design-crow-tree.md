@@ -111,7 +111,7 @@ crow-kv (Rust)
         ├─ Flusher (1 thread)  flushes the contiguous-applied prefix  L0 → B+tree
         ├─ MappingTable        PID → resident page | unloaded durable address
         ├─ BufferPool          tree-private frame cache
-        ├─ Reactor (1 thread)  io_uring event loop for async I/O
+        ├─ DiskIOUring (1 thread)  io_uring event loop for async I/O
         ├─ root_pid / leftmost_leaf_pid
         ├─ RootVersion         versioned root + refcount for consistent snapshots
         └─ PageStore (backend)  FilePageStore | BlockPageStore
@@ -120,7 +120,7 @@ crow-kv (Rust)
 
 - **One crow-tree per consensus group.** A node hosting many groups owns many
   lightweight `Crowtree` instances. Each owns its epoch manager, buffer pool,
-  and reactor; no shared process-wide state.
+  and DiskIOUring; no shared process-wide state.
 - **Two-level write path.** `apply` writes into the concurrent **MemTable
   (L0)**; a single **Flusher** thread merges the contiguous-applied prefix
   into the COW **B+tree (L1)**. The B+tree therefore has exactly one writer;
@@ -129,7 +129,7 @@ crow-kv (Rust)
 - **Concurrent readers.** Reads take an epoch guard, overlay the MemTable on
   the B+tree (read amplification 2), and walk immutable pages with lock-free
   atomic pointer loads.
-- **Async I/O.** A single-thread reactor per `Crowtree` handles demand-load
+- **Async I/O.** A single-thread DiskIOUring per `Crowtree` handles demand-load
   reads and flush/snapshot writes via io_uring
   ([`design-crow-tree-engine.md §3`](design-crow-tree-engine.md#3-async-ffi-bridge)).
   Fast path (in-memory hit) completes synchronously; slow path (I/O) submits
@@ -242,9 +242,9 @@ The boundary is **coarse** (engine-level). The Rust `CrowTreeEngine`
 
 - Owns an opaque `*mut ct_tree` handle returned by `ct_open`.
 - Translates `Batch` / keys / ranges to `(ptr, len)` pairs across the C ABI.
-- Bridges async↔sync via the io_uring reactor + completion-based `ct_future`
+- Bridges async↔sync via the io_uring engine + completion-based `ct_future`
   protocol (fast path completes synchronously with zero scheduling overhead;
-  slow path parks on `AsyncFd` until the C++ reactor signals completion).
+  slow path parks on `AsyncFd` until the C++ DiskIOUring signals completion).
   Full protocol in [`design-crow-tree-engine.md §3`](design-crow-tree-engine.md#3-async-ffi-bridge).
 - Maps C status codes to `EngineError`.
 
@@ -291,7 +291,7 @@ cross-engine parity, sanitizer) is documented in [`../kv/design-crow-kv-test.md`
 | D9 | **MemTable ordered map = `absl::btree_map`.** | Chosen over `std::map` (poor cache locality) and skip list (cache-miss-heavy at MemTable scale). B-tree fanout gives 2–3× faster point lookups; ordered iteration is preserved for drain/snapshot. |
 | D10 | **Snapshot/flush unified terminology + dual flush trigger.** | `flush` (drain L0→L1 + publish a new COW root) *is* snapshot creation. Trigger = MemTable size (primary) **OR** a long time interval (secondary safety net, default ~2 h) so a slow-write workload cannot leave L0 un-flushed and make crash recovery replay unbounded (§3.1). |
 | D11 | **C++ logging via `spdlog`, hot-path-silent.** | Async ring-buffer file logger matching the Rust `tracing` file format. Hot paths (`apply`/`get`/`scan`) emit no info/warn logs; only structural events (flush/snapshot/recover) and errors log at info+. Off by default (`Options.log_dir`). |
-| D12 | **Async FFI via io_uring + completion-based futures; no `spawn_blocking`, no large thread pools.** | Fast path (in-memory hit) completes synchronously with zero scheduling overhead; slow path (I/O) submits an io_uring SQE and returns pending. A single-thread C++ reactor per `Crowtree` processes completions and notifies the Rust `Future` via `eventfd` + Tokio `AsyncFd`. Full design in [`design-crow-tree-engine.md §3`](design-crow-tree-engine.md#3-async-ffi-bridge). |
+| D12 | **Async FFI via io_uring + completion-based futures; no `spawn_blocking`, no large thread pools.** | Fast path (in-memory hit) completes synchronously with zero scheduling overhead; slow path (I/O) submits an io_uring SQE and returns pending. A single-thread C++ DiskIOUring per `Crowtree` processes completions and notifies the Rust `Future` via `eventfd` + Tokio `AsyncFd`. Full design in [`design-crow-tree-engine.md §3`](design-crow-tree-engine.md#3-async-ffi-bridge). |
 | D13 | **Flush trigger = MemTable byte/entry limit OR time limit; flush the contiguous prefix only.** | The contiguous frontier is supplied by the learner (NoOp / repair-fill slots leave no MemTable entry, so the frontier must not be inferred from MemTable contents — otherwise the Flusher blocks at a NoOp gap). Flush entries with `slot ≤ contiguous_slot` (§3.1). |
 | D14 | **One block-device backend covers raw SSD / SCM / mem-for-test / RDMA-remote; RDMA is not a separate backend.** | All are IU-aligned with a configurable IU that can be **1 byte** (mem / SCM) up to a flash page (SSD). RDMA-remote is just a remote block device; its cache/eviction details are deferred with the rest of the block backend. Full design in [`design-crow-tree-storage.md §2`](design-crow-tree-storage.md#2-backends). |
 | D15 | **No multi-version; slot in the value cell, not the key.** | Single version per key, highest-slot-wins (§1, D5). |

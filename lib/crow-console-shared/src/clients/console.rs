@@ -68,6 +68,8 @@ pub struct AddDiskBody {
     pub capacity_bytes: u64,
     pub zone_size_bytes: u64,
     pub unit_size_bytes: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

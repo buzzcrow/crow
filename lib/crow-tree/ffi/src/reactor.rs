@@ -28,10 +28,10 @@ use crate::tree::Crowtree;
 // support any number of concurrent waiters.
 
 /// Non-owning view of a raw fd for `AsyncFd` registration. The engine's
-/// `Reactor` owns the eventfd `ct_reactor_eventfd` returns and closes it in
-/// its own destructor (~`Reactor`); Rust must wrap it *without* taking
-/// closing ownership -- unlike `std::os::fd::OwnedFd`, this type's `Drop`
-/// is a no-op.
+/// `DiskIOUring` owns the eventfds `ct_uring_eventfds` returns and closes
+/// them in its own destructor (~`DiskIOUring`); Rust must wrap them
+/// *without* taking closing ownership -- unlike `std::os::fd::OwnedFd`,
+/// this type's `Drop` is a no-op.
 pub(crate) struct RawFdView(pub(crate) RawFd);
 
 impl AsRawFd for RawFdView {

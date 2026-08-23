@@ -9,7 +9,7 @@
 //
 // Runs against a durable (file-backed) ct_tree so ct_evict_clean_leaves can
 // force the demand-load ("slow path") that ct_get_async's retry loop exists
-// for. On a build with liburing (CROW_TREE_HAVE_LIBURING), ct_open wires a
+// for. On a build with liburing (CROW_HAVE_LIBURING), ct_open wires a
 // real Reactor + BlockAsyncPageStore, so the slow path genuinely completes
 // off the Reactor thread; without liburing (or for an in-memory tree) it
 // falls back to completing synchronously -- every assertion
@@ -173,14 +173,17 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
     // the fast and slow paths.
     ct_future_free(f);
 
-    // The reactor eventfd is a valid fd whenever a Reactor is wired (durable
-    // tree + liburing build); -1 otherwise (design: -1 means "nothing will
-    // ever be genuinely pending", still a well-defined answer either way).
-    int32_t efd = ct_reactor_eventfd(t);
-#ifdef CROW_TREE_HAVE_LIBURING
-    EXPECT_GE(efd, 0) << "a durable tree on a liburing build should have a real Reactor";
+    // The uring eventfds are valid fds whenever a DiskIOUring is wired
+    // (durable tree + liburing build); 0 count otherwise (design: 0 means
+    // "nothing will ever be genuinely pending", still a well-defined answer
+    // either way).
+    int32_t efd = -1;
+    size_t  n   = ct_uring_eventfds(t, &efd, 1);
+#ifdef CROW_HAVE_LIBURING
+    EXPECT_EQ(n, 1u) << "a durable tree on a liburing build should have a real DiskIOUring";
+    EXPECT_GE(efd, 0);
 #else
-    EXPECT_EQ(efd, -1);
+    EXPECT_EQ(n, 0u);
 #endif
 
     ct_close(t);
@@ -272,7 +275,7 @@ TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
 }
 
 // Block-backend async snapshot: exercises BlockAsyncPageStore::submit_write
-// + submit_fsync through the Reactor's io_uring on Linux (CROW_TREE_HAVE_LIBURING).
+// + submit_fsync through the Reactor's io_uring on Linux (CROW_HAVE_LIBURING).
 // On non-liburing builds, snapshot_async falls back to the sync path — the
 // assertions hold either way (poll-until-done).
 TEST(AsyncSnapshot, BlockBackendAsyncSnapshotRoundTrip)

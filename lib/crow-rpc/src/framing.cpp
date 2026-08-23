@@ -95,6 +95,12 @@ Frame *FrameParser::yield_frame()
     frame_->data_buf        = data_buf_;
     frame_->parsed_nano     = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 
+    // Copy control bytes into the Frame for service-specific handlers.
+    // Common handlers (ping, unknown) ignore this field.
+    if (!control_buf_.empty()) {
+        frame_->control.assign(control_buf_.data(), control_buf_.data() + control_buf_.size());
+    }
+
     // Transfer ownership to the caller — clear our pointers so reset()
     // doesn't release them.
     Frame *out = frame_;

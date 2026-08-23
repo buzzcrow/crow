@@ -57,6 +57,8 @@ lib/crow-console-shared/log/
 app/crow-web/log/
 app/crow-diskdb/log/
 app/crow-chunkdb/log/
+lib/crow-diskdb-client/log/
+lib/crow-diskio-client/log/
 
 # ── Profiling artifacts ─────────────────────────────────────────
 # samply / perf / flamegraph output (profile-write-*.zip, profile-write-*/)
@@ -77,3 +79,7 @@ lib/crow-rpc/build-asan/
 lib/crow-rpc/build-tsan/
 lib/crow-rpc/build*/
 lib/crow-rpc/.cache/
+
+# crow-diskio build
+app/crow-diskio/build/
+app/crow-diskio/build*/

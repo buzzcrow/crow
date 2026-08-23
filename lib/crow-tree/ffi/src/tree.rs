@@ -18,11 +18,11 @@ use crate::sys;
 /// writes internally and keeps reads lock-free.
 pub struct Crowtree {
     ptr: NonNull<sys::ct_tree>,
-    // Lazily-spawned eventfd pump for this tree's Reactor eventfd
-    //, shared by every concurrently-pending
-    // drive_ct_future call. `None` once resolved means no Reactor is wired
-    // (or the pump failed to spawn); see `eventfd_notify`/`EventfdPump`.
-    eventfd_pump: std::sync::OnceLock<Option<EventfdPump>>,
+    // Lazily-spawned eventfd pumps for this tree's DiskIOUring eventfds
+    // (one per pipeline), shared by every concurrently-pending
+    // drive_ct_future call. Empty once resolved means no DiskIOUring is
+    // wired (or the pumps failed to spawn); see `eventfd_notify`/`EventfdPump`.
+    eventfd_pumps: std::sync::OnceLock<Vec<EventfdPump>>,
 }
 
 unsafe impl Send for Crowtree {}
@@ -85,7 +85,7 @@ impl Crowtree {
         check(unsafe { sys::ct_open(&copt, &mut out) })?;
         Ok(Self {
             ptr: NonNull::new(out).ok_or(CtError::Internal)?,
-            eventfd_pump: std::sync::OnceLock::new(),
+            eventfd_pumps: std::sync::OnceLock::new(),
         })
     }
 
@@ -233,38 +233,52 @@ impl Crowtree {
         unsafe { sys::ct_evict_clean_inner(self.as_ptr(), max_resident_inner) }
     }
 
-    /// The tree's Reactor eventfd, or -1 if none is wired (an
-    /// in-memory tree, or a build without liburing). Reactor-owned -- see
-    /// `RawFdView`'s doc comment for why callers must never close it.
-    fn reactor_eventfd(&self) -> RawFd {
-        unsafe { sys::ct_reactor_eventfd(self.as_ptr()) }
+    /// The tree's DiskIOUring eventfds (one per pipeline), or empty if
+    /// none is wired (an in-memory tree, or a build without liburing).
+    /// DiskIOUring-owned -- see `RawFdView`'s doc comment for why callers
+    /// must never close them.
+    fn uring_eventfds(&self) -> Vec<RawFd> {
+        // Query the count first, then fetch the fds.
+        let count = unsafe { sys::ct_uring_eventfds(self.as_ptr(), std::ptr::null_mut(), 0) };
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut fds = vec![0i32; count];
+        let got = unsafe { sys::ct_uring_eventfds(self.as_ptr(), fds.as_mut_ptr(), count) };
+        fds.truncate(got);
+        fds
     }
 
     /// True when the tree was opened with a durable path and the build has
-    /// an io_uring reactor wired. In-memory trees and non-Linux/liburing
+    /// an io_uring DiskIOUring wired. In-memory trees and non-Linux/liburing
     /// builds return `false`; `ct_get_async`/`ct_scan_async` then complete
     /// synchronously, so callers cannot observe a genuine `Pending` future.
     #[must_use]
     pub fn is_reactor_available(&self) -> bool {
-        self.reactor_eventfd() >= 0
+        !self.uring_eventfds().is_empty()
     }
 
     /// Lazily spawns (once) and returns the `Notify` fanned out by this
-    /// tree's eventfd pump -- see the module-level fan-out note above
-    /// `RawFdView` for why a single pump task, not a per-future
-    /// registration, is required. `None` if there's no Reactor wired, or
-    /// the pump failed to spawn. Must be called from within a Tokio runtime
-    /// context; every call site is inside an async fn body driven by one,
-    /// so this always holds.
+    /// tree's eventfd pumps -- one pump per pipeline eventfd, all sharing
+    /// a single `Arc<Notify>`. See the module-level fan-out note above
+    /// `RawFdView` for why a single Notify (not a per-future registration)
+    /// is required. `None` if there's no DiskIOUring wired, or all pumps
+    /// failed to spawn. Must be called from within a Tokio runtime context;
+    /// every call site is inside an async fn body driven by one, so this
+    /// always holds.
     pub(crate) fn eventfd_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
-        self.eventfd_pump
-            .get_or_init(|| {
-                let raw_fd = self.reactor_eventfd();
-                if raw_fd < 0 {
-                    return None;
-                }
-                let async_fd = AsyncFd::new(RawFdView(raw_fd)).ok()?;
-                let notify = Arc::new(tokio::sync::Notify::new());
+        let pumps = self.eventfd_pumps.get_or_init(|| {
+            let fds = self.uring_eventfds();
+            if fds.is_empty() {
+                return Vec::new();
+            }
+            let notify = Arc::new(tokio::sync::Notify::new());
+            let mut pumps = Vec::with_capacity(fds.len());
+            for fd in fds {
+                let async_fd = match AsyncFd::new(RawFdView(fd)) {
+                    Ok(af) => af,
+                    Err(_) => continue, // skip this pump, try the rest
+                };
                 let pump_notify = notify.clone();
                 let task = tokio::spawn(async move {
                     loop {
@@ -278,10 +292,18 @@ impl Crowtree {
                     }
                 })
                 .abort_handle();
-                Some(EventfdPump { notify, task })
-            })
-            .as_ref()
-            .map(|pump| pump.notify.clone())
+                pumps.push(EventfdPump {
+                    notify: notify.clone(),
+                    task,
+                });
+            }
+            pumps
+        });
+        if pumps.is_empty() {
+            None
+        } else {
+            Some(pumps[0].notify.clone())
+        }
     }
 
     /// Point read. Returns `None` for absent / tombstoned keys.
@@ -313,12 +335,14 @@ impl Crowtree {
 
 impl Drop for Crowtree {
     fn drop(&mut self) {
-        // Stop the eventfd pump (if any) before ct_close tears down the
-        // Reactor -- once that happens the eventfd is closed and the raw fd
-        // number may be reused elsewhere in the process, so the pump must
-        // not still be waiting on it.
-        if let Some(Some(pump)) = self.eventfd_pump.get() {
-            pump.task.abort();
+        // Stop all eventfd pumps (if any) before ct_close tears down the
+        // DiskIOUring -- once that happens the eventfds are closed and the
+        // raw fd numbers may be reused elsewhere in the process, so the
+        // pumps must not still be waiting on them.
+        if let Some(pumps) = self.eventfd_pumps.get() {
+            for pump in pumps {
+                pump.task.abort();
+            }
         }
         unsafe { sys::ct_close(self.ptr.as_ptr()) }
     }

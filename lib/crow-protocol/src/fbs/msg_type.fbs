@@ -18,4 +18,11 @@ enum FBMsgType : int16 {
     EUnknownResponse = 1,
     EConnectionPingRequest = 2,
     EConnectionPingResponse = 3,
+    // diskio service (range 3600s, see diskio.fbs)
+    EDiskWriteRequest = 3600,
+    EDiskWriteResponse = 3601,
+    EDiskReadRequest = 3602,
+    EDiskReadResponse = 3603,
+    EDiskFsyncRequest = 3604,
+    EDiskFsyncResponse = 3605,
 }

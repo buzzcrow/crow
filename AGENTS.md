@@ -9,7 +9,7 @@ Rust workspace + C++ storage engine (via FFI).
 ## Crates
 
 - **`crow-kv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
-- **`crow-kv-client`** — client library (retry, topology cache, `NotLeaderHint`) + group-0 sysdata service classes (`HardwareClient`, `ServiceRegistryClient`, `KVClusterMetaClient`, `KVClusterAdmin`).
+- **`crow-kv-client`** — client library (retry, topology cache, `NotLeaderHint`) + group-0 sysdata service classes (`HardwareClient`, `ServiceRegistryClient`, `KVClusterMetaClient`, `KVClusterAdmin`); `ffi` feature exposes a C ABI for C++ consumers (primarily `crow-diskio`).
 - **`crow-kv-server`** — binary: CLI, HTTP management API (internal — only called by `crow-kv-client`), store/group/replica wiring, keep-alive loop.
 - **`crow-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, gRPC service stubs; allocation logic is R72).
 - **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CROW.
@@ -19,7 +19,7 @@ Rust workspace + C++ storage engine (via FFI).
 ## Hard Constraints
 
 - All build/test/run commands run under **pixi** — never bare `cargo`, `clang-format`, or `cargo run`. Pixi provides system deps (e.g. `isa-l` headers) that bare cargo can't find.
-- `unsafe_code = deny` (except `crow-tree-ffi`); Clippy `pedantic = warn`.
+- `unsafe_code = deny` (except `crow-tree-ffi` and `crow-kv-client` `ffi` feature); Clippy `pedantic = warn`.
 - Markdown is read as raw text — prefer bullet or definition lists; tables allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results). `doc_index.md` always uses tables.
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
 - Commit messages: single-line subject only — no body, no trailers (e.g. `Co-Authored-By`, `Generated with`), no doc references, no task numbers (R-numbers). Code comments: single line, no doc references or task numbers.
@@ -46,7 +46,7 @@ Rust workspace + C++ storage engine (via FFI).
 | --- | --- |
 | Write/modify code | `/coding` skill (conventions, doc-first) |
 | Write/modify E2E tests | `/console-ui-e2e` skill (console-ui-e2e) |
-| Design or architecture question | `doc/doc_index.md` → match row → open only that doc under `doc/design/{kv,tree,console,diskdb,protocol,rpc}/`, grep for `##` section |
+| Design or architecture question | `doc/doc_index.md` → match row → open only that doc under `doc/design/{kv,tree,console,diskdb,diskio,protocol,rpc}/`, grep for `##` section |
 | Write/modify docs | `/doc` skill (hierarchy, naming, formatting rules) → Doc Guides section dispatches to per-type guides: `/doc-design` (formal design docs), `/doc-backlog` (R** requirement docs), `/doc-working-design` (design drafts), `/doc-working-plan` (task plans) |
 | Commit changes | Hard Constraints above — no extra doc needed |
 | Debug a test failure | `/debug-test` skill (env check, log-first, data-first, add missing logs) |

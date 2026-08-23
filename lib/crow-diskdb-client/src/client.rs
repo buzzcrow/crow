@@ -118,15 +118,16 @@ impl DiskdbClient {
 
     /// Get or create a gRPC channel for the given endpoint.
     fn channel_for(&self, endpoint: &str) -> Result<Channel> {
-        if let Some(ch) = self.channels.get(endpoint) {
+        let normalized = normalize_endpoint(endpoint);
+        if let Some(ch) = self.channels.get(&normalized) {
             return Ok(ch.clone());
         }
-        let ch = Channel::from_shared(endpoint.to_string())
+        let ch = Channel::from_shared(normalized.clone())
             .map_err(|e| DiskdbClientError::Unreachable(format!("invalid endpoint {endpoint}: {e}")))?
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
             .connect_lazy();
-        self.channels.insert(endpoint.to_string(), ch.clone());
+        self.channels.insert(normalized, ch.clone());
         Ok(ch)
     }
 
@@ -494,6 +495,19 @@ fn map_status(status: &tonic::Status) -> DiskdbClientError {
         tonic::Code::PermissionDenied => DiskdbClientError::Rpc(format!("permission denied: {status}")),
         _ => DiskdbClientError::Rpc(format!("{status}")),
     }
+}
+
+/// Normalize a service-registry endpoint for tonic `Channel`:
+/// prepend `http://` if no scheme is present, and rewrite `0.0.0.0`
+/// to `127.0.0.1` so the channel connects to a loopback address.
+#[must_use]
+pub fn normalize_endpoint(endpoint: &str) -> String {
+    let with_scheme = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    };
+    with_scheme.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
 }
 
 #[cfg(test)]

@@ -324,7 +324,7 @@ async fn run_zone_load(
             let disks_guard = dg.disks.read().unwrap();
             disks_guard
                 .iter()
-                .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
+                .map(|d| (d.disk_id, d.disk_value.read().unwrap().clone()))
                 .collect()
         };
         let load_start = std::time::Instant::now();

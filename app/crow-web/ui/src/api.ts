@@ -878,6 +878,7 @@ export interface AddDiskRequest {
   capacity_bytes: number;
   zone_size_bytes: number;
   unit_size_bytes: number;
+  device_path?: string;
 }
 
 export interface AddDisksBatchRequest {

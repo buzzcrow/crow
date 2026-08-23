@@ -26,6 +26,8 @@ pub enum DiskVerb {
         zone_size_bytes: u64,
         #[arg(long, default_value = "4096")]
         unit_size_bytes: u32,
+        #[arg(long, default_value = "")]
+        device_path: String,
     },
     Remove {
         #[arg(long)]
@@ -63,6 +65,7 @@ pub async fn run_disk_verb(cli: &Cli, verb: DiskVerb) -> ExitCode {
             capacity_bytes,
             zone_size_bytes,
             unit_size_bytes,
+            device_path,
         } => {
             disk_add(
                 cli,
@@ -73,6 +76,7 @@ pub async fn run_disk_verb(cli: &Cli, verb: DiskVerb) -> ExitCode {
                 capacity_bytes,
                 zone_size_bytes,
                 unit_size_bytes,
+                &device_path,
             )
             .await
         }
@@ -97,6 +101,7 @@ async fn disk_add(
     capacity_bytes: u64,
     zone_size_bytes: u64,
     unit_size_bytes: u32,
+    device_path: &str,
 ) -> ExitCode {
     let node_id: NodeId = match node.parse() {
         Ok(n) => n,
@@ -126,6 +131,7 @@ async fn disk_add(
                 capacity_bytes,
                 zone_size_bytes,
                 unit_size_bytes,
+                device_path: device_path.to_string(),
             },
         )
         .await

@@ -892,7 +892,13 @@ impl KeepAlive {
     /// via `load_zone_inner` (strategy 2 + strategy 1 fallback) and
     /// transitions `Init → disk_value.status` on success.
     fn disk_add_init(&self, dg: &Arc<DdbDiskGroup>, disk_id: DiskId, disk_value: &DiskValue) {
-        let mut disk = DdbDisk::new(disk_id, dg.disk_group_id, dg.node_id, dg.rack_id, *disk_value);
+        let mut disk = DdbDisk::new(
+            disk_id,
+            dg.disk_group_id,
+            dg.node_id,
+            dg.rack_id,
+            disk_value.clone(),
+        );
         disk.metrics = Some(Arc::new(DiskMetrics::new()));
         let disk = Arc::new(disk);
 
@@ -910,7 +916,7 @@ impl KeepAlive {
             let disk = Arc::clone(&disk);
             let kv = Arc::new(kv.clone());
             let cas_retry_metric = self.cas_retry_metric.clone();
-            let disk_value_owned = *disk_value;
+            let disk_value_owned = disk_value.clone();
             let hw = self.hw.clone();
             tokio::spawn(async move {
                 Self::background_zone_load(

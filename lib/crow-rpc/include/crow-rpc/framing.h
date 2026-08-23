@@ -52,6 +52,12 @@ struct Frame
     Buffer  *data_buf        = nullptr; // pool-allocated; nullptr if control-only
     uint64_t parsed_nano     = 0;       // steady_clock ns when parser yielded this frame
 
+    // Raw control message bytes (flatbuffer). Populated for all frames with
+    // msg_size > 0. Common handlers (ping, unknown) use only request_id +
+    // rpc_create_nano and ignore this; service-specific handlers (diskio)
+    // parse the full flatbuffer from here.
+    std::vector<uint8_t> control;
+
     ~Frame()
     {
         if (data_buf != nullptr) {

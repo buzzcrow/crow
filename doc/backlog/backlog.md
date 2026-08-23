@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R109** — Bump this line in the same commit when adding a new item.
+**Next R number: R110** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -72,30 +72,21 @@ complexity, and dependency. Before implementation, follow the
   backend (`File` / `BlockDevice`) routes `fdatasync` and file writes
   through `tokio::fs` / `std::fs`, both of which use `spawn_blocking`
   internally (thread hop + blocking pool saturation under burst load).
-  Add `IoBackend::Uring` variant that reuses the crow-tree C++ reactor
-  (`lib/crow-tree/src/reactor.cpp`, already proven for B-tree page I/O)
-  for WAL segment I/O via `io_uring` SQE/CQE. Expose the reactor's
-  submit API (`submit_read`/`submit_write`/`submit_fsync`) via FFI as
-  Rust async functions. `WalFileInner::Uring` implements all `WalFile`
-  operations via reactor SQEs — no `spawn_blocking`, no thread hop.
+  Add `IoBackend::Uring` variant that reuses `DiskIOUring` in
+  `crow-common` (already proven for B-tree page I/O) for WAL segment
+  I/O via `io_uring` SQE/CQE. Expose `DiskIOUring`'s submit API
+  (`submit_read`/`submit_write`/`submit_fsync`) via FFI as Rust async
+  functions. `WalFileInner::Uring` implements all `WalFile` operations
+  via `DiskIOUring` SQEs — no `spawn_blocking`, no thread hop.
   Fallback to `File` on non-Linux / no-liburing. `O_DIRECT` aligned
   writes. No `pipeline_writer` or `segment` API changes (drop-in async
   fn replacement). Linux + liburing only; tests skip on other platforms.
 
 ### Data Path (diskio + chunk object writers + read flow)
 
-Dependency order: R105 → R93 → R94 → R106, R107. R32 depends
+Dependency order: R93 → R94, R106, R107. R32 depends
 on the RPC library but is in a separate area (KV consensus).
 
-- **[R105](R105-diskio-disk-io-engine.md)** — Disk IO engine — Area:
-  diskio — Per-node disk IO server (`crow-diskio`) using io_uring on
-  Linux (SQE/CQE for read/write/fsync, no `spawn_blocking`) with
-  `pwrite`/`pread` fallback on macOS for dev/testing. Uses R104 RPC
-  for control+data framing (control message = disk/zone/offset/size,
-  followed by raw data payload). The missing data-I/O component that
-  chunkdb, the writers (R94, R106), the read flow (R107), and recovery
-  (R83) all depend on. Reference: the reference's disk I/O engine
-  (libaio/SPDK engine shapes).
 - **[R93](R93-chunkdb-mirror-to-ec-conversion.md)** — Mirror-to-EC
   conversion — Area: chunkdb — Background conversion of mirror strips
   to EC strips in shared chunks. Reads mirror data via diskio (R105),

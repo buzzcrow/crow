@@ -26,6 +26,7 @@ fn make_disk_with_zones(zone_count: u32, zone_capacity: u32) -> Arc<DdbDisk> {
             capacity_units: 16 * 1024,
             zone_size_units: 16 * 1024,
             unit_size_bytes: 1024 * 1024,
+            device_path: String::new(),
             ..Default::default()
         },
     ));

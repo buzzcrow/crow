@@ -101,10 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 
     // liburing (io_uring reactor) -- Linux-only, no
-    // macOS build exists, so reactor.cpp/block_async_page_store.cpp are
-    // excluded from the compiled set entirely when not found, mirroring
-    // crow-tree/CMakeLists.txt's CROW_TREE_HAVE_LIBURING gate exactly (same
-    // reasoning: macOS dev-path note).
+    // macOS build exists, so reactor.cpp (now in crow-common) and
+    // block_async_page_store.cpp (still in crow-tree) are excluded from
+    // the compiled set entirely when not found, mirroring
+    // crow-common/cpp/CMakeLists.txt's CROW_HAVE_LIBURING gate exactly
+    // (same reasoning: macOS dev-path note).
     let liburing_dir = conda_prefix.as_ref().filter(|prefix| {
         prefix.join("include").join("liburing.h").is_file()
             && (prefix.join("lib").join("liburing.so").is_file()
@@ -127,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(prefix) = liburing_dir {
         let inc = prefix.join("include");
         build.flag(format!("-isystem{}", inc.display()));
-        build.define("CROW_TREE_HAVE_LIBURING", "1");
+        build.define("CROW_HAVE_LIBURING", "1");
         println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
         println!("cargo:rustc-link-lib=dylib=uring");
     }

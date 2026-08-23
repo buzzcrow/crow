@@ -77,7 +77,7 @@ tree-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"
 rs-lint = "cargo clippy --all-targets -- -D warnings"
 ts-lint = { cmd = "cd app/crow-web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-deps"] }
-build = { cmd = "cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-tree/build -j && cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-rpc/build -j && cargo build --release && cd app/crow-web/ui && npm run build", depends-on = ["install-deps"] }
+build = { cmd = "cargo build --release --workspace --exclude crow-kv-client && cargo build --release -p crow-kv-client --features ffi && cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-tree/build -j && cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-rpc/build -j && cmake -S app/crow-diskio -B app/crow-diskio/build -DCMAKE_BUILD_TYPE=Release && cmake --build app/crow-diskio/build -j && cd app/crow-web/ui && npm run build", depends-on = ["install-deps"] }
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
@@ -101,6 +101,7 @@ clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-lo
 test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
 test-common-ct = { cmd = "lib/crow-tree/build/crow-common-build/crowcommon_tests", depends-on = ["build"] }
 test-rpc-ct = { cmd = "ctest --test-dir lib/crow-rpc/build --output-on-failure", depends-on = ["build"] }
+test-diskio-ct = { cmd = "ctest --test-dir app/crow-diskio/build --output-on-failure", depends-on = ["build"] }
 test-rpc-ffi = { cmd = "cargo test -p crow-rpc-ffi --all-targets", depends-on = ["build"] }
 test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
 test-common = { cmd = "cargo test -p crow-common --all-targets", depends-on = ["build"] }
@@ -110,6 +111,7 @@ test-kv-client = { cmd = "cargo test -p crow-kv-client --all-targets", depends-o
 test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets", depends-on = ["build"] }
 test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets", depends-on = ["build"] }
 test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets", depends-on = ["build"] }
+test-diskio-client = { cmd = "cargo test -p crow-diskio-client --all-targets", depends-on = ["build"] }
 test-chunkdb = { cmd = "cargo test -p crow-chunkdb --all-targets", depends-on = ["build"] }
 test-chunkdb-client = { cmd = "cargo test -p crow-chunkdb-client --all-targets", depends-on = ["build"] }
 test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets", depends-on = ["build"] }
@@ -127,6 +129,7 @@ pixi run test-tree-ct
 pixi run test-tree-ffi
 pixi run test-rpc-ct
 pixi run test-rpc-ffi
+pixi run test-diskio-ct
 pixi run test-common
 pixi run test-protocol
 pixi run test-kv-core
@@ -136,6 +139,7 @@ pixi run test-chunkdb-client
 pixi run test-kv-server
 pixi run test-diskdb
 pixi run test-chunkdb
+pixi run test-diskio-client
 pixi run clean-env
 pixi run test-console-shared
 pixi run test-console-cli

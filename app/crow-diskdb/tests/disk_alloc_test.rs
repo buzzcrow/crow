@@ -22,6 +22,7 @@ fn make_disk_value() -> DiskValue {
         capacity_units: 16 * 1024,
         zone_size_units: 16 * 1024,
         unit_size_bytes: 1024 * 1024,
+        device_path: String::new(),
         ..Default::default()
     }
 }

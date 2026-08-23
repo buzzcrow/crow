@@ -7,11 +7,19 @@ license.workspace = true
 repository.workspace = true
 description = "Standalone client library for CROW: topology cache, retry/idempotency, read-mode routing."
 
+[lib]
+# rlib for Rust dependents; cdylib for C++ consumers (crow-diskio FFI).
+# The cdylib only exports C ABI symbols when built with `--features ffi`.
+crate-type = ["rlib", "cdylib"]
+
 [features]
 # Enables test-only seams on `crow-kv` (e.g. `PxKvStore::set_get_delay_for_tests`)
 # for this crate's own test build. Auto-enabled via the self dev-dependency below;
 # no `--features` flag needed for `cargo test -p crow-kv-client`.
 test-util = ["crow-kv/test-util"]
+# Enables the C ABI FFI module (ffi.rs) for C++ consumers like crow-diskio.
+# Adds tokio rt-multi-thread for the FFI's dedicated runtime.
+ffi = ["tokio/rt-multi-thread"]
 
 [lints]
 workspace = true

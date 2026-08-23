@@ -35,7 +35,7 @@ struct Buffer
     uint32_t              capacity = 0; // allocated capacity
     BufferType            type     = BufferType::System;
     class BufferPool     *pool     = nullptr;
-    std::atomic<int32_t> *ref      = nullptr; // shared refcount slot (pool-allocated)
+    std::atomic<int32_t> *ref      = nullptr; // shared refcount (pool-allocated or standalone)
 
     // Copy src into data, set len. Called once per buffer.
     void write(const void *src, uint32_t n);
