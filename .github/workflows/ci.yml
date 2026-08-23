@@ -149,7 +149,7 @@ jobs:
     - name: Build all Rust test binaries + crow-kv-server
       run: pixi run build-tests
     - name: Build crow-rpc-echo-server (for bench rpc e2e test)
-      run: cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-rpc/build --target crow-rpc-echo-server -j
+      run: pixi run cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && pixi run cmake --build lib/crow-rpc/build --target crow-rpc-echo-server -j
     - name: Run console-shared tests
       run: pixi run test-console-shared
     - name: Run CLI tests
