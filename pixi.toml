@@ -142,6 +142,7 @@ test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets" }
 test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets" }
 test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets" }
 test-chunkdb = { cmd = "cargo test -p crow-chunkdb --all-targets" }
+test-chunk-client = { cmd = "cargo test -p crow-chunk-client --all-targets" }
 test-diskio-client = { cmd = "cargo test -p crow-diskio-client --all-targets" }
 
 # ── ConsoleTests job: spawns crow-kv-server via lifecycle::deploy_local ──
@@ -178,6 +179,7 @@ pixi run test-kv-server
 pixi run test-diskdb
 pixi run test-diskdb-client
 pixi run test-chunkdb
+pixi run test-chunk-client
 pixi run test-diskio-client
 # ConsoleTests
 pixi run clean-env
