@@ -1,40 +1,46 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `ChunkWriter` — chunk-info wrapper + write ability.
+//! `ChunkWriter` — chunk wrapper + write ability.
 //!
-//! Wraps the current `ChunkInfo` (protobuf `Chunk`) and provides write
-//! ability for one chunk. The drive loop (`LargeObjectWriter`) controls
-//! strip + chunk rotation by feeding placements; `ChunkWriter` pushes
-//! blocks to the current strip and finishes strips on demand. Does NOT
-//! own the drive loop. All chunkdb chunk operations (seal, delete,
-//! append) go through this class.
+//! Owns the current `Chunk` protobuf (in `Arc`, shared with
+//! `EcStripWriter` once Phase 2 lands). The drive loop
+//! (`LargeObjectWriter`) controls strip + chunk rotation by feeding
+//! cumulative `Chunk` values; `ChunkWriter` pushes blocks to the
+//! current strip and finishes strips on demand. Does NOT own the
+//! drive loop yet (Phase 3). All chunkdb chunk operations (seal,
+//! delete, append) go through this class.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use tracing::warn;
 
+use crate::chunk::chunk_prefetch::extract_placement_from_chunk;
 use crate::chunk::ec_strip_writer::EcStripWriter;
-use crate::chunk::strip::{StripPlacement, StripResult, StripWriter};
+use crate::chunk::strip::{StripResult, StripWriter};
 use crate::config::ChunkClientConfig;
 use crate::disk_io::DiskWriter;
 use crate::io::FeedStatus;
 use crate::traits::ChunkAllocator;
 use crate::{IoError, Location, Result};
 use crow_common::ec::EcScheme;
-use crow_protocol::chunkdb::rpc::{DeleteChunkRequest, SealChunkRequest};
+use crow_protocol::chunkdb::rpc::{Chunk, DeleteChunkRequest, SealChunkRequest};
 use crow_protocol::common::ChunkId;
 
-/// Chunk-info wrapper + write ability. Does NOT own the drive loop.
+/// Chunk wrapper + write ability. Owns `Arc<Chunk>`; the drive loop
+/// still controls strip + chunk rotation (Phase 3 moves the strip
+/// drive loop in here).
 pub struct ChunkWriter {
     pub(crate) allocator: Arc<dyn ChunkAllocator>,
     pub(crate) disk_writer: Arc<dyn DiskWriter>,
     pub(crate) ec_scheme: EcScheme,
     pub(crate) config: Arc<ChunkClientConfig>,
-    pub(crate) current_chunk_id: Option<ChunkId>,
+    pub(crate) chunk: Option<Arc<Chunk>>,
+    pub(crate) write_cursor: u32,
     pub(crate) bytes_in_chunk: u64,
-    pub(crate) strips_in_chunk: u32,
+    pub(crate) object_size: Option<u64>,
+    pub(crate) strips_remaining: Option<usize>,
     pub(crate) current_strip: Option<StripWriter>,
 }
 
@@ -51,33 +57,58 @@ impl ChunkWriter {
             disk_writer,
             ec_scheme,
             config,
-            current_chunk_id: None,
+            chunk: None,
+            write_cursor: 0,
             bytes_in_chunk: 0,
-            strips_in_chunk: 0,
+            object_size: None,
+            strips_remaining: None,
             current_strip: None,
         }
     }
 
-    /// Open a chunk from a pre-allocated placement. Constructs the
-    /// first `EcStripWriter` for the strip.
-    pub fn open(&mut self, placement: StripPlacement) -> Result<()> {
-        self.current_chunk_id = Some(placement.chunk_id);
-        self.bytes_in_chunk = 0;
-        self.strips_in_chunk = 1;
+    /// Open a chunk from a pre-allocated `Chunk` protobuf. Wraps it in
+    /// `Arc`, opens the first strip (already present from
+    /// `allocate_chunk`). `object_size` is stored for strip-prefetch
+    /// planning (used in Phase 3.2; no behavior yet).
+    pub fn open(&mut self, chunk: Chunk, object_size: Option<u64>) -> Result<()> {
+        let chunk_id = chunk
+            .id
+            .ok_or_else(|| IoError::AllocationFailed("open: chunk missing id".into()))?;
+        if chunk.strips.is_empty() {
+            return Err(IoError::AllocationFailed("open: chunk has no strips".into()));
+        }
+        self.object_size = object_size;
+        self.strips_remaining = compute_strips_remaining(object_size, &self.ec_scheme, &self.config);
+        let chunk = Arc::new(chunk);
+        let placement = extract_placement_from_chunk(&chunk, 0)?;
         let strip = EcStripWriter::new(placement, self.disk_writer.clone(), self.ec_scheme);
+        self.chunk = Some(chunk);
+        self.write_cursor = 0;
+        self.bytes_in_chunk = 0;
         self.current_strip = Some(StripWriter::Ec(strip));
+        let _ = chunk_id;
         Ok(())
     }
 
-    /// Continue with a new strip on the same chunk (from a placement
-    /// delivered by prefetch with the same chunk_id).
-    pub fn continue_strip(&mut self, placement: StripPlacement) -> Result<()> {
-        if placement.chunk_id != self.current_chunk_id.unwrap_or_default() {
+    /// Continue with a new strip on the same chunk. `chunk` is the
+    /// cumulative `Chunk` protobuf (from `append_chunk` response) with
+    /// the next strip appended. Arc-swaps `self.chunk` and opens the
+    /// strip at `write_cursor + 1`.
+    pub fn continue_strip(&mut self, chunk: Chunk) -> Result<()> {
+        let new_id = chunk
+            .id
+            .ok_or_else(|| IoError::AllocationFailed("continue_strip: chunk missing id".into()))?;
+        let cur_id = self.current_chunk_id();
+        if cur_id != Some(new_id) {
             return Err(IoError::Internal("continue_strip with different chunk_id".into()));
         }
+        let next_index = self.write_cursor + 1;
+        let chunk = Arc::new(chunk);
+        let placement = extract_placement_from_chunk(&chunk, next_index)?;
         let strip = EcStripWriter::new(placement, self.disk_writer.clone(), self.ec_scheme);
+        self.chunk = Some(chunk);
+        self.write_cursor = next_index;
         self.current_strip = Some(StripWriter::Ec(strip));
-        self.strips_in_chunk += 1;
         Ok(())
     }
 
@@ -118,17 +149,27 @@ impl ChunkWriter {
         self.current_strip.is_none()
     }
 
+    /// Is the chunk full (bytes written >= max_chunk_size)? The object
+    /// layer checks this after each push to decide chunk rotation.
+    pub fn is_full(&self) -> bool {
+        self.bytes_in_chunk >= self.config.max_chunk_size
+    }
+
     /// Append a new strip to the current chunk via `append_chunk` RPC.
-    pub async fn append_strip(&mut self) -> Result<StripPlacement> {
+    /// Returns the full cumulative `Chunk` (with the new strip
+    /// appended). Not used by the current drive loop (it goes through
+    /// `ChunkPrefetch::on_demand`); kept for the Phase 3 internal
+    /// strip prefetch.
+    pub async fn append_strip(&mut self) -> Result<Chunk> {
         let chunk_id = self
-            .current_chunk_id
+            .current_chunk_id()
             .ok_or_else(|| IoError::Internal("append_strip with no open chunk".into()))?;
         let write_granularity_kb = (self.config.read_buffer_size / 1024) as u32;
         crate::chunk::chunk_prefetch::append_strip(
             &*self.allocator,
             chunk_id,
             self.ec_scheme,
-            self.strips_in_chunk,
+            self.write_cursor + 1,
             write_granularity_kb,
         )
         .await
@@ -137,7 +178,7 @@ impl ChunkWriter {
     /// Seal the chunk: seal_chunk RPC, return the chunk's Location.
     /// The current strip should already be finished.
     pub async fn seal(&mut self) -> Result<Location> {
-        let chunk_id = self.current_chunk_id;
+        let chunk_id = self.current_chunk_id();
         let bytes_in_chunk = self.bytes_in_chunk;
 
         let location = match chunk_id {
@@ -182,14 +223,15 @@ impl ChunkWriter {
 
     /// Abort: cancel in-flight, delete the partial (unsealed) chunk.
     pub async fn abort(&mut self) -> Result<()> {
+        let had_strip = self.current_strip.is_some();
         if let Some(mut strip) = self.current_strip.take() {
             let _ = strip.abort().await;
         }
-        // Delete the chunk if it was opened (has a chunk_id) and has
-        // any data — either finished strips (bytes_in_chunk > 0) or
-        // an in-progress strip (current_strip was Some).
-        if let Some(chunk_id) = self.current_chunk_id {
-            if self.bytes_in_chunk > 0 || self.strips_in_chunk > 0 {
+        // Delete the chunk if it was opened and has any data — either
+        // finished strips (bytes_in_chunk > 0), an in-progress strip
+        // (had_strip), or prior finished strips (write_cursor > 0).
+        if let Some(chunk_id) = self.current_chunk_id() {
+            if self.bytes_in_chunk > 0 || had_strip || self.write_cursor > 0 {
                 warn!("abort: deleting partial chunk");
                 let _ = self
                     .allocator
@@ -215,13 +257,33 @@ impl ChunkWriter {
         self.bytes_in_chunk
     }
 
-    /// Current chunk id (if any).
+    /// Current chunk id (if any), derived from the owned `Chunk`.
     pub fn current_chunk_id(&self) -> Option<ChunkId> {
-        self.current_chunk_id
+        self.chunk.as_ref().and_then(|c| c.id)
     }
 
-    /// Strips in the current chunk so far.
+    /// Strips opened in the current chunk so far (= write_cursor + 1
+    /// when a chunk is open).
     pub fn strips_in_chunk(&self) -> u32 {
-        self.strips_in_chunk
+        if self.chunk.is_some() {
+            self.write_cursor + 1
+        } else {
+            0
+        }
     }
+}
+
+/// Compute the number of strips not yet allocated for a known-size
+/// object. Returns `None` for unknown-size objects. No behavior in
+/// Phase 1 (used by the Phase 3.2 internal strip prefetch).
+fn compute_strips_remaining(
+    object_size: Option<u64>,
+    ec_scheme: &EcScheme,
+    config: &ChunkClientConfig,
+) -> Option<usize> {
+    let total = object_size?;
+    let unit_bytes = u64::from((config.read_buffer_size / 1024) as u32) * 1024;
+    let strip_data_capacity = ec_scheme.data_num as u64 * unit_bytes;
+    let total_strips = total.div_ceil(strip_data_capacity) as usize;
+    Some(total_strips)
 }

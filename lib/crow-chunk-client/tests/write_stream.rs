@@ -50,7 +50,7 @@ struct MockChunkAllocator {
 
 #[derive(Debug, Default)]
 struct MockChunkState {
-    chunks: HashMap<(u64, u64), (u32, u32, bool)>,
+    chunks: HashMap<(u64, u64), (Vec<ChunkStrip>, u32, bool)>,
     next_segment_offset: u64,
     allocate_calls: usize,
     append_calls: usize,
@@ -118,11 +118,12 @@ impl ChunkAllocator for MockChunkAllocator {
             sealed_ts_ms: 0,
             capacity: data_num as u32,
             sealed_length: 0,
-            strips: vec![strip],
+            strips: vec![strip.clone()],
             chunk_type: ChunkType::Repo as i32,
         };
 
-        st.chunks.insert((chunk_id.high, chunk_id.low), (1, 0, false));
+        st.chunks
+            .insert((chunk_id.high, chunk_id.low), (vec![strip], 0, false));
         Ok(AllocateChunkResponse { chunk: Some(chunk) })
     }
 
@@ -134,12 +135,10 @@ impl ChunkAllocator for MockChunkAllocator {
         let code_num = req.code_num as usize;
         let total = data_num + code_num;
 
-        let entry = st
+        let strip_seq = st
             .chunks
-            .get_mut(&(chunk_id.high, chunk_id.low))
-            .expect("append to unknown chunk");
-        let strip_seq = entry.0;
-        entry.0 += 1;
+            .get(&(chunk_id.high, chunk_id.low))
+            .map_or(0, |e| e.0.len() as u32);
 
         let mut segments = Vec::with_capacity(total);
         for i in 0..total {
@@ -174,6 +173,13 @@ impl ChunkAllocator for MockChunkAllocator {
             usage_bitmap: Vec::new(),
         };
 
+        let entry = st
+            .chunks
+            .get_mut(&(chunk_id.high, chunk_id.low))
+            .expect("append to unknown chunk");
+        entry.0.push(strip);
+        let strips = entry.0.clone();
+
         let chunk = Chunk {
             id: Some(chunk_id),
             state: 1,
@@ -181,7 +187,7 @@ impl ChunkAllocator for MockChunkAllocator {
             sealed_ts_ms: 0,
             capacity: data_num as u32 * (strip_seq + 1),
             sealed_length: 0,
-            strips: vec![strip],
+            strips,
             chunk_type: ChunkType::Repo as i32,
         };
 

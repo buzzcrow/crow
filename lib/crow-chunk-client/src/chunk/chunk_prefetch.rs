@@ -4,10 +4,11 @@
 //! `ChunkPrefetch` — pre-create chunks + append strips ahead of the
 //! write cursor.
 //!
-//! Replaces `spawn_prealloc_task` + `run_prealloc` with a class whose
-//! `spawn` method starts the loop and whose fields replace the 7 loop
-//! parameters. Pre-creates `prefetch_chunk_count` chunks at start
-//! (default 1), then appends strips up to `prealloc_depth` ahead.
+//! Streams the full cumulative `Chunk` protobuf (one per strip-append)
+//! to the object layer. The object layer extracts the latest strip's
+//! placement via `extract_placement_from_chunk` (bridge — removed in
+//! Phase 2 when `EcStripWriter` holds `Arc<Chunk>` directly). Strip
+//! planning stays here until Phase 3.2 moves it into `ChunkWriter`.
 
 use std::sync::Arc;
 
@@ -21,9 +22,7 @@ use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
 use crow_protocol::chunk_id::CHUNK_TYPE_REPO;
 use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
-use crow_protocol::chunkdb::rpc::{
-    AllocateChunkRequest, AppendChunkRequest, Chunk, ChunkStrip, ChunkType, StripType,
-};
+use crow_protocol::chunkdb::rpc::{AllocateChunkRequest, AppendChunkRequest, Chunk, ChunkType, StripType};
 use crow_protocol::common::ChunkId;
 
 /// Chunk preallocation + strip prefetch.
@@ -50,10 +49,12 @@ impl ChunkPrefetch {
         }
     }
 
-    /// Spawn the prefetch task. Returns the placement receiver + join
+    /// Spawn the prefetch task. Returns the chunk receiver + join
     /// handle. Pre-creates `prefetch_chunk_count` chunks (default 1),
-    /// each with 1 strip, before sending the first `StripPlacement`.
-    pub fn spawn(self, object_size: Option<u64>) -> (mpsc::Receiver<Result<StripPlacement>>, JoinHandle<()>) {
+    /// each with 1 strip, then appends strips ahead of the write
+    /// cursor. Sends the full cumulative `Chunk` after each
+    /// strip-append.
+    pub fn spawn(self, object_size: Option<u64>) -> (mpsc::Receiver<Result<Chunk>>, JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(self.config.prealloc_depth.max(1));
         let handle = tokio::spawn(async move {
             if let Err(e) = self.run(object_size, &tx).await {
@@ -64,8 +65,9 @@ impl ChunkPrefetch {
     }
 
     /// Run the prealloc loop. Allocates chunks + strips ahead of the
-    /// write cursor, bounded by the channel capacity.
-    async fn run(self, object_size: Option<u64>, tx: &mpsc::Sender<Result<StripPlacement>>) -> Result<()> {
+    /// write cursor, bounded by the channel capacity. Sends the full
+    /// cumulative `Chunk` after each strip-append.
+    async fn run(self, object_size: Option<u64>, tx: &mpsc::Sender<Result<Chunk>>) -> Result<()> {
         let write_granularity_kb = (self.config.read_buffer_size / 1024) as u32;
         let unit_bytes = u64::from(write_granularity_kb) * 1024;
         let strip_data_capacity = self.ec_scheme.data_num as u64 * unit_bytes;
@@ -84,33 +86,33 @@ impl ChunkPrefetch {
                 }
             }
 
-            let placement = match current_chunk_id {
+            let chunk = match current_chunk_id {
                 None => {
-                    let p = allocate_new_chunk(
+                    let c = allocate_new_chunk(
                         &self.allocator,
                         self.ec_scheme,
                         write_granularity_kb,
                         self.chunk_type_byte,
                     )
                     .await?;
-                    current_chunk_id = Some(p.chunk_id);
+                    current_chunk_id = c.id;
                     strips_in_current_chunk = 1;
-                    p
+                    c
                 }
                 Some(_) if strips_in_current_chunk >= strips_per_chunk => {
-                    let p = allocate_new_chunk(
+                    let c = allocate_new_chunk(
                         &self.allocator,
                         self.ec_scheme,
                         write_granularity_kb,
                         self.chunk_type_byte,
                     )
                     .await?;
-                    current_chunk_id = Some(p.chunk_id);
+                    current_chunk_id = c.id;
                     strips_in_current_chunk = 1;
-                    p
+                    c
                 }
                 Some(cid) => {
-                    let p = append_strip(
+                    let c = append_strip(
                         &self.allocator,
                         cid,
                         self.ec_scheme,
@@ -119,11 +121,11 @@ impl ChunkPrefetch {
                     )
                     .await?;
                     strips_in_current_chunk += 1;
-                    p
+                    c
                 }
             };
 
-            tx.send(Ok(placement))
+            tx.send(Ok(chunk))
                 .await
                 .map_err(|_| IoError::Internal("prealloc receiver dropped".into()))?;
             allocated += 1;
@@ -133,12 +135,13 @@ impl ChunkPrefetch {
 
     /// On-demand strip allocation when the prefetch task has finished
     /// but more data remains. Appends to the current chunk if it has
-    /// room, otherwise allocates a new chunk.
+    /// room, otherwise allocates a new chunk. Returns the full
+    /// cumulative `Chunk`.
     pub async fn on_demand(
         &self,
         current_chunk_id: Option<ChunkId>,
         strips_in_current_chunk: u32,
-    ) -> Result<StripPlacement> {
+    ) -> Result<Chunk> {
         let write_granularity_kb = (self.config.read_buffer_size / 1024) as u32;
         let unit_bytes = u64::from(write_granularity_kb) * 1024;
         let strip_data_capacity = self.ec_scheme.data_num as u64 * unit_bytes;
@@ -168,13 +171,13 @@ impl ChunkPrefetch {
     }
 }
 
-/// Allocate a new chunk with 1 strip and return its placement.
+/// Allocate a new chunk with 1 strip and return the full `Chunk`.
 pub(crate) async fn allocate_new_chunk(
     chunkdb: &dyn ChunkAllocator,
     ec_scheme: EcScheme,
     write_granularity_kb: u32,
     chunk_type_byte: u8,
-) -> Result<StripPlacement> {
+) -> Result<Chunk> {
     let chunk_id = crow_protocol::generate_chunk_id(chunk_type_byte).to_proto();
     let req = AllocateChunkRequest {
         chunk_id: Some(chunk_id),
@@ -187,20 +190,19 @@ pub(crate) async fn allocate_new_chunk(
         chunk_type: ChunkType::Repo as i32,
     };
     let resp = chunkdb.allocate_chunk(req).await?;
-    let chunk = resp
-        .chunk
-        .ok_or_else(|| IoError::AllocationFailed("allocate_chunk response missing chunk".into()))?;
-    extract_placement_from_chunk(&chunk, 0)
+    resp.chunk
+        .ok_or_else(|| IoError::AllocationFailed("allocate_chunk response missing chunk".into()))
 }
 
-/// Append 1 strip to an existing chunk and return its placement.
+/// Append 1 strip to an existing chunk and return the full cumulative
+/// `Chunk`.
 pub(crate) async fn append_strip(
     chunkdb: &dyn ChunkAllocator,
     chunk_id: ChunkId,
     ec_scheme: EcScheme,
     strip_index_in_chunk: u32,
     write_granularity_kb: u32,
-) -> Result<StripPlacement> {
+) -> Result<Chunk> {
     let req = AppendChunkRequest {
         chunk_id: Some(chunk_id),
         strip_size: ec_scheme.data_num as u32,
@@ -210,28 +212,24 @@ pub(crate) async fn append_strip(
         code_num: ec_scheme.code_num as u32,
         copy_count: 0,
     };
-    let _ = write_granularity_kb;
+    let _ = (write_granularity_kb, strip_index_in_chunk);
     let resp = chunkdb.append_chunk(req).await?;
-    let chunk = resp
-        .chunk
-        .ok_or_else(|| IoError::AllocationFailed("append_chunk response missing chunk".into()))?;
-    extract_placement_from_chunk(&chunk, strip_index_in_chunk)
+    resp.chunk
+        .ok_or_else(|| IoError::AllocationFailed("append_chunk response missing chunk".into()))
 }
 
-/// Extract the EC segments + unit_kb from the last strip of a chunk
-/// response.
-pub(crate) fn extract_last_strip(chunk: &Chunk) -> Option<(&ChunkStrip, &StripOneof)> {
-    let last = chunk.strips.last()?;
-    match &last.strip {
-        Some(s) => Some((last, s)),
-        None => None,
-    }
-}
-
-/// Extract the placement of the last strip from a chunk response.
-fn extract_placement_from_chunk(chunk: &Chunk, strip_index: u32) -> Result<StripPlacement> {
-    let (strip, oneof) = extract_last_strip(chunk)
-        .ok_or_else(|| IoError::AllocationFailed("chunk has no EC strips".into()))?;
+/// Extract the placement of the strip at `strip_index` from a chunk.
+/// Bridge used by `ChunkWriter` while `EcStripWriter` still takes
+/// `StripPlacement` (removed in Phase 2).
+pub(crate) fn extract_placement_from_chunk(chunk: &Chunk, strip_index: u32) -> Result<StripPlacement> {
+    let strip = chunk
+        .strips
+        .get(strip_index as usize)
+        .ok_or_else(|| IoError::AllocationFailed(format!("chunk has no strip {strip_index}")))?;
+    let oneof = strip
+        .strip
+        .as_ref()
+        .ok_or_else(|| IoError::AllocationFailed("chunk strip missing oneof".into()))?;
     let segments = match oneof {
         StripOneof::EcStrip(ec) => ec.segments.clone(),
         StripOneof::MirrorStrip(_) => {

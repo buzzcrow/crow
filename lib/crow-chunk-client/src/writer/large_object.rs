@@ -17,13 +17,13 @@ use tokio::task::JoinHandle;
 
 use crate::chunk::chunk_prefetch::ChunkPrefetch;
 use crate::chunk::chunk_writer::ChunkWriter;
-use crate::chunk::strip::StripPlacement;
 use crate::config::ChunkClientConfig;
 use crate::disk_io::DiskWriter;
 use crate::io::{ChunkIoWriter, FeedStatus};
 use crate::traits::ChunkAllocator;
 use crate::{IoError, Location, Result};
 use crow_common::ec::EcScheme;
+use crow_protocol::chunkdb::rpc::Chunk;
 
 /// Large-object writer — non-blocking stream. Owns the drive loop.
 pub struct LargeObjectWriter {
@@ -32,7 +32,7 @@ pub struct LargeObjectWriter {
     pub(crate) ec_scheme: EcScheme,
     pub(crate) config: Arc<ChunkClientConfig>,
     pub(crate) chunk_writer: Option<ChunkWriter>,
-    pub(crate) prefetch_rx: Option<mpsc::Receiver<Result<StripPlacement>>>,
+    pub(crate) prefetch_rx: Option<mpsc::Receiver<Result<Chunk>>>,
     pub(crate) prefetch_handle: Option<JoinHandle<()>>,
     pub(crate) locations: Vec<Location>,
     pub(crate) logical_offset: u64,
@@ -79,11 +79,11 @@ impl LargeObjectWriter {
         self.prefetch_handle = Some(handle);
     }
 
-    /// Get the next placement (from prefetch or on-demand).
-    pub(crate) async fn next_placement(&mut self) -> Result<Option<StripPlacement>> {
+    /// Get the next chunk (from prefetch or on-demand).
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
         if let Some(rx) = self.prefetch_rx.as_mut() {
             match rx.recv().await {
-                Some(Ok(p)) => return Ok(Some(p)),
+                Some(Ok(c)) => return Ok(Some(c)),
                 Some(Err(e)) => return Err(e),
                 None => {
                     self.prefetch_rx = None;
@@ -99,11 +99,11 @@ impl LargeObjectWriter {
             self.config.clone(),
             crow_protocol::chunk_id::CHUNK_TYPE_REPO,
         );
-        let placement = pf.on_demand(chunk_id, strips).await?;
-        Ok(Some(placement))
+        let chunk = pf.on_demand(chunk_id, strips).await?;
+        Ok(Some(chunk))
     }
 
-    /// Ensure an open strip: get placement, rotate chunk if needed.
+    /// Ensure an open strip: get chunk, rotate chunk if needed.
     pub(crate) async fn ensure_open_strip(&mut self) -> Result<()> {
         let need_open = self
             .chunk_writer
@@ -114,14 +114,15 @@ impl LargeObjectWriter {
             return Ok(());
         }
 
-        let placement = self
-            .next_placement()
+        let chunk = self
+            .next_chunk()
             .await?
-            .ok_or_else(|| IoError::Internal("no placement available".into()))?;
+            .ok_or_else(|| IoError::Internal("no chunk available".into()))?;
 
+        let chunk_id = chunk.id;
         let need_rotate = match &self.chunk_writer {
             None => true,
-            Some(cw) => cw.current_chunk_id() != Some(placement.chunk_id),
+            Some(cw) => cw.current_chunk_id() != chunk_id,
         };
         if need_rotate {
             if let Some(mut cw) = self.chunk_writer.take() {
@@ -142,11 +143,11 @@ impl LargeObjectWriter {
                 self.ec_scheme,
                 self.config.clone(),
             );
-            cw.open(placement)?;
+            cw.open(chunk, None)?;
             self.chunk_writer = Some(cw);
         } else {
             let cw = self.chunk_writer.as_mut().unwrap();
-            cw.continue_strip(placement)?;
+            cw.continue_strip(chunk)?;
         }
         Ok(())
     }
