@@ -11,10 +11,19 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R110** — Bump this line in the same commit when adding a new item.
+**Next R number: R118** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R114](R114-rpc-streaming-support.md)** — crow-rpc streaming RPC
+  support — Area: rpc — R104 shipped request-response + one-way only;
+  streaming was explicitly deferred (§1 Non-Goals). Adds server-
+  streaming (one request → N response frames) and bi-directional
+  streaming (N request ↔ N response frames on one persistent
+  connection) via a stream-open/stream-close handshake + `stream_id`
+  correlation. **Blocks R32** (LearnerStream, StreamSnapshot) and
+  **R117** (WatchNotify). The three KV streaming RPCs cannot migrate
+  to crow-rpc until this lands.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
@@ -84,8 +93,11 @@ complexity, and dependency. Before implementation, follow the
 
 ### Data Path (diskio + chunk object writers + read flow)
 
-Dependency order: R93 → R94, R106, R107. R32 depends
-on the RPC library but is in a separate area (KV consensus).
+Dependency order: R93 → R106, R107 → R110, R111, R112
+(R110/R112 reuse R110's negative list; R111 reuses R110's negative
+list + degraded-strip tracking). The RPC migration items (R114,
+R115, R116, R117) are in a separate area (see RPC Migration section
+below); R32 depends on R114 + R115.
 
 - **[R93](R93-chunkdb-mirror-to-ec-conversion.md)** — Mirror-to-EC
   conversion — Area: chunkdb — Background conversion of mirror strips
@@ -95,17 +107,6 @@ on the RPC library but is in a separate area (KV consensus).
   storage (8+4 EC) on shared chunks. Configurable policy (seal age,
   strip count, manual trigger) + bandwidth throttling. Foundation
   for R106's mirror-first write strategy.
-- **[R94](R94-chunkdb-large-object-writer.md)** — Large object writer
-  + chunk IO interface + Location — Area: chunkdb — Dedicated chunk
-  per large object (> EC strip size, e.g. > 8 MB for 8+4). Direct EC
-  strip writes, producer-consumer strip preallocation (object size
-  known upfront → strip count known), ~1 GB max chunk size with chunk
-  rotation for very large objects. **Defines the shared `ChunkIoWriter`
-  async interface** (`on_data`/`on_finish`/`on_error` + completion)
-  and the `Location` type (`chunk_id [offset, end)` + logical
-  offset/length, array for multi-chunk) that R106 and R107 depend on.
-  All writer code lives in `crow-chunkdb-client`. Reference: the reference's
-  `SObjSChunkWriter` / `SObjMChunkWriter`.
 - **[R106](R106-chunkdb-small-object-writer.md)** — Small object
   shared chunk writer — Area: chunkdb — Shared 256 MB chunks for
   small objects (< EC strip threshold). Dynamic pool of write
@@ -124,6 +125,76 @@ on the RPC library but is in a separate area (KV consensus).
   Partial range reads (`read_range`). Streaming read for large
   objects (memory-bounded `ChunkReadStream`). Transparent across
   mirror→EC conversion (R93).
+
+- **[R110](R110-chunkdb-chunkio-error-handling.md)** — Large-write
+  IO error handling (write path) — Area: chunkdb / diskdb / diskio
+  — In-line error handler for the large-write data path (R94),
+  spanning three services: chunkdb (strip metadata,
+  `update_chunk_strip`), diskdb (block allocation with disk
+  exclusion), diskio (write/fsync error detection). Single-block
+  replacement on write failure (not whole-strip retry): keep
+  successful blocks, re-allocate the failed block on a healthy
+  disk via diskdb, `update_chunk_strip` to replace the segment in
+  chunkdb. Negative list (TTL-based) temporarily blocks bad disks
+  from new allocations across diskdb — shared with R111 (read) and
+  R112 (small-write). Degraded strip tracking (parity missing,
+  data durable). Escalation to R83 recovery when inline retries
+  are exhausted. Read-path error handling is a separate requirement
+  (R111); R110 defines the negative list and degraded-strip
+  tracking that R111 and R112 reuse.
+- **[R111](R111-chunkdb-read-io-error-handling.md)** — Chunk read
+  IO error handling (unified read path) — Area: chunkdb / diskdb /
+  diskio — In-line error handler for the read path (R107), which
+  is unified across large objects (EC strips, R94) and small
+  objects (mirror strips, R106, before R93 conversion). EC decode
+  fallback for failed EC blocks (read surviving data + parity,
+  isa-l decode the missing block, within `code_num` tolerance);
+  mirror replica fallback for failed mirror strips (read next
+  replica). Background rebuild + replace after a successful
+  fallback (allocate new block via diskdb, write reconstructed
+  data via diskio, `update_chunk_strip` to repair the strip so
+  future reads don't pay the fallback cost). Degraded strip read
+  tolerance (parity missing — readable for full-data, partial
+  result + R83 escalation on data block failure). Partial read
+  results with explicit failed byte ranges (no silent corruption —
+  applies to both `read_range` and `ChunkReadStream`). Escalation
+  to R83 when inline fallback is unrecoverable. Reuses R110's
+  negative list and degraded-strip tracking.
+- **[R112](R112-chunkdb-small-write-io-error-handling.md)** —
+  Small-write IO error handling (multi-service cooperation) — Area:
+  chunkdb / diskdb / diskio — In-line error handler for the
+  small-write data path (R106), spanning the same three services
+  as R110. Reuses R110's negative list and escalation reporting,
+  but adds batch-aware per-object retry (a single diskio write
+  carries a batch of N small objects — a partial failure must
+  track which objects were written and retry only the unwritten
+  ones) and mirror-replica replacement specific to the shared-
+  chunk writer (R106 writes 3 mirror replicas first, then R93
+  converts to EC in the background — a single replica failure is
+  tolerated but must be re-allocated + `update_chunk_strip` to
+  restore 3-replica durability). Shared chunk rotation safety
+  (mid-rotation failure must not corrupt the sealed portion or
+  span a corrupted boundary). Clear boundary with R93's mirror→EC
+  conversion (R112 handles write-path failures; R93 handles
+  conversion-path failures). Escalation to R83 when inline retries
+  are exhausted.
+- **[R113](R113-chunkio-batch-strip-allocation.md)** — Batch strip
+  allocation + deferred chunkdb confirm — Area: chunkio / chunkdb /
+  diskdb — Optimize the large-write strip allocation path (R94) to
+  reduce `append_chunk` RPC count. Current flow: one `append_chunk`
+  per strip (250K RPCs for a 1 TB object). Two candidate approaches:
+  (1) batch `append_chunk(strip_count=N)` — chunkdb allocates N
+  strips in parallel, persists once, returns `Chunk` with N strips.
+  Simple, safe, but first strip waits for all N. (2) Direct diskdb
+  allocation + deferred chunkdb confirm — client allocates blocks
+  from diskdb directly (TENTATIVE), writes immediately, batch-
+  confirms to chunkdb later. Maximum overlap but requires client-
+  side placement, a new confirm RPC, and a TENTATIVE block reaper.
+  Key design tension: the chunk allocate confirm flow
+  (`BusyBlockValue.commit_state: TENTATIVE → COMMITTED`) must
+  guarantee crash safety — TENTATIVE blocks with written data that
+  are never confirmed must be reclaimable. Blocked on the chunk-
+  layer refactor (`doc/working/design-chunk-layer-refactor.md`).
 
 ### Medium Priority
 
@@ -169,8 +240,47 @@ on the RPC library but is in a separate area (KV consensus).
   Recovers the ~17% h2-lock throughput loss at 2T:1C
   (measured in `kv-read-flow-analysis.md`). Protocol semantics
   preserved (same request/response shapes, `NotLeaderHint`, error
-  codes); only the transport changes. Depends on `crow-rpc` (RPC lib).
-  Management API stays on Axum/HTTP. Reference: the reference's RPC engine.
+  codes); only the transport changes. Depends on R104 (finished) +
+  R114 (streaming — for LearnerStream + StreamSnapshot). Management
+  API stays on Axum/HTTP. Open Question resolved: full `.fbs`
+  conversion (no prost bridge), consistent with R105/diskio.
+
+### RPC Migration (gRPC → crow-rpc)
+
+Dependency order: R114 → R32, R117 (streaming); R115 (unary,
+proof-of-pattern) → R116 (unary). R115 lands first to validate the
+migration pattern (schema, server, client, error mapping, mixed
+rollout) before the streaming services. All four items follow the
+zero-copy wrapper convention (`design-crow-rpc.md` §6): `FB`-prefixed
+flatbuffer types, wrapper classes in `crow-protocol`, no owned
+intermediate structs, no per-field copy.
+
+- **[R115](R115-diskdb-rpc-migration.md)** — DiskdbService → crow-rpc
+  — Area: diskdb / rpc — Migrate all 11 DiskdbService unary RPCs
+  (AllocateBlocks, FreeBlocks, CommitBlocks, QueryCapacityStats, etc.)
+  from tonic/gRPC to crow-rpc. No streaming needed (R114 not
+  required). Serves as the **proof-of-pattern** for the full `.fbs`
+  conversion approach — exercises every migration step (schema,
+  server, client, error mapping, `grpc_endpoint` rename, mixed
+  rollout, cutover) that R32/R116/R117 repeat. Full `.fbs` conversion
+  (no prost bridge), consistent with R105/diskio.
+- **[R116](R116-chunkdb-rpc-migration.md)** — ChunkdbService →
+  crow-rpc — Area: chunkdb / rpc — Migrate all 8 ChunkdbService unary
+  RPCs (AllocateChunk, AppendChunk, QueryChunk, SealChunk,
+  UpdateChunkStrip, etc.) from tonic/gRPC to crow-rpc. No streaming
+  needed. Preserves `NotLeaderHint` as a flatbuffer response field
+  (redirect `ret_code` + leader endpoint). Should land after R115
+  (pattern validation) and after the chunk-layer refactor stabilizes
+  `ChunkWriter`'s RPC call sites.
+- **[R117](R117-kv-client-rpc-migration.md)** — KvService (client-
+  facing) → crow-rpc — Area: kv / rpc — Migrate the client→server
+  path: 10 unary RPCs (Put, Get, Delete, BatchWrite, Scan, etc.) +
+  1 bi-directional stream (WatchNotify). R32 migrates the internal
+  Paxos path; R117 migrates the client-facing path — the surface
+  that `crow-kv-client` and FFI consumers (crow-diskio) call. FFI C
+  ABI preserved (only internal transport changes). Depends on R114
+  (WatchNotify streaming) + R32 (validates KV `NotLeaderHint`
+  flatbuffer model + `kv_rpc.fbs` schema sub-range).
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
   scan error spike by wrapping the maintenance loop's `flush` /

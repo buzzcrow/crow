@@ -49,9 +49,9 @@ async fn disk_io_e2e_group0_sync() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut heartbeat_ok = false;
     while Instant::now() < deadline {
-        if let Ok(Some(instance)) = svc.read_instance("diskdb", INSTANCE_ID).await {
+        if let Ok(Some(instance)) = svc.read_instance("diskio", INSTANCE_ID).await {
             eprintln!(
-                "  service registry: found diskdb instance {} at {}",
+                "  service registry: found diskio instance {} at {}",
                 instance.instance_id, instance.grpc_endpoint
             );
             assert!(

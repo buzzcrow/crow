@@ -30,6 +30,7 @@ uint64_t RpcClient::steady_now_ns()
 
 void RpcClient::set_completion_pool_size(size_t max_in_flight)
 {
+    std::scoped_lock lock(pool_mu_);
     if (completion_pool_ != nullptr) {
         return; // already sized
     }
@@ -60,61 +61,68 @@ OutFrame *RpcClient::build_frame(uint64_t request_id, Buffer *control, Buffer *d
     return frame;
 }
 
-// Callback-based call: tries slab first (CAS FREE→PENDING), falls back
-// to the pending map if the slot is occupied (slow request holding it).
-// The slab path is O(1) + zero heap alloc; the map path is one heap alloc
-// (std::function) — the overload fallback.
+// Callback-based call: tries slab first (CAS FREE/DONE→PENDING_CLAIMED),
+// writes fields, then publishes (PENDING_CLAIMED→PENDING_READY). Falls
+// back to the pending map if the slot is occupied (slow request holding
+// it). The slab path is O(1) + zero heap alloc; the map path is one heap
+// alloc (std::function) — the overload fallback.
 // Flow: doc/design/rpc/rpc-echo-flow-analysis.md § "Flow".
 bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
                      uint16_t msg_type, crow_rpc_on_complete cb, void *user_data)
 {
-    assert(completion_pool_ != nullptr && "send() without set_completion_pool_size");
-
     uint64_t timeout  = default_timeout_ns_.load(std::memory_order_relaxed);
     uint64_t deadline = (timeout > 0) ? steady_now_ns() + timeout : 0;
 
-    size_t idx  = request_id & pool_mask_;
-    auto  &slot = completion_pool_[idx];
-
-    // Check if the slot is reusable (FREE or DONE) before writing fields.
-    // This prevents corrupting a PENDING slot's callback/user_data when
-    // the slot is held by a slow request. DONE means the response was
-    // delivered and the callback already ran — the slot is safe to reuse
-    // (the coroutine model leaves slots in DONE after each response).
-    // The remaining race — two submitters both seeing FREE/DONE and both
-    // writing before one CAS wins — is extremely rare and only affects
-    // the general send() path, not the coroutine model (which
-    // assigns fixed slots per coroutine).
-    uint8_t st = slot.state.load(std::memory_order_acquire);
-    if (st == SLOT_FREE || st == SLOT_DONE) {
-        slot.request_id = request_id;
-        slot.cb         = cb;
-        slot.user_data  = user_data;
-        slot.deadline_ns.store(deadline, std::memory_order_relaxed);
-        uint8_t expected = st;
-        if (slot.state.compare_exchange_strong(expected, SLOT_PENDING, std::memory_order_acq_rel)) {
-            // Slab path — zero heap alloc.
-            OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
-            if (!transport->submit(conn, frame)) {
-                slot.state.store(SLOT_FREE, std::memory_order_release);
-                if (frame->control != nullptr)
-                    frame->control->release();
-                if (frame->data != nullptr)
-                    frame->data->release();
-                delete frame;
-                rpc_submit_fail().inc();
-                return false;
-            }
-            rpc_submit_ok().inc();
-            return true;
-        }
-        // CAS failed — rare race (another submitter grabbed the slot
-        // between our load and CAS). Fall through to map fallback.
+    // If no slab pool is sized, go directly to the map path. This is
+    // used by the oneshot call() path when the caller opts out of the
+    // slab (e.g. when per-call heap alloc already makes the slab's
+    // zero-alloc advantage marginal).
+    if (completion_pool_ == nullptr) {
+        goto map_path;
     }
 
-    // Slab slot occupied (or rare CAS race) — fall back to the pending
-    // map. One heap alloc for the std::function capture (overload path,
-    // not the hot path).
+    {
+        size_t idx  = request_id & pool_mask_;
+        auto  &slot = completion_pool_[idx];
+
+        // CAS first to claim the slot — the loser falls to the map before
+        // touching any slot fields, so the winner's fields are never
+        // corrupted. This eliminates the write-before-CAS race.
+        uint8_t st = slot.state.load(std::memory_order_acquire);
+        if (st == SLOT_FREE || st == SLOT_DONE) {
+            uint8_t expected = st;
+            if (slot.state.compare_exchange_strong(expected, SLOT_PENDING_CLAIMED, std::memory_order_acq_rel)) {
+                // We own the slot — write fields, then publish.
+                slot.request_id = request_id;
+                slot.cb         = cb;
+                slot.user_data  = user_data;
+                slot.deadline_ns.store(deadline, std::memory_order_relaxed);
+                slot.state.store(SLOT_PENDING_READY, std::memory_order_release);
+
+                OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
+                if (!transport->submit(conn, frame)) {
+                    slot.state.store(SLOT_FREE, std::memory_order_release);
+                    if (frame->control != nullptr)
+                        frame->control->release();
+                    if (frame->data != nullptr)
+                        frame->data->release();
+                    delete frame;
+                    rpc_submit_fail().inc();
+                    return false;
+                }
+                rpc_submit_ok().inc();
+                return true;
+            }
+            // CAS failed — another submitter grabbed the slot between our
+            // load and CAS. Fall through to map fallback.
+        }
+    } // end slab block
+
+map_path:
+    // Slab slot occupied (PENDING_CLAIMED/PENDING_READY/PROCESSING), rare
+    // CAS race, or no slab pool sized — fall back to the pending map. One
+    // heap alloc for the std::function capture (overload path, not the
+    // hot path).
     rpc_slab_fallback().inc();
     auto wrapped = [cb, user_data, request_id](Frame *resp, RpcError err) {
         invoke_c_complete(cb, user_data, request_id, resp, err);
@@ -148,40 +156,30 @@ void RpcClient::attach(Connection *conn)
 void RpcClient::on_response(uint64_t request_id, Frame *response)
 {
     // Slab path (callback model): O(1) index lookup, no hash. Check the
-    // slab pool first — if the slot is PENDING for this request_id, CAS
-    // PENDING→DONE to claim it. The CAS prevents double-invoke: if the
-    // reaper already timed out the slot, the CAS fails and we fall through
-    // to the map path (which won't find it → resp_missed).
+    // slab pool first — if the slot is PENDING_READY for this request_id,
+    // read fields BEFORE the CAS (safe: no concurrent writer can touch a
+    // PENDING_READY slot — send() only claims FREE/DONE), then CAS
+    // PENDING_READY→DONE to claim + release in one op. The callback uses
+    // locals, so a rapid DONE→PENDING_CLAIMED cycle by the callback's
+    // send() cannot corrupt the already-read fields.
     if (completion_pool_ != nullptr) {
         size_t  idx  = request_id & pool_mask_;
         auto   &slot = completion_pool_[idx];
         uint8_t st   = slot.state.load(std::memory_order_acquire);
-        if (st == SLOT_PENDING) {
-            if (slot.request_id == request_id) {
-                uint8_t expected = SLOT_PENDING;
-                if (slot.state.compare_exchange_strong(expected, SLOT_DONE, std::memory_order_acq_rel)) {
-                    // Do NOT reset to FREE after the callback — the callback
-                    // may reuse this slot (via send() → SLOT_PENDING)
-                    // for the next request. Resetting to FREE here would
-                    // overwrite that PENDING.
-                    auto cb = slot.cb;
-                    auto ud = slot.user_data;
-                    rpc_resp_matched().inc();
-                    invoke_c_complete(cb, ud, request_id, response, RpcError::Ok);
-                    return;
-                }
-                // CAS failed — reaper timed out this slot. Fall through
-                // to map (won't find it → resp_dropped).
+        if (st == SLOT_PENDING_READY && slot.request_id == request_id) {
+            auto    cb       = slot.cb;
+            auto    ud       = slot.user_data;
+            uint8_t expected = SLOT_PENDING_READY;
+            if (slot.state.compare_exchange_strong(expected, SLOT_DONE, std::memory_order_acq_rel)) {
+                rpc_resp_matched().inc();
+                invoke_c_complete(cb, ud, request_id, response, RpcError::Ok);
+                return;
             }
-            else {
-                // Slot is PENDING but for a different request_id — a stale
-                // response arrived after the slot was reused for a new
-                // request. Fall through to map; if map also misses, this
-                // is counted as resp_missed.
-            }
+            // CAS failed — reaper already claimed the slot. Fall through
+            // to map (won't find it → resp_missed).
         }
-        // Slot not PENDING (FREE or DONE) — late response, duplicate, or
-        // a map-fallback response. Fall through to map.
+        // Slot not PENDING_READY for this request_id — late response,
+        // duplicate, or a map-fallback response. Fall through to map.
     }
 
     // Map path: oneshot call() entries + slab-fallback entries.
@@ -205,16 +203,19 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
 
 void RpcClient::fail_all(RpcError err)
 {
-    // Fail slab-pending requests (callback model). CAS PENDING→DONE to
-    // avoid double-invoke with the reaper or on_response.
+    // Fail slab-pending requests (callback model). Read fields before CAS
+    // (slot is PENDING_READY, no concurrent writer), then CAS PENDING_READY→FREE
+    // to claim + release in one op. Same read-before-CAS pattern as on_response.
     for (size_t i = 0; i < pool_size_; ++i) {
         auto   &slot     = completion_pool_[i];
-        uint8_t expected = SLOT_PENDING;
-        if (slot.state.compare_exchange_strong(expected, SLOT_DONE, std::memory_order_acq_rel)) {
-            auto cb = slot.cb;
-            auto ud = slot.user_data;
-            invoke_c_complete(cb, ud, slot.request_id, nullptr, err);
-            slot.state.store(SLOT_FREE, std::memory_order_release);
+        uint8_t expected = SLOT_PENDING_READY;
+        if (slot.state.load(std::memory_order_acquire) == SLOT_PENDING_READY) {
+            auto cb  = slot.cb;
+            auto ud  = slot.user_data;
+            auto rid = slot.request_id;
+            if (slot.state.compare_exchange_strong(expected, SLOT_FREE, std::memory_order_acq_rel)) {
+                invoke_c_complete(cb, ud, rid, nullptr, err);
+            }
         }
     }
 
@@ -237,7 +238,8 @@ size_t RpcClient::pending_count()
 {
     size_t n = 0;
     for (size_t i = 0; i < pool_size_; ++i) {
-        if (completion_pool_[i].state.load(std::memory_order_relaxed) == SLOT_PENDING) {
+        uint8_t s = completion_pool_[i].state.load(std::memory_order_relaxed);
+        if (s == SLOT_PENDING_READY || s == SLOT_PENDING_CLAIMED) {
             ++n;
         }
     }
@@ -276,24 +278,28 @@ void RpcClient::reaper_loop()
     while (reaper_running_.load(std::memory_order_acquire)) {
         uint64_t now = steady_now_ns();
 
-        // Scan slab pool for timed-out slots. CAS PENDING→DONE to claim;
-        // if the CAS fails, on_response already handled it.
+        // Scan slab pool for timed-out slots. Only act on PENDING_READY —
+        // PENDING_CLAIMED means the submitter is still writing fields
+        // (deadline not yet set). Read fields before CAS (slot is
+        // PENDING_READY, no concurrent writer), then CAS PENDING_READY→FREE
+        // to claim + release in one op. If the CAS fails, on_response
+        // already handled it.
         for (size_t i = 0; i < pool_size_; ++i) {
             auto &slot = completion_pool_[i];
-            if (slot.state.load(std::memory_order_acquire) != SLOT_PENDING) {
+            if (slot.state.load(std::memory_order_acquire) != SLOT_PENDING_READY) {
                 continue;
             }
             uint64_t dl = slot.deadline_ns.load(std::memory_order_relaxed);
             if (dl == 0 || now < dl) {
                 continue; // no timeout or not yet expired
             }
-            uint8_t expected = SLOT_PENDING;
-            if (slot.state.compare_exchange_strong(expected, SLOT_DONE, std::memory_order_acq_rel)) {
-                auto cb = slot.cb;
-                auto ud = slot.user_data;
+            auto    cb       = slot.cb;
+            auto    ud       = slot.user_data;
+            auto    rid      = slot.request_id;
+            uint8_t expected = SLOT_PENDING_READY;
+            if (slot.state.compare_exchange_strong(expected, SLOT_FREE, std::memory_order_acq_rel)) {
                 rpc_reaped().inc();
-                invoke_c_complete(cb, ud, slot.request_id, nullptr, RpcError::Timeout);
-                slot.state.store(SLOT_FREE, std::memory_order_release);
+                invoke_c_complete(cb, ud, rid, nullptr, RpcError::Timeout);
             }
         }
 

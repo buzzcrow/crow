@@ -186,6 +186,7 @@ fn main() {
         // is not needed on them now.
         .type_attribute("MirrorStrip", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("EcStrip", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("Location", "#[derive(serde::Serialize, serde::Deserialize)]")
         .compile_protos(&protos, &[proto_dir])
         .expect("failed to compile CROW protos");
 }

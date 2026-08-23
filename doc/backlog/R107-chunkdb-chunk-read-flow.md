@@ -119,7 +119,7 @@ disks, and concatenating across multi-chunk objects.
 **Numbered work items**:
 
 1. **`ChunkReader`**
-   (`lib/crow-chunkdb-client/src/reader.rs`) — the main read API:
+   (`lib/crow-chunk-client/src/reader.rs`) — the main read API:
    ```rust
    pub struct ChunkReader {
        chunkdb: ChunkdbClient,

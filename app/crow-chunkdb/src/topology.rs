@@ -45,6 +45,10 @@ pub struct TopologySnapshot {
     nodes: HashMap<(RackId, NodeId), (i32, Vec<DiskGroupId>)>,
     /// dg_id → disk-group entry (with rack_id, node_id, status)
     disk_groups: HashMap<DiskGroupId, DiskGroupEntry>,
+    /// Unit size in bytes (from disk records). Used to convert
+    /// `write_granularity` (KB) to `unit_count` for diskdb allocation.
+    /// 0 if not yet populated.
+    unit_size_bytes: u32,
 }
 
 impl TopologySnapshot {
@@ -98,6 +102,11 @@ impl TopologySnapshot {
     /// Check if the snapshot is empty (no racks loaded yet).
     pub fn is_empty(&self) -> bool {
         self.racks.is_empty()
+    }
+
+    /// Unit size in bytes (0 if not yet populated).
+    pub fn unit_size_bytes(&self) -> u32 {
+        self.unit_size_bytes
     }
 }
 
@@ -211,6 +220,17 @@ pub async fn build_snapshot(hw: &crow_kv_client::HardwareClient) -> Option<Topol
     }
     for dg in disk_groups {
         snap.disk_groups.insert(dg.dg_id, dg);
+    }
+
+    // Read unit_size_bytes from the first available disk. All disks
+    // in the cluster use the same unit size, so one sample suffices.
+    for dg in snap.disk_groups.values() {
+        if let Some(disk_id) = dg.value.disk_ids.first() {
+            if let Ok(Some(disk)) = hw.get_disk(dg.rack_id, dg.node_id, dg.dg_id, disk_id).await {
+                snap.unit_size_bytes = disk.unit_size_bytes;
+                break;
+            }
+        }
     }
 
     Some(snap)

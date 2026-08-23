@@ -57,6 +57,7 @@ class AsyncPageStore
 // submit_fsync chains uring fsync across all dirty extent fds.
 class BlockPageStore;
 
+#ifdef CROW_HAVE_LIBURING
 class BlockAsyncPageStore : public AsyncPageStore
 {
   public:
@@ -76,5 +77,6 @@ class BlockAsyncPageStore : public AsyncPageStore
     BlockPageStore              *store_;
     ::crow::common::DiskIOUring *uring_;
 };
+#endif // CROW_HAVE_LIBURING
 
 } // namespace crow::tree

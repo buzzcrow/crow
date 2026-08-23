@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         files.retain(|f| {
             !matches!(
                 f.file_name().and_then(|s| s.to_str()),
-                Some("reactor.cpp") | Some("block_async_page_store.cpp")
+                Some("reactor.cpp") | Some("block_async_page_store.cpp") | Some("diskio_uring.cpp")
             )
         });
     }

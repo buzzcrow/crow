@@ -11,7 +11,7 @@
 
 pub mod client;
 
-pub use client::{DiskdbClient, RetryConfig};
+pub use client::{normalize_endpoint, DiskdbClient, RetryConfig};
 
 use thiserror::Error;
 

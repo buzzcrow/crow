@@ -164,10 +164,16 @@ Follower D ─┘                       Follower D ─┘                    │
 
 **Dependencies**
 
-- **Depends on**: **R104** (flatbuffer RPC engine library) — uses
-  `crow-rpc` crate for framing, connection, pool, schedule.
-- **Depended on by**: nothing (terminal migration item). R53
-  (heartbeat channel) is separate and independent.
+- **Depends on**: **R104** (flatbuffer RPC engine library — finished)
+  — uses `crow-rpc` crate for framing, connection, pool, schedule.
+  **R114** (streaming RPC support) — `LearnerStream` (bi-directional)
+  and `StreamSnapshot` (server-streaming) require R114's streaming
+  primitives. R115 (diskdb migration) should land first as the
+  proof-of-pattern for the unary migration steps.
+- **Depended on by**: **R117** (KvService client-facing migration)
+  reuses the `kv_rpc.fbs` schema sub-range and the `NotLeaderHint`
+  flatbuffer error model established here. R53 (heartbeat channel)
+  is separate and independent.
 
 **Acceptance**
 
@@ -208,10 +214,20 @@ Follower D ─┘                       Follower D ─┘                    │
 
 **Open Questions**
 
-- **Schema conversion scope**: Do we convert all existing KV `.proto`
-  schemas to `.fbs` (full flatbuffer migration), or bridge prost
-  messages to flatbuffer at the R104 boundary (keep `.proto` as the
-  schema source, serialize to flatbuffer at the wire layer)? Full
-  conversion is cleaner but is a large diff touching every RPC-using
-  crate. The bridge approach is smaller but adds a conversion step.
-  This is shared with R104's Open Question on flatbuffer vs protobuf.
+- **Schema conversion scope**: **Resolved — full `.fbs` conversion.**
+  R105 (diskio) already chose full `.fbs` conversion
+  (`diskio_service.proto` is now legacy/reserved). R115 (diskdb)
+  and R116 (chunkdb) follow the same approach. R32 converts
+  `pxos.proto` to `.fbs` schemas in `lib/crow-protocol/src/fbs/`.
+  The prost-to-flatbuffer bridge is not used — it would add a
+  conversion step and a dual-schema maintenance burden. The
+  zero-copy wrapper convention (`design-crow-rpc.md` §6) applies:
+  wrapper classes in `crow-protocol`, no owned intermediate structs,
+  no per-field copy.
+- **Streaming support**: R32 requires `LearnerStream` (bi-directional)
+  and `StreamSnapshot` (server-streaming). R104 shipped without
+  streaming support (§1 Non-Goals). **R114** (streaming RPC support)
+  must land before R32. R32's work items 1-4 assume R114 is
+  available; the `LearnerStream` client becomes an R114
+  bi-directional `Stream`, and `StreamSnapshot` becomes an R114
+  server-streaming `Stream`.

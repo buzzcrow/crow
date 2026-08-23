@@ -264,6 +264,30 @@ impl ServiceRegistryClient {
     }
 }
 
+// ── diskio convenience wrappers ─────────────────────────────────
+
+impl ServiceRegistryClient {
+    /// Register a diskio instance with `owned_dg_ids` and optional
+    /// per-disk-group usage summaries. Uses the "diskio" service group
+    /// so it doesn't pollute the "diskdb" group.
+    pub async fn heartbeat_diskio(
+        &self,
+        instance_id: InstanceId,
+        grpc_endpoint: &str,
+        owned_dg_ids: &[u64],
+        group_usages: &[DiskGroupUsageSummary],
+    ) -> Result<()> {
+        let extra = ServiceExtra {
+            diskdb: Some(DiskdbExtra {
+                owned_dg_ids: owned_dg_ids.to_vec(),
+                group_usages: group_usages.to_vec(),
+            }),
+            kv_server: None,
+        };
+        self.register("diskio", instance_id, grpc_endpoint, &extra).await
+    }
+}
+
 // ── kv-server convenience wrappers ──────────────────────────────
 
 impl ServiceRegistryClient {

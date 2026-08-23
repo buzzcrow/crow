@@ -292,7 +292,7 @@ pub unsafe extern "C" fn crow_svc_heartbeat_diskio(
         }
     };
     spawn_op(callback, user_data, move || async move {
-        svc.heartbeat_diskdb(instance_id, &endpoint, &dg_ids, &usages)
+        svc.heartbeat_diskio(instance_id, &endpoint, &dg_ids, &usages)
             .await
             .map_err(|e| e.to_string())?;
         Ok("{}".to_string())

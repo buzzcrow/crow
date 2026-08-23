@@ -78,6 +78,13 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_port(self.handle) }
     }
 
+    /// Set per-connection send queue capacity (backpressure bound).
+    /// Must be called before `listen`/`connect` creates connections.
+    /// Default 1024. Rounded up to next power of two internally.
+    pub fn set_send_queue_capacity(&self, capacity: u32) {
+        unsafe { sys::crow_rpc_server_set_send_queue_capacity(self.handle, capacity) };
+    }
+
     /// Sample transport-level stats: syscall counts + latency histograms.
     /// Aggregation ratios:
     ///   recv_agg = submit_to_writev.count / read_calls  (frames per read)

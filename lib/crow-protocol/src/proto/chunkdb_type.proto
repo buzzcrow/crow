@@ -113,3 +113,15 @@ message NotMyRangeHint {
   string grpc_endpoint = 4;  // unused — server does not know the owner
   uint32 sub_range_index = 5;  // unused (no sub-range info for out-of-range bucket)
 }
+
+// Location of a contiguous byte range of one object within one chunk.
+// An object spanning N chunks has a Vec<Location> of N entries ordered
+// by logical_offset. Used by the chunk data-path writers (R94, R106)
+// and the read flow (R107).
+message Location {
+  crow.common.ChunkId chunk_id       = 1;  // chunk holding the data
+  uint64              offset         = 2;  // byte offset within the chunk [start)
+  uint64              length         = 3;  // byte length stored in this chunk
+  uint64              logical_offset = 4;  // object-level logical offset
+  uint64              logical_length = 5;  // object-level logical length covered
+}
