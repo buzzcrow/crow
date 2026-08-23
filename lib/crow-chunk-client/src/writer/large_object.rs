@@ -1,237 +1,220 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `LargeObjectWriter` + `WriterConfig`.
+//! `LargeObjectWriter` (non-blocking stream) — owns the drive loop.
+//!
+//! Accepts a non-blocking stream (data already in buffer). Owns the
+//! drive loop: gets placements from `ChunkPrefetch`, rotates chunks
+//! when the placement's chunk_id changes, pushes data_num blocks per
+//! strip, finishes strips, seals chunks at EOF. Implements
+//! `ChunkIoWriter` for push mode.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::chunk::chunk_prefetch::ChunkPrefetch;
+use crate::chunk::chunk_writer::ChunkWriter;
+use crate::chunk::strip::StripPlacement;
+use crate::config::ChunkClientConfig;
+use crate::disk_io::DiskWriter;
 use crate::io::{ChunkIoWriter, FeedStatus};
-use crate::traits::{BlockWriter, ChunkAllocator};
-use crate::writer::pipeline::{run_fetch_stage, run_main_write_task};
+use crate::traits::ChunkAllocator;
 use crate::{IoError, Location, Result};
 use crow_common::ec::EcScheme;
-use crow_protocol::chunk_id::CHUNK_TYPE_REPO;
 
-/// Writer configuration.
-#[derive(Debug, Clone)]
-pub struct WriterConfig {
-    /// Max chunk size before rotation (bytes). Default 1 GB.
-    pub max_chunk_size: u64,
-    /// Strips allocated ahead of the write cursor. Default 2.
-    pub prealloc_depth: usize,
-    /// Parity tasks in flight. Default 2.
-    pub parity_depth: usize,
-    /// Chunks allocated ahead. Default 1.
-    pub chunk_prefetch_depth: usize,
-    /// Fetch read granularity / block size (bytes). Default 1 MB.
-    pub read_buffer_size: usize,
-    /// Max un-written data in fetch cache (bytes). Default 4 MB.
-    pub max_cached_buffer: usize,
+/// Large-object writer — non-blocking stream. Owns the drive loop.
+pub struct LargeObjectWriter {
+    pub(crate) allocator: Arc<dyn ChunkAllocator>,
+    pub(crate) disk_writer: Arc<dyn DiskWriter>,
+    pub(crate) ec_scheme: EcScheme,
+    pub(crate) config: Arc<ChunkClientConfig>,
+    pub(crate) chunk_writer: Option<ChunkWriter>,
+    pub(crate) prefetch_rx: Option<mpsc::Receiver<Result<StripPlacement>>>,
+    pub(crate) prefetch_handle: Option<JoinHandle<()>>,
+    pub(crate) locations: Vec<Location>,
+    pub(crate) logical_offset: u64,
+    pub(crate) finished: bool,
 }
 
-impl Default for WriterConfig {
-    fn default() -> Self {
-        const MB: usize = 1024 * 1024;
-        const GB: usize = 1024 * 1024 * 1024;
-        Self {
-            max_chunk_size: GB as u64,
-            prealloc_depth: 2,
-            parity_depth: 2,
-            chunk_prefetch_depth: 1,
-            read_buffer_size: MB,
-            max_cached_buffer: 4 * MB,
-        }
-    }
-}
-
-/// Large-object writer — writes one object to one or more dedicated
-/// chunks using EC strips.
-///
-/// Generic over `A: ChunkAllocator` (chunk lifecycle) and `W:
-/// `BlockWriter` (disk IO) for testability.
-///
-/// Two APIs: `write_stream` (stream-driven, recommended) and the
-/// `ChunkIoWriter` trait (push-driven, for callers that feed bytes
-/// incrementally). Both drive the same fetch→write→parity pipeline;
-/// `write_stream` runs a fetch stage that pulls from `AsyncRead`, while
-/// `on_data` pushes `Bytes` directly to the block channel.
-pub struct LargeObjectWriter<A: ChunkAllocator, W: BlockWriter> {
-    chunkdb: Arc<A>,
-    diskio: Arc<W>,
-    ec_scheme: EcScheme,
-    config: WriterConfig,
-    /// Push-mode pipeline state — `None` until the first `on_data`,
-    /// consumed (set to `None`) by `on_finish`/`on_error`. Unused by
-    /// `write_stream` (which runs the pipeline inline).
-    pipeline: Option<PipelineHandle>,
-    /// True after `write_stream`, `on_finish`, or `on_error` has run.
-    /// Further `on_data`/`on_finish`/`on_error` return `IoError::Finished`.
-    finished: bool,
-}
-
-/// Handles for the push-mode pipeline tasks + channels.
-struct PipelineHandle {
-    block_tx: mpsc::Sender<Bytes>,
-    prealloc_handle: JoinHandle<()>,
-    main_write: JoinHandle<Result<Vec<Location>>>,
-    cancel_tx: watch::Sender<bool>,
-}
-
-/// Output of `start_pipeline` — the block channel sender + task
-/// handles + cancel signal, bundled to avoid a complex tuple type.
-struct PipelineStart {
-    block_tx: mpsc::Sender<Bytes>,
-    prealloc_handle: JoinHandle<()>,
-    main_write: JoinHandle<Result<Vec<Location>>>,
-    cancel_tx: watch::Sender<bool>,
-}
-
-impl<A: ChunkAllocator + 'static, W: BlockWriter + 'static> LargeObjectWriter<A, W> {
+impl LargeObjectWriter {
     /// Construct a new writer.
-    pub fn new(chunkdb: A, diskio: W, ec_scheme: EcScheme, config: WriterConfig) -> Self {
+    pub fn new(
+        allocator: Arc<dyn ChunkAllocator>,
+        disk_writer: Arc<dyn DiskWriter>,
+        ec_scheme: EcScheme,
+        config: Arc<ChunkClientConfig>,
+    ) -> Self {
         Self {
-            chunkdb: Arc::new(chunkdb),
-            diskio: Arc::new(diskio),
+            allocator,
+            disk_writer,
             ec_scheme,
             config,
-            pipeline: None,
+            chunk_writer: None,
+            prefetch_rx: None,
+            prefetch_handle: None,
+            locations: Vec::new(),
+            logical_offset: 0,
             finished: false,
         }
     }
 
     /// Per-writer memory footprint for `WriterPool` budgeting.
     pub fn per_writer_memory(&self) -> usize {
-        let block = self.config.read_buffer_size;
-        self.config.max_cached_buffer
-            + block
-            + self.config.parity_depth * self.ec_scheme.total_blocks() * block
+        self.config.per_writer_memory(&self.ec_scheme)
     }
 
-    /// Spawn the prealloc task + main write task and return the block
-    /// channel sender + task handles + cancel signal. Shared by
-    /// `write_stream` (which adds a fetch stage) and push mode (which
-    /// feeds `block_tx` via `on_data`).
-    fn start_pipeline(&self, object_size: Option<u64>) -> PipelineStart {
-        let write_granularity_kb: u32 = (self.config.read_buffer_size / 1024) as u32;
-        let unit_bytes = u64::from(write_granularity_kb) * 1024;
-
-        let (prealloc_rx, prealloc_handle) = crate::prefetch::spawn_prealloc_task(
-            self.chunkdb.clone(),
+    /// Start the pipeline: spawn prefetch.
+    pub(crate) fn start_pipeline(&mut self, object_size: Option<u64>) {
+        let prefetch = ChunkPrefetch::new(
+            self.allocator.clone(),
             self.ec_scheme,
-            self.config.max_chunk_size,
-            self.config.prealloc_depth,
-            write_granularity_kb,
-            object_size,
-            CHUNK_TYPE_REPO,
+            self.config.clone(),
+            crow_protocol::chunk_id::CHUNK_TYPE_REPO,
         );
-
-        let block_channel_capacity = (self.config.max_cached_buffer / self.config.read_buffer_size).max(1);
-        let (block_tx, block_rx) = mpsc::channel(block_channel_capacity);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-
-        let main_write = tokio::spawn(run_main_write_task(
-            self.chunkdb.clone(),
-            self.diskio.clone(),
-            self.ec_scheme,
-            self.config.max_chunk_size,
-            self.config.parity_depth,
-            unit_bytes,
-            prealloc_rx,
-            block_rx,
-            cancel_rx,
-        ));
-
-        PipelineStart {
-            block_tx,
-            prealloc_handle,
-            main_write,
-            cancel_tx,
-        }
+        let (rx, handle) = prefetch.spawn(object_size);
+        self.prefetch_rx = Some(rx);
+        self.prefetch_handle = Some(handle);
     }
 
-    /// Stream-driven write. Drives fetch + main write + parity
-    /// pipeline internally.
-    ///
-    /// `object_size` known → pre-calculate strip/chunk count for
-    /// planning but still only pre-allocate `prealloc_depth` ahead;
-    /// `None` → streaming, on-demand strips.
-    pub async fn write_stream(
-        &mut self,
-        reader: impl tokio::io::AsyncRead + Unpin + Send,
-        object_size: Option<u64>,
-    ) -> Result<Vec<Location>> {
-        if self.finished {
-            return Err(IoError::Finished);
+    /// Get the next placement (from prefetch or on-demand).
+    pub(crate) async fn next_placement(&mut self) -> Result<Option<StripPlacement>> {
+        if let Some(rx) = self.prefetch_rx.as_mut() {
+            match rx.recv().await {
+                Some(Ok(p)) => return Ok(Some(p)),
+                Some(Err(e)) => return Err(e),
+                None => {
+                    self.prefetch_rx = None;
+                }
+            }
         }
-        self.finished = true;
+        // On-demand allocation.
+        let chunk_id = self.chunk_writer.as_ref().and_then(ChunkWriter::current_chunk_id);
+        let strips = self.chunk_writer.as_ref().map_or(0, ChunkWriter::strips_in_chunk);
+        let pf = ChunkPrefetch::new(
+            self.allocator.clone(),
+            self.ec_scheme,
+            self.config.clone(),
+            crow_protocol::chunk_id::CHUNK_TYPE_REPO,
+        );
+        let placement = pf.on_demand(chunk_id, strips).await?;
+        Ok(Some(placement))
+    }
 
-        // Empty object → no chunks.
-        if object_size == Some(0) {
-            return Ok(Vec::new());
+    /// Ensure an open strip: get placement, rotate chunk if needed.
+    pub(crate) async fn ensure_open_strip(&mut self) -> Result<()> {
+        let need_open = self
+            .chunk_writer
+            .as_ref()
+            .map_or(true, |cw| cw.is_strip_full() || cw.current_strip_is_none());
+
+        if !need_open {
+            return Ok(());
         }
 
-        // Start the pipeline (prealloc + main write). The fetch stage
-        // owns `block_tx`; when it hits EOF it drops the sender → main
-        // write sees channel closure → drains + seals.
-        let PipelineStart {
-            block_tx,
-            prealloc_handle,
-            main_write,
-            cancel_tx: _,
-        } = self.start_pipeline(object_size);
+        let placement = self
+            .next_placement()
+            .await?
+            .ok_or_else(|| IoError::Internal("no placement available".into()))?;
 
-        let fetch_fut = run_fetch_stage(reader, block_tx, self.config.read_buffer_size);
-        let (_fetch_result, main_result) = tokio::join!(fetch_fut, main_write);
+        let need_rotate = match &self.chunk_writer {
+            None => true,
+            Some(cw) => cw.current_chunk_id() != Some(placement.chunk_id),
+        };
+        if need_rotate {
+            if let Some(mut cw) = self.chunk_writer.take() {
+                let location = cw.seal().await?;
+                let bytes = location.length;
+                if bytes > 0 {
+                    self.locations.push(Location {
+                        logical_offset: self.logical_offset,
+                        logical_length: bytes,
+                        ..location
+                    });
+                    self.logical_offset += bytes;
+                }
+            }
+            let mut cw = ChunkWriter::new(
+                self.allocator.clone(),
+                self.disk_writer.clone(),
+                self.ec_scheme,
+                self.config.clone(),
+            );
+            cw.open(placement)?;
+            self.chunk_writer = Some(cw);
+        } else {
+            let cw = self.chunk_writer.as_mut().unwrap();
+            cw.continue_strip(placement)?;
+        }
+        Ok(())
+    }
 
-        // Abort prealloc task if still running (e.g. on error).
-        prealloc_handle.abort();
+    /// Finish: seal the current chunk, return all Locations.
+    pub(crate) async fn finish_pipeline(&mut self) -> Result<Vec<Location>> {
+        // Finish current strip if has data.
+        if let Some(cw) = self.chunk_writer.as_mut() {
+            if !cw.is_strip_full() && cw.ready() {
+                let _ = cw.finish_strip().await?;
+            }
+        }
 
-        main_result
-            .map_err(|e| IoError::Internal(format!("main write task panicked: {e}")))
-            .and_then(std::convert::identity)
+        if let Some(mut cw) = self.chunk_writer.take() {
+            let location = cw.seal().await?;
+            let bytes = location.length;
+            if bytes > 0 {
+                self.locations.push(Location {
+                    logical_offset: self.logical_offset,
+                    logical_length: bytes,
+                    ..location
+                });
+                self.logical_offset += bytes;
+            }
+        }
+        if let Some(handle) = self.prefetch_handle.take() {
+            handle.abort();
+        }
+        Ok(std::mem::take(&mut self.locations))
+    }
+
+    /// Abort: cancel in-flight, return already-sealed Locations.
+    pub(crate) async fn abort_pipeline(&mut self) -> Result<Vec<Location>> {
+        if let Some(mut cw) = self.chunk_writer.take() {
+            let _ = cw.abort().await;
+        }
+        if let Some(handle) = self.prefetch_handle.take() {
+            handle.abort();
+        }
+        Ok(std::mem::take(&mut self.locations))
     }
 }
 
 #[async_trait::async_trait]
-impl<A: ChunkAllocator + 'static, W: BlockWriter + 'static> ChunkIoWriter for LargeObjectWriter<A, W> {
+impl ChunkIoWriter for LargeObjectWriter {
     async fn on_data(&mut self, buffer: Bytes) -> Result<FeedStatus> {
         if self.finished {
             return Err(IoError::Finished);
         }
-        // Lazily start the pipeline on the first push.
-        if self.pipeline.is_none() {
-            let PipelineStart {
-                block_tx,
-                prealloc_handle,
-                main_write,
-                cancel_tx,
-            } = self.start_pipeline(None);
-            self.pipeline = Some(PipelineHandle {
-                block_tx,
-                prealloc_handle,
-                main_write,
-                cancel_tx,
-            });
+        if self.prefetch_rx.is_none() && self.chunk_writer.is_none() {
+            self.start_pipeline(None);
         }
-        let pipe = self.pipeline.as_ref().expect("pipeline just initialized");
-        // Always stores: awaits if the block channel is full
-        // (backpressure = max_cached_buffer).
-        pipe.block_tx
-            .send(buffer)
-            .await
-            .map_err(|_| IoError::Internal("main write task exited".into()))?;
-        // FeedStatus: Continue if the channel still has capacity,
-        // Pause if it is now full.
-        let status = if pipe.block_tx.capacity() > 0 {
-            FeedStatus::Continue
-        } else {
-            FeedStatus::Pause
-        };
+
+        // Ensure we have an open strip.
+        self.ensure_open_strip().await?;
+
+        // Push the block.
+        let cw = self
+            .chunk_writer
+            .as_mut()
+            .ok_or_else(|| IoError::Internal("no chunk writer".into()))?;
+        let status = cw.push(buffer).await?;
+
+        // If strip is now full, finish it.
+        if cw.is_strip_full() {
+            let _ = cw.finish_strip().await?;
+        }
+
         Ok(status)
     }
 
@@ -240,62 +223,18 @@ impl<A: ChunkAllocator + 'static, W: BlockWriter + 'static> ChunkIoWriter for La
             return Err(IoError::Finished);
         }
         self.finished = true;
-        let Some(pipe) = self.pipeline.take() else {
-            // No data was pushed — empty object.
-            return Ok(Vec::new());
-        };
-        // Drop block_tx → main write sees EOF → drains + seals.
-        drop(pipe.block_tx);
-        let locations = pipe
-            .main_write
-            .await
-            .map_err(|e| IoError::Internal(format!("main write task panicked: {e}")))
-            .and_then(std::convert::identity)?;
-        pipe.prealloc_handle.abort();
-        Ok(locations)
+        self.finish_pipeline().await
     }
 
     async fn on_error(&mut self) -> Result<Vec<Location>> {
         self.finished = true;
-        let Some(pipe) = self.pipeline.take() else {
-            return Ok(Vec::new());
-        };
-        // Signal cancel + drop block_tx → main write aborts: drops
-        // in-flight parity, deletes the partial chunk, returns the
-        // already-sealed Locations.
-        let _ = pipe.cancel_tx.send(true);
-        drop(pipe.block_tx);
-        let locations = pipe
-            .main_write
-            .await
-            .map_err(|e| IoError::Internal(format!("main write task panicked: {e}")))
-            .and_then(std::convert::identity)?;
-        pipe.prealloc_handle.abort();
-        Ok(locations)
+        self.abort_pipeline().await
     }
 
     fn require_data(&self) -> bool {
         if self.finished {
             return false;
         }
-        match &self.pipeline {
-            Some(pipe) => pipe.block_tx.capacity() > 0,
-            None => true, // pipeline not started → on_data would not block
-        }
-    }
-}
-
-impl<A: ChunkAllocator, W: BlockWriter> Drop for LargeObjectWriter<A, W> {
-    fn drop(&mut self) {
-        if let Some(pipe) = self.pipeline.take() {
-            // Safety net: signal cancel + drop block_tx so the main
-            // write task drains, sees cancel, and deletes the partial
-            // chunk. The task is detached (JoinHandle dropped) —
-            // best-effort cleanup if the runtime is still alive. The
-            // prealloc task is aborted (no cleanup needed).
-            let _ = pipe.cancel_tx.send(true);
-            drop(pipe.block_tx);
-            pipe.prealloc_handle.abort();
-        }
+        self.chunk_writer.as_ref().map_or(true, ChunkWriter::ready)
     }
 }

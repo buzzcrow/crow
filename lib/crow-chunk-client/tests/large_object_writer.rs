@@ -11,7 +11,9 @@
 )]
 
 use bytes::Bytes;
-use crow_chunk_client::{BackpressurePolicy, ChunkIoWriter, FeedStatus, IoError, Location, WriterConfig};
+use crow_chunk_client::{
+    BackpressurePolicy, ChunkClientConfig, ChunkIoWriter, FeedStatus, IoError, Location,
+};
 use crow_common::ec::{decode, encode_parity_from_shards, EcScheme};
 use crow_protocol::common::ChunkId;
 
@@ -97,17 +99,18 @@ fn location_binary_bad_length() {
     assert!(result.is_err());
 }
 
-// ── WriterConfig defaults ────────────────────────────────────────
+// ── ChunkClientConfig defaults ───────────────────────────────────
 
 #[test]
-fn writer_config_defaults() {
-    let cfg = WriterConfig::default();
+fn chunk_client_config_defaults() {
+    let cfg = ChunkClientConfig::default();
     assert_eq!(cfg.max_chunk_size, 1024 * 1024 * 1024);
     assert_eq!(cfg.prealloc_depth, 2);
     assert_eq!(cfg.parity_depth, 2);
     assert_eq!(cfg.chunk_prefetch_depth, 1);
     assert_eq!(cfg.read_buffer_size, 1024 * 1024);
     assert_eq!(cfg.max_cached_buffer, 4 * 1024 * 1024);
+    assert_eq!(cfg.prefetch_chunk_count, 1);
 }
 
 // ── ChunkIoWriter mock contract ──────────────────────────────────

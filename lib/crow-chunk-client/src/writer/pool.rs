@@ -3,13 +3,17 @@
 
 //! `WriterPool` — bounds concurrent writers by memory budget.
 //!
-//! Filled in Phase 5.
+//! No generics — holds concrete `Arc<dyn ChunkAllocator>` +
+//! `Arc<dyn DiskWriter>` + `Arc<ChunkClientConfig>`. Delegates
+//! `per_writer_memory` to `ChunkClientConfig`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::traits::{BlockWriter, ChunkAllocator};
-use crate::writer::large_object::{LargeObjectWriter, WriterConfig};
+use crate::config::ChunkClientConfig;
+use crate::disk_io::DiskWriter;
+use crate::traits::ChunkAllocator;
+use crate::writer::large_object::LargeObjectWriter;
 use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
 
@@ -17,27 +21,27 @@ use crow_common::ec::EcScheme;
 ///
 /// Each writer's footprint is `per_writer_memory()`. The pool rejects
 /// new acquisitions when the budget is exhausted.
-pub struct WriterPool<A: ChunkAllocator + Clone, W: BlockWriter + Clone> {
-    chunkdb: A,
-    diskio: W,
+pub struct WriterPool {
+    allocator: Arc<dyn ChunkAllocator>,
+    disk_writer: Arc<dyn DiskWriter>,
     ec_scheme: EcScheme,
-    config: WriterConfig,
+    config: Arc<ChunkClientConfig>,
     memory_budget: usize,
     in_use: Arc<AtomicUsize>,
 }
 
-impl<A: ChunkAllocator + Clone + 'static, W: BlockWriter + Clone + 'static> WriterPool<A, W> {
+impl WriterPool {
     /// Create a new pool.
     pub fn new(
-        chunkdb: A,
-        diskio: W,
+        allocator: Arc<dyn ChunkAllocator>,
+        disk_writer: Arc<dyn DiskWriter>,
         ec_scheme: EcScheme,
-        config: WriterConfig,
+        config: Arc<ChunkClientConfig>,
         memory_budget: usize,
     ) -> Self {
         Self {
-            chunkdb,
-            diskio,
+            allocator,
+            disk_writer,
             ec_scheme,
             config,
             memory_budget,
@@ -47,15 +51,12 @@ impl<A: ChunkAllocator + Clone + 'static, W: BlockWriter + Clone + 'static> Writ
 
     /// Per-writer memory footprint.
     fn per_writer_memory(&self) -> usize {
-        let block = self.config.read_buffer_size;
-        self.config.max_cached_buffer
-            + block
-            + self.config.parity_depth * self.ec_scheme.total_blocks() * block
+        self.config.per_writer_memory(&self.ec_scheme)
     }
 
     /// Try to acquire a writer. Returns `MemoryBudgetExhausted` if the
     /// budget is full.
-    pub fn try_acquire(&self) -> Result<PooledWriter<A, W>> {
+    pub fn try_acquire(&self) -> Result<PooledWriter> {
         let footprint = self.per_writer_memory();
         let prev = self.in_use.fetch_add(footprint, Ordering::AcqRel);
         if prev + footprint > self.memory_budget {
@@ -64,8 +65,8 @@ impl<A: ChunkAllocator + Clone + 'static, W: BlockWriter + Clone + 'static> Writ
         }
         Ok(PooledWriter {
             writer: LargeObjectWriter::new(
-                self.chunkdb.clone(),
-                self.diskio.clone(),
+                self.allocator.clone(),
+                self.disk_writer.clone(),
                 self.ec_scheme,
                 self.config.clone(),
             ),
@@ -76,13 +77,13 @@ impl<A: ChunkAllocator + Clone + 'static, W: BlockWriter + Clone + 'static> Writ
 }
 
 /// A writer acquired from the pool. Releases the budget on drop.
-pub struct PooledWriter<A: ChunkAllocator, W: BlockWriter> {
-    pub writer: LargeObjectWriter<A, W>,
+pub struct PooledWriter {
+    pub writer: LargeObjectWriter,
     in_use: Arc<AtomicUsize>,
     footprint: usize,
 }
 
-impl<A: ChunkAllocator, W: BlockWriter> Drop for PooledWriter<A, W> {
+impl Drop for PooledWriter {
     fn drop(&mut self) {
         self.in_use.fetch_sub(self.footprint, Ordering::AcqRel);
     }

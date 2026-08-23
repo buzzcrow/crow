@@ -1,22 +1,39 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `DiskioBlockWriter` — adapts `DiskioClient` (sync RPC) to the async
-//! `BlockWriter` trait by awaiting `CallFuture` responses.
+//! `DiskWriter` trait + `DiskioBlockWriter` (production impl).
+//!
+//! `DiskWriter` is the block-IO seam. `write` takes a `Segment`
+//! directly (carrying disk_id, zone_index, unit_offset) + `unit_bytes`
+//! to compute the byte offset — removing the repeated
+//! disk_id/zone/offset extraction from call sites. `fsync` flushes a
+//! disk. Production impl wraps `DiskioClient`; test impl
+//! (`LocalFileDiskWriter`) writes to local files.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use crow_diskio_client::{DiskId, DiskIoRetCode, DiskioClient};
+use crow_protocol::diskdb::rpc::Segment;
 use crow_rpc_ffi::{Connection, RpcServer};
 
-use crate::traits::BlockWriter;
 use crate::{IoError, Result};
 
-/// Wraps `DiskioClient` + `RpcServer` + `Connection` to implement the
-/// async `BlockWriter` trait. Each `write`/`fsync` call sends the RPC
-/// and awaits the response, checking the return code.
+/// Block-IO seam. Write data blocks to disk + fsync.
+#[async_trait]
+pub trait DiskWriter: Send + Sync {
+    /// Write `data` to the disk/zone/offset described by `seg`.
+    /// `unit_bytes` converts `seg.unit_offset` to a byte offset.
+    async fn write(&self, seg: &Segment, unit_bytes: u64, data: Bytes) -> Result<()>;
+
+    /// Flush all pending writes on `disk_id` to durable storage.
+    async fn fsync(&self, disk_id: DiskId) -> Result<()>;
+}
+
+/// Production `DiskWriter` — wraps `DiskioClient` + `RpcServer` +
+/// `Connection`. Each `write`/`fsync` sends the RPC and awaits the
+/// response, checking the return code.
 pub struct DiskioBlockWriter {
     client: Arc<DiskioClient>,
     server: Arc<RpcServer>,
@@ -33,15 +50,21 @@ impl DiskioBlockWriter {
 }
 
 #[async_trait]
-impl BlockWriter for DiskioBlockWriter {
-    async fn write(&self, disk_id: DiskId, zone_index: u32, zone_offset: u64, data: Bytes) -> Result<()> {
+impl DiskWriter for DiskioBlockWriter {
+    async fn write(&self, seg: &Segment, unit_bytes: u64, data: Bytes) -> Result<()> {
+        let disk_id = seg
+            .disk_id
+            .as_ref()
+            .ok_or_else(|| IoError::WriteFailed("segment missing disk_id".into()))?;
+        let disk_id = DiskId::new(disk_id.high, disk_id.low);
+        let zone_offset = seg.unit_offset * unit_bytes;
         let fut = self
             .client
             .write(
                 &self.server,
                 &self.conn,
                 disk_id,
-                zone_index,
+                seg.zone_index,
                 zone_offset,
                 data.to_vec(),
             )

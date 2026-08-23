@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crow_chunk_client::{DiskioBlockWriter, LargeObjectWriter, WriterConfig};
+use crow_chunk_client::{ChunkClientConfig, DiskWriter, DiskioBlockWriter, LargeAsyncObjectWriter};
 use crow_chunkdb_client::{ChunkdbClient, RetryConfig as ChunkdbRetryConfig};
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskioClient;
@@ -192,22 +192,24 @@ async fn e2e_case1_single_chunk_multi_strip() {
     // 12 MB, 1 MB blocks, 4 data blocks per strip → 4 MB per strip.
     // 12 MB / 4 MB = 3 strips. max_chunk_size = 1 GB → all 3 strips
     // in 1 chunk.
-    let config = WriterConfig {
+    let config = Arc::new(ChunkClientConfig {
         max_chunk_size: 1024 * 1024 * 1024,
         prealloc_depth: 2,
         parity_depth: 2,
         chunk_prefetch_depth: 1,
-        read_buffer_size: 1024 * 1024, // 1 MB
+        read_buffer_size: 1024 * 1024,
         max_cached_buffer: 4 * 1024 * 1024,
-    };
+        prefetch_chunk_count: 1,
+        memory_budget: 0,
+    });
 
-    let diskio_writer = DiskioBlockWriter::new(
+    let diskio_writer: Arc<dyn DiskWriter> = Arc::new(DiskioBlockWriter::new(
         stack.dio_client.clone(),
         stack.rpc_server.clone(),
         stack.conn.clone(),
-    );
+    ));
 
-    let mut writer = LargeObjectWriter::new(stack.chunkdb_client, diskio_writer, ec, config);
+    let mut writer = LargeAsyncObjectWriter::new(Arc::new(stack.chunkdb_client), diskio_writer, ec, config);
 
     let data = make_test_data(12 * 1024 * 1024);
     eprintln!("=== writing 12 MB ===");
@@ -239,22 +241,24 @@ async fn e2e_case2_chunk_rotation() {
     // 20 MB, 1 MB blocks, 4 data blocks per strip → 4 MB per strip.
     // max_chunk_size = 8 MB → 2 strips per chunk.
     // 20 MB / 4 MB = 5 strips → 3 chunks (2 × 2 strips + 1 × 1 strip).
-    let config = WriterConfig {
-        max_chunk_size: 8 * 1024 * 1024, // 8 MB → 2 strips/chunk
+    let config = Arc::new(ChunkClientConfig {
+        max_chunk_size: 8 * 1024 * 1024,
         prealloc_depth: 2,
         parity_depth: 2,
         chunk_prefetch_depth: 1,
-        read_buffer_size: 1024 * 1024, // 1 MB
+        read_buffer_size: 1024 * 1024,
         max_cached_buffer: 4 * 1024 * 1024,
-    };
+        prefetch_chunk_count: 1,
+        memory_budget: 0,
+    });
 
-    let diskio_writer = DiskioBlockWriter::new(
+    let diskio_writer: Arc<dyn DiskWriter> = Arc::new(DiskioBlockWriter::new(
         stack.dio_client.clone(),
         stack.rpc_server.clone(),
         stack.conn.clone(),
-    );
+    ));
 
-    let mut writer = LargeObjectWriter::new(stack.chunkdb_client, diskio_writer, ec, config);
+    let mut writer = LargeAsyncObjectWriter::new(Arc::new(stack.chunkdb_client), diskio_writer, ec, config);
 
     let data = make_test_data(20 * 1024 * 1024);
     eprintln!("=== writing 20 MB ===");

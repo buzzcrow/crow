@@ -1,11 +1,15 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Large-object writer + writer pool.
+//! Object-level writers — user-facing entry points. Own the drive loop.
 
+pub mod fetch;
+pub mod large_async_object;
 pub mod large_object;
-pub mod pipeline;
 pub mod pool;
+pub mod small_object;
 
-pub use large_object::{LargeObjectWriter, WriterConfig};
-pub use pool::WriterPool;
+pub use large_async_object::LargeAsyncObjectWriter;
+pub use large_object::LargeObjectWriter;
+pub use pool::{PooledWriter, WriterPool};
+pub use small_object::SmallObjectWriter;
