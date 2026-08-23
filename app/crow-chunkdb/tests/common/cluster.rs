@@ -31,7 +31,7 @@ use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::ZoneLoader;
 use crow_diskdb::scanner::ScanState;
 use crow_diskdb::service::DiskdbService;
-use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
+use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
 use crow_protocol::common::{DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
 use serde_json::Value;
@@ -271,7 +271,7 @@ impl KvCluster {
     }
 
     pub fn make_crowkv_client(&self) -> Arc<CrowkvClient> {
-        let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
+        let kv = CrowkvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         kv.seed_leader(0, 1, self.group1_leader_endpoint.clone());
         Arc::new(kv)
@@ -288,6 +288,21 @@ impl KvCluster {
     pub fn make_ddb_kv_client(&self) -> Arc<DdbKvClient> {
         Arc::new(DdbKvClient::from_shared(self.make_crowkv_client()))
     }
+}
+
+/// Build a `ClientConfig` with a generous retry budget for E2E tests,
+/// where leader election may still be converging right after cluster
+/// startup. The production default (`max_retries: 3`, 100ms wait) gives
+/// only ~300ms of patience; tests need ~2s to ride out re-elections.
+fn test_client_config(mgmt_seeds: Vec<String>) -> ClientConfig {
+    let mut cfg = ClientConfig::new(mgmt_seeds);
+    cfg.retry = RetryConfig {
+        max_retries: 10,
+        unknown_leader_wait: Duration::from_millis(200),
+        backoff_base: Duration::from_millis(100),
+        backoff_max: Duration::from_secs(5),
+    };
+    cfg
 }
 
 async fn start_kv_node_with_groups(

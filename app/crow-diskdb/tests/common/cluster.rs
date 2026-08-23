@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crow_diskdb::ddb_kv_client::DdbKvClient;
-use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
+use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
 use serde_json::Value;
 
 // ── process management ──────────────────────────────────────────
@@ -268,7 +268,7 @@ impl KvCluster {
     /// recover if the leader changes.
     #[must_use]
     pub fn make_ddb_kv_client(&self) -> DdbKvClient {
-        let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
+        let kv = CrowkvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 1, self.group1_leader_endpoint.clone());
         DdbKvClient::new(kv)
     }
@@ -276,7 +276,7 @@ impl KvCluster {
     /// Build a `HardwareClient` seeded with the group-0 leader endpoint.
     #[must_use]
     pub fn make_hardware_client(&self) -> HardwareClient {
-        let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
+        let kv = CrowkvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         HardwareClient::new(kv)
     }
@@ -284,10 +284,25 @@ impl KvCluster {
     /// Build a `ServiceRegistryClient` seeded with the group-0 leader.
     #[must_use]
     pub fn make_service_registry_client(&self) -> ServiceRegistryClient {
-        let kv = CrowkvClient::new(ClientConfig::new(self.mgmt_endpoints.clone()));
+        let kv = CrowkvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         ServiceRegistryClient::new(kv)
     }
+}
+
+/// Build a `ClientConfig` with a generous retry budget for E2E tests,
+/// where leader election may still be converging right after cluster
+/// startup. The production default (`max_retries: 3`, 100ms wait) gives
+/// only ~300ms of patience; tests need ~2s to ride out re-elections.
+fn test_client_config(mgmt_seeds: Vec<String>) -> ClientConfig {
+    let mut cfg = ClientConfig::new(mgmt_seeds);
+    cfg.retry = RetryConfig {
+        max_retries: 10,
+        unknown_leader_wait: Duration::from_millis(200),
+        backoff_base: Duration::from_millis(100),
+        backoff_max: Duration::from_secs(5),
+    };
+    cfg
 }
 
 /// Start a kv-server node hosting multiple groups on one store.
