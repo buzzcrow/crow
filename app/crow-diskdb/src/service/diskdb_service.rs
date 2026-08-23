@@ -39,10 +39,10 @@ use crate::scanner::ScanState;
 pub(crate) const MAX_ALLOCATE_COUNT: u32 = 1024;
 
 /// `u32::MAX` sentinel for "all zones on the disk".
-const ALL_ZONES: u32 = u32::MAX;
+pub(crate) const ALL_ZONES: u32 = u32::MAX;
 
 /// Elapsed nanoseconds as u64 (saturating cast from u128).
-fn elapsed_ns(start: std::time::Instant) -> u64 {
+pub(crate) fn elapsed_ns(start: std::time::Instant) -> u64 {
     start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
