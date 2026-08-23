@@ -616,6 +616,31 @@ impl Cluster {
         }
         summaries
     }
+
+    /// Wait until all nodes in a group have converged to the same WAL
+    /// `max_slot`. This prevents a lagging follower from catching up
+    /// between the pre-restart WAL snapshot and `stop_all`, which would
+    /// cause a false "WAL changed after stop" assertion.
+    async fn wait_for_wal_convergence(&self, store_id: u64, group_id: u64, nodes: &[u64], timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let summaries = self
+                .verify_wal_for_nodes("convergence", store_id, group_id, nodes)
+                .await;
+            let max_slots: Vec<u64> = summaries.iter().map(|s| s.max_slot).collect();
+            let min = *max_slots.iter().min().unwrap_or(&0);
+            let max = *max_slots.iter().max().unwrap_or(&0);
+            if min == max && min > 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "WAL did not converge for store {store_id} group {group_id} \
+                 within {timeout:?}: slots={max_slots:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 // ── Restart recovery helper ────────────────────────────────────────────────
@@ -765,6 +790,13 @@ async fn restart_recovery(
             g.group_id,
             g.nodes.len()
         );
+        // Wait for all replicas to converge to the same max_slot before
+        // snapshotting. Without this, a lagging follower can catch up
+        // between the snapshot and stop_all, causing a false "WAL changed
+        // after stop" failure.
+        cluster
+            .wait_for_wal_convergence(g.store_id, g.group_id, &g.nodes, Duration::from_secs(5))
+            .await;
         let summaries = cluster
             .verify_wal_for_nodes("pre-restart", g.store_id, g.group_id, &g.nodes)
             .await;
