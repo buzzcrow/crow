@@ -70,7 +70,7 @@ avoids any throwaway bridge code — the helper already exists.
 
 ## Phase 2: Own-protobuf in `EcStripWriter` (remove the bridge)
 
-- [ ] **2.1 Change `EcStripWriter` to hold `Arc<Chunk>` + index,
+- [x] **2.1 Change `EcStripWriter` to hold `Arc<Chunk>` + index,
   add accessor methods.** Replace `placement: StripPlacement` with
   `chunk: Arc<Chunk>` + `strip_index: u32`. Update `new()` to take
   `Arc<Chunk>` + index. Move `unit_bytes`, `segment(i)`,
@@ -82,13 +82,13 @@ avoids any throwaway bridge code — the helper already exists.
   behavior (join parity at strip finish) for now** — the parity
   handoff decoupling is Phase 3.1. Files:
   `src/chunk/ec_strip_writer.rs`.
-- [ ] **2.2 Update `ChunkWriter` to pass `Arc<Chunk>` + index to
+- [x] **2.2 Update `ChunkWriter` to pass `Arc<Chunk>` + index to
   `EcStripWriter`.** In `open` / `continue_strip`, pass
   `Arc::clone(&chunk)` + strip index instead of extracting a
   `StripPlacement`. Remove the `extract_placement_from_chunk` bridge
   from `ChunkWriter`. Files: `src/chunk/chunk_writer.rs`,
   `src/chunk/chunk_prefetch.rs`.
-- [ ] **Checkpoint: `pixi run cargo build -p crow-chunk-client`.**
+- [x] **Checkpoint: `pixi run cargo build -p crow-chunk-client`.**
   All 53 tests pass. `EcStripWriter` now shares `Arc<Chunk>`;
   `StripPlacement` still exists (in `strip.rs`) but is no longer
   used by the write path — removed in Phase 4.

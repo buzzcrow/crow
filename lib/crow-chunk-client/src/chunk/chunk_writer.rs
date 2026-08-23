@@ -16,7 +16,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tracing::warn;
 
-use crate::chunk::chunk_prefetch::extract_placement_from_chunk;
 use crate::chunk::ec_strip_writer::EcStripWriter;
 use crate::chunk::strip::{StripResult, StripWriter};
 use crate::config::ChunkClientConfig;
@@ -71,22 +70,20 @@ impl ChunkWriter {
     /// `allocate_chunk`). `object_size` is stored for strip-prefetch
     /// planning (used in Phase 3.2; no behavior yet).
     pub fn open(&mut self, chunk: Chunk, object_size: Option<u64>) -> Result<()> {
-        let chunk_id = chunk
-            .id
-            .ok_or_else(|| IoError::AllocationFailed("open: chunk missing id".into()))?;
+        if chunk.id.is_none() {
+            return Err(IoError::AllocationFailed("open: chunk missing id".into()));
+        }
         if chunk.strips.is_empty() {
             return Err(IoError::AllocationFailed("open: chunk has no strips".into()));
         }
         self.object_size = object_size;
         self.strips_remaining = compute_strips_remaining(object_size, &self.ec_scheme, &self.config);
         let chunk = Arc::new(chunk);
-        let placement = extract_placement_from_chunk(&chunk, 0)?;
-        let strip = EcStripWriter::new(placement, self.disk_writer.clone(), self.ec_scheme);
+        let strip = EcStripWriter::new(Arc::clone(&chunk), 0, self.disk_writer.clone(), self.ec_scheme);
         self.chunk = Some(chunk);
         self.write_cursor = 0;
         self.bytes_in_chunk = 0;
         self.current_strip = Some(StripWriter::Ec(strip));
-        let _ = chunk_id;
         Ok(())
     }
 
@@ -104,8 +101,12 @@ impl ChunkWriter {
         }
         let next_index = self.write_cursor + 1;
         let chunk = Arc::new(chunk);
-        let placement = extract_placement_from_chunk(&chunk, next_index)?;
-        let strip = EcStripWriter::new(placement, self.disk_writer.clone(), self.ec_scheme);
+        let strip = EcStripWriter::new(
+            Arc::clone(&chunk),
+            next_index,
+            self.disk_writer.clone(),
+            self.ec_scheme,
+        );
         self.chunk = Some(chunk);
         self.write_cursor = next_index;
         self.current_strip = Some(StripWriter::Ec(strip));

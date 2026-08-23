@@ -5,9 +5,8 @@
 //! write cursor.
 //!
 //! Streams the full cumulative `Chunk` protobuf (one per strip-append)
-//! to the object layer. The object layer extracts the latest strip's
-//! placement via `extract_placement_from_chunk` (bridge — removed in
-//! Phase 2 when `EcStripWriter` holds `Arc<Chunk>` directly). Strip
+//! to the object layer. `ChunkWriter` holds `Arc<Chunk>` and shares it
+//! with `EcStripWriter` directly — no `StripPlacement` bridge. Strip
 //! planning stays here until Phase 3.2 moves it into `ChunkWriter`.
 
 use std::sync::Arc;
@@ -15,13 +14,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::chunk::strip::StripPlacement;
 use crate::config::ChunkClientConfig;
 use crate::traits::ChunkAllocator;
 use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
 use crow_protocol::chunk_id::CHUNK_TYPE_REPO;
-use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
 use crow_protocol::chunkdb::rpc::{AllocateChunkRequest, AppendChunkRequest, Chunk, ChunkType, StripType};
 use crow_protocol::common::ChunkId;
 
@@ -216,32 +213,4 @@ pub(crate) async fn append_strip(
     let resp = chunkdb.append_chunk(req).await?;
     resp.chunk
         .ok_or_else(|| IoError::AllocationFailed("append_chunk response missing chunk".into()))
-}
-
-/// Extract the placement of the strip at `strip_index` from a chunk.
-/// Bridge used by `ChunkWriter` while `EcStripWriter` still takes
-/// `StripPlacement` (removed in Phase 2).
-pub(crate) fn extract_placement_from_chunk(chunk: &Chunk, strip_index: u32) -> Result<StripPlacement> {
-    let strip = chunk
-        .strips
-        .get(strip_index as usize)
-        .ok_or_else(|| IoError::AllocationFailed(format!("chunk has no strip {strip_index}")))?;
-    let oneof = strip
-        .strip
-        .as_ref()
-        .ok_or_else(|| IoError::AllocationFailed("chunk strip missing oneof".into()))?;
-    let segments = match oneof {
-        StripOneof::EcStrip(ec) => ec.segments.clone(),
-        StripOneof::MirrorStrip(_) => {
-            return Err(IoError::AllocationFailed("expected EC strip, got mirror".into()));
-        }
-    };
-    Ok(StripPlacement {
-        chunk_id: chunk
-            .id
-            .ok_or_else(|| IoError::AllocationFailed("chunk missing id".into()))?,
-        strip_index_in_chunk: strip_index,
-        segments,
-        unit_kb: strip.unit_kb,
-    })
 }
