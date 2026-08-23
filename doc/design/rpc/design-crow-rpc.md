@@ -230,7 +230,109 @@ are excluded (same pattern as crow-tree's liburing gate). pixi provides
 `flatbuffers` (for `flatc`); on Linux, `libibverbs` and `librdmacm` are
 optional RDMA deps.
 
-## 6. Sub-Design Document Map
+## 6. Flatbuffer Wrapper Convention
+
+**Rule for all services migrating to crow-rpc (R32, R115, R116, R117).**
+The flatbuffer control message is a buffer; field access is a direct
+memory-offset read through the flatbuffers runtime — no deserialization
+into an owned struct, no per-field copy. This rule governs both the C++
+server side and the Rust client side.
+
+- **`FB` prefix for flatbuffer types.** All flatbuffer table/enum/struct
+  names use the `FB` prefix (`FBDiskWriteRequest`, `FBMsgType`,
+  `FBDiskIoRetCode`). This is already established by R104/R105 and is
+  mandatory for new schemas.
+- **Zero-copy read — no owned intermediate.** The receiver gets a
+  `&[u8]` (Rust) or `const uint8_t*` (C++) view of the control buffer.
+  Field access is via the flatbuffers generated accessor
+  (`flatbuffers::root::<FBT>(buf)` → `fb.field()`, or
+  `flatbuffers::GetRoot<FBT>(ptr)` → `fb->field()`). Do **not**
+  deserialize the flatbuffer into a separate owned Rust struct or C++
+  class that copies each field out of the buffer. The buffer is the
+  object; accessors read from it in place.
+- **Wrapper classes in `crow-protocol`, defined when required.** When
+  a service needs a typed API over a flatbuffer buffer (to encapsulate
+  parse + null-check + field access, to add domain logic, or to hide
+  the raw generated type from downstream code), define a **wrapper
+  class** in `crow-protocol` that holds a reference to the buffer and
+  exposes typed accessor methods. The wrapper does **not** copy fields
+  — it reads through the flatbuffer root pointer on every accessor
+  call. Wrappers are defined when a service needs them (not
+  preemptively for every flatbuffer type), and they live in
+  `crow-protocol` so every project (crow-kv, crow-diskdb, crow-chunkdb,
+  crow-diskio) shares one definition.
+- **Wrapper naming.** Wrapper types use the `FB` prefix + the domain
+  type name, without a `View`/`Ref` suffix — the `FB` prefix already
+  signals "flatbuffer-backed". Example: `FBDiskWriteRequest` is the
+  generated flatbuffer table; a wrapper that adds null-safe access +
+  domain logic would be `FBDiskWriteRequest` itself if the generated
+  type suffices, or a thin extension trait/impl block on the generated
+  type. If a separate wrapper struct is needed (e.g. to hold the
+  buffer reference + parsed root), name it `FB<Type>Accessor` and put
+  it in `crow-protocol`.
+- **No extra allocation on the read path.** The control buffer is
+  pool-allocated (C++) or `Bytes`-backed (Rust FFI); the wrapper holds
+  a reference to it. Accessor calls are pure pointer-offset reads — no
+  heap allocation, no `Vec`, no `String` construction unless the
+  caller explicitly converts a field to an owned type. The data
+  payload (raw bytes after the control message) is the one exception:
+  it may be copied into an owned `Vec<u8>` when the caller needs owned
+  bytes, because it is not a flatbuffer.
+- **Write path: build, finish, attach.** The sender builds the
+  flatbuffer with `FlatBufferBuilder` (Rust) or
+  `flatbuffers::FlatBufferBuilder` (C++), calls `finish`, and attaches
+  the finished bytes to the frame's control buffer. The builder is
+  dropped after the buffer is attached — no retained builder state.
+
+### 6.1 Pattern (Rust, client side)
+
+```rust
+// In crow-protocol: a wrapper that encapsulates parse + access.
+// The generated FBDiskWriteResponse already has accessors; the
+// wrapper adds null-safe construction + domain-typed return.
+pub struct FBDiskWriteResponseRef<'a> {
+    root: flatbuffers::root::Result<'a, FBDiskWriteResponse<'a>>,
+}
+impl<'a> FBDiskWriteResponseRef<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        Self { root: flatbuffers::root::<FBDiskWriteResponse>(buf) }
+    }
+    pub fn ret_code(&self) -> Option<DiskIoRetCode> {
+        self.root.as_ref().ok()?.ret_code().try_into().ok()
+    }
+    pub fn request_id(&self) -> Option<u64> {
+        Some(self.root.as_ref().ok()?.id())
+    }
+}
+// Caller: no copy, no owned struct.
+let view = FBDiskWriteResponseRef::new(resp.control.bytes());
+let code = view.ret_code().unwrap_or(DiskIoRetCode::IoError);
+```
+
+### 6.2 Pattern (C++, server side)
+
+```cpp
+// In crow-protocol (header): a wrapper that encapsulates GetRoot +
+// null check + typed access. The handler calls the wrapper, not
+// GetRoot directly.
+class FBDiskWriteRequestRef {
+  public:
+    explicit FBDiskWriteRequestRef(const uint8_t *data, size_t size)
+        : root_(size >= 4 ? ::flatbuffers::GetRoot<FBDiskWriteRequest>(data) : nullptr) {}
+    bool valid() const { return root_ != nullptr; }
+    DiskId disk_id() const { return parse_disk_id(root_->disk_id()); }
+    uint32_t zone_index() const { return root_->zone_index(); }
+    // ... one accessor per field, reading through root_ in place.
+  private:
+    const FBDiskWriteRequest *root_;
+};
+// Handler: no copy, no owned struct.
+FBDiskWriteRequestRef req(request->control.data(), request->control.size());
+if (!req.valid()) { send_error_response(...); return nullptr; }
+DiskId did = req.disk_id();
+```
+
+## 7. Sub-Design Document Map
 
 - [`design-crow-rpc-tcp.md`](design-crow-rpc-tcp.md) — socket transport:
   `SocketTransport` shared base, `EpollEngine` (Linux, level-triggered),
