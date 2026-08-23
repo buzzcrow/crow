@@ -201,34 +201,41 @@ Memory is bounded regardless of object size.
   (64 KB, 512 KB) — the fetch stage accumulates to 1 MB, then sends
   the block to the main write task immediately. Does not wait for the
   full strip (4 MB) before sending — each 1 MB block is sent as soon
-  as it's read. The `max_cached_buffer` (default 4 MB) limits total
-  un-written data in the fetch cache: blocks sent to the main write
-  task but not yet written to disk count against this budget. When the
-  cache is full (disk write slower than receive), the fetch stage
-  blocks (backpressure). On EOF with a partial last block, sends the
-  partial block.
-- **Main write task**: receives 1 MB blocks one at a time, writes each
-  to the strip's corresponding data segment via `DiskIoClient::write`
-  (one disk per block, no EC wait). Tracks which block index within
-  the current strip (0–3 for 4+1). When all `data_num` (4) blocks of
-  strip N are written, hands off the strip's data blocks to a
-  background parity task (bounded by `parity_depth` — if the parity
-  task pool is full, blocks until a slot opens). Then **immediately
+  as it's read. The fetch stage does not track block indices or strip
+  boundaries — it sends sequential `Bytes` blocks; the main write
+  task tracks indices. The `max_cached_buffer` (default 4 MB) limits
+  total un-written data in the fetch channel: blocks sent to the main
+  write task but not yet written to disk count against this budget.
+  When the channel is full (disk write slower than receive), the fetch
+  stage blocks (backpressure). On EOF with a partial last block, sends
+  the partial block.
+- **Main write task**: the central coordinator. At the start of each
+  new strip, it first awaits the strip's placement from the prealloc
+  channel (blocks if prealloc fell behind). Then receives 1 MB blocks
+  one at a time from the fetch channel, tracks block index within the
+  current strip (`count % data_num`, 0–3 for 4+1), writes each to the
+  strip's corresponding data segment via `BlockWriter::write` (one
+  disk per block, no EC wait). When all `data_num` (4) blocks of strip
+  N are written, hands off the strip's data blocks to a background
+  parity task (bounded by `parity_depth` — if the parity task pool is
+  full, blocks until a slot opens), records the parity task's
+  `JoinHandle` in the current chunk's handle list. Then **immediately
   advances to the next strip's first block** — does not wait for EC
   compute, parity write, or fsync. On partial last strip (EOF before
-  all `data_num` blocks filled), writes only the filled data blocks,
-  releases the empty ones, hands off to parity for partial EC, and
-  records `sealed_length`. On chunk full, triggers rotation (seal + Location +
-  switch to prefetched chunk).
+  all `data_num` blocks filled — partial strips only occur at EOF,
+  never mid-chunk), writes only the filled data blocks, releases the
+  empty ones, hands off to parity for partial EC, and records
+  `sealed_length`. On chunk full, triggers rotation (join parity +
+  seal + Location + switch to prefetched chunk).
 - **Parity tasks** (one per strip, background `tokio::spawn`): receives
   the strip's data blocks, EC-encodes via
-  `crow_common::ec::encode(4+1, 4 MB)`
+  `crow_common::ec::encode_parity_from_shards(4+1, data_shards)`
   → 1 parity block (1 MB), writes it to the 5th segment via
-  `DiskIoClient::write`, `fsync` all 5 disks. Bounded by `parity_depth`
-  (default 2) — at most 2 parity tasks in flight. While strip N's
-  parity task is computing + writing parity, the main write task is
-  already writing strip N+1's data blocks, and strip N+2's blocks are
-  being fetched.
+  `BlockWriter::write`, `fsync` all 5 disks via `BlockWriter::fsync`.
+  Bounded by `parity_depth` (default 2) — at most 2 parity tasks in
+  flight. While strip N's parity task is computing + writing parity,
+  the main write task is already writing strip N+1's data blocks, and
+  strip N+2's blocks are being fetched.
 - **Prealloc task**: background `tokio::spawn`. Allocates the first
   chunk with **1 strip** (minimum to start writing immediately), then
   allocates remaining strips via `append_chunk` ahead of the write
@@ -286,7 +293,8 @@ Step-by-step:
      Block 2 to disk 2. Block 3 to disk 3. All 4 data blocks written
      → hands off data blocks to parity task N → **immediately
      advances to strip N+1 block 0** (no wait for EC/parity/fsync).
-   - Parity task N (background): `ec::encode(4+1, 4 MB)` → 1 parity
+   - Parity task N (background):
+     `ec::encode_parity_from_shards(4+1, data_shards)` → 1 parity
      block, writes to 5th disk, `fsync` all 5 disks. Bounded by
      `parity_depth = 2` — at most 2 parity tasks in flight.
    - Overlap: while parity task N computes + writes parity, main write
@@ -504,13 +512,22 @@ components (R106, R107).
    `LargeObjectWriter` (item 4) also implements this trait for
    callers who want manual push, but its primary API is the
    stream-based `write_stream` (item 5) which drives the pipeline
-   internally. R107 (read flow) uses the `Location` type but not this
-   trait.
+   internally. In `write_stream` mode, the fetch stage pulls from
+   `AsyncRead` and pushes `Bytes` to the block channel. In `on_data`
+   (push) mode, there is no fetch stage — `on_data` sends the
+   caller's `Bytes` directly to the same block channel (with the same
+   backpressure). The main write task and parity tasks are identical
+   in both modes. `require_data` is a non-async check of the block
+   channel's capacity. R107 (read flow) uses the `Location` type but
+   not this trait.
 
 4. **`LargeObjectWriter` + `WriterConfig`**
    (`lib/crow-chunk-client/src/writer/large_object.rs`) — the
-   large-object writer. Constructor takes `ChunkdbClient`,
-   `DiskioClient`, `EcScheme`, and a `WriterConfig`:
+   large-object writer. Generic over `A: ChunkAllocator` +
+   `W: BlockWriter` (trait seams for testability — see design §1.3;
+   `ChunkdbClient` implements `ChunkAllocator`, `DiskioClient`
+   implements `BlockWriter`). Constructor takes `A`, `W`, `EcScheme`,
+   and a `WriterConfig`:
    ```rust
    pub struct WriterConfig {
        pub max_chunk_size: u64,       // default 1 GB
@@ -550,31 +567,40 @@ components (R106, R107).
      stage accumulates to 1 MB, then sends the block to the main write
      task immediately. Does not wait for the full strip (4 MB) before
      sending — each 1 MB block is sent as soon as it's read, so the
-     first disk write starts after just 1 MB. The `max_cached_buffer`
-     (default 4 MB) limits total un-written data in the fetch cache:
-     blocks sent to the main write task but not yet written to disk
-     count against this budget. When the cache is full (disk write
-     slower than receive), the fetch stage blocks (backpressure). On
-     EOF with a partial last block, sends the partial block.
-   - **Main write task**: receives 1 MB blocks one at a time, writes
-     each to the strip's corresponding data segment via
-     `DiskIoClient::write` (one disk per block, no EC wait). Tracks
-     which block index within the current strip (0–3 for 4+1). When
-     all `data_num` (4) blocks of strip N are written, hands off the
+     first disk write starts after just 1 MB. The fetch stage does not
+     track block indices or strip boundaries — it sends sequential
+     `Bytes` blocks; the main write task tracks indices. The
+     `max_cached_buffer` (default 4 MB) limits total un-written data
+     in the fetch channel: blocks sent to the main write task but not
+     yet written to disk count against this budget. When the channel
+     is full (disk write slower than receive), the fetch stage blocks
+     (backpressure). On EOF with a partial last block, sends the
+     partial block.
+   - **Main write task**: the central coordinator. At the start of
+     each new strip, it first awaits the strip's placement from the
+     prealloc channel (blocks if prealloc fell behind). Then receives
+     1 MB blocks one at a time from the fetch channel, tracks block
+     index within the current strip (`count % data_num`, 0–3 for 4+1),
+     writes each to the strip's corresponding data segment via
+     `BlockWriter::write` (one disk per block, no EC wait). When all
+     `data_num` (4) blocks of strip N are written, hands off the
      strip's data blocks to a background parity task (bounded by
      `parity_depth`, default 2 — if the parity task pool is full,
-     blocks until a slot opens). Then **immediately advances to the
-     next strip's first block** — does not wait for EC compute,
-     parity write, or fsync. On partial last strip (EOF before all
-     `data_num` blocks filled), writes only the filled data blocks,
-     releases the empty ones, hands off to parity for partial EC,
-     and records `sealed_length`. On chunk full, triggers rotation
+     blocks until a slot opens), records the parity task's
+     `JoinHandle` in the current chunk's handle list. Then
+     **immediately advances to the next strip's first block** — does
+     not wait for EC compute, parity write, or fsync. On partial last
+     strip (EOF before all `data_num` blocks filled — partial strips
+     only occur at EOF, never mid-chunk), writes only the filled data
+     blocks, releases the empty ones, hands off to parity for partial
+     EC, and records `sealed_length`. On chunk full, triggers rotation
      (item 7).
    - **Parity tasks** (one per strip, background `tokio::spawn`):
      receives the strip's data blocks (full or partial), EC-encodes
-     via `crow_common::ec::encode(scheme, strip_data)` → `code_num`
-     parity blocks (1 × 1 MB for 4+1), writes them to the remaining
-     segments via `DiskIoClient::write`, `fsync` all disks. Bounded by
+     via `crow_common::ec::encode_parity_from_shards(scheme,
+     data_shards)` → `code_num` parity blocks (1 × 1 MB for 4+1),
+     writes them to the remaining segments via `BlockWriter::write`,
+     `fsync` all disks via `BlockWriter::fsync`. Bounded by
      `parity_depth` (default 2) — at most `parity_depth` parity tasks
      in flight. While strip N's parity task computes + writes parity,
      the main write task is already writing strip N+1's data blocks,
@@ -767,11 +793,12 @@ Caller              crow-chunk-client (pipeline)          chunkdb-client      di
   continues filling `max_cached_buffer`, then blocks when it's full.
   Backpressure propagates up the pipeline; no data is lost.
 - EC encode failure → the parity task returns an error; the
-  pipeline aborts, `write_stream` returns `IoError::EcEncodeFailed`.
-  The main write task retries with a new strip allocation (different
-  placement) up to 3 times before aborting. (R110 may refine this to
-  mark the strip degraded — data durable, parity missing — instead
-  of aborting; R94 ships with abort.)
+  pipeline aborts immediately, `write_stream` returns
+  `IoError::EcEncodeFailed`. No retry in R94 — EC encode is a CPU/isal
+  error, not a placement issue, so retrying with a new placement won't
+  help. R110 may refine this to mark the strip degraded (data durable,
+  parity missing) or retry with a fallback encoder; R94 ships with
+  abort and the abort path is the integration point for R110.
 - diskio write failure on one of 5 EC blocks (4+1) → the write stage
   retries the whole strip with a new allocation (R94's basic
   approach). Partially written blocks on the failed strip are freed
@@ -821,9 +848,12 @@ Caller              crow-chunk-client (pipeline)          chunkdb-client      di
     `lib/crow-chunkdb-client/src/reader.rs`).
   - **R110** (large-write IO error handling) — hardens R94's
     coarse error handling (whole-strip retry → single-block
-    replacement + negative list + degraded strip tracking). R110
+    replacement + negative list + degraded strip tracking; EC encode
+    failure abort → degraded-strip or fallback-encoder retry). R110
     modifies `large_object.rs` to add single-block replacement on
-    write failure; R94's error paths are the integration points.
+    write failure and refined EC encode failure handling; R94's error
+    paths (abort, `CancellationToken`, partial-`Location` return,
+    `delete_chunk` cleanup) are the integration points.
 
 **Acceptance**
 
@@ -850,6 +880,22 @@ Caller              crow-chunk-client (pipeline)          chunkdb-client      di
   `FeedStatus::Continue`, `on_finish` returns `Vec<Location>`,
   `on_error` returns `Vec<Location>`. Unit test (verifies the trait
   is implementable and the contract is sound).
+- `on_data` called after `on_finish` → `IoError::Finished`. Unit test.
+- `on_finish` called twice → second call returns `IoError::Finished`.
+  Unit test.
+- `on_error` with no sealed chunks → `Ok(vec![])`, no cleanup calls.
+  Unit test.
+
+**LargeObjectWriter — size hint edge cases**:
+- `object_size = Some(50 MB)` but stream yields only 30 MB → seals at
+  30 MB, `Location.length = 30 MB` (hint is planning only). Integration
+  test.
+- `object_size = Some(30 MB)` but stream yields 50 MB → writer
+  allocates beyond planned strip count, seals at 50 MB. Integration
+  test.
+- Object size exactly equals strip data capacity (4 MB with 4+1 EC) →
+  1 full strip, no partial EC, `sealed_length = 4 MB`. Integration
+  test.
 
 **LargeObjectWriter — stream API, single chunk (E2E Case 1)**:
 - Start 1 kv-server (group 0), 1 diskdb (5 disks), 1 chunkdb.
@@ -897,6 +943,10 @@ Caller              crow-chunk-client (pipeline)          chunkdb-client      di
   `prealloc_depth = 2`) → chunk prefetch allocates the next chunk
   before the current one is full. Integration test (verify
   `allocate_chunk` called for chunk N+1 before chunk N is sealed).
+- Prefetch fell behind at rotation: delay `allocate_chunk` for the
+  next chunk so it's not ready when rotation triggers → main write
+  task blocks at rotation until the chunk arrives; no data lost,
+  pipeline resumes. Integration test (inject allocation delay).
 
 **Backpressure (disk slower than receive)**:
 - `write_stream` with a slow diskio mock (10 ms per block write) and
@@ -913,15 +963,21 @@ Caller              crow-chunk-client (pipeline)          chunkdb-client      di
 - Write a 2 MB object (strip capacity 4 MB for 4+1) → 1 partial strip,
   `sealed_length = 2 MB`, `Location.length = 2 MB`. Integration test.
 
-**Error handling** (R94 basic — whole-strip retry; R110 refines to
-single-block replacement):
+**Error handling** (R94 basic — whole-strip retry for diskio write
+failure; EC encode failure aborts; R110 refines both):
 - `write_stream` with a diskio write failure on the 3rd strip → writer
   retries the whole strip with a new allocation (up to 3 retries). If
   all retries fail, returns `IoError`. Integration test (inject
   diskio error). R110's acceptance tests cover single-block
   replacement; R94 tests only the coarse retry path.
+- `write_stream` with an EC encode failure (parity task) → pipeline
+  aborts immediately, returns `IoError::EcEncodeFailed`, no retry.
+  Integration test (inject EC encode error). R110 may refine to
+  degraded-strip or fallback-encoder retry; R94 tests the abort path.
 - `on_error` after 2 chunks are sealed → returns 2 `Location`s (the
   sealed chunks), frees the partial 3rd chunk. Integration test.
+- `on_error` with no sealed chunks → returns `Ok(vec![])`, no cleanup
+  calls. Integration test.
 - Writer dropped without finishing → `Drop` impl aborts pipeline,
   frees partial chunks. Integration test (drop mid-write, verify
   partial chunk is deleted via `query_chunk`).
@@ -937,9 +993,9 @@ single-block replacement):
   Integration test.
 
 **Test commands**: `pixi run cargo test -p crow-chunk-client --test
-large_object_writer` (unit + integration), `pixi run cargo test -p
-crow-chunk-client --test large_object_writer_e2e` (E2E with real
-servers), `pixi run cargo fmt --all -- --check`,
+large_object_writer` (unit + integration), `pixi run clean-env && pixi
+run cargo test -p crow-chunk-client --test large_object_writer_e2e`
+(E2E with real servers), `pixi run cargo fmt --all -- --check`,
 `pixi run cargo clippy --all-targets -- -D warnings`.
 
 **Open Questions**
