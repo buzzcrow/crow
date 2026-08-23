@@ -368,10 +368,13 @@ impl ChunkWriter {
     pub async fn seal(&mut self) -> Result<ProtoLocation> {
         // Stop the strip-prefetch task (drop receiver → task exits).
         self.stop_prefetch();
-        // Finish the current strip if it's open (the last strip may
-        // be partial or full — push doesn't auto-finish on EOF).
-        if self.current_strip.is_some() {
-            self.finish_strip().await?;
+        // Finish the current strip if it's open and has data (the
+        // last strip may be partial or full — push doesn't auto-finish
+        // on EOF). Skip empty strips (no blocks written → no parity).
+        if let Some(strip) = &self.current_strip {
+            if strip.has_data() {
+                self.finish_strip().await?;
+            }
         }
         let chunk_id = self.current_chunk_id();
         let bytes_in_chunk = self.bytes_in_chunk;

@@ -199,33 +199,33 @@ avoids any throwaway bridge code — the helper already exists.
 
 ## Phase 6: New unit tests for `ChunkWriter` drive loop
 
-- [ ] **6.1 UT: `ChunkWriter` strip rotation.** Open with a `Chunk`
+- [x] **6.1 UT: `ChunkWriter` strip rotation.** Open with a `Chunk`
   containing 3 pre-appended strips. Push `data_num * 3` blocks.
   Verify 3 strips written, `bytes_in_chunk` correct, `write_cursor
   == 3`. Files: `tests/chunk_writer_test.rs` (new).
-- [ ] **6.2 UT: `ChunkWriter` on-demand append.** Open with 1 strip.
+- [x] **6.2 UT: `ChunkWriter` on-demand append.** Open with 1 strip.
   Push `data_num * 2` blocks. Verify `append_chunk` called once.
   Files: `tests/chunk_writer_test.rs`.
-- [ ] **6.3 UT: `ChunkWriter` is_full + seal.** Push enough to
+- [x] **6.3 UT: `ChunkWriter` is_full + seal.** Push enough to
   exceed `max_chunk_size`. Verify `is_full()`, `seal_chunk` RPC,
   `ProtoLocation` fields. Files: `tests/chunk_writer_test.rs`.
-- [ ] **6.4 UT: `ChunkWriter` abort.** Push partial, `abort()`.
+- [x] **6.4 UT: `ChunkWriter` abort.** Push partial, `abort()`.
   Verify `delete_chunk` called, in-flight cancelled. Files:
   `tests/chunk_writer_test.rs`.
-- [ ] **6.5 UT: `ChunkWriter` empty seal.** Open, immediately seal.
+- [x] **6.5 UT: `ChunkWriter` empty seal.** Open, immediately seal.
   Verify `delete_chunk` (not `seal_chunk`). Files:
   `tests/chunk_writer_test.rs`.
-- [ ] **6.6 UT: `EcStripWriter` with owned `ChunkStrip`.** Construct
+- [x] **6.6 UT: `EcStripWriter` with owned `ChunkStrip`.** Construct
   from `ChunkStrip` protobuf, push N blocks, finish, verify parity.
   Verify accessor methods. Files: `tests/ec_strip_writer_test.rs`
   (new) or extend `tests/ec_worker_test.rs`.
-- [ ] **Checkpoint: `pixi run cargo test -p crow-chunk-client
+- [x] **Checkpoint: `pixi run cargo test -p crow-chunk-client
   --all-targets --features test-util`.** All tests pass (existing +
   new).
 
 ## Phase 7: Lint + commit
 
-- [ ] **7.1 `pixi run rs-fmt`** — format all new/changed files.
+- [x] **7.1 `pixi run rs-fmt`** — format all new/changed files.
 - [ ] **7.2 `pixi run rs-lint`** — clippy `pedantic = warn`, fix up
   to 3 times.
 - [ ] **7.3 Final test run.** `pixi run cargo test -p crow-chunk-client

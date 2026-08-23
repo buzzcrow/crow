@@ -48,6 +48,11 @@ impl MirrorStripWriter {
     pub fn ready(&self) -> bool {
         false
     }
+
+    /// True if the strip has any data blocks written.
+    pub fn has_data(&self) -> bool {
+        false
+    }
 }
 
 impl Default for MirrorStripWriter {

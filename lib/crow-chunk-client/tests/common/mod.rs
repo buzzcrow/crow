@@ -27,6 +27,7 @@ pub struct LocalFileDiskWriter {
     fsync_count: Arc<AtomicUsize>,
 }
 
+#[allow(dead_code)] // methods may be unused in some test binaries
 impl LocalFileDiskWriter {
     /// Construct a new writer rooted at `root`.
     #[must_use]

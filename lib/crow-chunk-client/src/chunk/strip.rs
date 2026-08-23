@@ -72,4 +72,12 @@ impl StripWriter {
             Self::Mirror(w) => w.ready(),
         }
     }
+
+    /// True if the strip has any data blocks written.
+    pub fn has_data(&self) -> bool {
+        match self {
+            Self::Ec(w) => w.data_blocks_written() > 0,
+            Self::Mirror(w) => w.has_data(),
+        }
+    }
 }
