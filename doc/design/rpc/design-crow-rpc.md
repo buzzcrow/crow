@@ -381,6 +381,21 @@ if (!req.valid()) { send_error_response(...); return nullptr; }
 DiskId did = req.disk_id();
 ```
 
+### 6.3 Anti-patterns
+
+- **Deserializing into an owned struct.** Reading `FBDiskWriteRequest`
+  into a `DiskWriteRequest` Rust struct with `String` + `Vec` fields,
+  then passing that struct to the handler, copies every field on every
+  call.
+- **Accessor calls that allocate on the hot path.**
+  `fb.disk_id().to_string()` or `fb.strips().to_vec()` inside a
+  request handler heap-allocates per call. Use the flatbuffer reference
+  directly; convert to owned only at the boundary where the caller
+  truly needs owned data.
+- **Per-service wrapper duplicates.** Defining one wrapper in
+  `crow-diskdb` and another in `crow-chunkdb` for the same flatbuffer
+  type. Define once in `crow-protocol`, share everywhere.
+
 ## 7. Sub-Design Document Map
 
 - [`design-crow-rpc-tcp.md`](design-crow-rpc-tcp.md) — socket transport:

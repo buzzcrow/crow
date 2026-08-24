@@ -22,6 +22,16 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
 - No mutex on critical paths — use atomics. `std::sync::Mutex` ok for `start`/`stop` lifecycle. `tokio::sync::Mutex` only when held across `.await`.
 - Pre-size collections (`with_capacity`) or use stack.
 
+### Flatbuffer (crow-rpc handlers)
+
+The flatbuffer control message IS the buffer — field access is a memory-offset read through the runtime accessor, no deserialize step. Full spec: `doc/design/rpc/design-crow-rpc.md` §6.
+
+- **No owned intermediate struct.** Don't deserialize `FB*Request` into a Rust struct / C++ class with `String` + `Vec` fields then pass that to the handler. That copies every field per call. Read through the flatbuffer root pointer in place.
+- **No allocating accessor on the hot path.** `fb.field().to_string()` / `.to_vec()` inside a handler heap-allocates per call. Use the flatbuffer reference directly; convert to owned only at a boundary that truly needs owned data.
+- **Wrappers live in `crow-protocol`.** One shared definition per flatbuffer type, not a per-service duplicate. Wrapper holds a buffer reference and reads through the root pointer on every accessor — no field copy.
+- **Data payload: zero-copy when consumed by reference.** Streaming handlers (`pwrite(fd, &buf, len)`, `engine.apply(slot, &batch)`) take `&[u8]` and drop the buffer after the async write — no copy to owned `Vec`. Copy to owned only when the handler retains the data past the frame's lifetime.
+- **Write path: build, finish, attach, drop.** Build with `FlatBufferBuilder`, `finish`, attach the bytes to the frame's control buffer, drop the builder. No retained builder state.
+
 ## Checklist
 
 1. **Health & Info exposure** — when adding internal state, consider if it should be exposed via `HealthStatus` variants or info struct fields. Default to exposing useful internal state.
