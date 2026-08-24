@@ -193,67 +193,96 @@ Without them, "no regression" is unmeasurable. Capture in
 
 ## Per-Item Checklist (apply to each migration)
 
-- [ ] `.fbs` schema created in `lib/crow-protocol/src/fbs/`
-- [ ] `msg_type.fbs` extended with the service's range
-- [ ] `build.rs` + `lib.rs` re-exports updated
-- [ ] Zero-copy wrappers in `lib/crow-protocol/src/fb_wrappers/`
-- [ ] Server handler rewritten (dispatch by `msg_type`)
-- [ ] Client rewritten (`RpcClient` + `ConnectionPool`)
-- [ ] Error mapping (`RpcError` → service error variants)
-- [ ] `grpc_endpoint` → `rpc_endpoint` (already done — skip)
-- [ ] Mixed-rollout: both servers run, clients switch via config
+R115 (diskdb), R32 (KV consensus), R117 (KV client-facing) — DONE.
+R116 (chunkdb) — NEXT. Checklist status per item:
+
+- [x] `.fbs` schema created in `lib/crow-protocol/src/fbs/`
+      (R115: diskdb.fbs, R32: kv_consensus.fbs, R117: kv_client.fbs)
+- [x] `msg_type.fbs` extended with the service's range
+      (R115: 3000s, R32: 1000s, R117: 1100s)
+- [x] `build.rs` + `lib.rs` re-exports updated
+- [x] Zero-copy wrappers in `lib/crow-protocol/src/fb_wrappers/`
+      (R32: kv_consensus.rs, R117: kv_client.rs — R115 DEFERRED, see
+      Open Issues)
+- [x] Server handler rewritten (dispatch by `msg_type`)
+      (R115: diskdb, R32: px_rpc_service, R117: kv_rpc_service)
+- [x] Client rewritten (`RpcClient` + `ConnectionPool`)
+      (R115: DiskdbRpcTransport, R117: KvRpcTransport — R32 uses
+      PxRpcTransport)
+- [x] Error mapping (`RpcError` → service error variants)
+- [x] `grpc_endpoint` → `rpc_endpoint` (already done — skip)
+- [x] Mixed-rollout: both servers run, clients switch via
+      `with_rpc_transport()` (R115, R117 — gRPC server NOT yet
+      removed, see Open Issues)
 - [ ] Benchmark: gRPC baseline vs crow-rpc, no regression at 1T:1C
+      (NOT done for any service — baselines not captured, see
+      Suggestions §6)
 - [ ] Cutover: gRPC server removed, `.proto` stays as legacy/reserved
-- [ ] Tests pass: `cargo test -p <service>`, `cargo fmt --check`,
+      (NOT done for any service — all three still run both servers)
+- [x] Tests pass: `cargo test -p <service>`, `cargo fmt --check`,
       `cargo clippy -- -D warnings`
 
 ## Open Issues (deferred to follow-up items)
 
-- **R115 zero-copy wrappers**: The current diskdb client transport
-  parses flatbuffer responses into owned proto types (allocates per
+- **R115 zero-copy wrappers** → **still open; R117 established the
+  pattern to follow**: The diskdb client transport
+  (`lib/crow-diskdb-client/src/rpc_transport.rs`) still parses
+  flatbuffer responses via `flatbuffers::root::<FB<Type>>` (raw
+  generated types) and converts to owned proto types (allocates per
   response). The design doc's "no owned intermediate struct" rule is
   violated for the client side — acceptable during the mixed-rollout
-  window but should be addressed in a follow-up that switches the
-  client to use flatbuffer views directly. **Follow-up task
-  (post-R32)**: retrofit zero-copy `FB<Type>Ref` wrappers onto
-  `DiskdbRpcTransport` (`lib/crow-diskdb-client/src/rpc_transport.rs`),
-  mirroring R32's `lib/crow-protocol/src/fb_wrappers/kv_consensus.rs`
-  pattern. R32 establishes the wrapper convention properly; R115's
-  client transport should be brought in line once R32's wrappers are
-  proven on the hot path.
-- **R115 mixed-rollout cutover**: Both gRPC and crow-rpc servers run
+  window. R117 implemented the proper zero-copy `FB<Type>Ref` wrapper
+  pattern (`lib/crow-protocol/src/fb_wrappers/kv_client.rs` +
+  `lib/crow-kv-client/src/kv_rpc_transport.rs` using
+  `FBKvResponseRef::new(buf)` etc.). **Follow-up task**: retrofit
+  zero-copy `FB<Type>Ref` wrappers onto `DiskdbRpcTransport`,
+  mirroring R117's `kv_client.rs` wrapper pattern. R116 should
+  follow R117's pattern from the start (no retrofit needed).
+
+- **R115 mixed-rollout cutover** → **still open (applies to R115,
+  R117, and future R116)**: Both gRPC and crow-rpc servers run
   simultaneously. The client selects transport via
   `with_rpc_transport()`. No config-based toggle yet — callers must
-  explicitly enable crow-rpc.
-- **R114 client handler dispatch E2E gap** → **unblocked by R32** (the
-  `Connection::from_handle` FFI helper landed in R32 Phase 3): The
+  explicitly enable crow-rpc. The gRPC server is not yet removed
+  from any service.
+
+- **R114 client handler dispatch E2E gap** → **still open; unblocked
+  by R32, proven by R117 production use**: The
   `client_handler_dispatch_via_server_chain` test registers a
   client-side `NOTIFY` handler but never exercises it — the server's
-  PING handler builds a NOTIFY request buffer but drops it (`let _ =
-  (nreq_id, ctrl);`) because `request_client.send()` needs a
-  `&Connection` wrapper but the handler only has the raw
-  `conn_handle` pointer. The test only verifies the PING→ack path
-  (already covered by `server_dispatch_handler_first_order`). The
-  client's `dispatch_request` path (server sends request → client
-  handler fires → client acks) needs a proper E2E test. Now unblocked
-  — re-add the test using `Connection::from_handle`.
-- **R114 server→client send FFI gap** → **resolved by R32**: R32
-  added `Connection::from_handle(raw)` in
-  `lib/crow-rpc/ffi/src/server.rs`. `Connection` is a trivial wrapper
-  around `sys::crow_rpc_conn_t` with a no-op `Drop` (the transport
-  owns the connection), so constructing one from the raw pointer is
-  safe and lets a server-side handler call
-  `RpcClient::call()`/`send()`. Unblocks R117's WatchNotify
-  server-push and the R114 E2E test above.
-- **R114 server→client timeout test missing** → **unblocked by R32**:
-  The `server_to_client_timeout_no_handler` test (client doesn't ack,
-  reaper times out) was dropped during the dispatch-order fix. The
-  timeout/error path for server-initiated requests is untested. Now
-  unblocked — re-add once the `Connection::from_handle` helper is
-  used to actually send a request to the client.
-- **R114 `fail_all` is all-or-nothing**: `fail_all(ConnectionClosed)`
-  fires for ALL pending entries on the `request_client_`, not
-  per-connection. Fine for R114's single-connection test scope, but
-  R117 (WatchNotify with multiple watcher connections) will need
-  per-connection scoping — either a per-connection `RpcClient` or a
-  connection-scoped `fail_all`. Flagged as R117's scope.
+  PING handler builds a NOTIFY request buffer but drops it
+  (`let _ = (nreq_id, ctrl);`) because `request_client.send()` needs
+  a `&Connection` wrapper but the handler only had the raw
+  `conn_handle` pointer. R32 added `Connection::from_handle(raw)`,
+  and R117's WatchNotify server-push uses it in production
+  (`kv_rpc_service.rs` — 3 call sites). The test only verifies the
+  PING→ack path. The client's `dispatch_request` path (server sends
+  request → client handler fires → client acks) needs a proper E2E
+  test using `Connection::from_handle`.
+
+- **R114 server→client send FFI gap** → **resolved by R32, proven by
+  R117**: R32 added `Connection::from_handle(raw)` in
+  `lib/crow-rpc/ffi/src/server.rs`. R117's WatchNotify server-push
+  uses it in production (3 call sites in `kv_rpc_service.rs`).
+
+- **R114 server→client timeout test missing** → **still open;
+  unblocked by R32**: The `server_to_client_timeout_no_handler`
+  test (client doesn't ack, reaper times out) was dropped during the
+  dispatch-order fix. The timeout/error path for server-initiated
+  requests is untested. R117's WatchNotify uses fire-and-forget
+  `send()` (no response expected), so this gap does not block R117
+  — but it should be covered before any service uses
+  `request_client.call()` (request-response) from server to client.
+
+- **R114 `fail_all` is all-or-nothing** → **still open; flagged as
+  R117's scope but R117 did not address it**: `fail_all(
+  ConnectionClosed)` fires for ALL pending entries on the
+  `request_client_`, not per-connection. R117's WatchNotify uses
+  fire-and-forget `send()` (no pending entries on the client side),
+  so the all-or-nothing `fail_all` does not affect WatchNotify.
+  However, if a future service uses server→client `call()`
+  (request-response) with multiple client connections, this will
+  cause incorrect failure propagation. **Action**: either add
+  per-connection scoping to `fail_all`, or document that
+  server→client `call()` is limited to single-connection use until
+  fixed.
