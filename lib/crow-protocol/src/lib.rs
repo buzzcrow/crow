@@ -149,6 +149,17 @@ mod kv_client_generated {
     )]
     include!(concat!(env!("OUT_DIR"), "/kv_client_generated.rs"));
 }
+mod chunkdb_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/chunkdb_generated.rs"));
+}
 
 /// Flatbuffer control-message types for the crow-rpc library (R104).
 ///
@@ -223,6 +234,22 @@ pub mod kv_client_fb {
     pub use crate::kv_client_generated::crow::rpc::proto::FBInt128;
 }
 
+/// Flatbuffer chunkdb control-message types (R116).
+///
+/// Re-exports the generated `crow::chunkdb::proto` namespace plus
+/// `FBSegment` (inlined from `diskdb.fbs` via `--gen-all`) and
+/// `FBInt128` (inlined from `common_type.fbs` via `--gen-all`). The
+/// `--gen-all` codegen emits separate copies of `FBSegment` and
+/// `FBInt128` under their original namespaces inside `chunkdb_generated`,
+/// type-distinct from `diskdb_fb::FBSegment` and `fb::FBInt128`. Use
+/// `chunkdb_fb::FBSegment` / `chunkdb_fb::FBInt128` when constructing
+/// chunkdb request/response args.
+pub mod chunkdb_fb {
+    pub use crate::chunkdb_generated::crow::chunkdb::proto::*;
+    pub use crate::chunkdb_generated::crow::diskdb::proto::FBSegment;
+    pub use crate::chunkdb_generated::crow::rpc::proto::FBInt128;
+}
+
 /// Zero-copy flatbuffer wrapper classes (design-crow-rpc.md §6).
 /// Each `Ref` struct holds a `&[u8]` reference to the control buffer
 /// and exposes typed accessors that read through the flatbuffer root
@@ -268,6 +295,6 @@ pub use bitmap::{create_usage_bitmap, UsageBitmap};
 
 pub mod ports;
 pub use ports::{
-    ServicePort, CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, DISKDB_RPC_BASE,
-    KV_CLIENT_RPC_BASE, KV_RPC_BASE, KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
+    ServicePort, CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, CHUNKDB_RPC_BASE, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE,
+    DISKDB_RPC_BASE, KV_CLIENT_RPC_BASE, KV_RPC_BASE, KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
 };

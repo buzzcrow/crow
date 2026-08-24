@@ -69,6 +69,11 @@ pub const CHUNKDB_GRPC_BASE: u16 = 9971;
 /// crow-chunkdb HTTP management API — base port.
 pub const CHUNKDB_HTTP_BASE: u16 = 9972;
 
+/// crow-chunkdb crow-rpc listener — base port (R116 migration).
+/// Separate from the gRPC port so both servers run simultaneously
+/// during the mixed-rollout window. Stride 1 (one port per instance).
+pub const CHUNKDB_RPC_BASE: u16 = 9961;
+
 /// crow-web HTTP service — base port.
 pub const WEB_BASE: u16 = 9920;
 
@@ -96,6 +101,8 @@ pub enum ServicePort {
     ChunkdbGrpc,
     /// crow-chunkdb HTTP management API.
     ChunkdbHttp,
+    /// crow-chunkdb crow-rpc listener (R116 migration).
+    ChunkdbRpc,
     /// crow-web HTTP service.
     Web,
 }
@@ -113,6 +120,7 @@ impl ServicePort {
             Self::DiskdbHttp => DISKDB_HTTP_BASE,
             Self::ChunkdbGrpc => CHUNKDB_GRPC_BASE,
             Self::ChunkdbHttp => CHUNKDB_HTTP_BASE,
+            Self::ChunkdbRpc => CHUNKDB_RPC_BASE,
             Self::Web => WEB_BASE,
         }
     }
@@ -126,7 +134,8 @@ impl ServicePort {
             | Self::KvServerGrpc
             | Self::KvServerRpc
             | Self::KvServerClientRpc
-            | Self::Web => 1,
+            | Self::Web
+            | Self::ChunkdbRpc => 1,
             // diskdb and chunkdb use paired ports (gRPC + HTTP); each
             // instance consumes two consecutive ports.
             Self::DiskdbGrpc | Self::DiskdbHttp | Self::ChunkdbGrpc | Self::ChunkdbHttp => 2,

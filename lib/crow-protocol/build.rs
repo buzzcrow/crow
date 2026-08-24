@@ -25,6 +25,7 @@ fn main() {
         "src/fbs/diskdb.fbs",
         "src/fbs/kv_consensus.fbs",
         "src/fbs/kv_client.fbs",
+        "src/fbs/chunkdb.fbs",
     ];
     for f in &fbs_files {
         println!("cargo:rerun-if-changed={f}");
@@ -103,6 +104,17 @@ fn main() {
         status.success(),
         "flatc --rust --gen-all failed for kv_client.fbs"
     );
+    // chunkdb: --gen-all inlines common_type.fbs + diskdb.fbs so
+    // FBInt128 + FBSegment resolve.
+    let status = Command::new(&flatc)
+        .arg("--rust")
+        .arg("--gen-all")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("src/fbs/chunkdb.fbs")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run flatc at {}: {e}", flatc.display()));
+    assert!(status.success(), "flatc --rust --gen-all failed for chunkdb.fbs");
 
     let protos = [
         "src/proto/error_code.proto",
