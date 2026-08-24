@@ -618,10 +618,12 @@ fn resolve_diskdb_config_path(
     // Minimal valid config — only [server] is required; all other
     // sections default via `#[serde(default)]` on `DdbConfig` fields
     // (values match `DdbConfig::default()`).
+    let rpc_listen_port = rpc_port.saturating_add(2);
     let config = format!(
         "[server]\n\
          listen_addr = \"0.0.0.0:{rpc_port}\"\n\
          http_listen_addr = \"0.0.0.0:{http_port}\"\n\
+         rpc_listen_addr = \"0.0.0.0:{rpc_listen_port}\"\n\
          kv_server_mgmt_seeds = [{seeds}]\n",
     );
     std::fs::write(&path, config).map_err(Error::Io)?;
