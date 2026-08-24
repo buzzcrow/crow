@@ -19,21 +19,22 @@ use flatbuffers::FlatBufferBuilder;
 
 use crow_protocol::fb::FBMsgType;
 use crow_protocol::fb_wrappers::kv_consensus::{
-    FBAcceptedResponseRef, FBHeartbeatResponseRef, FBPreVoteResponseRef, FBPromiseResponseRef,
-    FBRequestVoteResponseRef, FBStepDownResponseRef,
+    FBAcceptedResponseRef, FBFetchGapResponseRef, FBHeartbeatResponseRef, FBPreVoteResponseRef,
+    FBPromiseResponseRef, FBRequestVoteResponseRef, FBStepDownResponseRef,
 };
 use crow_protocol::kv_consensus_fb::{
-    FBAcceptRequest, FBAcceptRequestArgs, FBAcceptedValue, FBAcceptedValueArgs, FBHeartbeatRequest,
-    FBHeartbeatRequestArgs, FBKvRetCode, FBPreVoteRequest, FBPreVoteRequestArgs, FBPrepareRequest,
-    FBPrepareRequestArgs, FBRequestVoteRequest, FBRequestVoteRequestArgs, FBStepDownRequest,
-    FBStepDownRequestArgs,
+    FBAcceptRequest, FBAcceptRequestArgs, FBAcceptedValue, FBAcceptedValueArgs, FBBatchChosenNotification,
+    FBBatchChosenNotificationArgs, FBChosenNotification, FBChosenNotificationArgs, FBFetchGapRequest,
+    FBFetchGapRequestArgs, FBHeartbeatRequest, FBHeartbeatRequestArgs, FBKvRetCode, FBPreVoteRequest,
+    FBPreVoteRequestArgs, FBPrepareRequest, FBPrepareRequestArgs, FBRequestVoteRequest,
+    FBRequestVoteRequestArgs, FBStepDownRequest, FBStepDownRequestArgs,
 };
 use crow_protocol::{KV_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::{Buffer, Connection, RpcClient, RpcError, RpcServer};
 
 use crate::cluster::replica::{
-    HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, StepDownReply, StepDownRequestPayload,
-    VoteReply, VoteRequestPayload,
+    FetchGapReply, HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, StepDownReply,
+    StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
 use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 
@@ -437,6 +438,141 @@ impl PxRpcTransport {
             current_term: r.current_term(),
             current_leader_id: r.current_leader_id(),
         })
+    }
+
+    /// Send a `FetchGap` request via crow-rpc.
+    pub async fn send_fetch_gap(
+        &self,
+        grpc_endpoint: &str,
+        group_id: u64,
+        slot: u64,
+        term: u64,
+        leader_id: u64,
+    ) -> Result<FetchGapReply, PxReplicaError> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let args = FBFetchGapRequestArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            version: 1,
+            group_id,
+            slot,
+            term,
+            leader_id,
+        };
+        let fb_req = FBFetchGapRequest::create(&mut builder, &args);
+        builder.finish(fb_req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::EFetchGapRequest.0 as u16;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(rpc_error_to_px)?;
+        let resp = fut.await.map_err(rpc_error_to_px)?;
+        let ctrl = resp
+            .control
+            .ok_or_else(|| PxReplicaError::Internal("fetch_gap response missing control buffer".into()))?;
+        let r = FBFetchGapResponseRef::new(ctrl.bytes());
+        if !r.valid() {
+            return Err(PxReplicaError::Internal("fetch_gap response malformed".into()));
+        }
+        check_ret_code(r.ret_code(), r.error_msg())?;
+        let payload = r.payload().map(bytes::Bytes::copy_from_slice).unwrap_or_default();
+        Ok(FetchGapReply {
+            group_id: r.group_id(),
+            slot: r.slot(),
+            term: r.term(),
+            ballot_round: r.ballot_round(),
+            leader_id: r.leader_id(),
+            payload,
+        })
+    }
+
+    /// Send a fire-and-forget `ChosenNotification` via crow-rpc. No
+    /// reply is expected — the frame is sent with no completion callback.
+    pub fn send_chosen(
+        &self,
+        grpc_endpoint: &str,
+        group_id: u64,
+        slot: u64,
+        term: u64,
+        leader_id: u64,
+        ballot_round: u64,
+    ) -> Result<(), PxReplicaError> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let args = FBChosenNotificationArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            version: 1,
+            group_id,
+            slot,
+            term,
+            leader_id,
+            ballot_round,
+        };
+        let fb_req = FBChosenNotification::create(&mut builder, &args);
+        builder.finish(fb_req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::EChosenNotification.0 as u16;
+        self.rpc
+            .send(
+                &self.server,
+                &conn,
+                req_id,
+                control,
+                None,
+                msg_type,
+                None,
+                std::ptr::null_mut(),
+            )
+            .map_err(rpc_error_to_px)
+    }
+
+    /// Send a fire-and-forget `BatchChosenNotification` via crow-rpc.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_batch_chosen(
+        &self,
+        grpc_endpoint: &str,
+        group_id: u64,
+        start_slot: u64,
+        end_slot: u64,
+        term: u64,
+        leader_id: u64,
+        ballot_round: u64,
+    ) -> Result<(), PxReplicaError> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let args = FBBatchChosenNotificationArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            version: 1,
+            group_id,
+            start_slot,
+            end_slot,
+            term,
+            leader_id,
+            ballot_round,
+        };
+        let fb_req = FBBatchChosenNotification::create(&mut builder, &args);
+        builder.finish(fb_req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::EBatchChosenNotification.0 as u16;
+        self.rpc
+            .send(
+                &self.server,
+                &conn,
+                req_id,
+                control,
+                None,
+                msg_type,
+                None,
+                std::ptr::null_mut(),
+            )
+            .map_err(rpc_error_to_px)
     }
 
     /// Get the underlying `RpcServer` (for the `LearnerStream` to share

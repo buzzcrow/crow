@@ -67,6 +67,12 @@ pub(crate) async fn run_fetchgap_driver(
         // Clone the learner stream Arc so the spawned task can send
         // FetchGap without holding a reference to the group.
         let stream = remote.learner_stream().clone();
+        // R32: if the crow-rpc transport is set, clone it + the endpoint
+        // so the spawned task can call `transport.send_fetch_gap()`
+        // directly instead of going through the gRPC LearnerStream.
+        let rpc_transport = remote.rpc_transport().cloned();
+        let rpc_endpoint = remote.endpoint_str().to_string();
+        let rpc_timeout = Duration::from_millis(group.config.election.learner_stream_rpc_timeout_ms);
         let replica = group.local_replica();
         let term = replica.current_term_snapshot();
         let gaps = replica.drain_gaps_for_fetchgap();
@@ -91,6 +97,9 @@ pub(crate) async fn run_fetchgap_driver(
         // Spawn a task per gap to send FetchGap concurrently.
         for slot in gaps {
             let stream_clone = stream.clone();
+            let rpc_transport_clone = rpc_transport.clone();
+            let rpc_endpoint_clone = rpc_endpoint.clone();
+            let rpc_timeout_clone = rpc_timeout;
             let fetchgap_inflight_clone = fetchgap_inflight.clone();
             let gap_slots_clone = gap_slots.clone();
             let learner_clone = learner.clone();
@@ -99,14 +108,41 @@ pub(crate) async fn run_fetchgap_driver(
             let fetchgap_received_clone = fetchgap_received.clone();
             let fetchgap_failed_clone = fetchgap_failed.clone();
             tokio::spawn(async move {
-                let req = crate::rpc::FetchGapRequest {
-                    version: 1,
-                    group_id,
-                    slot,
-                    term,
-                    leader_id,
+                // R32: prefer crow-rpc transport when available; fall
+                // back to gRPC LearnerStream otherwise.
+                let result = if let Some(ref transport) = rpc_transport_clone {
+                    tokio::time::timeout(
+                        rpc_timeout_clone,
+                        transport.send_fetch_gap(&rpc_endpoint_clone, group_id, slot, term, leader_id),
+                    )
+                    .await
+                    .map_err(|_| {
+                        crate::cluster::replica::PxReplicaError::Internal(format!(
+                            "fetch_gap rpc timeout after {} ms at peer {}",
+                            rpc_timeout_clone.as_millis(),
+                            rpc_endpoint_clone
+                        ))
+                    })
+                    .and_then(|r| r)
+                } else {
+                    let req = crate::rpc::FetchGapRequest {
+                        version: 1,
+                        group_id,
+                        slot,
+                        term,
+                        leader_id,
+                    };
+                    stream_clone.send_fetch_gap(req).await.map(|resp| {
+                        crate::cluster::replica::FetchGapReply {
+                            group_id: resp.group_id,
+                            slot: resp.slot,
+                            term: resp.term,
+                            ballot_round: resp.ballot_round,
+                            leader_id: resp.leader_id,
+                            payload: bytes::Bytes::from(resp.payload),
+                        }
+                    })
                 };
-                let result = stream_clone.send_fetch_gap(req).await;
                 fetchgap_inflight_clone.fetch_sub(1, Ordering::AcqRel);
                 match result {
                     Ok(resp) => {
@@ -126,7 +162,7 @@ pub(crate) async fn run_fetchgap_driver(
                             slot: resp.slot,
                             ballot: crate::paxos::roles::PxBallot::new(resp.ballot_round, resp.leader_id),
                             term: resp.term,
-                            payload: bytes::Bytes::from(resp.payload),
+                            payload: resp.payload,
                         };
                         acceptor_clone.accept(&entry).await;
                         learner_clone.update_chosen_frontier(resp.slot, resp.term);

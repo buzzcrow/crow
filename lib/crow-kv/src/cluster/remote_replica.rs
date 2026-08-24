@@ -16,8 +16,8 @@
 
 use crate::cluster::learner_stream::PxLearnerStream;
 use crate::cluster::replica::{
-    HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaClient, StepDownReply,
-    StepDownRequestPayload, VoteReply, VoteRequestPayload,
+    FetchGapReply, HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaClient,
+    StepDownReply, StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
 use crate::cluster::status::{RemoteStatus, StatusLevel};
 use crate::common::config::PxElectionConfig;
@@ -27,6 +27,7 @@ use crate::metrics::{Counter, LatencySummary, MetricsRegistry};
 use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
+use crate::rpc::PxRpcTransport;
 use crate::rpc::{
     AcceptRequest, AcceptedValue, BatchChosenNotification as RpcBatchChosenNotification,
     ChosenNotification as RpcChosenNotification, HeartbeatRequest as RpcHeartbeatRequest,
@@ -80,6 +81,12 @@ pub struct PxRemoteReplica {
     rpc_handles: OnceLock<RpcRegistryHandles>,
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
+    /// Optional crow-rpc transport (R32 migration). When set, all RPCs
+    /// (Prepare/Accept/PreVote/RequestVote/Heartbeat/StepDown/
+    /// `ChosenNotification`/`BatchChosenNotification`/`FetchGap`) are routed
+    /// through the crow-rpc transport instead of gRPC. When not set,
+    /// the existing gRPC client + `LearnerStream` path is used.
+    rpc_transport: OnceLock<Arc<PxRpcTransport>>,
 }
 
 /// Registry-based metric handles for per-peer RPC stats.
@@ -118,6 +125,33 @@ impl ReplicaClient for PxRemoteReplica {
         group_id: u64,
         membership_epoch: u64,
     ) -> Result<PxPrepareReply, PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                self.rpc_timeout,
+                transport.send_prepare(&self.endpoint, slot, ballot, term, group_id, membership_epoch),
+            )
+            .await;
+            return match result {
+                Ok(Ok(reply)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.record_ok(started.elapsed().as_millis() as u64);
+                    Ok(reply)
+                }
+                Ok(Err(e)) => {
+                    self.record_err();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.record_err();
+                    Err(PxReplicaError::Internal(format!(
+                        "prepare rpc timeout after {} ms at peer {}",
+                        self.rpc_timeout.as_millis(),
+                        self.endpoint
+                    )))
+                }
+            };
+        }
         let mut client = match self.get_client().await {
             Ok(c) => c.clone(),
             Err(status) => {
@@ -188,6 +222,36 @@ impl ReplicaClient for PxRemoteReplica {
         group_id: u64,
         membership_epoch: u64,
     ) -> Result<PxAcceptReply, PxReplicaError> {
+        // R32: When crow-rpc transport is set, route Accept through the
+        // transport directly (pipelined unary call on persistent
+        // connection). Falls back to the gRPC LearnerStream otherwise.
+        if let Some(transport) = self.rpc_transport.get() {
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                self.rpc_timeout,
+                transport.send_accept(&self.endpoint, entry, dedup_tags, group_id, membership_epoch),
+            )
+            .await;
+            return match result {
+                Ok(Ok(reply)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.record_ok(started.elapsed().as_millis() as u64);
+                    Ok(reply)
+                }
+                Ok(Err(e)) => {
+                    self.record_err();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.record_err();
+                    Err(PxReplicaError::Internal(format!(
+                        "accept rpc timeout after {} ms at peer {}",
+                        self.rpc_timeout.as_millis(),
+                        self.endpoint
+                    )))
+                }
+            };
+        }
         // Route `Accept` through the per-peer bidi PxLearnerStream rather
         // than a one-shot unary RPC. The wire-level conversion
         // (PxLogEntry -> AcceptRequest, AcceptedResponse -> PxAcceptReply)
@@ -265,6 +329,33 @@ impl ReplicaClient for PxRemoteReplica {
         req: VoteRequestPayload,
         group_id: u64,
     ) -> Result<VoteReply, PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                self.rpc_timeout,
+                transport.send_pre_vote(&self.endpoint, req, group_id),
+            )
+            .await;
+            return match result {
+                Ok(Ok(reply)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.record_ok(started.elapsed().as_millis() as u64);
+                    Ok(reply)
+                }
+                Ok(Err(e)) => {
+                    self.record_err();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.record_err();
+                    Err(PxReplicaError::Internal(format!(
+                        "pre_vote rpc timeout after {} ms at peer {}",
+                        self.rpc_timeout.as_millis(),
+                        self.endpoint
+                    )))
+                }
+            };
+        }
         let mut client = self
             .get_client()
             .await
@@ -307,6 +398,33 @@ impl ReplicaClient for PxRemoteReplica {
         req: VoteRequestPayload,
         group_id: u64,
     ) -> Result<VoteReply, PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                self.rpc_timeout,
+                transport.send_request_vote(&self.endpoint, req, group_id),
+            )
+            .await;
+            return match result {
+                Ok(Ok(reply)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.record_ok(started.elapsed().as_millis() as u64);
+                    Ok(reply)
+                }
+                Ok(Err(e)) => {
+                    self.record_err();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.record_err();
+                    Err(PxReplicaError::Internal(format!(
+                        "request_vote rpc timeout after {} ms at peer {}",
+                        self.rpc_timeout.as_millis(),
+                        self.endpoint
+                    )))
+                }
+            };
+        }
         let mut client = self
             .get_client()
             .await
@@ -349,6 +467,33 @@ impl ReplicaClient for PxRemoteReplica {
         req: HeartbeatRequestPayload,
         group_id: u64,
     ) -> Result<HeartbeatReply, PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                self.rpc_timeout,
+                transport.send_heartbeat(&self.endpoint, req, group_id),
+            )
+            .await;
+            return match result {
+                Ok(Ok(reply)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.record_ok(started.elapsed().as_millis() as u64);
+                    Ok(reply)
+                }
+                Ok(Err(e)) => {
+                    self.record_err();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.record_err();
+                    Err(PxReplicaError::Internal(format!(
+                        "heartbeat rpc timeout after {} ms at peer {}",
+                        self.rpc_timeout.as_millis(),
+                        self.endpoint
+                    )))
+                }
+            };
+        }
         // Route Heartbeat over a dedicated gRPC Channel (separate TCP
         // connection) via the unary `heartbeat` RPC so liveness messages
         // are never blocked behind data on the `LearnerStream`. The FIFO
@@ -411,6 +556,33 @@ impl ReplicaClient for PxRemoteReplica {
         req: &StepDownRequestPayload,
         group_id: u64,
     ) -> Result<StepDownReply, PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                self.rpc_timeout,
+                transport.send_step_down(&self.endpoint, req, group_id),
+            )
+            .await;
+            return match result {
+                Ok(Ok(reply)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.record_ok(started.elapsed().as_millis() as u64);
+                    Ok(reply)
+                }
+                Ok(Err(e)) => {
+                    self.record_err();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.record_err();
+                    Err(PxReplicaError::Internal(format!(
+                        "step_down rpc timeout after {} ms at peer {}",
+                        self.rpc_timeout.as_millis(),
+                        self.endpoint
+                    )))
+                }
+            };
+        }
         let mut client = self
             .get_client()
             .await
@@ -499,6 +671,7 @@ impl PxRemoteReplica {
             metrics: LayerMetrics::new(),
             rpc_handles: OnceLock::new(),
             shutdown_started: AtomicBool::new(false),
+            rpc_transport: OnceLock::new(),
         }
     }
 
@@ -513,6 +686,18 @@ impl PxRemoteReplica {
         r.learner_stream_window_frames = cfg.learner_stream_window_frames;
         r.rpc_timeout = Duration::from_millis(cfg.learner_stream_rpc_timeout_ms);
         r
+    }
+
+    /// Enable crow-rpc transport for all RPCs to this peer (R32
+    /// migration). When set, Prepare/Accept/PreVote/RequestVote/
+    /// Heartbeat/StepDown/Chosen/BatchChosen/FetchGap are routed
+    /// through the crow-rpc transport instead of gRPC. The transport
+    /// is shared across all remote replicas in the store.
+    #[must_use]
+    #[allow(dead_code)] // Wired in Phase 7 (server wiring)
+    pub(crate) fn with_rpc_transport(self, transport: Arc<PxRpcTransport>) -> Self {
+        let _ = self.rpc_transport.set(transport);
+        self
     }
 
     /// Lazily construct (and reuse) the per-peer bidi stream client.
@@ -547,6 +732,9 @@ impl PxRemoteReplica {
         group_id: u64,
         ballot_round: u64,
     ) -> Result<(), PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            return transport.send_chosen(&self.endpoint, group_id, slot, term, leader_id, ballot_round);
+        }
         let notice = RpcChosenNotification {
             version: 1,
             group_id,
@@ -578,6 +766,17 @@ impl PxRemoteReplica {
         group_id: u64,
         ballot_round: u64,
     ) -> Result<(), PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            return transport.send_batch_chosen(
+                &self.endpoint,
+                group_id,
+                start_slot,
+                end_slot,
+                term,
+                leader_id,
+                ballot_round,
+            );
+        }
         let batch = RpcBatchChosenNotification {
             version: 1,
             group_id,
@@ -606,7 +805,34 @@ impl PxRemoteReplica {
         term: crate::paxos::PxTerm,
         leader_id: PxNodeId,
         group_id: u64,
-    ) -> Result<crate::rpc::FetchGapResponse, PxReplicaError> {
+    ) -> Result<FetchGapReply, PxReplicaError> {
+        if let Some(transport) = self.rpc_transport.get() {
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                self.rpc_timeout,
+                transport.send_fetch_gap(&self.endpoint, group_id, slot, term, leader_id),
+            )
+            .await;
+            return match result {
+                Ok(Ok(reply)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.record_ok(started.elapsed().as_millis() as u64);
+                    Ok(reply)
+                }
+                Ok(Err(e)) => {
+                    self.record_err();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.record_err();
+                    Err(PxReplicaError::Internal(format!(
+                        "fetch_gap rpc timeout after {} ms at peer {}",
+                        self.rpc_timeout.as_millis(),
+                        self.endpoint
+                    )))
+                }
+            };
+        }
         let req = crate::rpc::FetchGapRequest {
             version: 1,
             group_id,
@@ -614,7 +840,15 @@ impl PxRemoteReplica {
             term,
             leader_id,
         };
-        self.learner_stream().send_fetch_gap(req).await
+        let resp = self.learner_stream().send_fetch_gap(req).await?;
+        Ok(FetchGapReply {
+            group_id: resp.group_id,
+            slot: resp.slot,
+            term: resp.term,
+            ballot_round: resp.ballot_round,
+            leader_id: resp.leader_id,
+            payload: bytes::Bytes::from(resp.payload),
+        })
     }
 
     /// Allocate the next correlation id for an `Accept` frame or unary
@@ -643,6 +877,19 @@ impl PxRemoteReplica {
         if let Some(h) = self.rpc_handles.get() {
             h.errors.inc();
         }
+    }
+
+    /// Get the crow-rpc transport if set (R32 migration). Used by
+    /// `group_fetchgap.rs` to route `FetchGap` through the transport when
+    /// available.
+    pub(crate) fn rpc_transport(&self) -> Option<&Arc<PxRpcTransport>> {
+        self.rpc_transport.get()
+    }
+
+    /// Get the endpoint string (for spawned tasks that need to call
+    /// the transport directly).
+    pub(crate) fn endpoint_str(&self) -> &str {
+        &self.endpoint
     }
 
     /// Register per-peer RPC latency summary and error counter with the

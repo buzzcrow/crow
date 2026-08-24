@@ -103,6 +103,18 @@ pub struct StepDownReply {
     pub current_leader_id: PxNodeId,
 }
 
+/// `FetchGap` reply (R65). Carries the chosen value at the chosen ballot
+/// so the follower can overwrite any stale lower-ballot value and apply.
+#[derive(Clone, Debug)]
+pub struct FetchGapReply {
+    pub group_id: u64,
+    pub slot: u64,
+    pub term: u64,
+    pub ballot_round: u64,
+    pub leader_id: u64,
+    pub payload: bytes::Bytes,
+}
+
 /// Common trait for replica metadata.
 ///
 /// This trait defines the minimal metadata interface that all replicas must implement.
