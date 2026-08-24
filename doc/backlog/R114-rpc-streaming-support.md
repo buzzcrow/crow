@@ -1,203 +1,215 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R114: rpc — crow-rpc Streaming RPC Support
+### R114: rpc — crow-rpc Request-Response Completion + RequestId Generator
 
 **Problem**
 
-R104 shipped crow-rpc with request-response and one-way messages
-only — `design-crow-rpc.md` §1 Non-Goals explicitly defers streaming
-RPC: "v1 supports request-response and one-way messages only.
-Bidirectional streaming is a future addition." The implementation
-confirms: `HandlerFn` returns a single `OutFrame*`, `RpcClient::send`
-pairs one request with one completion callback, and the Rust FFI
-`CallFuture` resolves to one `Response`. There is no stream
-abstraction on either the C++ engine or the Rust FFI side.
+R104 shipped crow-rpc with request-response and one-way messages.
+The wire protocol is a raw socket conversation — every frame is
+`[12-byte header][flatbuffer control][data]`, correlated by
+`request_id` extracted from the control message during parse. There
+is no "stream" concept (unlike HTTP/2); the connection is a
+persistent bidirectional byte stream where either side can send a
+request and expect a response.
 
-Three KV RPCs need streaming and are blocked by this gap:
-- `LearnerStream` (bi-directional) — follower catch-up, pxos.proto
-  L323. The follower sends a sequence of "give me slots N..M"
-  requests; the leader streams back log entries.
-- `StreamSnapshot` (server-streaming) — snapshot transfer, pxos.proto
-  L369. The leader streams snapshot chunks to a follower.
-- `WatchNotify` (bi-directional) — kv.proto L194. The client sends
-  watch registrations; the server streams change notifications.
+Three KV RPCs need crow-rpc support and are blocked by gaps in the
+current wiring:
+- `LearnerStream` — follower catch-up, pxos.proto L323. The
+  follower sends a sequence of "give me slots N..M" requests; the
+  leader responds with log entries. Each request gets one
+  response — normal request-response, no protocol change needed.
+- `StreamSnapshot` — snapshot transfer, pxos.proto L369. The
+  follower sends "give me chunk N" requests; the leader responds
+  with chunk N. Per-chunk request-response, no protocol change
+  needed.
+- `WatchNotify` — kv.proto L194. The client sends watch
+  registrations; the server sends change notifications **as
+  requests** (server→client), and the client sends ack responses.
+  This is server-initiated request-response — the connection is
+  bidirectional, so the server can send a request and await an ack.
 
 **Current behavior + impact**: R32 (KV consensus migration) and R117
-(KvService client-facing migration) are blocked. Without streaming,
-these three RPCs cannot migrate to crow-rpc, leaving the h2-lock
-throughput loss un-recovered on the LearnerStream path and the
-WatchNotify path on gRPC indefinitely.
+(KvService client-facing migration) are blocked. The current code
+only wires one direction of request-response (client→server
+requests, server→client responses). The server side has
+`HandlerRegistry` (dispatch incoming requests) + `transport->submit`
+(send responses) but no request-response correlation (send a
+request, await ack, retry). The client side has `RpcClient` (send
+requests, route responses) but no request handler dispatch (handle
+incoming requests, send responses). WatchNotify needs both halves.
+Additionally, the `request_id` generator is duplicated across
+clients (C++ `RpcClient::next_request_id_`, Rust
+`DiskioClient::next_req_id`) and should be consolidated into
+`crow-common`.
 
 **Design pointers**: `design-crow-rpc.md` §1 (Non-Goals — streaming
-deferred), §3 (Wire Format — the 12-byte header + control + data
-frame), §4.2 (Request/Response Correlation — the pending-request
-map), §4.4 (Server Side — handler dispatch). The streaming design
-extends these sections; it does not replace them. The three streaming
-RPCs are defined in `design-crow-kv-rpc.md` (LearnerStream,
-StreamSnapshot) and `design-crow-kv-watch-notify.md` (WatchNotify).
+deferred; this requirement resolves it as "not needed"), §3 (Wire
+Format — the 12-byte header + control + data frame), §4.2
+(Request/Response Correlation — the pending-request map), §4.4
+(Server Side — handler dispatch). The three KV RPCs are defined in
+`design-crow-kv-rpc.md` (LearnerStream, StreamSnapshot) and
+`design-crow-kv-watch-notify.md` (WatchNotify).
 
 **Use scenarios**:
 
 - **Follower catch-up via LearnerStream**: A follower joins or falls
-  behind. It opens a persistent connection to the leader and sends
-  "give me slots from N" requests. The leader streams back log
-  entries as a sequence of response frames on the same connection.
-  The follower sends new requests as it consumes entries. Expected:
-  the follower reaches `CaughtUp` state; the stream stays open for
-  incremental catch-up.
+  behind. It sends "give me slots from N" requests to the leader on
+  a persistent connection; the leader responds with log entries for
+  each request. The follower sends new requests as it consumes
+  entries. Expected: the follower reaches `CaughtUp` state; the
+  connection stays open for incremental catch-up.
 
 - **Snapshot transfer via StreamSnapshot**: A follower needs a
-  snapshot (too far behind for log catch-up). It sends one
-  `SnapshotRequest`; the leader streams back `SnapshotStreamItem`
+  snapshot (too far behind for log catch-up). It sends "give me
+  chunk N" requests; the leader responds with `SnapshotChunk`
   frames until the snapshot is fully transferred. Expected: the
   follower applies the snapshot and resumes from the snapshot's
   `last_applied` slot.
 
 - **Watch registration + notification via WatchNotify**: A client
-  opens a persistent connection, sends watch registrations (prefix
-  patterns), and receives change notifications as the KV store
-  applies writes to matching keys. The stream is long-lived (minutes
-  to hours). Expected: the client receives notifications for all
-  matching writes; missed notifications are caught by the safety-net
-  poller (existing design, unchanged).
+  sends watch registrations (prefix patterns) via normal
+  request-response. When a matching key is written, the server
+  sends a **notify request** to the client; the client handles it
+  and sends an **ack response**. If the server doesn't receive a
+  success response after retry, it logs `WSCritical` and retries
+  the notify on the next change. Expected: the client receives
+  notifications for all matching writes; missed notifications are
+  caught by the safety-net poller (existing design, unchanged).
 
 **Solution**
 
-Extend crow-rpc with streaming support — two patterns:
-**server-streaming** (one request → N response frames) and
-**bi-directional streaming** (N request frames ↔ N response frames on
-one persistent connection). Both reuse the existing 12-byte header +
-flatbuffer control + raw data frame format. The stream is a
-conversation on a single `Connection`; each frame carries the same
-`request_id` (or a stream-scoped `stream_id` — see Open Questions).
+No new protocol concept, no streaming, no `stream_id`, no
+`FLAG_LAST_FRAME`, no `call_multi`, no new handler type. Every RPC
+is one request frame → one response frame, correlated by
+`request_id`. The three KV RPCs map onto normal request-response:
+LearnerStream and StreamSnapshot are per-batch/per-chunk `call()`
+with zero protocol change; WatchNotify is server-initiated
+request-response (the server sends a request, the client sends a
+response). The work is: (1) consolidate the `request_id` generator
+into `crow-common`, (2) add server-side request-response
+correlation (reuse `RpcClient`), (3) add client-side request
+handler dispatch, (4) retry + `WSCritical` logging for WatchNotify.
 
-**One-line summary**: Add server-streaming and bi-directional
-streaming to crow-rpc by extending the connection to carry multi-
-frame conversations, reusing the existing frame format and
-correlation mechanism.
+**One-line summary**: Complete the request-response model on both
+sides of crow-rpc (server can send requests, client can handle
+requests) and consolidate the `request_id` generator into
+`crow-common` — no streaming, no protocol change.
 
 **Numbered work items**:
 
-1. **Stream correlation model** (`lib/crow-rpc/include/crow-rpc/`)
-   — decide whether streams are correlated by `request_id` (one id
-   per stream, reused across all frames) or by a new `stream_id`
-   field in the header (or a stream-open control message that
-   allocates a `stream_id`). The existing `request_id`-keyed pending
-   map must be extended to track open streams vs. single
-   request-response calls. A stream-open/stream-close handshake
-   (control messages with `FBMsgType::EStreamOpen` /
-   `EStreamClose`) cleanly separates stream lifecycle from
-   per-frame request_id. Files: `framing.h`, `connection.h`,
-   `client/client.h`.
+1. **RequestId generator in crow-common** (`lib/crow-common/`) —
+   add a `RequestIdGen` struct with an internal `AtomicU64` counter
+   and a `next() -> u64` method (thread-safe `fetch_add(1,
+   Relaxed)`). Per-client instance (not global static) —
+   `request_id` only needs uniqueness within one client's pending
+   map, and per-client counters yield smaller numbers → smaller
+   slab pool + pending hashmap. Rust side: `RequestId(u64)` newtype
+   in `lib/crow-common/rust/src/`, `as_u64() -> u64` at the FFI
+   boundary. C++ side: `RequestIdGen` in
+   `lib/crow-common/cpp/include/crow-common/`. Remove
+   `RpcClient::next_request_id_` (`client/client.h` L162) —
+   verified only 4 test call sites use it, zero production code.
+   Update those sites to use `crow-common`'s generator. Update
+   `DiskioClient::next_req_id` (`crow-diskio-client/src/client.rs`
+   L86) to use the shared generator.
 
-2. **C++ server-side streaming handler** (`lib/crow-rpc/include/
-   crow-rpc/server/handler.h`, `lib/crow-rpc/src/server/`) —
-   extend `HandlerFn` or add a `StreamHandlerFn` that receives the
-   request frame + connection + a `StreamWriter` interface. The
-   handler calls `StreamWriter::send_frame(control, data)` to push
-   response frames; for bi-directional streams, the handler also
-   receives a `StreamReader` to pull subsequent request frames. The
-   handler signals stream end by returning (server-streaming) or by
-   a stream-close frame (bi-directional). Files: `server/handler.h`,
-   `server/server.cpp`.
+2. **Server-side request-response correlation** (`lib/crow-rpc/`)
+   — the server needs to send requests (not just responses) and
+   await acks. Reuse `RpcClient` (keep the name) for
+   request-response correlation on the server side: `send()` +
+   `on_response()` + the pending map + reaper. The server already
+   has `HandlerRegistry` (dispatch incoming requests) +
+   `transport->submit` (send responses); `RpcClient` adds the
+   "send a request, await ack, retry" half. Wire `RpcClient` into
+   the server's connection so server-sent requests get their acks
+   routed back. Files: `lib/crow-rpc/include/crow-rpc/server/
+   server.h`, `lib/crow-rpc/src/server/`, `lib/crow-rpc/include/
+   crow-rpc/client/client.h` (shared).
 
-3. **C++ client-side streaming** (`lib/crow-rpc/include/crow-rpc/
-   client/`) — add `RpcClient::open_stream(...)` that sends a
-   stream-open control message, allocates a stream-scoped callback
-   queue, and returns a `StreamWriter` + `StreamReader` pair (or a
-   `Stream` object combining both). The pending map tracks the
-   stream; incoming frames with the stream's id are routed to the
-   stream's reader queue, not the single-call callback. Files:
-   `client/client.h`, `client/client.cpp`.
+3. **Client-side request handler dispatch** (`lib/crow-rpc/`) —
+   the client needs to handle incoming requests (not just
+   responses) and send responses. Add a `HandlerRegistry`-like
+   dispatch on the client side: `on_frame` tries `request_id`
+   routing first (existing — for responses to client-sent
+   requests); if no match, dispatch by `msg_type` to a registered
+   handler. The handler receives `Frame* + Connection*`, processes
+   the request, and submits a response via `transport->submit` with
+   the same `request_id`. This mirrors the server-side dispatch
+   model. Files: `lib/crow-rpc/include/crow-rpc/client/client.h`,
+   `lib/crow-rpc/src/client/`, `lib/crow-rpc/ffi/src/client.rs`.
 
-4. **Rust FFI streaming facade** (`lib/crow-rpc/ffi/src/`) — expose
-   `Stream` as an async Rust type with `send()` (pushes a frame) and
-   a `StreamReceiver` (yields response frames as an `async
-   Stream`). The C++→Rust callback routes stream frames to the
-   receiver's channel. `CallFuture` is not reused — streams have
-   their own completion model (stream-close or error). Files:
-   `lib/crow-rpc/ffi/src/lib.rs`, `lib/crow-rpc/ffi/src/stream.rs`
-   (new).
+4. **WatchNotify retry + WSCritical logging** (`lib/crow-kv/`) —
+   when the server sends a notify request, it tracks the
+   `request_id` in its `RpcClient` pending map with a timeout. If
+   the ack doesn't arrive after retry, log `WSCritical` and retry
+   the notify on the next change. The retry policy and timeout are
+   service-level (defined here, not in crow-rpc). Files:
+   `lib/crow-kv/src/cluster/watch_registry.rs`,
+   `lib/crow-kv/src/cluster/remote_replica.rs`.
 
-5. **Stream lifecycle + error handling** — stream-open fails if the
-   server rejects the `msg_type` (unknown stream type →
-   `UnknownMessage` response). Mid-stream connection drop → all
-   pending stream frames are failed with `ConnectionClosed`; the
-   Rust `StreamReceiver` yields an error item. Stream-close is
-   idempotent (double-close is a no-op). Per-frame timeout: each
-   frame in a stream may have its own timeout, or the stream has a
-   global idle timeout (see Open Questions). Files: `connection.cpp`,
-   `client/client.cpp`.
-
-6. **Common flatbuffer stream-control schemas** (`lib/crow-protocol/
-   src/fbs/common_msg.fbs`) — add `FBStreamOpenRequest`,
-   `FBStreamOpenResponse`, `FBStreamClose` control messages. Register
-   `EStreamOpenRequest`, `EStreamOpenResponse`, `EStreamClose` in
-   `msg_type.fbs` (common range, below 100). These are
-   service-agnostic; the service-specific stream payload types
-   (LearnerStream entries, SnapshotStreamItem, WatchNotify) are
-   defined in each service's own `.fbs` schema (R32, R117). Files:
-   `lib/crow-protocol/src/fbs/common_msg.fbs`,
-   `lib/crow-protocol/src/fbs/msg_type.fbs`,
-   `lib/crow-protocol/build.rs`.
-
-7. **Echo stream test** (`lib/crow-rpc/ffi/tests/`) — an end-to-end
-   test: client opens a bi-directional stream, sends N request
-   frames, server echoes each as a response frame, client verifies
-   all N responses. Also a server-streaming test: client sends one
-   request, server sends N responses, client verifies all N. This
-   validates the streaming primitive before any service uses it.
-   Files: `lib/crow-rpc/ffi/tests/ffi_stream_test.rs` (new).
+5. **Echo request-response test** (`lib/crow-rpc/ffi/tests/`) —
+   an end-to-end test validating both directions: (a) client sends
+   a request, server responds (existing path, regression check);
+   (b) server sends a request, client responds (new path). Also a
+   WatchNotify-style test: server sends a notify request, client
+   acks, server verifies ack received; server sends notify, client
+   drops, server retries then logs `WSCritical`. Files:
+   `lib/crow-rpc/ffi/tests/ffi_request_test.rs` (new).
 
 **Flow diagram**:
 
 ```
-Bi-directional stream (LearnerStream, WatchNotify)
+WatchNotify — server-initiated request-response
 
-Client                              Server
-  │                                   │
-  │── StreamOpen(msg_type) ──────────►│  handler registered for msg_type
-  │◄────────── StreamOpenResp ────────│  stream accepted
-  │                                   │
-  │── Frame(stream_id, req1) ────────►│  StreamHandler reads req1
-  │◄────────── Frame(stream_id, resp1)│  StreamHandler sends resp1
-  │── Frame(stream_id, req2) ────────►│  ...
-  │◄────────── Frame(stream_id, resp2)│
-  │   ...                             │
-  │── StreamClose(stream_id) ────────►│  handler returns
-  │◄────────── StreamClose ───────────│
-  │                                   │
+Client                               Server
+  │                                    │
+  │── RegisterWatch(prefix) ──────────►│  normal call()
+  │◄────────── RegisterAck ────────────│  watch_id=42
+  │                                    │
+  │  (key "foo/bar" written)           │
+  │◄────────── NotifyReq(id=R) ────────│  server sends request
+  │── NotifyAck(R) ───────────────────►│  server awaits ack
+  │                                    │  ack received → done
+  │                                    │
+  │  (client drops, no ack)            │
+  │◄────────── NotifyReq(id=R2) ───────│  retry
+  │  (still no ack)                    │
+  │                                    │  log WSCritical
+  │                                    │  retry on next change
+  │                                    │
 
-Server-streaming (StreamSnapshot)
+LearnerStream / StreamSnapshot — normal request-response
 
-Client                              Server
-  │                                   │
-  │── StreamOpen(msg_type, req) ─────►│  handler reads req
-  │◄────────── StreamOpenResp ────────│  stream accepted
-  │◄────────── Frame(stream_id, item1)│  handler pushes N items
-  │◄────────── Frame(stream_id, item2)│
-  │   ...                             │
-  │◄────────── StreamClose ───────────│  handler done
-  │                                   │
+Client                               Server
+  │                                    │
+  │── GiveMeSlots(N..M, id=R1) ───────►│
+  │◄────────── LogEntries(R1) ─────────│
+  │── GiveMeSlots(M+1..P, id=R2) ─────►│
+  │◄────────── LogEntries(R2) ─────────│
+  │   ...                              │
+  │                                    │
 ```
 
 **Edge cases at a glance**:
 
-- Stream-open rejected (unknown `msg_type`) → client receives
-  `UnknownMessage` response, no stream created.
-- Mid-stream connection drop → all in-flight stream frames failed
-  with `ConnectionClosed`; Rust `StreamReceiver` yields error;
-  caller retries (open a new stream on a new connection).
-- Server handler crashes mid-stream → connection is closed (handler
-  exception → error response + connection close, same as §4.4).
-- Stream-close from client while server is still sending → server
-  stops sending, drains its write queue, acknowledges close.
-- Per-frame timeout vs. stream idle timeout → see Open Questions.
-- Concurrent streams on one connection → multiple `stream_id`s
-  active; the connection's send queue interleaves frames from
-  different streams (the per-connection writer is already
-  lock-free).
+- Server sends notify request, client doesn't ack → server retries
+  per retry policy; after retries exhausted, logs `WSCritical`,
+  retries on next change.
+- Server sends notify request, connection drops → `RpcClient`'s
+  `fail_all` fires the pending entry with `ConnectionClosed`; the
+  server treats it as a failed notify (log + retry on next change).
+- Client receives a request with an unregistered `msg_type` →
+  client sends `UnknownMessage` response (same as server-side
+  behavior today).
+- Client receives a request with a `request_id` that matches a
+  pending client-sent request → `request_id` routing takes
+  precedence (it's a response, not a request); the frame is
+  routed to the pending callback, not the handler dispatch.
+- Concurrent server-initiated requests on one connection →
+  multiple `request_id`s in the server's `RpcClient` pending map;
+  the connection's send queue interleaves frames (the
+  per-connection writer is already lock-free).
 
 **Dependencies**
 
@@ -208,60 +220,53 @@ Client                              Server
 
 **Acceptance**
 
-**Streaming primitives**:
-- A bi-directional echo stream: client opens stream, sends 10
-  request frames, server echoes each → client receives all 10
-  response frames in order. Integration test
-  (`ffi_stream_test.rs`).
-- A server-streaming stream: client sends 1 request, server sends 10
-  response frames → client receives all 10 in order. Integration
-  test.
-- Stream-open rejected for an unregistered `msg_type` → client
-  receives `UnknownMessage` error, no stream created. Integration
-  test.
-- Mid-stream connection drop → client `StreamReceiver` yields
-  `ConnectionClosed` error. Integration test (kill server
-  mid-stream).
-- Stream-close from client mid-stream → server stops sending,
-  client receives no more frames. Integration test.
+**RequestId generator**:
+- `RequestIdGen::next()` returns monotonically increasing `u64`
+  values, thread-safe (concurrent `next()` calls never return the
+  same value). Unit test.
+- `RequestId(u64)` newtype: `as_u64()` returns the inner value;
+  the type is not accidentally interchangeable with raw `u64` at
+  call sites (compile-time check). Unit test.
+- C++ `RpcClient::next_request_id_` removed; the 4 test call sites
+  (`client_pool_test.cpp` L254, `load_test.cpp` L142/L276/L402)
+  use `crow-common`'s `RequestIdGen`. Tests pass.
+- `DiskioClient` uses the shared `RequestIdGen` instead of its own
+  `AtomicU64`. Integration test (`cargo test -p crow-diskio-client`).
 
-**Performance**:
-- A bi-directional stream carrying 1000 frames has < 5% overhead
-  vs. 1000 independent request-response calls on the same
-  connection (streaming avoids per-call stream-open/close). Benchmark
-  test (Linux).
+**Server-side request-response**:
+- Server sends a request via `RpcClient::send`, client responds,
+  server's `on_response` fires the pending callback. Integration
+  test.
+- Server sends a request, client drops, server's `fail_all` fires
+  the pending entry with `ConnectionClosed`. Integration test (kill
+  client mid-request).
 
-**FFI**:
-- Rust `Stream` `send()` is async (awaits send-queue capacity in
-  `Await` mode, fails fast in `Reject` mode). Integration test.
-- Rust `StreamReceiver` implements `futures::Stream` (yields
-  `Result<Frame, RpcError>`). Integration test.
+**Client-side request handler dispatch**:
+- Client receives a request frame with a registered `msg_type` →
+  handler dispatched, response sent with the same `request_id`.
+  Integration test.
+- Client receives a request frame with an unregistered `msg_type`
+  → `UnknownMessage` response sent. Integration test.
+- Client receives a response frame (matching a pending
+  client-sent request) → routed to the pending callback, not the
+  handler dispatch. Integration test.
+
+**WatchNotify retry + WSCritical**:
+- Server sends notify request, client acks → server pending entry
+  removed, no retry. Integration test.
+- Server sends notify request, client doesn't ack → server
+  retries per policy; after retries exhausted, `WSCritical` logged,
+  pending entry removed. Integration test.
+- Server sends notify request, connection drops → `fail_all` fires
+  with `ConnectionClosed`; server logs + retries on next change.
+  Integration test.
 
 **Test commands**: `pixi run cargo test -p crow-rpc-ffi --test
-ffi_stream_test`, `pixi run cargo fmt --all -- --check`,
+ffi_request_test`, `pixi run cargo test -p crow-diskio-client`,
+`pixi run cargo fmt --all -- --check`,
 `pixi run cargo clippy --all-targets -- -D warnings`.
 
 **Open Questions**
 
-- **Stream correlation: `request_id` reuse vs. `stream_id`**. Reusing
-  `request_id` for all frames in a stream is simpler (no header
-  change) but conflates single-call and stream correlation in the
-  pending map. A separate `stream_id` (allocated by a stream-open
-  control message) cleanly separates the two but adds a round-trip
-  for stream setup. The stream-open handshake is cleaner and
-  supports concurrent streams on one connection; the `request_id`
-  reuse approach is simpler for single-stream-per-connection use
-  cases. Recommendation: `stream_id` via stream-open handshake —
-  concurrent streams matter for WatchNotify (one client may watch
-  multiple prefixes on one connection).
-
-- **Per-frame timeout vs. stream idle timeout**. Single-call RPCs
-  have a per-call timeout (§4.2). Streams are long-lived (WatchNotify
-  runs for hours); a per-frame timeout would fire constantly. An
-  idle timeout (no frames for N seconds → close stream) fits
-  long-lived streams better. LearnerStream and StreamSnapshot are
-  short-lived but bursty; they need a per-frame timeout on the
-  client side (waiting for the next entry). Recommendation: both —
-  per-frame timeout for short-lived streams (LearnerStream,
-  StreamSnapshot), idle timeout for long-lived streams (WatchNotify),
-  selected by the stream-open request's flags.
+None — all design decisions resolved in `doc/working/todo_fb.md`
+§ "R114 — Revised Design".

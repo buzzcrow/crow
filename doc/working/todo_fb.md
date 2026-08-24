@@ -318,5 +318,4 @@ Without them, "no regression" is unmeasurable. Capture in
 
 - **Zero-copy wrappers** (R115 follow-up): The current client transport parses flatbuffer responses into owned proto types (allocates per response). The design doc's "no owned intermediate struct" rule is violated for the client side — this is acceptable during the mixed-rollout window but should be addressed in a follow-up that switches the client to use flatbuffer views directly.
 - **Mixed-rollout cutover**: Both gRPC and crow-rpc servers run simultaneously. The client selects transport via `with_rpc_transport()`. No config-based toggle yet — callers must explicitly enable crow-rpc.
-- **Benchmark baseline**: No benchmark has been captured comparing crow-rpc vs gRPC throughput for diskdb operations. Should be done before cutover.
 - **R114/R32/R116/R117**: Other migration items not yet started. R114 (streaming) has a revised design but no implementation. R32 (KV consensus) is the highest-risk item. R116 (chunkdb) and R117 (KvService client-facing) follow the same pattern as R115.
