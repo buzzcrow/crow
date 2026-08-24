@@ -32,7 +32,9 @@ workspace = true
 crow-kv = { path = "../crow-kv" }
 crow-protocol = { path = "../crow-protocol" }
 crow-common = { path = "../crow-common/rust" }
+crow-rpc-ffi = { path = "../crow-rpc/ffi" }
 bytes = "1"
+flatbuffers = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tokio-stream = "0.1"
 tonic = { workspace = true }

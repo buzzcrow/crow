@@ -26,6 +26,7 @@ mod config;
 mod error;
 mod hardware;
 mod kv_cluster;
+mod kv_rpc_transport;
 mod metrics;
 mod pool;
 mod range_binding;
@@ -54,6 +55,7 @@ pub use hardware::{
     NodeCapacityEntry, RackCapacityEntry,
 };
 pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
+pub use kv_rpc_transport::KvRpcTransport;
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 pub use range_binding::{ChunkdbRangeBinding, RangeBindingClient, RangeRouteError, RouteWithFallback};
 pub use service_registry::ServiceRegistryClient;
