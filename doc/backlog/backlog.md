@@ -255,15 +255,6 @@ zero-copy wrapper convention (`design-crow-rpc.md` §6): `FB`-prefixed
 flatbuffer types, wrapper classes in `crow-protocol`, no owned
 intermediate structs, no per-field copy.
 
-- **[R115](R115-diskdb-rpc-migration.md)** — DiskdbService → crow-rpc
-  — Area: diskdb / rpc — Migrate all 11 DiskdbService unary RPCs
-  (AllocateBlocks, FreeBlocks, CommitBlocks, QueryCapacityStats, etc.)
-  from tonic/gRPC to crow-rpc. No streaming needed (R114 not
-  required). Serves as the **proof-of-pattern** for the full `.fbs`
-  conversion approach — exercises every migration step (schema,
-  server, client, error mapping, `grpc_endpoint` rename, mixed
-  rollout, cutover) that R32/R116/R117 repeat. Full `.fbs` conversion
-  (no prost bridge), consistent with R105/diskio.
 - **[R116](R116-chunkdb-rpc-migration.md)** — ChunkdbService →
   crow-rpc — Area: chunkdb / rpc — Migrate all 8 ChunkdbService unary
   RPCs (AllocateChunk, AppendChunk, QueryChunk, SealChunk,

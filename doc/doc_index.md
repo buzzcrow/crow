@@ -83,6 +83,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/rpc/design-crow-rpc.md` | RPC root: architecture, Non-Goals, key design decisions (native buffer, 12-byte header, transport interface, pull-based parser, per-connection writer, folly CHM, worker timer, C ABI + oneshot FFI, flatbuffers), wire format diagram, control plane (pool + reconnect, `RpcClient` correlation, `ScheduledExecutor`, `RpcServer` + handler offload, backpressure Reject/Await), flatbuffer schema home + build matrix, sub-design map. |
 | `doc/design/rpc/design-crow-rpc-tcp.md` | TCP transport: `SocketTransport` shared base, worker loop, scatter-gather `writev` send, zero-copy receive, `EpollEngine` (Linux, level-triggered), `KqueueEngine` (macOS, `EV_CLEAR` write), multi-engine scaling (N engines × M workers). |
 | `doc/design/rpc/design-crow-rpc-rdma.md` | RDMA transport: `RdmaTransport`, CQ poll loop, `librdmacm` connection setup, pre-registered buffer pools. |
+| `doc/design/rpc/design-crow-rpc-diskdb-migration.md` | diskdb crow-rpc migration: server-side Rust handler dispatch (`DiskdbRpcService`), client-side `DiskdbRpcTransport`, error model parity, mixed-rollout mechanism, `conn_handle` lifetime safety (live-connection registry in `SocketTransport`). |
 
 ## How AI Should Use This Index
 

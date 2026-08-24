@@ -341,3 +341,7 @@ DiskId did = req.disk_id();
 - [`design-crow-rpc-rdma.md`](design-crow-rpc-rdma.md) — RDMA transport:
   `RdmaTransport`, CQ poll loop, `librdmacm` connection setup,
   pre-registered buffer pools.
+- [`design-crow-rpc-diskdb-migration.md`](design-crow-rpc-diskdb-migration.md)
+  — diskdb service migration from tonic/gRPC to crow-rpc: server-side
+  Rust handler dispatch, client-side `DiskdbRpcTransport`, error model
+  parity, mixed-rollout mechanism, `conn_handle` lifetime safety.
