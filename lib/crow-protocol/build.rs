@@ -24,6 +24,7 @@ fn main() {
         "src/fbs/diskio.fbs",
         "src/fbs/diskdb.fbs",
         "src/fbs/kv_consensus.fbs",
+        "src/fbs/kv_client.fbs",
     ];
     for f in &fbs_files {
         println!("cargo:rerun-if-changed={f}");
@@ -88,6 +89,19 @@ fn main() {
     assert!(
         status.success(),
         "flatc --rust --gen-all failed for kv_consensus.fbs"
+    );
+    // kv_client: --gen-all inlines common_type.fbs so FBInt128 resolves.
+    let status = Command::new(&flatc)
+        .arg("--rust")
+        .arg("--gen-all")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("src/fbs/kv_client.fbs")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run flatc at {}: {e}", flatc.display()));
+    assert!(
+        status.success(),
+        "flatc --rust --gen-all failed for kv_client.fbs"
     );
 
     let protos = [

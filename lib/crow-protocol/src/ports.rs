@@ -24,6 +24,9 @@
 //! - `28101`–`28300` — crow-kv-server crow-rpc consensus listener (R32
 //!   migration, stride 1; inter-KV-server only. R117 adds a separate
 //!   client-facing port)
+//! - `28201`–`28400` — crow-kv-server crow-rpc client-facing listener
+//!   (R117 migration, stride 1; client-to-server only. Separate from
+//!   the consensus port so the two surfaces evolve independently)
 //!
 //! Future service types (diskio, …) should pick a base
 //! outside these ranges and document it here.
@@ -40,6 +43,14 @@ pub const KV_SERVER_GRPC_BASE: u16 = 28001;
 /// only (replica-to-replica Paxos). R117 adds a separate client-facing
 /// port. Stride 1 (one port per instance).
 pub const KV_RPC_BASE: u16 = 28101;
+
+/// crow-kv-server crow-rpc client-facing listener — base port (R117
+/// migration). Separate from the consensus port so the two surfaces
+/// evolve independently. Stride 1 (one port per instance). Derived
+/// from the gRPC port via `KV_CLIENT_RPC_BASE - KV_SERVER_GRPC_BASE
+/// = 200` (parallel to R32's `KV_RPC_BASE - KV_SERVER_GRPC_BASE =
+/// 100`).
+pub const KV_CLIENT_RPC_BASE: u16 = 28201;
 
 /// crow-diskdb gRPC listener — base port.
 pub const DISKDB_GRPC_BASE: u16 = 9941;
@@ -75,6 +86,8 @@ pub enum ServicePort {
     KvServerGrpc,
     /// crow-kv-server crow-rpc consensus listener (R32 migration).
     KvServerRpc,
+    /// crow-kv-server crow-rpc client-facing listener (R117 migration).
+    KvServerClientRpc,
     /// crow-diskdb gRPC listener.
     DiskdbGrpc,
     /// crow-diskdb HTTP management API.
@@ -95,6 +108,7 @@ impl ServicePort {
             Self::KvServerMgmt => KV_SERVER_MGMT_BASE,
             Self::KvServerGrpc => KV_SERVER_GRPC_BASE,
             Self::KvServerRpc => KV_RPC_BASE,
+            Self::KvServerClientRpc => KV_CLIENT_RPC_BASE,
             Self::DiskdbGrpc => DISKDB_GRPC_BASE,
             Self::DiskdbHttp => DISKDB_HTTP_BASE,
             Self::ChunkdbGrpc => CHUNKDB_GRPC_BASE,
@@ -108,7 +122,11 @@ impl ServicePort {
     #[must_use]
     pub const fn stride(self) -> u16 {
         match self {
-            Self::KvServerMgmt | Self::KvServerGrpc | Self::KvServerRpc | Self::Web => 1,
+            Self::KvServerMgmt
+            | Self::KvServerGrpc
+            | Self::KvServerRpc
+            | Self::KvServerClientRpc
+            | Self::Web => 1,
             // diskdb and chunkdb use paired ports (gRPC + HTTP); each
             // instance consumes two consecutive ports.
             Self::DiskdbGrpc | Self::DiskdbHttp | Self::ChunkdbGrpc | Self::ChunkdbHttp => 2,

@@ -138,6 +138,17 @@ mod kv_consensus_generated {
     )]
     include!(concat!(env!("OUT_DIR"), "/kv_consensus_generated.rs"));
 }
+mod kv_client_generated {
+    #![allow(
+        unsafe_code,
+        clippy::all,
+        clippy::pedantic,
+        dead_code,
+        non_camel_case_types,
+        non_snake_case
+    )]
+    include!(concat!(env!("OUT_DIR"), "/kv_client_generated.rs"));
+}
 
 /// Flatbuffer control-message types for the crow-rpc library (R104).
 ///
@@ -203,6 +214,15 @@ pub mod kv_consensus_fb {
     pub use crate::kv_consensus_generated::crow::rpc::proto::FBInt128;
 }
 
+/// Flatbuffer KV client-facing control-message types (R117).
+///
+/// Re-exports the generated `crow::kv_client::proto` namespace plus
+/// the `FBInt128` struct inlined from `common_type.fbs` via `--gen-all`.
+pub mod kv_client_fb {
+    pub use crate::kv_client_generated::crow::kv_client::proto::*;
+    pub use crate::kv_client_generated::crow::rpc::proto::FBInt128;
+}
+
 /// Zero-copy flatbuffer wrapper classes (design-crow-rpc.md §6).
 /// Each `Ref` struct holds a `&[u8]` reference to the control buffer
 /// and exposes typed accessors that read through the flatbuffer root
@@ -249,5 +269,5 @@ pub use bitmap::{create_usage_bitmap, UsageBitmap};
 pub mod ports;
 pub use ports::{
     ServicePort, CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, DISKDB_RPC_BASE,
-    KV_RPC_BASE, KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
+    KV_CLIENT_RPC_BASE, KV_RPC_BASE, KV_SERVER_GRPC_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
 };

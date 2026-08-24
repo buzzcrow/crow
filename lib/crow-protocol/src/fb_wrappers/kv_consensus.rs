@@ -16,19 +16,9 @@ use crate::kv_consensus_fb::{
     FBPromiseResponse, FBRequestVoteResponse, FBSnapshotResponse, FBStepDownResponse,
 };
 
-/// Helper: parse a flatbuffer root from a byte slice, returning `None`
-/// on parse failure (malformed buffer / wrong type). The bound matches
-/// `flatbuffers::root` — `Follow<'a>` (with `Inner = Self` for generated
-/// table types) + `Verifiable`.
-fn parse_root<'a, T>(buf: &'a [u8]) -> Option<T::Inner>
-where
-    T: 'a + flatbuffers::Follow<'a> + flatbuffers::Verifiable,
-{
-    if buf.len() < 4 {
-        return None;
-    }
-    flatbuffers::root::<T>(buf).ok()
-}
+// `parse_root` is hoisted to the parent `fb_wrappers` module (R117)
+// so both `kv_consensus` and `kv_client` reuse it without duplication.
+use super::parse_root;
 
 // ── FBPromiseResponseRef ─────────────────────────────────────────
 

@@ -7,4 +7,20 @@
 //! and exposes typed accessors that read through the flatbuffer root
 //! pointer — no per-field copy, no owned intermediate struct.
 
+pub mod kv_client;
 pub mod kv_consensus;
+
+/// Parse a flatbuffer root from a byte slice, returning `None` on
+/// parse failure (malformed buffer / wrong type). Shared by all
+/// wrapper modules. The bound matches `flatbuffers::root` —
+/// `Follow<'a>` (with `Inner = Self` for generated table types) +
+/// `Verifiable`.
+pub(super) fn parse_root<'a, T>(buf: &'a [u8]) -> Option<T::Inner>
+where
+    T: 'a + flatbuffers::Follow<'a> + flatbuffers::Verifiable,
+{
+    if buf.len() < 4 {
+        return None;
+    }
+    flatbuffers::root::<T>(buf).ok()
+}
