@@ -255,9 +255,9 @@ impl KvClientRpcForwarder {
         builder.finish(fb, None);
         let control = Buffer::from_bytes(builder.finished_data());
         let msg_type = FBMsgType::EWatchNotifyError.0 as u16;
-        let _ = self.rpc.send(
+        let _ = self.rpc.send_to_handle(
             &self.server,
-            conn,
+            conn.handle().cast::<std::ffi::c_void>(),
             req_id,
             control,
             None,

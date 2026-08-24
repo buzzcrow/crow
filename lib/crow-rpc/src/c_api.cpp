@@ -404,6 +404,44 @@ crow_rpc_status crow_rpc_client_send(crow_rpc_client_t client, crow_rpc_server_t
     return ok ? CROW_RPC_OK : CROW_RPC_ERR_SEND_QUEUE;
 }
 
+// Variant of crow_rpc_client_send for server-handler use: conn_handle
+// is a raw Connection* (as passed to the dispatch callback), NOT a
+// crow_rpc_conn_s*. The handler's conn_handle is a Connection* obtained
+// from static_cast<void*>(conn) in invoke_c_handler; crow_rpc_conn_s
+// wraps a shared_ptr<Connection> and is only created by crow_rpc_connect.
+// Using crow_rpc_client_send with a Connection* would dereference invalid
+// memory (conn->conn.get() on the wrong struct).
+crow_rpc_status crow_rpc_client_send_conn(crow_rpc_client_t client, crow_rpc_server_t server, void *conn_handle,
+                                          uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                          uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data)
+{
+    if (client == nullptr || server == nullptr || conn_handle == nullptr || control == nullptr ||
+        on_complete == nullptr) {
+        return CROW_RPC_ERR_INVALID_ARG;
+    }
+
+    crow::rpc::Buffer *ctrl_buf = control->buf;
+    crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
+
+    if (ctrl_buf != nullptr) {
+        ctrl_buf->ref_clone();
+    }
+    if (data_buf != nullptr) {
+        data_buf->ref_clone();
+    }
+
+    auto *conn = static_cast<crow::rpc::Connection *>(conn_handle);
+    bool  ok   = client->client->send(server->server->transport(), conn, request_id, ctrl_buf, data_buf, msg_type,
+                                      on_complete, user_data);
+
+    crow_rpc_buffer_release(control);
+    if (data != nullptr) {
+        crow_rpc_buffer_release(data);
+    }
+
+    return ok ? CROW_RPC_OK : CROW_RPC_ERR_SEND_QUEUE;
+}
+
 // ── Connection ────────────────────────────────────────────────────
 
 crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int port)

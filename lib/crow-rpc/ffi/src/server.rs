@@ -243,6 +243,15 @@ impl Connection {
     /// this wrapper is a borrow (no-op `Drop`). Safe to use for the
     /// duration of the handler's async work (the transport keeps the
     /// connection alive until it drops).
+    ///
+    /// **Only for `RpcServer::submit_response`** — the handler's
+    /// `conn_handle` is a raw `Connection*`, which `submit_response`
+    /// casts back to `Connection*`. Do NOT pass this wrapper to
+    /// `RpcClient::send`/`call` — those expect a `crow_rpc_conn_s*`
+    /// (created by `server.connect()`), not a `Connection*`. For
+    /// server→client request sends from a handler, use
+    /// `RpcClient::send_to_handle`/`call_to_handle` with the raw
+    /// `conn_handle` directly.
     #[must_use]
     pub fn from_handle(handle: sys::crow_rpc_conn_t) -> Self {
         Self { handle }

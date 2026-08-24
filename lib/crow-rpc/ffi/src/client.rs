@@ -199,6 +199,100 @@ impl RpcClient {
         Ok(CallFuture { rx })
     }
 
+    /// Send a request on a raw server-side connection handle (a
+    /// `Connection*` from `ServerRequest::conn_handle` or
+    /// `ClientRequest::conn_handle`). Use this from server handlers
+    /// that need to push a request to the client (server→client
+    /// direction) via the request_client. The regular `send` expects
+    /// a `&Connection` created by `server.connect()` (a
+    /// `crow_rpc_conn_s*`); handler conn_handles are raw `Connection*`
+    /// — passing them to `send` would dereference invalid memory.
+    ///
+    /// # Safety
+    ///
+    /// `conn_handle` must be a valid `Connection*` obtained from a
+    /// dispatch callback. The callback must be non-blocking.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "FFI wrapper mirrors C ABI; user_data is opaque to C++"
+    )]
+    pub fn send_to_handle(
+        &self,
+        server: &RpcServer,
+        conn_handle: *mut std::ffi::c_void,
+        request_id: u64,
+        control: Buffer,
+        data: Option<Buffer>,
+        msg_type: u16,
+        on_complete: sys::crow_rpc_on_complete,
+        user_data: *mut std::ffi::c_void,
+    ) -> Result<(), RpcError> {
+        let control_handle = control.into_raw();
+        let data_handle = data.map(|d| d.into_raw()).unwrap_or(ptr::null_mut());
+
+        let status = unsafe {
+            sys::crow_rpc_client_send_conn(
+                self.handle,
+                server.handle(),
+                conn_handle,
+                request_id,
+                control_handle,
+                data_handle,
+                msg_type,
+                on_complete,
+                user_data,
+            )
+        };
+
+        if status != sys::CROW_RPC_OK {
+            return Err(RpcError::from_status(status));
+        }
+        Ok(())
+    }
+
+    /// Request-response variant of `send_to_handle`: creates a oneshot
+    /// channel, submits via `send_to_handle`, and returns a `CallFuture`.
+    /// Use this from server handlers that need a request-response
+    /// roundtrip to the client (server→client→server ack).
+    pub fn call_to_handle(
+        &self,
+        server: &RpcServer,
+        conn_handle: *mut std::ffi::c_void,
+        request_id: u64,
+        control: Buffer,
+        data: Option<Buffer>,
+        msg_type: u16,
+    ) -> Result<CallFuture, RpcError> {
+        self.set_completion_pool_size(DEFAULT_POOL_SIZE);
+
+        let (tx, rx) = oneshot::channel();
+        let user_data = Box::into_raw(Box::new(tx)) as *mut std::ffi::c_void;
+
+        if self
+            .send_to_handle(
+                server,
+                conn_handle,
+                request_id,
+                control,
+                data,
+                msg_type,
+                Some(on_complete_cb),
+                user_data,
+            )
+            .is_err()
+        {
+            unsafe {
+                drop(Box::from_raw(
+                    user_data as *mut oneshot::Sender<Result<Response, RpcError>>,
+                ))
+            };
+            return Err(RpcError::SendQueueFull);
+        }
+
+        Ok(CallFuture { rx })
+    }
+
     /// Get global client-side correlation counters (submit/response
     /// match/miss/reap). Static — shared across all RpcClient instances.
     pub fn counters(&self) -> sys::CrowRpcClientCounters {

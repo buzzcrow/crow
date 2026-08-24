@@ -389,9 +389,9 @@ impl WatchRegistry {
         builder.finish(fb, None);
         let control = crow_rpc_ffi::Buffer::from_bytes(builder.finished_data());
         let msg_type = crow_protocol::fb::FBMsgType::EWatchNotify.0 as u16;
-        let result = target.rpc.send(
+        let result = target.rpc.send_to_handle(
             &target.server,
-            &target.conn,
+            target.conn.handle().cast::<std::ffi::c_void>(),
             push_id,
             control,
             None,

@@ -148,6 +148,16 @@ crow_rpc_status crow_rpc_client_send(crow_rpc_client_t client, crow_rpc_server_t
                                      uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
                                      uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data);
 
+// Variant for server-handler use: conn_handle is a raw Connection* (as
+// passed to the dispatch callback), NOT a crow_rpc_conn_t. Use this from
+// server handlers that need to send a request (server→client direction)
+// via the request_client. crow_rpc_client_send expects a crow_rpc_conn_t
+// (created by crow_rpc_connect); using it with a handler's conn_handle
+// would dereference invalid memory.
+crow_rpc_status crow_rpc_client_send_conn(crow_rpc_client_t client, crow_rpc_server_t server, void *conn_handle,
+                                          uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                          uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data);
+
 // ── Connection (for client-side use) ──────────────────────────────
 crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int port);
 

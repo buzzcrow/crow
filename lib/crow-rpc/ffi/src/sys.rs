@@ -177,6 +177,18 @@ extern "C" {
         user_data: *mut c_void,
     ) -> crow_rpc_status;
 
+    pub fn crow_rpc_client_send_conn(
+        client: crow_rpc_client_t,
+        server: crow_rpc_server_t,
+        conn_handle: *mut c_void,
+        request_id: u64,
+        control: crow_rpc_buffer_t,
+        data: crow_rpc_buffer_t,
+        msg_type: u16,
+        on_complete: crow_rpc_on_complete,
+        user_data: *mut c_void,
+    ) -> crow_rpc_status;
+
     pub fn crow_rpc_connect(server: crow_rpc_server_t, addr: *const c_char, port: c_int) -> crow_rpc_conn_t;
 
     pub fn crow_rpc_server_register_echo_handler(server: crow_rpc_server_t, msg_type: u16);
