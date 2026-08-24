@@ -6,38 +6,68 @@
 Depends on: [`design-crow-kv.md`](design-crow-kv.md) §2, §3, §9.2, §10
 Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §3, §9.2, §10.1
 
-This document defines the wire-serialization contract for all node-to-node and client-to-node RPC communication. The implementation uses **gRPC with protobuf** (tonic + prost). Every message carries a `version: u32` field at fixed protobuf tag 1 for forward/backward compatibility; no `required` fields; field numbers are append-only.
+This document defines the wire-serialization contract for all
+node-to-node and client-to-node RPC communication. The consensus hot
+path (Prepare/Promise, Accept/Accepted, PreVote/RequestVote,
+Heartbeat/StepDown, ChosenNotification, FetchGap) uses the
+**crow-rpc flatbuffer transport** — a custom epoll/kqueue-based RPC
+library with flatbuffer framing and request/response correlation via
+oneshot channels. Client-to-node KV RPCs (Get/Set/Delete/Batch/Scan)
+remain on **gRPC with protobuf** (tonic + prost). Every message carries
+a `version: u32` field for forward/backward compatibility; no
+`required` fields; field numbers are append-only.
 
 ## Table of Contents
 
 - [1. Design Principles](#1-design-principles)
 - [2. Message Surface](#2-message-surface)
-- [3. LearnerStream — Why a Dedicated Bidi Stream](#3-learnerstream--why-a-dedicated-bidi-stream)
-- [4. Service Definitions](#4-service-definitions)
-- [5. Version Compatibility Rules](#5-version-compatibility-rules)
-- [6. Flow Control and Parallelism](#6-flow-control-and-parallelism)
-  - [6.1 Quorum Short-Circuit](#61-quorum-short-circuit)
-  - [6.2 RPC Deadline](#62-rpc-deadline)
-- [7. Paxos Error Model](#7-paxos-error-model)
-- [8. Open Questions](#8-open-questions)
-- [9. Proto `bytes` Field Mapping — `bytes::Bytes`](#9-proto-bytes-field-mapping--bytesbytes)
+- [3. Transport Architecture — crow-rpc for Consensus](#3-transport-architecture--crow-rpc-for-consensus)
+- [4. Server-Side Handler (PxRpcService)](#4-server-side-handler-pxrpcservice)
+- [5. Client-Side Transport (PxRpcTransport)](#5-client-side-transport-pxrpctransport)
+- [6. Dual-Path Routing in PxRemoteReplica](#6-dual-path-routing-in-pxremotereplica)
+- [7. Flow Control and Parallelism](#7-flow-control-and-parallelism)
+  - [7.1 Quorum Short-Circuit](#71-quorum-short-circuit)
+  - [7.2 RPC Deadline](#72-rpc-deadline)
+- [8. Paxos Error Model](#8-paxos-error-model)
+- [9. Version Compatibility Rules](#9-version-compatibility-rules)
+- [10. Flatbuffer Schema (kv_consensus.fbs)](#10-flatbuffer-schema-kv_consensusfbs)
+- [11. Zero-Copy Wrapper Classes](#11-zero-copy-wrapper-classes)
+- [12. Port Allocation](#12-port-allocation)
+- [13. Proto `bytes` Field Mapping — `bytes::Bytes`](#13-proto-bytes-field-mapping--bytesbytes)
 
 ---
 
 ## 1. Design Principles
 
-1. **One bidirectional stream per peer pair.** Steady-state data traffic
-   (`Accept`, `Chosen`) multiplexes over a single gRPC bidi stream
-   (`LearnerStream`) keyed by `(group_id, peer_node_id)`. Steady-state
-   `Heartbeat` traffic moves over a **dedicated unary gRPC channel**
-   (separate TCP connection) so liveness messages are never blocked
-   behind data on the `LearnerStream` (see §3). One-shot messages
-   (`Prepare`, `PreVote`, `RequestVote`, `StepDown`) remain unary RPCs on
-   the control channel.
-2. **Frame multiplexing.** Each `LearnerStreamRequest` / `LearnerStreamResponse` is a protobuf `oneof` frame. New steady-state message types add new oneof arms without changing existing field numbers.
-3. **No `required` fields.** All protobuf fields are `optional` or have sensible defaults. A missing `version` field defaults to `0` (meaning "pre-versioning, treat as earliest").
-4. **Field numbers are append-only.** Once assigned, a field number is never reused for a different semantic meaning. This is a hard rule for rolling upgrades.
-5. **Plaintext in P1/P4; TLS hooks reserved.** The transport layer is plaintext TCP loopback in tests and P1/P4 integration. TLS config slots exist in the service builder but are unimplemented.
+1. **Consensus over crow-rpc, client KV over gRPC.** The Paxos hot
+   path (Prepare/Accept/Heartbeat/Chosen/FetchGap) runs on the
+   crow-rpc flatbuffer transport for zero-copy framing and
+   epoll/kqueue I/O efficiency. Client-facing KV RPCs (Get/Set/Delete/
+   Batch/Scan/Watch) remain on gRPC/protobuf for ecosystem
+   compatibility (tonic interception, `Bytes` mapping, client library
+   ergonomics).
+2. **Pipelined unary calls on persistent connections.** Steady-state
+   data traffic (`Accept`, `ChosenNotification`) multiplexes over
+   pipelined unary `call()`s on a persistent crow-rpc connection per
+   `(group_id, peer_id)` pair. Connection setup cost is paid once per
+   server lifetime. Fire-and-forget frames (`ChosenNotification`,
+   `BatchChosenNotification`) use `send()` with a no-op completion
+   callback — no reply is awaited.
+3. **Heartbeats on the same connection.** Steady-state `Heartbeat`
+   traffic flows over the same crow-rpc connection as `Accept` and
+   `Chosen`. The crow-rpc transport multiplexes frames at the I/O
+   layer (epoll/kqueue), so heartbeats are not blocked behind data
+   frames the way they were in the gRPC bidi stream's FIFO send-half.
+   The term fence handles cross-term reordering; same-term
+   heartbeat/accept mutate independent state.
+4. **No `required` fields.** All flatbuffer fields are optional or
+   have sensible defaults. A missing `version` field defaults to `0`.
+5. **Field numbers are append-only.** Once assigned, a field number is
+   never reused for a different semantic meaning. This is a hard rule
+   for rolling upgrades.
+6. **Plaintext in P1/P4; TLS hooks reserved.** The transport layer is
+   plaintext TCP loopback in tests and P1/P4 integration. TLS config
+   slots exist in the service builder but are unimplemented.
 
 ---
 
@@ -47,137 +77,171 @@ The wire protocol defines four classic Paxos messages (P1 M2):
 `Prepare`, `Promise`, `Accept`, `Accepted`, sufficient to run a full
 classic Paxos round across a real network boundary. Election messages
 (`Heartbeat`, `RequestVote`, `PreVote`, `StepDown`) and the
-`LearnerStream` / `ChosenNotification` frames are added in P1 M3;
-snapshot and client RPCs land in P4.
+`ChosenNotification` / `BatchChosenNotification` / `FetchGap` frames
+are added in P1 M3; snapshot and client RPCs land in P4.
 
 Key reusable sub-message: `AcceptedValue` carries `(slot, round,
 leader_id, term, payload)`. Used in `Accept` requests and `Promise`
 responses for classic Paxos value-recovery. The `payload` is opaque
 bytes in P1 M2; `kind` discrimination (empty = `NoOp`, non-empty =
-`Write`) is not a protobuf field. `ConfigChange` and
-`DedupCheckpoint` kinds are designed but not yet implemented.
+`Write`) is not a wire field. `ConfigChange` and `DedupCheckpoint`
+kinds are designed but not yet implemented.
 
-The full protobuf definitions are in `lib/crow-kv/src/rpc/proto/`; this
-doc covers design decisions only.
-
----
-
-## 3. LearnerStream — Why a Dedicated Bidi Stream
-
-The steady-state **data** traffic (`Accept`, `ChosenNotification`,
-`BatchChosenNotification`)
-moves onto a single gRPC bidi stream per `(group_id, peer_id)` pair.
-Two problems the unary-per-RPC pattern cannot solve for data:
-
-1. **Connection churn.** Paying TCP + HTTP/2 setup cost once per
-   leadership tenure, rather than per-RPC, amortizes overhead under
-   high write throughput.
-2. **Per-peer backpressure.** A bounded `mpsc` on the stream gives the
-   proposer an explicit signal (`Busy`) when a peer cannot keep up.
-
-**Heartbeats move to a separate unary channel.** Steady-state
-`Heartbeat` traffic no longer flows through the `LearnerStream`. It
-routes over a **dedicated gRPC `Channel`** (separate TCP connection)
-via the existing unary `heartbeat` RPC, established lazily on first
-heartbeat and reused for the peer's lifetime. The reason is an
-**availability** issue: when the `LearnerStream`'s send-half loop
-flushes frames FIFO via `out_tx.send(frame).await`, a heartbeat
-admitted to the queue still sits behind every accept already queued.
-With 16 KiB values, the cumulative wire-flush time of N accepts can
-exceed the election timeout — the follower's election deadline fires,
-a spurious election challenges the leader, and the leader loses
-quorum. A separate connection gives heartbeats their own wire with no
-data traffic, so they are never delayed by accept backpressure.
-
-**Why the FIFO invariant can be relaxed.** The original design
-justified multiplexing heartbeats with accepts on a single stream
-with an ordering hazard: a heartbeat reordering ahead of an Accept
-could cause the follower to reject the Accept while already having
-promised not to vote. Code analysis shows this hazard does not hold:
-
-- `handle_heartbeat` mutates `election_state` (`current_term`,
-  `voted_for`, `leader_id`, `vote_lockout_until`).
-  `on_accept_inner` checks the term fence then calls the acceptor's
-  per-slot ballot CAS. The two operate on **independent state**.
-- `vote_lockout_until` only gates `handle_request_vote` /
-  `handle_pre_vote`, not `on_accept`. A heartbeat extending the
-  lockout cannot cause an accept to be rejected.
-- The only coupling is `current_term`, and the term fence
-  (`req.term < local_term → TermStale`) handles all cross-term
-  reordering correctly. A stale-term accept being rejected is
-  correct behavior (the old leader lost leadership).
-- Same-term reordering is harmless: heartbeat and accept mutate
-  independent state.
-
-The `term` **is** the epoch mechanism; no new timestamp or epoch
-field is needed to make separate connections safe.
-
-**What stays unary:** `Prepare` (one-shot Phase-1, no ordering need
-with steady-state traffic), `PreVote` / `RequestVote` (election probe
-/ real vote, must not be queued behind `Accept`s), `StepDown` (admin
-primitive, must cut through immediately), `Heartbeat` (steady-state
-liveness, must not be blocked behind data).
+The full flatbuffer schema is in `lib/crow-protocol/src/fbs/kv_consensus.fbs`;
+the gRPC proto definitions for client KV RPCs are in
+`lib/crow-kv/src/rpc/proto/`. This doc covers design decisions only.
 
 ---
 
-## 4. Service Definitions
+## 3. Transport Architecture — crow-rpc for Consensus
 
-`PxService` is the node-to-node gRPC service. It exposes:
+The consensus RPC path uses the R104 `crow-rpc` engine: a C++
+epoll/kqueue transport with flatbuffer framing and request/response
+correlation. The Rust facade (`crow-rpc-ffi`) exposes `RpcServer`
+(listen + register handlers), `RpcClient` (connect + `call()` for
+request-response, `send()` for fire-and-forget), and `Connection`
+(per-peer persistent connection).
 
-- **Unary RPCs:** `Prepare`, `Accept` (classic Paxos), `PreVote`,
-  `RequestVote`, `Heartbeat`, `StepDown` (leader election).
-- **Bidi stream:** `LearnerStream` (steady-state `Accept` + `Chosen`
-  multiplexed).
+**Why crow-rpc over gRPC for consensus:**
 
-The unary `Accept` RPC is kept alongside `LearnerStream` for callers
-that need a one-shot path. In practice, steady-state `Accept` traffic
-flows through `LearnerStream`. The unary `Heartbeat` RPC is used for
-steady-state heartbeats over a dedicated channel (§3). The
-`LearnerStream` no longer carries heartbeat frames in steady state,
-though the server-side bidi handler still accepts them for backward
-compatibility during rolling upgrades.
+- **H2-lock recovery.** The gRPC transport (tonic + hyper) serializes
+  concurrent requests on a single HTTP/2 connection through a
+  per-stream lock, causing ~17% throughput loss at 2T:1C write
+  workload. crow-rpc's epoll/kqueue I/O loop handles concurrent frames
+  without a per-stream lock.
+- **Zero-copy framing.** Flatbuffer responses are read in-place via
+  `FB<Type>Ref` wrappers — no deserialization into owned types on the
+  hot path.
+- **Fire-and-forget support.** `ChosenNotification` and
+  `BatchChosenNotification` are sent via `send()` with a no-op
+  completion callback — no oneshot channel allocation, no reply
+  correlation overhead.
 
-**Cluster discovery — HTTP, not gRPC.** A gRPC `AdminService.DescribeCluster`
-RPC was sketched but **rejected, not deferred**. Cluster/topology
-discovery is served by `crow-kv-server`'s existing HTTP management API
-(`GET /topology`), which every client polls for
-`(store_id, group_id) -> leader_endpoint` discovery. No
-`AdminService` gRPC service exists or is planned.
+**What stays on gRPC:** Client-facing KV RPCs (`Get`, `Set`, `Delete`,
+`Batch`, `Scan`, `Watch`) remain on gRPC/protobuf. The client library
+(`crow-kv-client`) uses tonic for retry, topology cache, and
+`NotLeaderHint` handling — these benefit from tonic's interceptor
+ecosystem and `Bytes` mapping. The gRPC server also serves
+`SnapshotService` (snapshot install stream).
+
+**Connection model:** Each `PxKvStore` runs one `RpcServer` on the
+crow-rpc port (derived from the gRPC port via a fixed offset, see
+§12). The shared `PxRpcTransport` holds one `RpcClient` + a
+`DashMap<endpoint, Connection>` connection cache. All `PxRemoteReplica`
+instances in the store share the same transport.
 
 ---
 
-## 5. Version Compatibility Rules
+## 4. Server-Side Handler (PxRpcService)
 
-1. **Sender rule:** every message sets `version = 1` (the initial wire version).
-2. **Receiver rule:** decode must accept any `version <= max_supported`. Unknown fields are ignored (protobuf default behavior).
-3. **Upgrade rule:** new fields are added with new field numbers; old fields are never removed or renumbered.
-4. **Field-number freeze per message:** field numbers are frozen once
-   assigned. The frozen ranges are documented in the proto file
-   comments. Future versions may add new oneof arms starting at the
-   next free field number.
+`PxRpcService` is the crow-rpc handler set for consensus RPCs. It
+holds `Arc<PxKvStore>` + a tokio `Handle` (for spawning async
+handlers). `register_handlers` wires one handler per `msg_type` into
+the `RpcServer`:
+
+- `EPrepareRequest` → `handle_prepare` — dispatches to
+  `PxLocalReplica::on_prepare`, builds `FBPromiseResponse`.
+- `EAcceptRequest` → `handle_accept` — dispatches to
+  `PxLocalReplica::on_accept`, builds `FBAcceptedResponse`.
+- `EPreVoteRequest` → `handle_pre_vote` — dispatches to
+  `PxLocalReplica::on_pre_vote`, builds `FBPreVoteResponse`.
+- `ERequestVoteRequest` → `handle_request_vote` — dispatches to
+  `PxLocalReplica::on_request_vote`, builds `FBRequestVoteResponse`.
+- `EHeartbeatRequest` → `handle_heartbeat` — dispatches to
+  `PxLocalReplica::on_heartbeat`, builds `FBHeartbeatResponse`.
+- `EStepDownRequest` → `handle_step_down` — dispatches to
+  `PxLocalReplica::on_step_down`, builds `FBStepDownResponse`.
+- `EChosenNotification` → `handle_chosen_notice` — fire-and-forget,
+  updates the learner's chosen frontier, no response sent.
+- `EBatchChosenNotification` → `handle_batch_chosen` — fire-and-forget,
+  batch frontier update, no response sent.
+- `EFetchGapRequest` → `handle_fetch_gap` — looks up the accepted
+  value at the requested slot, builds `FBFetchGapResponse` (or
+  `NotFound` error if the slot is not yet chosen).
+
+Each handler reads the request flatbuffer directly via
+`flatbuffers::root::<FB<Type>Request>(req.control)`, dispatches to the
+existing consensus logic on `PxLocalReplica`, and builds the response
+flatbuffer via `FlatBufferBuilder`. The response is submitted via
+`server.submit_response(conn_handle, &ctrl, None, msg_type, req_id)`.
 
 ---
 
-## 6. Flow Control and Parallelism
+## 5. Client-Side Transport (PxRpcTransport)
 
-The `LearnerStream` design directly enables the parallel-slot
-pipelining described in `design-crow-kv-slot.md` §5:
+`PxRpcTransport` is the shared client-side transport for outbound
+consensus RPCs. It holds:
 
-- **Multiple in-flight `Accept` frames per peer.** The background task
-  maintains a `PendingMap` keyed by `request_id`. Each `send_accept`
-  call inserts a new oneshot and returns immediately; the caller does
-  not block waiting for the peer's reply. This allows slot N+1's
+- `server: Arc<RpcServer>` — the local server handle (for connection
+  attachment).
+- `rpc: RpcClient` — the client facade for `call()` / `send()`.
+- `connections: DashMap<String, Connection>` — per-endpoint
+  connection cache. `conn_for(endpoint)` lazily connects and caches.
+
+**Request-response path (`send_prepare`, `send_accept`, etc.):**
+Builds the flatbuffer request via `FlatBufferBuilder`, calls
+`rpc.call(server, conn, req_id, control, None, msg_type)`, which
+returns a `CallFuture`. The future resolves to a `Response` containing
+the control buffer. The response is parsed via the zero-copy
+`FB<Type>ResponseRef` wrapper (§11).
+
+**Fire-and-forget path (`send_chosen`, `send_batch_chosen`):** Builds
+the flatbuffer, calls `rpc.send(server, conn, req_id, control, None,
+msg_type, noop_completion(), null_mut())`. The no-op completion
+callback satisfies the C++ side's non-null `on_complete` requirement.
+No reply is awaited; failures are returned for caller-side
+observability but treated as best-effort.
+
+**Port derivation:** `conn_for(endpoint)` parses the gRPC endpoint
+(host:port) and connects to `port + RPC_PORT_OFFSET` (see §12).
+
+---
+
+## 6. Dual-Path Routing in PxRemoteReplica
+
+`PxRemoteReplica` supports both transports: when `with_rpc_transport`
+is called, all RPCs route through crow-rpc; otherwise, the existing
+gRPC client + `LearnerStream` path is used. This enables incremental
+rollout — existing tests continue to use gRPC, while production
+deployments opt into crow-rpc via `start_rpc_server`.
+
+Each `ReplicaClient` trait method (`send_prepare`, `send_accept`,
+`send_pre_vote`, `send_request_vote`, `send_heartbeat`,
+`send_step_down`) checks `rpc_transport.get()` first. When set, it
+delegates to the transport with a `tokio::time::timeout` wrapper and
+records metrics. When not set, it falls back to the gRPC path.
+
+`send_chosen_notice` and `send_batch_chosen_notice` similarly check
+the transport — fire-and-forget via `transport.send_chosen()` /
+`transport.send_batch_chosen()` when available, gRPC `LearnerStream`
+otherwise.
+
+`send_fetch_gap` checks the transport and delegates to
+`transport.send_fetch_gap()` (request-response) or the gRPC
+`LearnerStream::send_fetch_gap()` path. The `group_fetchgap` loop
+also checks `remote.rpc_transport()` to route FetchGap through the
+transport when available.
+
+---
+
+## 7. Flow Control and Parallelism
+
+The crow-rpc transport enables the parallel-slot pipelining described
+in `design-crow-kv-slot.md` §5:
+
+- **Multiple in-flight `Accept` frames per peer.** Each `send_accept`
+  call creates a new `CallFuture` and returns immediately; the caller
+  does not block waiting for the peer's reply. This allows slot N+1's
   `Accept` to be sent before slot N's `Accepted` response arrives.
-- **Bounded mpsc backpressure.** The user-facing `cmd_tx` is a bounded
-  `tokio::sync::mpsc` (default 64 frames, tunable via
-  `PxElectionConfig`). When full, `dispatch` fails and the proposer
-  surfaces `PxPaxosError::Busy`.
-- **Reconnect safety.** On transport failure the background task fails
-  all pending oneshots, then reconnects with capped exponential
-  backoff (50 ms → 2 s). The proposer treats this as retryable and
-  re-sends the `Accept` after reconnect.
+- **Connection-level flow control.** The crow-rpc engine manages a
+  send queue per connection; when the queue is full, `send()` /
+  `call()` returns `SendQueueFull`, which the caller treats as
+  retryable.
+- **Reconnect safety.** On transport failure, the connection is
+  dropped from the cache; the next `conn_for()` lazily reconnects.
+  The proposer treats this as retryable and re-sends after reconnect.
 
-### 6.1 Quorum Short-Circuit
+### 7.1 Quorum Short-Circuit
 
 `run_prepare_phase` and `run_accept_phase` fan out to all peers but
 do not wait for all replies. A `FuturesUnordered` (local + each remote,
@@ -197,34 +261,25 @@ quorum-th-fastest reply, not `max(all peers)`. A slow but connected
 follower no longer drags every write. Failure detection is preserved.
 It just moves off the latency path.
 
-### 6.2 RPC Deadline
+### 7.2 RPC Deadline
 
-`send_accept` wraps its oneshot await with
-`tokio::time::timeout(rpc_timeout)`. On expiry the caller removes its
-pending-map entry (the recv half no-ops on a missing entry, so a late
-reply is logged at `debug!` and dropped) and surfaces a typed
-retryable error. `send_prepare` and `send_heartbeat` wrap the unary
-gRPC call with the same timeout. A connected-yet-unresponsive peer (GC
-pause, half-open socket, overloaded server) is surfaced as a
-retryable failure within `learner_stream_rpc_timeout_ms` (default 2000
-ms, aligned with the 2 s election max) rather than blocking the
-fan-out indefinitely.
-
-Belt-and-braces: h2 keepalive (`http2_keep_alive_interval` +
-`keep_alive_while_idle`) is enabled on the `get_client`,
-`get_heartbeat_client`, and `learner_stream` connect `Endpoint`s, so a
-silent half-open connection is detected at the transport layer
-independent of the application timeout.
+Each `send_*` method wraps its `CallFuture` await with
+`tokio::time::timeout(rpc_timeout)`. On expiry the caller surfaces a
+typed retryable error. A connected-yet-unresponsive peer (GC pause,
+half-open socket, overloaded server) is surfaced as a retryable
+failure within `learner_stream_rpc_timeout_ms` (default 2000 ms,
+aligned with the 2 s election max) rather than blocking the fan-out
+indefinitely.
 
 ---
 
-## 7. Paxos Error Model
+## 8. Paxos Error Model
 
 The error categories below determine whether the proposer retries the
 same slot, runs classic repair, moves the client operation to a new
 slot, redirects the client, or returns a retryable error.
 
-### 7.1 Error Categories
+### 8.1 Error Categories
 
 - **`NotLeader`** — KV request reaches follower. Client retries with
   leader hint.
@@ -245,7 +300,7 @@ slot, redirects the client, or returns a retryable error.
 - **`InternalInvariantViolation`** — Missing required value, invalid
   state transition. Fail test fast; production maps to internal error.
 
-### 7.2 Retry Rules
+### 8.2 Retry Rules
 
 - **Prepare rejection:** retry Phase 1 for the same slot using a
   ballot above the highest observed rejected ballot. Do not move to a
@@ -267,33 +322,140 @@ decorrelates retry storms across replicas that collide on the same
 slot. The admission permit is held during backoff (releasing it would
 let a duplicate `(client_id, seq)` admit concurrently).
 
-### 7.3 RPC Mapping
+### 8.3 RPC Mapping
 
-Unary Paxos responses carry rejected metadata directly. RPC transport
-failures are mapped by the caller into `TransportFailure`. Malformed
-Paxos RPCs map to `InternalInvariantViolation` at the Paxos model
-level and to `invalid_argument` at the gRPC boundary.
-
----
-
-## 8. Open Questions
-
-- **Q1: `AcceptedValue.payload` kind discrimination** — Resolved:
-  opaque bytes in M2; empty payload = `NoOp`, non-empty = `Write`.
-  `ConfigChange` and `DedupCheckpoint` kinds are designed but not yet
-  implemented.
-- **Q2: Should `Promise` and `Accepted` carry `term` for leader
-  fencing?** — Resolved: `term` added in P1 M3 to all messages for the
-  two-fence rule (see `design-crow-kv-leader-election.md` §2.3).
-- **Q3: Should `Prepare`/`Accept` carry `membership_epoch`?** —
-  Resolved: Added in P5 M2. Responses echo `membership_epoch` and set
-  `epoch_mismatch` when the proposer's epoch doesn't match the
-  responder's. The proposer adopts the responder's epoch and retries
-  without bumping its ballot.
+Consensus responses carry rejected metadata directly in the
+flatbuffer response fields (`rejected`, `term_stale`, `epoch_mismatch`
+booleans + the term/epoch fields). RPC transport failures are mapped
+by the caller into `TransportFailure`. Malformed consensus RPCs map
+to `InternalInvariantViolation` at the Paxos model level and to
+`FBKvRetCode::InvalidArgument` at the crow-rpc boundary.
 
 ---
 
-## 9. Proto `bytes` Field Mapping — `bytes::Bytes`
+## 9. Version Compatibility Rules
+
+1. **Sender rule:** every message sets `version = 1` (the initial wire version).
+2. **Receiver rule:** decode must accept any `version <= max_supported`. Unknown fields are ignored (flatbuffer default behavior).
+3. **Upgrade rule:** new fields are added with new field numbers; old fields are never removed or renumbered.
+4. **Field-number freeze per message:** field numbers are frozen once
+   assigned. The frozen ranges are documented in the schema file
+   comments. Future versions may add new fields starting at the
+   next free field number.
+
+---
+
+## 10. Flatbuffer Schema (kv_consensus.fbs)
+
+`lib/crow-protocol/src/fbs/kv_consensus.fbs` mirrors the consensus
+messages from `pxos.proto`, following the `diskdb.fbs` conventions
+proven by R115:
+
+- `include "common_type.fbs";` for `FBInt128`.
+- `namespace crow.kv_consensus.proto;`
+- Every request/response table carries `id` (request_id) +
+  `rpc_create_nano` as its first two fields.
+- `FBAcceptedValue` is a table (has a `payload: [ubyte]` vector,
+  which requires a vtable).
+- `FBDedupTag` is an inline struct (fixed-layout, two `uint64` fields).
+- `NotLeaderHint` is NOT a separate message — it is fields on the
+  response tables (`not_leader_hint:string` + `term:uint64` +
+  `membership_epoch:uint64`).
+
+Message type IDs registered in `msg_type.fbs` (1000–1099 range):
+
+```
+EPrepareRequest = 1000,
+EPromiseResponse = 1001,
+EAcceptRequest = 1002,
+EAcceptedResponse = 1003,
+EPreVoteRequest = 1004,
+EPreVoteResponse = 1005,
+ERequestVoteRequest = 1006,
+ERequestVoteResponse = 1007,
+EHeartbeatRequest = 1008,
+EHeartbeatResponse = 1009,
+EStepDownRequest = 1010,
+EStepDownResponse = 1011,
+EChosenNotification = 1012,       // fire-and-forget (no response)
+EBatchChosenNotification = 1013,  // fire-and-forget (no response)
+EFetchGapRequest = 1014,
+EFetchGapResponse = 1015,
+ESnapshotRequest = 1016,
+ESnapshotResponse = 1017,
+```
+
+No separate LearnerStream request/response msg_types — each frame type
+has its own msg_type. The persistent connection carries a mix of these
+msg_types; the server dispatches each frame independently by its
+msg_type.
+
+**Build integration:** `lib/crow-protocol/build.rs` compiles
+`kv_consensus.fbs` via `flatc --rust --gen-all` (inlines
+`common_type.fbs` so `FBInt128` resolves). The generated module is
+re-exported as `crow_protocol::kv_consensus_fb`.
+
+---
+
+## 11. Zero-Copy Wrapper Classes
+
+`lib/crow-protocol/src/fb_wrappers/kv_consensus.rs` defines one
+`FB<Type>Ref` struct per response type:
+
+```rust
+pub struct FBPromiseResponseRef<'a> {
+    root: flatbuffers::Result<'a, FBPromiseResponse<'a>>,
+}
+impl<'a> FBPromiseResponseRef<'a> {
+    pub fn new(buf: &'a [u8]) -> Self { Self { root: flatbuffers::root::<FBPromiseResponse>(buf) } }
+    pub fn valid(&self) -> bool { self.root.is_ok() }
+    pub fn request_id(&self) -> Option<u64> { self.root.as_ref().ok()?.id() }
+    pub fn slot(&self) -> Option<u64> { self.root.as_ref().ok()?.slot() }
+    // ... remaining fields
+}
+```
+
+Same pattern for: `FBAcceptedResponseRef`, `FBHeartbeatResponseRef`,
+`FBPreVoteResponseRef`, `FBRequestVoteResponseRef`,
+`FBStepDownResponseRef`, `FBFetchGapResponseRef`.
+
+Request wrappers are NOT needed — the server handler reads the request
+flatbuffer directly via `flatbuffers::root::<FB<Type>Request>(req.control)`.
+The client builds requests with `FlatBufferBuilder` and doesn't need
+to read them back.
+
+Edge cases:
+- Malformed flatbuffer → `valid()` returns false; the caller treats it
+  as a transport error (maps to `PxReplicaError::Internal`).
+- Missing optional field → accessor returns `None` / default; the
+  caller handles the missing-field case.
+
+---
+
+## 12. Port Allocation
+
+The crow-rpc port is derived from the gRPC port via a fixed offset:
+
+```
+KV_SERVER_GRPC_BASE = 28001  (gRPC port base for KV server)
+KV_RPC_BASE         = 28101  (crow-rpc port base for KV server)
+RPC_PORT_OFFSET     = KV_RPC_BASE - KV_SERVER_GRPC_BASE = 100
+```
+
+When a `PxKvStore` binds gRPC on port P, the crow-rpc server listens
+on port `P + 100`. The client transport's `conn_for(endpoint)` parses
+the gRPC endpoint and connects to `grpc_port + 100`.
+
+For ephemeral ports (port 0 in tests), the gRPC server binds first,
+then `start_rpc_server` reads the actual bound port from
+`server_state.listen_addr` and derives the crow-rpc port.
+
+Port constants are in `lib/crow-protocol/src/ports.rs` and the
+`KvServerPort` enum.
+
+---
+
+## 13. Proto `bytes` Field Mapping — `bytes::Bytes`
 
 By default, `prost-build` maps protobuf `bytes` fields to `Vec<u8>`,
 making every clone an O(n) heap allocate + memcpy. For hot-path KV
@@ -324,18 +486,6 @@ flattens `KvBatchItem` fields into a `Vec<u8>` consensus payload.
 That copy remains (eliminating it requires changing the consensus
 payload contract, out of scope).
 
-**Alternatives considered**:
-
-- **Borrowed slices in client API** (`&[(&[u8], Option<&[u8]>)]`):
-  eliminates copies but changes the public API ergonomics and
-  complicates retry (borrowed data must outlive the retry loop).
-  `Bytes` achieves the same zero-copy-with-ergonomics via ref-counting.
-- **Server-side payload encoding elimination**: skip
-  `encode_kv_batch_items` and pass `KvBatchItem` directly as the Paxos
-  payload. Requires changing `Batch::decode` to match the protobuf
-  wire format. High complexity, ripples through consensus + WAL +
-  replay. Separate requirement.
-
 ---
 
 ## References
@@ -346,3 +496,5 @@ payload contract, out of scope).
 - `design-crow-kv-observability.md` — write-path phase metrics
   (`write.propose_e2e.l`, `write.prepare_phase.l`, `write.accept_phase.l`,
   `write.accept_quorum_rpc.l`, `write.engine_apply.l`)
+- `design-crow-rpc.md` §6 — Flatbuffer Wrapper Convention
+- `design-crow-rpc-diskdb-migration.md` — R115's proven migration pattern

@@ -56,7 +56,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | --- | --- |
 | `doc/design/kv/design-crow-kv-leader-election.md` | Election protocol, leader lease, ReadIndex, step-down. |
 | `doc/design/kv/design-crow-kv-slot.md` | Parallel slot pipelining, gap repair, follower catch-up, `SlotList`, proposal coalescing. |
-| `doc/design/kv/design-crow-kv-rpc.md` | Wire protocol, LearnerStream, PxService, Paxos error model. |
+| `doc/design/kv/design-crow-kv-rpc.md` | Wire protocol, crow-rpc consensus transport, PxRpcService, PxRpcTransport, flatbuffer schema, Paxos error model. |
 | `doc/design/kv/design-crow-kv-reconfiguration.md` | Member add/remove, leader transfer, `membership_epoch` fence. |
 | `doc/design/kv/design-crow-kv-group0.md` | Group-0 sysdata schema, service registry, cluster topology records. |
 | `doc/design/kv/design-crow-kv-sysdata-lifecycle.md` | Sysdata lifecycle: ID reuse safety, cascading cleanup, client cache eviction, disk move, cluster reset. |
