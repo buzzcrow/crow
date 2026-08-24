@@ -5,7 +5,7 @@
 
 use crate::cluster::group::{ProposeResult, PxGroup};
 use crate::cluster::group_election::{LeaderElection, ReadBarrierOutcome};
-use crate::cluster::kv_server::GrpcTaskState;
+use crate::cluster::kv_server::{GrpcTaskState, RpcServerState};
 use crate::cluster::status::{GroupStatus, StatusLevel, StoreStatus};
 use crate::common::config::ServerConfig;
 use crate::common::report::OperationReport;
@@ -25,6 +25,9 @@ pub struct PxKvStore {
     pub(crate) groups: DashMap<u64, Arc<PxGroup>>,
     pub(crate) server_state: Mutex<GrpcTaskState>,
     pub(crate) listen_addr: SocketAddr,
+    /// crow-rpc server state (R32 migration). Holds the `RpcServer`
+    /// handle + the shared `PxRpcTransport` for outbound RPCs.
+    pub(crate) rpc_server_state: Mutex<RpcServerState>,
     /// Set the first time `shutdown()` is invoked. Subsequent calls are no-ops.
     shutdown_started: AtomicBool,
     /// Metrics registry for KV service instrumentation. `None` when
@@ -48,6 +51,7 @@ impl PxKvStore {
             store_id,
             groups: DashMap::new(),
             server_state: Mutex::new(GrpcTaskState::default()),
+            rpc_server_state: Mutex::new(RpcServerState::default()),
             listen_addr,
             shutdown_started: AtomicBool::new(false),
             metrics_registry: None,

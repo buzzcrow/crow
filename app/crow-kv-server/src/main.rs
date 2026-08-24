@@ -464,6 +464,13 @@ async fn create_and_start_stores(
             continue;
         }
 
+        // R32: start the crow-rpc server alongside the gRPC server.
+        let rt = tokio::runtime::Handle::current();
+        if let Err(e) = store.start_rpc_server(rt) {
+            tracing::error!(store_id, port, error = %e, "failed to start crow-rpc server, skipping");
+            continue;
+        }
+
         info!(
             store_id,
             listen_addr = ?store.listen_addr(),

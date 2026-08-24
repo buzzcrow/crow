@@ -17,11 +17,14 @@ use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::kv_service_server::KvServiceServer;
 use crate::rpc::px_service_server::PxServiceServer;
 use crate::rpc::snapshot_service_server::SnapshotServiceServer;
-use crate::rpc::{KvStoreService, PxReplicaService, PxSnapshotService};
+use crate::rpc::{KvStoreService, PxReplicaService, PxRpcService, PxRpcTransport, PxSnapshotService};
+use crow_protocol::{KV_RPC_BASE, KV_SERVER_GRPC_BASE};
+use crow_rpc_ffi::RpcServer;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::runtime::Handle;
 use tokio_stream::Stream;
 use tonic::transport::Server;
 use tracing::{debug, error, info};
@@ -42,6 +45,17 @@ pub(crate) struct GrpcTaskState {
     pub(crate) handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) listen_addr: Option<SocketAddr>,
+}
+
+/// crow-rpc server state (R32 migration). Holds the `RpcServer`
+/// handle + the shared `PxRpcTransport` for outbound RPCs to peers.
+#[derive(Default)]
+pub(crate) struct RpcServerState {
+    /// The crow-rpc server (listens on the crow-rpc port).
+    pub(crate) server: Option<Arc<RpcServer>>,
+    /// Shared client-side transport for outbound RPCs. Wired into
+    /// `PxRemoteReplica` via `with_rpc_transport`.
+    pub(crate) transport: Option<Arc<PxRpcTransport>>,
 }
 
 impl KvServer for Arc<PxKvStore> {
@@ -153,6 +167,9 @@ impl PxKvStore {
     /// Used by [`PxKvStore::shutdown`] as the first cascade step. Aborts the
     /// task on hang; idempotent.
     pub(crate) async fn shutdown_server(&self, timeout: Duration) -> Result<(), String> {
+        // R32: also stop the crow-rpc server.
+        self.stop_rpc_server();
+
         let (handle, sender) = {
             let mut state = self.server_state.lock();
             (state.handle.take(), state.shutdown_tx.take())
@@ -198,6 +215,89 @@ impl PxKvStore {
                 );
                 Err(msg)
             }
+        }
+    }
+
+    /// Start the crow-rpc server (R32 migration). Binds to the
+    /// crow-rpc port (derived from the gRPC port via a fixed offset),
+    /// registers all consensus handlers, and creates a shared
+    /// `PxRpcTransport` for outbound RPCs. The transport is stored in
+    /// `rpc_server_state` and can be retrieved via
+    /// [`Self::rpc_transport`] to wire into `PxRemoteReplica`.
+    ///
+    /// Must be called after [`KvServer::start`] (which binds the gRPC
+    /// port and sets `listen_addr`).
+    ///
+    /// # Errors
+    /// Returns an error string if the crow-rpc port is out of range or
+    /// the server fails to listen on the derived port.
+    pub fn start_rpc_server(self: &Arc<Self>, rt: Handle) -> Result<(), String> {
+        {
+            let state = self.rpc_server_state.lock();
+            if state.server.is_some() {
+                debug!(
+                    store_id = self.store_id,
+                    "rpc server start skipped because server is already running"
+                );
+                return Ok(());
+            }
+        }
+
+        // Derive the crow-rpc port from the gRPC port.
+        let grpc_port = self.listen_addr.port();
+        let rpc_port = i32::from(grpc_port) + (i32::from(KV_RPC_BASE) - i32::from(KV_SERVER_GRPC_BASE));
+        if !(1..=65535).contains(&rpc_port) {
+            return Err(format!(
+                "crow-rpc port {rpc_port} out of range (gRPC port {grpc_port})"
+            ));
+        }
+        let rpc_addr = format!("{}:{}", self.listen_addr.ip(), rpc_port);
+
+        let server = Arc::new(RpcServer::new(None));
+        server
+            .listen(&self.listen_addr.ip().to_string(), rpc_port)
+            .map_err(|e| format!("crow-rpc listen on {rpc_addr}: {e:?}"))?;
+        server.start();
+
+        // Register consensus handlers.
+        let service = Arc::new(PxRpcService::new(self.clone(), rt));
+        service.register_handlers(&server);
+
+        // Create the shared client transport.
+        let transport = Arc::new(PxRpcTransport::new());
+
+        {
+            let mut state = self.rpc_server_state.lock();
+            state.server = Some(server);
+            state.transport = Some(transport);
+        }
+
+        info!(
+            store_id = self.store_id,
+            rpc_addr = %rpc_addr,
+            "crow-rpc server started"
+        );
+        Ok(())
+    }
+
+    /// Get the shared `PxRpcTransport` for outbound RPCs (R32
+    /// migration). Returns `None` if `start_rpc_server` has not been
+    /// called.
+    #[allow(dead_code)] // Wired in Phase 8 (integration tests)
+    pub(crate) fn rpc_transport(&self) -> Option<Arc<PxRpcTransport>> {
+        self.rpc_server_state.lock().transport.clone()
+    }
+
+    /// Stop the crow-rpc server (R32 migration). Called from
+    /// [`Self::shutdown_server`] or directly for testing.
+    pub(crate) fn stop_rpc_server(&self) {
+        let server = {
+            let mut state = self.rpc_server_state.lock();
+            state.server.take()
+        };
+        if let Some(server) = server {
+            server.stop();
+            info!(store_id = self.store_id, "crow-rpc server stopped");
         }
     }
 }
