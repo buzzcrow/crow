@@ -14,7 +14,7 @@ use crow_chunkdb::lifecycle::{ChunkLockMap, LifecycleHandler};
 use crow_chunkdb::metrics::LifecycleMetrics;
 use crow_chunkdb::range_guard::RangeGuard;
 use crow_chunkdb::routing::{default_binding_table, BindingCache};
-use crow_chunkdb::service::ChunkdbService;
+use crow_chunkdb::service::{ChunkdbRpcService, ChunkdbService};
 use crow_chunkdb::storage::ChunkStore;
 use crow_chunkdb::topology::{notify::NotifyHandler, refresh::run_refresh_loop, TopologyCache};
 use crow_kv_client::{
@@ -54,6 +54,11 @@ async fn main() {
         .http_listen_addr
         .parse()
         .expect("valid http_listen_addr");
+    let rpc_listen_addr: SocketAddr = config
+        .server
+        .rpc_listen_addr
+        .parse()
+        .expect("valid rpc_listen_addr");
 
     // Build KV client for group-0 topology access.
     let kv = Arc::new(CrowkvClient::new(ClientConfig::new(
@@ -154,18 +159,36 @@ async fn main() {
             .with_range_guard(Arc::clone(&range_guard))
             .with_locks(Arc::clone(&lock_map)),
     );
-    let grpc_service = ChunkdbService::new(handler).into_server();
+    let grpc_service = ChunkdbService::new(Arc::clone(&handler)).into_server();
+
+    // Build the crow-rpc server (R116 migration — runs alongside gRPC
+    // during the mixed-rollout window). The RpcServer listens on a
+    // separate port and dispatches to ChunkdbRpcService handlers.
+    let rpc_rt_handle = tokio::runtime::Handle::current();
+    let rpc_service = Arc::new(ChunkdbRpcService::new(Arc::clone(&handler), rpc_rt_handle));
+    let rpc_server = Arc::new(crow_rpc_ffi::RpcServer::new(None));
+    rpc_server
+        .listen(
+            rpc_listen_addr.ip().to_string().as_str(),
+            i32::from(rpc_listen_addr.port()),
+        )
+        .expect("rpc server listen");
+    rpc_service.register_handlers(&rpc_server);
+    rpc_server.start();
+    info!(%rpc_listen_addr, "crow-rpc server listening (R116 migration)");
 
     // Start HTTP health + metrics + cache invalidation server.
     let http_handle = tokio::spawn(run_http_server(http_listen_addr, Arc::clone(&lock_map)));
 
     info!(%listen_addr, "gRPC server listening");
 
+    let rpc_server_stop = Arc::clone(&rpc_server);
     let grpc_result = tonic::transport::Server::builder()
         .add_service(grpc_service)
         .serve_with_shutdown(listen_addr, async move {
             let _ = tokio::signal::ctrl_c().await;
             info!("received shutdown signal");
+            rpc_server_stop.stop();
             let _ = stop_tx.send(true);
         })
         .await;
