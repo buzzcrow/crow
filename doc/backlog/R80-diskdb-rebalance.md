@@ -212,7 +212,7 @@ imbalance (placeholder relocation in v1; real move deferred to a future
      emit a new plan.
 
 4. **Rebalance plan KV schema** —
-   `lib/crow-protocol/src/proto/diskdb_type.proto` +
+   `lib/crow-protocol/src/fbs/diskdb.fbs` +
    `lib/crow-protocol/src/key/`:
    - New key type `RebalancePlanKey { disk_group_id }` (BinaryKey, on
      the bound data group alongside zone records).
@@ -228,7 +228,7 @@ imbalance (placeholder relocation in v1; real move deferred to a future
      relocation.
 
 5. **Disk-group-level imbalance hint API** —
-   `app/crow-diskdb` gRPC service (`DiskdbService`, §4 Protocol):
+   `app/crow-diskdb` crow-rpc service (`DiskdbService`, §4 Protocol):
    - Add `GetRebalanceHint` RPC — returns per-owned-disk-group
      `used_pct` + `allocatable_disk_count` + an `imbalance_spread`
      flag, derived from `aggregate_usage()`. The caller / placement

@@ -20,8 +20,8 @@
   `Relocate`/`RebuildFromEc` when the `diskio` service exists"
   (disk_recovery.rs:37). There is **no chunkdb yet** — chunks (logical
   blocks composed of mirror or EC strips, each strip a set of diskdb
-  `Segment`s) are only a reserved proto surface
-  (`chunkdb_type.proto`, `chunkdb_service.proto`). So when a disk goes
+  `Segment`s) are only a reserved fbs schema surface
+  (`chunkdb.fbs`). So when a disk goes
   `Bad`, its impacted blocks are identified and handed to a
   "future recovery/relocation path" (§8) that does not exist: the owner
   is notified nowhere, no surviving replica/parity is read, no rebuilt
@@ -44,12 +44,12 @@
   elsewhere"),
   [`design-crow-diskdb-zone-management.md`](../design/diskdb/design-crow-diskdb-zone-management.md)
   §6 (crash recovery strategies 1/2/3 — diskdb-layer bitmap
-  reconstruction only). Proto surfaces:
-  `chunkdb_type.proto` (`Chunk`, `ChunkStrip`, `MirrorStrip`,
-  `EcStrip`, `StripType`, `ECState`, `ChunkState`),
-  `chunkdb_service.proto` (`ChunkdbService` — `AllocateChunk` /
+  reconstruction only). Fbs schema surfaces:
+  `chunkdb.fbs` (`Chunk`, `ChunkStrip`, `MirrorStrip`,
+  `EcStrip`, `StripType`, `ECState`, `ChunkState`,
+  `ChunkdbService` — `AllocateChunk` /
   `AppendChunk` / `SealChunk` / `DeleteChunk` / `UpdateChunkStrip` /
-  `ListChunks`), `diskio_service.proto` (`DiskWrite` / `DiskRead`).
+  `ListChunks`), `diskio.fbs` (`DiskWrite` / `DiskRead`).
   CROW's chunkdb owns disk-failure recovery: it rebuilds lost blocks
   from mirror/EC at the chunk layer, driving rebuild I/O and pacing it.
 - **Use scenarios** —
@@ -92,7 +92,7 @@
   depends on chunkdb's architecture (chunk→strip→segment storage,
   ownership model, KV schema) plus the `diskio` service (also unbuilt).
   The high-level shape is known from R76's placeholder + the reserved
-  proto surfaces, but the detailed design (rebuild orchestration,
+  fbs schema surfaces, but the detailed design (rebuild orchestration,
   hand-off mechanism, throttle mechanism, progress schema) needs a
   design draft once chunkdb's core is defined.
 
@@ -203,7 +203,7 @@
   first; without it there is no chunk owner to drive recovery.
 - **`diskio` service (prerequisite, unlanded)** — real data recovery
   needs `DiskRead` (surviving blocks) + `DiskWrite` (rebuilt blocks).
-  The `diskio` server is a future component (§2, `diskio_service.proto`
+  The `diskio` server is a future component (§2, `diskio.fbs`
   reserved). Must be filed as its own backlog item. Fallback without
   diskio: R76's `LogOnly` placeholder stays (current state).
 - **R76** — `RecoveryScanTask`, impacted-blocks + `owner_chunk`

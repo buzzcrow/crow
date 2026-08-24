@@ -96,8 +96,8 @@ impl KvClientRpcForwarder {
     /// Get or create a `Connection` for the given endpoint. The
     /// crow-rpc server listens on the same port as the gRPC endpoint
     /// (no port derivation).
-    fn conn_for(&self, grpc_endpoint: &str) -> Result<Connection, RpcError> {
-        let normalized = normalize_endpoint(grpc_endpoint);
+    fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection, RpcError> {
+        let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(conn) = self.connections.get(&normalized) {
             return Ok(conn.clone());
         }
@@ -112,11 +112,11 @@ impl KvClientRpcForwarder {
     /// response control buffer on success.
     pub(crate) async fn forward_get(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &FBKvGetRequest<'_>,
     ) -> Result<Vec<u8>, RpcError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let key = builder.create_vector(req.key().map_or(&[], |v| v.bytes()));
         let args = FBKvGetRequestArgs {
@@ -146,11 +146,11 @@ impl KvClientRpcForwarder {
     /// Forward a `Scan` request to the leader.
     pub(crate) async fn forward_scan(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &FBKvScanRequest<'_>,
     ) -> Result<Vec<u8>, RpcError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let prefix = builder.create_vector(req.prefix().map_or(&[], |v| v.bytes()));
         let start_after = builder.create_vector(req.start_after().map_or(&[], |v| v.bytes()));
@@ -188,11 +188,11 @@ impl KvClientRpcForwarder {
     /// Forward a `JournalScan` request to the leader.
     pub(crate) async fn forward_journal_scan(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &FBKvJournalScanRequest<'_>,
     ) -> Result<Vec<u8>, RpcError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let key_prefix = builder.create_vector(req.key_prefix().map_or(&[], |v| v.bytes()));
         let args = FBKvJournalScanRequestArgs {

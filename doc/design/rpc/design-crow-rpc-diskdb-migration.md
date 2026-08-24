@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0 -->
 
-# CROW - Design: diskdb crow-rpc Migration
+# CROW - Design: diskdb crow-rpc Service
 
 Depends on: [`design-crow-rpc.md`](design-crow-rpc.md) §3 (Wire Format),
 §4 (Control Plane), §6 (Flatbuffer Wrapper Convention);
@@ -9,10 +9,9 @@ Depends on: [`design-crow-rpc.md`](design-crow-rpc.md) §3 (Wire Format),
 Satisfies: `design-crow-rpc.md` §4.4 (Server Side — Rust handler
 dispatch), §6 (Flatbuffer Wrapper Convention — diskdb schema).
 
-The diskdb service migrated from tonic/gRPC to crow-rpc (flatbuffer over
-TCP). This doc covers the server-side handler wiring, client-side
-transport, error model, mixed-rollout mechanism, and the
-`conn_handle` lifetime safety fix in `SocketTransport`. Architecture
+The diskdb service uses crow-rpc (flatbuffer over TCP). This doc covers
+the server-side handler wiring, client-side transport, error model, and
+the `conn_handle` lifetime safety in `SocketTransport`. Architecture
 and rationale for the crow-rpc engine itself are in
 `design-crow-rpc.md` §3–§6; this doc does not repeat them.
 
@@ -20,28 +19,27 @@ and rationale for the crow-rpc engine itself are in
 
 - [1. Server-side handler wiring](#1-server-side-handler-wiring)
 - [2. Client-side transport](#2-client-side-transport)
-- [3. Error model parity](#3-error-model-parity)
-- [4. Mixed rollout + cutover](#4-mixed-rollout--cutover)
+- [3. Error model](#3-error-model)
+- [4. Port allocation + reserved schemas](#4-port-allocation--reserved-schemas)
 - [5. conn_handle lifetime safety](#5-conn_handle-lifetime-safety)
-- [6. rpc_endpoint rename](#6-rpc_endpoint-rename)
+- [6. rpc_endpoint field](#6-rpc_endpoint-field)
 
 ## 1. Server-side handler wiring
 
 ### 1.1 Why
 
-diskdb's service is Rust (`DiskdbService`, tonic trait). The diskio
-reference is C++ and registers handlers via
-`server.register_handler(...)` directly. Rust servers need a C ABI
-bridge to register handlers — `RpcServer::register_handler<F>` provides
-this. Without it, Rust servers cannot use crow-rpc.
+diskdb's service is Rust (`DiskdbRpcService`). The diskio reference is
+C++ and registers handlers via `server.register_handler(...)`) directly.
+Rust servers need a C ABI bridge to register handlers —
+`RpcServer::register_handler<F>` provides this. Without it, Rust
+servers cannot use crow-rpc.
 
 ### 1.2 Handler module
 
-`DiskdbRpcService` — a struct holding the same dependencies as the
-tonic `DiskdbService` (`container`, `kv`, `storage`, `zone_loader`,
-`recalc`, `scan_state`, `metrics`). Method
-`register_handlers(&self, server: &RpcServer)` registers one handler
-per request `msg_type` (11 handlers).
+`DiskdbRpcService` — a struct holding the diskdb service dependencies
+(`container`, `kv`, `storage`, `zone_loader`, `recalc`, `scan_state`,
+`metrics`). Method `register_handlers(&self, server: &RpcServer)`
+registers one handler per request `msg_type` (11 handlers).
 
 Each handler closure:
 a. Parses the request flatbuffer from `ServerRequest::control` via
@@ -49,21 +47,20 @@ a. Parses the request flatbuffer from `ServerRequest::control` via
    appropriate type).
 b. Extracts the domain fields (zero-copy reads through the root
    pointer — no owned struct, no per-field copy except where the
-   existing diskdb logic already owns the type).
-c. Calls the existing diskdb logic (`model::alloc::allocate_blocks`,
-   `compact_zone`, `ScanState::trigger`, etc.) — reused verbatim from
-   the tonic handler bodies.
+   diskdb logic already owns the type).
+c. Calls the diskdb logic (`model::alloc::allocate_blocks`,
+   `compact_zone`, `ScanState::trigger`, etc.).
 d. Builds the response flatbuffer (`FlatBufferBuilder` → `finish` →
    bytes), and submits via `server.submit_response(req.conn_handle,
    &ctrl_bytes, data, resp_msg_type, req.request_id)`.
 
-The handler runs on the C++ I/O worker thread. The existing diskdb
-logic is synchronous (in-memory allocator + KV client calls that are
-already async via `DdbKvClient`). For the synchronous allocator path
+The handler runs on the C++ I/O worker thread. The diskdb logic is
+synchronous (in-memory allocator + KV client calls that are already
+async via `DdbKvClient`). For the synchronous allocator path
 (`AllocateBlocks`), the handler does the work inline and submits the
 response before returning. For paths that call async KV ops, the
-handler spawns a tokio task (the diskdb server already runs a tokio
-runtime) and submits the response from the task.
+handler spawns a tokio task (the diskdb server runs a tokio runtime)
+and submits the response from the task.
 
 ### 1.3 Edge cases
 
@@ -80,17 +77,16 @@ runtime) and submits the response from the task.
 
 ### 2.1 Why
 
-The client uses `RpcClient` + `Connection` (per-endpoint) instead of
-tonic `Channel` pools. The `disk_group_id → endpoint` cache + retry
-logic stay; only the transport layer changes.
+The client uses `RpcClient` + `Connection` (per-endpoint). The
+`disk_group_id → endpoint` cache + retry logic live in the client; the
+transport layer is crow-rpc.
 
 ### 2.2 Structure
 
 `DiskdbClient` keeps `svc: ServiceRegistryClient` + endpoint cache
 (`DashMap<DiskGroupId, String>`) + `disk_to_dg` reverse map. The
 `with_rpc_transport()` builder sets an `Option<Arc<DiskdbRpcTransport>>`;
-when set, all 11 RPC methods dispatch via crow-rpc. When unset, they
-fall back to tonic gRPC (mixed-rollout support).
+when set, all 11 RPC methods dispatch via crow-rpc.
 
 `DiskdbRpcTransport` holds a shared `RpcServer` (connection owner), a
 shared `RpcClient` (completion pool), and a `DashMap<String,
@@ -115,9 +111,9 @@ g. On `ret_code != Success` (protocol error): map to
   connection (reconnect).
 - All endpoints down → `AllDown` → `DiskdbClientError::Unreachable`.
 
-## 3. Error model parity
+## 3. Error model
 
-`map_status` (tonic `Status` → `DiskdbClientError`) is replaced by:
+Error mapping:
 - `From<RpcError> for DiskdbClientError` — transport errors.
   `ConnectionClosed`/`Timeout`/`SendQueueFull`/`ConnectionError` are
   retryable (`is_retryable()`); `RegistrationFailed`/`AllDown` are not.
@@ -127,18 +123,12 @@ g. On `ret_code != Success` (protocol error): map to
   `DiskdbClientError::Rpc(code_name)`; `InvalidArgument`/`Internal` →
   `DiskdbClientError::Rpc(msg)`.
 
-## 4. Mixed rollout + cutover
+## 4. Port allocation + reserved schemas
 
-The diskdb server runs the tonic gRPC server on the existing port and
-the crow-rpc server on a new port (`DISKDB_RPC_BASE` in `ports.rs`,
-offset from `DISKDB_GRPC_BASE`). The service registry stores the
-endpoint; clients pick based on whether `with_rpc_transport()` was
-called.
-
-Cutover: after all clients are migrated, the tonic server startup is
-removed in a follow-up commit. `diskdb_service.proto` stays in
-`crow-protocol` as a legacy/reserved schema (same as
-`diskio_service.proto`).
+The diskdb server runs the crow-rpc server on `DISKDB_RPC_BASE` (in
+`ports.rs`). The service registry stores the endpoint; clients use it
+via `with_rpc_transport()`. The legacy `diskdb_service` and
+`diskio_service` schemas are reserved in `crow-protocol`.
 
 ## 5. conn_handle lifetime safety
 
@@ -167,11 +157,10 @@ the `Connection::on_close` callback).
   `lookup_conn()` returns `nullopt`, and `submit()` falls through to
   direct access (backward compat for tests).
 
-## 6. rpc_endpoint rename
+## 6. rpc_endpoint field
 
-The proto field `grpc_endpoint` was renamed to `rpc_endpoint` in all
-3 proto messages (`InstanceValue`, `ChunkdbRangeBindingValue` in
-`sysdata_type.proto`; `NotMyRangeHint` in `chunkdb_type.proto`).
-Protobuf binary wire format uses tag numbers (not field names), so
-this is binary-wire-compatible — no `#[prost(rename)]` needed. All
-Rust, TS, and C++ references were updated.
+The `rpc_endpoint` field is defined in 3 flatbuffer schemas
+(`InstanceValue`, `ChunkdbRangeBindingValue` in `sysdata_type.fbs`;
+`NotMyRangeHint` in `chunkdb_type.fbs`). Flatbuffers binary wire format
+uses field offsets (not field names), so field renames are
+wire-compatible. All Rust, TS, and C++ references use `rpc_endpoint`.

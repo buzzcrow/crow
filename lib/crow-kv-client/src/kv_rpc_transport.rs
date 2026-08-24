@@ -89,17 +89,17 @@ impl KvRpcTransport {
     /// Get or create a `Connection` for the given endpoint. The
     /// crow-rpc server listens on the same port as the gRPC endpoint
     /// (no port derivation).
-    fn conn_for(&self, grpc_endpoint: &str) -> Result<Connection> {
-        let normalized = normalize_endpoint(grpc_endpoint);
+    fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection> {
+        let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(conn) = self.connections.get(&normalized) {
             return Ok(conn.clone());
         }
         let (host, port) = parse_endpoint(&normalized).map_err(|e| Error::InvalidEndpoint {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             reason: e,
         })?;
         let conn = self.server.connect(&host, port).map_err(|e| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: format!("rpc connect to {host}:{port}: {e:?}"),
         })?;
         self.rpc.attach(&conn);
@@ -112,7 +112,7 @@ impl KvRpcTransport {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_put(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         key: &[u8],
         value: &[u8],
         client_id: u64,
@@ -122,7 +122,7 @@ impl KvRpcTransport {
         group_id: u64,
     ) -> Result<KvResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let fb_key = builder.create_vector(key);
         let fb_value = builder.create_vector(value);
@@ -150,7 +150,7 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "put response missing control buffer".into(),
         })?;
         parse_kv_response(ctrl.bytes())
@@ -160,7 +160,7 @@ impl KvRpcTransport {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_get(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         key: &[u8],
         request_id: u64,
         request_create_ms: u64,
@@ -169,7 +169,7 @@ impl KvRpcTransport {
         min_slot: u64,
     ) -> Result<KvResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let fb_key = builder.create_vector(key);
         let args = FBKvGetRequestArgs {
@@ -194,7 +194,7 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "get response missing control buffer".into(),
         })?;
         parse_kv_response(ctrl.bytes())
@@ -204,7 +204,7 @@ impl KvRpcTransport {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_delete(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         key: &[u8],
         client_id: u64,
         seq: u64,
@@ -213,7 +213,7 @@ impl KvRpcTransport {
         group_id: u64,
     ) -> Result<KvResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let fb_key = builder.create_vector(key);
         let args = FBKvDeleteRequestArgs {
@@ -238,7 +238,7 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "delete response missing control buffer".into(),
         })?;
         parse_kv_response(ctrl.bytes())
@@ -248,7 +248,7 @@ impl KvRpcTransport {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_batch_write(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         items: &[crow_kv::rpc::KvBatchItem],
         client_id: u64,
         seq: u64,
@@ -257,7 +257,7 @@ impl KvRpcTransport {
         group_id: u64,
     ) -> Result<KvResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let item_offsets: Vec<_> = items
             .iter()
@@ -297,7 +297,7 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "batch_write response missing control buffer".into(),
         })?;
         parse_kv_response(ctrl.bytes())
@@ -307,7 +307,7 @@ impl KvRpcTransport {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_scan(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         prefix: &[u8],
         start_after: &[u8],
         end_key: &[u8],
@@ -322,7 +322,7 @@ impl KvRpcTransport {
         deadline_ms: u64,
     ) -> Result<KvScanResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let fb_prefix = builder.create_vector(prefix);
         let fb_start_after = builder.create_vector(start_after);
@@ -355,7 +355,7 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "scan response missing control buffer".into(),
         })?;
         parse_scan_response(ctrl.bytes())
@@ -365,7 +365,7 @@ impl KvRpcTransport {
     #[allow(clippy::too_many_arguments)]
     pub async fn send_journal_scan(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         min_slot: u64,
         max_slot: u64,
         key_prefix: &[u8],
@@ -376,7 +376,7 @@ impl KvRpcTransport {
         read_mode: ReadMode,
     ) -> Result<KvJournalScanResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let fb_key_prefix = builder.create_vector(key_prefix);
         let args = FBKvJournalScanRequestArgs {
@@ -403,7 +403,7 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "journal_scan response missing control buffer".into(),
         })?;
         parse_journal_scan_response(ctrl.bytes())
@@ -412,13 +412,13 @@ impl KvRpcTransport {
     /// Send a `CreateSnapshot` request via crow-rpc.
     pub async fn send_create_snapshot(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         group_id: u64,
         read_mode: ReadMode,
         min_slot: u64,
     ) -> Result<CreateSnapshotResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBCreateSnapshotRequestArgs {
             id: req_id,
@@ -441,17 +441,17 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "create_snapshot response missing control buffer".into(),
         })?;
         let r = FBCreateSnapshotResponseRef::new(ctrl.bytes());
         if !r.valid() {
             return Err(Error::Transport {
-                endpoint: grpc_endpoint.to_string(),
+                endpoint: rpc_endpoint.to_string(),
                 status: "create_snapshot response malformed".into(),
             });
         }
-        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        check_client_ret_code(r.ret_code(), r.error_msg(), rpc_endpoint)?;
         Ok(CreateSnapshotResponse {
             ok: r.ok(),
             error: r.error_msg().unwrap_or_default().to_string(),
@@ -465,11 +465,11 @@ impl KvRpcTransport {
     /// Send a `ListSnapshots` request via crow-rpc.
     pub async fn send_list_snapshots(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         group_id: u64,
     ) -> Result<ListSnapshotsResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBListSnapshotsRequestArgs {
             id: req_id,
@@ -486,17 +486,17 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "list_snapshots response missing control buffer".into(),
         })?;
         let r = FBListSnapshotsResponseRef::new(ctrl.bytes());
         if !r.valid() {
             return Err(Error::Transport {
-                endpoint: grpc_endpoint.to_string(),
+                endpoint: rpc_endpoint.to_string(),
                 status: "list_snapshots response malformed".into(),
             });
         }
-        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        check_client_ret_code(r.ret_code(), r.error_msg(), rpc_endpoint)?;
         let snapshots = r
             .snapshots()
             .map(|items| {
@@ -520,7 +520,7 @@ impl KvRpcTransport {
     /// Send a `SnapshotScan` request via crow-rpc.
     pub async fn send_snapshot_scan(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         snapshot_handle: u64,
         prefix: &[u8],
         start_after: &[u8],
@@ -528,7 +528,7 @@ impl KvRpcTransport {
         group_id: u64,
     ) -> Result<SnapshotScanResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let fb_prefix = builder.create_vector(prefix);
         let fb_start_after = builder.create_vector(start_after);
@@ -551,17 +551,17 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "snapshot_scan response missing control buffer".into(),
         })?;
         let r = FBSnapshotScanResponseRef::new(ctrl.bytes());
         if !r.valid() {
             return Err(Error::Transport {
-                endpoint: grpc_endpoint.to_string(),
+                endpoint: rpc_endpoint.to_string(),
                 status: "snapshot_scan response malformed".into(),
             });
         }
-        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        check_client_ret_code(r.ret_code(), r.error_msg(), rpc_endpoint)?;
         let items = r
             .items()
             .map(|items| {
@@ -586,12 +586,12 @@ impl KvRpcTransport {
     /// Send a `ReleaseSnapshot` request via crow-rpc.
     pub async fn send_release_snapshot(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         snapshot_handle: u64,
         group_id: u64,
     ) -> Result<ReleaseSnapshotResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBReleaseSnapshotRequestArgs {
             id: req_id,
@@ -609,17 +609,17 @@ impl KvRpcTransport {
             .map_err(rpc_error_to_client)?;
         let resp = fut.await.map_err(rpc_error_to_client)?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: grpc_endpoint.to_string(),
+            endpoint: rpc_endpoint.to_string(),
             status: "release_snapshot response missing control buffer".into(),
         })?;
         let r = FBReleaseSnapshotResponseRef::new(ctrl.bytes());
         if !r.valid() {
             return Err(Error::Transport {
-                endpoint: grpc_endpoint.to_string(),
+                endpoint: rpc_endpoint.to_string(),
                 status: "release_snapshot response malformed".into(),
             });
         }
-        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        check_client_ret_code(r.ret_code(), r.error_msg(), rpc_endpoint)?;
         Ok(ReleaseSnapshotResponse {
             ok: r.ok(),
             error: r.error_msg().unwrap_or_default().to_string(),
@@ -629,8 +629,8 @@ impl KvRpcTransport {
     /// Get or create a `Connection` for the given gRPC endpoint
     /// (public — used by `WatchNotifyClient` for the persistent
     /// connection).
-    pub fn get_conn(&self, grpc_endpoint: &str) -> Result<Connection> {
-        self.conn_for(grpc_endpoint)
+    pub fn get_conn(&self, rpc_endpoint: &str) -> Result<Connection> {
+        self.conn_for(rpc_endpoint)
     }
 
     /// The client-side `RpcServer` (public — used by

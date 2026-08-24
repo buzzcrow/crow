@@ -464,14 +464,14 @@ pre-populated keys):
   deep pagination would cost ~1.75s (the full-100k number), not 7ms.
   The over-fetch proxy ratio is 1.7x; the etcd-style "fetch all then
   truncate" regression would show ~400x.
-- **Per-scan fixed cost** (~4.2ms): ReadIndex consensus round + gRPC
+- **Per-scan fixed cost** (~4.2ms): ReadIndex consensus round + crow-rpc
   roundtrip + B+tree descent. Dominates at small limit (10/100).
 - **Per-entry cost** (~0.3us/entry at 64B values): visible at limit
   >= 10k. At limit=10k, avg=7.3ms vs 4.4ms at limit=10.
-- **gRPC 4 MiB message size limit**: scans returning > 4 MiB (full
+- **crow-rpc 4 MiB message size limit**: scans returning > 4 MiB (full
   100k keyspace at 64B values, or limit=1000 at 16KiB values) hit
-  tonic's default `max_recv_message_length` and fail with transport
-  errors. This is the gRPC-message-size analog of etcd's range-read
+  crow-rpc's default `max_recv_message_length` and fail with transport
+  errors. This is the crow-rpc-message-size analog of etcd's range-read
   OOM risk (issue #12342). A streaming scan response (mirroring etcd
   PR #19766) or a raised max-message-size config is needed for
   large-payload scans.
@@ -501,8 +501,8 @@ the step.
 
 Cost-split prioritization: with leaf resolution O(limit), the remaining
 scan cost is per-entry decode/copy plus the per-scan fixed cost
-(ReadIndex consensus round + gRPC roundtrip + descent, ~0.4-0.6ms),
-which dominates every bounded scan. The gRPC 4 MiB limit caps practical
+(ReadIndex consensus round + crow-rpc roundtrip + descent, ~0.4-0.6ms),
+which dominates every bounded scan. The crow-rpc 4 MiB limit caps practical
 scan width before per-byte copy becomes dominant, so response-size work
 (pagination + byte budget) gates large-value scans more than per-byte
 copy does.
@@ -880,7 +880,7 @@ pub trait KVEngine: Send + Sync {
     // persist_snapshot / set_gc_watermark / collect_garbage: plain sync fns.
     // Diagnostic/maintenance-path only (compare/iter_all: tests + snapshot
     // export; the rest: restore path + the periodic group-maintenance
-    // task), never on the hot Paxos-accept / gRPC-read path, so a brief
+    // task), never on the hot Paxos-accept / crow-rpc-read path, so a brief
     // blocking call there is an acceptable trade-off.
 }
 ```

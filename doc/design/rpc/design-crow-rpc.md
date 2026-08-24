@@ -35,7 +35,7 @@ detail is in the sub-designs.
   `common_type`). Diskio, consensus, and other services define their
   own schemas in their own crates.
 - **No value serialization policy.** The data payload is raw bytes;
-  the caller chooses how to serialize values (protobuf, bincode, raw).
+  the caller chooses how to serialize values (flatbuffers, bincode, raw).
 - **No TLS.** CROW runs on a trusted internal cluster network.
 - **No client-side retry or topology.** Retry, topology cache, and
   `NotLeaderHint` handling live in `crow-kv-client`, not here.
@@ -263,7 +263,7 @@ optional RDMA deps.
 
 ## 6. Flatbuffer Wrapper Convention
 
-**Rule for all services migrating to crow-rpc (R32, R115, R116, R117).**
+**Rule for all services on crow-rpc (R32, R115, R116, R117).**
 The flatbuffer control message is a buffer; field access is a direct
 memory-offset read through the flatbuffers runtime — no deserialization
 into an owned struct, no per-field copy. This rule governs both the C++
@@ -391,6 +391,6 @@ DiskId did = req.disk_id();
   `RdmaTransport`, CQ poll loop, `librdmacm` connection setup,
   pre-registered buffer pools.
 - [`design-crow-rpc-diskdb-migration.md`](design-crow-rpc-diskdb-migration.md)
-  — diskdb service migration from tonic/gRPC to crow-rpc: server-side
-  Rust handler dispatch, client-side `DiskdbRpcTransport`, error model
-  parity, mixed-rollout mechanism, `conn_handle` lifetime safety.
+  — diskdb service on crow-rpc: server-side Rust handler dispatch,
+  client-side `DiskdbRpcTransport`, error model parity, `conn_handle`
+  lifetime safety.

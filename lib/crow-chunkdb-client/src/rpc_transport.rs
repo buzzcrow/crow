@@ -107,11 +107,11 @@ impl ChunkdbRpcTransport {
     /// `AllocateChunkResponse` so the caller's retry logic is unchanged.
     pub async fn send_allocate_chunk(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::AllocateChunkRequest,
     ) -> Result<AllocateChunkResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let chunk_id_off = req.chunk_id.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let args = FBAllocateChunkRequestArgs {
@@ -141,7 +141,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         let r = FBAllocateChunkResponseRef::new(resp.bytes());
@@ -161,11 +161,11 @@ impl ChunkdbRpcTransport {
     /// Send an `AppendChunk` request via crow-rpc.
     pub async fn send_append_chunk(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::AppendChunkRequest,
     ) -> Result<AppendChunkResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let chunk_id_off = req.chunk_id.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let args = FBAppendChunkRequestArgs {
@@ -192,7 +192,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         // AppendChunk response shares the same shape as AllocateChunkResponse.
@@ -211,11 +211,11 @@ impl ChunkdbRpcTransport {
     /// Send a `QueryChunk` request via crow-rpc.
     pub async fn send_query_chunk(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::QueryChunkRequest,
     ) -> Result<QueryChunkResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let chunk_id_off = req.chunk_id.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let args = FBQueryChunkRequestArgs {
@@ -234,7 +234,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         let r = FBAllocateChunkResponseRef::new(resp.bytes());
@@ -252,11 +252,11 @@ impl ChunkdbRpcTransport {
     /// Send a `SealChunk` request via crow-rpc.
     pub async fn send_seal_chunk(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::SealChunkRequest,
     ) -> Result<SealChunkResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let chunk_id_off = req.chunk_id.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let args = FBSealChunkRequestArgs {
@@ -276,7 +276,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         let r = FBAllocateChunkResponseRef::new(resp.bytes());
@@ -294,11 +294,11 @@ impl ChunkdbRpcTransport {
     /// Send a `DeleteChunk` request via crow-rpc.
     pub async fn send_delete_chunk(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::DeleteChunkRequest,
     ) -> Result<DeleteChunkResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let chunk_id_off = req.chunk_id.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let args = FBDeleteChunkRequestArgs {
@@ -317,7 +317,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         let r = FBAllocateChunkResponseRef::new(resp.bytes());
@@ -335,11 +335,11 @@ impl ChunkdbRpcTransport {
     /// Send a `DeleteChunkRange` request via crow-rpc.
     pub async fn send_delete_chunk_range(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::DeleteChunkRangeRequest,
     ) -> Result<DeleteChunkRangeResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let chunk_id_off = req.chunk_id.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let args = FBDeleteChunkRangeRequestArgs {
@@ -360,7 +360,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         let r = FBDeleteChunkRangeResponseRef::new(resp.bytes());
@@ -378,11 +378,11 @@ impl ChunkdbRpcTransport {
     /// Send an `UpdateChunkStrip` request via crow-rpc.
     pub async fn send_update_chunk_strip(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::UpdateChunkStripRequest,
     ) -> Result<UpdateChunkStripResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let chunk_id_off = req.chunk_id.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let strip_off = req
@@ -407,7 +407,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         let r = FBAllocateChunkResponseRef::new(resp.bytes());
@@ -427,11 +427,11 @@ impl ChunkdbRpcTransport {
     /// Send a `ListChunks` request via crow-rpc.
     pub async fn send_list_chunks(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &crow_protocol::chunkdb::rpc::ListChunksRequest,
     ) -> Result<ListChunksResponse> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let start_token_off = req.start_token.as_ref().map(|id| FBInt128::new(id.high, id.low));
         let args = FBListChunksRequestArgs {
@@ -452,7 +452,7 @@ impl ChunkdbRpcTransport {
             req_id,
             control,
             msg_type,
-            grpc_endpoint,
+            rpc_endpoint,
         )
         .await?;
         let r = FBListChunksResponseRef::new(resp.bytes());
@@ -488,14 +488,14 @@ async fn call_rpc(
     req_id: u64,
     control: Buffer,
     msg_type: u16,
-    grpc_endpoint: &str,
+    rpc_endpoint: &str,
 ) -> Result<Buffer> {
     let fut = rpc
         .call(server, conn, req_id, control, None, msg_type)
         .map_err(rpc_error_to_client)?;
     let resp = fut.await.map_err(rpc_error_to_client)?;
     resp.control.ok_or_else(|| {
-        ChunkdbClientError::Rpc(format!("response missing control buffer from {grpc_endpoint}"))
+        ChunkdbClientError::Rpc(format!("response missing control buffer from {rpc_endpoint}"))
     })
 }
 

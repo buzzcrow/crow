@@ -82,8 +82,8 @@ impl PxRpcTransport {
     /// Get or create a `Connection` for the given endpoint. The
     /// crow-rpc server listens on the same port as the gRPC endpoint
     /// (no port derivation).
-    fn conn_for(&self, grpc_endpoint: &str) -> Result<Connection, PxReplicaError> {
-        let normalized = normalize_endpoint(grpc_endpoint);
+    fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection, PxReplicaError> {
+        let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(conn) = self.connections.get(&normalized) {
             return Ok(conn.clone());
         }
@@ -101,7 +101,7 @@ impl PxRpcTransport {
     /// Send a `Prepare` request via crow-rpc.
     pub async fn send_prepare(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         slot: u64,
         ballot: PxBallot,
         term: u64,
@@ -109,7 +109,7 @@ impl PxRpcTransport {
         membership_epoch: u64,
     ) -> Result<PxPrepareReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBPrepareRequestArgs {
             id: req_id,
@@ -174,14 +174,14 @@ impl PxRpcTransport {
     /// frames, but Accept is request-response).
     pub async fn send_accept(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         entry: &PxLogEntry,
         dedup_tags: &[DedupTag],
         group_id: u64,
         membership_epoch: u64,
     ) -> Result<PxAcceptReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let payload_vec = entry.payload.to_vec();
         let payload = builder.create_vector(&payload_vec);
@@ -253,12 +253,12 @@ impl PxRpcTransport {
     /// Send a `PreVote` request via crow-rpc.
     pub async fn send_pre_vote(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: VoteRequestPayload,
         group_id: u64,
     ) -> Result<VoteReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBPreVoteRequestArgs {
             id: req_id,
@@ -299,12 +299,12 @@ impl PxRpcTransport {
     /// Send a `RequestVote` request via crow-rpc.
     pub async fn send_request_vote(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: VoteRequestPayload,
         group_id: u64,
     ) -> Result<VoteReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBRequestVoteRequestArgs {
             id: req_id,
@@ -345,12 +345,12 @@ impl PxRpcTransport {
     /// Send a `Heartbeat` request via crow-rpc.
     pub async fn send_heartbeat(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: HeartbeatRequestPayload,
         group_id: u64,
     ) -> Result<HeartbeatReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBHeartbeatRequestArgs {
             id: req_id,
@@ -396,12 +396,12 @@ impl PxRpcTransport {
     /// Send a `StepDown` request via crow-rpc.
     pub async fn send_step_down(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         req: &StepDownRequestPayload,
         group_id: u64,
     ) -> Result<StepDownReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let reason = builder.create_string(&req.reason);
         let args = FBStepDownRequestArgs {
@@ -440,14 +440,14 @@ impl PxRpcTransport {
     /// Send a `FetchGap` request via crow-rpc.
     pub async fn send_fetch_gap(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         group_id: u64,
         slot: u64,
         term: u64,
         leader_id: u64,
     ) -> Result<FetchGapReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBFetchGapRequestArgs {
             id: req_id,
@@ -490,7 +490,7 @@ impl PxRpcTransport {
     /// reply is expected — the frame is sent with no completion callback.
     pub fn send_chosen(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         group_id: u64,
         slot: u64,
         term: u64,
@@ -498,7 +498,7 @@ impl PxRpcTransport {
         ballot_round: u64,
     ) -> Result<(), PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBChosenNotificationArgs {
             id: req_id,
@@ -532,7 +532,7 @@ impl PxRpcTransport {
     #[allow(clippy::too_many_arguments)]
     pub fn send_batch_chosen(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         group_id: u64,
         start_slot: u64,
         end_slot: u64,
@@ -541,7 +541,7 @@ impl PxRpcTransport {
         ballot_round: u64,
     ) -> Result<(), PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBBatchChosenNotificationArgs {
             id: req_id,
@@ -577,11 +577,11 @@ impl PxRpcTransport {
     /// control buffer and the full snapshot bytes in the data buffer.
     pub async fn send_snapshot(
         &self,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         group_id: u64,
     ) -> Result<SnapshotReply, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(grpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let args = FBSnapshotRequestArgs {
             id: req_id,
@@ -632,8 +632,8 @@ impl PxRpcTransport {
 
     /// Get or create a connection for an endpoint (exposed for the
     /// `LearnerStream` to share the connection pool).
-    pub(crate) fn get_conn(&self, grpc_endpoint: &str) -> Result<Connection, PxReplicaError> {
-        self.conn_for(grpc_endpoint)
+    pub(crate) fn get_conn(&self, rpc_endpoint: &str) -> Result<Connection, PxReplicaError> {
+        self.conn_for(rpc_endpoint)
     }
 
     /// Allocate a new request ID (exposed for the `LearnerStream`).

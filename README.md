@@ -53,7 +53,7 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
   │   │Group-2 F│          │Group-2 L│          │Group-2 F│  │
   │   └─────────┘          └─────────┘          └─────────┘  │
   └───────▲──────────────────────────────────────────────────┘
-          │  HTTP /topology + per-group gRPC reads/writes
+          │  HTTP /topology + per-group crow-rpc reads/writes
      ┌────┴────┐
      │ Client  │
      └─────────┘
@@ -69,7 +69,7 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
 | Crate | What it is |
 | --- | --- |
 | `crow-kv` | Core library: Multi-Paxos consensus, WAL, storage engine trait, RPC, reconfiguration |
-| `crow-kv-server` | Server binary: hosts groups, serves gRPC + HTTP management API |
+| `crow-kv-server` | Server binary: hosts groups, serves crow-rpc + HTTP management API |
 | `crow-kv-client` | Client library: topology cache, retry, idempotency |
 | `crow-tree` | Custom storage engine (C++ core): B+tree, delta chains, io_uring reactor, buffer pool |
 | `crow-tree-ffi` | Rust FFI bindings to `crow-tree` — exposes the C++ engine as a `KVEngine` trait impl |
@@ -81,7 +81,7 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
 <details>
 <summary><b>Getting Started</b></summary>
 
-CROW uses [Pixi](https://pixi.sh) for environment management — it pins the C++ toolchain, Rust compiler, and all native dependencies (cmake, gtest, lz4, folly, protobuf, etc.) in a single lockfile. The Linux build targets glibc 2.17 (CentOS 7 / Ubuntu 16.04 era), so binaries built once run on virtually any modern Linux distribution.
+CROW uses [Pixi](https://pixi.sh) for environment management — it pins the C++ toolchain, Rust compiler, and all native dependencies (cmake, gtest, lz4, folly, flatbuffers, etc.) in a single lockfile. The Linux build targets glibc 2.17 (CentOS 7 / Ubuntu 16.04 era), so binaries built once run on virtually any modern Linux distribution.
 
 ```bash
 # Install pixi (if not already installed)
@@ -130,7 +130,7 @@ Peak **123K ops/s** at 256 threads — 4.3× the non-coalesced ceiling (~29K) fr
 | 24 | 24 | 120,494 | 403 µs | 112,172 | 444 µs |
 | 48 | 48 | 144,486 | 828 µs | 135,928 | 884 µs |
 
-Peak **145K ops/s** — ~1.17× the coalesced write peak (124K). Reads skip the consensus critical path entirely (no WAL, no quorum RPC); the lease barrier costs ~0 when valid, so a linearizable read is just engine get + gRPC RTT.
+Peak **145K ops/s** — ~1.17× the coalesced write peak (124K). Reads skip the consensus critical path entirely (no WAL, no quorum RPC); the lease barrier costs ~0 when valid, so a linearizable read is just engine get + crow-rpc RTT.
 
 ## Documentation
 

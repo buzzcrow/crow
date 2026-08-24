@@ -32,10 +32,10 @@ large objects.
 - `doc/design/diskdb/design-crow-diskio.md` — `BusyBlockValue`
   `commit_state` field (`TENTATIVE` → `COMMITTED`), two-phase
   allocate (sync bitmap claim + async KV persist).
-- `lib/crow-protocol/src/proto/chunkdb_op.proto` —
+- `lib/crow-protocol/src/fbs/chunkdb.fbs` —
   `AppendChunkRequest` already has `strip_count` field (currently
   always sent as 1).
-- `lib/crow-protocol/src/proto/diskdb_type.proto` —
+- `lib/crow-protocol/src/fbs/diskdb.fbs` —
   `BusyBlockValue.commit_state`, `CommitState` enum.
 
 **Use scenarios:**
@@ -154,7 +154,7 @@ confirm flow for crash safety.
    in chunkdb.
 
 4. **Deferred confirm RPC (approach 2 only)** —
-   `lib/crow-protocol/src/proto/chunkdb_op.proto`,
+   `lib/crow-protocol/src/fbs/chunkdb.fbs`,
    `app/crow-chunkdb/src/lifecycle.rs`. New RPC
    (`ConfirmStripsRequest`) that takes a `ChunkId` + pre-allocated
    segments (from direct diskdb allocation) and persists them to
@@ -246,12 +246,12 @@ confirm flow for crash safety.
   prefetch into `ChunkWriter`; this requirement optimizes that
   prefetch.
 - **Depends on chunkdb `append_chunk(strip_count=N)` support**
-  (approach 1) — the proto field exists; the server implementation
+  (approach 1) — the fbs field exists; the server implementation
   must be verified to handle N > 1 correctly (parallel allocation +
   single persist).
 - **Depends on diskdb `commit_state` two-phase commit** (approach 2)
   — `BusyBlockValue.commit_state: TENTATIVE → COMMITTED` already
-  exists in the proto (`diskdb_type.proto:112`). The
+  exists in the fbs schema (`diskdb.fbs:112`). The
   `TENTATIVE` → `COMMITTED` transition path must be implemented in
   diskdb (may be partially landed — verify in design).
 - **Blocked by: chunk-layer refactor** — this optimization builds on
@@ -333,7 +333,7 @@ confirm flow for crash safety.
 - **TENTATIVE block reaper design** (approach 2). Timeout-based
   (simple, but delays reclamation) vs. explicit abort (client
   sends a "free these TENTATIVE blocks" RPC on error). The
-  `commit_state` field exists in the proto but the reaper may not
+  `commit_state` field exists in the fbs schema but the reaper may not
   be implemented. Verify in design whether diskdb already has a
   TENTATIVE cleanup mechanism or if it must be built.
 - **Placement logic location** (approach 2). If the client

@@ -27,7 +27,7 @@ Client SCAN(prefix, start_after, end_key, limit, read_mode, min_slot?)
         the per-page leader barrier — page 1 is the only barrier round]
     4. retry: not_leader_hint → follow (uncounted);
        error → counted + backoff; transport error → refresh + backoff
-  → KvStoreService::scan (gRPC)                    [kv_service.rs]
+  → KvStoreService::scan (crow-rpc)                    [kv_service.rs]
     5. [Linearizable] forward to leader if not already
     6. [MinSlot] serve local — no forwarding
   → PxKvStore::kv_scan                             [px_kv_store.rs]
@@ -50,12 +50,12 @@ Client SCAN(prefix, start_after, end_key, limit, read_mode, min_slot?)
     13. packed result → take_buf → decode_scan slices one Bytes per
         entry — zero-copy, no per-entry Vec<u8>
   → Client receives KvScanResponse
-    14. prost Bytes passed through directly (no to_vec);
+    14. flatbuffer Bytes passed through directly (no to_vec);
         pagination continues if truncated and limit not reached
 ```
 
 **Copy points**: O(limit) for L0/L1 cursor materialization (only
-entries that reach the output); O(n) unavoidable for gRPC + FFI
+entries that reach the output); O(n) unavoidable for crow-rpc + FFI
 serialization. The scan path is zero-copy from packed buffer to client
 `Bytes`, matching the get path after R6.
 
@@ -219,12 +219,12 @@ Four changes drove the improvement:
   barrier entirely. No freshness lost (the leader has `S` applied by
   construction). Verified by an e2e test asserting
   `lease_path + readindex_path == 1` for an N-page scan (was N before).
-  Client-local, no proto change.
+  Client-local, no schema change.
 - **R56 (prefix-only range predicate)**: `KvScanRequest` gained an
-  optional exclusive `end_key` (proto field 10). The C++ merge loop
+  optional exclusive `end_key` (flatbuffer field 10). The C++ merge loop
   early-stops when `winner_key >= end_key` alongside the existing
   prefix stop. Threaded through the full scan path (C API, FFI,
-  `KVEngine::scan`, gRPC service, client). Prerequisite shape for R52
+  `KVEngine::scan`, crow-rpc service, client). Prerequisite shape for R52
   reverse scan.
 - **R57 (zero-copy result staging)**: the engine's 3-copy scan result
   path (`consider` lambda → `std::vector<scan_entry>` → `std::string
@@ -284,7 +284,7 @@ Deep pagination is flat (equal to from-start); O(limit) confirmed.
 
 ## Open Problems
 
-Full-path audit (client → gRPC → PxKvStore → FFI → C++ engine),
+Full-path audit (client → crow-rpc → PxKvStore → FFI → C++ engine),
 2026-08-07. Each item is tracked by a backlog requirement except where
 noted.
 
@@ -332,5 +332,5 @@ noted.
   complexity (mid-stream error/cancellation/backpressure, HTTP/2
   flow-control stalls) and loses the clean per-page retry that
   `start_after` keying gives. The same production/transfer overlap is
-  available without a proto change via client-side page prefetch
+  available without a schema change via client-side page prefetch
   (request page N+1 while consuming page N). No backlog entry.

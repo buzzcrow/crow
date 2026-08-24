@@ -29,7 +29,6 @@ isa-l = "*"
 flatbuffers = "*"
 # Rust toolchain (crow-kv)
 rust = ">=1.96"
-protobuf = "*"
 openssl = "*"
 pkg-config = "*"
 # Frontend

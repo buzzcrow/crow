@@ -247,7 +247,7 @@ good lock-free design:
 
 - **`PxKvStore::groups`** (`px_kv_store.rs` line 25) — `DashMap<u64,
   Arc<PxGroup>>`. Lock-free group lookup. `server_state: Mutex` only
-  guards gRPC task lifecycle (not hot). Correct.
+  guards crow-rpc task lifecycle (not hot). Correct.
 
 - **`PxGroup::driver_handle` / `maintenance_handle` / `fetchgap_handle`**
   (`group.rs` lines 109, 116, 119) — `tokio::sync::Mutex<Option<
@@ -317,7 +317,7 @@ good lock-free design:
   on the background sync loop, not the allocate hot path. Correct.
 
 - **`diskdb_service.rs` disk/group reads** — `disks.read()`,
-  `disk_value.read()`, `status.read()` on the gRPC service path. These
+  `disk_value.read()`, `status.read()` on the crow-rpc service path. These
   are admin/query RPCs (list disks, query usage), not the allocate hot
   path. Brief read locks. Correct.
 

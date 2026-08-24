@@ -11,9 +11,7 @@ JournalScan/CreateSnapshot/ListSnapshots/SnapshotScan/ReleaseSnapshot +
 WatchNotify) uses the **crow-rpc flatbuffer transport** — the same
 engine as the consensus hot path, but on a separate port and with a
 dedicated schema (`kv_client.fbs`). The transport selection is
-programmatic (`CrowkvClient::with_rpc_transport`), enabling a
-mixed-rollout window where both the gRPC and crow-rpc client-facing
-servers run simultaneously.
+programmatic (`CrowkvClient::with_rpc_transport`).
 
 ## Table of Contents
 
@@ -35,14 +33,11 @@ servers run simultaneously.
 ## 1. Design Principles
 
 - **Same engine, separate port.** The client-facing crow-rpc server
-  binds `grpc_port + 200` (the `KV_CLIENT_RPC_BASE` offset). The
-  consensus crow-rpc server binds `grpc_port + 100`. Both run
+  binds `rpc_port + 200` (the `KV_CLIENT_RPC_BASE` offset). The
+  consensus crow-rpc server binds `rpc_port + 100`. Both run
   simultaneously on the same node.
-- **Mixed rollout.** Both the gRPC and crow-rpc client-facing servers
-  run simultaneously. Clients switch via `with_rpc_transport`. After
-  all clients migrate, the gRPC server is removed.
 - **Same retry/topology/NotLeaderHint logic.** The client-side
-  transport returns the existing tonic proto response types
+  transport returns the existing crow-rpc response types
   (`KvResponse`, `KvScanResponse`, `KvJournalScanResponse`), so the
   retry loop, topology cache, and `NotLeaderHint` handling in
   `CrowkvClient` are unchanged — only the wire send changes.
@@ -79,26 +74,26 @@ re-exported as `crow_protocol::kv_client_fb`.
 - **`[[ubyte]]` workaround.** Flatbuffers does not support nested
   vectors (`[[ubyte]]`). The `FBBytes` wrapper table (`{ data: [ubyte] }`)
   is used for byte-vector fields in `FBWatchNotify` (`keys`, `values`).
-- **`FBKvClientRetCode` enum.** Maps 1:1 to the tonic `KvErrorCode`:
+- **`FBKvClientRetCode` enum.** Maps 1:1 to the `KvErrorCode`:
   `Success`, `NotLeader`, `Unavailable`, `Internal`, `JournalScanGcGap`,
   `InvalidArgument`.
-- **`FBReadMode` enum.** `Linearizable` / `MinSlot`, matching the tonic
+- **`FBReadMode` enum.** `Linearizable` / `MinSlot`, matching the
   `ReadMode`.
 - **`forwarded: bool` field.** On `FBKvGetRequest`, `FBKvScanRequest`,
   and `FBKvJournalScanRequest` — the loop-guard for transparent
-  leader-forwarding (replaces the tonic `x-crow-kv-forwarded` metadata
-  header).
+  leader-forwarding (the `forwarded` field replaces the
+  `x-crow-kv-forwarded` metadata header).
 
 ## 4. Port Allocation
 
-The client-facing crow-rpc port is derived from the gRPC port:
+The client-facing crow-rpc port is derived from the base port:
 
 ```
-client_rpc_port = grpc_port + (KV_CLIENT_RPC_BASE - KV_SERVER_GRPC_BASE)
-                = grpc_port + 200
+client_rpc_port = rpc_port + (KV_CLIENT_RPC_BASE - KV_SERVER_RPC_BASE)
+                = rpc_port + 200
 ```
 
-This is parallel to the consensus-side offset (`grpc_port + 100`). The
+This is parallel to the consensus-side offset (`rpc_port + 100`). The
 `KV_CLIENT_RPC_BASE` constant lives in `crow-protocol::ports`. The port
 mapping is registered as `KvServerClientRpc` in the port-claim registry.
 
@@ -116,7 +111,7 @@ b. Dispatch to the existing `KvStore` trait methods
    (`kv_put`/`kv_get`/`kv_delete`/`kv_batch_write`/`kv_scan`/
    `kv_journal_scan`/`kv_create_snapshot`/`kv_list_snapshots`/
    `kv_snapshot_scan`/`kv_release_snapshot`) — the same methods the
-   tonic handler calls. The async path spawns a tokio task via
+   crow-rpc handler calls. The async path spawns a tokio task via
    `self.rt.spawn` and submits the response from the task.
 c. Build the response flatbuffer via `FlatBufferBuilder`, `finish`,
    `submit_response`.
@@ -163,12 +158,9 @@ d. Else → build `Connection` via `from_handle`, register it in the
    (`(Connection, Arc<RpcClient>, Arc<RpcServer>)`).
 
 `WatchRegistry` uses a `PushTarget` enum:
-- `Tonic` — `mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>`
-  (existing tonic stream path).
 - `CrowRpc` — `Arc<CrowRpcPushTarget>` (crow-rpc push path).
 
-`emit` matches on the target: `Tonic` → `try_send` (existing path);
-`CrowRpc` → build `FBWatchNotify` flatbuffer + `rpc.send` (fire-and-
+`emit` builds `FBWatchNotify` flatbuffer + `rpc.send` (fire-and-
 forget). On `ConnectionClosed`/`ConnectionError` → increment
 `closed_watchers` (lazy cleanup; the watcher is removed on the next
 emit pass or via the safety-net poller).
@@ -183,13 +175,13 @@ safety-net poller covers missed notifications during the gap.
 `KvRpcTransport` (in `lib/crow-kv-client/src/kv_rpc_transport.rs`)
 mirrors `PxRpcTransport`: holds `Arc<RpcServer>` + `Arc<RpcClient>` +
 `DashMap<String, Connection>` + `AtomicU64` next_req_id. `conn_for`
-derives the client-facing crow-rpc port from the gRPC port via the
+derives the client-facing crow-rpc port from the base port via the
 `KV_CLIENT_RPC_BASE` offset.
 
 Unary methods (`send_put`, `send_get`, `send_delete`, `send_batch_write`,
 `send_scan`, `send_journal_scan`): build request flatbuffer →
 `rpc.call` → await → parse via `Ref` wrapper → map to the existing
-tonic proto response types (`KvResponse`, `KvScanResponse`,
+crow-rpc response types (`KvResponse`, `KvScanResponse`,
 `KvJournalScanResponse`). `NotLeaderHint` parsed from the
 `not_leader_hint` string field → fed into `CrowkvClient`'s existing
 retry + topology-cache logic.
@@ -201,22 +193,15 @@ retry + topology-cache logic.
 method (`put`/`get`/`delete`/`batch_write`/`scan`/`scan_count`/
 `journal_scan`) checks `self.rpc_transport` first: when set, delegate
 to the transport's `send_*` (with the existing retry/topology/
-`NotLeaderHint`/metrics wrapping — only the wire send changes); when
-not set, the existing tonic path.
+`NotLeaderHint`/metrics wrapping — only the wire send changes).
 
 ## 10. WatchNotifyClient
 
-`WatchNotifyClient` selects the transport path based on whether
-`CrowkvClient` has `rpc_transport` set:
+`WatchNotifyClient` uses the crow-rpc transport path:
 
-- **Tonic path** (default): bidi stream via
-  `KvServiceClient::watch_notify`. The reader loop resolves the leader,
-  opens the stream, sends `WatchSubscribe`, and forwards notify frames
-  to an mpsc channel. On leader-change (stream closes with
-  `not_leader_hint`), the loop reconnects.
-- **crow-rpc path** (when `with_rpc_transport` is set): persistent
-  connection + client-side handler. The reader loop resolves the
-  leader, opens a connection via `KvRpcTransport::get_conn`, registers
+- **crow-rpc path**: persistent
+  connection + client-side handler. The reader loop resolves the leader,
+  opens a connection via `KvRpcTransport::get_conn`, registers
   handlers for `FBWatchNotify` + `FBWatchNotifyError` via
   `RpcClient::register_handler`, sends `FBWatchSubscribe` as
   fire-and-forget `send()`. On `FBWatchNotifyError` with non-empty
@@ -238,7 +223,7 @@ convention.
 
 ## 12. Error Model
 
-`FBKvClientRetCode` → tonic `KvErrorCode` mapping:
+`FBKvClientRetCode` → `KvErrorCode` mapping:
 
 - `Success` → `KvErrorNone`
 - `NotLeader` → `KvErrorNotLeader`
@@ -247,7 +232,7 @@ convention.
 - `Internal` / `InvalidArgument` / unknown → `KvErrorInternal`
 
 `RpcError` → `Error` variants:
-- `ConnectionClosed` → retry on next connection (same as gRPC
+- `ConnectionClosed` → retry on next connection (same as crow-rpc
   `Unavailable`).
 - `Timeout` → `Error::Transport` (caller retry budget).
 - `SendQueueFull` → retry with backoff.

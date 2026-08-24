@@ -19,7 +19,7 @@
   Chunks reference the blocks they own via `Segment { disk_id,
   zone_index, unit_offset, unit_count }` (one `Segment` per allocated
   range, embedded in `MirrorStrip` / `EcStrip` inside each
-  `ChunkStrip`, `chunkdb_type.proto`). After a disk move, every chunk
+  `ChunkStrip`, `chunkdb.fbs`). After a disk move, every chunk
   that has a `Segment` on the moved disk must still be able to reach
   that segment: the `disk_id` must resolve to a disk that is `Up` at
   its new placement. There is no scanner that walks
@@ -42,9 +42,9 @@
   by absence from a group-0 sync response), §10 (Background Scanner —
   `ScannerTask` / `BgRunner` / `BackgroundTask` pattern, KV-persisted
   progress, resume after restart, admin RPCs `TriggerScan` /
-  `GetScanStatus`). Proto surfaces: `chunkdb_type.proto` (`Chunk`,
+  `GetScanStatus`). Fbs schema surfaces: `chunkdb.fbs` (`Chunk`,
   `ChunkStrip`, `MirrorStrip`, `EcStrip`, `Segment` reference),
-  `chunkdb_service.proto` (`ListChunks` — paginated chunk scan).
+  `chunkdb.fbs` (`ListChunks` — paginated chunk scan).
   CROW's disk-move model (R81) is new, so the post-move chunk
   placement scanner is new work shaped on diskdb's `ScannerTask`
   precedent.

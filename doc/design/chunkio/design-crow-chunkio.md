@@ -95,10 +95,10 @@ model, and the design choices that make a 1 TB upload cost the same
   track strip boundaries, block indices, or parity handoff. This
   eliminates the `StripPlacement` bridge type and keeps the object
   layer thin.
-- **Own protobuf types directly.** `ChunkWriter` owns `Arc<Chunk>`,
+- **Own flatbuffer types directly.** `ChunkWriter` owns `Arc<Chunk>`,
   `EcStripWriter` holds `Arc<Chunk>` + strip index, and `seal()`
   returns `ProtoLocation` directly. No parallel wrapper structs
-  (`StripPlacement`, `Location`) — the protobuf types are the canonical
+  (`StripPlacement`, `Location`) — the flatbuffer types are the canonical
   representation throughout the write path.
 
 ## 3. Write Flow
@@ -281,7 +281,7 @@ spanning N chunks has N locations ordered by logical offset, contiguous
 and non-overlapping. The within-chunk offset is always 0 for the
 large-object writer (dedicated chunks filled from the start); it
 exists for future shared-chunk packing and range reads. Serialization
-is protobuf via prost's `Message` trait (`encode_to_vec` / `decode`).
+is flatbuffers via the flatbuffer `Message` trait (`encode_to_vec` / `decode`).
 
 Edge cases:
 

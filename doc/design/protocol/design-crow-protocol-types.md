@@ -64,7 +64,7 @@ and the conversion is a place for bugs.
 All cross-component protocol types (wire types, ID aliases, key
 types) live in `crow-protocol`. No other crate defines its own copy
 of a type that crosses a boundary. `crow-protocol` is the natural
-home: it already hosts the shared protobuf types and has no heavy
+home: it already hosts the shared flatbuffer types and has no heavy
 dependencies.
 
 ### 3.2 ID aliases are `u64` type aliases, not newtypes
@@ -74,11 +74,11 @@ Simple integer IDs (`RackId`, `NodeId`, `DiskGroupId`, `StoreId`,
 `crow-protocol::common_type`. They exist for documentation and API
 clarity (signatures read `rack_id: RackId`, not `rack_id: u64`), not
 for type-safety enforcement. Newtypes would add conversion friction
-at every boundary (serde, axum path params, proto field access)
+at every boundary (serde, axum path params, flatbuffer field access)
 without runtime benefit.
 
-Composite IDs (`DiskId` 128-bit, `ChunkId` 192-bit) are proto
-structs in `common_type.proto`, not aliases.
+Composite IDs (`DiskId` 128-bit, `ChunkId` 192-bit) are flatbuffer
+structs in `common_type.fbs`, not aliases.
 
 **String is not an ID type.** No struct field uses `String` for an
 ID that is fundamentally numeric. The only `String` exceptions are
@@ -146,7 +146,7 @@ when a second crate needs to consume it.
 types are re-exported from the crate root.
 
 - **`common_type`** — ID aliases (`u64` type aliases) complementing
-  the proto types in `common_type.proto`.
+  the flatbuffer types in `common_type.fbs`.
 - **`mgmt`** — HTTP management API wire types in two groups:
   - **Lifecycle DTOs** — request/response bodies for the kv-server's
     internal mgmt API (store/group/remote lifecycle, step-down,
@@ -160,9 +160,9 @@ types are re-exported from the crate root.
 - **`key`** — key encoding traits and structs (covered in
   [`design-crow-protocol-key.md`](design-crow-protocol-key.md)).
 - **`common` / `diskdb::rpc` / `chunkdb::rpc` / `diskio::rpc`** —
-  generated protobuf code from `.proto` files.
+  generated flatbuffer code from `.fbs` files.
 - **`diskdb_type_util`** — extension traits and utility functions
-  for diskdb proto types.
+  for diskdb flatbuffer types.
 - **`bitmap`** — usage bitmap utilities for disk space accounting.
 - **`ports`** — default port allocation for CROW services. Each
   service type has a base (start) port; multiple instances of the

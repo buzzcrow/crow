@@ -61,7 +61,7 @@ Client PUT/DELETE/BatchWrite
             i.  [if force_prepare] run_prepare_phase (R16a: concurrent)
                 - tokio::join!(local on_prepare, join_all(remote send_prepare))
                   local on_prepare: acceptor.prepare + WAL append Promised
-                  remote: send_prepare RPCs (unary gRPC)
+                  remote: send_prepare RPCs (unary crow-rpc)
                 - quorum check counts the local reply (W6 intact)
                 - on TermStale → become_follower + return NotLeader
                 - on MembershipEpochMismatch → adopt responder epoch,
@@ -74,8 +74,8 @@ Client PUT/DELETE/BatchWrite
                 - remote (both paths): send_accept RPCs (join_all, bidi
                   LearnerStream)
                   [O(1) ref-count: Bytes::clone for AcceptRequest]
-                  [copy: payload → socket buffer on gRPC serialize, unavoidable]
-                  [move: follower gRPC deserialize → PxLogEntry.payload Bytes]
+                  [copy: payload → socket buffer on crow-rpc serialize, unavoidable]
+                  [move: follower crow-rpc deserialize → PxLogEntry.payload Bytes]
                 - strict (wal_early_ack = false, R16a; test default):
                     tokio::join!(local on_accept, join_all(remote send_accept))
                     local on_accept = on_accept_inner (CAS) + on_accept_persist
@@ -183,7 +183,7 @@ throughput gain (consensus pipeline saturated).
 **T:C ratio has zero effect on write throughput** (12T: C=3 and C=48
 both ~25K; 48T: C=12 and C=64 both ~29K). Unlike reads (where the
 HTTP/2 connection lock makes T:C ratio critical), writes are
-bottlenecked by server-side consensus, not gRPC framing.
+bottlenecked by server-side consensus, not crow-rpc framing.
 
 ### Phase 3 — Window impact at 48T:48C
 
@@ -247,7 +247,7 @@ single-permit queue saturation, not consensus failures.
 - **Threads scale until 24T, then plateau** — 1T→24T gives 10×
   (3K→29K); 24T→48T adds latency only.
 - **T:C ratio has zero effect on writes** — the write bottleneck is
-  server-side consensus, not gRPC framing (the key difference from
+  server-side consensus, not crow-rpc framing (the key difference from
   reads).
 - **Queue mode: zero errors across all 28 configurations** — no `Busy`
   rejections; queue naturally backpressures at any window size.
@@ -377,17 +377,17 @@ of what remains:
 - **O(n) unavoidable** — payload encoding (client key/value slices →
   contiguous `Vec<u8>`); WAL replay (`Bytes::copy_from_slice` to
   reconstruct `PxLogEntry` from on-disk bytes); C++ engine apply
-  (internal memtable copy); gRPC socket write (kernel user→socket
+  (internal memtable copy); crow-rpc socket write (kernel user→socket
   buffer copy).
 - **O(1) ref-count bumps (negligible)** — `base_entry` payload clone
   per slot retry; `inner_accept` entry clone for `cas_accepted`;
-  `send_accept` payload clone for protobuf; `learn_chosen` entry clone
+  `send_accept` payload clone for flatbuffer; `learn_chosen` entry clone
   for learner; WAL `from_accepted` payload clone (`encode_accepted_payload`
   is `entry.payload.clone()`); WAL `encode_frame` payload clone for
   `RecordFrame`; Batch decode `Bytes::slice` per key/value (shares
   payload buffer).
 - **Zero-copy (move/borrow)** — `Vec<u8>` → `Bytes` at `propose_inner`
-  entry; gRPC deserialization → `PxLogEntry` (move `Bytes`); WAL
+  entry; crow-rpc deserialization → `PxLogEntry` (move `Bytes`); WAL
   vectored write (`IoSlice` borrows `Bytes`); FFI batch apply
   `ct_kv_ref` pointer-length structs (R23, done).
 

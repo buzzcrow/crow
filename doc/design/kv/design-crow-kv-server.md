@@ -138,10 +138,10 @@ API, not just at CLI bootstrap.
 On SIGINT/SIGTERM, Axum stops accepting new HTTP requests, then
 `graceful_shutdown` cascades through each store:
 
-1. **`PxKvStore::shutdown`** — stops the gRPC server (cuts frontend
+1. **`PxKvStore::shutdown`** — stops the crow-rpc server (cuts frontend
    load), then cascades into each group.
 2. **`PxGroup::shutdown`** — cancels the tenure token and awaits the
-   election driver + maintenance loop, closes remote gRPC channels,
+   election driver + maintenance loop, closes remote crow-rpc channels,
    then cascades into the local replica.
 3. **`PxLocalReplica::shutdown`** — calls `KVEngine::flush` (drain L0
    memtable into L1 B+tree, in-memory) then

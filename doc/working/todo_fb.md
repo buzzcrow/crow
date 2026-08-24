@@ -5,7 +5,10 @@
 
 Tracking doc for the gRPC → crow-rpc (flatbuffer) migration across
 all CROW services. Backlog items: R114 (done), R115 (done), R116
-(chunkdb), R117 (KvService client-facing), R32 (KV consensus — done).
+(chunkdb — done), R117 (KvService client-facing — done), R32 (KV
+consensus — done). The migration is **complete**: no gRPC/tonic/prost
+dependency remains, no `.proto` files exist, and `protoc` has been
+removed from the pixi env.
 
 ## Rules to Follow During Migration
 
@@ -84,7 +87,7 @@ R32 (KV consensus, internal)  — DONE
   ↓ validated: KV NotLeaderHint flatbuffer model, kv_consensus.fbs schema
 R117 (KvService client-facing — needs R114 + R32) — DONE
   ↓ validated: zero-copy Ref wrappers, with_rpc_transport, forwarded loop-guard
-R116 (ChunkdbService — after chunk-layer refactor stabilizes) — NEXT
+R116 (ChunkdbService — after chunk-layer refactor stabilizes) — DONE
 ```
 
 Rationale:
@@ -113,18 +116,18 @@ Rationale:
   pattern (R115 deferred this, R117 implemented it properly) +
   `with_rpc_transport` programmatic selection + `forwarded` loop-guard
   for transparent leader-forwarding.
-- R116 next — reuses R115's unary-only migration pattern (diskdb) +
+- R116 done — reuses R115's unary-only migration pattern (diskdb) +
   R117's zero-copy `Ref` wrapper pattern + `with_rpc_transport`
   programmatic selection. All 8 ChunkdbService RPCs are unary (no
   streaming, R114 not needed). Port: `CHUNKDB_RPC_BASE = 9961`
-  (fills gap between diskdb RPC 9931-9940 and chunkdb gRPC
-  9971-9990). `NotMyRangeHint` is diagnostic-only (no leader
-  endpoint — client refreshes from group-0 + re-routes). The
-  chunk-layer refactor (R113) is NOT done but strip prefetch is
-  already inside `ChunkWriter`, RPC call sites are consolidated
-  and stable. The allocator pool (`pool.rs`) calls diskdb (not
-  chunkdb) — that path is R115's scope, already done, NOT changed
-  by R116.
+  (fills gap between diskdb RPC 9931-9940 and the legacy chunkdb
+  gRPC port 9971-9990, now removed). `NotMyRangeHint` is
+  diagnostic-only (no leader endpoint — client refreshes from
+  group-0 + re-routes). The chunk-layer refactor (R113) is NOT
+  done but strip prefetch is already inside `ChunkWriter`, RPC
+  call sites are consolidated and stable. The allocator pool
+  (`pool.rs`) calls diskdb (not chunkdb) — that path is R115's
+  scope, already done, NOT changed by R116.
 
 ## Suggestions (apply across all migration items)
 
@@ -193,43 +196,53 @@ Without them, "no regression" is unmeasurable. Capture in
 
 ## Per-Item Checklist (apply to each migration)
 
-R115 (diskdb), R32 (KV consensus), R117 (KV client-facing) — DONE.
-R116 (chunkdb) — NEXT. Checklist status per item:
+R115 (diskdb), R32 (KV consensus), R117 (KV client-facing), R116
+(chunkdb) — ALL DONE. Checklist status per item:
 
 - [x] `.fbs` schema created in `lib/crow-protocol/src/fbs/`
-      (R115: diskdb.fbs, R32: kv_consensus.fbs, R117: kv_client.fbs)
+      (R115: diskdb.fbs, R32: kv_consensus.fbs, R117: kv_client.fbs,
+      R116: chunkdb.fbs)
 - [x] `msg_type.fbs` extended with the service's range
-      (R115: 3000s, R32: 1000s, R117: 1100s)
+      (R115: 3000s, R32: 1000s, R117: 1100s, R116: 3300s)
 - [x] `build.rs` + `lib.rs` re-exports updated
 - [x] Zero-copy wrappers in `lib/crow-protocol/src/fb_wrappers/`
-      (R32: kv_consensus.rs, R117: kv_client.rs, R115: diskdb.rs —
-      R115 retrofitted, see Open Issues)
+      (R32: kv_consensus.rs, R117: kv_client.rs, R115: diskdb.rs,
+      R116: chunkdb.rs — R115 retrofitted, see Open Issues)
 - [x] Server handler rewritten (dispatch by `msg_type`)
-      (R115: diskdb, R32: px_rpc_service, R117: kv_rpc_service)
+      (R115: diskdb, R32: px_rpc_service, R117: kv_rpc_service,
+      R116: chunkdb_rpc_service)
 - [x] Client rewritten (`RpcClient` + `ConnectionPool`)
       (R115: DiskdbRpcTransport, R117: KvRpcTransport — R32 uses
-      PxRpcTransport)
+      PxRpcTransport, R116: ChunkdbRpcTransport)
 - [x] Error mapping (`RpcError` → service error variants)
-- [x] `grpc_endpoint` → `rpc_endpoint` (already done — skip)
-- [x] Mixed-rollout: both servers run, clients switch via
-      `with_rpc_transport()` (R115, R117 — gRPC server NOT yet
-      removed, see Open Issues)
-- [ ] Cutover: gRPC server removed, `.proto` stays as legacy/reserved
-      (NOT done for any service — all three still run both servers)
+- [x] `grpc_endpoint` → `rpc_endpoint` (all call sites — proto field,
+      keepalive struct, FFI param, transport/service param names)
+- [x] Mixed-rollout cutover: crow-rpc is the only transport; the
+      `with_rpc_transport()` switch has been replaced with a required
+      `rpc_transport` parameter at construction. No service runs a
+      gRPC server anymore.
+- [x] Cutover: gRPC server + tonic traits + prost types removed from
+      all crates; `.proto` files deleted; `protobuf`/`protoc` removed
+      from pixi env. `Cargo.lock` has no tonic/prost/protobuf/grpcio.
 - [x] Tests pass: `cargo test -p <service>`, `cargo fmt --check`,
       `cargo clippy -- -D warnings`
 
 ## Open Issues (deferred to follow-up items)
 
-- **R115 mixed-rollout cutover** → **done for diskdb/chunkdb; crow-kv
-  still pending**: gRPC and prost types have been removed from
-  `crow-protocol`, `crow-diskdb`, `crow-diskdb-client`, `crow-chunkdb`,
-  `crow-chunkdb-client`, and `crow-web`. The tonic server traits and
-  gRPC client paths are gone; crow-rpc is the only transport. The
+- **R115 mixed-rollout cutover** → **done for all services**: gRPC
+  and prost types have been removed from every crate
+  (`crow-protocol`, `crow-diskdb`, `crow-diskdb-client`,
+  `crow-chunkdb`, `crow-chunkdb-client`, `crow-web`, `crow-kv`,
+  `crow-kv-client`). The tonic server traits and gRPC client paths
+  are gone; crow-rpc is the only transport. The
   `with_rpc_transport()` switch has been replaced with a required
-  `rpc_transport` parameter at construction. Remaining: `crow-kv` and
-  `crow-kv-client` still use tonic for the KV consensus and client RPCs
-  (Paxos peer RPCs, KV service server/client, WatchNotify bidi stream).
+  `rpc_transport` parameter at construction. `Cargo.lock` carries no
+  tonic/prost/protobuf/grpcio packages; no `.proto` files remain in
+  the repo; `protobuf`/`protoc` has been removed from the pixi env
+  (only `flatc`, from the `flatbuffers` package, is needed for
+  codegen). The last cosmetic legacy — the `grpc_endpoint`
+  parameter name in the transport/service call sites — has been
+  renamed to `rpc_endpoint`.
 
 - **R114 `fail_all` is all-or-nothing** → **resolved**: Added
   per-connection scoping to `fail_all` in the C++ `RpcClient`. Each

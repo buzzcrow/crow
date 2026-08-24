@@ -25,7 +25,7 @@ patterns** are persistence concerns, defined in:
 - `doc/design/kv/design-crow-kv-group0.md` §3 — group-0 sysdata schema
   (text keys + JSON values).
 - `doc/design/diskdb/design-crow-diskdb.md` §5 and §7 — data-group
-  zone records (binary keys + protobuf values).
+  zone records (binary keys + flatbuffer values).
 
 ## Table of Contents
 
@@ -34,7 +34,7 @@ patterns** are persistence concerns, defined in:
 - [3. Key Design Decisions](#3-key-design-decisions)
 - [4. Unified Key Concept — Two Encodings](#4-unified-key-concept--two-encodings)
 - [5. Evolution (Append-Only)](#5-evolution-append-only)
-- [6. Relationship to RPC (Protobuf) Types](#6-relationship-to-rpc-protobuf-types)
+- [6. Relationship to RPC (Flatbuffer) Types](#6-relationship-to-rpc-flatbuffer-types)
 - [7. Crate Home](#7-crate-home)
 - [8. Trait Shape](#8-trait-shape)
 - [9. Testing](#9-testing)
@@ -55,7 +55,7 @@ therefore satisfy two rules:
 - **Prefix-stable** — truncating the encoded key at a field boundary
   must yield a valid scan prefix that returns exactly the child range.
 
-Protobuf-serialized `*Key` messages satisfy neither. Protobuf emits a
+Flatbuffer-serialized `*Key` messages satisfy neither. Flatbuffers emits a
 tag byte (field number + wire type) before every field, omits fields
 that are at their default, and does not guarantee field order across
 implementations. The result:
@@ -68,7 +68,7 @@ implementations. The result:
   ordering, not field values), so range scans return rows in the wrong
   order.
 
-Conclusion: **protobuf `*Key` messages must never be used as KV key
+Conclusion: **flatbuffer `*Key` messages must never be used as KV key
 bytes.** CROW controls its own binary key format.
 
 ## 2. Goals
@@ -225,16 +225,16 @@ concept** (struct + fields) is the single source of truth in
 to bytes:
 
 - **`BinaryKey`** — `magic_byte | type_tag:u16 BE | fields BE`,
-  prost-encoded protobuf values. Used by data groups (high-volume,
+  flatbuffer-encoded values. Used by data groups (high-volume,
   machine-only).
 - **`TextKey`** — `/magic/type/<field1>/<field2>/...` slash-delimited
-  path, JSON-encoded values (serde on the same proto types). Used by
+  path, JSON-encoded values (serde on the same flatbuffer types). Used by
   group 0 (small, human-inspected, scan-friendly).
 
 **Design decisions:**
 
 - **Encoding choice is per-namespace.** Group 0 uses text keys + JSON
-  values; data groups use binary keys + protobuf values. A key type
+  values; data groups use binary keys + flatbuffer values. A key type
   implements `BinaryKey`, `TextKey`, or both. Group-0 keys implement
   both (text for group 0, binary available for future use); data-group
   keys (`ZoneKey`, `BusyBlockKey`, `FreeBlockKey`) implement
@@ -315,7 +315,7 @@ Its exact value is fixed at first ship and never changed afterward.
 ### 4.2 Text Key Layouts (Group 0)
 
 Text keys are slash-delimited paths: `/magic/type/<fields...>`. Values
-are JSON-encoded (serde on the same proto types). The path segments
+are JSON-encoded (serde on the same flatbuffer types). The path segments
 for integer fields are decimal strings; `DiskId` is a 32-char
 lowercase hex string (`high:low`, zero-padded).
 
@@ -356,15 +356,15 @@ patterns are in `design-crow-kv-group0.md` §3):
 In short: key types are append-only — new kinds are added, existing
 kinds are never changed.
 
-## 6. Relationship to RPC (Protobuf) Types
+## 6. Relationship to RPC (Flatbuffer) Types
 
 KV keys and RPC messages are separate concerns:
 
 - **KV key bytes** — produced and consumed only by the Rust
   `BinaryKey` types in `crow-protocol`. These bytes go to
   `crow-kv-client`'s `put` / `get` / `scan` and never appear on the
-  gRPC wire as a serialized key message.
-- **RPC responses/requests** — use protobuf `**Info` messages that
+  crow-rpc wire as a serialized key message.
+- **RPC responses/requests** — use flatbuffer `**Info` messages that
   **flatten key fields and value fields into one message**
   (e.g. `DiskInfo` carries `node_id`, `disk_group_id`, `disk_id`
   alongside `disk_type`, `capacity_units`, …). Requests that identify
@@ -372,10 +372,10 @@ KV keys and RPC messages are separate concerns:
   `GetDiskInfoRequest { node_id, disk_group_id, disk_id }`), not a
   serialized key.
 
-The proto `*Key` messages (`DiskKey`, `ZoneKey`, `DiskGroupKey`,
-`BusyBlockKey`, `FreeBlockKey`, `RackKey`, `NodeKey`) are removed.
+There are no `*Key` flatbuffer messages (`DiskKey`, `ZoneKey`,
+`DiskGroupKey`, `BusyBlockKey`, `FreeBlockKey`, `RackKey`, `NodeKey`).
 There is no second representation of a key: the Rust `BinaryKey` types
-are the keys; the `**Info` proto messages are the RPC shape that
+are the keys; the `**Info` flatbuffer messages are the RPC shape that
 happens to repeat the key's fields as plain scalars.
 
 ## 7. Crate Home
@@ -383,7 +383,7 @@ happens to repeat the key's fields as plain scalars.
 The `BinaryKey` trait, the key structs, the `CROW_KEY_MAGIC` constant,
 the type-tag constants, and the prefix constructors live in
 `lib/crow-protocol/src/key/` and are re-exported from the crate root.
-`crow-protocol` already hosts the shared proto types and is the
+`crow-protocol` already hosts the shared flatbuffer types and is the
 cross-component protocol crate, so it is the natural home for the
 shared key encoding. Components (`crow-diskdb`, future components)
 depend on `crow-protocol` and build keys via the key structs; they do
@@ -446,7 +446,7 @@ string-field kinds; not needed while all keys are fixed-width.)
 - diskdb key kinds and their hierarchy:
   `doc/design/diskdb/design-crow-diskdb.md` §5 (group-0 sysdata) and
   §7 (zone records).
-- Proto types being replaced: the `crow-protocol` proto module.
-  `common_type.proto` (`RackKey`, `NodeKey`), `diskdb_type.proto`
+- Flatbuffer types: the `crow-protocol` flatbuffer module.
+  `common_type.fbs` (`RackKey`, `NodeKey`), `diskdb_type.fbs`
   (`ZoneKey`, `DiskKey`, `DiskGroupKey`, `BusyBlockKey`,
   `FreeBlockKey`).

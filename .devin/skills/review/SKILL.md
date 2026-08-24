@@ -32,7 +32,7 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
 6. **Enum vs `dyn Trait`** — prefer enum dispatch. `dyn` only for open-ended / cross-crate.
 7. **Dead code** — remove unused types/imports/fields/methods/deps. Collapse always-same-value enum variants to unit.
 8. **Duplication** — move shared helpers to `common/` or `rpc/`.
-9. **Errors** — no `panic!` in non-test code. Replace `OnceCell::get_or_init + unwrap` with `get_or_try_init`. gRPC client init must propagate.
+9. **Errors** — no `panic!` in non-test code. Replace `OnceCell::get_or_init + unwrap` with `get_or_try_init`. crow-rpc client init must propagate.
 10. **Naming** — `Px` prefix for Paxos types. `&self` when interior mutability suffices.
 11. **Visibility** — minimise `pub`; use `pub(crate)` / `pub(super)`. Test-only access via `#[cfg(feature = "test-util")]` gates + `_for_tests` setters, not `pub`. Review every changed `pub` item — narrowest visibility that works (private < `pub(super)` < `pub(crate)` < `pub`).
 12. **Debug** — all public structs implement `Debug`. Manual: identity fields + `finish_non_exhaustive()`.

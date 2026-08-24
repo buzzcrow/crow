@@ -7,7 +7,7 @@
 
 **Current behavior + impact**
 
-`KvSetRequest` (`lib/crow-kv/src/rpc/proto/kv.proto:29`) is a blind
+`KvSetRequest` (`lib/crow-protocol/src/fbs/kv_client.fbs:29`) is a blind
 overwrite — it has no `expected_revision` field. The KV server's `put`
 handler (`lib/crow-kv/src/rpc/kv_service.rs:217`) calls `kv_put` →
 `propose_and_respond` → paxos propose, with no precondition check. The
@@ -33,7 +33,7 @@ read-modify-write callers, not just chunkdb.
   "Concurrency: KV CAS or state machine guards prevent conflicting
   transitions." R101 implements the KV CAS half of this statement (R100
   implements the state-machine-guard half via the in-process mutex).
-- `lib/crow-kv/src/rpc/proto/kv.proto:29` — `KvSetRequest` message to
+- `lib/crow-protocol/src/fbs/kv_client.fbs:29` — `KvSetRequest` message to
   extend.
 - `lib/crow-kv/src/cluster/px_kv_store.rs:488` — `propose_and_respond`,
   the propose path where the CAS check would be inserted (read-before-
@@ -85,7 +85,7 @@ the propose, so the check is authoritative.
 
 **Numbered work items**
 
-- **`KvSetRequest` proto extension** (`lib/crow-kv/src/rpc/proto/kv.proto`)
+- **`KvSetRequest` fbs extension** (`lib/crow-protocol/src/fbs/kv_client.fbs`)
   — add `optional uint64 expected_revision = 10;` to `KvSetRequest`
   (field number 10, next available after the existing fields 1-9). When
   absent (0 / None), behavior is unchanged (blind overwrite, the default).
@@ -104,7 +104,7 @@ the propose, so the check is authoritative.
     revision without a separate read).
   - If `current_revision == expected_revision`, proceed with
     `store.kv_put` as today. The lease guarantees no interleaving.
-- **`KV_ERROR_CAS_FAILED` error code** (`kv.proto` `KvErrorCode` enum)
+- **`KV_ERROR_CAS_FAILED` error code** (`kv_client.fbs` `KvErrorCode` enum)
   — new error code. The `KvResponse` on CAS failure includes the
   current revision in the `revision` field (normally the write's slot;
   on CAS failure, it's the key's current revision for client retry).
@@ -190,7 +190,7 @@ Client calls put_cas(key, value, expected_revision=N)
 - Depends on: existing KV server `put` path (`kv_service.rs:217`,
   `px_kv_store.rs:488`), existing `GetOutcome::Found { revision }`
   (`client.rs:40`), existing leader lease (linearizable read path).
-- No proto-breaking changes — `expected_revision` is an optional field
+- No schema-breaking changes — `expected_revision` is an optional field
   (field number 10); existing clients that don't set it get blind-overwrite
   behavior (backward compatible).
 - **R100** (chunkdb lifecycle lock) — not a dependency. R101 is
@@ -250,13 +250,13 @@ Client calls put_cas(key, value, expected_revision=N)
 
 - Existing `put` calls (no `expected_revision`) behave identically
   before and after R101. Unit test.
-- Existing clients built against the old proto can still send `put`
+- Existing clients built against the old fbs schema can still send `put`
   requests to a server upgraded with R101 (optional field). Integration
   test.
 
 **Error mapping**:
 
-- `CasFailed` maps to gRPC `ABORTED` with the current revision in the
+- `CasFailed` maps to a crow-rpc error with the current revision in the
   error detail (so the client can retry without a separate read). Unit
   test.
 

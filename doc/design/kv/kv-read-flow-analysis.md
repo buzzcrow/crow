@@ -24,7 +24,7 @@ Client GET(key, read_mode, min_slot?)
        [copy: key → HTTP/2 frame, unavoidable]
     4. retry: NotLeaderHint → follow; empty hint → wait+refresh;
        transport error → backoff+refresh
-  → KvStoreService::get (gRPC)                    [kv_service.rs]
+  → KvStoreService::get (crow-rpc)                    [kv_service.rs]
     5. [Linearizable] if local not leader and not already forwarded →
        forward_kv_get to leader (at-most-once via x-crow-kv-forwarded)
        - success → return leader's response
@@ -41,13 +41,13 @@ Client GET(key, read_mode, min_slot?)
         Crowtree slow path one copy I/O buf→Bytes on reactor thread]
     9. build KvResponse { read_slot, safe_slot, value: Bytes }
        [move: Bytes moved into response, no copy]
-       [copy: value → socket buffer on gRPC serialize, unavoidable]
+       [copy: value → socket buffer on crow-rpc serialize, unavoidable]
 ```
 
 **Copy points**: O(1) for the get path, one value copy (frame → `Bytes`
 fast path, or I/O buffer → `Bytes` slow path on demand-load); O(n)
-unavoidable for gRPC serialize/deserialize. After R6, the get path is
-fully zero-copy from C++ frame to gRPC response: `PinnedValue::into_bytes()`
+unavoidable for crow-rpc serialize/deserialize. After R6, the get path is
+fully zero-copy from C++ frame to crow-rpc response: `PinnedValue::into_bytes()`
 produces a `Bytes` backed by the C++ frame via `Bytes::from_owner`, with
 page refcount pins keeping the frame alive until the `Bytes` is dropped.
 
@@ -73,7 +73,7 @@ page refcount pins keeping the frame alive until the `Bytes` is dropped.
 
 - **R6** — Zero-copy value returns: `PinnedValue::into_bytes()` produces
   a `Bytes` via `Bytes::from_owner` backed by the C++ frame — no copy
-  from frame to gRPC response. Page refcount pins keep the frame alive
+  from frame to crow-rpc response. Page refcount pins keep the frame alive
   until the `Bytes` is dropped on any thread.
 - **R21** — Eliminated the intermediate `Vec<u8>` in engine get: the
   fast path returns `PinnedValue` borrowing the C++ frame; final `Bytes`
@@ -86,7 +86,7 @@ page refcount pins keeping the frame alive until the `Bytes` is dropped.
   later reads enqueue a waiter and adopt the same outcome. Eliminates
   per-read heartbeat rounds under lease-expiry bursts.
 - **TCP_NODELAY** — Before the fix, read latency was ~41ms (Nagle +
-  delayed ACK interaction in tonic/gRPC). After applying `TCP_NODELAY`
+  delayed ACK interaction in crow-rpc). After applying `TCP_NODELAY`
   to all client and server sockets, latency dropped to ~138us — a 290×
   improvement.
 
@@ -107,7 +107,7 @@ values. Raw TSV: `doc/working/bench-read-regression.tsv` (gitignored).
 
 At 1T:1C both modes are identical (~21K ops/s, 46us) — no concurrency
 advantage for MinSlot, and the Linearizable lease barrier is ~0 (lease
-fast path). Per-read cost is engine get + gRPC RTT only.
+fast path). Per-read cost is engine get + crow-rpc RTT only.
 
 ### Multi-thread — max throughput + read-mode split
 
@@ -165,7 +165,7 @@ values. Raw TSV: `doc/working/bench-read-regression.tsv` (gitignored).
 | minslot_1t | minslot | 6160 | 20478 | -70% | 222 | 73 | 0 |
 
 Linux single-thread is ~3x slower (6608 vs 20441) — same gap as scan,
-dominated by gRPC RTT and engine get cost on x86_64.
+dominated by crow-rpc RTT and engine get cost on x86_64.
 
 #### Multi-thread
 
@@ -236,7 +236,7 @@ Zero correctness errors on Linux. Verify overhead negligible (<1%).
 - **HTTP/2 connection lock (deferred, R32).** HTTP/2 requires a
   connection-level userspace lock (HPACK dynamic table, frame output
   buffer, flow-control windows are shared mutable state). When N threads
-  submit to one gRPC connection concurrently, they serialize on this
+  submit to one crow-rpc connection concurrently, they serialize on this
   lock during frame encoding, a single-threaded userspace funnel before
   any `write()` reaches the kernel. The 2T:1C throughput drop measured by
   the `minslot_6t_2to1` sentinel is this lock's cost. 1T:1C avoids it

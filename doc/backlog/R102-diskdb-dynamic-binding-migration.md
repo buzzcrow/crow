@@ -114,7 +114,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
 
 ### Work items
 
-1. **diskdb binding schema** — `lib/crow-protocol/src/proto/sysdata_type.proto`
+1. **diskdb binding schema** — `lib/crow-protocol/src/fbs/common_type.fbs`
    (extend): add `DiskdbBindingValue` (disk-group-id → paxos-group-id
    `(store_id, group_id)` + diskdb instance endpoint); stored in
    group-0 with key pattern `/diskdb/dg_bind/<disk_group_id>`. Add a
@@ -131,7 +131,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
    No `Copying`/`Cutover`/`Complete` state enum — progress is derived
    from comparing the current `BindMapValue` to `new_bind` (copy done
    iff bind already points to `new_bind`). Add
-   `ERROR_CODE_NOT_MY_BINDING` to `error_code.proto` for the
+   `ERROR_CODE_NOT_MY_BINDING` to `ret_code.fbs` for the
    reject-and-retry protocol.
 2. **diskdb binding client** — `lib/crow-kv-client/src/` (extend):
    add `DiskdbBindingClient` (fetch + cache + watch/notify),

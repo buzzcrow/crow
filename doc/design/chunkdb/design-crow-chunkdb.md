@@ -22,7 +22,7 @@ and Rust source; this doc covers decisions and architecture only.
 - [3.4a Watch/notify for real-time updates](#34a-watchnotify-for-real-time-updates)
   - [3.5 EC at strip level via isa-l (crow-common module)](#35-ec-at-strip-level-via-isa-l-crow-common-module)
   - [3.6 Stateless with KV persistence](#36-stateless-with-kv-persistence)
-  - [3.7 Common protocol crate; gRPC now](#37-common-protocol-crate-grpc-now)
+  - [3.7 Common protocol crate; crow-rpc](#37-common-protocol-crate-crow-rpc)
   - [3.8 Proto types used directly; no Rust type duplication](#38-proto-types-used-directly-no-rust-type-duplication)
   - [3.9 Chunk types for different use cases](#39-chunk-types-for-different-use-cases)
 - [4. Architecture Overview](#4-architecture-overview)
@@ -208,18 +208,16 @@ crash recovery without local WAL, and relies on CROW KV's durability
 guarantees. Stateless design also makes scaling out easier. New instances
 can start without data migration.
 
-### 3.7 Common protocol crate; gRPC + crow-rpc
+### 3.7 Common protocol crate; crow-rpc
 
-Protocol definitions live in `lib/crow-protocol/src/proto/chunkdb_*.proto`
+Protocol definitions live in `lib/crow-protocol/src/fbs/chunkdb_*.fbs`
 and are shared between chunkdb server and chunkdb client. Communication
-uses gRPC, with a crow-rpc flatbuffer transport available alongside it
-for performance (programmatic selection via
-`ChunkdbClient::with_rpc_transport`). See sub-design
+uses crow-rpc (flatbuffer transport), the same engine as the KV
+consensus hot path. See sub-design
 [`design-crow-chunkdb-rpc.md`](design-crow-chunkdb-rpc.md).
 
-**Rationale:** Single source of truth for protocol definitions. gRPC is
-well-understood; the crow-rpc transport uses the same engine as the KV
-consensus hot path for lower latency.
+**Rationale:** Single source of truth for protocol definitions. crow-rpc
+uses the same engine as the KV consensus hot path for lower latency.
 
 ### 3.8 Proto types used directly; no Rust type duplication
 
@@ -250,7 +248,7 @@ either mirror or EC strips based on configuration and access patterns.
 ┌─────────────────────────────────────────────────────────────────┐
 │                         chunkdb Server                          │
 ├─────────────────────────────────────────────────────────────────┤
-│  gRPC Service (ChunkdbService)                                  │
+│  crow-rpc Service (ChunkdbService)                              │
 │  ├── AllocateChunk                                              │
 │  ├── SealChunk                                                   │
 │  ├── DeleteChunk                                                 │
@@ -294,7 +292,7 @@ either mirror or EC strips based on configuration and access patterns.
 
 **Key components:**
 
-- **gRPC Service**: External API for chunk operations.
+- **crow-rpc Service**: External API for chunk operations.
 - **Lifecycle Layer**: Implements chunk state machine transitions.
 - **Allocation Layer**: Orchestrates strip allocation with rollback on failure.
 - **Placement Layer**: Rack/node-aware placement algorithms.
@@ -768,7 +766,7 @@ impl Default for CacheHint {
   is still updated so the current operation sees the chunk.
 
 All mutating RPCs use `LockPolicy::default()` and `CacheHint::Cache`.
-These are internal in v1, not exposed in the gRPC API.
+These are internal in v1, not exposed in the RPC API.
 
 ### 10.3 ChunkGuard
 
@@ -921,7 +919,7 @@ All internal (no auth, same as `/ready` and `/health`).
 - `acquire` returns `ChunkNotFound` (store miss during acquire) → the
   chunk does not exist; `append`/`seal`/`delete` return
   `ChunkNotFound`.
-- `LockBusy` / `LockTimeout` → mapped to gRPC `UNAVAILABLE`.
+- `LockBusy` / `LockTimeout` → mapped to RPC `UNAVAILABLE`.
 
 ## 11. EC Encoding/Decoding
 
@@ -954,7 +952,7 @@ app/crow-chunkdb/              # chunkdb server binary
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs               # CLI entrypoint
-│   ├── server.rs             # gRPC server
+│   ├── server.rs             # rpc server
 │   ├── lifecycle.rs          # Chunk lifecycle handlers
 │   ├── allocator/
 │   │   ├── mod.rs            # ChunkAllocator
@@ -987,9 +985,9 @@ lib/crow-common/               # Shared library (EC module added)
 │   └── ec.rs                 # isa-l FFI wrapper (encode/decode)
 
 lib/crow-protocol/             # Protocol definitions
-└── src/proto/
-    ├── chunkdb_service.proto # gRPC service
-    └── chunkdb_types.proto   # Data types
+└── src/fbs/
+    ├── chunkdb_service.fbs # rpc service
+    └── chunkdb_types.fbs   # Data types
 ```
 
 ## 13. Concurrency Model

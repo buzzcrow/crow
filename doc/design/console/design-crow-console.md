@@ -46,7 +46,7 @@ design is detailed in the sub-design `design-crow-console-ui.md`.
 
 ### Goals
 - Single workspace project `crow-console` delivering a Web UI and a CLI that share one Rust core.
-- Operate against any number of `crow-kv-server` instances via their public surfaces (HTTP management API + gRPC KV / health).
+- Operate against any number of `crow-kv-server` instances via their public surfaces (HTTP management API + crow-rpc KV / health).
 - Model a **Rack → Node → Server Instance → Store → Group → Replica** hierarchy, including a "simulated hardware" mode that runs entirely on `127.0.0.1`.
 - Host the Swagger UI static bundle in `crow-web` (one pinned offline release); the OpenAPI document shown inside it is proxied from the user-selected `crow-kv-server`, so the SPA can inspect a specific server's API even though all servers of the same version produce the same doc.
 
@@ -63,7 +63,7 @@ general cluster-management surface (not limited to CROW), so crate
 names use the `crow-*` prefix without `kv`.
 
 ```
-lib/crow-console-shared/   (lib)   data models, HTTP+gRPC clients, registry, aggregator, error model, SSH session pool, workload generator
+lib/crow-console-shared/   (lib)   data models, HTTP+crow-rpc clients, registry, aggregator, error model, SSH session pool, workload generator
 app/crow-web/              (bin)   Axum backend, static asset server, Swagger UI mount, proxy routes
   src/                             Rust source
   ui/                              React + Vite frontend source (TS, shadcn/ui, React Flow)
@@ -82,7 +82,7 @@ Targets:
 Every console operation follows the same path. The frontend (web SPA
 backed by Axum, **or** the `crow-cli` CLI binary) is a thin presentation
 layer; it always calls into `shared`, and `shared` is the only place
-that talks to `crow-kv-server` over HTTP / gRPC / SSH.
+that talks to `crow-kv-server` over HTTP / crow-rpc / SSH.
 
 ```
                 ┌──────────────┐        ┌──────────────┐
@@ -99,7 +99,7 @@ that talks to `crow-kv-server` over HTTP / gRPC / SSH.
                                  │                        leader resolution,
                   ┌──────────────┼──────────────┐         SSH session pool)
                   ▼              ▼              ▼
-               HTTP            gRPC            SSH
+               HTTP            crow-rpc            SSH
                   │              │              │
                   ▼              ▼              ▼
               ┌────────────────────────────────────┐
@@ -147,7 +147,7 @@ Rooted at **Cluster → Store → Group → Replica…** with a unified replica
 list (no local/remote split; each replica carries a `node_id`). This is
 the view that KV traffic, leader resolution, and routine cluster
 operations use. The web backend is the only component that needs to
-translate logical ids into upstream `(node_id, mgmt_url, grpc_url)`
+translate logical ids into upstream `(node_id, mgmt_url, rpc_url)`
 tuples; the SPA and the CLI never see those.
 
 Identity is `(store_id[, group_id[, replica_id]])`.
@@ -166,7 +166,7 @@ Identity is `(store_id[, group_id[, replica_id]])`.
 
 ### 3.4 Design decisions
 
-- **No `server_id` namespace.** The server's mgmt/gRPC URLs live inside
+- **No `server_id` namespace.** The server's mgmt/crow-rpc URLs live inside
   `Node.server` and are never exposed in console-facing JSON URLs. Since
   the console enforces one server per node, node identity *is* server
   identity.
@@ -186,7 +186,7 @@ Identity is `(store_id[, group_id[, replica_id]])`.
 - Contents:
   - `rack` / `node` entries (id, rack_id, host, SSH creds).
   - Optional per-node server deployment record: management endpoint,
-    gRPC endpoint, and binary/config path as implementation evolves.
+    rpc endpoint, and binary/config path as implementation evolves.
     This records the operator's intended deployment target, not
     authoritative live state.
 - **Plaintext** SSH credentials are acceptable for v1 (internal demo);
@@ -292,7 +292,7 @@ analog: CockroachDB system ranges).
 | --- | --- |
 | Deploy / start / stop `crow-kv-server` process; copy binary | SSH |
 | Runtime mgmt API (add store/group, list, health) | HTTP |
-| Runtime KV ops, paxos health | gRPC |
+| Runtime KV ops, paxos health | crow-rpc |
 
 ### 5.2 SSH defaults (russh)
 - Crate: **`russh`** (pure Rust, async). No shell-out fallback.
@@ -478,8 +478,8 @@ ever appears in the browser.
   `Validation`, `NotFound`, `Conflict`. HTTP maps to 4xx/5xx; CLI maps
   to exit codes (0 ok, 1 user error, 2 cluster/network error).
 - **Operation log** — a per-session file under `~/.lib/crow-kv/log/` records
-  every outbound action (HTTP/gRPC/SSH) with enough detail to reproduce
-  by copy-pasting the equivalent curl/grpcurl/ssh command.
+  every outbound action (HTTP/crow-rpc/SSH) with enough detail to reproduce
+  by copy-pasting the equivalent curl/crow-cli/ssh command.
 
 ## 10. Observability
 

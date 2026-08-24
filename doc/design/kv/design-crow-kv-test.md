@@ -55,10 +55,10 @@ ui e2e     (Playwright browser: SPA + real backend)                <- app/crow-w
 | `lib/crow-kv/tests/wal.rs` | subsystem | `WalEngine` append/replay/gc/segment + record codec + backends |
 | `lib/crow-kv/tests/slot.rs` | subsystem | `PxSlotList` / `PxSlotNode` |
 | `lib/crow-kv/tests/replica.rs` | replica | single `PxLocalReplica` (no peers) |
-| `lib/crow-kv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback gRPC, no mocks) |
+| `lib/crow-kv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback crow-rpc, no mocks) |
 | `lib/crow-kv/tests/store.rs` | store | `PxKvStore` routing / lifecycle / status / health |
 | `app/crow-kv-server/tests/*` | deployment | server binary + HTTP API, multi-process clusters, CLI, startup |
-| `lib/crow-kv-client/tests/*` | client e2e | `CrowkvClient` retry, topology cache, `NotLeaderHint` follow, `AnyReplica` read distribution + fallback against embedded gRPC servers |
+| `lib/crow-kv-client/tests/*` | client e2e | `CrowkvClient` retry, topology cache, `NotLeaderHint` follow, `AnyReplica` read distribution + fallback against embedded crow-rpc servers |
 | `app/crow-web/tests/*` | console mgmt API | Axum REST API server: node management, OpenAPI proxy, API forwarding |
 | `lib/crow-console-shared/tests/*`, `app/crow-cli/tests/*` | console mgmt API | shared core (config, API client, health aggregation) + CLI commands |
 | `app/crow-cli/tests/bench_benchmark.rs` | benchmark | `bench benchmark` lifecycle (deploy → run → collect → report → cleanup) + `bench compare` |
@@ -67,7 +67,7 @@ ui e2e     (Playwright browser: SPA + real backend)                <- app/crow-w
 ## 4. Cross-Cutting Coverage Rules
 
 **Placement rule:** a test that only needs the `crow-kv` library (even if it
-binds the embedded gRPC server via `PxKvStore::start`) lives in `crow-kv`. A
+binds the embedded crow-rpc server via `PxKvStore::start`) lives in `crow-kv`. A
 test that boots the `crow-kv-server` binary / HTTP management API lives in
 `crow-kv-server`.
 
@@ -116,7 +116,7 @@ proceeding to tier-specific assertions:
    tuning is tracked separately (see Benchmark row in the binary map above
    and [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md)).
 
-   KV operations are gRPC only (no REST API for KV). Tests use
+   KV operations are crow-rpc only (no REST API for KV). Tests use
    `CrowkvClient` (deployment/UI layers) or `PxKvStore` public API
    directly (group/store layers). The console mgmt API layer verifies
    topology management via REST but does not perform KV operations; KV
@@ -165,11 +165,11 @@ lowest broken layer. Detailed per-layer coverage checklists live in
   WAL + slot integration: prepare/accept with WAL persistence, dedup,
   snapshot install, WAL replay ordering.
 - **Group** — `PxGroup` with 1 local + N remote replicas over real loopback
-  gRPC (no mocks): full Paxos rounds, leader election, KV through the
+  crow-rpc (no mocks): full Paxos rounds, leader election, KV through the
   group, durability under crash/restart.
 - **Store** — `PxKvStore`: multi-group routing, node identity, lifecycle,
-  topology status. Uses embedded gRPC server via `PxKvStore::start`.
-- **Client E2E** — `CrowkvClient` against embedded `PxKvStore` gRPC
+  topology status. Uses embedded crow-rpc server via `PxKvStore::start`.
+- **Client E2E** — `CrowkvClient` against embedded `PxKvStore` crow-rpc
   servers: retry, topology cache refresh, `NotLeaderHint` follow,
   `AnyReplica` read distribution, `MinSlot` lagging-follower fallback. No
   `crow-kv-server` binary is booted.

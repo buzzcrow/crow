@@ -8,13 +8,11 @@ Satisfies: [`design-crow-chunkdb.md`](design-crow-chunkdb.md) §4 (RPC layer)
 
 The chunkdb service (Allocate/Append/Query/Seal/Delete/DeleteRange/
 UpdateStrip/ListChunks) uses the **crow-rpc flatbuffer transport** — the
-same engine as the KV consensus hot path, but on a separate port and
-with a dedicated schema (`chunkdb.fbs`). The transport selection is
-programmatic (`ChunkdbClient::with_rpc_transport`), enabling a
-mixed-rollout window where both the gRPC and crow-rpc servers run
-simultaneously. Architecture decisions and rationale live in the root
-RPC design; this doc covers the chunkdb-specific schema, handler, and
-transport detail.
+same engine as the KV consensus hot path, on a dedicated port with a
+dedicated schema (`chunkdb.fbs`). The transport is selected
+programmatically (`ChunkdbClient::with_rpc_transport`). Architecture
+decisions and rationale live in the root RPC design; this doc covers the
+chunkdb-specific schema, handler, and transport detail.
 
 ## Table of Contents
 
@@ -31,27 +29,23 @@ transport detail.
 
 ## 1. Port Allocation
 
-The chunkdb gRPC port is `CHUNKDB_GRPC_BASE = 9971` (stride 2, paired
-with HTTP 9972). The crow-rpc port uses a new base:
+The chunkdb RPC port is `CHUNKDB_RPC_BASE = 9961` (stride 1, paired
+with HTTP 9972).
 
 ```rust
 pub const CHUNKDB_RPC_BASE: u16 = 9961;
 ```
 
-Fills the gap between diskdb RPC (9931-9940) and chunkdb gRPC
-(9971-9990). Stride 1 (one port per instance). The `ChunkdbRpc` variant
+Fills the gap between diskdb RPC (9931-9940) and chunkdb HTTP
+(9972). Stride 1 (one port per instance). The `ChunkdbRpc` variant
 in `ServicePort` provides `base() => CHUNKDB_RPC_BASE`, `stride() => 1`.
-
-The client derives the chunkdb RPC port from the gRPC port via:
-`rpc_port = grpc_port + (CHUNKDB_RPC_BASE - CHUNKDB_GRPC_BASE)` =
-`grpc_port - 10`.
 
 ## 2. Flatbuffer Schema (chunkdb.fbs)
 
 File: `lib/crow-protocol/src/fbs/chunkdb.fbs`
 
 Includes `common_type.fbs` (provides `FBInt128`) and `diskdb.fbs`
-(provides `FBSegment` as an inline struct in the `crow.diskdb.proto`
+(provides `FBSegment` as an inline struct in the `crow.diskdb`
 namespace).
 
 **Enums:**
@@ -68,7 +62,7 @@ namespace).
 
 - `FBMirrorStrip` — `segments:[FBSegment]`
 - `FBEcStrip` — `data_num`, `code_num`, `ec_state`, `segments:[FBSegment]`
-- `FBStripBody` union — None, Mirror, Ec (maps the proto `oneof strip`)
+- `FBStripBody` union — None, Mirror, Ec (the strip body union)
 - `FBChunkStrip` — `chunk_offset`, `strip_sequence`, `unit_kb`,
   `capacity`, `create_ts_ms`, `sealed_ts_ms`, `sealed_length`,
   `strip_type`, `strip_body:FBStripBody`, `usage_bitmap:[ubyte]`
@@ -78,7 +72,7 @@ namespace).
 **Request/response tables:**
 
 All 8 request types follow the same shape: `id` + `rpc_create_nano`
-first, then the proto fields. All 8 response types carry `id` +
+first, then the schema fields. All 8 response types carry `id` +
 `rpc_create_nano` + `ret_code` + `error_msg` + `range_start` +
 `range_end` (diagnostic for `NotMyRange`) + the response data.
 
@@ -129,7 +123,7 @@ File: `app/crow-chunkdb/src/service/chunkdb_rpc_service.rs`
 
 The `ChunkdbRpcService` struct holds `Arc<LifecycleHandler>` + a
 `tokio::runtime::Handle`. The handler delegates to `LifecycleHandler`
-for all 8 RPCs — same logic as the tonic `ChunkdbService`, different
+for all 8 RPCs — same logic as the crow-rpc `ChunkdbService`, different
 wire format. No transparent forwarding (chunkdb has no leader — range
 routing is client-side via `RangeBindingClient`).
 
@@ -155,7 +149,7 @@ h. Submit via `server.submit_response`.
 **Response builders:** one `build_<type>_response` function per
 response type. The `Chunk` → `FBChunk` conversion builds nested
 `FBChunkStrip` + `FBMirrorStrip`/`FBEcStrip` + `FBSegment` vectors —
-the most complex part since the proto `Chunk` has nested `Vec<ChunkStrip>`
+the most complex part since the `Chunk` flatbuffer has nested `Vec<ChunkStrip>`
 with a `oneof strip` field.
 
 ## 5. Client-Side Transport (ChunkdbRpcTransport)
@@ -173,15 +167,14 @@ pub struct ChunkdbRpcTransport {
 
 The `RpcServer` is the client-side transport — it does not listen but
 establishes connections to remote endpoints. `conn_for(endpoint)`
-normalizes the endpoint, derives the RPC port via `grpc_port - 10`,
-connects, and caches the `Connection`.
+normalizes the endpoint, connects, and caches the `Connection`.
 
 8 `send_*` methods (one per RPC): build request flatbuffer →
 `rpc.call(&server, &conn, req_id, control, None, msg_type)` →
-`fut.await` → parse response via `Ref` wrapper → map to proto response
+`fut.await` → parse response via `Ref` wrapper → map to the response
 type → return.
 
-The proto response types are still returned — the caller's retry +
+The response types are still returned — the caller's retry +
 `RangeBindingClient` logic is unchanged; only the wire send changes.
 
 ## 6. ChunkdbClient Transport Selection
@@ -199,11 +192,9 @@ a. When set, delegate to the transport's `send_*` method via
    or `first_endpoint()`, call `transport.send_*(endpoint, req)`, on
    `NotMyRange` refresh binding + re-route, on transient error retry
    with backoff.
-b. When not set, the existing tonic `with_retry` path.
 
-The `with_rpc_retry` helper mirrors the tonic `with_retry` loop — same
-retry semantics, same `RangeBindingClient` integration, only the wire
-send differs.
+The `with_rpc_retry` helper implements the retry loop — retry semantics
+and `RangeBindingClient` integration, with the crow-rpc wire send.
 
 ## 7. Server Wiring
 
@@ -211,9 +202,9 @@ File: `app/crow-chunkdb/src/main.rs`
 
 The chunkdb server runs inside `#[tokio::main]` so
 `tokio::runtime::Handle::current()` is available. The crow-rpc server
-starts alongside the tonic server during mixed rollout.
+is the chunkdb RPC transport.
 
-Startup sequence (additions marked with `+`):
+Startup sequence:
 
 1. Load config from TOML.
 2. Build KV client for group-0 topology access.
@@ -225,17 +216,15 @@ Startup sequence (additions marked with `+`):
 8. Create diskdb client pool + chunk allocator.
 9. Create per-chunk lock map + metrics.
 10. Spawn sweep task for idle lock reaping.
-11. Create lifecycle handler + gRPC service.
-+ 12. Create crow-rpc server: parse `rpc_listen_addr`, `RpcServer::new`,
+11. Create lifecycle handler.
+12. Create crow-rpc server: parse `rpc_listen_addr`, `RpcServer::new`,
       `listen`, `start`, `ChunkdbRpcService::new(handler, Handle)`,
       `register_handlers`.
 13. Start HTTP health + metrics + cache invalidation server.
-14. Start tonic gRPC server (blocking `serve_with_shutdown`).
-15. On shutdown: stop crow-rpc server, then tonic server stops via
-    shutdown signal.
+14. On shutdown: stop crow-rpc server via shutdown signal.
 
-The `handler` (already constructed for the tonic service) is shared
-between the tonic and crow-rpc paths — same `Arc<LifecycleHandler>`.
+The `handler` is shared between the crow-rpc service — same
+`Arc<LifecycleHandler>`.
 
 The `rpc_listen_addr` config field (default `0.0.0.0:9961`) is
 validated as a `SocketAddr` in `ChunkdbConfig::validate`.

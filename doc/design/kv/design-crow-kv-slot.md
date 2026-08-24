@@ -99,7 +99,7 @@ The number of in-flight slots is capped at the **window size** (`max_inflight_pr
 
 As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ...)` to all followers. It does **not** wait for slot N-1, N-2 to reach quorum first.
 
-**Transport: per-peer bidi `LearnerStream`.** The leader uses one long-running gRPC bidi stream per `(group_id, peer_id)` pair (see [`design-crow-kv-rpc.md`](design-crow-kv-rpc.md) §3). The stream's background task maintains a `PendingMap` (`HashMap<request_id, oneshot::Sender>`). Because each `Accept` gets its own oneshot, the leader can enqueue slot N+1's `Accept` before slot N's `Accepted` response has returned.
+**Transport: per-peer bidi `LearnerStream`.** The leader uses one long-running crow-rpc bidi stream per `(group_id, peer_id)` pair (see [`design-crow-kv-rpc.md`](design-crow-kv-rpc.md) §3). The stream's background task maintains a `PendingMap` (`HashMap<request_id, oneshot::Sender>`). Because each `Accept` gets its own oneshot, the leader can enqueue slot N+1's `Accept` before slot N's `Accepted` response has returned.
 
 **Per-follower flow control.** The stream's `cmd_tx` is a bounded `tokio::sync::mpsc` whose capacity is `learner_stream_window_frames` (default 64). When full, `dispatch` fails and the proposer surfaces `PxPaxosError::Busy`.
 
@@ -107,7 +107,7 @@ As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ..
 
 **Out-of-order `Accepted` and `Chosen` notifications are fine.** A follower may respond `Accepted(N+2)` before `Accepted(N)`. Each is processed independently. A follower may receive `Chosen(N+2)` before `Chosen(N)` and apply only the parts safe to apply (per-key tracking handles this).
 
-**Zero-copy accept path.** `Acceptor::accept` and `ReplicaHandler::on_accept` take `&PxLogEntry` instead of owned `PxLogEntry`. The caller (proposer's `run_accept_phase`, gRPC `handle_accept_inner`, WAL replay) passes a reference; no clone for the acceptor call. The only clone is inside `inner_accept` for `cas_accepted`, where the slot node must own its copy. `WALRecord::from_accepted` already borrows, so the WAL encode after accept is also zero-copy. With `Bytes` payloads these clones were O(1) ref-count bumps; the signature change makes the zero-copy intent explicit and avoids redundant bumps.
+**Zero-copy accept path.** `Acceptor::accept` and `ReplicaHandler::on_accept` take `&PxLogEntry` instead of owned `PxLogEntry`. The caller (proposer's `run_accept_phase`, crow-rpc `handle_accept_inner`, WAL replay) passes a reference; no clone for the acceptor call. The only clone is inside `inner_accept` for `cas_accepted`, where the slot node must own its copy. `WALRecord::from_accepted` already borrows, so the WAL encode after accept is also zero-copy. With `Bytes` payloads these clones were O(1) ref-count bumps; the signature change makes the zero-copy intent explicit and avoids redundant bumps.
 
 ---
 
@@ -188,7 +188,7 @@ When the leader chooses a slot, it broadcasts a `ChosenNotice` carrying `(slot, 
 - If the follower's accepted ballot at `slot` is **lower** than the chosen ballot (stale) → the follower has an outdated value. It records a gap for `slot` (driven by FetchGap, §9A.3) and does not apply.
 - If the follower has no accepted value at `slot` → it records a gap and does not apply.
 
-The `ballot_round` field in the ChosenNotice proto enables this verification. Without it, the follower cannot distinguish a fresh chosen value from a stale re-delivery.
+The `ballot_round` field in the ChosenNotice flatbuffer enables this verification. Without it, the follower cannot distinguish a fresh chosen value from a stale re-delivery.
 
 ### 9A.3 Follower-Driven FetchGap Catch-up
 
@@ -637,9 +637,9 @@ preserve the existing dedup-on-all-replicas invariant (so a follower
 that becomes leader can return cached slots for retried coalesced ops),
 all K tags must reach every replica that accepts the batch.
 
-The `Accept` RPC proto is extended with a repeated `dedup_tags` field:
+The `Accept` RPC flatbuffer is extended with a repeated `dedup_tags` field:
 
-```proto
+```fbs
 message DedupTag { uint64 client_id = 1; uint64 seq = 2; }
 // in AcceptRequest:
 repeated DedupTag dedup_tags = 13;

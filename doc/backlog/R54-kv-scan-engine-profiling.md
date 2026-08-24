@@ -37,8 +37,8 @@ Without a flamegraph, optimizing any one of these is guessing.
 - **Profiling targets**:
   - The C++ merge loop (`crow-tree` scan path) — the primary suspect.
   - The FFI boundary (`try_scan` → C++ → packed result → Rust decode).
-  - The Rust scan-response serialization (`kv_service.rs::scan` → proto
-    encode → gRPC send), to confirm the engine is truly dominant over
+  - The Rust scan-response serialization (`kv_service.rs::scan` → fbs
+    encode → crow-rpc send), to confirm the engine is truly dominant over
     the response path.
 - **Deliverable**: a working doc (`doc/working/scan-profile-findings.md`)
   with the top hot stacks, a ranked list of bottlenecks by CPU time,

@@ -3,12 +3,13 @@
 
 ### R94: chunkdb — Performance Optimization
 
-**Problem**: gRPC may become a bottleneck on high-throughput paths. Allocation
-pipeline and topology cache management may need optimization for large-scale
-deployments.
+**Problem**: The RPC layer may become a bottleneck on high-throughput paths
+(gRPC was replaced by crow-rpc; this evaluates whether crow-rpc itself is
+sufficient). Allocation pipeline and topology cache management may need
+optimization for large-scale deployments.
 
-**Solution**: Evaluate and implement custom RPC library to replace gRPC on
-hot paths. Optimize allocation pipeline for reduced latency. Tune topology
+**Solution**: Evaluate and optimize the crow-rpc transport on hot paths
+(gRPC was already replaced by crow-rpc via R115/R116/R117/R32). Optimize allocation pipeline for reduced latency. Tune topology
 cache refresh and connection pooling. Profile and optimize critical code
 paths.
 

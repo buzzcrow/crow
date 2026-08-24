@@ -11,7 +11,7 @@ Rust workspace + C++ storage engine (via FFI).
 - **`crow-kv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
 - **`crow-kv-client`** — client library (retry, topology cache, `NotLeaderHint`) + group-0 sysdata service classes (`HardwareClient`, `ServiceRegistryClient`, `KVClusterMetaClient`, `KVClusterAdmin`); `ffi` feature exposes a C ABI for C++ consumers (primarily `crow-diskio`).
 - **`crow-kv-server`** — binary: CLI, HTTP management API (internal — only called by `crow-kv-client`), store/group/replica wiring, keep-alive loop.
-- **`crow-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, gRPC service stubs; allocation logic is R72).
+- **`crow-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, crow-rpc service stubs; allocation logic is R72).
 - **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CROW.
 - **`lib/crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
 - **`lib/crow-rpc/ffi`** — Rust async facade over C++ crow-rpc C ABI (epoll/kqueue transport, flatbuffer framing, request/response correlation via oneshot channels).

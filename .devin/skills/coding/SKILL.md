@@ -93,10 +93,10 @@ separate concerns:
 - **One concept = one module; gather a cohesive model into one place**
   — concepts that belong together live together. A reader should find
   the whole model in one place, separate from infrastructure (I/O,
-  recovery, gRPC, config).
+  recovery, RPC, config).
 - **Separate domain from infrastructure by layer** — domain = the
   in-memory model + its invariants + orchestration logic. Infrastructure
-  = transport/I/O wrappers, gRPC service wiring, config loading, metrics.
+  = transport/I/O wrappers, RPC service wiring, config loading, metrics.
   Don't mix both in one file. Dependency direction: domain may depend on
   an infra interface, infra depends on domain types; never the reverse
   unconstrained.
