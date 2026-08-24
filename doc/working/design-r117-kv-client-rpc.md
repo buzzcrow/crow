@@ -269,12 +269,16 @@ field on the request flatbuffer. The handler:
 
 a. If `read_mode == Linearizable && !req.forwarded` and
    `forward_target_for(group_id)` returns `Some(endpoint)` → re-issue
-   the request to the leader via the client-facing crow-rpc client
-   transport (Work Item 4's `KvRpcTransport`, held by the server for
-   forwarding). Set `forwarded = true` on the re-issued request. On
-   success, submit the leader's response. On forward failure, serve
-   stale local + set `not_leader_hint = endpoint` (same fallback as
-   the tonic handler).
+   the request to the leader via a minimal **server-side forwarder**
+   (`KvClientRpcForwarder`, living in `crow-kv` itself — NOT
+   `KvRpcTransport`, which is in `crow-kv-client` and would create a
+   crate cycle). The forwarder holds an `Arc<RpcServer>` +
+   `Arc<RpcClient>` + connection cache, builds the request flatbuffer
+   with `forwarded = true`, calls `rpc.call()`, and returns the raw
+   response control buffer. Set `forwarded = true` on the re-issued
+   request. On success, submit the leader's response. On forward
+   failure, serve stale local + set `not_leader_hint = endpoint`
+   (same fallback as the tonic handler).
 b. Else serve locally.
 
 The server holds an `Arc<KvRpcTransport>` for outbound forwards
@@ -475,10 +479,10 @@ port offset (parallel to R32's `RPC_PORT_OFFSET = 100`).
 `kv_server.rs`: add `start_client_rpc_server` (parallel to
 `start_rpc_server`) — binds the client-facing crow-rpc port
 (`grpc_port + 200`), registers `KvRpcService` handlers, creates a
-`KvRpcTransport` for server-side forwards, stores in a new
-`client_rpc_server_state` field on `PxKvStore`. `shutdown_server`
-stops both crow-rpc servers. `main.rs` calls `start_client_rpc_server`
-after `start_rpc_server`.
+`KvClientRpcForwarder` (minimal, in `crow-kv`) for server-side
+forwards, stores in a new `client_rpc_server_state` field on
+`PxKvStore`. `shutdown_server` stops both crow-rpc servers. `main.rs`
+calls `start_client_rpc_server` after `start_rpc_server`.
 
 ### 7.3 Cutover
 
