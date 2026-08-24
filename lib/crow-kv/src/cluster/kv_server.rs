@@ -243,19 +243,24 @@ impl PxKvStore {
             }
         }
 
-        // Derive the crow-rpc port from the gRPC port.
-        let grpc_port = self.listen_addr.port();
+        // Derive the crow-rpc port from the actual bound gRPC port.
+        let bound_addr = self
+            .server_state
+            .lock()
+            .listen_addr
+            .ok_or_else(|| "start_rpc_server called before gRPC start()".to_string())?;
+        let grpc_port = bound_addr.port();
         let rpc_port = i32::from(grpc_port) + (i32::from(KV_RPC_BASE) - i32::from(KV_SERVER_GRPC_BASE));
         if !(1..=65535).contains(&rpc_port) {
             return Err(format!(
                 "crow-rpc port {rpc_port} out of range (gRPC port {grpc_port})"
             ));
         }
-        let rpc_addr = format!("{}:{}", self.listen_addr.ip(), rpc_port);
+        let rpc_addr = format!("{}:{}", bound_addr.ip(), rpc_port);
 
         let server = Arc::new(RpcServer::new(None));
         server
-            .listen(&self.listen_addr.ip().to_string(), rpc_port)
+            .listen(&bound_addr.ip().to_string(), rpc_port)
             .map_err(|e| format!("crow-rpc listen on {rpc_addr}: {e:?}"))?;
         server.start();
 
@@ -284,7 +289,7 @@ impl PxKvStore {
     /// migration). Returns `None` if `start_rpc_server` has not been
     /// called.
     #[allow(dead_code)] // Wired in Phase 8 (integration tests)
-    pub(crate) fn rpc_transport(&self) -> Option<Arc<PxRpcTransport>> {
+    pub fn rpc_transport(&self) -> Option<Arc<PxRpcTransport>> {
         self.rpc_server_state.lock().transport.clone()
     }
 

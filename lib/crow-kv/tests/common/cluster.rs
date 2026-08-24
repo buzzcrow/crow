@@ -59,6 +59,7 @@ impl TestCluster {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub async fn shutdown(self) {
         for node in &self.nodes {
             node.stop();
@@ -78,6 +79,7 @@ impl TestCluster {
         .expect("connect PxService")
     }
 
+    #[allow(dead_code)]
     pub async fn kv_client(&self, node: &Arc<PxKvStore>) -> KvServiceClient<Channel> {
         KvServiceClient::connect(format!(
             "http://{}",

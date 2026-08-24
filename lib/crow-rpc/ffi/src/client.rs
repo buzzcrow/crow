@@ -291,6 +291,24 @@ impl std::future::Future for CallFuture {
     }
 }
 
+// No-op completion callback for fire-and-forget frames. The C++ side
+// requires a non-null `on_complete` even when no reply is expected.
+unsafe extern "C" fn noop_on_complete(
+    _request_id: u64,
+    _control: sys::crow_rpc_buffer_t,
+    _data: sys::crow_rpc_buffer_t,
+    _status: i32,
+    _user_data: *mut std::ffi::c_void,
+) {
+    // Discard — fire-and-forget.
+}
+
+/// Get the no-op completion callback for fire-and-forget `send()` calls.
+#[must_use]
+pub fn noop_completion() -> sys::crow_rpc_on_complete {
+    Some(noop_on_complete)
+}
+
 // The C++→Rust callback — O(1), non-blocking, runs on the C++ I/O thread.
 // It looks up the oneshot sender, sends the result, returns.
 unsafe extern "C" fn on_complete_cb(

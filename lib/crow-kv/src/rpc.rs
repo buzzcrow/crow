@@ -43,6 +43,6 @@ pub(crate) use kv_service::KvStoreService;
 #[allow(unused_imports)]
 pub(crate) use px_rpc_service::PxRpcService;
 #[allow(unused_imports)]
-pub(crate) use px_rpc_transport::PxRpcTransport;
+pub use px_rpc_transport::PxRpcTransport;
 pub(crate) use px_service::PxReplicaService;
 pub(crate) use snapshot_service::PxSnapshotService;

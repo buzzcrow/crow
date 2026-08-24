@@ -695,7 +695,7 @@ impl PxRemoteReplica {
     /// is shared across all remote replicas in the store.
     #[must_use]
     #[allow(dead_code)] // Wired in Phase 7 (server wiring)
-    pub(crate) fn with_rpc_transport(self, transport: Arc<PxRpcTransport>) -> Self {
+    pub fn with_rpc_transport(self, transport: Arc<PxRpcTransport>) -> Self {
         let _ = self.rpc_transport.set(transport);
         self
     }
@@ -724,7 +724,7 @@ impl PxRemoteReplica {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the per-peer stream is
     /// shut down or its reconnect loop is currently failing fast.
-    pub(crate) fn send_chosen_notice(
+    pub fn send_chosen_notice(
         &self,
         slot: u64,
         term: crate::paxos::PxTerm,
@@ -799,7 +799,7 @@ impl PxRemoteReplica {
     /// # Errors
     /// Returns [`PxReplicaError`] on transport failure or timeout.
     #[allow(dead_code)]
-    pub(crate) async fn send_fetch_gap(
+    pub async fn send_fetch_gap(
         &self,
         slot: u64,
         term: crate::paxos::PxTerm,
@@ -882,7 +882,7 @@ impl PxRemoteReplica {
     /// Get the crow-rpc transport if set (R32 migration). Used by
     /// `group_fetchgap.rs` to route `FetchGap` through the transport when
     /// available.
-    pub(crate) fn rpc_transport(&self) -> Option<&Arc<PxRpcTransport>> {
+    pub fn rpc_transport(&self) -> Option<&Arc<PxRpcTransport>> {
         self.rpc_transport.get()
     }
 

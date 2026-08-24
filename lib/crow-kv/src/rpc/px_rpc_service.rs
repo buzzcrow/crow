@@ -1009,6 +1009,15 @@ impl PxRpcService {
                 store_id = self.store.store_id,
                 group_id, slot, "fetch_gap no value (not yet chosen)"
             );
+            submit_error(
+                server,
+                req.conn_handle,
+                req_id,
+                create_nano,
+                msg_type,
+                FBKvRetCode::NotFound,
+                "slot not yet chosen",
+            );
         }
     }
 }

@@ -30,7 +30,7 @@ use crow_protocol::kv_consensus_fb::{
     FBRequestVoteRequestArgs, FBStepDownRequest, FBStepDownRequestArgs,
 };
 use crow_protocol::{KV_RPC_BASE, KV_SERVER_GRPC_BASE};
-use crow_rpc_ffi::{Buffer, Connection, RpcClient, RpcError, RpcServer};
+use crow_rpc_ffi::{noop_completion, Buffer, Connection, RpcClient, RpcError, RpcServer};
 
 use crate::cluster::replica::{
     FetchGapReply, HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, StepDownReply,
@@ -525,7 +525,7 @@ impl PxRpcTransport {
                 control,
                 None,
                 msg_type,
-                None,
+                noop_completion(),
                 std::ptr::null_mut(),
             )
             .map_err(rpc_error_to_px)
@@ -569,7 +569,7 @@ impl PxRpcTransport {
                 control,
                 None,
                 msg_type,
-                None,
+                noop_completion(),
                 std::ptr::null_mut(),
             )
             .map_err(rpc_error_to_px)

@@ -72,6 +72,10 @@ name = "group_test"
 path = "tests/group_test.rs"
 
 [[test]]
+name = "rpc_migration_test"
+path = "tests/rpc_migration_test.rs"
+
+[[test]]
 name = "kv_test"
 path = "tests/kv_test.rs"
 
