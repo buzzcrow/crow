@@ -14,7 +14,7 @@ use crow_chunkdb::lifecycle::{ChunkLockMap, LifecycleHandler};
 use crow_chunkdb::metrics::LifecycleMetrics;
 use crow_chunkdb::range_guard::RangeGuard;
 use crow_chunkdb::routing::{default_binding_table, BindingCache};
-use crow_chunkdb::service::{ChunkdbRpcService, ChunkdbService};
+use crow_chunkdb::service::ChunkdbRpcService;
 use crow_chunkdb::storage::ChunkStore;
 use crow_chunkdb::topology::{notify::NotifyHandler, refresh::run_refresh_loop, TopologyCache};
 use crow_kv_client::{
@@ -153,17 +153,15 @@ async fn main() {
         stop_rx.clone(),
     ));
 
-    // Lifecycle handler + gRPC service.
+    // Lifecycle handler.
     let handler = Arc::new(
         LifecycleHandler::new(Arc::clone(&store), allocator, cache)
             .with_range_guard(Arc::clone(&range_guard))
             .with_locks(Arc::clone(&lock_map)),
     );
-    let grpc_service = ChunkdbService::new(Arc::clone(&handler)).into_server();
 
-    // Build the crow-rpc server (R116 migration — runs alongside gRPC
-    // during the mixed-rollout window). The RpcServer listens on a
-    // separate port and dispatches to ChunkdbRpcService handlers.
+    // Build the crow-rpc server. The RpcServer listens on the RPC
+    // port and dispatches to ChunkdbRpcService handlers.
     let rpc_rt_handle = tokio::runtime::Handle::current();
     let rpc_service = Arc::new(ChunkdbRpcService::new(Arc::clone(&handler), rpc_rt_handle));
     let rpc_server = Arc::new(crow_rpc_ffi::RpcServer::new(None));
@@ -180,22 +178,13 @@ async fn main() {
     // Start HTTP health + metrics + cache invalidation server.
     let http_handle = tokio::spawn(run_http_server(http_listen_addr, Arc::clone(&lock_map)));
 
-    info!(%listen_addr, "gRPC server listening");
+    info!(%listen_addr, "RPC server listening");
 
     let rpc_server_stop = Arc::clone(&rpc_server);
-    let grpc_result = tonic::transport::Server::builder()
-        .add_service(grpc_service)
-        .serve_with_shutdown(listen_addr, async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("received shutdown signal");
-            rpc_server_stop.stop();
-            let _ = stop_tx.send(true);
-        })
-        .await;
-
-    if let Err(e) = grpc_result {
-        warn!("gRPC server error: {e}");
-    }
+    let _ = tokio::signal::ctrl_c().await;
+    info!("received shutdown signal");
+    rpc_server_stop.stop();
+    let _ = stop_tx.send(true);
     let _ = http_handle.await;
     let _ = refresh_handle.await;
     let _ = notify_handle.await;

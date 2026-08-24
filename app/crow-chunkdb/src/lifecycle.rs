@@ -825,7 +825,7 @@ impl LifecycleHandler {
 
 /// Extract all segments from a strip (mirror or EC).
 fn extract_segments(strip: &ChunkStrip) -> Vec<crow_protocol::diskdb::rpc::Segment> {
-    use crow_protocol::chunkdb::rpc::chunk_strip::Strip;
+    use crow_protocol::chunkdb::rpc::Strip;
     match &strip.strip {
         Some(Strip::MirrorStrip(m)) => m.segments.clone(),
         Some(Strip::EcStrip(ec)) => ec.segments.clone(),

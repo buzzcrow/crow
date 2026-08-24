@@ -16,7 +16,6 @@ crow-protocol = { path = "../crow-protocol" }
 crow-kv-client = { path = "../crow-kv-client" }
 crow-rpc-ffi = { path = "../crow-rpc/ffi" }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
-tonic = { workspace = true }
 bytes = "1"
 flatbuffers = { workspace = true }
 thiserror = { workspace = true }

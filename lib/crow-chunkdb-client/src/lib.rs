@@ -21,7 +21,6 @@ pub use rpc_transport::ChunkdbRpcTransport;
 // direct crow-kv-client dependency for this one type.
 pub use crow_kv_client::RangeBindingClient;
 
-use prost::Message as _;
 use thiserror::Error;
 
 /// Error type for chunkdb client operations.
@@ -58,37 +57,6 @@ impl ChunkdbClientError {
             self,
             Self::Unavailable(_) | Self::DeadlineExceeded(_) | Self::Unreachable(_) | Self::NotMyRange(_)
         )
-    }
-}
-
-/// Map a gRPC status to a `ChunkdbClientError`. If the status carries
-/// a `NotMyRangeHint` detail, maps to `NotMyRange` (retryable). The
-/// hint carries only the rejected bucket — the client refreshes its
-/// binding cache from group-0 and re-routes.
-pub fn from_status(status: &tonic::Status) -> ChunkdbClientError {
-    let msg = status.message().to_string();
-    // Check for NotMyRangeHint details on FailedPrecondition.
-    if status.code() == tonic::Code::FailedPrecondition {
-        let details = status.details();
-        if !details.is_empty() {
-            if let Ok(hint) = crow_protocol::chunkdb::rpc::NotMyRangeHint::decode(details) {
-                return ChunkdbClientError::NotMyRange(format!(
-                    "bucket not in owned ranges [{}]",
-                    hint.range_start
-                ));
-            }
-        }
-    }
-    match status.code() {
-        tonic::Code::Unavailable => ChunkdbClientError::Unavailable(msg),
-        tonic::Code::DeadlineExceeded => ChunkdbClientError::DeadlineExceeded(msg),
-        tonic::Code::NotFound => ChunkdbClientError::NotFound(msg),
-        tonic::Code::AlreadyExists => ChunkdbClientError::AlreadyExists(msg),
-        tonic::Code::FailedPrecondition => ChunkdbClientError::FailedPrecondition(msg),
-        tonic::Code::Aborted => ChunkdbClientError::Aborted(msg),
-        tonic::Code::InvalidArgument => ChunkdbClientError::InvalidArgument(msg),
-        tonic::Code::Internal => ChunkdbClientError::Internal(msg),
-        _ => ChunkdbClientError::Rpc(msg),
     }
 }
 

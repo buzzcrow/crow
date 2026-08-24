@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crow_chunkdb_client::{ChunkdbClient, RetryConfig};
+use crow_chunkdb_client::{ChunkdbClient, ChunkdbRpcTransport, RetryConfig};
 
 use crate::hardware::INSTANCE_ID;
 
@@ -195,11 +195,13 @@ pub fn check_binaries() -> bool {
 
 /// Build a `ChunkdbClient` with standard retry config.
 pub fn make_client(svc: crow_kv_client::ServiceRegistryClient) -> Arc<ChunkdbClient> {
+    let transport = Arc::new(ChunkdbRpcTransport::new());
     Arc::new(ChunkdbClient::with_retry_config(
         svc,
         RetryConfig {
             max_retries: 5,
             initial_backoff: Duration::from_millis(100),
         },
+        transport,
     ))
 }

@@ -3,64 +3,32 @@
 
 //! Common protocol definitions for CROW components.
 //!
-//! Hosts shared protobuf types (`crow.common`), the diskdb gRPC service
-//! definitions (`crow.diskdb.rpc`), the chunkdb gRPC service
-//! definitions (`crow.chunkdb.rpc`), the diskio gRPC service stub
-//! (`crow.diskio.rpc`), the flatbuffer control-message schemas for
-//! crow-rpc (`fb`), and utility functions/extension traits for diskdb
-//! proto types (`diskdb_type_util`).
+//! Hosts hand-written Rust types (`common`, `diskdb.rpc`, `chunkdb.rpc`,
+//! `diskio.rpc`), the flatbuffer control-message schemas for crow-rpc
+//! (`fb`), and utility functions/extension traits for diskdb types
+//! (`diskdb_type_util`).
+
+mod types;
 
 pub mod common {
-    #![allow(
-        clippy::all,
-        clippy::pedantic,
-        clippy::missing_errors_doc,
-        clippy::doc_markdown,
-        clippy::default_trait_access,
-        clippy::too_many_lines
-    )]
-    include!(concat!(env!("OUT_DIR"), "/crow.common.rs"));
+    pub use crate::types::common::*;
 }
 
 pub mod diskdb {
     pub mod rpc {
-        #![allow(
-            clippy::all,
-            clippy::pedantic,
-            clippy::missing_errors_doc,
-            clippy::doc_markdown,
-            clippy::default_trait_access,
-            clippy::too_many_lines
-        )]
-        include!(concat!(env!("OUT_DIR"), "/crow.diskdb.rpc.rs"));
+        pub use crate::types::diskdb::*;
     }
 }
 
 pub mod chunkdb {
     pub mod rpc {
-        #![allow(
-            clippy::all,
-            clippy::pedantic,
-            clippy::missing_errors_doc,
-            clippy::doc_markdown,
-            clippy::default_trait_access,
-            clippy::too_many_lines
-        )]
-        include!(concat!(env!("OUT_DIR"), "/crow.chunkdb.rpc.rs"));
+        pub use crate::types::chunkdb::*;
     }
 }
 
 pub mod diskio {
     pub mod rpc {
-        #![allow(
-            clippy::all,
-            clippy::pedantic,
-            clippy::missing_errors_doc,
-            clippy::doc_markdown,
-            clippy::default_trait_access,
-            clippy::too_many_lines
-        )]
-        include!(concat!(env!("OUT_DIR"), "/crow.diskio.rpc.rs"));
+        pub use crate::types::diskio::*;
     }
 }
 

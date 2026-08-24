@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crow_chunk_client::{ChunkAllocator, ChunkClientConfig, ChunkWriter, Result};
 use crow_common::ec::EcScheme;
-use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
+use crow_protocol::chunkdb::rpc::Strip as StripOneof;
 use crow_protocol::chunkdb::rpc::{
     AllocateChunkRequest, AllocateChunkResponse, AppendChunkRequest, AppendChunkResponse, Chunk, ChunkStrip,
     ChunkType, DeleteChunkRequest, DeleteChunkResponse, EcStrip, QueryChunkRequest, QueryChunkResponse,

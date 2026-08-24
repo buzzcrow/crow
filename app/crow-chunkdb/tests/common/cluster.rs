@@ -30,7 +30,7 @@ use crow_diskdb::metrics::RecalcEngine;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::ZoneLoader;
 use crow_diskdb::scanner::ScanState;
-use crow_diskdb::service::DiskdbService;
+use crow_diskdb::service::DiskdbRpcService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
 use crow_protocol::common::{DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -493,18 +493,18 @@ pub fn seeded_dg_ids() -> Vec<u64> {
 pub struct DiskdbServer {
     pub container: Arc<DdbDiskGroupContainer>,
     pub rpc_endpoint: String,
-    _serve_handle: tokio::task::JoinHandle<()>,
+    _serve_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DiskdbServer {
     /// Start diskdb in-process: run one keepalive tick to populate
-    /// state, wait for zones, then start the gRPC server on a free
+    /// state, wait for zones, then start the crow-rpc server on a free
     /// port and register in the service registry.
     pub async fn start(cluster: &KvCluster) -> Self {
         let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
         let svc = cluster.make_service_registry_client();
         let hw = cluster.make_hardware_client();
-        // Keepalive takes an owned DdbKvClient; the gRPC service takes Arc.
+        // Keepalive takes an owned DdbKvClient; the RPC service takes Arc.
         let dg_kv_owned = DdbKvClient::from_shared(cluster.make_crowkv_client());
 
         let keepalive_cfg = KeepAliveConfig {
@@ -535,7 +535,8 @@ impl DiskdbServer {
 
         let mut registry = MetricsRegistry::new();
         let metrics = Arc::new(DiskdbMetrics::register(&mut registry));
-        let grpc_service = DiskdbService::new(
+        let rt_handle = tokio::runtime::Handle::current();
+        let rpc_service = Arc::new(DiskdbRpcService::new(
             Arc::clone(&container),
             cluster.make_ddb_kv_client(),
             StorageDefaults::default(),
@@ -546,18 +547,19 @@ impl DiskdbServer {
             )),
             ScanState::new(),
             metrics,
-        )
-        .into_server();
+            rt_handle,
+        ));
+        let rpc_server = Arc::new(crow_rpc_ffi::RpcServer::new(None));
+        rpc_server
+            .listen(
+                listen_addr.ip().to_string().as_str(),
+                i32::from(listen_addr.port()),
+            )
+            .expect("rpc server listen");
+        rpc_service.register_handlers(&rpc_server);
+        rpc_server.start();
 
         container.set_lifecycle_phase(StartupPhase::Up);
-
-        let serve_handle = tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(grpc_service)
-                .serve(listen_addr)
-                .await
-                .expect("diskdb gRPC server");
-        });
 
         let rpc_endpoint = format!("http://127.0.0.1:{port}");
 
@@ -574,7 +576,7 @@ impl DiskdbServer {
         Self {
             container,
             rpc_endpoint,
-            _serve_handle: serve_handle,
+            _serve_handle: None,
         }
     }
 }

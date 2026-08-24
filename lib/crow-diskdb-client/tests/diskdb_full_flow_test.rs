@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crow_diskdb_client::{DiskdbClient, RetryConfig};
+use crow_diskdb_client::{DiskdbClient, DiskdbRpcTransport, RetryConfig};
 use crow_protocol::diskdb::rpc::{AllocateBlocksRequest, CompactZoneRequest, FreeBlocksRequest};
 use crow_test_harness::cluster::KvCluster;
 use crow_test_harness::diskdb::*;
@@ -48,7 +48,8 @@ async fn diskdb_client_e2e_full_flow() {
 
     // 4. Build the DiskdbClient and refresh endpoints.
     let svc = cluster.make_service_registry_client();
-    let client = Arc::new(DiskdbClient::new(svc).with_retry_config(RetryConfig {
+    let transport = Arc::new(DiskdbRpcTransport::new());
+    let client = Arc::new(DiskdbClient::new(svc, transport).with_retry_config(RetryConfig {
         max_retries: 5,
         initial_backoff: std::time::Duration::from_millis(100),
     }));

@@ -21,8 +21,8 @@ use crate::disk_io::DiskWriter;
 use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskId;
-use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
 use crow_protocol::chunkdb::rpc::Chunk;
+use crow_protocol::chunkdb::rpc::Strip as StripOneof;
 
 /// Spawn parity write + fsync tasks for a finished strip. Returns
 /// `JoinHandle`s without joining — caller joins at seal time.

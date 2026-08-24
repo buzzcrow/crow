@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crow_diskdb_client::{DiskdbClient, RetryConfig};
+use crow_diskdb_client::{DiskdbClient, DiskdbRpcTransport, RetryConfig};
 use crow_protocol::common::ChunkId;
 
 use crate::hardware::{DG_ID, INSTANCE_ID, STORE_ID, UNIT_SIZE_BYTES, ZONE_SIZE_UNITS};
@@ -293,7 +293,8 @@ pub fn check_binaries() -> bool {
 
 /// Build a `DiskdbClient` with standard retry config.
 pub fn make_client(svc: crow_kv_client::ServiceRegistryClient) -> Arc<DiskdbClient> {
-    Arc::new(DiskdbClient::new(svc).with_retry_config(RetryConfig {
+    let transport = Arc::new(DiskdbRpcTransport::new());
+    Arc::new(DiskdbClient::new(svc, transport).with_retry_config(RetryConfig {
         max_retries: 5,
         initial_backoff: Duration::from_millis(100),
     }))

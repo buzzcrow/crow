@@ -1,32 +1,28 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `DiskdbClient` — full client library for CROW diskdb gRPC operations.
+//! `DiskdbClient` — full client library for CROW diskdb operations.
 //!
 //! Endpoint discovery + cache: `refresh_endpoints` reads all diskdb
 //! instances from the service registry, populates a `DashMap` cache
 //! (`disk_group_id -> rpc_endpoint`). On cache miss or
 //! `Unavailable`, lazily refreshes and retries.
 //!
-//! Channel pool: a `DashMap<String, tonic::transport::Channel>` per
-//! endpoint; lazily created on first use.
+//! All RPCs go through the crow-rpc flatbuffer transport.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tonic::transport::Channel;
 use tracing::warn;
 
 use crow_kv_client::ServiceRegistryClient;
 use crow_protocol::common::DiskId;
-use crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient;
 use crow_protocol::diskdb::rpc::{
     AllocateBlocksRequest, AllocateResponse, CompactZoneRequest, CompactZoneResponse, FreeBlocksRequest,
-    FreeResponse, GetDiskGroupInfoRequest, GetDiskGroupInfoResponse, GetDiskInfoRequest, GetDiskInfoResponse,
-    GetScanStatusRequest, GetScanStatusResponse, QueryCapacityStatsRequest, QueryCapacityStatsResponse,
-    RebuildZoneBitmapRequest, RebuildZoneBitmapResponse, RecalcDiskUsageRequest, RecalcDiskUsageResponse,
-    TriggerScanRequest, TriggerScanResponse,
+    FreeResponse, GetDiskGroupInfoResponse, GetDiskInfoResponse, GetScanStatusResponse,
+    QueryCapacityStatsRequest, QueryCapacityStatsResponse, RebuildZoneBitmapResponse, RecalcDiskUsageRequest,
+    RecalcDiskUsageResponse, TriggerScanResponse,
 };
 use crow_protocol::DiskGroupId;
 
@@ -49,7 +45,7 @@ impl Default for RetryConfig {
     }
 }
 
-/// Client for CROW diskdb gRPC operations.
+/// Client for CROW diskdb operations via crow-rpc.
 #[derive(Clone)]
 pub struct DiskdbClient {
     svc: ServiceRegistryClient,
@@ -58,23 +54,19 @@ pub struct DiskdbClient {
     /// `disk_id -> disk_group_id` reverse routing map (for
     /// `free_blocks` across multiple disk-groups).
     disk_to_dg: DashMap<DiskId, DiskGroupId>,
-    /// `rpc_endpoint -> Channel` pool.
-    channels: DashMap<String, Channel>,
-    /// Optional crow-rpc transport (R115 migration). When set, the
-    /// client uses crow-rpc instead of tonic gRPC.
-    rpc_transport: Option<Arc<DiskdbRpcTransport>>,
+    /// crow-rpc transport.
+    rpc_transport: Arc<DiskdbRpcTransport>,
     retry: RetryConfig,
 }
 
 impl DiskdbClient {
     #[must_use]
-    pub fn new(svc: ServiceRegistryClient) -> Self {
+    pub fn new(svc: ServiceRegistryClient, rpc_transport: Arc<DiskdbRpcTransport>) -> Self {
         Self {
             svc,
             endpoint_cache: DashMap::new(),
             disk_to_dg: DashMap::new(),
-            channels: DashMap::new(),
-            rpc_transport: None,
+            rpc_transport,
             retry: RetryConfig::default(),
         }
     }
@@ -83,15 +75,6 @@ impl DiskdbClient {
     #[must_use]
     pub fn with_retry_config(mut self, retry: RetryConfig) -> Self {
         self.retry = retry;
-        self
-    }
-
-    /// Enable crow-rpc transport (R115 migration). When set, all RPCs
-    /// use crow-rpc instead of tonic gRPC. The transport manages its
-    /// own connection pool; the grpc channel pool is unused.
-    #[must_use]
-    pub fn with_rpc_transport(mut self, transport: Arc<DiskdbRpcTransport>) -> Self {
-        self.rpc_transport = Some(transport);
         self
     }
 
@@ -131,28 +114,6 @@ impl DiskdbClient {
             .ok_or_else(|| DiskdbClientError::Unreachable(format!("no diskdb instance owns dg {dg_id}")))
     }
 
-    /// Get or create a gRPC channel for the given endpoint.
-    fn channel_for(&self, endpoint: &str) -> Result<Channel> {
-        let normalized = normalize_endpoint(endpoint);
-        if let Some(ch) = self.channels.get(&normalized) {
-            return Ok(ch.clone());
-        }
-        let ch = Channel::from_shared(normalized.clone())
-            .map_err(|e| DiskdbClientError::Unreachable(format!("invalid endpoint {endpoint}: {e}")))?
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
-            .connect_lazy();
-        self.channels.insert(normalized, ch.clone());
-        Ok(ch)
-    }
-
-    /// Get or create a gRPC client for the given `dg_id`.
-    async fn client_for(&self, dg_id: DiskGroupId) -> Result<DiskdbServiceClient<Channel>> {
-        let endpoint = self.endpoint_for(dg_id).await?;
-        let channel = self.channel_for(&endpoint)?;
-        Ok(DiskdbServiceClient::new(channel))
-    }
-
     /// Allocate blocks on a disk-group. Retries on transient errors
     /// (`Unavailable`, deadline-exceeded). `ResourceExhausted` (no
     /// space) is returned to the caller (not retryable).
@@ -161,19 +122,11 @@ impl DiskdbClient {
     /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn allocate_blocks(&self, req: AllocateBlocksRequest) -> Result<AllocateResponse> {
         let dg_id = req.disk_group_id;
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| {
-                let req = req.clone();
-                async move { rpc.allocate_blocks(&endpoint, &req).await }
-            })
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| {
-                let req = req.clone();
-                async move { client.allocate_blocks(req).await }
-            })
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| {
+            let req = req.clone();
+            async move { rpc.allocate_blocks(&endpoint, &req).await }
+        })
+        .await
     }
 
     /// Free blocks. The request carries `Segment`s (each with
@@ -205,23 +158,13 @@ impl DiskdbClient {
         let mut total_freed = 0u32;
         for (dg_id, segs) in groups {
             let sub_req = FreeBlocksRequest { segments: segs };
-            if let Some(_rpc) = &self.rpc_transport {
-                let resp = self
-                    .with_rpc_retry(dg_id, |endpoint, rpc| {
-                        let req = sub_req.clone();
-                        async move { rpc.free_blocks(&endpoint, &req).await }
-                    })
-                    .await?;
-                total_freed += resp.freed_count;
-            } else {
-                let resp = self
-                    .with_retry(dg_id, |mut client| {
-                        let req = sub_req.clone();
-                        async move { client.free_blocks(req).await }
-                    })
-                    .await?;
-                total_freed += resp.freed_count;
-            }
+            let resp = self
+                .with_rpc_retry(dg_id, |endpoint, rpc| {
+                    let req = sub_req.clone();
+                    async move { rpc.free_blocks(&endpoint, &req).await }
+                })
+                .await?;
+            total_freed += resp.freed_count;
         }
         Ok(FreeResponse {
             freed_count: total_freed,
@@ -243,17 +186,11 @@ impl DiskdbClient {
             // Use the first cached endpoint for an all-owned query.
             self.first_cached_dg()?
         };
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
-                rpc.query_capacity_stats(&endpoint, &req).await
-            })
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| async move {
-                client.query_capacity_stats(req).await
-            })
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| {
+            let req = req.clone();
+            async move { rpc.query_capacity_stats(&endpoint, &req).await }
+        })
+        .await
     }
 
     /// Query one disk-group's capacity stats.
@@ -305,18 +242,10 @@ impl DiskdbClient {
     /// # Errors
     /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn get_disk_group_info(&self, dg_id: u64) -> Result<GetDiskGroupInfoResponse> {
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
-                rpc.get_disk_group_info(&endpoint, dg_id).await
-            })
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| {
-                let req = GetDiskGroupInfoRequest { disk_group_id: dg_id };
-                async move { client.get_disk_group_info(req).await }
-            })
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
+            rpc.get_disk_group_info(&endpoint, dg_id).await
+        })
+        .await
     }
 
     /// Get disk info. `rack_id`/`node_id` are passed as 0 (the
@@ -326,23 +255,10 @@ impl DiskdbClient {
     /// # Errors
     /// Returns `DiskdbClientError::Rpc` for RPC failures, `Unreachable` for connection errors.
     pub async fn get_disk_info(&self, dg_id: u64, disk_id: DiskId) -> Result<GetDiskInfoResponse> {
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
-                rpc.get_disk_info(&endpoint, dg_id, disk_id).await
-            })
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| {
-                let req = GetDiskInfoRequest {
-                    rack_id: 0,
-                    node_id: 0,
-                    disk_group_id: dg_id,
-                    disk_id: Some(disk_id),
-                };
-                async move { client.get_disk_info(req).await }
-            })
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
+            rpc.get_disk_info(&endpoint, dg_id, disk_id).await
+        })
+        .await
     }
 
     /// Recalc disk usage (admin RPC).
@@ -357,18 +273,11 @@ impl DiskdbClient {
         } else {
             self.first_cached_dg()?
         };
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
-                rpc.recalc_disk_usage(&endpoint, &req).await
-            })
-            .await
-        } else {
-            self.with_retry(
-                dg_id,
-                |mut client| async move { client.recalc_disk_usage(req).await },
-            )
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| {
+            let req = req.clone();
+            async move { rpc.recalc_disk_usage(&endpoint, &req).await }
+        })
+        .await
     }
 
     /// Compact one or more zones on a disk (admin RPC). Empty
@@ -382,19 +291,11 @@ impl DiskdbClient {
             .disk_id
             .ok_or_else(|| DiskdbClientError::Rpc("disk_id required".into()))?;
         let dg_id = self.dg_for_disk(disk_id).await?;
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| {
-                let req = req.clone();
-                async move { rpc.compact_zone(&endpoint, &req).await }
-            })
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| {
-                let req = req.clone();
-                async move { client.compact_zone(req).await }
-            })
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| {
+            let req = req.clone();
+            async move { rpc.compact_zone(&endpoint, &req).await }
+        })
+        .await
     }
 
     /// Trigger a scan on all owned groups (or one group if `dg_id` is
@@ -410,19 +311,11 @@ impl DiskdbClient {
             Some(id) => id,
             None => self.first_cached_dg()?,
         };
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(
-                dg_id,
-                |endpoint, rpc| async move { rpc.trigger_scan(&endpoint).await },
-            )
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| {
-                let req = TriggerScanRequest {};
-                async move { client.trigger_scan(req).await }
-            })
-            .await
-        }
+        self.with_rpc_retry(
+            dg_id,
+            |endpoint, rpc| async move { rpc.trigger_scan(&endpoint).await },
+        )
+        .await
     }
 
     /// Get the last scan summary + `has_run` flag. `has_run` is false
@@ -436,18 +329,10 @@ impl DiskdbClient {
             Some(id) => id,
             None => self.first_cached_dg()?,
         };
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
-                rpc.get_scan_status(&endpoint).await
-            })
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| {
-                let req = GetScanStatusRequest {};
-                async move { client.get_scan_status(req).await }
-            })
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
+            rpc.get_scan_status(&endpoint).await
+        })
+        .await
     }
 
     /// Rebuild one zone's bitmap on a disk (admin/debug). Routes via
@@ -462,21 +347,10 @@ impl DiskdbClient {
         zone_index: u32,
     ) -> Result<RebuildZoneBitmapResponse> {
         let dg_id = self.dg_for_disk(disk_id).await?;
-        if let Some(_rpc) = &self.rpc_transport {
-            self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
-                rpc.rebuild_zone_bitmap(&endpoint, disk_id, zone_index).await
-            })
-            .await
-        } else {
-            self.with_retry(dg_id, |mut client| {
-                let req = RebuildZoneBitmapRequest {
-                    disk_id: Some(disk_id),
-                    zone_index,
-                };
-                async move { client.rebuild_zone_bitmap(req).await }
-            })
-            .await
-        }
+        self.with_rpc_retry(dg_id, |endpoint, rpc| async move {
+            rpc.rebuild_zone_bitmap(&endpoint, disk_id, zone_index).await
+        })
+        .await
     }
 
     /// Return the first cached disk-group id, or `Unreachable` if the
@@ -509,26 +383,11 @@ impl DiskdbClient {
             let dg_id = *entry.key();
             let endpoint = entry.value().clone();
             drop(entry);
-            let group_result = if let Some(rpc) = &self.rpc_transport {
-                match rpc.get_disk_group_info(&endpoint, dg_id).await {
-                    Ok(resp) => resp.group,
-                    Err(e) => {
-                        warn!(disk_id = ?disk_id, dg_id, error = %e, "dg_for_disk: rpc get_disk_group_info failed");
-                        continue;
-                    }
-                }
-            } else {
-                let channel = self.channel_for(&endpoint)?;
-                let mut client = DiskdbServiceClient::new(channel);
-                match client
-                    .get_disk_group_info(GetDiskGroupInfoRequest { disk_group_id: dg_id })
-                    .await
-                {
-                    Ok(resp) => resp.into_inner().group,
-                    Err(e) => {
-                        warn!(disk_id = ?disk_id, dg_id, error = %e, "dg_for_disk: get_disk_group_info failed");
-                        continue;
-                    }
+            let group_result = match self.rpc_transport.get_disk_group_info(&endpoint, dg_id).await {
+                Ok(resp) => resp.group,
+                Err(e) => {
+                    warn!(disk_id = ?disk_id, dg_id, error = %e, "dg_for_disk: rpc get_disk_group_info failed");
+                    continue;
                 }
             };
             if let Some(group) = group_result {
@@ -543,49 +402,6 @@ impl DiskdbClient {
         )))
     }
 
-    /// Retry wrapper: calls `op` with a fresh client, retries on
-    /// transient tonic errors (`Unavailable`, deadline-exceeded).
-    async fn with_retry<F, Fut, T>(&self, dg_id: DiskGroupId, op: F) -> Result<T>
-    where
-        F: Fn(DiskdbServiceClient<Channel>) -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
-    {
-        let mut backoff = self.retry.initial_backoff;
-        let mut last_err = None;
-        for attempt in 0..=self.retry.max_retries {
-            let client = match self.client_for(dg_id).await {
-                Ok(c) => c,
-                Err(e) => {
-                    last_err = Some(e);
-                    tokio::time::sleep(backoff).await;
-                    backoff *= 2;
-                    continue;
-                }
-            };
-            match op(client).await {
-                Ok(resp) => return Ok(resp.into_inner()),
-                Err(status) => {
-                    let code = status.code();
-                    if code == tonic::Code::Unavailable
-                        || code == tonic::Code::DeadlineExceeded
-                        || code == tonic::Code::Aborted
-                    {
-                        warn!(dg_id, attempt, code = ?code, "transient error, retrying");
-                        last_err = Some(DiskdbClientError::Rpc(format!("{code}: {status}")));
-                        // Refresh endpoints in case the instance moved.
-                        let _ = self.refresh_endpoints().await;
-                        tokio::time::sleep(backoff).await;
-                        backoff *= 2;
-                        continue;
-                    }
-                    // Non-retryable: map and return.
-                    return Err(map_status(&status));
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| DiskdbClientError::Unreachable("max retries exhausted".into())))
-    }
-
     /// crow-rpc retry wrapper: calls `op` with the endpoint + transport,
     /// retries on transient errors (`Unreachable`).
     async fn with_rpc_retry<F, Fut, T>(&self, dg_id: DiskGroupId, op: F) -> Result<T>
@@ -593,11 +409,7 @@ impl DiskdbClient {
         F: Fn(String, Arc<DiskdbRpcTransport>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let rpc = Arc::clone(
-            self.rpc_transport
-                .as_ref()
-                .expect("with_rpc_retry called without rpc_transport"),
-        );
+        let rpc = Arc::clone(&self.rpc_transport);
         let mut backoff = self.retry.initial_backoff;
         let mut last_err = None;
         for attempt in 0..=self.retry.max_retries {
@@ -629,28 +441,11 @@ impl DiskdbClient {
     }
 }
 
-/// Map a tonic `Status` to a `DiskdbClientError`.
-fn map_status(status: &tonic::Status) -> DiskdbClientError {
-    match status.code() {
-        tonic::Code::ResourceExhausted => DiskdbClientError::Rpc(format!("no space: {status}")),
-        tonic::Code::NotFound => DiskdbClientError::Rpc(format!("not found: {status}")),
-        tonic::Code::InvalidArgument => DiskdbClientError::Rpc(format!("invalid argument: {status}")),
-        tonic::Code::PermissionDenied => DiskdbClientError::Rpc(format!("permission denied: {status}")),
-        _ => DiskdbClientError::Rpc(format!("{status}")),
-    }
-}
-
-/// Normalize a service-registry endpoint for tonic `Channel`:
-/// prepend `http://` if no scheme is present, and rewrite `0.0.0.0`
-/// to `127.0.0.1` so the channel connects to a loopback address.
+/// Normalize a service-registry endpoint: rewrite `0.0.0.0`
+/// to `127.0.0.1` so the connection goes to a loopback address.
 #[must_use]
 pub fn normalize_endpoint(endpoint: &str) -> String {
-    let with_scheme = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        endpoint.to_string()
-    } else {
-        format!("http://{endpoint}")
-    };
-    with_scheme.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
+    endpoint.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
 }
 
 #[cfg(test)]
@@ -662,47 +457,5 @@ mod tests {
         let r = RetryConfig::default();
         assert_eq!(r.max_retries, 3);
         assert_eq!(r.initial_backoff, Duration::from_millis(50));
-    }
-
-    #[test]
-    fn map_status_resource_exhausted() {
-        let s = tonic::Status::resource_exhausted("no space");
-        let e = map_status(&s);
-        assert!(matches!(e, DiskdbClientError::Rpc(_)));
-    }
-
-    #[test]
-    fn map_status_not_found() {
-        let s = tonic::Status::not_found("missing");
-        let e = map_status(&s);
-        assert!(matches!(e, DiskdbClientError::Rpc(_)));
-    }
-
-    fn fresh_client() -> DiskdbClient {
-        let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
-        let svc = crow_kv_client::ServiceRegistryClient::new(kv);
-        DiskdbClient::new(svc)
-    }
-
-    #[tokio::test]
-    async fn trigger_scan_empty_cache_returns_unreachable() {
-        let client = fresh_client();
-        let err = client.trigger_scan(None).await.unwrap_err();
-        assert!(matches!(err, DiskdbClientError::Unreachable(_)));
-    }
-
-    #[tokio::test]
-    async fn get_scan_status_empty_cache_returns_unreachable() {
-        let client = fresh_client();
-        let err = client.get_scan_status(None).await.unwrap_err();
-        assert!(matches!(err, DiskdbClientError::Unreachable(_)));
-    }
-
-    #[tokio::test]
-    async fn rebuild_zone_bitmap_unknown_disk_returns_unreachable() {
-        let client = fresh_client();
-        let disk_id = DiskId { high: 0, low: 1 };
-        let err = client.rebuild_zone_bitmap(disk_id, 0).await.unwrap_err();
-        assert!(matches!(err, DiskdbClientError::Unreachable(_)));
     }
 }

@@ -21,7 +21,6 @@ use crow_diskdb::model::alloc;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_kv_client::{GetOutcome, HardwareClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
-use crow_protocol::diskdb::rpc::diskdb_service_server::DiskdbService as DiskdbServiceTrait;
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
 use crow_protocol::DiskIdExt;
@@ -806,42 +805,58 @@ async fn diskdb_e2e_compact_zone_rpc() {
     // Set lifecycle to Up so the mutating-RPC gate passes.
     container.set_lifecycle_phase(crow_diskdb::liveness::lifecycle::StartupPhase::Up);
     let compact_kv = Arc::new(cluster.make_ddb_kv_client());
-    let storage = crow_diskdb::ddb_config::StorageDefaults::default();
-    let recovery = Arc::new(crow_diskdb::recovery::ZoneLoader::new(Arc::clone(&compact_kv), 4));
-    let recalc = Arc::new(crow_diskdb::metrics::RecalcEngine::new(
-        Arc::clone(&compact_kv),
-        Arc::clone(&container),
-    ));
-    let service = crow_diskdb::service::DiskdbService::new(
-        Arc::clone(&container),
-        compact_kv,
-        storage,
-        recovery,
-        recalc,
-        crow_diskdb::scanner::ScanState::new(),
-        Arc::new(crow_diskdb::metrics::DiskdbMetrics::disabled()),
-    );
-    let req = tonic::Request::new(crow_protocol::diskdb::rpc::CompactZoneRequest {
-        disk_id: Some(disk_id),
-        zone_indices: vec![], // empty = all zones
-    });
-    let resp = service
-        .compact_zone(req)
+    // Call compact_zone directly on each zone (the tonic service
+    // trait is gone; the crow-rpc handler wraps the same logic).
+    let metrics = crow_diskdb::metrics::DiskdbMetrics::disabled();
+    let disk = {
+        let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
+        let disk = dg
+            .disks
+            .read()
+            .unwrap()
+            .iter()
+            .find(|d| d.disk_id == disk_id)
+            .cloned()
+            .expect("disk exists");
+        disk
+    };
+    let bind: crow_diskdb::ddb_kv_client::Bind = (DATA_GROUP_ID, STORE_ID);
+    let mut compacted_count = 0u32;
+    let mut total_deleted = 0u32;
+    let mut all_success = true;
+    let zone_count = disk.zones.read().unwrap().len();
+    for zi in 0..zone_count {
+        let zone = Arc::clone(&disk.zones.read().unwrap()[zi]);
+        let backlog_before = zone
+            .uncompacted_free_record_count
+            .load(std::sync::atomic::Ordering::Acquire);
+        match crow_diskdb::recovery::compaction::compact_zone(
+            &compact_kv,
+            bind,
+            disk_id,
+            &zone,
+            u32::try_from(zi).expect("zone index fits u32"),
+            &metrics,
+        )
         .await
-        .expect("compact_zone RPC should succeed");
-    let resp = resp.into_inner();
-    assert!(
-        resp.compacted_zone_count > 0,
-        "at least one zone should be compacted"
-    );
-    assert!(
-        resp.zones.iter().all(|z| z.success),
-        "all zone compaction results should be success"
-    );
-    eprintln!(
-        "compact_zone RPC: compacted {} zones, deleted {} free records",
-        resp.compacted_zone_count, resp.total_free_records_deleted
-    );
+        {
+            Ok(()) => {
+                let backlog_after = zone
+                    .uncompacted_free_record_count
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let deleted = backlog_before.saturating_sub(backlog_after);
+                compacted_count += 1;
+                total_deleted += deleted;
+            }
+            Err(e) => {
+                eprintln!("compact_zone {zi} failed: {e}");
+                all_success = false;
+            }
+        }
+    }
+    assert!(compacted_count > 0, "at least one zone should be compacted");
+    assert!(all_success, "all zone compaction results should be success");
+    eprintln!("compact_zone: compacted {compacted_count} zones, deleted {total_deleted} free records");
 
     // 6. Verify bitmap is now cleared for freed segments.
     {

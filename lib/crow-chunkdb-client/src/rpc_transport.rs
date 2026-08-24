@@ -20,13 +20,12 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use flatbuffers::FlatBufferBuilder;
 
-use crow_protocol::chunkdb::rpc::{chunk_strip::Strip as ProtoStrip, EcStrip, MirrorStrip};
 use crow_protocol::chunkdb::rpc::{
     AllocateChunkResponse, AppendChunkResponse, Chunk, ChunkState as ProtoChunkState, ChunkStrip,
-    ChunkType as ProtoChunkType, DeleteChunkRangeResponse, DeleteChunkResponse, EcState as ProtoEcState,
-    ListChunksResponse, QueryChunkResponse, SealChunkResponse, StripType as ProtoStripType,
-    UpdateChunkStripResponse,
+    ChunkType as ProtoChunkType, DeleteChunkRangeResponse, DeleteChunkResponse, ListChunksResponse,
+    QueryChunkResponse, SealChunkResponse, StripType as ProtoStripType, UpdateChunkStripResponse,
 };
+use crow_protocol::chunkdb::rpc::{EcState as ProtoEcState, EcStrip, MirrorStrip, Strip as ProtoStrip};
 use crow_protocol::chunkdb_fb::{
     FBAllocateChunkRequest, FBAllocateChunkRequestArgs, FBAppendChunkRequest, FBAppendChunkRequestArgs,
     FBChunkState, FBChunkStrip, FBChunkType, FBChunkdbRetCode, FBDeleteChunkRangeRequest,

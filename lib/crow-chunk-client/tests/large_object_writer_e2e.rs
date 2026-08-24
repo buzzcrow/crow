@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crow_chunk_client::{ChunkClientConfig, DiskWriter, DiskioBlockWriter, LargeAsyncObjectWriter};
-use crow_chunkdb_client::{ChunkdbClient, RetryConfig as ChunkdbRetryConfig};
+use crow_chunkdb_client::{ChunkdbClient, ChunkdbRpcTransport, RetryConfig as ChunkdbRetryConfig};
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskioClient;
 use crow_protocol::common::DiskId as ProtoDiskId;
@@ -134,12 +134,14 @@ async fn start_e2e_stack() -> E2eStack {
 
     // 6. Build chunkdb client + refresh endpoints.
     let svc = cluster.make_service_registry_client();
+    let transport = std::sync::Arc::new(ChunkdbRpcTransport::new());
     let chunkdb_client = ChunkdbClient::with_retry_config(
         svc,
         ChunkdbRetryConfig {
             max_retries: 5,
             initial_backoff: Duration::from_millis(100),
         },
+        transport,
     );
     // Wait for chunkdb to register in the service registry.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

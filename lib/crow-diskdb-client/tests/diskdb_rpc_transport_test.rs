@@ -53,14 +53,10 @@ async fn diskdb_rpc_transport_e2e() {
     // 4. Build the DiskdbClient with crow-rpc transport enabled.
     let svc = cluster.make_service_registry_client();
     let transport = Arc::new(DiskdbRpcTransport::new());
-    let client = Arc::new(
-        DiskdbClient::new(svc)
-            .with_retry_config(RetryConfig {
-                max_retries: 5,
-                initial_backoff: std::time::Duration::from_millis(100),
-            })
-            .with_rpc_transport(transport),
-    );
+    let client = Arc::new(DiskdbClient::new(svc, transport).with_retry_config(RetryConfig {
+        max_retries: 5,
+        initial_backoff: std::time::Duration::from_millis(100),
+    }));
     client.refresh_endpoints().await.expect("refresh endpoints");
     eprintln!("diskdb client endpoints refreshed (rpc transport enabled)");
 

@@ -13,7 +13,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crow_diskdb_client::DiskdbClient;
+use crow_diskdb_client::{DiskdbClient, DiskdbRpcTransport};
 use crow_kv_client::ServiceRegistryClient;
 use crow_protocol::common::{DiskGroupUsageSummary, DiskdbExtra, HwStatus, InstanceValue};
 use crow_protocol::common_type::InstanceId;
@@ -42,7 +42,8 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
             let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
             kv.seed_leader(0, 0, ep);
             let svc = ServiceRegistryClient::new(kv);
-            let client = DiskdbClient::new(svc);
+            let transport = std::sync::Arc::new(DiskdbRpcTransport::new());
+            let client = DiskdbClient::new(svc, transport);
             if let Err(e) = client.refresh_endpoints().await {
                 warn!(error = %e, "build_diskdb_client: refresh_endpoints failed");
             }
@@ -355,17 +356,11 @@ async fn query_instance_direct(
     endpoint: &str,
     req: QueryCapacityStatsRequest,
 ) -> Result<QueryCapacityStatsResponse, String> {
-    use crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient;
-    let channel = tonic::transport::Channel::from_shared(endpoint.to_string())
-        .map_err(|e| format!("invalid endpoint: {e}"))?
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_lazy();
-    let mut grpc = DiskdbServiceClient::new(channel);
-    grpc.query_capacity_stats(req)
+    let transport = std::sync::Arc::new(DiskdbRpcTransport::new());
+    transport
+        .query_capacity_stats(endpoint, &req)
         .await
-        .map(tonic::Response::into_inner)
-        .map_err(|e| format!("gRPC: {e}"))
+        .map_err(|e| format!("rpc: {e}"))
 }
 
 #[derive(Debug, Deserialize)]

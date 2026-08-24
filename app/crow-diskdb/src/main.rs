@@ -20,7 +20,7 @@ use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::compaction::{CompactionEngine, PreparatoryThread};
 use crow_diskdb::recovery::ZoneLoader;
 use crow_diskdb::scanner::{ScanState, ScannerTask};
-use crow_diskdb::service::{DiskdbRpcService, DiskdbService};
+use crow_diskdb::service::DiskdbRpcService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient};
 use tracing::info;
 
@@ -168,21 +168,10 @@ async fn main() {
         .listen_addr
         .parse()
         .expect("valid listen_addr");
-    let grpc_service = DiskdbService::new(
-        container.clone(),
-        Arc::clone(&dg_kv),
-        config.load().storage.clone(),
-        Arc::clone(&zone_loader),
-        Arc::clone(&recalc_engine),
-        scan_state.clone(),
-        Arc::new(metrics.clone()),
-    )
-    .into_server();
-    info!(%listen_addr, "gRPC server listening (zone load pending)");
+    info!(%listen_addr, "RPC server listening (zone load pending)");
 
-    // Build the crow-rpc server (R115 migration — runs alongside gRPC
-    // during the mixed-rollout window). The RpcServer listens on a
-    // separate port and dispatches to DiskdbRpcService handlers.
+    // Build the crow-rpc server. The RpcServer listens on the RPC
+    // port and dispatches to DiskdbRpcService handlers.
     let rpc_listen_addr: SocketAddr = config
         .load()
         .server
@@ -306,22 +295,13 @@ async fn main() {
             .expect("HTTP health server error");
     });
 
-    // Serve gRPC until shutdown signal.
+    // Wait for shutdown signal.
     let rpc_server_stop = Arc::clone(&rpc_server);
-    let grpc_result = tonic::transport::Server::builder()
-        .add_service(grpc_service)
-        .serve_with_shutdown(listen_addr, async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("received shutdown signal");
-            rpc_server_stop.stop();
-            stop.notify_waiters();
-            http_stop.notify_waiters();
-        })
-        .await;
-
-    if let Err(e) = grpc_result {
-        tracing::error!("gRPC server error: {e}");
-    }
+    let _ = tokio::signal::ctrl_c().await;
+    info!("received shutdown signal");
+    rpc_server_stop.stop();
+    stop.notify_waiters();
+    http_stop.notify_waiters();
     for h in bg_handles {
         let _ = h.await;
     }

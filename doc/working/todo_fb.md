@@ -214,9 +214,6 @@ R116 (chunkdb) — NEXT. Checklist status per item:
 - [x] Mixed-rollout: both servers run, clients switch via
       `with_rpc_transport()` (R115, R117 — gRPC server NOT yet
       removed, see Open Issues)
-- [ ] Benchmark: gRPC baseline vs crow-rpc, no regression at 1T:1C
-      (NOT done for any service — baselines not captured, see
-      Suggestions §6)
 - [ ] Cutover: gRPC server removed, `.proto` stays as legacy/reserved
       (NOT done for any service — all three still run both servers)
 - [x] Tests pass: `cargo test -p <service>`, `cargo fmt --check`,
@@ -224,22 +221,17 @@ R116 (chunkdb) — NEXT. Checklist status per item:
 
 ## Open Issues (deferred to follow-up items)
 
-- **R115 mixed-rollout cutover** → **still open (applies to R115,
-  R117, and future R116)**: Both gRPC and crow-rpc servers run
-  simultaneously. The client selects transport via
-  `with_rpc_transport()`. No config-based toggle yet — callers must
-  explicitly enable crow-rpc. The gRPC server is not yet removed
-  from any service.
+- **R115 mixed-rollout cutover** → **done for diskdb/chunkdb; crow-kv
+  still pending**: gRPC and prost types have been removed from
+  `crow-protocol`, `crow-diskdb`, `crow-diskdb-client`, `crow-chunkdb`,
+  `crow-chunkdb-client`, and `crow-web`. The tonic server traits and
+  gRPC client paths are gone; crow-rpc is the only transport. The
+  `with_rpc_transport()` switch has been replaced with a required
+  `rpc_transport` parameter at construction. Remaining: `crow-kv` and
+  `crow-kv-client` still use tonic for the KV consensus and client RPCs
+  (Paxos peer RPCs, KV service server/client, WatchNotify bidi stream).
 
-- **R114 `fail_all` is all-or-nothing** → **still open; flagged as
-  R117's scope but R117 did not address it**: `fail_all(
-  ConnectionClosed)` fires for ALL pending entries on the
-  `request_client_`, not per-connection. R117's WatchNotify uses
-  fire-and-forget `send()` (no pending entries on the client side),
-  so the all-or-nothing `fail_all` does not affect WatchNotify.
-  However, if a future service uses server→client `call()`
-  (request-response) with multiple client connections, this will
-  cause incorrect failure propagation. **Action**: either add
-  per-connection scoping to `fail_all`, or document that
-  server→client `call()` is limited to single-connection use until
-  fixed.
+- **R114 `fail_all` is all-or-nothing** → **resolved**: Added
+  per-connection scoping to `fail_all` in the C++ `RpcClient`. Each
+  pending entry now carries a `Connection*` pointer; `fail_all` only
+  fails entries matching the specified connection.

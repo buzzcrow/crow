@@ -608,6 +608,7 @@ name = "crow-chunk-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "bytes",
  "crow-chunk-client",
  "crow-chunkdb-client",
@@ -618,7 +619,6 @@ dependencies = [
  "crow-protocol",
  "crow-rpc-ffi",
  "crow-test-harness",
- "prost",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -631,6 +631,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "axum",
+ "bincode",
  "bytes",
  "clap",
  "crow-chunkdb",
@@ -644,7 +645,6 @@ dependencies = [
  "flatbuffers",
  "futures",
  "parking_lot",
- "prost",
  "quick_cache",
  "rand 0.8.6",
  "reqwest",
@@ -654,7 +654,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
- "tonic",
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
@@ -670,10 +669,8 @@ dependencies = [
  "crow-rpc-ffi",
  "dashmap",
  "flatbuffers",
- "prost",
  "thiserror 2.0.18",
  "tokio",
- "tonic",
  "tracing",
 ]
 
@@ -760,7 +757,6 @@ dependencies = [
  "crow-rpc-ffi",
  "dashmap",
  "flatbuffers",
- "prost",
  "rand 0.9.5",
  "reqwest",
  "serde",
@@ -769,7 +765,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
- "tonic",
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
@@ -792,7 +787,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tonic",
  "tracing",
 ]
 
@@ -906,10 +900,7 @@ dependencies = [
  "crc32fast",
  "flatbuffers",
  "getrandom 0.2.17",
- "prost",
  "serde",
- "tonic",
- "tonic-build",
  "utoipa",
  "xxhash-rust",
 ]
@@ -969,7 +960,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tonic",
  "tower 0.5.3",
  "tower-http",
  "tracing",

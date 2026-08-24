@@ -30,8 +30,8 @@
 use std::sync::Arc;
 
 use crow_protocol::chunkdb::rpc::{
-    chunk_strip::Strip as ProtoStrip, Chunk, ChunkState as ProtoChunkState, ChunkStrip,
-    ChunkType as ProtoChunkType, EcState as ProtoEcState, StripType as ProtoStripType,
+    Chunk, ChunkState as ProtoChunkState, ChunkStrip, ChunkType as ProtoChunkType, EcState as ProtoEcState,
+    Strip as ProtoStrip, StripType as ProtoStripType,
 };
 use crow_protocol::chunkdb_fb::{
     FBAllocateChunkRequest, FBAllocateChunkResponse, FBAllocateChunkResponseArgs, FBAppendChunkRequest,

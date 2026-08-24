@@ -28,7 +28,7 @@ use crate::worker::EcWorker;
 use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskId;
-use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
+use crow_protocol::chunkdb::rpc::Strip as StripOneof;
 use crow_protocol::chunkdb::rpc::{Chunk, EcStrip};
 use crow_protocol::diskdb::rpc::Segment;
 
