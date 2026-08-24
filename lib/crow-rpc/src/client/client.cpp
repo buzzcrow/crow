@@ -97,6 +97,7 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
                 slot.request_id = request_id;
                 slot.cb         = cb;
                 slot.user_data  = user_data;
+                slot.conn       = conn;
                 slot.deadline_ns.store(deadline, std::memory_order_relaxed);
                 slot.state.store(SLOT_PENDING_READY, std::memory_order_release);
 
@@ -128,7 +129,7 @@ map_path:
     auto wrapped = [cb, user_data, request_id](Frame *resp, RpcError err) {
         invoke_c_complete(cb, user_data, request_id, resp, err);
     };
-    pending_.insert_or_assign(request_id, PendingEntry{std::move(wrapped), deadline});
+    pending_.insert_or_assign(request_id, PendingEntry{std::move(wrapped), deadline, conn});
 
     OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
     if (!transport->submit(conn, frame)) {
@@ -259,15 +260,20 @@ bool RpcClient::on_response(uint64_t request_id, Frame *response)
     return true;
 }
 
-void RpcClient::fail_all(RpcError err)
+void RpcClient::fail_all(Connection *conn, RpcError err)
 {
     // Fail slab-pending requests (callback model). Read fields before CAS
     // (slot is PENDING_READY, no concurrent writer), then CAS PENDING_READY→FREE
     // to claim + release in one op. Same read-before-CAS pattern as on_response.
+    // If conn is non-null, only fail entries sent on that connection
+    // (per-connection scoping). If conn is null, fail all (shutdown).
     for (size_t i = 0; i < pool_size_; ++i) {
         auto   &slot     = completion_pool_[i];
         uint8_t expected = SLOT_PENDING_READY;
         if (slot.state.load(std::memory_order_acquire) == SLOT_PENDING_READY) {
+            if (conn != nullptr && slot.conn != conn) {
+                continue;
+            }
             auto cb  = slot.cb;
             auto ud  = slot.user_data;
             auto rid = slot.request_id;
@@ -279,9 +285,13 @@ void RpcClient::fail_all(RpcError err)
 
     // Fail map-pending requests (oneshot + slab-fallback). folly has no
     // swap; iterate + erase + invoke. Each erase is safe during iteration
-    // (striped-lock map).
+    // (striped-lock map). Filter by conn if non-null.
     auto it = pending_.begin();
     while (it != pending_.end()) {
+        if (conn != nullptr && it->second.conn != conn) {
+            ++it;
+            continue;
+        }
         CompletionCallback cb  = std::move(it->second.cb);
         auto               key = it->first;
         ++it;

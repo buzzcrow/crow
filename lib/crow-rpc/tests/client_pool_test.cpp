@@ -293,7 +293,7 @@ TEST_F(CallerLoopbackTest, FailAllOnClose)
     auto conn = std::make_shared<Connection>(1, "test", &buf_pool);
 
     // Test fail_all with 0 pending (edge case — should be a no-op).
-    caller.fail_all(RpcError::ConnectionClosed);
+    caller.fail_all(nullptr, RpcError::ConnectionClosed);
     EXPECT_EQ(caller.pending_count(), 0u);
 }
 

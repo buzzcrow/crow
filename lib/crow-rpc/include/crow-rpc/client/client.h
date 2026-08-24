@@ -78,6 +78,7 @@ struct CompletionSlot
     crow_rpc_on_complete  cb{nullptr};   // C ABI callback
     void                 *user_data{nullptr};
     std::atomic<uint64_t> deadline_ns{0};
+    Connection           *conn{nullptr}; // for per-connection fail_all
 };
 
 // Map entry for the pending map (oneshot call() path + slab fallback).
@@ -88,6 +89,7 @@ struct PendingEntry
 {
     CompletionCallback cb;
     uint64_t           deadline_ns{0};
+    Connection        *conn{nullptr}; // for per-connection fail_all
 };
 
 // RpcClient manages request/response correlation. Each call allocates
@@ -152,8 +154,11 @@ class RpcClient
         transport_ = t;
     }
 
-    // Called by Connection::close to fail all pending requests.
-    void fail_all(RpcError err);
+    // Fail pending requests. If conn is non-null, only requests sent on
+    // that connection are failed (per-connection scoping for connection
+    // close). If conn is null, all pending requests are failed (used by
+    // shutdown / destructor).
+    void fail_all(Connection *conn, RpcError err);
 
     // Number of pending requests (for diagnostics).
     size_t pending_count();

@@ -169,9 +169,10 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
         auto conn = transport_->create_connection(fd, "client");
         conn->set_on_frame([this](Frame *frame, Connection *c) { dispatch(frame, c); });
         // Fail pending server-initiated requests when the connection closes.
-        conn->set_on_close([this](Connection *) {
+        // Per-connection scoping: only fail requests sent on this connection.
+        conn->set_on_close([this](Connection *c) {
             if (request_client_ != nullptr) {
-                request_client_->fail_all(RpcError::ConnectionClosed);
+                request_client_->fail_all(c, RpcError::ConnectionClosed);
             }
         });
     }
