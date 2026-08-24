@@ -13,7 +13,9 @@ Heartbeat/StepDown, ChosenNotification, FetchGap) uses the
 **crow-rpc flatbuffer transport** — a custom epoll/kqueue-based RPC
 library with flatbuffer framing and request/response correlation via
 oneshot channels. Client-to-node KV RPCs (Get/Set/Delete/Batch/Scan)
-remain on **gRPC with protobuf** (tonic + prost). Every message carries
+use the same crow-rpc engine on a separate port with a dedicated
+schema — see [`design-crow-kv-rpc-client.md`](design-crow-kv-rpc-client.md)
+for the client-facing transport design. Every message carries
 a `version: u32` field for forward/backward compatibility; no
 `required` fields; field numbers are append-only.
 

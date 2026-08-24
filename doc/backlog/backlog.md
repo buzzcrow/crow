@@ -255,22 +255,6 @@ intermediate structs, no per-field copy.
   (redirect `ret_code` + leader endpoint). Should land after R115
   (pattern validation) and after the chunk-layer refactor stabilizes
   `ChunkWriter`'s RPC call sites.
-- **[R117](R117-kv-client-rpc-migration.md)** — KvService (client-
-  facing) → crow-rpc — Area: kv / rpc — Migrate the client→server
-  path: 10 unary RPCs (Put, Get, Delete, BatchWrite, Scan, etc.) +
-  1 bi-directional stream (WatchNotify). R32 migrates the internal
-  Paxos path; R117 migrates the client-facing path — the surface
-  that `crow-kv-client` and FFI consumers (crow-diskio) call. FFI C
-  ABI preserved (only internal transport changes). Depends on R114
-  (finished — bidirectional request-response for WatchNotify) + R32
-  (done — validates KV `NotLeaderHint`
-  flatbuffer model + `kv_consensus.fbs` schema sub-range; R117
-  reuses R32's `px_rpc_service`/`px_rpc_transport`/`FB<Type>Ref`
-  patterns and the `Connection::from_handle` FFI helper). Note:
-  R114's `Stream`/`StreamHandlerFn` primitives are not exposed in
-  the Rust FFI — R117 models WatchNotify as persistent-connection +
-  server→client push (`register_handler` + `from_handle` + `send`),
-  mirroring R32's LearnerStream modeling.
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
   scan error spike by wrapping the maintenance loop's `flush` /
