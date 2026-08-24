@@ -244,6 +244,13 @@ impl CrowkvClient {
         self
     }
 
+    /// The crow-rpc transport, if set via `with_rpc_transport`.
+    /// Used by `WatchNotifyClient` to select the crow-rpc push path.
+    #[must_use]
+    pub(crate) fn rpc_transport(&self) -> Option<&Arc<crate::kv_rpc_transport::KvRpcTransport>> {
+        self.rpc_transport.as_ref()
+    }
+
     /// This client session's opaque `client_id`.
     #[must_use]
     pub fn client_id(&self) -> u64 {
