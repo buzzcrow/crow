@@ -52,6 +52,29 @@ pub fn find_free_port() -> i32 {
         .into()
 }
 
+/// Find a pair of free ports `(grpc_port, rpc_port)` such that
+/// `rpc_port = grpc_port - offset`. The chunkdb client derives the
+/// crow-rpc port from the gRPC port using a fixed offset
+/// (`CHUNKDB_RPC_BASE - CHUNKDB_GRPC_BASE`), so the harness must pick a
+/// pair satisfying that constraint — otherwise the subprocess falls
+/// back to the hardcoded default `0.0.0.0:9961` and collides across
+/// tests. Tries up to 100 random ports.
+fn find_port_pair_with_offset(offset: i32) -> (i32, i32) {
+    for _ in 0..100 {
+        let grpc_port = find_free_port();
+        let rpc_port = grpc_port - offset;
+        if rpc_port > 1024 && is_port_free(rpc_port) {
+            return (grpc_port, rpc_port);
+        }
+    }
+    panic!("could not find a free port pair with offset {offset}");
+}
+
+fn is_port_free(port: i32) -> bool {
+    let addr = format!("127.0.0.1:{port}");
+    std::net::TcpListener::bind(addr.as_str()).is_ok()
+}
+
 // ── chunkdb subprocess ───────────────────────────────────────────
 
 pub struct ChunkdbProcess {
@@ -74,12 +97,21 @@ impl ChunkdbProcess {
             panic!("crow-chunkdb binary not found; set CROW_CHUNKDB_BIN or build app/crow-chunkdb")
         });
 
-        let grpc_port = find_free_port();
+        // The client derives rpc_port from grpc_port using a fixed
+        // offset (CHUNKDB_GRPC_BASE - CHUNKDB_RPC_BASE = 10). Pick a
+        // port pair that satisfies this constraint so the subprocess
+        // binds the crow-rpc listener on the port the client will
+        // connect to (instead of the hardcoded default 0.0.0.0:9961,
+        // which collides across tests).
+        let rpc_port_offset =
+            i32::from(crow_protocol::CHUNKDB_GRPC_BASE) - i32::from(crow_protocol::CHUNKDB_RPC_BASE);
+        let (grpc_port, rpc_port) = find_port_pair_with_offset(rpc_port_offset);
         let http_port = find_free_port();
 
         let config_content = format!(
             r#"[server]
 listen_addr = "127.0.0.1:{grpc_port}"
+rpc_listen_addr = "127.0.0.1:{rpc_port}"
 http_listen_addr = "127.0.0.1:{http_port}"
 instance_id = "{INSTANCE_ID}"
 kv_server_mgmt_seeds = [{seeds}]
