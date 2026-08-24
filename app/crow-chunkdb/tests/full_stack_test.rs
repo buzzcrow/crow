@@ -35,7 +35,7 @@ async fn chunkdb_full_stack_allocate_seal_delete() {
 
     // 3. Start diskdb in-process.
     let diskdb = DiskdbServer::start(&cluster).await;
-    eprintln!("diskdb started: {}", diskdb.grpc_endpoint);
+    eprintln!("diskdb started: {}", diskdb.rpc_endpoint);
 
     // 4. Wire chunkdb handler.
     let harness = ChunkdbHarness::start(&cluster).await;

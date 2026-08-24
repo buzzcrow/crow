@@ -6,7 +6,7 @@
 use crate::error::{err_400, err_409, err_500, err_502, ErrorBody};
 use crate::expand::Recursive;
 use crate::mgmt::{
-    build_server_client, cluster_initialized, grpc_endpoint_for_node, mgmt_url_for_node, refresh_node_cache,
+    build_server_client, cluster_initialized, mgmt_url_for_node, refresh_node_cache, rpc_endpoint_for_node,
 };
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -103,7 +103,7 @@ pub(crate) async fn http_add_group(
 
     // Refresh the cache for each node before wiring remotes so the per-store
     // `listen_addr` (each `PxKvStore` binds its own port) is known to the
-    // monitor cache used by `grpc_endpoint_for_node`.
+    // monitor cache used by `rpc_endpoint_for_node`.
     for (nid, _) in &succeeded {
         refresh_node_cache(&state, *nid).await;
     }
@@ -122,7 +122,7 @@ pub(crate) async fn http_add_group(
             if j == i {
                 continue;
             }
-            if let Some(ep) = grpc_endpoint_for_node(&state, *peer_nid, sid).await {
+            if let Some(ep) = rpc_endpoint_for_node(&state, *peer_nid, sid).await {
                 remotes.push(RemoteReplicaInfo {
                     replica_id: *peer_rid,
                     endpoint: ep,

@@ -4,7 +4,7 @@
 //! Topology restore: startup three-way fallback + per-node restore.
 
 use crate::mgmt::{
-    build_server_client, grpc_endpoint_for_node, mgmt_url_for_node, port_of, refresh_node_cache,
+    build_server_client, mgmt_url_for_node, port_of, refresh_node_cache, rpc_endpoint_for_node,
     rpc_is_conflict, rpc_is_not_found,
 };
 use crate::state::AppState;
@@ -429,7 +429,7 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
             if peer.replica_id == replica.replica_id {
                 continue;
             }
-            let Some(current_endpoint) = grpc_endpoint_for_node(state, peer.node_id, group.store_id).await
+            let Some(current_endpoint) = rpc_endpoint_for_node(state, peer.node_id, group.store_id).await
             else {
                 // Peer's store is not up yet; skip rather than overwriting
                 // the correct persisted-config endpoint with a stale one.

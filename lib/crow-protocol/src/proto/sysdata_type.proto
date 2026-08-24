@@ -50,7 +50,7 @@ message ReplicaValue {
 // Key: /srv/<service>/<instance_id>
 message InstanceValue {
   uint64 instance_id        = 1;
-  string grpc_endpoint      = 2;
+  string rpc_endpoint       = 2;
   uint64 last_heartbeat_ms  = 3;
   ServiceExtra extra        = 4;
 }
@@ -128,7 +128,7 @@ message ChunkdbRangeBindingValue {
   uint32 range_start     = 2;  // derived from sub_range_index (cached for routing)
   uint32 range_end       = 3;  // derived from sub_range_index
   uint64 instance_id     = 4;  // current owner chunkdb instance ID
-  string grpc_endpoint   = 5;  // current owner gRPC endpoint
+  string rpc_endpoint    = 5;  // current owner RPC endpoint
   uint64 original_instance_id = 6;  // original owner (for migration fallback)
   string original_endpoint     = 7;  // original owner gRPC endpoint
   RangeStatus status     = 8;  // STABLE or IN_TRANSITION

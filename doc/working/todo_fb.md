@@ -95,6 +95,92 @@ Rationale:
   and chunkdb is the newest service with the least production
   exposure.
 
+## R114 — Revised Design (request_id, no stream)
+
+**Decision**: crow-rpc is a raw socket protocol, not HTTP/2. A
+connection is a persistent bidirectional byte stream; every frame is
+`[12-byte header][flatbuffer control][data]`. Frames are correlated by
+`request_id` (extracted from the control message during parse). There
+is no "stream" concept — just requests and responses, each carrying an
+id. R114's original design (`FBStreamOpen/Close` control messages,
+`stream_id` field, `StreamHandlerFn`/`StreamWriter`/`StreamReader`,
+`open_stream` handshake) imports HTTP/2's stream model onto a protocol
+that doesn't need it. **R114 is rewritten to drop all of that.**
+
+What the existing engine already gives us:
+- `HandlerFn` receives `Frame* + Connection*`; slow handlers return
+  `nullptr` and submit response(s) later via `transport->submit`
+  (`server/handler.h` L25-26). Nothing limits a handler to one
+  response frame.
+- `on_response(request_id, Frame*)` routes by `request_id`
+  (`client/client.h` L130). The pending map is the only correlation
+  mechanism.
+- `request_id` is extracted from the flatbuffer control during parse
+  (`framing.h` L50). It is the per-frame correlation key.
+
+What's actually missing (minimal):
+- **One request, one response.** Every RPC is one request frame → one
+  response frame, correlated by `request_id`. No multi-response, no
+  `FLAG_LAST_FRAME`, no `call_multi`, no new handler type. The
+  existing `send()` + `on_response()` + `HandlerFn` already handle
+  this. The three KV RPCs map onto this model:
+  - *LearnerStream*: each "give me slots N..M" is a normal `call()`
+    with its own `request_id`, gets one response. The follower sends
+    the next call when ready. Zero protocol change.
+  - *StreamSnapshot*: the client sends "give me chunk N" → server
+    responds with chunk N. Repeat per chunk. Each is a normal
+    `call()`. Zero protocol change.
+  - *WatchNotify*: server-initiated request-response — the server
+    sends a notify **request**, the client sends an ack
+    **response**. See Resolved (continued) below.
+
+**RequestId generator consolidation**: the `request_id` generator
+moves to `crow-common` so every service client shares one definition
+instead of each re-implementing `AtomicU64::new(1)` + `fetch_add`.
+Currently duplicated:
+- C++ `RpcClient::next_request_id_` (`crow-rpc/include/crow-rpc/
+  client/client.h` L162) — used by 4 test call sites.
+- Rust `DiskioClient::next_req_id` (`crow-diskio-client/src/client.rs`
+  L86) — own `AtomicU64`.
+- Rust `CrowkvClient` uses `(client_id, next_seq)` — a higher-level
+  idempotency key, NOT the RPC `request_id`. When R117 migrates
+  kv-client to crow-rpc, it'll need the shared RPC `request_id`
+  generator alongside the existing `(client_id, seq)`.
+
+### Resolved
+
+- **RequestId generator**: per-client `RequestIdGen` struct in
+  `crow-common`. Per-client counter → smaller slab pool + pending
+  hashmap.
+- **RequestId type**: newtype `RequestId(u64)`, internal `AtomicU64`
+  (thread-safe `fetch_add(1, Relaxed)`), `next()` returns `u64`.
+- **C++ `RpcClient::next_request_id()` removal**: remove it, move to
+  `crow-common/cpp`. Verified: only 4 test call sites use it, zero
+  production code.
+- **One request, one response**: every RPC is one request frame → one
+  response frame. No multi-response, no `FLAG_LAST_FRAME`, no
+  `call_multi`, no new handler type. StreamSnapshot = per-chunk
+  `call()`. LearnerStream = per-batch `call()`.
+
+### Resolved (continued)
+
+- **WatchNotify: server-initiated request-response.** The notify is
+  a **request** (server→client), the client sends an **ack
+  response**, and the server retries on timeout. If retries are
+  exhausted, the server logs `WSCritical` and retries the notify on
+  the next change. This is normal request-response in the reverse
+  direction — no protocol change. The implementation gap is the
+  "other half" of request-response on each side:
+  - **Server side**: reuse `RpcClient` (keep the name) for
+    request-response correlation — send a notify request, await
+    ack, retry. The existing `HandlerRegistry` +
+    `transport->submit` already handle incoming requests and
+    outgoing responses.
+  - **Client side**: add a `HandlerRegistry`-like dispatch (handle
+    incoming requests by `msg_type`) + `transport->submit` to send
+    responses. The existing `RpcClient` already handles sending
+    requests and routing responses.
+
 ## Suggestions (apply across all migration items)
 
 ### 1. Shared error-mapping helper
@@ -113,33 +199,18 @@ retryable-error classification. Extract a shared helper in
 Not blocking, but avoids 4 copies of the same logic. Define in R115
 (the first migration) and reuse in R32/R116/R117.
 
-### 2. `grpc_endpoint` → `rpc_endpoint` as a standalone commit
+### 2. `grpc_endpoint` → `rpc_endpoint` — DONE (R115)
 
-R115 work item 6 does this for diskdb, but the rename touches
-`crow-kv-client/src/service_registry.rs` (shared by all services).
-Doing it inside R115 means R116/R117 conflict on the same files.
-
-Better: a **standalone commit before R115** that renames all Rust
-struct fields + method parameters from `grpc_endpoint` to
-`rpc_endpoint`. The group-0 sysdata **wire field name stays
-`grpc_endpoint`** (backward compat — old nodes reading new registry
-entries). Only Rust source identifiers change. The keepalive struct
-`with_grpc_endpoint` → `with_rpc_endpoint`. FFI parameter
-`grpc_endpoint` → `rpc_endpoint` in `crow-kv-client/src/ffi.rs` +
-`c_api.h` (no ABI change — it's a `*const c_char` either way).
-
-Files touched:
-- `lib/crow-kv-client/src/service_registry.rs`
-- `lib/crow-kv-client/src/ffi.rs`
-- `lib/crow-kv-client/include/crow-kv-client/c_api.h`
-- `app/crow-diskdb/src/liveness/keepalive.rs`
-- `app/crow-diskdb/src/main.rs`
-- `app/crow-chunkdb/src/main.rs`
-- `app/crow-kv-server/src/keepalive.rs`
-- `app/crow-diskio/src/group0/group0_sync.cpp` (C++ — `grpc_endpoint`
-  field in `g0_cfg` struct + the `crow_svc_heartbeat_diskio` call)
-- `app/crow-diskio/src/dio_main.cpp`
-- Test harnesses (`lib/crow-test-harness/src/*.rs`)
+DONE as part of R115. Renamed the proto field to `rpc_endpoint` in all
+3 proto messages (`InstanceValue`, `ChunkdbRangeBindingValue` in
+`sysdata_type.proto`; `NotMyRangeHint` in `chunkdb_type.proto`).
+Protobuf binary wire format uses tag numbers (not field names), so
+this is binary-wire-compatible — no `#[prost(rename)]` needed. Updated
+all 29 Rust files, 3 TS files, 4 C++ files that referenced
+`grpc_endpoint`. The keepalive struct `with_grpc_endpoint` →
+`with_rpc_endpoint`. FFI parameter `grpc_endpoint` → `rpc_endpoint`
+in `crow-kv-client/src/ffi.rs` + `c_api.h` (no ABI change — it's a
+`*const c_char` either way).
 
 ### 3. `msg_type.fbs` sub-range coordination
 
@@ -228,3 +299,24 @@ Without them, "no regression" is unmeasurable. Capture in
 - [ ] Cutover: gRPC server removed, `.proto` stays as legacy/reserved
 - [ ] Tests pass: `cargo test -p <service>`, `cargo fmt --check`,
       `cargo clippy -- -D warnings`
+
+## R115 — diskdb Migration Status (2026-08-24)
+
+### Completed
+
+- **Schema**: `diskdb.fbs` with all 11 request/response tables, `FBDiskdbRetCode` enum, `FBHwStatus`/`FBDiskType`/`FBZoneAllocationState` enums. `msg_type.fbs` extended with 3000s range. `build.rs` + `lib.rs` re-exports.
+- **Server handlers**: All 11 `DiskdbRpcService` handlers implemented in `app/crow-diskdb/src/service/diskdb_rpc_service.rs` — allocate, free, commit, query_capacity, get_disk_group_info, get_disk_info, rebuild_zone_bitmap, recalc_disk_usage, compact_zone, trigger_scan, get_scan_status.
+- **Server wiring**: `crow-rpc` server started alongside gRPC in `main.rs`; `rpc_listen_addr` added to `DdbConfig` + config file + validation.
+- **Client transport**: `DiskdbRpcTransport` in `lib/crow-diskdb-client/src/rpc_transport.rs` — builds flatbuffer requests, sends via `RpcClient::call`, parses flatbuffer responses into existing proto types. `DiskdbClient.with_rpc_transport()` builder selects crow-rpc when set; falls back to tonic gRPC otherwise.
+- **Error mapping**: `From<RpcError> for DiskdbClientError` — retryable → `Unreachable`, non-retryable → `Rpc`. `FBDiskdbRetCode` mapped to `DiskdbClientError` variants.
+- **E2E tests**: `diskdb_rpc_transport_test.rs` — full flow via crow-rpc (allocate, free, query drill-down, recalc, compact+reclaim, trigger_scan, get_scan_status, rebuild_zone_bitmap). All pass alongside existing gRPC E2E test.
+- **Bug fix**: `build_query_capacity_response` now passes `include_zones = true` for disk-level queries (was `false`, causing empty `zone_usages`).
+- **`grpc_endpoint` → `rpc_endpoint` rename**: Renamed the proto field in all 3 proto messages (`InstanceValue`, `ChunkdbRangeBindingValue`, `NotMyRangeHint`). Protobuf binary wire format uses tag numbers, so this is binary-wire-compatible. Updated all 29 Rust files, 3 TS files, 4 C++ files.
+- **`conn_handle` lifetime safety**: Added a live-connection registry to `SocketTransport` that maps `Connection*` → `weak_ptr<Connection>`. `submit()` looks up the connection before accessing it; stale handles return false instead of crashing. The `on_close` callback unregisters connections when they close.
+
+### Open Issues (deferred to follow-up items)
+
+- **Zero-copy wrappers** (R115 follow-up): The current client transport parses flatbuffer responses into owned proto types (allocates per response). The design doc's "no owned intermediate struct" rule is violated for the client side — this is acceptable during the mixed-rollout window but should be addressed in a follow-up that switches the client to use flatbuffer views directly.
+- **Mixed-rollout cutover**: Both gRPC and crow-rpc servers run simultaneously. The client selects transport via `with_rpc_transport()`. No config-based toggle yet — callers must explicitly enable crow-rpc.
+- **Benchmark baseline**: No benchmark has been captured comparing crow-rpc vs gRPC throughput for diskdb operations. Should be done before cutover.
+- **R114/R32/R116/R117**: Other migration items not yet started. R114 (streaming) has a revised design but no implementation. R32 (KV consensus) is the highest-risk item. R116 (chunkdb) and R117 (KvService client-facing) follow the same pattern as R115.

@@ -287,7 +287,7 @@ export interface DiskEntry {
 
 export interface DiskdbInstanceInfo {
   instance_id: number;
-  grpc_endpoint: string;
+  rpc_endpoint: string;
   last_heartbeat_ms: number;
   owned_dg_ids: number[];
   group_usages: DiskGroupUsageSummary[];

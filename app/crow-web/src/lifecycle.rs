@@ -2199,10 +2199,10 @@ pub async fn http_move_disk(
 
     // Build a CrowkvClient seeded with both old and new bind leaders.
     let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
-    if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, old_node_id, old_bind.0).await {
+    if let Some(ep) = crate::mgmt::rpc_endpoint_for_node(&state, old_node_id, old_bind.0).await {
         kv.seed_leader(old_bind.0, old_bind.1, ep);
     }
-    if let Some(ep) = crate::mgmt::grpc_endpoint_for_node(&state, body.new_node_id, new_bind.0).await {
+    if let Some(ep) = crate::mgmt::rpc_endpoint_for_node(&state, body.new_node_id, new_bind.0).await {
         kv.seed_leader(new_bind.0, new_bind.1, ep);
     }
     let copy_count = copy_disk_records(&kv, old_bind, new_bind, &disk_id_proto).await;

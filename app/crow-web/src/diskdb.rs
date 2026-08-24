@@ -24,7 +24,7 @@ use crow_protocol::diskdb::rpc::{
 };
 
 use crate::error::{err_400, err_404, err_502, ErrorBody};
-use crate::mgmt::{build_hardware_client, grpc_endpoint_for_node};
+use crate::mgmt::{build_hardware_client, rpc_endpoint_for_node};
 use crate::state::AppState;
 
 // ── lazy DiskdbClient init ───────────────────────────────────────
@@ -38,7 +38,7 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
         return None;
     }
     for node_id in snap.keys() {
-        if let Some(ep) = grpc_endpoint_for_node(state, *node_id, 0).await {
+        if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
             let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
             kv.seed_leader(0, 0, ep);
             let svc = ServiceRegistryClient::new(kv);
@@ -218,7 +218,7 @@ fn merge_capacity_responses(responses: Vec<QueryCapacityStatsResponse>) -> Usage
 #[derive(Debug, Serialize)]
 pub struct DiskdbInstanceInfo {
     pub instance_id: u64,
-    pub grpc_endpoint: String,
+    pub rpc_endpoint: String,
     pub last_heartbeat_ms: u64,
     pub owned_dg_ids: Vec<u64>,
     pub group_usages: Vec<DiskGroupUsageSummary>,
@@ -234,7 +234,7 @@ impl From<(InstanceId, InstanceValue)> for DiskdbInstanceInfo {
             .unwrap_or_default();
         Self {
             instance_id: id,
-            grpc_endpoint: val.grpc_endpoint,
+            rpc_endpoint: val.rpc_endpoint,
             last_heartbeat_ms: val.last_heartbeat_ms,
             owned_dg_ids,
             group_usages,
@@ -303,7 +303,7 @@ pub async fn http_diskdb_usage(
         let futs: Vec<_> = instances
             .into_iter()
             .map(|(_id, val)| {
-                let endpoint = val.grpc_endpoint.clone();
+                let endpoint = val.rpc_endpoint.clone();
                 let state_clone = state.clone();
                 async move {
                     let req = QueryCapacityStatsRequest {

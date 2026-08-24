@@ -220,9 +220,9 @@ fn spawn_chunkdb_keepalive(
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let instance_id = instance_id_str?.parse::<u64>().ok()?;
-    let grpc_endpoint = format!("http://{listen_addr}");
+    let rpc_endpoint = format!("http://{listen_addr}");
     let handle = tokio::spawn(async move {
-        if let Err(e) = svc.register_chunkdb(instance_id, &grpc_endpoint).await {
+        if let Err(e) = svc.register_chunkdb(instance_id, &rpc_endpoint).await {
             warn!(error = %e, "chunkdb keep-alive: initial register failed");
         } else {
             info!(instance_id, "chunkdb keep-alive: registered");
@@ -232,7 +232,7 @@ fn spawn_chunkdb_keepalive(
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    if let Err(e) = svc.heartbeat_chunkdb(instance_id, &grpc_endpoint).await {
+                    if let Err(e) = svc.heartbeat_chunkdb(instance_id, &rpc_endpoint).await {
                         warn!(error = %e, "chunkdb keep-alive: heartbeat failed");
                     }
                 }

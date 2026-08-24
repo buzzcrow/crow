@@ -492,7 +492,7 @@ pub fn seeded_dg_ids() -> Vec<u64> {
 #[allow(dead_code)]
 pub struct DiskdbServer {
     pub container: Arc<DdbDiskGroupContainer>,
-    pub grpc_endpoint: String,
+    pub rpc_endpoint: String,
     _serve_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -559,12 +559,12 @@ impl DiskdbServer {
                 .expect("diskdb gRPC server");
         });
 
-        let grpc_endpoint = format!("http://127.0.0.1:{port}");
+        let rpc_endpoint = format!("http://127.0.0.1:{port}");
 
         // Register in service registry.
         let svc = cluster.make_service_registry_client();
         let dg_ids = seeded_dg_ids();
-        svc.register_diskdb(INSTANCE_ID, &grpc_endpoint, &dg_ids, &[])
+        svc.register_diskdb(INSTANCE_ID, &rpc_endpoint, &dg_ids, &[])
             .await
             .expect("register diskdb");
 
@@ -573,7 +573,7 @@ impl DiskdbServer {
 
         Self {
             container,
-            grpc_endpoint,
+            rpc_endpoint,
             _serve_handle: serve_handle,
         }
     }

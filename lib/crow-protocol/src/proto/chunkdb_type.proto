@@ -104,13 +104,13 @@ message Chunk {
 // a request for a chunk outside its owned hash range. The server does
 // not track other instances' bindings, so only the bucket is filled
 // (in range_start/range_end as a diagnostic); instance_id and
-// grpc_endpoint are empty. The client refreshes its binding cache from
+// rpc_endpoint are empty. The client refreshes its binding cache from
 // group-0 and re-routes via RangeBindingClient::refresh_and_route.
 message NotMyRangeHint {
   uint32 range_start   = 1;  // rejected bucket (diagnostic)
   uint32 range_end     = 2;  // rejected bucket (diagnostic)
   uint64 instance_id   = 3;  // unused — server does not know the owner
-  string grpc_endpoint = 4;  // unused — server does not know the owner
+  string rpc_endpoint  = 4;  // unused — server does not know the owner
   uint32 sub_range_index = 5;  // unused (no sub-range info for out-of-range bucket)
 }
 

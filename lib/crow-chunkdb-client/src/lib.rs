@@ -6,7 +6,7 @@
 //! Provides allocate/append/seal/delete/query APIs with endpoint
 //! caching, mirroring `crow-diskdb-client`'s pattern. The client
 //! discovers chunkdb instances via the service registry (group 0),
-//! caches `instance_id -> grpc_endpoint`, and lazily refreshes on
+//! caches `instance_id -> rpc_endpoint`, and lazily refreshes on
 //! cache miss. Retry on transient errors with exponential backoff.
 
 #![allow(clippy::must_use_candidate, clippy::missing_errors_doc)]

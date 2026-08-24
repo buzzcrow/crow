@@ -166,7 +166,7 @@ pub(crate) fn rpc_is_conflict(err: &SharedError) -> bool {
 ///
 /// `0.0.0.0` listen addresses are remapped to `127.0.0.1` so other
 /// processes on the same host can dial the channel.
-pub(crate) async fn grpc_endpoint_for_node(
+pub(crate) async fn rpc_endpoint_for_node(
     state: &AppState,
     node_id: NodeId,
     store_id: u64,
@@ -179,7 +179,7 @@ pub(crate) async fn grpc_endpoint_for_node(
     }
     warn!(
         node_id,
-        store_id, "grpc_endpoint_for_node: cache miss, no known endpoint"
+        store_id, "rpc_endpoint_for_node: cache miss, no known endpoint"
     );
     None
 }
@@ -221,7 +221,7 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crow_kv_cl
         return None;
     }
     for node_id in snap.keys() {
-        if let Some(ep) = grpc_endpoint_for_node(state, *node_id, 0).await {
+        if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
             let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
             kv.seed_leader(0, 0, ep);
             return Some(crow_kv_client::HardwareClient::new(kv));

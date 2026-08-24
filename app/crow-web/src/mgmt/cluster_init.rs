@@ -4,7 +4,7 @@
 //! R2: Cluster initialization — system group bootstrap.
 
 use crate::error::{err_400, err_500, err_502, ErrorBody};
-use crate::mgmt::{build_server_client, grpc_endpoint_for_node, mgmt_url_for_node, refresh_node_cache};
+use crate::mgmt::{build_server_client, mgmt_url_for_node, refresh_node_cache, rpc_endpoint_for_node};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -121,7 +121,7 @@ pub(crate) async fn http_cluster_init(
                 if j == i {
                     continue;
                 }
-                if let Some(ep) = grpc_endpoint_for_node(&state, *peer_nid, 0).await {
+                if let Some(ep) = rpc_endpoint_for_node(&state, *peer_nid, 0).await {
                     remotes.push(RemoteReplicaInfo {
                         replica_id: *peer_rid,
                         endpoint: ep,
@@ -164,7 +164,7 @@ pub(crate) async fn http_cluster_init(
     let cfg_snapshot = state.config.read().unwrap().clone();
     let mut topology_written = false;
     for (nid, _) in &succeeded {
-        let Some(grpc_ep) = grpc_endpoint_for_node(&state, *nid, 0).await else {
+        let Some(grpc_ep) = rpc_endpoint_for_node(&state, *nid, 0).await else {
             continue;
         };
         let kv_client = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));

@@ -240,25 +240,38 @@ lib/crow-diskdb-client/src/
    the tokio runtime continues to serve the tonic server + async KV ops.
 3. Shutdown: stop the crow-rpc server before the tonic server.
 
-## Open Questions
+## Open Questions — Resolved
 
-1. **`grpc_endpoint` → `rpc_endpoint` rename scope** — the todo lists
-   ~10 files but the rename touches 48 files (proto wire fields, TS UI,
-   e2e tests). The proto wire field name must stay `grpc_endpoint`
-   (backward compat). Decision needed: do the rename as a standalone
-   commit before R115 (per the todo), or defer and use
-   `#[prost(rename)]` so the Rust field is `rpc_endpoint` while the
-   wire name stays `grpc_endpoint`? See todo_fb.md Open Issues.
+1. **`grpc_endpoint` → `rpc_endpoint` rename scope** — RESOLVED.
+   Renamed the proto field to `rpc_endpoint` in all 3 proto messages
+   (`InstanceValue`, `ChunkdbRangeBindingValue` in `sysdata_type.proto`;
+   `NotMyRangeHint` in `chunkdb_type.proto`). Protobuf binary wire
+   format uses tag numbers (not field names), so this is
+   binary-wire-compatible — no `#[prost(rename)]` needed. Updated all
+   29 Rust files, 3 TS files, 4 C++ files that referenced
+   `grpc_endpoint`. The rename is done as part of R115, not as a
+   standalone commit.
 
-2. **Async handler pattern from the C++ I/O thread** — the dispatch
-   callback runs on the C++ I/O worker thread. For handlers that call
-   async KV ops (`DdbKvClient`), the handler must spawn a tokio task
-   and submit the response from it. The `conn_handle` must remain valid
-   until the task completes (the transport owns the connection; it stays
-   alive until the client disconnects or the server stops). Need to
-   verify the handle lifetime is safe across this boundary — the
-   `submit_response` C API dereferences `conn_handle` as a
-   `Connection*`. If the connection is closed between spawn and submit,
-   `submit_response` must handle a stale handle gracefully (return an
-   error, not crash). This needs verification in the C++ transport
-   (`SocketTransport::submit` with a closed connection).
+2. **Async handler pattern from the C++ I/O thread** — RESOLVED.
+   The dispatch callback runs on the C++ I/O worker thread. For
+   handlers that call async KV ops (`DdbKvClient`), the handler spawns
+   a tokio task and submits the response from it. The `conn_handle` is
+   a raw `Connection*` pointer; if the connection closes between spawn
+   and submit, the pointer dangles (use-after-free risk).
+
+   Fix: added a live-connection registry to `SocketTransport` that
+   maps `Connection*` → `weak_ptr<Connection>`. `submit()` looks up
+   the connection before accessing it:
+   - If the connection is alive → `weak_ptr::lock()` returns a
+     `shared_ptr`, and `submit()` proceeds normally.
+   - If the connection was closed and freed (stale handle) →
+     `weak_ptr::lock()` returns null, and `submit()` frees the frame
+     and returns false (no crash).
+   - If the connection was never registered (test/direct connection)
+     → `lookup_conn()` returns `nullopt`, and `submit()` falls through
+     to direct access (backward compat for tests).
+
+   The `on_close` callback on `Connection` unregisters it from the
+   registry when the connection closes. Files:
+   `lib/crow-rpc/include/crow-rpc/transport/socket_transport.h`,
+   `lib/crow-rpc/src/transport/socket_transport.cpp`.

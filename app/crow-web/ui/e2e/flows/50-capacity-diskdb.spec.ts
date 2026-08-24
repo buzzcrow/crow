@@ -907,7 +907,7 @@ test.describe('capacity · diskdb', () => {
             {
               instance_id: `diskdb-${nodeId}`,
               node_id: nodeId,
-              grpc_endpoint: `http://127.0.0.1:30099`,
+              rpc_endpoint: `http://127.0.0.1:30099`,
               owned_dg_ids: [dg580, dg581],
               status: 'up',
             },
@@ -1182,7 +1182,7 @@ test.describe('capacity · diskdb', () => {
             {
               instance_id: `diskdb-bitmap`,
               node_id: nodeId,
-              grpc_endpoint: `http://127.0.0.1:30099`,
+              rpc_endpoint: `http://127.0.0.1:30099`,
               owned_dg_ids: [dgId],
               status: 'up',
             },
@@ -1257,8 +1257,8 @@ test.describe('capacity · diskdb', () => {
         const r = await api.get('/api/diskdb/instances');
         expect(r.ok()).toBeTruthy();
         const instances = await r.json();
-        const ddb = instances.find((i: { grpc_endpoint: string }) =>
-          i.grpc_endpoint.includes(String(rpcPort)));
+        const ddb = instances.find((i: { rpc_endpoint: string }) =>
+          i.rpc_endpoint.includes(String(rpcPort)));
         expect(ddb, 'diskdb instance should be registered').toBeTruthy();
         instanceId = ddb.instance_id;
       } finally {

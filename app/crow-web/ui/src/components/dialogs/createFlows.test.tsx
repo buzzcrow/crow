@@ -327,7 +327,7 @@ describe('diskdbPortDefaultsForNode', () => {
   });
 
   it('increments past ports already assigned to other diskdb instances', () => {
-    const instances = [{ grpc_endpoint: 'http://127.0.0.1:29921' }];
+    const instances = [{ rpc_endpoint: 'http://127.0.0.1:29921' }];
     expect(diskdbPortDefaultsForNode(instances, 1)).toBe('29922');
   });
 

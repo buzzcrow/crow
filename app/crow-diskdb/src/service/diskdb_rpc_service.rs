@@ -654,7 +654,8 @@ impl DiskdbRpcService {
             out
         };
 
-        let ctrl = build_query_capacity_response(req_id, create_nano, &disk_groups);
+        let ctrl =
+            build_query_capacity_response(req_id, create_nano, &disk_groups, disk_id.is_some() && !has_zone);
         unsafe {
             if let Err(e) = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id) {
                 tracing::warn!(?e, "query_capacity submit failed");
@@ -1485,12 +1486,13 @@ fn build_query_capacity_response(
     req_id: u64,
     create_nano: u64,
     disk_groups: &[DiskGroupQueryEntry],
+    include_zones: bool,
 ) -> Vec<u8> {
     let mut fbb = FlatBufferBuilder::new();
     let dg_offs: Vec<flatbuffers::WIPOffset<FBDiskGroupInfo>> = disk_groups
         .iter()
         .map(|(dg, usage, disk_ids, disks)| {
-            build_disk_group_info_offset(&mut fbb, dg, usage, disk_ids, disks, false)
+            build_disk_group_info_offset(&mut fbb, dg, usage, disk_ids, disks, include_zones)
         })
         .collect();
     let dg_vec = fbb.create_vector(&dg_offs);

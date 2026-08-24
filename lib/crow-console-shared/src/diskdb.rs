@@ -18,7 +18,7 @@ use crate::error::Result;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiskdbInstanceInfo {
     pub instance_id: u64,
-    pub grpc_endpoint: String,
+    pub rpc_endpoint: String,
     pub last_heartbeat_ms: u64,
     pub owned_dg_ids: Vec<u64>,
     pub group_usages: Vec<DiskGroupUsageSummary>,

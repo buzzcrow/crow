@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 
@@ -285,6 +286,24 @@ class SocketTransport : public Transport
     // (nullptr on failure). The connection can both send and receive.
     std::shared_ptr<Connection> connect(const std::string &addr, int port);
 
+    // Register a connection in the live-connection registry. Called
+    // when a connection is created. The registry holds a weak_ptr so
+    // that submit() on a stale handle returns false instead of crashing.
+    void register_conn(const std::shared_ptr<Connection> &conn);
+
+    // Remove a connection from the live-connection registry. Called
+    // when a connection is closed.
+    void unregister_conn(Connection *conn);
+
+    // Look up a connection by raw pointer. Returns a shared_ptr (null
+    // if the connection has been closed/freed). Used by submit() to
+    // safely access connections from arbitrary threads.
+    // Returns:
+    //   - shared_ptr (non-null) if the connection is alive
+    //   - shared_ptr (null) if the connection was registered but freed (stale)
+    //   - nullopt if the connection was never registered (test/direct connection)
+    std::optional<std::shared_ptr<Connection>> lookup_conn(Connection *conn);
+
     // The buffer pool (for callers that allocate request buffers).
     BufferPool *pool() const
     {
@@ -317,6 +336,14 @@ class SocketTransport : public Transport
 
     // Per-connection send queue capacity (backpressure bound).
     uint32_t send_queue_capacity_{1024};
+
+    // Connection registry: maps raw Connection* to shared_ptr, so
+    // submit() can safely access connections from arbitrary threads
+    // (e.g. tokio tasks spawned by Rust handlers). When a connection
+    // closes, it is removed from this map; submit() on a stale handle
+    // returns false instead of crashing.
+    std::mutex                                                  live_conns_mu_;
+    std::unordered_map<Connection *, std::weak_ptr<Connection>> live_conns_;
 
     friend class Worker;
 };

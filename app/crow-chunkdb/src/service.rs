@@ -45,7 +45,7 @@ impl ChunkdbService {
             range_start: u32::from(bucket),
             range_end: u32::from(bucket),
             instance_id: 0,
-            grpc_endpoint: String::new(),
+            rpc_endpoint: String::new(),
             sub_range_index: 0,
         };
         let details = prost::Message::encode_to_vec(&hint);

@@ -66,7 +66,7 @@ void crow_svc_client_destroy(crow_svc_client_t client);
 // owned_dg_ids_json: JSON array of u64 disk-group IDs (e.g. "[1,2,3]").
 // group_usages_json: JSON array of DiskGroupUsageSummary objects (can be "[]").
 void crow_svc_heartbeat_diskio(crow_svc_client_t client, uint64_t instance_id,
-                               const char *grpc_endpoint, const char *owned_dg_ids_json,
+                               const char *rpc_endpoint, const char *owned_dg_ids_json,
                                const char *group_usages_json, crow_kv_on_complete callback,
                                void *user_data);
 

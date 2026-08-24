@@ -162,13 +162,13 @@ export function deployPortDefaultsForNode(
 }
 
 interface DiskdbPortSource {
-  grpc_endpoint?: string | null;
+  rpc_endpoint?: string | null;
 }
 
 /**
  * Pick a dynamic diskdb gRPC port for a node: offset the base by the
  * node-id suffix, then increment past ports already assigned to other
- * diskdb instances (extracted from their `grpc_endpoint`) and any
+ * diskdb instances (extracted from their `rpc_endpoint`) and any
  * extra remembered ports. Mirrors `deployPortDefaultsForNode` so diskdb
  * deploy gets the same collision-avoidance as kv-server deploy.
  */
@@ -180,7 +180,7 @@ export function diskdbPortDefaultsForNode(
 ): string {
   const usedRpcPorts: number[] = [...extraUsedRpcPorts];
   for (const inst of instances) {
-    const port = extractPort(inst.grpc_endpoint);
+    const port = extractPort(inst.rpc_endpoint);
     if (port) usedRpcPorts.push(port);
   }
   return nextAvailablePort(usedRpcPorts, preferredPortStart(rpcStart, nodeId));

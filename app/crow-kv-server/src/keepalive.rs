@@ -32,7 +32,7 @@ impl KeepAliveLoop {
     pub fn spawn(
         registry: Arc<KvStoreRegistry>,
         instance_id: u64,
-        grpc_endpoint: String,
+        rpc_endpoint: String,
         group0_endpoint: &str,
         data_root: String,
         interval_secs: u64,
@@ -47,7 +47,7 @@ impl KeepAliveLoop {
             // Initial registration.
             let (stores, groups) = hosted_summary(&registry);
             if let Err(e) = svc
-                .register_kv_server(instance_id, &grpc_endpoint, &stores, &groups, "ok", &data_root)
+                .register_kv_server(instance_id, &rpc_endpoint, &stores, &groups, "ok", &data_root)
                 .await
             {
                 warn!(error = %e, "keep-alive: initial register failed");
@@ -64,7 +64,7 @@ impl KeepAliveLoop {
                     _ = ticker.tick() => {
                         let (stores, groups) = hosted_summary(&registry);
                         if let Err(e) = svc
-                            .heartbeat_kv_server(instance_id, &grpc_endpoint, &stores, &groups, "ok", &data_root)
+                            .heartbeat_kv_server(instance_id, &rpc_endpoint, &stores, &groups, "ok", &data_root)
                             .await
                         {
                             warn!(error = %e, "keep-alive: heartbeat failed");

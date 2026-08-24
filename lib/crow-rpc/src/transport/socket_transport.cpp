@@ -362,6 +362,28 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     if (workers_.empty()) {
         return false;
     }
+    // Look up the connection in the live-connection registry. This
+    // protects against stale handles: if the connection was closed
+    // between the handler spawn and submit, lookup_conn returns a
+    // null shared_ptr and we free the frame instead of crashing.
+    // Connections not in the registry (nullopt) are test/direct
+    // connections — fall through to direct access.
+    auto lookup = lookup_conn(conn);
+    if (lookup.has_value()) {
+        auto &conn_ptr = lookup.value();
+        if (conn_ptr == nullptr) {
+            // Stale handle — connection has been closed/freed.
+            if (frame->control != nullptr) {
+                frame->control->release();
+            }
+            if (frame->data != nullptr) {
+                frame->data->release();
+            }
+            delete frame;
+            return false;
+        }
+        conn = conn_ptr.get();
+    }
     frame->create_nano = now_nano();
     // Buzz model: enqueue to the connection's send queue, then try to
     // writev directly on the caller's thread. The in_send_ flag serializes
@@ -408,11 +430,38 @@ std::shared_ptr<Connection> SocketTransport::create_connection(int fd, const std
     int64_t id             = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
     auto    conn           = std::make_shared<Connection>(id, name, pool_, 4 << 20, send_queue_capacity_);
     conn->transport_handle = static_cast<uint64_t>(fd);
-    Worker *w              = get_worker();
+    // Set the on_close callback to unregister from the live-conn
+    // registry. This ensures submit() on a stale handle returns false
+    // instead of crashing (use-after-free).
+    conn->set_on_close([this](Connection *c) { unregister_conn(c); });
+    Worker *w = get_worker();
     if (w != nullptr) {
         w->add_connection(fd, conn);
     }
+    register_conn(conn);
     return conn;
+}
+
+void SocketTransport::register_conn(const std::shared_ptr<Connection> &conn)
+{
+    std::lock_guard<std::mutex> lock(live_conns_mu_);
+    live_conns_[conn.get()] = conn;
+}
+
+void SocketTransport::unregister_conn(Connection *conn)
+{
+    std::lock_guard<std::mutex> lock(live_conns_mu_);
+    live_conns_.erase(conn);
+}
+
+std::optional<std::shared_ptr<Connection>> SocketTransport::lookup_conn(Connection *conn)
+{
+    std::lock_guard<std::mutex> lock(live_conns_mu_);
+    auto                        it = live_conns_.find(conn);
+    if (it == live_conns_.end()) {
+        return std::nullopt; // not registered (test/direct connection)
+    }
+    return it->second.lock(); // null if expired (stale), non-null if alive
 }
 
 std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, int port)

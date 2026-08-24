@@ -5,7 +5,7 @@
 //!
 //! Endpoint discovery + cache: `refresh_endpoints` reads all chunkdb
 //! instances from the service registry, populates a `DashMap` cache
-//! (`instance_id -> grpc_endpoint`). On cache miss, lazily refreshes.
+//! (`instance_id -> rpc_endpoint`). On cache miss, lazily refreshes.
 //! Channel pool: `DashMap<String, Channel>` per endpoint.
 //! Retry: exponential backoff on transient errors (`Unavailable`,
 //! `DeadlineExceeded`), up to `max_retries`.
@@ -47,9 +47,9 @@ impl Default for RetryConfig {
 /// Client for CROW chunkdb gRPC operations.
 pub struct ChunkdbClient {
     svc: ServiceRegistryClient,
-    /// `instance_id -> grpc_endpoint` cache.
+    /// `instance_id -> rpc_endpoint` cache.
     endpoint_cache: DashMap<InstanceId, String>,
-    /// `grpc_endpoint -> Channel` pool.
+    /// `rpc_endpoint -> Channel` pool.
     channels: DashMap<String, Channel>,
     retry: RetryConfig,
     /// Optional range binding client for R99 sharded mode. When
@@ -98,7 +98,7 @@ impl ChunkdbClient {
             .await
             .map_err(|e| ChunkdbClientError::Unreachable(format!("read_all_instances: {e}")))?;
         for (id, value) in instances {
-            self.endpoint_cache.insert(id, value.grpc_endpoint);
+            self.endpoint_cache.insert(id, value.rpc_endpoint);
         }
         Ok(())
     }
@@ -144,7 +144,7 @@ impl ChunkdbClient {
         if let Some(binding) = &self.range_binding {
             if let Some(id) = chunk_id {
                 if let Ok(b) = binding.route(id).await {
-                    let channel = self.channel_for(&b.grpc_endpoint)?;
+                    let channel = self.channel_for(&b.rpc_endpoint)?;
                     return Ok(ChunkdbServiceClient::new(channel));
                 }
                 // Refresh failed or unbound — fall back to any instance.

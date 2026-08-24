@@ -168,7 +168,7 @@ int main(int argc, char *argv[])
         g0_cfg.node_id             = cfg.node_id;
         g0_cfg.dg_id               = cfg.dg_id;
         g0_cfg.sync_interval_ms    = cfg.sync_interval_ms;
-        g0_cfg.grpc_endpoint       = cfg.bind_address + ":" + std::to_string(actual_port);
+        g0_cfg.rpc_endpoint       = cfg.bind_address + ":" + std::to_string(actual_port);
         g0_cfg.auto_discover_disks = cfg.auto_discover_disks;
         g0_cfg.dummy_disk_type     = cfg.dummy_disk_type;
         g0_cfg.dummy_props         = cfg.dummy_props;

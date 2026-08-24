@@ -137,7 +137,7 @@ async fn diskdb_instances(cli: &Cli) -> ExitCode {
             for i in &instances {
                 println!(
                     "{:<12}  {:<30}  {:<16}  {:?}",
-                    i.instance_id, i.grpc_endpoint, i.last_heartbeat_ms, i.owned_dg_ids
+                    i.instance_id, i.rpc_endpoint, i.last_heartbeat_ms, i.owned_dg_ids
                 );
             }
             ExitCode::SUCCESS

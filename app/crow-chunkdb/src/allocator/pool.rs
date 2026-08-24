@@ -30,9 +30,9 @@ type FreeFut = std::pin::Pin<
 /// Pool of diskdb gRPC clients, keyed by disk-group ID.
 pub struct DiskdbClientPool {
     svc: ServiceRegistryClient,
-    /// `disk_group_id -> grpc_endpoint` cache.
+    /// `disk_group_id -> rpc_endpoint` cache.
     endpoints: DashMap<u64, String>,
-    /// `grpc_endpoint -> Channel` pool.
+    /// `rpc_endpoint -> Channel` pool.
     channels: DashMap<String, Channel>,
     /// `disk_id -> disk_group_id` reverse lookup cache (GAP-4).
     /// Populated from the topology cache's `DiskGroupEntry` list.
@@ -113,7 +113,7 @@ impl DiskdbClientPool {
             if let Some(ref extra) = value.extra {
                 if let Some(ref diskdb) = extra.diskdb {
                     for dg_id in &diskdb.owned_dg_ids {
-                        self.endpoints.insert(*dg_id, value.grpc_endpoint.clone());
+                        self.endpoints.insert(*dg_id, value.rpc_endpoint.clone());
                     }
                 }
             }
