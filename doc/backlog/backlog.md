@@ -245,22 +245,9 @@ migration pattern (schema, server, client, error mapping, mixed
 rollout) before the streaming services. All four items follow the
 zero-copy wrapper convention (`design-crow-rpc.md` §6): `FB`-prefixed
 flatbuffer types, wrapper classes in `crow-protocol`, no owned
-intermediate structs, no per-field copy. R115 (diskdb), R32 (KV
-consensus), and R117 (KV client-facing) are DONE — R116 is the
-terminal migration item.
+intermediate structs, no per-field copy. All four items (R115 diskdb,
+R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
 
-- **[R116](R116-chunkdb-rpc-migration.md)** — ChunkdbService →
-  crow-rpc — Area: chunkdb / rpc — Migrate all 8 ChunkdbService unary
-  RPCs (AllocateChunk, AppendChunk, QueryChunk, SealChunk,
-  UpdateChunkStrip, etc.) from tonic/gRPC to crow-rpc. No streaming
-  needed. Preserves `NotMyRangeHint` as a flatbuffer `ret_code`
-  (diagnostic `range_start`/`range_end` — the server does not know
-  the owner; client refreshes binding cache from group-0 + re-routes).
-  Port: `CHUNKDB_RPC_BASE = 9961` (stride 1, offset -10 from gRPC).
-  Reuses R115's unary migration pattern + R117's zero-copy `Ref`
-  wrapper pattern + `with_rpc_transport` programmatic selection.
-  The allocator pool (`pool.rs`) calls diskdb (not chunkdb) — that
-  path is R115's scope, already done, NOT changed by R116.
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
   scan error spike by wrapping the maintenance loop's `flush` /

@@ -208,16 +208,18 @@ crash recovery without local WAL, and relies on CROW KV's durability
 guarantees. Stateless design also makes scaling out easier. New instances
 can start without data migration.
 
-### 3.7 Common protocol crate; gRPC now
+### 3.7 Common protocol crate; gRPC + crow-rpc
 
 Protocol definitions live in `lib/crow-protocol/src/proto/chunkdb_*.proto`
 and are shared between chunkdb server and chunkdb client. Communication
-uses gRPC in v1. Future work may replace gRPC with a custom RPC library
-for performance (similar to the crow-kv custom RPC plan).
+uses gRPC, with a crow-rpc flatbuffer transport available alongside it
+for performance (programmatic selection via
+`ChunkdbClient::with_rpc_transport`). See sub-design
+[`design-crow-chunkdb-rpc.md`](design-crow-chunkdb-rpc.md).
 
 **Rationale:** Single source of truth for protocol definitions. gRPC is
-well-understood and sufficient for v1; custom RPC is an optimization that
-can be added later if needed.
+well-understood; the crow-rpc transport uses the same engine as the KV
+consensus hot path for lower latency.
 
 ### 3.8 Proto types used directly; no Rust type duplication
 
