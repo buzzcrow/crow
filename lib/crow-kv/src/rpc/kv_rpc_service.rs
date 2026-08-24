@@ -77,8 +77,8 @@ const CLIENT_RPC_PORT_OFFSET: i32 = KV_CLIENT_RPC_BASE as i32 - KV_SERVER_GRPC_B
 /// control buffer for the handler to submit back to the original
 /// client.
 pub(crate) struct KvClientRpcForwarder {
-    server: Arc<RpcServer>,
-    rpc: Arc<RpcClient>,
+    pub(crate) server: Arc<RpcServer>,
+    pub(crate) rpc: Arc<RpcClient>,
     connections: DashMap<String, Connection>,
     next_req_id: AtomicU64,
 }
@@ -965,10 +965,9 @@ impl KvRpcService {
             return;
         };
         let group_id = fb_req.group_id();
-        let prefix = fb_req.prefix().map(|v| v.bytes().to_vec()).unwrap_or_default();
+        let prefix = fb_req.prefix().map_or(&[][..], |v| v.bytes()).to_vec();
 
         let Some(group) = self.store.get_group(group_id) else {
-            // Push a WatchNotifyError on the inbound connection.
             let conn = Connection::from_handle(req.conn_handle as crow_rpc_ffi::sys::crow_rpc_conn_t);
             self.forwarder.send_watch_notify_error(
                 &conn,
@@ -984,17 +983,20 @@ impl KvRpcService {
             self.forwarder.send_watch_notify_error(&conn, group_id, &hint, "");
             return;
         }
-        // Register the watcher with a crow-rpc push target.
-        // The WatchRegistry refactor (Phase 5) adds the crow-rpc push
-        // overload. For now this is a placeholder — the actual subscribe
-        // will be wired after the WatchRegistry refactor.
-        let _conn = Connection::from_handle(req.conn_handle as crow_rpc_ffi::sys::crow_rpc_conn_t);
-        let _registry = group.watch_registry.clone();
+        let conn = Connection::from_handle(req.conn_handle as crow_rpc_ffi::sys::crow_rpc_conn_t);
+        let target = Arc::new(crate::cluster::watch_registry::CrowRpcPushTarget::new(
+            conn,
+            Arc::clone(&self.forwarder.rpc),
+            Arc::clone(&self.forwarder.server),
+        ));
+        let registry = group.watch_registry.clone();
+        let watcher_id = registry.subscribe_crow_rpc(&prefix, target);
         debug!(
             store_id = self.store.store_id,
             group_id,
+            watcher_id,
             prefix_len = prefix.len(),
-            "watch subscribe received (crow-rpc push target wiring pending Phase 5)"
+            "watch subscribed (crow-rpc push target)"
         );
     }
 
@@ -1009,7 +1011,7 @@ impl KvRpcService {
             return;
         };
         let group_id = fb_req.group_id();
-        let prefix = fb_req.prefix().map(|v| v.bytes().to_vec()).unwrap_or_default();
+        let prefix = fb_req.prefix().map_or(&[][..], |v| v.bytes()).to_vec();
 
         let Some(group) = self.store.get_group(group_id) else {
             debug!(
@@ -1023,7 +1025,7 @@ impl KvRpcService {
             store_id = self.store.store_id,
             group_id,
             prefix_len = prefix.len(),
-            "watch unsubscribe received (crow-rpc push target wiring pending Phase 5)"
+            "watch unsubscribe received (crow-rpc: lazy cleanup via dead-connection detection)"
         );
     }
 }

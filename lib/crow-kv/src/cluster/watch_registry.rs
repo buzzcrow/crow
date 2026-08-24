@@ -8,16 +8,57 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
+use flatbuffers::FlatBufferBuilder;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
 use crate::kv::{BatchOp, Op};
 use crate::rpc::{WatchNotify, WatchNotifyResponse};
 
-/// One watcher: an outbound channel to push notify frames.
-struct Watcher {
-    tx: mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>,
+/// crow-rpc push target for `WatchNotify` (R117). The server pushes
+/// `FBWatchNotify` frames fire-and-forget via `RpcClient::send` on the
+/// captured connection. On `ConnectionClosed`/`ConnectionError` the
+/// watcher is lazily removed by `emit` (no connection-close callback
+/// in crow-rpc).
+pub struct CrowRpcPushTarget {
+    /// The connection to the watching client (borrowed from the
+    /// transport via `Connection::from_handle`).
+    pub conn: crow_rpc_ffi::Connection,
+    /// The client-side RPC client (for `send`).
+    pub rpc: Arc<crow_rpc_ffi::RpcClient>,
+    /// The server handle (for `send`).
+    pub server: Arc<crow_rpc_ffi::RpcServer>,
+    /// Next request ID for push frames.
+    next_push_id: AtomicU64,
+}
+
+impl CrowRpcPushTarget {
+    #[must_use]
+    pub fn new(
+        conn: crow_rpc_ffi::Connection,
+        rpc: Arc<crow_rpc_ffi::RpcClient>,
+        server: Arc<crow_rpc_ffi::RpcServer>,
+    ) -> Self {
+        Self {
+            conn,
+            rpc,
+            server,
+            next_push_id: AtomicU64::new(1),
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.next_push_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// One watcher: an outbound push target. Tonic watchers use an mpsc
+/// channel; crow-rpc watchers use a `CrowRpcPushTarget` (R117).
+pub enum PushTarget {
+    Tonic(mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>),
+    CrowRpc(Arc<CrowRpcPushTarget>),
 }
 
 /// Byte-level prefix trie node. Each node holds the watchers
@@ -25,7 +66,7 @@ struct Watcher {
 /// the root to this node is the prefix bytes). Children are keyed by
 /// the next byte of the key.
 struct TrieNode {
-    watchers: Vec<(u64, Watcher)>,
+    watchers: Vec<(u64, PushTarget)>,
     children: HashMap<u8, TrieNode>,
 }
 
@@ -93,7 +134,7 @@ impl PrefixTrie {
     /// Look up the watcher list for `prefix` (walk to the node at
     /// the end of `prefix`). Returns `None` if the path doesn't
     /// exist or has no watchers.
-    fn watchers_for(&self, prefix: &[u8]) -> Option<&[(u64, Watcher)]> {
+    fn watchers_for(&self, prefix: &[u8]) -> Option<&[(u64, PushTarget)]> {
         let mut node = &self.root;
         for &byte in prefix {
             node = node.children.get(&byte)?;
@@ -149,20 +190,31 @@ impl WatchRegistry {
         }
     }
 
-    /// Register a watcher for `prefix`. Returns the `watcher_id` for
-    /// later removal. Sets `has_watchers = true`.
+    /// Register a tonic watcher for `prefix`. Returns the `watcher_id`
+    /// for later removal. Sets `has_watchers = true`.
     pub fn subscribe(
         &self,
         prefix: &[u8],
         tx: mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>,
     ) -> u64 {
+        self.subscribe_with_target(prefix, PushTarget::Tonic(tx))
+    }
+
+    /// Register a crow-rpc watcher for `prefix` (R117). Returns the
+    /// `watcher_id` for later removal. Sets `has_watchers = true`.
+    pub fn subscribe_crow_rpc(&self, prefix: &[u8], target: Arc<CrowRpcPushTarget>) -> u64 {
+        self.subscribe_with_target(prefix, PushTarget::CrowRpc(target))
+    }
+
+    /// Internal subscribe — shared by tonic + crow-rpc overloads.
+    fn subscribe_with_target(&self, prefix: &[u8], target: PushTarget) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut trie = self.trie.write();
         let mut node = &mut trie.root;
         for &byte in prefix {
             node = node.children.entry(byte).or_insert_with(TrieNode::new);
         }
-        node.watchers.push((id, Watcher { tx }));
+        node.watchers.push((id, target));
         self.has_watchers.store(true, Ordering::Release);
         id
     }
@@ -245,36 +297,124 @@ impl WatchRegistry {
         // collection clones are eliminated.
         for (prefix, (keys, values)) in prefix_map {
             if let Some(watchers) = trie.watchers_for(&prefix) {
-                let notify = WatchNotify {
-                    group_id,
-                    prefix,
-                    keys: keys.into_iter().map(<[u8]>::to_vec).collect(),
-                    slot,
-                    values: values.into_iter().map(<[u8]>::to_vec).collect(),
-                };
                 for (_, watcher) in watchers {
-                    let resp = WatchNotifyResponse {
-                        frame: Some(crate::rpc::watch_notify_response::Frame::Notify(notify.clone())),
-                    };
-                    match watcher.tx.try_send(Ok(resp)) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            self.dropped_notifies.fetch_add(1, Ordering::Relaxed);
-                            tracing::error!(
-                                "critical: watch notify dropped -- watcher channel full, \
-                                 client will catch up via safety-net poller"
-                            );
+                    match watcher {
+                        PushTarget::Tonic(tx) => {
+                            let notify = WatchNotify {
+                                group_id,
+                                prefix: prefix.clone(),
+                                keys: keys.iter().map(|k| k.to_vec()).collect(),
+                                slot,
+                                values: values.iter().map(|v| v.to_vec()).collect(),
+                            };
+                            let resp = WatchNotifyResponse {
+                                frame: Some(crate::rpc::watch_notify_response::Frame::Notify(notify)),
+                            };
+                            match tx.try_send(Ok(resp)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    self.dropped_notifies.fetch_add(1, Ordering::Relaxed);
+                                    tracing::error!(
+                                        "critical: watch notify dropped -- watcher channel full, \
+                                         client will catch up via safety-net poller"
+                                    );
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    self.closed_watchers.fetch_add(1, Ordering::Relaxed);
+                                    tracing::warn!(
+                                        "watch notify: watcher channel closed -- \
+                                         leaked watcher (stream-end cleanup missed it); \
+                                         client will catch up via safety-net poller"
+                                    );
+                                }
+                            }
                         }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            self.closed_watchers.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!(
-                                "watch notify: watcher channel closed -- \
-                                 leaked watcher (stream-end cleanup missed it); \
-                                 client will catch up via safety-net poller"
-                            );
+                        PushTarget::CrowRpc(target) => {
+                            self.push_crow_rpc_notify(target, group_id, slot, &prefix, &keys, &values);
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Build + send a `FBWatchNotify` frame to a crow-rpc watcher.
+    /// Fire-and-forget via `RpcClient::send`. On connection errors the
+    /// watcher is lazily removed (counter incremented; actual removal
+    /// happens on the next emit pass or via the safety-net poller).
+    fn push_crow_rpc_notify(
+        &self,
+        target: &Arc<CrowRpcPushTarget>,
+        group_id: u64,
+        slot: u64,
+        prefix: &[u8],
+        keys: &[&[u8]],
+        values: &[&[u8]],
+    ) {
+        let push_id = target.next_id();
+        let mut builder = FlatBufferBuilder::new();
+        let fb_prefix = builder.create_vector(prefix);
+        let key_offsets: Vec<_> = keys
+            .iter()
+            .map(|k| {
+                let data = builder.create_vector(k);
+                crow_protocol::kv_client_fb::FBBytes::create(
+                    &mut builder,
+                    &crow_protocol::kv_client_fb::FBBytesArgs { data: Some(data) },
+                )
+            })
+            .collect();
+        let val_offsets: Vec<_> = values
+            .iter()
+            .map(|v| {
+                let data = builder.create_vector(v);
+                crow_protocol::kv_client_fb::FBBytes::create(
+                    &mut builder,
+                    &crow_protocol::kv_client_fb::FBBytesArgs { data: Some(data) },
+                )
+            })
+            .collect();
+        let fb_keys = builder.create_vector(&key_offsets);
+        let fb_values = builder.create_vector(&val_offsets);
+        let args = crow_protocol::kv_client_fb::FBWatchNotifyArgs {
+            id: push_id,
+            rpc_create_nano: 0,
+            group_id,
+            prefix: Some(fb_prefix),
+            keys: Some(fb_keys),
+            slot,
+            values: Some(fb_values),
+        };
+        let fb = crow_protocol::kv_client_fb::FBWatchNotify::create(&mut builder, &args);
+        builder.finish(fb, None);
+        let control = crow_rpc_ffi::Buffer::from_bytes(builder.finished_data());
+        let msg_type = crow_protocol::fb::FBMsgType::EWatchNotify.0 as u16;
+        let result = target.rpc.send(
+            &target.server,
+            &target.conn,
+            push_id,
+            control,
+            None,
+            msg_type,
+            crow_rpc_ffi::noop_completion(),
+            std::ptr::null_mut(),
+        );
+        if let Err(e) = result {
+            if matches!(
+                e,
+                crow_rpc_ffi::RpcError::ConnectionClosed | crow_rpc_ffi::RpcError::ConnectionError
+            ) {
+                self.closed_watchers.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    "watch notify: crow-rpc push failed ({e}) -- \
+                     lazy watcher removal on next emit pass"
+                );
+            } else {
+                self.dropped_notifies.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    "watch notify: crow-rpc push error ({e}) -- \
+                     client will catch up via safety-net poller"
+                );
             }
         }
     }
