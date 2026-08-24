@@ -82,8 +82,9 @@ R115 (diskdb, unary)         — DONE
 R114 (bidirectional req-resp) — DONE
 R32 (KV consensus, internal)  — DONE
   ↓ validated: KV NotLeaderHint flatbuffer model, kv_consensus.fbs schema
-R117 (KvService client-facing — needs R114 + R32) — NEXT
-R116 (ChunkdbService — after chunk-layer refactor stabilizes)
+R117 (KvService client-facing — needs R114 + R32) — DONE
+  ↓ validated: zero-copy Ref wrappers, with_rpc_transport, forwarded loop-guard
+R116 (ChunkdbService — after chunk-layer refactor stabilizes) — NEXT
 ```
 
 Rationale:
@@ -104,14 +105,26 @@ Rationale:
   request-response (not R114 bidi), separate consensus + client
   ports, R32 resolves the R114 server→client send FFI gap to
   unblock R117.
-- R117 next — reuses the `kv_consensus.fbs` schema sub-range
+- R117 done — reuses the `kv_consensus.fbs` schema sub-range
   split (R32: 1000-1099, R117: 1100-1199) + `NotLeaderHint`
   flatbuffer model + zero-copy wrapper pattern validated by R32.
-  Also needs R32's `Connection::from_handle` FFI helper for
-  WatchNotify server-push.
-- R116 last — blocked on the chunk-layer refactor anyway (R113),
-  and chunkdb is the newest service with the least production
-  exposure.
+  Also uses R32's `Connection::from_handle` FFI helper for
+  WatchNotify server-push. Established the zero-copy `Ref` wrapper
+  pattern (R115 deferred this, R117 implemented it properly) +
+  `with_rpc_transport` programmatic selection + `forwarded` loop-guard
+  for transparent leader-forwarding.
+- R116 next — reuses R115's unary-only migration pattern (diskdb) +
+  R117's zero-copy `Ref` wrapper pattern + `with_rpc_transport`
+  programmatic selection. All 8 ChunkdbService RPCs are unary (no
+  streaming, R114 not needed). Port: `CHUNKDB_RPC_BASE = 9961`
+  (fills gap between diskdb RPC 9931-9940 and chunkdb gRPC
+  9971-9990). `NotMyRangeHint` is diagnostic-only (no leader
+  endpoint — client refreshes from group-0 + re-routes). The
+  chunk-layer refactor (R113) is NOT done but strip prefetch is
+  already inside `ChunkWriter`, RPC call sites are consolidated
+  and stable. The allocator pool (`pool.rs`) calls diskdb (not
+  chunkdb) — that path is R115's scope, already done, NOT changed
+  by R116.
 
 ## Suggestions (apply across all migration items)
 
