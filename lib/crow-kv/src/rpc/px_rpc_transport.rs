@@ -30,7 +30,6 @@ use crow_protocol::kv_consensus_fb::{
     FBRequestVoteRequestArgs, FBSnapshotRequest, FBSnapshotRequestArgs, FBStepDownRequest,
     FBStepDownRequestArgs,
 };
-use crow_protocol::{KV_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::{noop_completion, Buffer, Connection, RpcClient, RpcError, RpcServer};
 
 use crate::cluster::replica::{
@@ -38,11 +37,6 @@ use crate::cluster::replica::{
     StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
 use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
-
-/// Port offset: `rpc_port` = `grpc_port` + (`KV_RPC_BASE` -
-/// `KV_SERVER_GRPC_BASE`). During the mixed-rollout window the rpc
-/// port is derived from the grpc port using this fixed offset.
-const RPC_PORT_OFFSET: i32 = KV_RPC_BASE as i32 - KV_SERVER_GRPC_BASE as i32;
 
 /// crow-rpc transport for the KV consensus service. Holds the
 /// client-side `RpcServer` (manages connections), `RpcClient`
@@ -85,21 +79,20 @@ impl PxRpcTransport {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Get or create a `Connection` for the given gRPC endpoint. The
-    /// crow-rpc port is derived from the gRPC port using
-    /// `RPC_PORT_OFFSET`.
+    /// Get or create a `Connection` for the given endpoint. The
+    /// crow-rpc server listens on the same port as the gRPC endpoint
+    /// (no port derivation).
     fn conn_for(&self, grpc_endpoint: &str) -> Result<Connection, PxReplicaError> {
         let normalized = normalize_endpoint(grpc_endpoint);
         if let Some(conn) = self.connections.get(&normalized) {
             return Ok(conn.clone());
         }
-        let (host, grpc_port) = parse_endpoint(&normalized)
+        let (host, port) = parse_endpoint(&normalized)
             .map_err(|e| PxReplicaError::Internal(format!("rpc connect parse endpoint: {e}")))?;
-        let rpc_port = grpc_port + RPC_PORT_OFFSET;
         let conn = self
             .server
-            .connect(&host, rpc_port)
-            .map_err(|e| PxReplicaError::Internal(format!("rpc connect to {host}:{rpc_port}: {e:?}")))?;
+            .connect(&host, port)
+            .map_err(|e| PxReplicaError::Internal(format!("rpc connect to {host}:{port}: {e:?}")))?;
         self.rpc.attach(&conn);
         self.connections.insert(normalized, conn.clone());
         Ok(conn)

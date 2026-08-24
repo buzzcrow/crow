@@ -18,7 +18,6 @@
 
 use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::{KvClientRpcForwarder, KvRpcService, PxRpcService, PxRpcTransport};
-use crow_protocol::{KV_CLIENT_RPC_BASE, KV_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::RpcServer;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -66,8 +65,13 @@ impl KvServer for Arc<PxKvStore> {
             }
         }
 
-        let listener = match TcpListener::bind(self.listen_addr).await {
-            Ok(tcp) => tcp,
+        // Bind a TCP listener to determine the actual port (supports
+        // port 0 for OS-assigned), then immediately drop it — the
+        // crow-rpc server will re-bind the same port.
+        let bound_addr = match TcpListener::bind(self.listen_addr).await {
+            Ok(tcp) => tcp
+                .local_addr()
+                .map_err(|e| format!("failed to read bound kv server address: {e}"))?,
             Err(error) => {
                 let msg = format!(
                     "failed to bind kv server on {}: {error}; next step: choose an available listen_addr or stop the conflicting process",
@@ -77,20 +81,32 @@ impl KvServer for Arc<PxKvStore> {
                 return Err(msg);
             }
         };
-        let bound_addr = match listener.local_addr() {
-            Ok(addr) => addr,
-            Err(error) => {
-                let msg = format!("failed to read bound kv server address: {error}; next step: restart kv server and inspect socket state");
-                error!(store_id = self.store_id, error = %error, "{msg}");
-                return Err(msg);
-            }
-        };
+
+        // Start a single crow-rpc server on the gRPC port. Both
+        // consensus (PxRpcService) and client (KvRpcService) handlers
+        // are registered on the same server — their handler names
+        // don't conflict.
+        let server = Arc::new(RpcServer::new(None));
+        server
+            .listen(&bound_addr.ip().to_string(), i32::from(bound_addr.port()))
+            .map_err(|e| format!("crow-rpc listen on {bound_addr}: {e:?}"))?;
+        server.start();
+
+        let rt = tokio::runtime::Handle::current();
+        let px_service = Arc::new(PxRpcService::new(self.clone(), rt.clone()));
+        px_service.register_handlers(&server);
+
+        let forwarder = Arc::new(KvClientRpcForwarder::new());
+        let kv_service = Arc::new(KvRpcService::new(self.clone(), rt, forwarder));
+        kv_service.register_handlers(&server);
+
+        let transport = Arc::new(PxRpcTransport::new());
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-
+        let server_clone = Arc::clone(&server);
         let handle = tokio::spawn(async move {
-            drop(listener);
             let _ = rx.await;
+            server_clone.stop();
         });
 
         {
@@ -98,6 +114,11 @@ impl KvServer for Arc<PxKvStore> {
             state.listen_addr = Some(bound_addr);
             state.handle = Some(handle);
             state.shutdown_tx = Some(tx);
+        }
+        {
+            let mut state = self.rpc_server_state.lock();
+            state.server = Some(server);
+            state.transport = Some(transport);
         }
 
         for entry in &self.groups {
@@ -191,74 +212,41 @@ impl PxKvStore {
         }
     }
 
-    /// Start the crow-rpc server. Binds to the crow-rpc port (derived
-    /// from the bound port via a fixed offset), registers all consensus
-    /// handlers, and creates a shared `PxRpcTransport` for outbound
-    /// RPCs. The transport is stored in `rpc_server_state` and can be
-    /// retrieved via [`Self::rpc_transport`] to wire into
-    /// `PxRemoteReplica`.
+    /// Start the crow-rpc consensus server.
     ///
-    /// Must be called after [`KvServer::start`] (which binds the port
-    /// and sets `listen_addr`).
-    ///
-    /// # Errors
-    /// Returns an error string if the crow-rpc port is out of range or
-    /// the server fails to listen on the derived port.
-    pub fn start_rpc_server(self: &Arc<Self>, rt: Handle) -> Result<(), String> {
-        {
-            let state = self.rpc_server_state.lock();
-            if state.server.is_some() {
-                debug!(
-                    store_id = self.store_id,
-                    "rpc server start skipped because server is already running"
-                );
-                return Ok(());
-            }
+    /// This is now a no-op — `start()` starts a single crow-rpc server
+    /// that hosts both consensus and client handlers on the gRPC port.
+    /// Kept for backward compatibility with callers that call it
+    /// explicitly (e.g. `rpc_migration_test`).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn start_rpc_server(self: &Arc<Self>, _rt: Handle) -> Result<(), String> {
+        if self.rpc_server_state.lock().server.is_some() {
+            return Ok(());
         }
-
-        let bound_addr = self
-            .server_state
-            .lock()
-            .listen_addr
-            .ok_or_else(|| "start_rpc_server called before start()".to_string())?;
-        let grpc_port = bound_addr.port();
-        let rpc_port = i32::from(grpc_port) + (i32::from(KV_RPC_BASE) - i32::from(KV_SERVER_GRPC_BASE));
-        if !(1..=65535).contains(&rpc_port) {
-            return Err(format!(
-                "crow-rpc port {rpc_port} out of range (port {grpc_port})"
-            ));
-        }
-        let rpc_addr = format!("{}:{}", bound_addr.ip(), rpc_port);
-
-        let server = Arc::new(RpcServer::new(None));
-        server
-            .listen(&bound_addr.ip().to_string(), rpc_port)
-            .map_err(|e| format!("crow-rpc listen on {rpc_addr}: {e:?}"))?;
-        server.start();
-
-        let service = Arc::new(PxRpcService::new(self.clone(), rt));
-        service.register_handlers(&server);
-
-        let transport = Arc::new(PxRpcTransport::new());
-
-        {
-            let mut state = self.rpc_server_state.lock();
-            state.server = Some(server);
-            state.transport = Some(transport);
-        }
-
-        info!(
-            store_id = self.store_id,
-            rpc_addr = %rpc_addr,
-            "crow-rpc server started"
-        );
-        Ok(())
+        Err("start_rpc_server is a no-op; start() already starts the server".to_string())
     }
 
     /// Get the shared `PxRpcTransport` for outbound RPCs. Returns
     /// `None` if `start_rpc_server` has not been called.
     pub fn rpc_transport(&self) -> Option<Arc<PxRpcTransport>> {
         self.rpc_server_state.lock().transport.clone()
+    }
+
+    /// Wire the shared `PxRpcTransport` into all existing remote
+    /// replicas across all groups. Must be called after
+    /// [`Self::start_rpc_server`]. Remote replicas added later (via
+    /// the management API) get the transport via
+    /// [`Self::rpc_transport`] at construction time.
+    pub fn wire_rpc_transport(&self) {
+        let transport = self.rpc_transport();
+        let Some(transport) = transport else { return };
+        for entry in &self.groups {
+            for remote in &entry.remote_replicas {
+                if let Some(real) = remote.as_real() {
+                    real.set_rpc_transport(transport.clone());
+                }
+            }
+        }
     }
 
     /// Stop the crow-rpc server. Called from [`Self::shutdown_server`]
@@ -274,64 +262,21 @@ impl PxKvStore {
         }
     }
 
-    /// Start the client-facing crow-rpc server. Binds to the
-    /// client-facing crow-rpc port (derived from the port via
-    /// `KV_CLIENT_RPC_BASE - KV_SERVER_GRPC_BASE`), registers all
-    /// client-facing handlers, and stores the server handle in
-    /// `client_rpc_server_state`.
+    /// Start the client-facing crow-rpc server.
     ///
-    /// Must be called after [`Self::start_rpc_server`].
+    /// This is now a no-op — `start()` starts a single crow-rpc server
+    /// that hosts both consensus and client handlers on the gRPC port.
+    /// Kept for backward compatibility.
     ///
     /// # Errors
     /// Returns an error string if the client-facing crow-rpc port is
     /// out of range or the server fails to listen on the derived port.
-    pub fn start_client_rpc_server(self: &Arc<Self>, rt: Handle) -> Result<(), String> {
-        {
-            let state = self.client_rpc_server_state.lock();
-            if state.server.is_some() {
-                debug!(
-                    store_id = self.store_id,
-                    "client rpc server start skipped because server is already running"
-                );
-                return Ok(());
-            }
-        }
-
-        let bound_addr = self
-            .server_state
-            .lock()
-            .listen_addr
-            .ok_or_else(|| "start_client_rpc_server called before start()".to_string())?;
-        let grpc_port = bound_addr.port();
-        let rpc_port =
-            i32::from(grpc_port) + (i32::from(KV_CLIENT_RPC_BASE) - i32::from(KV_SERVER_GRPC_BASE));
-        if !(1..=65535).contains(&rpc_port) {
-            return Err(format!(
-                "client crow-rpc port {rpc_port} out of range (port {grpc_port})"
-            ));
-        }
-        let rpc_addr = format!("{}:{}", bound_addr.ip(), rpc_port);
-
-        let server = Arc::new(RpcServer::new(None));
-        server
-            .listen(&bound_addr.ip().to_string(), rpc_port)
-            .map_err(|e| format!("client crow-rpc listen on {rpc_addr}: {e:?}"))?;
-        server.start();
-
-        let forwarder = Arc::new(KvClientRpcForwarder::new());
-        let service = Arc::new(KvRpcService::new(self.clone(), rt, forwarder));
-        service.register_handlers(&server);
-
-        {
-            let mut state = self.client_rpc_server_state.lock();
-            state.server = Some(server);
-        }
-
-        info!(
-            store_id = self.store_id,
-            rpc_addr = %rpc_addr,
-            "client crow-rpc server started"
-        );
+    /// Start the client-facing crow-rpc server.
+    ///
+    /// This is now a no-op — `start()` starts a single crow-rpc server
+    /// that hosts both consensus and client handlers on the gRPC port.
+    /// Kept for backward compatibility.
+    pub fn start_client_rpc_server(self: &Arc<Self>, _rt: Handle) -> Result<(), String> {
         Ok(())
     }
 

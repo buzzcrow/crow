@@ -38,12 +38,6 @@ async fn start_crow_rpc_cluster() -> CrowRpcCluster {
     leader_store.start().await.expect("leader start");
     follower_store.start().await.expect("follower start");
 
-    let rt = tokio::runtime::Handle::current();
-    leader_store
-        .start_rpc_server(rt.clone())
-        .expect("leader rpc start");
-    follower_store.start_rpc_server(rt).expect("follower rpc start");
-
     let leader_transport = leader_store.rpc_transport().expect("leader transport");
     let follower_transport = follower_store.rpc_transport().expect("follower transport");
 

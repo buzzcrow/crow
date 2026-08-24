@@ -4,7 +4,6 @@
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::replica::Replica;
 use crow_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
-use std::net::SocketAddr;
 
 fn sample_group() -> PxGroup {
     let remote_replicas = vec![PxRemoteReplica::new(2, "127.0.0.1:2".to_string())];
@@ -28,7 +27,7 @@ fn endpoint_update_and_lookup() {
 
 #[test]
 fn group_adds_remote_replicas_for_all_non_local_members() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     let remote_replicas = vec![PxRemoteReplica::new(2, "127.0.0.1:2".to_string())];
     let mut group = PxGroup::new(1, replica);
@@ -51,7 +50,7 @@ fn group_remote_replica_scale_shape_supports_large_membership() {
     let local_replica = PxLocalReplica::new(0, PxLocalReplicaRole::Leader);
     let mut group = PxGroup::new(99, local_replica);
     group.set_remote_replicas(remote_replicas);
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(group);
 
     let group = store.get_group(99).expect("group should be registered");

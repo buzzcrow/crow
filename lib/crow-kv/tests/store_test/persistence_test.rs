@@ -15,7 +15,6 @@
 //! uses the embedded library only (no `crow-kv-server` HTTP process), so it lives
 //! in `crow_kv`.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -81,7 +80,7 @@ async fn store_reloads_kv_through_public_api_after_restart() {
         replica.set_wal(wal);
         let group = PxGroup::new(GROUP, replica);
 
-        let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+        let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
         store.add_group(group);
 
         assert!(store.kv_put(GROUP, b"alpha", b"1", 7, 1, 1, 1).await.ok);
@@ -103,7 +102,7 @@ async fn store_reloads_kv_through_public_api_after_restart() {
     }
 
     // ── reopen phase: fresh store rebuilt from the on-disk WAL ──
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(reopen_group(&wal_dir).await);
 
     // WAL replay now fully restores the learner: every accepted entry is

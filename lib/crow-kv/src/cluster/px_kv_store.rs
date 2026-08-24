@@ -288,6 +288,15 @@ impl PxKvStore {
         if let Some(ref registry) = self.metrics_registry {
             arc.set_metrics_registry(registry, self.store_id);
         }
+        // Wire the shared crow-rpc transport into remote replicas when
+        // the server has already started the consensus RPC server.
+        if let Some(transport) = self.rpc_transport() {
+            for remote in &arc.remote_replicas {
+                if let Some(real) = remote.as_real() {
+                    real.set_rpc_transport(transport.clone());
+                }
+            }
+        }
         // Spawn the per-group election driver (no-op when
         // `election_driver_disabled`). Driver holds a `Weak<PxGroup>` so
         // dropping the store's `Arc` does not leak the task. Skip when no

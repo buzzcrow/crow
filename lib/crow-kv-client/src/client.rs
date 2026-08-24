@@ -223,7 +223,7 @@ impl CrowkvClient {
             read_endpoint_policy: config.read_endpoint_policy,
             read_rr: DashMap::new(),
             endpoint_stats: DashMap::new(),
-            rpc_transport: None,
+            rpc_transport: Some(std::sync::Arc::new(crate::kv_rpc_transport::KvRpcTransport::new())),
         }
     }
 

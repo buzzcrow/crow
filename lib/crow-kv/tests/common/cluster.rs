@@ -173,6 +173,12 @@ async fn start_cluster_no_leader_inner(ids: &[u64]) -> TestCluster {
         node.add_group(new_group);
     }
 
+    // Wire the shared PxRpcTransport into all remote replicas so
+    // consensus RPCs (prepare/accept/chosen) can reach peers.
+    for node in &running {
+        node.wire_rpc_transport();
+    }
+
     // `leader_id` is unknown until an election completes; seed with the
     // first id as a placeholder so the legacy `leader()` accessor still
     // compiles. Tests should prefer `elected_leader()`.
@@ -255,6 +261,12 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
         }
 
         node.add_group(new_group);
+    }
+
+    // Wire the shared PxRpcTransport into all remote replicas so
+    // consensus RPCs (prepare/accept/chosen) can reach peers.
+    for node in &running {
+        node.wire_rpc_transport();
     }
 
     TestCluster::new(running, leader_id, net)

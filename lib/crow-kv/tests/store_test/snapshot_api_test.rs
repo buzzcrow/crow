@@ -19,12 +19,11 @@ use crow_kv::kv::{CrowTreeEngine, CrowTreeOptions};
 use crow_kv::rpc::ReadMode;
 use crow_kv::wal::io_backend::IoBackend;
 use crow_kv::wal::replay::replay_group;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 async fn crow_tree_store() -> PxKvStore {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     let engine = CrowTreeEngine::open(&CrowTreeOptions::default()).expect("open crow-tree engine");
     // Empty replay (no WAL segments) — gives a fresh replica with the
     // caller-supplied engine wired in.

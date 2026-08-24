@@ -135,7 +135,7 @@ async fn main() {
         .with_ddb_kv_client(dg_kv_sync)
         .with_cas_retry_metric(Arc::clone(&metrics.allocate_retry_cas_bit))
         .with_config_handle(Arc::clone(&config))
-        .with_rpc_endpoint(config.load().server.listen_addr.clone())
+        .with_rpc_endpoint(config.load().server.rpc_listen_addr.clone())
         .with_metrics(metrics.clone());
     let keepalive = if let Some(ref trigger) = sync_trigger {
         keepalive.with_sync_trigger(Arc::clone(trigger))

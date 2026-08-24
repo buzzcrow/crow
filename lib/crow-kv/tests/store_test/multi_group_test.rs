@@ -6,7 +6,6 @@
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::kv_store::KvStore;
 use crow_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole};
-use std::net::SocketAddr;
 
 fn leader_group(group_id: u64, node_id: u64) -> PxGroup {
     let local = PxLocalReplica::new(node_id, PxLocalReplicaRole::Leader);
@@ -15,7 +14,7 @@ fn leader_group(group_id: u64, node_id: u64) -> PxGroup {
 
 #[tokio::test]
 async fn multi_group_routes_to_correct_group() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(leader_group(1, 10));
     store.add_group(leader_group(2, 20));
 
@@ -60,7 +59,7 @@ async fn multi_group_routes_to_correct_group() {
 
 #[tokio::test]
 async fn missing_group_returns_error() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(leader_group(1, 10));
 
     // Put to non-existent group
@@ -90,7 +89,7 @@ async fn missing_group_returns_error() {
 
 #[tokio::test]
 async fn add_and_remove_group_dynamic() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(leader_group(1, 10));
 
     let r = store.kv_put(1, b"k", b"v", 1, 1, 100, 1000).await;

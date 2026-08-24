@@ -51,7 +51,6 @@ use crow_protocol::kv_client_fb::{
     FBSnapshotScanResponse, FBSnapshotScanResponseArgs, FBWatchNotifyError, FBWatchNotifyErrorArgs,
     FBWatchSubscribe, FBWatchUnsubscribe,
 };
-use crow_protocol::{KV_CLIENT_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::{noop_completion, Buffer, Connection, RpcClient, RpcError, RpcServer};
 
 use crate::cluster::kv_store::KvStore;
@@ -59,13 +58,6 @@ use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::{
     FBKvDeleteRequest, FBKvGetRequest, FBKvGetRequestArgs, FBKvSetRequest, KvBatchItem, ReadMode,
 };
-
-/// Port offset: `client_rpc_port` = `grpc_port` + (`KV_CLIENT_RPC_BASE`
-/// minus `KV_SERVER_GRPC_BASE`).
-/// During the mixed-rollout window the client-facing rpc port is
-/// derived from the grpc port using this fixed offset (parallel to
-/// R32's `RPC_PORT_OFFSET = 100`).
-const CLIENT_RPC_PORT_OFFSET: i32 = KV_CLIENT_RPC_BASE as i32 - KV_SERVER_GRPC_BASE as i32;
 
 // ── KvClientRpcForwarder ─────────────────────────────────────────
 
@@ -101,17 +93,16 @@ impl KvClientRpcForwarder {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Get or create a `Connection` for the given gRPC endpoint. The
-    /// client-facing crow-rpc port is derived from the gRPC port using
-    /// `CLIENT_RPC_PORT_OFFSET`.
+    /// Get or create a `Connection` for the given endpoint. The
+    /// crow-rpc server listens on the same port as the gRPC endpoint
+    /// (no port derivation).
     fn conn_for(&self, grpc_endpoint: &str) -> Result<Connection, RpcError> {
         let normalized = normalize_endpoint(grpc_endpoint);
         if let Some(conn) = self.connections.get(&normalized) {
             return Ok(conn.clone());
         }
-        let (host, grpc_port) = parse_endpoint(&normalized).map_err(|_| RpcError::InvalidArg)?;
-        let rpc_port = grpc_port + CLIENT_RPC_PORT_OFFSET;
-        let conn = self.server.connect(&host, rpc_port)?;
+        let (host, port) = parse_endpoint(&normalized).map_err(|_| RpcError::InvalidArg)?;
+        let conn = self.server.connect(&host, port)?;
         self.rpc.attach(&conn);
         self.connections.insert(normalized, conn.clone());
         Ok(conn)

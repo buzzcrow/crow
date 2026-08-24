@@ -125,9 +125,10 @@ pub(super) async fn add_store(
     if let Err(e) = store.start().await {
         return Err(err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to start store gRPC server: {e}"),
+            format!("failed to start store server: {e}"),
         ));
     }
+    store.wire_rpc_transport();
 
     info!(
         store_id = req.store_id,

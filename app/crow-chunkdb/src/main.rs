@@ -127,7 +127,7 @@ async fn main() {
     let keepalive_handle = spawn_chunkdb_keepalive(
         svc_keepalive,
         config.server.instance_id.as_deref(),
-        &config.server.listen_addr,
+        &config.server.rpc_listen_addr,
         Duration::from_secs(u64::from(config.server.keepalive_interval_secs)),
         stop_rx.clone(),
     );

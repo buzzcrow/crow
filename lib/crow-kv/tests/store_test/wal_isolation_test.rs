@@ -10,7 +10,6 @@
 //! isolation contract. True disk isolation (different physical disks per
 //! group) remains blocked on a store-level config change.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -47,7 +46,7 @@ async fn per_group_wal_path_isolation() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let wal_root = tmp.path().join("wal");
 
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
 
     // Create two groups with WALs sharing the same root. Each WalEngine
     // appends `group{group_id}` to the root, so group 1's segments land in

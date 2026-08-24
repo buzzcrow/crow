@@ -445,7 +445,12 @@ impl DiskdbClient {
 /// to `127.0.0.1` so the connection goes to a loopback address.
 #[must_use]
 pub fn normalize_endpoint(endpoint: &str) -> String {
-    endpoint.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
+    let with_scheme = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    };
+    with_scheme.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
 }
 
 #[cfg(test)]

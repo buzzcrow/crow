@@ -820,7 +820,7 @@ async fn diskdb_e2e_compact_zone_rpc() {
             .expect("disk exists");
         disk
     };
-    let bind: crow_diskdb::ddb_kv_client::Bind = (DATA_GROUP_ID, STORE_ID);
+    let bind: crow_diskdb::ddb_kv_client::Bind = (STORE_ID, DATA_GROUP_ID);
     let mut compacted_count = 0u32;
     let mut total_deleted = 0u32;
     let mut all_success = true;

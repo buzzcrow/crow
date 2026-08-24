@@ -86,6 +86,7 @@ pub(super) async fn health_check(State(state): State<RegistryArc>) -> (StatusCod
             (status = 500, description = "Store or group creation failed", body = ErrorResponse)
         )
     )]
+#[allow(clippy::too_many_lines)]
 pub(super) async fn system_init(
     State(state): State<RegistryArc>,
     req: Option<Json<SystemInitRequest>>,
@@ -122,6 +123,7 @@ pub(super) async fn system_init(
                 format!("failed to start store 0: {e}"),
             )
         })?;
+        store.wire_rpc_transport();
         state.add_store(SYSTEM_STORE_ID, store);
         info!(
             store_id = SYSTEM_STORE_ID,

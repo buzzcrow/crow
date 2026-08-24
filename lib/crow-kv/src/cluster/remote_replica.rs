@@ -46,11 +46,11 @@ pub struct PxRemoteReplica {
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
     /// crow-rpc transport — the only RPC path. Set via
-    /// [`Self::with_rpc_transport`] when the store wires the shared
-    /// transport. All Prepare/Accept/PreVote/RequestVote/Heartbeat/
-    /// `StepDown`/`ChosenNotification`/`BatchChosenNotification`/`FetchGap`
-    /// calls route through it.
-    rpc_transport: Option<Arc<PxRpcTransport>>,
+    /// [`Self::with_rpc_transport`] or [`Self::set_rpc_transport`] when
+    /// the store wires the shared transport. All Prepare/Accept/PreVote/
+    /// RequestVote/Heartbeat/`StepDown`/`ChosenNotification`/
+    /// `BatchChosenNotification`/`FetchGap` calls route through it.
+    rpc_transport: OnceLock<Arc<PxRpcTransport>>,
 }
 
 /// Registry-based metric handles for per-peer RPC stats.
@@ -182,7 +182,7 @@ impl PxRemoteReplica {
             metrics: LayerMetrics::new(),
             rpc_handles: OnceLock::new(),
             shutdown_started: AtomicBool::new(false),
-            rpc_transport: None,
+            rpc_transport: OnceLock::new(),
         }
     }
 
@@ -200,10 +200,16 @@ impl PxRemoteReplica {
     /// Enable crow-rpc transport for all RPCs to this peer. The transport
     /// is shared across all remote replicas in the store.
     #[must_use]
-    #[allow(dead_code)] // Wired in Phase 7 (server wiring)
-    pub fn with_rpc_transport(mut self, transport: Arc<PxRpcTransport>) -> Self {
-        self.rpc_transport = Some(transport);
+    pub fn with_rpc_transport(self, transport: Arc<PxRpcTransport>) -> Self {
+        let _ = self.rpc_transport.set(transport);
         self
+    }
+
+    /// Set the crow-rpc transport on an already-constructed replica.
+    /// Used by the server after `start_rpc_server` to wire the shared
+    /// transport into existing remote replicas.
+    pub fn set_rpc_transport(&self, transport: Arc<PxRpcTransport>) {
+        let _ = self.rpc_transport.set(transport);
     }
 
     /// Fire-and-forget peer notification that `(slot, term)` is chosen
@@ -289,12 +295,12 @@ impl PxRemoteReplica {
     /// context. Records an error and returns `Err` if the transport was
     /// never wired (e.g. in unit tests that construct via `new`).
     fn transport_or_err(&self) -> Result<Arc<PxRpcTransport>, PxReplicaError> {
-        if let Some(t) = self.rpc_transport.as_ref() {
+        if let Some(t) = self.rpc_transport.get() {
             Ok(t.clone())
         } else {
             self.record_err();
             Err(PxReplicaError::Internal(format!(
-                "crow-rpc transport not set for peer {} ({})",
+                "crow-rpc transport unavailable: not set for peer {} ({})",
                 self.node_id, self.endpoint
             )))
         }
@@ -305,12 +311,12 @@ impl PxRemoteReplica {
     /// Returns a borrowed `&Arc` so the caller can dispatch without
     /// cloning.
     fn transport_or_err_sync(&self) -> Result<&Arc<PxRpcTransport>, PxReplicaError> {
-        if let Some(t) = self.rpc_transport.as_ref() {
+        if let Some(t) = self.rpc_transport.get() {
             Ok(t)
         } else {
             self.record_err();
             Err(PxReplicaError::Internal(format!(
-                "crow-rpc transport not set for peer {} ({})",
+                "crow-rpc transport unavailable: not set for peer {} ({})",
                 self.node_id, self.endpoint
             )))
         }
@@ -366,7 +372,7 @@ impl PxRemoteReplica {
     /// Get the crow-rpc transport if set. Used by `group_fetchgap.rs`
     /// to route `FetchGap` through the transport when available.
     pub fn rpc_transport(&self) -> Option<&Arc<PxRpcTransport>> {
-        self.rpc_transport.as_ref()
+        self.rpc_transport.get()
     }
 
     /// Get the endpoint string (for spawned tasks that need to call
@@ -403,7 +409,7 @@ impl PxRemoteReplica {
     pub(crate) fn status(&self) -> RemoteStatus {
         let mut status = StatusLevel::Ok;
         let mut messages = Vec::new();
-        if self.rpc_transport.is_none() {
+        if self.rpc_transport.get().is_none() {
             status = StatusLevel::Degraded;
             messages.push(format!(
                 "remote {} ({}): crow-rpc transport not wired",

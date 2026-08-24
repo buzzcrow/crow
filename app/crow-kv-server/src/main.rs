@@ -464,18 +464,8 @@ async fn create_and_start_stores(
             continue;
         }
 
-        // R32: start the crow-rpc server alongside the gRPC server.
-        let rt = tokio::runtime::Handle::current();
-        if let Err(e) = store.start_rpc_server(rt.clone()) {
-            tracing::error!(store_id, port, error = %e, "failed to start crow-rpc server, skipping");
-            continue;
-        }
-
-        // R117: start the client-facing crow-rpc server.
-        if let Err(e) = store.start_client_rpc_server(rt.clone()) {
-            tracing::error!(store_id, port, error = %e, "failed to start client crow-rpc server, skipping");
-            continue;
-        }
+        // Wire the shared transport into all existing remote replicas.
+        store.wire_rpc_transport();
 
         info!(
             store_id,

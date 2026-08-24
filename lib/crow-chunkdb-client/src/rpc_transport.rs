@@ -39,15 +39,9 @@ use crow_protocol::fb::FBMsgType;
 use crow_protocol::fb_wrappers::chunkdb::{
     FBAllocateChunkResponseRef, FBDeleteChunkRangeResponseRef, FBListChunksResponseRef,
 };
-use crow_protocol::{CHUNKDB_GRPC_BASE, CHUNKDB_RPC_BASE};
 use crow_rpc_ffi::{Buffer, Connection, RpcClient, RpcError, RpcServer};
 
 use crate::{ChunkdbClientError, Result};
-
-/// Port offset: `rpc_port` = `grpc_port` + (`CHUNKDB_RPC_BASE` minus
-/// `CHUNKDB_GRPC_BASE`). During the mixed-rollout window the crow-rpc
-/// port is derived from the gRPC port using this fixed offset.
-const CHUNKDB_RPC_PORT_OFFSET: i32 = CHUNKDB_RPC_BASE as i32 - CHUNKDB_GRPC_BASE as i32;
 
 /// crow-rpc transport for `ChunkdbService`. Holds the client-side
 /// `RpcServer` (manages connections), `RpcClient` (request/response
@@ -89,21 +83,19 @@ impl ChunkdbRpcTransport {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Get or create a `Connection` for the given gRPC endpoint. The
-    /// crow-rpc port is derived from the gRPC port using
-    /// `CHUNKDB_RPC_PORT_OFFSET`.
-    fn conn_for(&self, grpc_endpoint: &str) -> Result<Connection> {
-        let normalized = normalize_endpoint(grpc_endpoint);
+    /// Get or create a `Connection` for the given rpc endpoint.
+    fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection> {
+        let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(conn) = self.connections.get(&normalized) {
             return Ok(conn.clone());
         }
-        let (host, grpc_port) = parse_endpoint(&normalized).map_err(|reason| {
-            ChunkdbClientError::Unreachable(format!("invalid endpoint {grpc_endpoint}: {reason}"))
+        let (host, port) = parse_endpoint(&normalized).map_err(|reason| {
+            ChunkdbClientError::Unreachable(format!("invalid endpoint {rpc_endpoint}: {reason}"))
         })?;
-        let rpc_port = grpc_port + CHUNKDB_RPC_PORT_OFFSET;
-        let conn = self.server.connect(&host, rpc_port).map_err(|e| {
-            ChunkdbClientError::Unreachable(format!("rpc connect to {host}:{rpc_port}: {e:?}"))
-        })?;
+        let conn = self
+            .server
+            .connect(&host, port)
+            .map_err(|e| ChunkdbClientError::Unreachable(format!("rpc connect to {host}:{port}: {e:?}")))?;
         self.rpc.attach(&conn);
         self.connections.insert(normalized, conn.clone());
         Ok(conn)

@@ -44,11 +44,6 @@ use crow_rpc_ffi::{Buffer, Connection, RpcClient, RpcError, RpcServer};
 
 use crate::{DiskdbClientError, Result};
 
-/// Port offset: `rpc_port` = `grpc_port` - (`DISKDB_GRPC_BASE` - `DISKDB_RPC_BASE`).
-/// During the mixed-rollout window the rpc port is derived from the grpc
-/// port using this fixed offset. See design-diskdb-rpc-migration.md §4.
-const RPC_PORT_OFFSET: i32 = crow_protocol::DISKDB_GRPC_BASE as i32 - crow_protocol::DISKDB_RPC_BASE as i32;
-
 /// crow-rpc transport for diskdb. Holds the client-side `RpcServer`
 /// (manages connections), `RpcClient` (request/response correlation),
 /// and a `Connection` cache per endpoint.
@@ -89,18 +84,17 @@ impl DiskdbRpcTransport {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Get or create a `Connection` for the given grpc endpoint.
-    /// The rpc port is derived from the grpc port using `RPC_PORT_OFFSET`.
+    /// Get or create a `Connection` for the given rpc endpoint.
     fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection> {
         let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(conn) = self.connections.get(&normalized) {
             return Ok(conn.clone());
         }
         let (host, port) = parse_endpoint(&normalized)?;
-        let rpc_port = port - RPC_PORT_OFFSET;
-        let conn = self.server.connect(&host, rpc_port).map_err(|e| {
-            DiskdbClientError::Unreachable(format!("rpc connect to {host}:{rpc_port}: {e:?}"))
-        })?;
+        let conn = self
+            .server
+            .connect(&host, port)
+            .map_err(|e| DiskdbClientError::Unreachable(format!("rpc connect to {host}:{port}: {e:?}")))?;
         self.rpc.attach(&conn);
         self.connections.insert(normalized, conn.clone());
         Ok(conn)

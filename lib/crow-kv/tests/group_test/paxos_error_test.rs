@@ -11,11 +11,10 @@ use crow_kv::cluster::kv_store::KvStore;
 use crow_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 use crow_kv::paxos::roles::PxBallot;
 use crow_kv::rpc::PrepareRequest;
-use std::net::SocketAddr;
 
 #[tokio::test]
 async fn follower_request_maps_to_not_leader_with_hint() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     let remote_replicas = vec![
         PxRemoteReplica::new(42, "127.0.0.1:4444".to_string()),
         PxRemoteReplica::new(7, "127.0.0.1:7777".to_string()),

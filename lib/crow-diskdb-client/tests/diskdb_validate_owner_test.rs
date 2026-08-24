@@ -77,10 +77,10 @@ async fn diskdb_client_e2e_validate_owner() {
         })
         .await;
     assert!(
-        matches!(&result, Err(DiskdbClientError::Rpc(msg)) if msg.contains("permission denied")),
-        "expected permission denied error for wrong owner, got {result:?}"
+        matches!(&result, Err(DiskdbClientError::Rpc(msg)) if msg.contains("not owner")),
+        "expected not-owner error for wrong owner, got {result:?}"
     );
-    eprintln!("  free with wrong owner: rejected (PermissionDenied)");
+    eprintln!("  free with wrong owner: rejected (NotOwner)");
 
     // 6. Free with correct owner → success.
     let free_resp = client
