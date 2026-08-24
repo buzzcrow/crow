@@ -15,15 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R114](R114-rpc-streaming-support.md)** — crow-rpc streaming RPC
-  support — Area: rpc — R104 shipped request-response + one-way only;
-  streaming was explicitly deferred (§1 Non-Goals). Adds server-
-  streaming (one request → N response frames) and bi-directional
-  streaming (N request ↔ N response frames on one persistent
-  connection) via a stream-open/stream-close handshake + `stream_id`
-  correlation. **Blocks R32** (LearnerStream, StreamSnapshot) and
-  **R117** (WatchNotify). The three KV streaming RPCs cannot migrate
-  to crow-rpc until this lands.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
@@ -95,9 +86,9 @@ complexity, and dependency. Before implementation, follow the
 
 Dependency order: R93 → R106, R107 → R110, R111, R112
 (R110/R112 reuse R110's negative list; R111 reuses R110's negative
-list + degraded-strip tracking). The RPC migration items (R114,
-R115, R116, R117) are in a separate area (see RPC Migration section
-below); R32 depends on R114 + R115.
+list + degraded-strip tracking). The RPC migration items (R115,
+R116, R117) are in a separate area (see RPC Migration section
+below); R32 depends on R115.
 
 - **[R93](R93-chunkdb-mirror-to-ec-conversion.md)** — Mirror-to-EC
   conversion — Area: chunkdb — Background conversion of mirror strips
@@ -241,14 +232,15 @@ below); R32 depends on R114 + R115.
   (measured in `kv-read-flow-analysis.md`). Protocol semantics
   preserved (same request/response shapes, `NotLeaderHint`, error
   codes); only the transport changes. Depends on R104 (finished) +
-  R114 (streaming — for LearnerStream + StreamSnapshot). Management
+  R114 (finished — bidirectional request-response for LearnerStream +
+  StreamSnapshot). Management
   API stays on Axum/HTTP. Open Question resolved: full `.fbs`
   conversion (no prost bridge), consistent with R105/diskio.
 
 ### RPC Migration (gRPC → crow-rpc)
 
-Dependency order: R114 → R32, R117 (streaming); R115 (unary,
-proof-of-pattern) → R116 (unary). R115 lands first to validate the
+Dependency order: R115 → R116 (unary); R117 (streaming) depends on
+R114 (finished) + R32. R115 lands first to validate the
 migration pattern (schema, server, client, error mapping, mixed
 rollout) before the streaming services. All four items follow the
 zero-copy wrapper convention (`design-crow-rpc.md` §6): `FB`-prefixed
@@ -270,7 +262,8 @@ intermediate structs, no per-field copy.
   Paxos path; R117 migrates the client-facing path — the surface
   that `crow-kv-client` and FFI consumers (crow-diskio) call. FFI C
   ABI preserved (only internal transport changes). Depends on R114
-  (WatchNotify streaming) + R32 (validates KV `NotLeaderHint`
+  (finished — bidirectional request-response for WatchNotify) + R32
+  (validates KV `NotLeaderHint`
   flatbuffer model + `kv_rpc.fbs` schema sub-range).
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
