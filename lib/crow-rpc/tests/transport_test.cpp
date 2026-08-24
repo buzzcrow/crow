@@ -165,3 +165,59 @@ TEST_F(TransportLoopbackTest, ConnectionCloseCallback)
 
     transport.stop();
 }
+
+// Regression: when a client disconnects (EOF), the transport must close
+// the server-side fd and remove it from epoll. Without this, the
+// level-triggered worker spins at 100% CPU re-reading EOF forever.
+TEST_F(TransportLoopbackTest, EofCloseStopsWorkerSpin)
+{
+    SocketTransport transport(1, 1); // level-triggered (no ONESHOT)
+    transport.start();
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    struct sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(port_);
+    ASSERT_EQ(::connect(client_fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)), 0);
+
+    int server_fd = ::accept(listen_fd_, nullptr, nullptr);
+    ASSERT_GE(server_fd, 0);
+
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    auto server_conn = transport.create_connection(server_fd, "server");
+
+    std::atomic<bool> closed{false};
+    server_conn->set_on_close([&](Connection *) { closed.store(true, std::memory_order_release); });
+
+    // Close the client side — server should detect EOF.
+    ::close(client_fd);
+
+    // Wait for the close callback.
+    for (int i = 0; i < 200 && !closed.load(std::memory_order_acquire); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(closed.load(std::memory_order_acquire));
+
+    // Give the worker one more poll cycle to process the cleanup.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // The transport must have closed the server-side fd. If it didn't,
+    // the fd is still open and epoll keeps firing EOF — the spin.
+    EXPECT_EQ(fcntl(server_fd, F_GETFL), -1);
+    EXPECT_EQ(errno, EBADF);
+
+    // Sanity: read_calls should not be climbing rapidly after close.
+    // A spinning worker would rack up thousands of read() calls per
+    // second. We sample twice with a 100ms gap and expect near-zero
+    // growth.
+    uint64_t calls_1 = transport.stats().read_calls.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    uint64_t calls_2 = transport.stats().read_calls.load(std::memory_order_relaxed);
+    EXPECT_LT(calls_2 - calls_1, 100u);
+
+    transport.stop();
+}
