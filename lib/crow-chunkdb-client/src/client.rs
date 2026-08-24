@@ -10,6 +10,7 @@
 //! Retry: exponential backoff on transient errors (`Unavailable`,
 //! `DeadlineExceeded`), up to `max_retries`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -26,7 +27,7 @@ use crow_protocol::chunkdb::rpc::{
 use crow_protocol::common::ChunkId;
 use crow_protocol::InstanceId;
 
-use crate::{ChunkdbClientError, Result};
+use crate::{ChunkdbClientError, ChunkdbRpcTransport, Result};
 
 /// Retry configuration for transient errors.
 #[derive(Debug, Clone)]
@@ -56,6 +57,11 @@ pub struct ChunkdbClient {
     /// present, chunk IDs are routed to the owning instance. When
     /// `None`, falls back to "any instance" (v1 behavior).
     range_binding: Option<RangeBindingClient>,
+    /// Optional crow-rpc transport (R116). When set via
+    /// `with_rpc_transport`, all 8 RPCs send via crow-rpc instead of
+    /// tonic. The retry/routing/`NotMyRange` logic is unchanged — only
+    /// the wire send changes.
+    rpc_transport: Option<Arc<ChunkdbRpcTransport>>,
 }
 
 impl ChunkdbClient {
@@ -67,6 +73,7 @@ impl ChunkdbClient {
             channels: DashMap::new(),
             retry: RetryConfig::default(),
             range_binding: None,
+            rpc_transport: None,
         }
     }
 
@@ -79,6 +86,7 @@ impl ChunkdbClient {
             channels: DashMap::new(),
             retry,
             range_binding: None,
+            rpc_transport: None,
         }
     }
 
@@ -87,6 +95,15 @@ impl ChunkdbClient {
     #[must_use]
     pub fn with_range_binding(mut self, binding: RangeBindingClient) -> Self {
         self.range_binding = Some(binding);
+        self
+    }
+
+    /// Switch the client to use crow-rpc (R116) for chunkdb operations.
+    /// When set, all 8 RPCs send via the transport instead of tonic.
+    /// The retry/routing/`NotMyRange` logic is unchanged.
+    #[must_use]
+    pub fn with_rpc_transport(mut self, transport: Arc<ChunkdbRpcTransport>) -> Self {
+        self.rpc_transport = Some(transport);
         self
     }
 
@@ -153,6 +170,20 @@ impl ChunkdbClient {
         self.client().await
     }
 
+    /// Resolve the gRPC endpoint string for the chunk ID's owning
+    /// instance (crow-rpc path). Falls back to `first_endpoint` (any
+    /// instance) when range binding is not configured or routing fails.
+    async fn endpoint_for_chunk(&self, chunk_id: Option<&ChunkId>) -> Result<String> {
+        if let Some(binding) = &self.range_binding {
+            if let Some(id) = chunk_id {
+                if let Ok(b) = binding.route(id).await {
+                    return Ok(b.rpc_endpoint);
+                }
+            }
+        }
+        self.first_endpoint().await
+    }
+
     /// Execute an RPC with retry on transient errors.
     /// `build_req` produces a fresh request clone for each attempt.
     /// `chunk_id` is used for range-based routing when available.
@@ -202,90 +233,187 @@ impl ChunkdbClient {
         }
     }
 
+    /// Execute a crow-rpc call with retry on transient errors. Mirrors
+    /// `with_retry` but uses the crow-rpc transport instead of a tonic
+    /// channel. `op` receives an owned `Arc<ChunkdbRpcTransport>` +
+    /// `String` endpoint to avoid lifetime issues with async closures.
+    async fn with_rpc_retry<T, F, Fut>(&self, chunk_id: Option<&ChunkId>, op: F) -> Result<T>
+    where
+        F: Fn(Arc<ChunkdbRpcTransport>, String) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let transport = Arc::clone(
+            self.rpc_transport
+                .as_ref()
+                .expect("with_rpc_retry called without rpc_transport"),
+        );
+        let mut attempts = 0u32;
+        let mut backoff = self.retry.initial_backoff;
+        loop {
+            let endpoint = self.endpoint_for_chunk(chunk_id).await?;
+            match op(Arc::clone(&transport), endpoint).await {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    if !err.is_transient() || attempts >= self.retry.max_retries {
+                        return Err(err);
+                    }
+                    attempts += 1;
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                    let _ = self.refresh_endpoints().await;
+                    if matches!(err, ChunkdbClientError::NotMyRange(_)) {
+                        if let Some(binding) = &self.range_binding {
+                            if let Some(id) = chunk_id {
+                                let _ = binding.refresh_and_route(id).await;
+                            } else {
+                                let _ = binding.refresh().await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Allocate a new chunk.
     pub async fn allocate_chunk(&self, req: AllocateChunkRequest) -> Result<AllocateChunkResponse> {
-        let chunk_id = req.chunk_id.as_ref();
-        self.with_retry(
-            chunk_id,
-            || req,
-            |mut c, r| async move { c.allocate_chunk(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        let chunk_id = req.chunk_id;
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(chunk_id.as_ref(), |t, ep| async move {
+                t.send_allocate_chunk(&ep, &req).await
+            })
+            .await
+        } else {
+            self.with_retry(
+                chunk_id.as_ref(),
+                || req,
+                |mut c, r| async move { c.allocate_chunk(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 
     /// Append strips to an existing chunk.
     pub async fn append_chunk(&self, req: AppendChunkRequest) -> Result<AppendChunkResponse> {
-        let chunk_id = req.chunk_id.as_ref();
-        self.with_retry(
-            chunk_id,
-            || req,
-            |mut c, r| async move { c.append_chunk(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        let chunk_id = req.chunk_id;
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(chunk_id.as_ref(), |t, ep| async move {
+                t.send_append_chunk(&ep, &req).await
+            })
+            .await
+        } else {
+            self.with_retry(
+                chunk_id.as_ref(),
+                || req,
+                |mut c, r| async move { c.append_chunk(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 
     /// Query a chunk by ID.
     pub async fn query_chunk(&self, req: QueryChunkRequest) -> Result<QueryChunkResponse> {
-        let chunk_id = req.chunk_id.as_ref();
-        self.with_retry(
-            chunk_id,
-            || req,
-            |mut c, r| async move { c.query_chunk(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        let chunk_id = req.chunk_id;
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(chunk_id.as_ref(), |t, ep| async move {
+                t.send_query_chunk(&ep, &req).await
+            })
+            .await
+        } else {
+            self.with_retry(
+                chunk_id.as_ref(),
+                || req,
+                |mut c, r| async move { c.query_chunk(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 
     /// Seal a chunk.
     pub async fn seal_chunk(&self, req: SealChunkRequest) -> Result<SealChunkResponse> {
-        let chunk_id = req.chunk_id.as_ref();
-        self.with_retry(
-            chunk_id,
-            || req,
-            |mut c, r| async move { c.seal_chunk(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        let chunk_id = req.chunk_id;
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(chunk_id.as_ref(), |t, ep| async move {
+                t.send_seal_chunk(&ep, &req).await
+            })
+            .await
+        } else {
+            self.with_retry(
+                chunk_id.as_ref(),
+                || req,
+                |mut c, r| async move { c.seal_chunk(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 
     /// Delete a chunk.
     pub async fn delete_chunk(&self, req: DeleteChunkRequest) -> Result<DeleteChunkResponse> {
-        let chunk_id = req.chunk_id.as_ref();
-        self.with_retry(
-            chunk_id,
-            || req,
-            |mut c, r| async move { c.delete_chunk(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        let chunk_id = req.chunk_id;
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(chunk_id.as_ref(), |t, ep| async move {
+                t.send_delete_chunk(&ep, &req).await
+            })
+            .await
+        } else {
+            self.with_retry(
+                chunk_id.as_ref(),
+                || req,
+                |mut c, r| async move { c.delete_chunk(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 
     /// Delete a range within a chunk.
     pub async fn delete_chunk_range(&self, req: DeleteChunkRangeRequest) -> Result<DeleteChunkRangeResponse> {
-        let chunk_id = req.chunk_id.as_ref();
-        self.with_retry(
-            chunk_id,
-            || req,
-            |mut c, r| async move { c.delete_chunk_range(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        let chunk_id = req.chunk_id;
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(chunk_id.as_ref(), |t, ep| async move {
+                t.send_delete_chunk_range(&ep, &req).await
+            })
+            .await
+        } else {
+            self.with_retry(
+                chunk_id.as_ref(),
+                || req,
+                |mut c, r| async move { c.delete_chunk_range(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 
     /// Update a single strip within a chunk.
     pub async fn update_chunk_strip(&self, req: UpdateChunkStripRequest) -> Result<UpdateChunkStripResponse> {
-        let chunk_id = req.chunk_id.as_ref();
-        self.with_retry(
-            chunk_id,
-            || req.clone(),
-            |mut c, r| async move { c.update_chunk_strip(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        let chunk_id = req.chunk_id;
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(chunk_id.as_ref(), |t, ep| {
+                let req = req.clone();
+                async move { t.send_update_chunk_strip(&ep, &req).await }
+            })
+            .await
+        } else {
+            self.with_retry(
+                chunk_id.as_ref(),
+                || req.clone(),
+                |mut c, r| async move { c.update_chunk_strip(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 
     /// List chunks with pagination.
     pub async fn list_chunks(&self, req: ListChunksRequest) -> Result<ListChunksResponse> {
-        self.with_retry(
-            None,
-            || req,
-            |mut c, r| async move { c.list_chunks(r).await.map(tonic::Response::into_inner) },
-        )
-        .await
+        if self.rpc_transport.is_some() {
+            self.with_rpc_retry(None, |t, ep| async move { t.send_list_chunks(&ep, &req).await })
+                .await
+        } else {
+            self.with_retry(
+                None,
+                || req,
+                |mut c, r| async move { c.list_chunks(r).await.map(tonic::Response::into_inner) },
+            )
+            .await
+        }
     }
 }

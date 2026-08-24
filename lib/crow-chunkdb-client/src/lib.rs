@@ -12,8 +12,10 @@
 #![allow(clippy::must_use_candidate, clippy::missing_errors_doc)]
 
 pub mod client;
+pub mod rpc_transport;
 
 pub use client::{ChunkdbClient, RetryConfig};
+pub use rpc_transport::ChunkdbRpcTransport;
 
 // Re-export RangeBindingClient so callers can construct it without a
 // direct crow-kv-client dependency for this one type.
