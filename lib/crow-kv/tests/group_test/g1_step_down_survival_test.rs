@@ -11,7 +11,7 @@ use bytes::Bytes;
 use crow_kv::cluster::replica::StepDownRequestPayload;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
 
 /// Poll until some node reports the `Leader` role, returning its node id.
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {

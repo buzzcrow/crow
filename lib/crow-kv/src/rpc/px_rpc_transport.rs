@@ -154,14 +154,17 @@ impl PxRpcTransport {
                 current_promised: PxBallot::new(r.rejected_round(), r.rejected_leader_id()),
             })
         } else {
-            // Promised — previously_accepted is not exposed via the
-            // zero-copy wrapper yet (it requires reading a nested
-            // table). For now, return None (the proposer will re-propose
-            // with its own value, which is safe but suboptimal). A
-            // follow-up will add the nested-table accessor.
+            // Promised — read the previously accepted value from the
+            // nested FBAcceptedValue table so the proposer can adopt it.
+            let accepted = r.previously_accepted().map(|av| PxLogEntry {
+                slot: av.slot,
+                ballot: PxBallot::new(av.round, av.leader_id),
+                term: av.term,
+                payload: av.payload,
+            });
             Ok(PxPrepareReply::Promised {
                 slot: r.slot(),
-                accepted: None,
+                accepted,
             })
         }
     }

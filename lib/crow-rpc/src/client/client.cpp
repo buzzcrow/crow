@@ -54,7 +54,7 @@ OutFrame *RpcClient::build_frame(uint64_t request_id, Buffer *control, Buffer *d
     frame->control         = control;
     frame->data            = data;
     if (control != nullptr) {
-        frame->header.msg_size = static_cast<uint16_t>(control->len);
+        frame->header.msg_size = control->len;
     }
     if (data != nullptr) {
         frame->header.data_size = data->len;

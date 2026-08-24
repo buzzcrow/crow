@@ -148,7 +148,11 @@ impl PxAcceptor {
                 }
             }
             // Ensure promised is at least the accept ballot (Paxos formulation).
-            if ballot > node.promised_cloned().unwrap_or(ballot) {
+            // A null promised (no prior prepare) is treated as (0, 0), not as
+            // the accept ballot — otherwise the promised is never updated and
+            // a subsequent prepare with a lower ballot could overwrite the
+            // accepted value.
+            if ballot > node.promised_cloned().unwrap_or(PxBallot::new(0, 0)) {
                 match node.cas_promised(promised_ptr, ballot) {
                     Ok(_) | Err(_) => {} // either way, continue to accepted CAS
                 }

@@ -88,7 +88,7 @@ OutFrame *build_out_frame(uint64_t request_id, uint16_t msg_type, Buffer *contro
     auto *out             = new OutFrame;
     out->request_id       = request_id;
     out->header.msg_type  = msg_type;
-    out->header.msg_size  = control != nullptr ? static_cast<uint16_t>(control->len) : 0;
+    out->header.msg_size  = control != nullptr ? control->len : 0;
     out->header.data_size = data != nullptr ? data->len : 0;
     out->header.flags     = flags;
     out->control          = control;

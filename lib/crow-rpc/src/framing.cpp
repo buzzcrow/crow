@@ -26,12 +26,14 @@ void serialize_header(uint8_t *buf, const Header &h)
     buf[3]  = static_cast<uint8_t>(h.msg_type >> 8);
     buf[4]  = static_cast<uint8_t>(h.msg_size & 0xFF);
     buf[5]  = static_cast<uint8_t>(h.msg_size >> 8);
-    buf[6]  = static_cast<uint8_t>(h.data_size & 0xFF);
-    buf[7]  = static_cast<uint8_t>(h.data_size >> 8);
-    buf[8]  = static_cast<uint8_t>(h.data_size >> 16);
-    buf[9]  = static_cast<uint8_t>(h.data_size >> 24);
-    buf[10] = h.msg_offset;
-    buf[11] = h.flags;
+    buf[6]  = static_cast<uint8_t>(h.msg_size >> 16);
+    buf[7]  = static_cast<uint8_t>(h.msg_size >> 24);
+    buf[8]  = static_cast<uint8_t>(h.data_size & 0xFF);
+    buf[9]  = static_cast<uint8_t>(h.data_size >> 8);
+    buf[10] = static_cast<uint8_t>(h.data_size >> 16);
+    buf[11] = static_cast<uint8_t>(h.data_size >> 24);
+    buf[12] = h.msg_offset;
+    buf[13] = h.flags;
 }
 
 Header parse_header(const uint8_t *buf)
@@ -39,11 +41,12 @@ Header parse_header(const uint8_t *buf)
     Header h;
     h.magic      = static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8);
     h.msg_type   = static_cast<uint16_t>(buf[2]) | (static_cast<uint16_t>(buf[3]) << 8);
-    h.msg_size   = static_cast<uint16_t>(buf[4]) | (static_cast<uint16_t>(buf[5]) << 8);
-    h.data_size  = static_cast<uint32_t>(buf[6]) | (static_cast<uint32_t>(buf[7]) << 8) |
-                   (static_cast<uint32_t>(buf[8]) << 16) | (static_cast<uint32_t>(buf[9]) << 24);
-    h.msg_offset = buf[10];
-    h.flags      = buf[11];
+    h.msg_size   = static_cast<uint32_t>(buf[4]) | (static_cast<uint32_t>(buf[5]) << 8) |
+                   (static_cast<uint32_t>(buf[6]) << 16) | (static_cast<uint32_t>(buf[7]) << 24);
+    h.data_size  = static_cast<uint32_t>(buf[8]) | (static_cast<uint32_t>(buf[9]) << 8) |
+                   (static_cast<uint32_t>(buf[10]) << 16) | (static_cast<uint32_t>(buf[11]) << 24);
+    h.msg_offset = buf[12];
+    h.flags      = buf[13];
     return h;
 }
 

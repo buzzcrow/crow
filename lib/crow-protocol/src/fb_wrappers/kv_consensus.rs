@@ -15,6 +15,8 @@ use crate::kv_consensus_fb::{
     FBAcceptedResponse, FBFetchGapResponse, FBHeartbeatResponse, FBKvRetCode, FBPreVoteResponse,
     FBPromiseResponse, FBRequestVoteResponse, FBSnapshotResponse, FBStepDownResponse,
 };
+use crate::types::kv_consensus::AcceptedValue;
+use bytes::Bytes;
 
 // `parse_root` is hoisted to the parent `fb_wrappers` module (R117)
 // so both `kv_consensus` and `kv_client` reuse it without duplication.
@@ -77,6 +79,22 @@ impl<'a> FBPromiseResponseRef<'a> {
     }
     pub fn epoch_mismatch(&self) -> bool {
         self.root.is_some_and(|r| r.epoch_mismatch())
+    }
+    /// Previously accepted value from the acceptor (nested table).
+    /// Returns `None` if the acceptor has no prior accepted value for this slot.
+    pub fn previously_accepted(&self) -> Option<AcceptedValue> {
+        self.root.and_then(|r| {
+            let av = r.previously_accepted()?;
+            Some(AcceptedValue {
+                slot: av.slot(),
+                round: av.round(),
+                leader_id: av.leader_id(),
+                term: av.term(),
+                payload: av
+                    .payload()
+                    .map_or_else(Bytes::new, |p| Bytes::copy_from_slice(p.bytes())),
+            })
+        })
     }
 }
 

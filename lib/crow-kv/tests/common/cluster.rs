@@ -113,14 +113,27 @@ pub async fn start_cluster_classic(ids: &[u64], leader_id: u64) -> TestCluster {
 /// election has completed.
 #[allow(dead_code)]
 pub async fn start_cluster_no_leader(ids: &[u64]) -> TestCluster {
-    start_cluster_no_leader_inner(ids).await
+    start_cluster_no_leader_inner(ids, PxElectionConfig::for_tests()).await
 }
 
-async fn start_cluster_no_leader_inner(ids: &[u64]) -> TestCluster {
+/// Like `start_cluster_no_leader` but with a relaxed election timer
+/// (500–1000 ms) for tests that need multiple RPC round-trips without
+/// triggering a spurious leader change.
+#[allow(dead_code)]
+pub async fn start_cluster_no_leader_relaxed(ids: &[u64]) -> TestCluster {
+    let cfg = PxElectionConfig {
+        election_min_ms: 500,
+        election_max_ms: 1000,
+        lease_duration_ms: 1100,
+        ..PxElectionConfig::for_tests()
+    };
+    start_cluster_no_leader_inner(ids, cfg).await
+}
+
+async fn start_cluster_no_leader_inner(ids: &[u64], cfg: PxElectionConfig) -> TestCluster {
     let net = lock().await;
     init_test_subscriber();
 
-    let cfg = PxElectionConfig::for_tests();
     let mut running = Vec::with_capacity(ids.len());
     for &id in ids {
         let replica = PxLocalReplica::new(id, PxLocalReplicaRole::Follower);

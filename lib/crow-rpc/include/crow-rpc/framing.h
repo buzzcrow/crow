@@ -13,9 +13,9 @@
 namespace crow::rpc
 {
 
-// ── Wire format (12-byte header) ──────────────────────────────────
+// ── Wire format (14-byte header) ──────────────────────────────────
 //
-// [magic:2][msg_type:2][msg_size:2][data_size:4][msg_offset:1][flags:1]
+// [magic:2][msg_type:2][msg_size:4][data_size:4][msg_offset:1][flags:1]
 //
 // Little-endian, field-by-field (not memcpy of the struct — avoids
 // compiler-layout dependence). See design-crow-rpc.md §3 for
@@ -23,7 +23,7 @@ namespace crow::rpc
 // reference's 20-byte header.
 
 constexpr uint16_t MAGIC       = 0xCA70;
-constexpr uint8_t  HEADER_SIZE = 12;
+constexpr uint8_t  HEADER_SIZE = 14;
 
 // flags bit definitions
 constexpr uint8_t FLAG_ONE_WAY = 0x01;
@@ -32,7 +32,7 @@ struct Header
 {
     uint16_t magic      = MAGIC;
     uint16_t msg_type   = 0;
-    uint16_t msg_size   = 0;           // control message length
+    uint32_t msg_size   = 0;           // control message length
     uint32_t data_size  = 0;           // data payload length
     uint8_t  msg_offset = HEADER_SIZE; // offset to control message
     uint8_t  flags      = 0;
