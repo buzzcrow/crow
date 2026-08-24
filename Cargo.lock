@@ -796,6 +796,7 @@ dependencies = [
 name = "crow-diskio-client"
 version = "0.1.0"
 dependencies = [
+ "crow-common",
  "crow-kv-client",
  "crow-protocol",
  "crow-rpc-ffi",
@@ -910,6 +911,7 @@ name = "crow-rpc-ffi"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "crow-common",
  "crow-protocol",
  "flatbuffers",
  "tokio",

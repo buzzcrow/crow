@@ -199,6 +199,33 @@ crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *
                                                 uint32_t control_len, const uint8_t *data, uint32_t data_len,
                                                 uint16_t msg_type, uint64_t request_id);
 
+// ── Client-side request handler dispatch (R114) ───────────────────
+
+// Register a custom dispatch callback on the CLIENT side for the given
+// msg_type. When a frame arrives whose request_id is not in the client's
+// pending map (i.e. it's a server-initiated request, not a response),
+// the client dispatches it by msg_type to this callback. The callback
+// receives the same fields as the server-side handler and submits the
+// response via crow_rpc_server_submit_response (the Rust closure
+// captures the server handle). The callback must be non-blocking.
+void crow_rpc_client_register_handler(crow_rpc_client_t client, uint16_t msg_type, crow_rpc_handler_fn callback,
+                                      void *user_data);
+
+// Set the transport on a client for submitting UnknownMessage responses
+// when no handler matches an incoming request msg_type. The transport
+// is extracted from the server handle. If not set, unmatched request
+// frames are dropped.
+void crow_rpc_client_set_transport(crow_rpc_client_t client, crow_rpc_server_t server);
+
+// ── Server-side request-response correlation (R114) ───────────────
+
+// Wire an RpcClient into the server for server-initiated request-response
+// (e.g. WatchNotify: server sends a notify request, awaits ack). The
+// server's dispatch tries the request client's on_response first (to
+// route ack responses); if no match, dispatches as a request (existing
+// behavior). The server sends requests via crow_rpc_client_send.
+void crow_rpc_server_set_request_client(crow_rpc_server_t server, crow_rpc_client_t client);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

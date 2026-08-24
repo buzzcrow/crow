@@ -3,6 +3,7 @@
 
 #include "crow-rpc/server/server.h"
 
+#include "crow-rpc/client/client.h" // RpcClient, RpcError (for request_client_ + fail_all)
 #include "crow-rpc/server/handler.h"
 #include "msg_type_generated.h"
 
@@ -167,6 +168,12 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
 
         auto conn = transport_->create_connection(fd, "client");
         conn->set_on_frame([this](Frame *frame, Connection *c) { dispatch(frame, c); });
+        // Fail pending server-initiated requests when the connection closes.
+        conn->set_on_close([this](Connection *) {
+            if (request_client_ != nullptr) {
+                request_client_->fail_all(RpcError::ConnectionClosed);
+            }
+        });
     }
 }
 
@@ -182,26 +189,43 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
     uint16_t msg_type   = frame->header.msg_type;
     bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
 
+    // Try request dispatch first — if a handler is registered for
+    // this msg_type, dispatch as a request. This ensures request
+    // frames are not intercepted by on_response (which matches by
+    // request_id and can't distinguish a request from its ack).
     HandlerFn handler = handlers_.get_handler(msg_type);
-    if (!handler) {
-        // Unknown msg_type — send UnknownMessage response (if not one-way).
-        if (!is_one_way) {
-            handler = handle_unknown;
+    if (handler) {
+        OutFrame *response = handler(frame, conn);
+        if (response != nullptr) {
+            if (dispatch_nano > 0) {
+                stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
+            }
+            transport_->submit_inline(conn, response);
         }
-        else {
-            delete frame;
-            return;
-        }
+        return;
     }
 
-    OutFrame *response = handler(frame, conn);
-    if (response != nullptr) {
-        // Record handler latency (dispatch entry → response enqueue).
-        if (dispatch_nano > 0) {
-            stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
+    // No handler for this msg_type — try response routing (ack to
+    // a server-sent request). on_response consumes the frame if the
+    // request_id is in the request client's pending map.
+    if (request_client_ != nullptr && request_client_->on_response(frame->request_id, frame)) {
+        return; // ack routed, frame consumed
+    }
+
+    // Unknown msg_type and not an ack — send UnknownMessage (if not
+    // one-way) or drop.
+    if (!is_one_way) {
+        handler            = handle_unknown;
+        OutFrame *response = handler(frame, conn);
+        if (response != nullptr) {
+            if (dispatch_nano > 0) {
+                stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
+            }
+            transport_->submit_inline(conn, response);
         }
-        // Submit the response via inline path (direct enqueue + write).
-        transport_->submit_inline(conn, response);
+    }
+    else {
+        delete frame;
     }
 }
 

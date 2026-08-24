@@ -1,6 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#include "crow-common/request_id.h"
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
@@ -175,8 +176,9 @@ class CallerLoopbackTest : public ::testing::Test
             ::close(listen_fd_);
     }
 
-    int      listen_fd_ = -1;
-    uint16_t port_      = 0;
+    int                        listen_fd_ = -1;
+    uint16_t                   port_      = 0;
+    crow::common::RequestIdGen id_gen_;
 };
 
 // Callback state + C ABI callback for CallAndReceiveResponse test.
@@ -251,7 +253,7 @@ TEST_F(CallerLoopbackTest, CallAndReceiveResponse)
     ctrl->write(ctrl->data, 32);
 
     // Submit the call — the callback fires when on_response is called.
-    uint64_t req_id = caller.next_request_id();
+    uint64_t req_id = id_gen_.next();
     bool     ok     = caller.send(&transport, client_conn.get(), req_id, ctrl, nullptr, 42, call_recv_cb, &state);
 
     // The request didn't actually go through the transport (client_conn

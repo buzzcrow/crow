@@ -23,4 +23,7 @@ pub mod ec_isal;
 pub mod logging;
 pub mod metrics;
 pub mod report;
+pub mod request_id;
 pub mod time;
+
+pub use request_id::{RequestId, RequestIdGen};

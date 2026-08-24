@@ -275,9 +275,27 @@ server side and the Rust client side.
   a reference to it. Accessor calls are pure pointer-offset reads — no
   heap allocation, no `Vec`, no `String` construction unless the
   caller explicitly converts a field to an owned type. The data
-  payload (raw bytes after the control message) is the one exception:
-  it may be copied into an owned `Vec<u8>` when the caller needs owned
-  bytes, because it is not a flatbuffer.
+  payload (raw bytes after the control message) is not a flatbuffer;
+  whether it is copied depends on what the receiver does with it (see
+  the next bullet).
+- **Data payload: zero-copy when the receiver consumes by reference.**
+  The data buffer is a ref-counted pool buffer on the same ref-count
+  path as the control buffer. The receiver may copy it into an owned
+  `Vec<u8>` when it genuinely needs owned bytes — e.g. retaining the
+  data beyond the handler's lifetime, or handing it to an API that
+  takes ownership. But streaming-data handlers consume the data with
+  `pwrite(fd, &buf, len)` and `engine.apply(slot, &batch)`, both of
+  which take `&[u8]` for the duration of the call and need no owned
+  bytes. These handlers hold the frame's data buffer by reference,
+  pass `&[u8]` to `pwrite`/`apply`, and drop the reference after the
+  async write completes — no copy to owned `Vec`. The pool buffer
+  recycles when the last reference drops. This is the receive-side
+  companion to the "no owned intermediate" rule above: the control
+  buffer is zero-copy via flatbuffer accessors; the data buffer is
+  zero-copy via ref-counted pool reference. Applies to LearnerStream
+  (log entries) and StreamSnapshot (snapshot chunks); the handler
+  implementation is R32's scope, the protocol design (per-batch
+  `call()`) enables it.
 - **Write path: build, finish, attach.** The sender builds the
   flatbuffer with `FlatBufferBuilder` (Rust) or
   `flatbuffers::FlatBufferBuilder` (C++), calls `finish`, and attaches

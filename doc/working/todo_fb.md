@@ -43,9 +43,16 @@ Wrapper Convention); this section is the quick-reference checklist.
   holds a reference to it. Accessor calls are pure pointer-offset
   reads — no heap allocation, no `Vec`, no `String` construction
   unless the caller explicitly converts a field to an owned type.
-  The data payload (raw bytes after the control message) is the one
-  exception: it may be copied into an owned `Vec<u8>` when the
-  caller needs owned bytes, because it is not a flatbuffer.
+  The data payload (raw bytes after the control message) is not a
+  flatbuffer; whether it is copied depends on what the receiver does
+  with it. Streaming-data handlers (LearnerStream, StreamSnapshot)
+  consume the data with `pwrite`/`apply` — both take `&[u8]`, no
+  owned bytes needed — so they hold the data buffer by reference and
+  drop it after the async write completes (zero-copy). The "copy to
+  owned `Vec`" exception applies only when a handler genuinely needs
+  to retain the data beyond the frame's lifetime. Full rule in
+  `design-crow-rpc.md` §6 ("Data payload: zero-copy when the receiver
+  consumes by reference").
 - **Write path: build, finish, attach.** The sender builds the
   flatbuffer with `FlatBufferBuilder`, calls `finish`, and attaches
   the finished bytes to the frame's control buffer. The builder is
@@ -180,6 +187,61 @@ Currently duplicated:
     incoming requests by `msg_type`) + `transport->submit` to send
     responses. The existing `RpcClient` already handles sending
     requests and routing responses.
+
+### Copy Streaming — Application-Level, Not Transport-Level
+
+The "streaming is copy streaming" concern is about where the copy
+happens, not whether the protocol needs a stream concept. Two layers:
+
+- **Transport is zero-copy.** Pool-allocated ref-counted buffers,
+  pull-based `FrameParser` (reads directly into pool buffers, no
+  scratch), scatter-gather `writev` send. The frame's data payload
+  rides in a pool buffer from receive to handler.
+- **Application copies when it wants owned bytes.** The §6 wrapper
+  convention's data-payload exception ("may be copied into an owned
+  `Vec<u8>` when the caller needs owned bytes") is a caller choice,
+  not a transport limitation.
+
+For the two data-heavy streaming RPCs, the receiver does
+`pwrite(fd, &buf, len)` and `engine.apply(slot, &batch)` — both take
+`&[u8]` for the duration of the call, neither needs owned bytes. So
+the handlers stay zero-copy on the data payload: hold the frame's
+data buffer by reference, pass `&[u8]` to `pwrite`/`apply`, drop the
+reference after the async write completes. The pool buffer recycles
+when the last reference drops. This is the receive-side companion to
+§6's "no owned intermediate struct" rule for the control buffer; the
+rule itself now lives in `design-crow-rpc.md` §6 ("Data payload:
+zero-copy when the receiver consumes by reference").
+
+The "copy to owned `Vec`" exception applies only when a handler
+genuinely needs to retain the data beyond the frame's lifetime (e.g.
+queuing it for later processing without holding the pool buffer). The
+streaming-data handlers do not.
+
+### Pull vs Push — Deliberate Decision
+
+R114 uses pull: the follower sends per-batch/per-chunk `call()` and
+gets one response per call. The alternative — push (one "start from
+slot N" request → server streams response frames as entries arrive)
+— is lower-latency for steady-state catch-up but needs the
+multi-response machinery R114 dropped (`FLAG_LAST_FRAME`, `call_multi`,
+new handler type).
+
+Pull is the right call for R114:
+- StreamSnapshot is inherently pull (follower requests chunks at its
+  own pace → natural backpressure).
+- WatchNotify is server-initiated request-response (the revised
+  design above).
+- LearnerStream catch-up is the only case where push helps, and
+  pipelining (multiple in-flight `call()`s on the persistent
+  connection) closes most of the gap without protocol change.
+- LearnerStream steady-state traffic (Accept→Accepted, Chosen→one-way)
+  maps to `call()` + one-way send on a persistent connection — no
+  stream needed.
+
+Push (`call_multi` + `FLAG_LAST_FRAME`) is an additive future
+extension if catch-up latency under pipelining proves insufficient.
+R114 does not block on it.
 
 ## Suggestions (apply across all migration items)
 

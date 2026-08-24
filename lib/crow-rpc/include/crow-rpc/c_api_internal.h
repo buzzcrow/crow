@@ -51,4 +51,10 @@ void frame_to_c_handles(Frame *frame, crow_rpc_buffer_t *out_ctrl, crow_rpc_buff
 // Takes ownership of the frame (frees it after invoking the callback).
 void invoke_c_complete(crow_rpc_on_complete cb, void *user_data, uint64_t request_id, Frame *frame, RpcError err);
 
+// Shared handler trampoline: extracts request fields from the frame,
+// invokes the C dispatch callback, and deletes the frame. Used by both
+// server-side and client-side handler dispatch. The callback submits the
+// response later via crow_rpc_server_submit_response (async pattern).
+void invoke_c_handler(crow_rpc_handler_fn callback, void *user_data, Frame *request, Connection *conn);
+
 } // namespace crow::rpc

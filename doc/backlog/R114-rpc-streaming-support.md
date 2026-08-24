@@ -47,9 +47,10 @@ clients (C++ `RpcClient::next_request_id_`, Rust
 deferred; this requirement resolves it as "not needed"), §3 (Wire
 Format — the 12-byte header + control + data frame), §4.2
 (Request/Response Correlation — the pending-request map), §4.4
-(Server Side — handler dispatch). The three KV RPCs are defined in
-`design-crow-kv-rpc.md` (LearnerStream, StreamSnapshot) and
-`design-crow-kv-watch-notify.md` (WatchNotify).
+(Server Side — handler dispatch), §6 (Flatbuffer Wrapper Convention —
+including the data-payload zero-copy rule for streaming handlers). The
+three KV RPCs are defined in `design-crow-kv-rpc.md` (LearnerStream,
+StreamSnapshot) and `design-crow-kv-watch-notify.md` (WatchNotify).
 
 **Use scenarios**:
 
@@ -156,6 +157,34 @@ requests) and consolidate the `request_id` generator into
    acks, server verifies ack received; server sends notify, client
    drops, server retries then logs `WSCritical`. Files:
    `lib/crow-rpc/ffi/tests/ffi_request_test.rs` (new).
+
+**Zero-copy data payload for streaming handlers**: The per-batch
+`call()` design is zero-copy on the data payload, not just the
+control buffer. The frame's data buffer is a ref-counted pool buffer;
+streaming-data handlers (LearnerStream log entries, StreamSnapshot
+chunks) consume it with `pwrite(fd, &buf, len)` and
+`engine.apply(slot, &batch)`, both of which take `&[u8]` for the
+duration of the call and need no owned bytes. These handlers hold the
+data buffer by reference and drop it after the async write completes
+— no copy to owned `Vec<u8>`. The "may copy to owned `Vec`" exception
+in `design-crow-rpc.md` §6 does not apply here: the receiver does not
+need owned bytes. This is the receive-side companion to §6's "no
+owned intermediate struct" rule for the control buffer; the canonical
+rule lives in `design-crow-rpc.md` §6 ("Data payload: zero-copy when
+the receiver consumes by reference"). Handler implementation is
+R32/R117's scope; R114's protocol design (per-batch `call()`) enables
+it.
+
+**Pull, not push (deliberate)**: R114 uses pull — per-batch/per-chunk
+`call()`, one response per call. Push (one request → many responses)
+is lower-latency for steady-state catch-up but needs multi-response
+machinery (`FLAG_LAST_FRAME`, `call_multi`, new handler type) that
+R114 drops. Pipelining (multiple in-flight `call()`s on the
+persistent connection) amortizes the per-batch round-trip. Push is
+an additive future extension if catch-up latency under pipelining
+proves insufficient; R114 does not block on it. See
+`doc/working/todo_fb.md` § "Pull vs Push — Deliberate Decision" for
+the full rationale.
 
 **Flow diagram**:
 
@@ -269,4 +298,7 @@ ffi_request_test`, `pixi run cargo test -p crow-diskio-client`,
 **Open Questions**
 
 None — all design decisions resolved in `doc/working/todo_fb.md`
-§ "R114 — Revised Design".
+§ "R114 — Revised Design" (including "Copy Streaming —
+Application-Level, Not Transport-Level" and "Pull vs Push —
+Deliberate Decision"). The zero-copy data-payload rule for streaming
+handlers is canonical in `design-crow-rpc.md` §6.

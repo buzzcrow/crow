@@ -456,17 +456,17 @@ void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t ms
 
 // ── Custom handler dispatch (R115: Rust server handlers) ──────────
 
-// Wraps a C dispatch callback as a C++ HandlerFn. Extracts the
-// correlation fields + control/data byte slices from the frame, invokes
-// the C callback, then releases the frame. Always returns nullptr
-// (async) — the callback submits the response later via
-// crow_rpc_server_submit_response. The callback + user_data are captured
-// by value in the lambda; user_data lifetime is owned by the caller
-// (the Rust FFI box, freed when the handler is re-registered or the
-// server is dropped).
-static crow::rpc::OutFrame *c_handler_trampoline(crow::rpc::Frame *request, crow::rpc::Connection *conn,
-                                                 crow_rpc_handler_fn callback, void *user_data)
+// Shared handler trampoline: extracts request fields from the frame,
+// invokes the C dispatch callback, and deletes the frame. Used by both
+// server-side (c_handler_trampoline) and client-side (RpcClient::dispatch_request)
+// handler dispatch. The callback submits the response later via
+// crow_rpc_server_submit_response (async pattern).
+void crow::rpc::invoke_c_handler(crow_rpc_handler_fn callback, void *user_data, Frame *request, Connection *conn)
 {
+    if (callback == nullptr || request == nullptr) {
+        delete request;
+        return;
+    }
     uint64_t       req_id      = request->request_id;
     uint64_t       create_nano = request->rpc_create_nano;
     uint16_t       msg_type    = request->header.msg_type;
@@ -485,7 +485,6 @@ static crow::rpc::OutFrame *c_handler_trampoline(crow::rpc::Frame *request, crow
     callback(req_id, create_nano, msg_type, ctrl_ptr, ctrl_len, data_ptr, data_len, conn_handle, user_data);
 
     delete request;
-    return nullptr; // async — callback submits the response later.
 }
 
 void crow_rpc_server_register_handler(crow_rpc_server_t server, uint16_t msg_type, crow_rpc_handler_fn callback,
@@ -496,7 +495,8 @@ void crow_rpc_server_register_handler(crow_rpc_server_t server, uint16_t msg_typ
     }
     server->server->register_handler(msg_type,
                                      [callback, user_data](crow::rpc::Frame *req, crow::rpc::Connection *conn) {
-                                         return c_handler_trampoline(req, conn, callback, user_data);
+                                         crow::rpc::invoke_c_handler(callback, user_data, req, conn);
+                                         return nullptr; // async — callback submits response later.
                                      });
 }
 
@@ -538,4 +538,33 @@ crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *
         return CROW_RPC_ERR_SEND_QUEUE;
     }
     return CROW_RPC_OK;
+}
+
+// ── Client-side request handler dispatch (R114) ──────────────────
+
+void crow_rpc_client_register_handler(crow_rpc_client_t client, uint16_t msg_type, crow_rpc_handler_fn callback,
+                                      void *user_data)
+{
+    if (client == nullptr || callback == nullptr) {
+        return;
+    }
+    client->client->register_handler(msg_type, callback, user_data);
+}
+
+void crow_rpc_client_set_transport(crow_rpc_client_t client, crow_rpc_server_t server)
+{
+    if (client == nullptr || server == nullptr) {
+        return;
+    }
+    client->client->set_transport(server->server->transport());
+}
+
+// ── Server-side request-response correlation (R114) ──────────────
+
+void crow_rpc_server_set_request_client(crow_rpc_server_t server, crow_rpc_client_t client)
+{
+    if (server == nullptr || client == nullptr) {
+        return;
+    }
+    server->server->set_request_client(client->client);
 }

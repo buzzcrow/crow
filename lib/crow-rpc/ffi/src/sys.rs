@@ -199,6 +199,19 @@ extern "C" {
         request_id: u64,
     ) -> crow_rpc_status;
 
+    // ── Client-side request handler dispatch (R114) ───────────────
+    pub fn crow_rpc_client_register_handler(
+        client: crow_rpc_client_t,
+        msg_type: u16,
+        callback: crow_rpc_handler_fn,
+        user_data: *mut c_void,
+    );
+
+    pub fn crow_rpc_client_set_transport(client: crow_rpc_client_t, server: crow_rpc_server_t);
+
+    // ── Server-side request-response correlation (R114) ───────────
+    pub fn crow_rpc_server_set_request_client(server: crow_rpc_server_t, client: crow_rpc_client_t);
+
     // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
     pub fn crow_rpc_co_spawn(
         client: crow_rpc_client_t,

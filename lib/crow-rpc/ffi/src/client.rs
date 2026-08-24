@@ -206,6 +206,44 @@ impl RpcClient {
         unsafe { sys::crow_rpc_client_get_counters(self.handle, &mut out) };
         out
     }
+
+    /// Set the transport on this client for submitting UnknownMessage
+    /// responses when no handler matches an incoming request msg_type.
+    /// The transport is extracted from the server handle. If not set,
+    /// unmatched request frames are dropped.
+    pub fn set_transport(&self, server: &RpcServer) {
+        unsafe { sys::crow_rpc_client_set_transport(self.handle, server.handle()) };
+    }
+
+    /// Register a custom Rust dispatch handler for incoming requests
+    /// (server→client direction). When a frame arrives whose request_id
+    /// is not in the client's pending map (i.e. it's a server-initiated
+    /// request, not a response), the client dispatches it by msg_type
+    /// to this handler. The handler receives a `ClientRequest` carrying
+    /// the correlation fields, the control + data byte slices (borrowed
+    /// for the duration of the call only — copy what must outlive the
+    /// call), and the `conn_handle` to pass back to
+    /// `RpcServer::submit_response`.
+    ///
+    /// The handler must be non-blocking: spawn async work (e.g. onto a
+    /// tokio runtime) and return; submit the response later via
+    /// `RpcServer::submit_response`. Same pattern as the server-side
+    /// handler (`RpcServer::register_handler`).
+    pub fn register_handler<F>(&self, msg_type: u16, handler: F)
+    where
+        F: Fn(ClientRequest<'_>) + Send + 'static,
+    {
+        let box_ptr: *mut Box<dyn Fn(ClientRequest<'_>) + Send + 'static> =
+            Box::into_raw(Box::new(Box::new(handler)));
+        unsafe {
+            sys::crow_rpc_client_register_handler(
+                self.handle,
+                msg_type,
+                Some(rust_client_handler_trampoline),
+                box_ptr.cast::<std::ffi::c_void>(),
+            );
+        }
+    }
 }
 
 impl Default for RpcClient {
@@ -283,4 +321,67 @@ unsafe extern "C" fn on_complete_cb(
     };
 
     let _ = tx.send(result);
+}
+
+// ── Client-side request handler dispatch (R114) ────────────────────
+
+/// A borrowed view of an incoming client-side request (server→client
+/// direction), passed to a handler registered via
+/// `RpcClient::register_handler`. Same shape as `ServerRequest` — the
+/// handler submits the response via `RpcServer::submit_response` using
+/// the captured server handle. All byte slices are borrowed for the
+/// duration of the handler call only — copy what must outlive the call.
+pub struct ClientRequest<'a> {
+    pub request_id: u64,
+    pub rpc_create_nano: u64,
+    pub msg_type: u16,
+    pub control: &'a [u8],
+    pub data: Option<&'a [u8]>,
+    pub conn_handle: *mut std::ffi::c_void,
+}
+
+// Safety: conn_handle is a raw pointer to a C++ Connection owned by the
+// transport. Safe to send across threads (same rationale as ServerRequest).
+unsafe impl Send for ClientRequest<'_> {}
+
+// Trampoline invoked by the C++ client dispatch layer. Reconstructs the
+// borrowed byte slices, builds a ClientRequest, and invokes the boxed
+// Rust closure. Same pattern as rust_handler_trampoline in server.rs.
+#[allow(clippy::borrowed_box)]
+unsafe extern "C" fn rust_client_handler_trampoline(
+    request_id: u64,
+    rpc_create_nano: u64,
+    msg_type: u16,
+    control: *const u8,
+    control_len: u32,
+    data: *const u8,
+    data_len: u32,
+    conn_handle: *mut std::ffi::c_void,
+    user_data: *mut std::ffi::c_void,
+) {
+    if user_data.is_null() {
+        return;
+    }
+    let boxed: &Box<dyn Fn(ClientRequest<'_>) + Send + 'static> =
+        unsafe { &*(user_data.cast::<Box<dyn Fn(ClientRequest<'_>) + Send + 'static>>()) };
+    let closure: &(dyn Fn(ClientRequest<'_>) + Send + 'static) = &**boxed;
+    let control_slice = if control.is_null() || control_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(control, control_len as usize) }
+    };
+    let data_slice = if data.is_null() || data_len == 0 {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(data, data_len as usize) })
+    };
+    let req = ClientRequest {
+        request_id,
+        rpc_create_nano,
+        msg_type,
+        control: control_slice,
+        data: data_slice,
+        conn_handle,
+    };
+    closure(req);
 }

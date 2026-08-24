@@ -185,6 +185,15 @@ impl RpcServer {
         }
     }
 
+    /// Wire an RpcClient into the server for server-initiated request-
+    /// response (e.g. WatchNotify: server sends a notify request, awaits
+    /// ack). The server's dispatch tries the request client's on_response
+    /// first (to route ack responses); if no match, dispatches as a
+    /// request (existing behavior).
+    pub fn set_request_client(&self, client: &crate::RpcClient) {
+        unsafe { sys::crow_rpc_server_set_request_client(self.handle, client.handle()) };
+    }
+
     pub fn handle(&self) -> sys::crow_rpc_server_t {
         self.handle
     }

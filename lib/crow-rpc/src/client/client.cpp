@@ -5,6 +5,7 @@
 
 #include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/rpc_client_metrics.h"
+#include "crow-rpc/server/handler.h"
 #include "crow-rpc/server/message.h"
 
 #include <cassert>
@@ -148,12 +149,67 @@ map_path:
 
 void RpcClient::attach(Connection *conn)
 {
-    // Set the on_frame callback to route response frames to on_response.
-    // request_id is extracted during parse.
-    conn->set_on_frame([this](Frame *frame, Connection * /*conn*/) { on_response(frame->request_id, frame); });
+    // Set the on_frame callback to combined routing: try response
+    // routing first (on_response); if the request_id is not in the
+    // pending map, dispatch as a request via dispatch_request.
+    conn->set_on_frame([this](Frame *frame, Connection *conn) {
+        if (!on_response(frame->request_id, frame)) {
+            dispatch_request(frame, conn);
+        }
+    });
 }
 
-void RpcClient::on_response(uint64_t request_id, Frame *response)
+void RpcClient::register_handler(uint16_t msg_type, crow_rpc_handler_fn callback, void *user_data)
+{
+    std::lock_guard<std::mutex> lock(handler_mu_);
+    request_handlers_[msg_type] = {callback, user_data};
+}
+
+void RpcClient::dispatch_request(Frame *frame, Connection *conn)
+{
+    uint16_t msg_type   = frame->header.msg_type;
+    bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
+
+    crow_rpc_handler_fn cb        = nullptr;
+    void               *user_data = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(handler_mu_);
+        auto                        it = request_handlers_.find(msg_type);
+        if (it != request_handlers_.end()) {
+            cb        = it->second.first;
+            user_data = it->second.second;
+        }
+    }
+
+    if (cb != nullptr) {
+        // Same trampoline as server-side dispatch: extract fields,
+        // invoke C callback, delete frame. The callback submits the
+        // response later via crow_rpc_server_submit_response.
+        invoke_c_handler(cb, user_data, frame, conn);
+        return;
+    }
+
+    // No handler registered for this msg_type.
+    if (is_one_way) {
+        delete frame;
+        return;
+    }
+    if (transport_ != nullptr) {
+        // Send UnknownMessage response (same as server-side behavior).
+        OutFrame *resp = handle_unknown(frame, conn);
+        delete frame;
+        if (resp != nullptr) {
+            transport_->submit(conn, resp);
+        }
+    }
+    else {
+        // No transport — drop the frame. The server's request will
+        // time out; the retry/WSCritical logic handles it.
+        delete frame;
+    }
+}
+
+bool RpcClient::on_response(uint64_t request_id, Frame *response)
 {
     // Slab path (callback model): O(1) index lookup, no hash. Check the
     // slab pool first — if the slot is PENDING_READY for this request_id,
@@ -173,7 +229,7 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
             if (slot.state.compare_exchange_strong(expected, SLOT_DONE, std::memory_order_acq_rel)) {
                 rpc_resp_matched().inc();
                 invoke_c_complete(cb, ud, request_id, response, RpcError::Ok);
-                return;
+                return true;
             }
             // CAS failed — reaper already claimed the slot. Fall through
             // to map (won't find it → resp_missed).
@@ -185,10 +241,11 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
     // Map path: oneshot call() entries + slab-fallback entries.
     auto it = pending_.find(request_id);
     if (it == pending_.end()) {
-        // Late response after timeout or duplicate — discard.
+        // Late response after timeout or duplicate — not in pending map.
+        // Return false so the caller can dispatch it as a request (or
+        // delete it). Do NOT delete the frame here — the caller owns it.
         rpc_resp_missed().inc();
-        delete response;
-        return;
+        return false;
     }
     CompletionCallback cb = std::move(it->second.cb);
     pending_.erase(it);
@@ -199,6 +256,7 @@ void RpcClient::on_response(uint64_t request_id, Frame *response)
     else {
         delete response;
     }
+    return true;
 }
 
 void RpcClient::fail_all(RpcError err)

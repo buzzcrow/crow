@@ -18,6 +18,8 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <utility>
 
 namespace crow::rpc
 {
@@ -118,16 +120,37 @@ class RpcClient
     bool send(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
               uint16_t msg_type, crow_rpc_on_complete cb, void *user_data);
 
-    // Attach this caller to a connection's on_frame callback so responses
-    // are routed to on_response. Call this once per connection before
-    // sending requests through it.
+    // Attach this caller to a connection's on_frame callback. The
+    // callback tries response routing first (on_response); if the
+    // frame's request_id is not in the pending map, it dispatches as
+    // a request via dispatch_request. Call this once per connection
+    // before sending requests through it.
     void attach(Connection *conn);
 
-    // Called by the on_frame callback (set by attach) when a response
-    // arrives. Looks up request_id, invokes callback, removes entry.
-    // Dispatches to the slab pool (callback model) first, then falls
-    // back to the folly map (oneshot model).
-    void on_response(uint64_t request_id, Frame *response);
+    // Try to route a frame as a response to a previously-sent request.
+    // Returns true if request_id was found in the pending map (frame
+    // consumed, callback invoked). Returns false if not found (frame
+    // NOT consumed — caller owns it and must dispatch or delete it).
+    bool on_response(uint64_t request_id, Frame *response);
+
+    // Dispatch an incoming request frame (server→client direction) to
+    // a registered handler by msg_type. If no handler is found, sends
+    // UnknownMessage (if transport set) or drops the frame.
+    void dispatch_request(Frame *frame, Connection *conn);
+
+    // Register a handler for an incoming request msg_type. The handler
+    // is a C callback (same type as server-side handlers) that receives
+    // the request fields + conn_handle and submits the response later
+    // via crow_rpc_server_submit_response.
+    void register_handler(uint16_t msg_type, crow_rpc_handler_fn callback, void *user_data);
+
+    // Set the transport for submitting UnknownMessage responses when
+    // no handler matches an incoming request msg_type. If not set,
+    // unmatched request frames are dropped.
+    void set_transport(Transport *t)
+    {
+        transport_ = t;
+    }
 
     // Called by Connection::close to fail all pending requests.
     void fail_all(RpcError err);
@@ -151,15 +174,16 @@ class RpcClient
     // No-op if not running.
     void stop_reaper();
 
-    // Generate the next request_id (for callers that need to embed it
-    // in the flatbuffer control message before calling call()).
-    uint64_t next_request_id()
-    {
-        return next_request_id_.fetch_add(1, std::memory_order_relaxed);
-    }
-
   private:
-    std::atomic<uint64_t> next_request_id_{1};
+    // Handler registry for incoming requests (server→client direction).
+    // Maps msg_type → (C callback, user_data). Same trampoline pattern
+    // as the server-side handler dispatch.
+    std::mutex                                                           handler_mu_;
+    std::unordered_map<uint16_t, std::pair<crow_rpc_handler_fn, void *>> request_handlers_;
+
+    // Transport for submitting UnknownMessage responses when no handler
+    // matches an incoming request msg_type. Set via set_transport.
+    Transport *transport_{nullptr};
 
     // Slab-based completion pool (callback model). Indexed by
     // request_id & pool_mask_. Null by default (callback model opt-in).
