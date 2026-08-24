@@ -17,8 +17,11 @@ use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::kv_service_server::KvServiceServer;
 use crate::rpc::px_service_server::PxServiceServer;
 use crate::rpc::snapshot_service_server::SnapshotServiceServer;
-use crate::rpc::{KvStoreService, PxReplicaService, PxRpcService, PxRpcTransport, PxSnapshotService};
-use crow_protocol::{KV_RPC_BASE, KV_SERVER_GRPC_BASE};
+use crate::rpc::{
+    KvClientRpcForwarder, KvRpcService, KvStoreService, PxReplicaService, PxRpcService, PxRpcTransport,
+    PxSnapshotService,
+};
+use crow_protocol::{KV_CLIENT_RPC_BASE, KV_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::RpcServer;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -169,6 +172,8 @@ impl PxKvStore {
     pub(crate) async fn shutdown_server(&self, timeout: Duration) -> Result<(), String> {
         // R32: also stop the crow-rpc server.
         self.stop_rpc_server();
+        // R117: also stop the client-facing crow-rpc server.
+        self.stop_client_rpc_server();
 
         let (handle, sender) = {
             let mut state = self.server_state.lock();
@@ -303,6 +308,82 @@ impl PxKvStore {
         if let Some(server) = server {
             server.stop();
             info!(store_id = self.store_id, "crow-rpc server stopped");
+        }
+    }
+
+    /// Start the client-facing crow-rpc server (R117 migration). Binds
+    /// to the client-facing crow-rpc port (derived from the gRPC port
+    /// via `KV_CLIENT_RPC_BASE - KV_SERVER_GRPC_BASE`), registers all
+    /// client-facing handlers, and stores the server handle in
+    /// `client_rpc_server_state`.
+    ///
+    /// Must be called after [`Self::start_rpc_server`].
+    ///
+    /// # Errors
+    /// Returns an error string if the client-facing crow-rpc port is
+    /// out of range or the server fails to listen on the derived port.
+    pub fn start_client_rpc_server(self: &Arc<Self>, rt: Handle) -> Result<(), String> {
+        {
+            let state = self.client_rpc_server_state.lock();
+            if state.server.is_some() {
+                debug!(
+                    store_id = self.store_id,
+                    "client rpc server start skipped because server is already running"
+                );
+                return Ok(());
+            }
+        }
+
+        // Derive the client-facing crow-rpc port from the actual bound gRPC port.
+        let bound_addr = self
+            .server_state
+            .lock()
+            .listen_addr
+            .ok_or_else(|| "start_client_rpc_server called before gRPC start()".to_string())?;
+        let grpc_port = bound_addr.port();
+        let rpc_port =
+            i32::from(grpc_port) + (i32::from(KV_CLIENT_RPC_BASE) - i32::from(KV_SERVER_GRPC_BASE));
+        if !(1..=65535).contains(&rpc_port) {
+            return Err(format!(
+                "client crow-rpc port {rpc_port} out of range (gRPC port {grpc_port})"
+            ));
+        }
+        let rpc_addr = format!("{}:{}", bound_addr.ip(), rpc_port);
+
+        let server = Arc::new(RpcServer::new(None));
+        server
+            .listen(&bound_addr.ip().to_string(), rpc_port)
+            .map_err(|e| format!("client crow-rpc listen on {rpc_addr}: {e:?}"))?;
+        server.start();
+
+        // Register client-facing handlers.
+        let forwarder = Arc::new(KvClientRpcForwarder::new());
+        let service = Arc::new(KvRpcService::new(self.clone(), rt, forwarder));
+        service.register_handlers(&server);
+
+        {
+            let mut state = self.client_rpc_server_state.lock();
+            state.server = Some(server);
+        }
+
+        info!(
+            store_id = self.store_id,
+            rpc_addr = %rpc_addr,
+            "client crow-rpc server started"
+        );
+        Ok(())
+    }
+
+    /// Stop the client-facing crow-rpc server (R117 migration). Called
+    /// from [`Self::shutdown_server`] or directly for testing.
+    pub(crate) fn stop_client_rpc_server(&self) {
+        let server = {
+            let mut state = self.client_rpc_server_state.lock();
+            state.server.take()
+        };
+        if let Some(server) = server {
+            server.stop();
+            info!(store_id = self.store_id, "client crow-rpc server stopped");
         }
     }
 }

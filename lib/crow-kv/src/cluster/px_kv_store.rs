@@ -28,6 +28,9 @@ pub struct PxKvStore {
     /// crow-rpc server state (R32 migration). Holds the `RpcServer`
     /// handle + the shared `PxRpcTransport` for outbound RPCs.
     pub(crate) rpc_server_state: Mutex<RpcServerState>,
+    /// Client-facing crow-rpc server state (R117 migration). Holds the
+    /// `RpcServer` handle for the client-facing KV service.
+    pub(crate) client_rpc_server_state: Mutex<RpcServerState>,
     /// Set the first time `shutdown()` is invoked. Subsequent calls are no-ops.
     shutdown_started: AtomicBool,
     /// Metrics registry for KV service instrumentation. `None` when
@@ -52,6 +55,7 @@ impl PxKvStore {
             groups: DashMap::new(),
             server_state: Mutex::new(GrpcTaskState::default()),
             rpc_server_state: Mutex::new(RpcServerState::default()),
+            client_rpc_server_state: Mutex::new(RpcServerState::default()),
             listen_addr,
             shutdown_started: AtomicBool::new(false),
             metrics_registry: None,
