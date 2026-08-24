@@ -24,19 +24,22 @@ use crow_protocol::diskdb::rpc::{
     RecalcDiskUsageResponse, Segment, TriggerScanResponse, ZoneAllocationState, ZoneUsage,
 };
 use crow_protocol::diskdb_fb::{
-    FBAllocateBlocksRequest, FBAllocateBlocksRequestArgs, FBAllocateResponse, FBCommitBlocksRequest,
-    FBCommitBlocksRequestArgs, FBCommitBlocksResponse, FBCompactZoneRequest, FBCompactZoneRequestArgs,
-    FBCompactZoneResponse, FBDiskGroupInfo, FBDiskInfo, FBDiskType, FBDiskdbRetCode, FBFreeBlocksRequest,
-    FBFreeBlocksRequestArgs, FBFreeResponse, FBGetDiskGroupInfoRequest, FBGetDiskGroupInfoRequestArgs,
-    FBGetDiskGroupInfoResponse, FBGetDiskInfoRequest, FBGetDiskInfoRequestArgs, FBGetDiskInfoResponse,
-    FBGetScanStatusRequest, FBGetScanStatusRequestArgs, FBGetScanStatusResponse, FBHwStatus, FBInt128,
-    FBQueryCapacityStatsRequest, FBQueryCapacityStatsRequestArgs, FBQueryCapacityStatsResponse,
-    FBRebuildZoneBitmapRequest, FBRebuildZoneBitmapRequestArgs, FBRebuildZoneBitmapResponse,
-    FBRecalcDiskUsageRequest, FBRecalcDiskUsageRequestArgs, FBRecalcDiskUsageResponse, FBScanSummary,
-    FBSegment, FBTriggerScanRequest, FBTriggerScanRequestArgs, FBTriggerScanResponse, FBZoneAllocationState,
-    FBZoneUsage,
+    FBAllocateBlocksRequest, FBAllocateBlocksRequestArgs, FBCommitBlocksRequest, FBCommitBlocksRequestArgs,
+    FBCompactZoneRequest, FBCompactZoneRequestArgs, FBDiskGroupInfo, FBDiskInfo, FBDiskType, FBDiskdbRetCode,
+    FBFreeBlocksRequest, FBFreeBlocksRequestArgs, FBGetDiskGroupInfoRequest, FBGetDiskGroupInfoRequestArgs,
+    FBGetDiskInfoRequest, FBGetDiskInfoRequestArgs, FBGetScanStatusRequest, FBGetScanStatusRequestArgs,
+    FBHwStatus, FBInt128, FBQueryCapacityStatsRequest, FBQueryCapacityStatsRequestArgs,
+    FBRebuildZoneBitmapRequest, FBRebuildZoneBitmapRequestArgs, FBRecalcDiskUsageRequest,
+    FBRecalcDiskUsageRequestArgs, FBScanSummary, FBSegment, FBTriggerScanRequest, FBTriggerScanRequestArgs,
+    FBZoneAllocationState, FBZoneUsage,
 };
 use crow_protocol::fb::FBMsgType;
+use crow_protocol::fb_wrappers::diskdb::{
+    FBAllocateResponseRef, FBCommitBlocksResponseRef, FBCompactZoneResponseRef, FBFreeResponseRef,
+    FBGetDiskGroupInfoResponseRef, FBGetDiskInfoResponseRef, FBGetScanStatusResponseRef,
+    FBQueryCapacityStatsResponseRef, FBRebuildZoneBitmapResponseRef, FBRecalcDiskUsageResponseRef,
+    FBTriggerScanResponseRef,
+};
 use crow_rpc_ffi::{Buffer, Connection, RpcClient, RpcError, RpcServer};
 
 use crate::{DiskdbClientError, Result};
@@ -551,10 +554,12 @@ fn parse_allocate_response(resp: &crow_rpc_ffi::Response) -> Result<AllocateResp
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBAllocateResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid allocate response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let segments: Vec<Segment> = fb
+    let r = FBAllocateResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid allocate response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let segments: Vec<Segment> = r
         .segments()
         .map(|v| {
             v.iter()
@@ -582,11 +587,13 @@ fn parse_free_response(resp: &crow_rpc_ffi::Response) -> Result<FreeResponse> {
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBFreeResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid free response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
+    let r = FBFreeResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid free response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
     Ok(FreeResponse {
-        freed_count: fb.freed_count(),
+        freed_count: r.freed_count(),
     })
 }
 
@@ -597,11 +604,13 @@ fn parse_commit_response(
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBCommitBlocksResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid commit response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
+    let r = FBCommitBlocksResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid commit response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
     Ok(crow_protocol::diskdb::rpc::CommitBlocksResponse {
-        committed_count: fb.committed_count(),
+        committed_count: r.committed_count(),
     })
 }
 
@@ -610,10 +619,12 @@ fn parse_query_capacity_response(resp: &crow_rpc_ffi::Response) -> Result<QueryC
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBQueryCapacityStatsResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid query response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let disk_groups: Vec<crow_protocol::diskdb::rpc::DiskGroupInfo> = fb
+    let r = FBQueryCapacityStatsResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid query response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let disk_groups: Vec<crow_protocol::diskdb::rpc::DiskGroupInfo> = r
         .disk_groups()
         .map(|v| v.iter().map(parse_disk_group_info).collect())
         .unwrap_or_default();
@@ -625,10 +636,14 @@ fn parse_get_disk_group_info_response(resp: &crow_rpc_ffi::Response) -> Result<G
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBGetDiskGroupInfoResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid get_disk_group_info response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let group = fb.group().map(parse_disk_group_info);
+    let r = FBGetDiskGroupInfoResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc(
+            "invalid get_disk_group_info response".into(),
+        ));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let group = r.group().map(parse_disk_group_info);
     Ok(GetDiskGroupInfoResponse { group })
 }
 
@@ -637,10 +652,12 @@ fn parse_get_disk_info_response(resp: &crow_rpc_ffi::Response) -> Result<GetDisk
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBGetDiskInfoResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid get_disk_info response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let disk = fb.disk().map(parse_disk_info);
+    let r = FBGetDiskInfoResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid get_disk_info response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let disk = r.disk().map(parse_disk_info);
     Ok(GetDiskInfoResponse { disk })
 }
 
@@ -649,13 +666,15 @@ fn parse_rebuild_zone_bitmap_response(resp: &crow_rpc_ffi::Response) -> Result<R
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBRebuildZoneBitmapResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid rebuild response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
+    let r = FBRebuildZoneBitmapResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid rebuild response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
     Ok(RebuildZoneBitmapResponse {
-        rebuilt_zone_count: fb.rebuilt_zone_count(),
-        total_busy_units: fb.total_busy_units(),
-        total_free_units: fb.total_free_units(),
+        rebuilt_zone_count: r.rebuilt_zone_count(),
+        total_busy_units: r.total_busy_units(),
+        total_free_units: r.total_free_units(),
     })
 }
 
@@ -664,10 +683,12 @@ fn parse_recalc_response(resp: &crow_rpc_ffi::Response) -> Result<RecalcDiskUsag
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBRecalcDiskUsageResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid recalc response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let results: Vec<crow_protocol::diskdb::rpc::DiskGroupRecalcResult> = fb
+    let r = FBRecalcDiskUsageResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid recalc response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let results: Vec<crow_protocol::diskdb::rpc::DiskGroupRecalcResult> = r
         .results()
         .map(|v| {
             v.iter()
@@ -716,10 +737,12 @@ fn parse_compact_zone_response(resp: &crow_rpc_ffi::Response) -> Result<CompactZ
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBCompactZoneResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid compact response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let zones: Vec<crow_protocol::diskdb::rpc::ZoneCompactionResult> = fb
+    let r = FBCompactZoneResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid compact response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let zones: Vec<crow_protocol::diskdb::rpc::ZoneCompactionResult> = r
         .zones()
         .map(|v| {
             v.iter()
@@ -733,8 +756,8 @@ fn parse_compact_zone_response(resp: &crow_rpc_ffi::Response) -> Result<CompactZ
         })
         .unwrap_or_default();
     Ok(CompactZoneResponse {
-        compacted_zone_count: fb.compacted_zone_count(),
-        total_free_records_deleted: fb.total_free_records_deleted(),
+        compacted_zone_count: r.compacted_zone_count(),
+        total_free_records_deleted: r.total_free_records_deleted(),
         zones,
     })
 }
@@ -744,13 +767,15 @@ fn parse_trigger_scan_response(resp: &crow_rpc_ffi::Response) -> Result<TriggerS
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBTriggerScanResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid trigger_scan response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let summary = fb.summary().map(parse_scan_summary);
+    let r = FBTriggerScanResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid trigger_scan response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let summary = r.summary().map(parse_scan_summary);
     Ok(TriggerScanResponse {
         summary,
-        scan_in_progress: fb.scan_in_progress(),
+        scan_in_progress: r.scan_in_progress(),
     })
 }
 
@@ -759,13 +784,15 @@ fn parse_get_scan_status_response(resp: &crow_rpc_ffi::Response) -> Result<GetSc
         .control
         .as_ref()
         .ok_or_else(|| DiskdbClientError::Rpc("missing control buffer".into()))?;
-    let fb = flatbuffers::root::<FBGetScanStatusResponse>(ctrl.bytes())
-        .map_err(|e| DiskdbClientError::Rpc(format!("invalid get_scan_status response: {e}")))?;
-    check_ret_code(fb.ret_code(), fb.error_msg())?;
-    let summary = fb.summary().map(parse_scan_summary);
+    let r = FBGetScanStatusResponseRef::new(ctrl.bytes());
+    if !r.valid() {
+        return Err(DiskdbClientError::Rpc("invalid get_scan_status response".into()));
+    }
+    check_ret_code(r.ret_code(), r.error_msg())?;
+    let summary = r.summary().map(parse_scan_summary);
     Ok(GetScanStatusResponse {
         summary,
-        has_run: fb.has_run(),
+        has_run: r.has_run(),
     })
 }
 

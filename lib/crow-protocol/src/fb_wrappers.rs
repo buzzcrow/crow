@@ -8,6 +8,7 @@
 //! pointer — no per-field copy, no owned intermediate struct.
 
 pub mod chunkdb;
+pub mod diskdb;
 pub mod kv_client;
 pub mod kv_consensus;
 
