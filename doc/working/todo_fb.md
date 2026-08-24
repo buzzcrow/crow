@@ -224,53 +224,12 @@ R116 (chunkdb) — NEXT. Checklist status per item:
 
 ## Open Issues (deferred to follow-up items)
 
-- **R115 zero-copy wrappers** → **RESOLVED**: Retrofitted zero-copy
-  `FB<Type>Ref` wrappers onto `DiskdbRpcTransport`. Created
-  `lib/crow-protocol/src/fb_wrappers/diskdb.rs` (11 wrapper structs
-  for all diskdb response types, mirroring R117's `kv_client.rs`
-  pattern). Updated `rpc_transport.rs` to use
-  `FBAllocateResponseRef::new(buf)` etc. instead of
-  `flatbuffers::root::<FB<Type>>`. R116 followed R117's pattern from
-  the start (no retrofit needed).
-
 - **R115 mixed-rollout cutover** → **still open (applies to R115,
   R117, and future R116)**: Both gRPC and crow-rpc servers run
   simultaneously. The client selects transport via
   `with_rpc_transport()`. No config-based toggle yet — callers must
   explicitly enable crow-rpc. The gRPC server is not yet removed
   from any service.
-
-- **R114 client handler dispatch E2E gap** → **RESOLVED**: Fixed the
-  `client_handler_dispatch_via_server_chain` test to actually send
-  the NOTIFY request via `request_client.call_to_handle()` using the
-  raw `req.conn_handle`. The test now verifies the full
-  server→client→server roundtrip: PING → server handler → NOTIFY to
-  client → client NOTIFY handler fires → ack → server receives ack.
-  Also added `notify_handler_fired` AtomicBool to verify the client
-  handler actually executed.
-
-- **R114 server→client send FFI gap** → **RESOLVED by R32 + FFI
-  fix**: R32 added `Connection::from_handle(raw)`, but
-  `Connection::from_handle` + `RpcClient::send`/`call` was
-  type-confused: the handler's `conn_handle` is a raw `Connection*`
-  (C++), but `crow_rpc_client_send` expects a `crow_rpc_conn_s*`
-  (which wraps `shared_ptr<Connection>`). Passing a `Connection*`
-  where `crow_rpc_conn_s*` is expected dereferences invalid memory
-  (SIGSEGV). **Fix**: added `crow_rpc_client_send_conn` C ABI
-  function that takes `void *conn_handle` (raw `Connection*`) and
-  calls `RpcClient::send` directly. Added Rust
-  `RpcClient::send_to_handle`/`call_to_handle` methods. Fixed R117's
-  production code (`send_watch_notify_error` + `CrowRpcPushTarget`)
-  to use `send_to_handle`. This was a latent segfault bug in R117's
-  WatchNotify push path — it would have crashed on the first
-  server→client send.
-
-- **R114 server→client timeout test missing** → **RESOLVED**: Added
-  `server_to_client_timeout_no_handler` test: server sends a request
-  with a msg_type the client has no handler for (and no transport
-  set, so the frame is dropped). The `request_client`'s reaper
-  (300ms timeout, 50ms scan) times out the pending entry. The test
-  verifies the `CallFuture` resolves with `Err(RpcError::Timeout)`.
 
 - **R114 `fail_all` is all-or-nothing** → **still open; flagged as
   R117's scope but R117 did not address it**: `fail_all(
