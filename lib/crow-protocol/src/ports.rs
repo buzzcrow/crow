@@ -21,6 +21,9 @@
 //!   stride 2; instance `i` uses gRPC `9971 + 2i`, HTTP `9972 + 2i`)
 //! - `28001`–`28200` — crow-kv-server gRPC `PxKvStore` listener pool
 //!   (stride 1)
+//! - `28101`–`28300` — crow-kv-server crow-rpc consensus listener (R32
+//!   migration, stride 1; inter-KV-server only. R117 adds a separate
+//!   client-facing port)
 //!
 //! Future service types (diskio, …) should pick a base
 //! outside these ranges and document it here.
@@ -30,6 +33,13 @@ pub const KV_SERVER_MGMT_BASE: u16 = 9910;
 
 /// crow-kv-server gRPC `PxKvStore` listener — base port (port pool).
 pub const KV_SERVER_GRPC_BASE: u16 = 28001;
+
+/// crow-kv-server crow-rpc consensus listener — base port (R32
+/// migration). Separate from the gRPC port so both servers run
+/// simultaneously during the mixed-rollout window. Inter-KV-server
+/// only (replica-to-replica Paxos). R117 adds a separate client-facing
+/// port. Stride 1 (one port per instance).
+pub const KV_RPC_BASE: u16 = 28101;
 
 /// crow-diskdb gRPC listener — base port.
 pub const DISKDB_GRPC_BASE: u16 = 9941;
@@ -63,6 +73,8 @@ pub enum ServicePort {
     KvServerMgmt,
     /// crow-kv-server gRPC — `PxKvStore` listener (port pool).
     KvServerGrpc,
+    /// crow-kv-server crow-rpc consensus listener (R32 migration).
+    KvServerRpc,
     /// crow-diskdb gRPC listener.
     DiskdbGrpc,
     /// crow-diskdb HTTP management API.
@@ -82,6 +94,7 @@ impl ServicePort {
         match self {
             Self::KvServerMgmt => KV_SERVER_MGMT_BASE,
             Self::KvServerGrpc => KV_SERVER_GRPC_BASE,
+            Self::KvServerRpc => KV_RPC_BASE,
             Self::DiskdbGrpc => DISKDB_GRPC_BASE,
             Self::DiskdbHttp => DISKDB_HTTP_BASE,
             Self::ChunkdbGrpc => CHUNKDB_GRPC_BASE,
@@ -95,7 +108,7 @@ impl ServicePort {
     #[must_use]
     pub const fn stride(self) -> u16 {
         match self {
-            Self::KvServerMgmt | Self::KvServerGrpc | Self::Web => 1,
+            Self::KvServerMgmt | Self::KvServerGrpc | Self::KvServerRpc | Self::Web => 1,
             // diskdb and chunkdb use paired ports (gRPC + HTTP); each
             // instance consumes two consecutive ports.
             Self::DiskdbGrpc | Self::DiskdbHttp | Self::ChunkdbGrpc | Self::ChunkdbHttp => 2,

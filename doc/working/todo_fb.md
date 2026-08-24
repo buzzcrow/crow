@@ -88,15 +88,27 @@ R116 (ChunkdbService — after chunk-layer refactor stabilizes)
 
 Rationale:
 - R115 done — validated the full `.fbs` conversion approach +
-  zero-copy wrapper convention + error mapping + mixed rollout.
+  error mapping + mixed rollout. (Zero-copy wrapper convention
+  deferred — R115 parses into owned proto types; R32 implements
+  zero-copy properly, R115 retrofit is a follow-up — see Open
+  Issues.)
 - R114 done — bidirectional request-response (server can send
   requests, client can handle requests) + `RequestIdGen` in
-  `crow-common`. Unblocks R32 and R117.
+  `crow-common`. Unblocks R32 and R117. (Server→client send FFI gap
+  + E2E test gap + timeout test — carried as open issues, resolved
+  by R32 work item 7 — see Open Issues.)
 - R32 next — highest perf value (recovers the ~17% h2-lock loss);
-  R115 has proven the unary pattern.
-- R117 after R32 — reuses the `kv_rpc.fbs` schema sub-range +
-  `NotLeaderHint` flatbuffer model validated by R32. Also needs
-  R114's server→client request path for WatchNotify.
+  R115 has proven the unary pattern. Open questions resolved (see
+  R32 doc § Resolved Questions): `kv_consensus.fbs` schema,
+  zero-copy wrappers, `LearnerStream` as persistent-connection
+  request-response (not R114 bidi), separate consensus + client
+  ports, R32 resolves the R114 server→client send FFI gap to
+  unblock R117.
+- R117 after R32 — reuses the `kv_consensus.fbs` schema sub-range
+  split (R32: 1000-1099, R117: 1100-1199) + `NotLeaderHint`
+  flatbuffer model + zero-copy wrapper pattern validated by R32.
+  Also needs R32's `Connection::from_handle` FFI helper for
+  WatchNotify server-push.
 - R116 last — blocked on the chunk-layer refactor anyway (R113),
   and chunkdb is the newest service with the least production
   exposure.
@@ -121,10 +133,10 @@ files. The keepalive struct `with_grpc_endpoint` →
 in `crow-kv-client/src/ffi.rs` + `c_api.h` (no ABI change — it's a
 `*const c_char` either way).
 
-### 3. `msg_type.fbs` sub-range coordination
+### 3. `msg_type.fbs` sub-range coordination — DECIDED (R32)
 
-R32 and R117 both use the 1000s range (KV). Decide the sub-range
-split once (in R32, since it lands first) and reference it in R117:
+R32 and R117 both use the 1000s range (KV). Sub-range split decided
+in R32 (lands first), referenced in R117:
 
 - Consensus (R32): 1000–1099
 - Client-facing (R117): 1100–1199
@@ -189,7 +201,13 @@ Without them, "no regression" is unmeasurable. Capture in
   response). The design doc's "no owned intermediate struct" rule is
   violated for the client side — acceptable during the mixed-rollout
   window but should be addressed in a follow-up that switches the
-  client to use flatbuffer views directly.
+  client to use flatbuffer views directly. **Follow-up task
+  (post-R32)**: retrofit zero-copy `FB<Type>Ref` wrappers onto
+  `DiskdbRpcTransport` (`lib/crow-diskdb-client/src/rpc_transport.rs`),
+  mirroring R32's `lib/crow-protocol/src/fb_wrappers/kv_consensus.rs`
+  pattern. R32 establishes the wrapper convention properly; R115's
+  client transport should be brought in line once R32's wrappers are
+  proven on the hot path.
 - **R115 mixed-rollout cutover**: Both gRPC and crow-rpc servers run
   simultaneously. The client selects transport via
   `with_rpc_transport()`. No config-based toggle yet — callers must
@@ -203,22 +221,29 @@ Without them, "no regression" is unmeasurable. Capture in
   `conn_handle` pointer. The test only verifies the PING→ack path
   (already covered by `server_dispatch_handler_first_order`). The
   client's `dispatch_request` path (server sends request → client
-  handler fires → client acks) needs a proper E2E test. Blocked on
-  the FFI gap below.
-- **R114 server→client send FFI gap**: `RpcClient::send()` takes
-  `&Connection` (a Rust wrapper), but a server-side handler only has
-  the raw `conn_handle` (`*mut c_void`) from `ServerRequest`. There
-  is no FFI helper to send a request from a raw `conn_handle`. R117
-  will need either a `send_raw(server, conn_handle, ...)` FFI method
-  or a way to reconstruct a `Connection` wrapper from the raw
-  pointer. Without this, the server cannot initiate requests to the
-  client from within a handler.
+  handler fires → client acks) needs a proper E2E test. **Unblocked
+  by R32 work item 7** (the `Connection::from_handle` FFI helper) —
+  re-add the test once R32 lands the helper.
+- **R114 server→client send FFI gap** → **resolved by R32 work item
+  7**: `RpcClient::send()` takes `&Connection` (a Rust wrapper), but
+  a server-side handler only has the raw `conn_handle` (`*mut c_void`)
+  from `ServerRequest`. R32 adds a `Connection::from_handle(raw)`
+  constructor in `lib/crow-rpc/ffi/src/server.rs` — `Connection` is
+  already a trivial wrapper around `sys::crow_rpc_conn_t` with a
+  no-op `Drop` (the transport owns the connection), so constructing
+  one from the raw pointer is safe and lets a server-side handler
+  call `RpcClient::call()`/`send()`. R32 itself does not need it
+  (LearnerStream's server side only sends responses via
+  `submit_response`), but R32 resolves it to unblock R117's
+  WatchNotify and the R114 E2E test above. Do not leave it as an R114
+  carry-over.
 - **R114 server→client timeout test missing**: The
   `server_to_client_timeout_no_handler` test (client doesn't ack,
   reaper times out) was dropped during the dispatch-order fix. The
   timeout/error path for server-initiated requests is untested.
-  Should be re-added once the send-FFI gap is resolved (the test
-  needs the server to actually send a request to the client).
+  **Unblocked by R32 work item 7** — re-add once the
+  `Connection::from_handle` helper lands and the server can actually
+  send a request to the client.
 - **R114 `fail_all` is all-or-nothing**: `fail_all(ConnectionClosed)`
   fires for ALL pending entries on the `request_client_`, not
   per-connection. Fine for R114's single-connection test scope, but

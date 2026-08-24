@@ -34,8 +34,15 @@ pub use generated::*;
 
 mod kv_response;
 pub(crate) mod kv_service;
+pub(crate) mod px_rpc_service;
+pub(crate) mod px_rpc_transport;
 pub(crate) mod px_service;
 pub(crate) mod snapshot_service;
+#[allow(unused_imports)]
 pub(crate) use kv_service::KvStoreService;
+#[allow(unused_imports)]
+pub(crate) use px_rpc_service::PxRpcService;
+#[allow(unused_imports)]
+pub(crate) use px_rpc_transport::PxRpcTransport;
 pub(crate) use px_service::PxReplicaService;
 pub(crate) use snapshot_service::PxSnapshotService;

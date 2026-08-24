@@ -236,6 +236,17 @@ impl Connection {
     pub fn handle(&self) -> sys::crow_rpc_conn_t {
         self.handle
     }
+
+    /// Construct a `Connection` wrapper from a raw `conn_handle`
+    /// obtained from `ServerRequest` (R32: unblocks R117's server→
+    /// client send path). The connection is owned by the transport;
+    /// this wrapper is a borrow (no-op `Drop`). Safe to use for the
+    /// duration of the handler's async work (the transport keeps the
+    /// connection alive until it drops).
+    #[must_use]
+    pub fn from_handle(handle: sys::crow_rpc_conn_t) -> Self {
+        Self { handle }
+    }
 }
 
 impl Drop for Connection {

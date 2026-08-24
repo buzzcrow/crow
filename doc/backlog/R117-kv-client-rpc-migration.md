@@ -99,8 +99,8 @@ C ABI and protocol semantics.
    endpoint + membership epoch) is a field in the response table
    (same as R32's consensus responses). Register message type IDs
    in the 1000s range in `msg_type.fbs` (shared with R32's
-   consensus messages — coordinate the sub-range split, e.g.
-   consensus 1000-1099, client 1100-1199). Files:
+   consensus messages — R32 takes 1000-1099, R117 takes 1100-1199).
+   Files:
    `lib/crow-protocol/src/fbs/kv_client.fbs` (new),
    `lib/crow-protocol/src/fbs/msg_type.fbs`,
    `lib/crow-protocol/build.rs`, `lib/crow-protocol/src/lib.rs`.
@@ -212,7 +212,7 @@ Client                              Server
 - **Depends on**: R104 (crow-rpc — finished), **R114** (streaming
   support — for `WatchNotify`), **R32** (consensus migration —
   validates the `NotLeaderHint` flatbuffer error model on the KV
-  path and establishes the `kv_rpc.fbs` schema sub-range). R32
+  path and establishes the `kv_consensus.fbs` schema sub-range). R32
   should land first to validate the KV-specific migration pattern.
 - **Depended on by**: nothing (terminal migration item).
 

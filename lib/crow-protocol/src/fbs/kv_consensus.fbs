@@ -1,0 +1,305 @@
+include "common_type.fbs";
+
+namespace crow.kv_consensus.proto;
+
+// KV consensus service flatbuffer control messages (R32: gRPC →
+// crow-rpc migration). Mirrors pxos.proto (PxService + SnapshotService).
+//
+// Conventions (design-crow-rpc.md §6, todo_fb.md "Rules to Follow"):
+// - Every request/response table carries `id` (request_id, matched by
+//   the RPC framework) + `rpc_create_nano` (creation timestamp in ns)
+//   as its first two fields, same as diskio.fbs / diskdb.fbs.
+// - Every response carries `ret_code` (FBKvRetCode) + optional
+//   `error_msg`. On Success the data fields are populated; on error
+//   the data fields are empty and `error_msg` describes the failure.
+// - `NotLeaderHint` is NOT a separate message — it is fields on the
+//   response tables (`term`, `term_stale`, `membership_epoch`,
+//   `epoch_mismatch`). The client reads these to detect stale leader
+//   / epoch mismatch and redirects accordingly.
+// - Each frame type within the LearnerStream has its own msg_type
+//   (EAcceptRequest, EChosenNotification, etc.) — no union wrapper.
+//   The persistent connection carries a mix of msg_types; the server
+//   dispatches each frame independently.
+
+// ── Return codes ─────────────────────────────────────────────────
+enum FBKvRetCode : int16 {
+    Success = 0,
+    NotFound = 1,
+    Unavailable = 2,
+    Internal = 3,
+    InvalidArgument = 4,
+}
+
+// ── Dedup tag (R36: inline struct, two uint64 fields) ────────────
+struct FBDedupTag {
+    client_id:uint64;
+    seq:uint64;
+}
+
+// ── Accepted value (table — has a payload vector) ────────────────
+table FBAcceptedValue {
+    slot:uint64;
+    round:uint64;
+    leader_id:uint64;
+    term:uint64;
+    payload:[ubyte];
+}
+
+// ── Prepare / Promise (Paxos Phase 1) ────────────────────────────
+
+table FBPrepareRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    slot:uint64;
+    round:uint64;
+    leader_id:uint64;
+    term:uint64;
+    group_id:uint64;
+    membership_epoch:uint64;
+}
+
+table FBPromiseResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    version:uint32;
+    slot:uint64;
+    round:uint64;
+    leader_id:uint64;
+    previously_accepted:FBAcceptedValue;
+    rejected:bool;
+    rejected_round:uint64;
+    rejected_leader_id:uint64;
+    term:uint64;
+    term_stale:bool;
+    membership_epoch:uint64;
+    epoch_mismatch:bool;
+}
+
+// ── Accept / Accepted (Paxos Phase 2) ────────────────────────────
+
+table FBAcceptRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    slot:uint64;
+    round:uint64;
+    leader_id:uint64;
+    term:uint64;
+    value:FBAcceptedValue;
+    // Legacy single dedup tag (fields 9/10 in proto). Kept for
+    // backward-compat with older followers during rolling upgrade.
+    client_id:uint64;
+    seq:uint64;
+    group_id:uint64;
+    membership_epoch:uint64;
+    // R36: one (client_id, seq) dedup tag per coalesced client op.
+    dedup_tags:[FBDedupTag];
+}
+
+table FBAcceptedResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    version:uint32;
+    slot:uint64;
+    round:uint64;
+    leader_id:uint64;
+    rejected:bool;
+    rejected_round:uint64;
+    rejected_leader_id:uint64;
+    term:uint64;
+    term_stale:bool;
+    membership_epoch:uint64;
+    epoch_mismatch:bool;
+}
+
+// ── Leader election (P1 M3) ──────────────────────────────────────
+
+table FBPreVoteRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    term:uint64;
+    candidate_id:uint64;
+    accepted_log_tip_slot:uint64;
+    accepted_log_tip_term:uint64;
+}
+
+table FBPreVoteResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    version:uint32;
+    group_id:uint64;
+    term:uint64;
+    granted:bool;
+    contiguous_chosen:uint64;
+    last_chosen_term:uint64;
+    highest_seen_slot:uint64;
+}
+
+table FBRequestVoteRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    term:uint64;
+    candidate_id:uint64;
+    accepted_log_tip_slot:uint64;
+    accepted_log_tip_term:uint64;
+}
+
+table FBRequestVoteResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    version:uint32;
+    group_id:uint64;
+    term:uint64;
+    granted:bool;
+    contiguous_chosen:uint64;
+    last_chosen_term:uint64;
+    highest_seen_slot:uint64;
+}
+
+// ── Heartbeat ────────────────────────────────────────────────────
+
+table FBHeartbeatRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    term:uint64;
+    leader_id:uint64;
+    prev_log_slot:uint64;
+    prev_log_term:uint64;
+    committed_safe_slot:uint64;
+    lease_grant_until_ms_mono:uint64;
+    t_send_ms_mono:uint64;
+}
+
+table FBHeartbeatResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    version:uint32;
+    group_id:uint64;
+    term:uint64;
+    success:bool;
+    contiguous_chosen:uint64;
+    last_chosen_term:uint64;
+    contiguous_applied:uint64;
+    highest_seen_slot:uint64;
+    durable_snapshot_slot:uint64;
+}
+
+// ── StepDown (admin) ─────────────────────────────────────────────
+
+table FBStepDownRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    term:uint64;
+    target_leader_id:uint64;
+    reason:string;
+}
+
+table FBStepDownResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    version:uint32;
+    group_id:uint64;
+    accepted:bool;
+    current_term:uint64;
+    current_leader_id:uint64;
+}
+
+// ── ChosenNotification (fire-and-forget, no response) ────────────
+
+table FBChosenNotification {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    slot:uint64;
+    term:uint64;
+    leader_id:uint64;
+    ballot_round:uint64;
+}
+
+table FBBatchChosenNotification {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    start_slot:uint64;
+    end_slot:uint64;
+    term:uint64;
+    leader_id:uint64;
+    ballot_round:uint64;
+}
+
+// ── FetchGap (R65: follower-driven catch-up) ─────────────────────
+
+table FBFetchGapRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    slot:uint64;
+    term:uint64;
+    leader_id:uint64;
+}
+
+table FBFetchGapResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    version:uint32;
+    group_id:uint64;
+    slot:uint64;
+    term:uint64;
+    ballot_round:uint64;
+    leader_id:uint64;
+    payload:[ubyte];
+}
+
+// ── Snapshot (new-member install) ────────────────────────────────
+// Single-frame response: header info in the control buffer (this
+// table), full exported bytes in the frame's data buffer. The server
+// configures a larger max_data_size (64 MiB) to accommodate large
+// snapshots. If the snapshot exceeds the limit, the join fails with
+// a clear error.
+
+table FBSnapshotRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    group_id:uint64;
+}
+
+table FBSnapshotResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvRetCode;
+    error_msg:string;
+    group_id:uint64;
+    // Term of the log entry chosen at the snapshot's at_slot.
+    term_at_slot:uint64;
+    // Exporting replica's current membership_epoch.
+    membership_epoch:uint64;
+    // The slot covered by the snapshot (returned by snapshot_import
+    // on the server side; echoed here so the client can verify).
+    at_slot:uint64;
+}

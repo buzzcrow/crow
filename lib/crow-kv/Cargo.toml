@@ -43,6 +43,8 @@ pin-project-lite = { workspace = true }
 crow-common = { workspace = true }
 crow-protocol = { path = "../crow-protocol", features = ["schema"] }
 crow-tree-ffi = { path = "../crow-tree/ffi" }
+crow-rpc-ffi = { path = "../crow-rpc/ffi" }
+flatbuffers = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.12"
