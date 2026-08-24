@@ -17,7 +17,7 @@ async fn integration_accept_preemption_then_ballot_bump_retry() {
         .filter(|n| n.get_group(1).expect("group exists").local_replica().id != 0)
         .take(3)
     {
-        let mut client = cluster.px_client(node).await;
+        let client = cluster.px_client(node).await;
         let resp = client
             .prepare(PrepareRequest {
                 version: 1,

@@ -11,7 +11,7 @@ use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetReque
 async fn kv_mutations_apply_to_all_learners() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     // Put k1=v1
     let resp = client

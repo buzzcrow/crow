@@ -13,11 +13,10 @@ use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::{KvServer, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 use crow_kv::common::config::PxElectionConfig;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
-use tonic::transport::Channel;
 
 use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::test_client::TestKvClient;
 
 async fn wait_for_leader_in_group(cluster: &TestCluster, group_id: u64, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -34,13 +33,7 @@ async fn wait_for_leader_in_group(cluster: &TestCluster, group_id: u64, timeout:
     None
 }
 
-async fn put_to_group(
-    client: &mut KvServiceClient<Channel>,
-    group_id: u64,
-    key: &[u8],
-    val: &[u8],
-    req_id: u64,
-) -> bool {
+async fn put_to_group(client: &mut TestKvClient, group_id: u64, key: &[u8], val: &[u8], req_id: u64) -> bool {
     let resp = client
         .put(KvSetRequest {
             version: 1,
@@ -59,7 +52,7 @@ async fn put_to_group(
     resp.ok
 }
 
-async fn get_from_group(client: &mut KvServiceClient<Channel>, group_id: u64, key: &[u8]) -> Option<Vec<u8>> {
+async fn get_from_group(client: &mut TestKvClient, group_id: u64, key: &[u8]) -> Option<Vec<u8>> {
     let resp = client
         .get(KvGetRequest {
             version: 1,

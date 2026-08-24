@@ -6,11 +6,11 @@
 mod common;
 
 use bytes::Bytes;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvSetRequest};
 use serde_json::Value;
 
 use common::process::{start_test_server, ServerHandle};
+use common::test_client::TestKvClient;
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()
@@ -99,16 +99,12 @@ enum KvOp {
 /// aggressive `test` election profile while tolerating transient leader
 /// churn on the same physical host.
 async fn run_kv_op_with_retry(nodes: &[ServerNode], group_id: u64, op: &KvOp) -> crow_kv::rpc::KvResponse {
-    use crow_kv::rpc::kv_service_client::KvServiceClient;
-
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut last_err = String::new();
     while std::time::Instant::now() < deadline {
         let leader_idx = wait_for_leader(nodes, group_id, std::time::Duration::from_secs(10)).await;
         let addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-        let mut client = KvServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect to leader");
+        let client = TestKvClient::connect(format!("http://{addr}")).await;
         let result = match op {
             KvOp::Put(req) => client.put(req.clone()).await,
             KvOp::Get(req) => client.get(req.clone()).await,
@@ -392,9 +388,7 @@ async fn e2e_follower_returns_not_leader_hint() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    let mut kv = KvServiceClient::connect(format!("http://{follower_addr}"))
-        .await
-        .expect("connect to follower");
+    let kv = TestKvClient::connect(format!("http://{follower_addr}")).await;
 
     let resp = kv
         .put(KvSetRequest {
@@ -486,9 +480,7 @@ async fn e2e_dynamic_group_management() {
 
     let leader_idx = wait_for_leader(&nodes, group_id, std::time::Duration::from_secs(20)).await;
     let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-    let mut kv = KvServiceClient::connect(format!("http://{leader_addr}"))
-        .await
-        .unwrap();
+    let kv = TestKvClient::connect(format!("http://{leader_addr}")).await;
     let resp = kv
         .put(KvSetRequest {
             version: 1,
@@ -588,13 +580,7 @@ async fn remove_remote_replica(target: &ServerNode, group_id: u64, replica_id: u
     );
 }
 
-async fn kv_put(
-    kv: &mut KvServiceClient<tonic::transport::Channel>,
-    group_id: u64,
-    key: &[u8],
-    value: &[u8],
-    req_id: u64,
-) -> bool {
+async fn kv_put(kv: &TestKvClient, group_id: u64, key: &[u8], value: &[u8], req_id: u64) -> bool {
     let resp = kv
         .put(KvSetRequest {
             version: 1,
@@ -617,12 +603,7 @@ async fn kv_put(
 /// Returns `(found, value)`. `found=false` means `not_found=true` from
 /// the server (the `kv_get` contract returns `ok=false, not_found=true`
 /// for a missing key — see `PxKvStore::kv_get`).
-async fn kv_get(
-    kv: &mut KvServiceClient<tonic::transport::Channel>,
-    group_id: u64,
-    key: &[u8],
-    req_id: u64,
-) -> (bool, Vec<u8>) {
+async fn kv_get(kv: &TestKvClient, group_id: u64, key: &[u8], req_id: u64) -> (bool, Vec<u8>) {
     let resp = kv
         .get(KvGetRequest {
             version: 1,
@@ -648,12 +629,7 @@ async fn kv_get(
     }
 }
 
-async fn kv_delete(
-    kv: &mut KvServiceClient<tonic::transport::Channel>,
-    group_id: u64,
-    key: &[u8],
-    req_id: u64,
-) {
+async fn kv_delete(kv: &TestKvClient, group_id: u64, key: &[u8], req_id: u64) {
     let resp = kv
         .delete(KvDeleteRequest {
             version: 1,
@@ -671,7 +647,7 @@ async fn kv_delete(
 }
 
 async fn kv_get_until(
-    kv: &mut KvServiceClient<tonic::transport::Channel>,
+    kv: &TestKvClient,
     group_id: u64,
     key: &[u8],
     req_id: u64,
@@ -931,13 +907,11 @@ async fn e2e_kv_after_dynamic_replica_change() {
     )
     .await;
     let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-    let mut kv = KvServiceClient::connect(format!("http://{leader_addr}"))
-        .await
-        .expect("connect leader");
+    let kv = TestKvClient::connect(format!("http://{leader_addr}")).await;
 
     // Pre-add KV.
-    kv_put(&mut kv, group_id, b"k1", b"v1", 6001).await;
-    let (found, v) = kv_get(&mut kv, group_id, b"k1", 6011).await;
+    kv_put(&kv, group_id, b"k1", b"v1", 6001).await;
+    let (found, v) = kv_get(&kv, group_id, b"k1", 6011).await;
     assert!(found);
     assert_eq!(v, b"v1");
 
@@ -959,19 +933,17 @@ async fn e2e_kv_after_dynamic_replica_change() {
     )
     .await;
     let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-    let mut kv = KvServiceClient::connect(format!("http://{leader_addr}"))
-        .await
-        .expect("reconnect after add");
+    let kv = TestKvClient::connect(format!("http://{leader_addr}")).await;
 
     // Post-add KV: pre-add value still readable (Arc-shared learner), and
     // a new write commits successfully against the (now 5-replica) quorum.
-    let (found, v) = kv_get(&mut kv, group_id, b"k1", 6021).await;
+    let (found, v) = kv_get(&kv, group_id, b"k1", 6021).await;
     assert!(
         found,
         "k1 must survive add_remote (Arc-shared PxLearner across rebuild)"
     );
     assert_eq!(v, b"v1");
-    kv_put(&mut kv, group_id, b"k2", b"v2", 6101).await;
+    kv_put(&kv, group_id, b"k2", b"v2", 6101).await;
 
     // Dynamically remove nodes[0] and nodes[1] from the (2,3,4) members'
     // view, AND remove (2,3,4) from nodes[0,1]'s view so the old leader
@@ -991,14 +963,12 @@ async fn e2e_kv_after_dynamic_replica_change() {
     )
     .await;
     let leader_addr = node_endpoint(&topology(&nodes[2 + leader_idx]).await);
-    let mut kv = KvServiceClient::connect(format!("http://{leader_addr}"))
-        .await
-        .expect("reconnect after remove");
+    let kv = TestKvClient::connect(format!("http://{leader_addr}")).await;
 
     // Post-remove KV: previous writes still readable, delete + re-write
     // commit through the smaller quorum.
     let (found, v) = kv_get_until(
-        &mut kv,
+        &kv,
         group_id,
         b"k2",
         6201,
@@ -1008,9 +978,9 @@ async fn e2e_kv_after_dynamic_replica_change() {
     .await;
     assert!(found);
     assert_eq!(v, b"v2");
-    kv_delete(&mut kv, group_id, b"k1", 6301).await;
+    kv_delete(&kv, group_id, b"k1", 6301).await;
     let (found, _) = kv_get_until(
-        &mut kv,
+        &kv,
         group_id,
         b"k1",
         6311,
@@ -1019,5 +989,5 @@ async fn e2e_kv_after_dynamic_replica_change() {
     )
     .await;
     assert!(!found, "k1 must be gone after delete");
-    kv_put(&mut kv, group_id, b"k3", b"v3", 6401).await;
+    kv_put(&kv, group_id, b"k3", b"v3", 6401).await;
 }

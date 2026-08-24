@@ -8,15 +8,11 @@
 //! empty value. All verified via `engine_get` on all replicas.
 
 use crate::common::cluster::{start_cluster, TestCluster};
+use crate::common::test_client::TestKvClient;
 use bytes::Bytes;
 use crow_kv::rpc::KvSetRequest;
 
-async fn put_raw(
-    client: &mut crow_kv::rpc::kv_service_client::KvServiceClient<tonic::transport::Channel>,
-    key: &[u8],
-    val: &[u8],
-    req_id: u64,
-) {
+async fn put_raw(client: &mut TestKvClient, key: &[u8], val: &[u8], req_id: u64) {
     let resp = client
         .put(KvSetRequest {
             version: 1,

@@ -12,7 +12,7 @@
 //!   server's dedup cache can do its job.
 //! - **`ReadMode` routing**, including client-side `MinSlot` slot
 //!   tracking (a bounded per-group high-watermark, not per-key).
-//! - A per-endpoint `tonic::Channel` pool.
+//! - A per-endpoint connection pool (crow-rpc).
 //!
 //! `crow-console` is expected to depend on this crate rather than rolling
 //! its own gRPC client.
@@ -28,7 +28,6 @@ mod hardware;
 mod kv_cluster;
 mod kv_rpc_transport;
 mod metrics;
-mod pool;
 mod range_binding;
 mod service_registry;
 mod space_usage;

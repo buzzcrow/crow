@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Common protobuf definitions for CROW components (diskdb, chunkdb, diskio; crow-kv protos stay in crow-kv)."
+description = "Common flatbuffer schemas and wire types for CROW components (diskdb, chunkdb, diskio, kv)."
 autobenches = false
 
 [features]

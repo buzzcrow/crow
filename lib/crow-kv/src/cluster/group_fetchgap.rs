@@ -64,12 +64,8 @@ pub(crate) async fn run_fetchgap_driver(
             );
             continue;
         }
-        // Clone the learner stream Arc so the spawned task can send
-        // FetchGap without holding a reference to the group.
-        let stream = remote.learner_stream().clone();
-        // R32: if the crow-rpc transport is set, clone it + the endpoint
-        // so the spawned task can call `transport.send_fetch_gap()`
-        // directly instead of going through the gRPC LearnerStream.
+        // Clone the crow-rpc transport + endpoint so the spawned task
+        // can call `transport.send_fetch_gap()` directly.
         let rpc_transport = remote.rpc_transport().cloned();
         let rpc_endpoint = remote.endpoint_str().to_string();
         let rpc_timeout = Duration::from_millis(group.config.election.learner_stream_rpc_timeout_ms);
@@ -96,7 +92,6 @@ pub(crate) async fn run_fetchgap_driver(
             .map(|h| h.fetchgap_failed.clone());
         // Spawn a task per gap to send FetchGap concurrently.
         for slot in gaps {
-            let stream_clone = stream.clone();
             let rpc_transport_clone = rpc_transport.clone();
             let rpc_endpoint_clone = rpc_endpoint.clone();
             let rpc_timeout_clone = rpc_timeout;
@@ -108,41 +103,26 @@ pub(crate) async fn run_fetchgap_driver(
             let fetchgap_received_clone = fetchgap_received.clone();
             let fetchgap_failed_clone = fetchgap_failed.clone();
             tokio::spawn(async move {
-                // R32: prefer crow-rpc transport when available; fall
-                // back to gRPC LearnerStream otherwise.
-                let result = if let Some(ref transport) = rpc_transport_clone {
-                    tokio::time::timeout(
-                        rpc_timeout_clone,
-                        transport.send_fetch_gap(&rpc_endpoint_clone, group_id, slot, term, leader_id),
-                    )
-                    .await
-                    .map_err(|_| {
-                        crate::cluster::replica::PxReplicaError::Internal(format!(
-                            "fetch_gap rpc timeout after {} ms at peer {}",
-                            rpc_timeout_clone.as_millis(),
-                            rpc_endpoint_clone
-                        ))
-                    })
-                    .and_then(|r| r)
-                } else {
-                    let req = crate::rpc::FetchGapRequest {
-                        version: 1,
-                        group_id,
-                        slot,
-                        term,
-                        leader_id,
-                    };
-                    stream_clone.send_fetch_gap(req).await.map(|resp| {
-                        crate::cluster::replica::FetchGapReply {
-                            group_id: resp.group_id,
-                            slot: resp.slot,
-                            term: resp.term,
-                            ballot_round: resp.ballot_round,
-                            leader_id: resp.leader_id,
-                            payload: bytes::Bytes::from(resp.payload),
-                        }
-                    })
+                let Some(ref transport) = rpc_transport_clone else {
+                    fetchgap_inflight_clone.fetch_sub(1, Ordering::AcqRel);
+                    if let Some(c) = &fetchgap_failed_clone {
+                        c.inc();
+                    }
+                    return;
                 };
+                let result = tokio::time::timeout(
+                    rpc_timeout_clone,
+                    transport.send_fetch_gap(&rpc_endpoint_clone, group_id, slot, term, leader_id),
+                )
+                .await
+                .map_err(|_| {
+                    crate::cluster::replica::PxReplicaError::Internal(format!(
+                        "fetch_gap rpc timeout after {} ms at peer {}",
+                        rpc_timeout_clone.as_millis(),
+                        rpc_endpoint_clone
+                    ))
+                })
+                .and_then(|r| r);
                 fetchgap_inflight_clone.fetch_sub(1, Ordering::AcqRel);
                 match result {
                     Ok(resp) => {

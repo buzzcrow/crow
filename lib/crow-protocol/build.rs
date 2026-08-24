@@ -8,8 +8,7 @@ use std::process::Command;
 fn main() {
     // ── Flatbuffer schemas (.fbs) → Rust via flatc ──
     // Common control-message schemas for the crow-rpc library (R104). The
-    // `.fbs` files live under `src/fbs/` (separate from `src/proto/` which
-    // holds protobuf `.proto` files). `common_msg.fbs` includes
+    // `.fbs` files live under `src/fbs/`. `common_msg.fbs` includes
     // `ret_code.fbs` and references FBRetCode in accessors, so it is
     // generated with `--gen-all` to inline ret_code into one self-contained
     // file (avoids flatc's cross-file `crate::` glob quirk). The other two

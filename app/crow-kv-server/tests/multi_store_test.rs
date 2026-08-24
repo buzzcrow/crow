@@ -13,12 +13,12 @@
 mod common;
 
 use bytes::Bytes;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
 use common::process::{start_test_server_with_ports, ServerHandle};
+use common::test_client::TestKvClient;
 
 const STORE_IDS: &[u64] = &[1, 2];
 const GROUP_ID: u64 = 10;
@@ -157,9 +157,7 @@ async fn kv_put(
     while Instant::now() < deadline {
         let leader_idx = wait_for_store_leader(handles, store_id, group_id, Duration::from_secs(10)).await;
         let addr = store_endpoint(&handles[leader_idx], store_id).await;
-        let mut client = KvServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect");
+        let client = TestKvClient::connect(format!("http://{addr}")).await;
         match client
             .put(KvSetRequest {
                 version: 1,
@@ -191,9 +189,7 @@ async fn kv_put(
 async fn kv_get(handles: &[ServerHandle], store_id: u64, group_id: u64, key: &[u8]) -> Option<Vec<u8>> {
     let leader_idx = wait_for_store_leader(handles, store_id, group_id, Duration::from_secs(10)).await;
     let addr = store_endpoint(&handles[leader_idx], store_id).await;
-    let mut client = KvServiceClient::connect(format!("http://{addr}"))
-        .await
-        .expect("connect");
+    let client = TestKvClient::connect(format!("http://{addr}")).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,

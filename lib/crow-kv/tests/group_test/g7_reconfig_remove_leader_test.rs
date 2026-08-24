@@ -16,10 +16,10 @@ use bytes::Bytes;
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxRemoteReplica};
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
 use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::test_client::TestKvClient;
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -49,14 +49,12 @@ async fn wait_for_leader_in(nodes: &[&Arc<PxKvStore>], timeout: Duration) -> Opt
     None
 }
 
-async fn kv_client_for(node: &Arc<PxKvStore>) -> KvServiceClient<tonic::transport::Channel> {
-    KvServiceClient::connect(format!("http://{}", node.listen_addr().expect("server started")))
-        .await
-        .expect("connect KvService")
+async fn kv_client_for(node: &Arc<PxKvStore>) -> TestKvClient {
+    TestKvClient::connect(format!("http://{}", node.listen_addr().expect("server started"))).await
 }
 
 async fn put_via_node(node: &Arc<PxKvStore>, key: &[u8], val: &[u8], req_id: u64) -> bool {
-    let mut client = kv_client_for(node).await;
+    let client = kv_client_for(node).await;
     let resp = client
         .put(KvSetRequest {
             version: 1,
@@ -76,7 +74,7 @@ async fn put_via_node(node: &Arc<PxKvStore>, key: &[u8], val: &[u8], req_id: u64
 }
 
 async fn read_via_node(node: &Arc<PxKvStore>, key: &[u8]) -> Option<Vec<u8>> {
-    let mut client = kv_client_for(node).await;
+    let client = kv_client_for(node).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,

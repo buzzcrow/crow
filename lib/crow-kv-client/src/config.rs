@@ -88,7 +88,7 @@ pub struct ClientConfig {
     /// and refresh the topology cache. At least one
     /// must be reachable for the client to discover any group leader.
     pub mgmt_seeds: Vec<String>,
-    /// Number of `tonic::Channel`s kept per gRPC endpoint, round-robined.
+    /// Number of connections kept per endpoint, round-robined.
     /// `1` (default) is sufficient for most workloads since a single
     /// HTTP/2 channel already multiplexes concurrent requests; raise this
     /// only if profiling shows one channel is the bottleneck.

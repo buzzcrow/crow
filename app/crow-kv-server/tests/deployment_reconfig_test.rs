@@ -10,12 +10,12 @@
 mod common;
 
 use bytes::Bytes;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
 use common::process::{start_test_server, ServerHandle};
+use common::test_client::TestKvClient;
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()
@@ -162,9 +162,7 @@ async fn kv_put_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8], val: &[u
     while Instant::now() < deadline {
         let leader_idx = wait_for_leader_ref(nodes, group_id, Duration::from_secs(10)).await;
         let addr = node_endpoint(&topology(nodes[leader_idx]).await);
-        let mut client = KvServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect");
+        let client = TestKvClient::connect(format!("http://{addr}")).await;
         match client
             .put(KvSetRequest {
                 version: 1,
@@ -201,9 +199,7 @@ async fn kv_get(nodes: &[ServerNode], group_id: u64, key: &[u8]) -> Option<Vec<u
 async fn kv_get_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8]) -> Option<Vec<u8>> {
     let leader_idx = wait_for_leader_ref(nodes, group_id, Duration::from_secs(10)).await;
     let addr = node_endpoint(&topology(nodes[leader_idx]).await);
-    let mut client = KvServiceClient::connect(format!("http://{addr}"))
-        .await
-        .expect("connect");
+    let client = TestKvClient::connect(format!("http://{addr}")).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,

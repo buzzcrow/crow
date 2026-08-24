@@ -42,7 +42,7 @@ async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64
 
 async fn put(cluster: &TestCluster, client_id: u64, seq: u64, key: &[u8], value: &[u8]) -> (bool, String) {
     let leader = cluster.elected_leader().expect("leader present");
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
     let resp = client
         .put(KvSetRequest {
             version: 1,
@@ -63,7 +63,7 @@ async fn put(cluster: &TestCluster, client_id: u64, seq: u64, key: &[u8], value:
 
 async fn get_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     let leader = cluster.elected_leader()?;
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,

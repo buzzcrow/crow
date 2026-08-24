@@ -20,14 +20,15 @@ use flatbuffers::FlatBufferBuilder;
 use crow_protocol::fb::FBMsgType;
 use crow_protocol::fb_wrappers::kv_consensus::{
     FBAcceptedResponseRef, FBFetchGapResponseRef, FBHeartbeatResponseRef, FBPreVoteResponseRef,
-    FBPromiseResponseRef, FBRequestVoteResponseRef, FBStepDownResponseRef,
+    FBPromiseResponseRef, FBRequestVoteResponseRef, FBSnapshotResponseRef, FBStepDownResponseRef,
 };
 use crow_protocol::kv_consensus_fb::{
     FBAcceptRequest, FBAcceptRequestArgs, FBAcceptedValue, FBAcceptedValueArgs, FBBatchChosenNotification,
     FBBatchChosenNotificationArgs, FBChosenNotification, FBChosenNotificationArgs, FBFetchGapRequest,
     FBFetchGapRequestArgs, FBHeartbeatRequest, FBHeartbeatRequestArgs, FBKvRetCode, FBPreVoteRequest,
     FBPreVoteRequestArgs, FBPrepareRequest, FBPrepareRequestArgs, FBRequestVoteRequest,
-    FBRequestVoteRequestArgs, FBStepDownRequest, FBStepDownRequestArgs,
+    FBRequestVoteRequestArgs, FBSnapshotRequest, FBSnapshotRequestArgs, FBStepDownRequest,
+    FBStepDownRequestArgs,
 };
 use crow_protocol::{KV_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::{noop_completion, Buffer, Connection, RpcClient, RpcError, RpcServer};
@@ -575,6 +576,52 @@ impl PxRpcTransport {
             .map_err(rpc_error_to_px)
     }
 
+    /// Request a snapshot from a peer via crow-rpc. The response carries
+    /// header info (`term_at_slot`, `membership_epoch`, `at_slot`) in the
+    /// control buffer and the full snapshot bytes in the data buffer.
+    pub async fn send_snapshot(
+        &self,
+        grpc_endpoint: &str,
+        group_id: u64,
+    ) -> Result<SnapshotReply, PxReplicaError> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let args = FBSnapshotRequestArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            group_id,
+        };
+        let fb_req = FBSnapshotRequest::create(&mut builder, &args);
+        builder.finish(fb_req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::ESnapshotRequest.0 as u16;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(rpc_error_to_px)?;
+        let resp = fut.await.map_err(rpc_error_to_px)?;
+        let ctrl = resp
+            .control
+            .ok_or_else(|| PxReplicaError::Internal("snapshot response missing control buffer".into()))?;
+        let r = FBSnapshotResponseRef::new(ctrl.bytes());
+        if !r.valid() {
+            return Err(PxReplicaError::Internal("snapshot response malformed".into()));
+        }
+        check_ret_code(r.ret_code(), r.error_msg())?;
+        let data = resp
+            .data
+            .map(|d| bytes::Bytes::copy_from_slice(d.bytes()))
+            .unwrap_or_default();
+        Ok(SnapshotReply {
+            group_id: r.group_id(),
+            term_at_slot: r.term_at_slot(),
+            membership_epoch: r.membership_epoch(),
+            at_slot: r.at_slot(),
+            data,
+        })
+    }
+
     /// Get the underlying `RpcServer` (for the `LearnerStream` to share
     /// the connection pool).
     pub(crate) fn server(&self) -> &Arc<RpcServer> {
@@ -603,6 +650,15 @@ impl Default for PxRpcTransport {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Snapshot reply: header info + exported bytes.
+pub struct SnapshotReply {
+    pub group_id: u64,
+    pub term_at_slot: u64,
+    pub membership_epoch: u64,
+    pub at_slot: u64,
+    pub data: bytes::Bytes,
 }
 
 // ── Error mapping ────────────────────────────────────────────────

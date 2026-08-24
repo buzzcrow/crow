@@ -32,6 +32,18 @@ pub mod diskio {
     }
 }
 
+pub mod kv_client {
+    pub mod rpc {
+        pub use crate::types::kv_client::*;
+    }
+}
+
+pub mod kv_consensus {
+    pub mod rpc {
+        pub use crate::types::kv_consensus::*;
+    }
+}
+
 // ── Flatbuffer control-message schemas (crow-rpc, R104) ──
 // `common_msg_generated` is built with `flatc --gen-all` so it inlines
 // `ret_code.fbs` (FBRetCode) into one self-contained file. `msg_type` and

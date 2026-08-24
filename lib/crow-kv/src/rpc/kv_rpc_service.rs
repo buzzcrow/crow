@@ -12,7 +12,7 @@
 
 //! crow-rpc handler set for the KV client-facing service (R117
 //! migration). Each handler dispatches by `msg_type` to the existing
-//! `KvStore` trait methods — the same logic bodies as the tonic
+//! `KvStore` trait methods — the same logic bodies as the former gRPC
 //! `KvStoreService` in `kv_service.rs`. The response is a flatbuffer
 //! frame built per `design-crow-rpc.md` §6 (build → finish → attach)
 //! and submitted via `RpcServer::submit_response`.
@@ -25,7 +25,7 @@
 //!
 //! `Get`/`Scan`/`JournalScan` preserve the transparent leader-forward
 //! step (linearizable reads only). The loop-guard `forwarded: bool`
-//! field on the request flatbuffer replaces the tonic
+//! field on the request flatbuffer replaces the former gRPC
 //! `x-crow-kv-forwarded` metadata header. The forwarder
 //! (`KvClientRpcForwarder`) lives in `crow-kv` itself (not
 //! `crow-kv-client`) to avoid a crate cycle.
@@ -271,7 +271,7 @@ impl KvClientRpcForwarder {
 // ── KvRpcService ─────────────────────────────────────────────────
 
 /// crow-rpc handler set for the KV client-facing service. Holds the
-/// same dependencies as the tonic `KvStoreService` plus a tokio
+/// same dependencies as the former `KvStoreService` plus a tokio
 /// `Handle` for spawning async work from the C++ I/O thread callback,
 /// and a `KvClientRpcForwarder` for transparent leader-forwarding.
 pub struct KvRpcService {
@@ -1032,7 +1032,7 @@ impl KvRpcService {
 
 // ── Error → ret_code mapping ─────────────────────────────────────
 
-/// Map a tonic `KvErrorCode` to the flatbuffer `FBKvClientRetCode`.
+/// Map a `KvErrorCode` to the flatbuffer `FBKvClientRetCode`.
 fn kv_error_code_to_fb(code: i32) -> FBKvClientRetCode {
     match code {
         0 => FBKvClientRetCode::Success,

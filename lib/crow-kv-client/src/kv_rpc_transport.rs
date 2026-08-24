@@ -8,11 +8,11 @@
 //! migration). Mirrors `px_rpc_transport.rs` (consensus side): builds
 //! flatbuffer requests, sends via `RpcClient::call`, awaits
 //! `CallFuture`, parses flatbuffer responses via the zero-copy `Ref`
-//! wrappers, and maps them to the existing tonic proto response types
+//! wrappers, and maps them to the existing response types
 //! (`KvResponse`, `KvScanResponse`, `KvJournalScanResponse`) so the
 //! retry/topology/`NotLeaderHint` logic in `client.rs` is unchanged.
 //!
-//! Runs alongside the tonic `ConnectionPool` during the mixed-rollout
+//! The only transport path (the former gRPC `ConnectionPool` was removed).
 //! window; `CrowkvClient` selects the transport via
 //! `with_rpc_transport`.
 
@@ -24,17 +24,22 @@ use dashmap::DashMap;
 use flatbuffers::FlatBufferBuilder;
 
 use crow_kv::rpc::{
-    KvErrorCode, KvJournalOp, KvJournalScanResponse, KvResponse, KvScanItem, KvScanResponse, ReadMode,
+    CreateSnapshotResponse, KvErrorCode, KvJournalOp, KvJournalScanResponse, KvResponse, KvScanItem,
+    KvScanResponse, ListSnapshotsResponse, ReadMode, ReleaseSnapshotResponse, SnapshotInfo,
+    SnapshotScanResponse,
 };
 use crow_protocol::fb::FBMsgType;
 use crow_protocol::fb_wrappers::kv_client::{
-    FBKvJournalScanResponseRef, FBKvResponseRef, FBKvScanResponseRef,
+    FBCreateSnapshotResponseRef, FBKvJournalScanResponseRef, FBKvResponseRef, FBKvScanResponseRef,
+    FBListSnapshotsResponseRef, FBReleaseSnapshotResponseRef, FBSnapshotScanResponseRef,
 };
 use crow_protocol::kv_client_fb::{
-    FBKvBatchItem, FBKvBatchItemArgs, FBKvBatchWriteRequest, FBKvBatchWriteRequestArgs, FBKvClientRetCode,
-    FBKvDeleteRequest, FBKvDeleteRequestArgs, FBKvGetRequest, FBKvGetRequestArgs, FBKvJournalScanRequest,
+    FBCreateSnapshotRequest, FBCreateSnapshotRequestArgs, FBKvBatchItem, FBKvBatchItemArgs,
+    FBKvBatchWriteRequest, FBKvBatchWriteRequestArgs, FBKvClientRetCode, FBKvDeleteRequest,
+    FBKvDeleteRequestArgs, FBKvGetRequest, FBKvGetRequestArgs, FBKvJournalScanRequest,
     FBKvJournalScanRequestArgs, FBKvScanRequest, FBKvScanRequestArgs, FBKvSetRequest, FBKvSetRequestArgs,
-    FBReadMode,
+    FBListSnapshotsRequest, FBListSnapshotsRequestArgs, FBReadMode, FBReleaseSnapshotRequest,
+    FBReleaseSnapshotRequestArgs, FBSnapshotScanRequest, FBSnapshotScanRequestArgs,
 };
 use crow_protocol::{KV_CLIENT_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::{Buffer, Connection, RpcClient, RpcError, RpcServer};
@@ -114,7 +119,7 @@ impl KvRpcTransport {
         Ok(conn)
     }
 
-    /// Send a `Put` request via crow-rpc. Returns the tonic
+    /// Send a `Put` request via crow-rpc. Returns the
     /// `KvResponse` so the caller's retry logic is unchanged.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_put(
@@ -416,6 +421,223 @@ impl KvRpcTransport {
         parse_journal_scan_response(ctrl.bytes())
     }
 
+    /// Send a `CreateSnapshot` request via crow-rpc.
+    pub async fn send_create_snapshot(
+        &self,
+        grpc_endpoint: &str,
+        group_id: u64,
+        read_mode: ReadMode,
+        min_slot: u64,
+    ) -> Result<CreateSnapshotResponse> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let args = FBCreateSnapshotRequestArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            group_id,
+            read_mode: match read_mode {
+                ReadMode::Linearizable => FBReadMode::Linearizable,
+                ReadMode::MinSlot => FBReadMode::MinSlot,
+            },
+            min_slot,
+            forwarded: false,
+        };
+        let req = FBCreateSnapshotRequest::create(&mut builder, &args);
+        builder.finish(req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::ECreateSnapshotRequest.0 as u16;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(rpc_error_to_client)?;
+        let resp = fut.await.map_err(rpc_error_to_client)?;
+        let ctrl = resp.control.ok_or_else(|| Error::Transport {
+            endpoint: grpc_endpoint.to_string(),
+            status: "create_snapshot response missing control buffer".into(),
+        })?;
+        let r = FBCreateSnapshotResponseRef::new(ctrl.bytes());
+        if !r.valid() {
+            return Err(Error::Transport {
+                endpoint: grpc_endpoint.to_string(),
+                status: "create_snapshot response malformed".into(),
+            });
+        }
+        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        Ok(CreateSnapshotResponse {
+            ok: r.ok(),
+            error: r.error_msg().unwrap_or_default().to_string(),
+            snapshot_handle: r.snapshot_handle(),
+            at_slot: r.at_slot(),
+            error_code: fb_ret_code_to_kv_error_code(r.ret_code()),
+            not_leader_hint: r.not_leader_hint().unwrap_or_default().to_string(),
+        })
+    }
+
+    /// Send a `ListSnapshots` request via crow-rpc.
+    pub async fn send_list_snapshots(
+        &self,
+        grpc_endpoint: &str,
+        group_id: u64,
+    ) -> Result<ListSnapshotsResponse> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let args = FBListSnapshotsRequestArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            group_id,
+        };
+        let req = FBListSnapshotsRequest::create(&mut builder, &args);
+        builder.finish(req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::EListSnapshotsRequest.0 as u16;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(rpc_error_to_client)?;
+        let resp = fut.await.map_err(rpc_error_to_client)?;
+        let ctrl = resp.control.ok_or_else(|| Error::Transport {
+            endpoint: grpc_endpoint.to_string(),
+            status: "list_snapshots response missing control buffer".into(),
+        })?;
+        let r = FBListSnapshotsResponseRef::new(ctrl.bytes());
+        if !r.valid() {
+            return Err(Error::Transport {
+                endpoint: grpc_endpoint.to_string(),
+                status: "list_snapshots response malformed".into(),
+            });
+        }
+        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        let snapshots = r
+            .snapshots()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|s| SnapshotInfo {
+                        snapshot_handle: s.snapshot_handle(),
+                        at_slot: s.at_slot(),
+                        lease_remaining_ms: s.lease_remaining_ms(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(ListSnapshotsResponse {
+            ok: r.ok(),
+            error: r.error_msg().unwrap_or_default().to_string(),
+            snapshots,
+        })
+    }
+
+    /// Send a `SnapshotScan` request via crow-rpc.
+    pub async fn send_snapshot_scan(
+        &self,
+        grpc_endpoint: &str,
+        snapshot_handle: u64,
+        prefix: &[u8],
+        start_after: &[u8],
+        limit: u32,
+        group_id: u64,
+    ) -> Result<SnapshotScanResponse> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let fb_prefix = builder.create_vector(prefix);
+        let fb_start_after = builder.create_vector(start_after);
+        let args = FBSnapshotScanRequestArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            snapshot_handle,
+            prefix: Some(fb_prefix),
+            start_after: Some(fb_start_after),
+            limit,
+            group_id,
+        };
+        let req = FBSnapshotScanRequest::create(&mut builder, &args);
+        builder.finish(req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::ESnapshotScanRequest.0 as u16;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(rpc_error_to_client)?;
+        let resp = fut.await.map_err(rpc_error_to_client)?;
+        let ctrl = resp.control.ok_or_else(|| Error::Transport {
+            endpoint: grpc_endpoint.to_string(),
+            status: "snapshot_scan response missing control buffer".into(),
+        })?;
+        let r = FBSnapshotScanResponseRef::new(ctrl.bytes());
+        if !r.valid() {
+            return Err(Error::Transport {
+                endpoint: grpc_endpoint.to_string(),
+                status: "snapshot_scan response malformed".into(),
+            });
+        }
+        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        let items = r
+            .items()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| KvScanItem {
+                        key: Bytes::copy_from_slice(item.key().unwrap_or_default().bytes()),
+                        value: Bytes::copy_from_slice(item.value().unwrap_or_default().bytes()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(SnapshotScanResponse {
+            ok: r.ok(),
+            error: r.error_msg().unwrap_or_default().to_string(),
+            truncated: r.truncated(),
+            items,
+            error_code: fb_ret_code_to_kv_error_code(r.ret_code()),
+        })
+    }
+
+    /// Send a `ReleaseSnapshot` request via crow-rpc.
+    pub async fn send_release_snapshot(
+        &self,
+        grpc_endpoint: &str,
+        snapshot_handle: u64,
+        group_id: u64,
+    ) -> Result<ReleaseSnapshotResponse> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(grpc_endpoint)?;
+        let mut builder = FlatBufferBuilder::new();
+        let args = FBReleaseSnapshotRequestArgs {
+            id: req_id,
+            rpc_create_nano: 0,
+            snapshot_handle,
+            group_id,
+        };
+        let req = FBReleaseSnapshotRequest::create(&mut builder, &args);
+        builder.finish(req, None);
+        let control = Buffer::from_bytes(builder.finished_data());
+        let msg_type = FBMsgType::EReleaseSnapshotRequest.0 as u16;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(rpc_error_to_client)?;
+        let resp = fut.await.map_err(rpc_error_to_client)?;
+        let ctrl = resp.control.ok_or_else(|| Error::Transport {
+            endpoint: grpc_endpoint.to_string(),
+            status: "release_snapshot response missing control buffer".into(),
+        })?;
+        let r = FBReleaseSnapshotResponseRef::new(ctrl.bytes());
+        if !r.valid() {
+            return Err(Error::Transport {
+                endpoint: grpc_endpoint.to_string(),
+                status: "release_snapshot response malformed".into(),
+            });
+        }
+        check_client_ret_code(r.ret_code(), r.error_msg(), grpc_endpoint)?;
+        Ok(ReleaseSnapshotResponse {
+            ok: r.ok(),
+            error: r.error_msg().unwrap_or_default().to_string(),
+        })
+    }
+
     /// Get or create a `Connection` for the given gRPC endpoint
     /// (public — used by `WatchNotifyClient` for the persistent
     /// connection).
@@ -447,9 +669,28 @@ impl Default for KvRpcTransport {
     }
 }
 
+fn check_client_ret_code(code: FBKvClientRetCode, msg: Option<&str>, endpoint: &str) -> Result<()> {
+    match code {
+        FBKvClientRetCode::Success => Ok(()),
+        FBKvClientRetCode::NotLeader => Err(Error::Transport {
+            endpoint: endpoint.to_string(),
+            status: msg.unwrap_or("not leader").into(),
+        }),
+        FBKvClientRetCode::Unavailable => Err(Error::Transport {
+            endpoint: endpoint.to_string(),
+            status: msg.unwrap_or("unavailable").into(),
+        }),
+        FBKvClientRetCode::JournalScanGcGap => Err(Error::JournalScanGcGap),
+        _ => Err(Error::Transport {
+            endpoint: endpoint.to_string(),
+            status: msg.unwrap_or("internal error").into(),
+        }),
+    }
+}
+
 // ── Response parsing ─────────────────────────────────────────────
 
-/// Parse a `FBKvResponse` flatbuffer into the tonic `KvResponse`.
+/// Parse a `FBKvResponse` flatbuffer into a `KvResponse`.
 fn parse_kv_response(buf: &[u8]) -> Result<KvResponse> {
     let r = FBKvResponseRef::new(buf);
     if !r.valid() {
@@ -480,7 +721,7 @@ fn parse_kv_response(buf: &[u8]) -> Result<KvResponse> {
     })
 }
 
-/// Parse a `FBKvScanResponse` flatbuffer into the tonic
+/// Parse a `FBKvScanResponse` flatbuffer into a
 /// `KvScanResponse`.
 fn parse_scan_response(buf: &[u8]) -> Result<KvScanResponse> {
     let r = FBKvScanResponseRef::new(buf);
@@ -517,7 +758,7 @@ fn parse_scan_response(buf: &[u8]) -> Result<KvScanResponse> {
     })
 }
 
-/// Parse a `FBKvJournalScanResponse` flatbuffer into the tonic
+/// Parse a `FBKvJournalScanResponse` flatbuffer into a
 /// `KvJournalScanResponse`.
 fn parse_journal_scan_response(buf: &[u8]) -> Result<KvJournalScanResponse> {
     let r = FBKvJournalScanResponseRef::new(buf);

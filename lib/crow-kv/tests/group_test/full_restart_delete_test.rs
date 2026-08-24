@@ -19,11 +19,11 @@ use crow_kv::cluster::group_config::GroupConfigStore;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::common::config::{PxElectionConfig, WalConfig};
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvDeleteRequest, KvGetRequest, KvSetRequest};
 use crow_kv::wal::replay::replay_group;
 use crow_kv::wal::{IoBackend, WalEngine};
-use tonic::transport::Channel;
+
+use crate::common::test_client::TestKvClient;
 
 const GROUP: u64 = 1;
 
@@ -149,13 +149,12 @@ impl WalCluster {
         })
     }
 
-    async fn kv_client(&self, node: &WalNode) -> KvServiceClient<Channel> {
-        KvServiceClient::connect(format!(
+    async fn kv_client(&self, node: &WalNode) -> TestKvClient {
+        TestKvClient::connect(format!(
             "http://{}",
             node.store.listen_addr().expect("bound addr")
         ))
         .await
-        .expect("connect kv")
     }
 
     async fn wait_for_leader(&self, timeout: Duration) -> Option<u64> {
@@ -173,7 +172,7 @@ impl WalCluster {
     async fn read_local_everywhere(&self, key: &[u8]) -> Vec<(u64, Option<Vec<u8>>)> {
         let mut out = Vec::new();
         for node in &self.nodes {
-            let mut client = self.kv_client(node).await;
+            let client = self.kv_client(node).await;
             let resp = client
                 .get(KvGetRequest {
                     version: 1,
@@ -255,7 +254,7 @@ async fn put(cluster: &WalCluster, key: &str, value: &str, seq: u64) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if let Some(leader) = cluster.elected_leader() {
-            let mut client = cluster.kv_client(leader).await;
+            let client = cluster.kv_client(leader).await;
             let resp = client
                 .put(KvSetRequest {
                     version: 1,
@@ -285,7 +284,7 @@ async fn delete(cluster: &WalCluster, key: &str, seq: u64) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if let Some(leader) = cluster.elected_leader() {
-            let mut client = cluster.kv_client(leader).await;
+            let client = cluster.kv_client(leader).await;
             let resp = client
                 .delete(KvDeleteRequest {
                     version: 1,

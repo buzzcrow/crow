@@ -41,7 +41,7 @@ async fn graceful_shutdown_under_load() {
         .expect("leader elected");
 
     let leader = cluster.elected_leader().expect("leader present");
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     // Write initial data to group 1.
     for i in 0u64..10 {
@@ -98,7 +98,7 @@ async fn graceful_shutdown_under_load() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        let mut client = cluster.kv_client(leader_node).await;
+        let client = cluster.kv_client(leader_node).await;
         let mut all_ok = true;
         let mut idx = verified;
         while idx < 10 {

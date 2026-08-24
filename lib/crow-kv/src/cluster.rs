@@ -20,7 +20,6 @@ pub mod group_propose;
 mod group_tests;
 pub mod kv_server;
 pub mod kv_store;
-pub mod learner_stream;
 pub mod local_replica;
 pub mod local_replica_accept;
 pub mod local_replica_apply;

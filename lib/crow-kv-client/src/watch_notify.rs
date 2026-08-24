@@ -5,25 +5,18 @@
 //! the group leader, subscribes to prefixes, and delivers notify
 //! frames via a channel. Automatically reconnects on leader change.
 //!
-//! Two transport paths coexist (R117 mixed rollout):
-//! - **Tonic** (default): bidi stream via `KvServiceClient::watch_notify`.
-//! - **crow-rpc** (when `CrowkvClient::with_rpc_transport` is set):
-//!   persistent connection + client-side handler for `FBWatchNotify` /
-//!   `FBWatchNotifyError` push frames, fire-and-forget
-//!   `FBWatchSubscribe`.
+//! Uses the crow-rpc persistent connection: client-side handler for
+//! `FBWatchNotify` / `FBWatchNotifyError` push frames, fire-and-forget
+//! `FBWatchSubscribe`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use flatbuffers::FlatBufferBuilder;
 use tokio::sync::mpsc;
-use tokio_stream::StreamExt as _;
 
 use crate::client::CrowkvClient;
 use crate::error::Result;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
-use crow_kv::rpc::watch_notify_request;
-use crow_kv::rpc::{watch_notify_response, WatchNotifyRequest};
 use crow_protocol::fb::FBMsgType;
 use crow_protocol::fb_wrappers::kv_client::FBWatchNotifyRef;
 use crow_protocol::kv_client_fb::{
@@ -47,7 +40,7 @@ pub struct WatchSubscription {
 impl Drop for WatchSubscription {
     fn drop(&mut self) {
         // Signal the reader task to stop. Dropping the sender also
-        // closes the gRPC stream (the client half closes).
+        // closes the connection (the client half closes).
         if let Some(abort) = self.abort.take() {
             let _ = abort.send(());
         }
@@ -86,17 +79,9 @@ impl WatchNotifyClient {
         let kv = Arc::clone(&self.kv);
         let prefix = prefix.to_vec();
 
-        // Select the transport path based on whether the client has
-        // a crow-rpc transport set.
-        if kv.rpc_transport().is_some() {
-            tokio::spawn(async move {
-                crow_rpc_reader_loop(kv, store_id, group_id, prefix, notify_tx, abort_rx).await;
-            });
-        } else {
-            tokio::spawn(async move {
-                tonic_reader_loop(kv, store_id, group_id, prefix, notify_tx, abort_rx).await;
-            });
-        }
+        tokio::spawn(async move {
+            crow_rpc_reader_loop(kv, store_id, group_id, prefix, notify_tx, abort_rx).await;
+        });
 
         Ok(WatchSubscription {
             notify_rx,
@@ -114,106 +99,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 /// connection is still alive. If the send fails, the loop reconnects.
 const CROW_RPC_LIVENESS_CHECK: Duration = Duration::from_secs(5);
 
-// ── Tonic reader loop (existing path) ────────────────────────────
-
-/// Reader loop: resolve leader, open stream, forward notifies,
-/// reconnect on error/leader-change. Runs until the abort signal.
-async fn tonic_reader_loop(
-    kv: Arc<CrowkvClient>,
-    store_id: u64,
-    group_id: u64,
-    prefix: Vec<u8>,
-    notify_tx: mpsc::Sender<WatchNotify>,
-    mut abort_rx: tokio::sync::oneshot::Receiver<()>,
-) {
-    let mut backoff = Duration::from_millis(50);
-    loop {
-        // Proactively refresh topology on every (re)connect. A cached
-        // leader endpoint may be stale if the leader changed during the
-        // disconnect gap; refreshing first avoids connecting to the old
-        // leader and getting bounced back via not_leader_hint (or, if
-        // the old leader is down, getting stuck in backoff retries).
-        if let Err(e) = kv.topology.refresh().await {
-            tracing::warn!(error = %e, "watch_notify: topology refresh failed");
-            sleep_backoff(&mut backoff).await;
-            continue;
-        }
-        let Some(endpoint) = kv.topology.leader(store_id, group_id) else {
-            tracing::warn!(
-                store_id,
-                group_id,
-                "watch_notify: leader still unknown after refresh"
-            );
-            sleep_backoff(&mut backoff).await;
-            continue;
-        };
-
-        let channel = match kv.pool.get(&endpoint) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "watch_notify: pool get failed");
-                sleep_backoff(&mut backoff).await;
-                continue;
-            }
-        };
-
-        let mut client = KvServiceClient::new(channel);
-        let req = WatchNotifyRequest {
-            frame: Some(watch_notify_request::Frame::Subscribe(
-                crow_kv::rpc::WatchSubscribe {
-                    version: 1,
-                    group_id,
-                    prefix: prefix.clone(),
-                },
-            )),
-        };
-        let stream_req = tokio_stream::iter(vec![req]);
-        let response = match client.watch_notify(stream_req).await {
-            Ok(r) => r.into_inner(),
-            Err(e) => {
-                tracing::warn!(error = %e, "watch_notify: stream open failed");
-                sleep_backoff(&mut backoff).await;
-                continue;
-            }
-        };
-
-        // Reset backoff on successful connection.
-        backoff = Duration::from_millis(50);
-
-        // Read the response stream, forwarding notify frames.
-        let mut stream = response;
-        loop {
-            tokio::select! {
-                _ = &mut abort_rx => return,
-                item = stream.next() => match item {
-                    Some(Ok(resp)) => {
-                        if let Some(watch_notify_response::Frame::Notify(notify)) = resp.frame {
-                            if notify_tx.send(notify).await.is_err() {
-                                return;
-                            }
-                        } else if let Some(watch_notify_response::Frame::Error(err)) = resp.frame {
-                            if !err.not_leader_hint.is_empty() {
-                                kv.topology.set_leader(store_id, group_id, err.not_leader_hint);
-                                break;
-                            }
-                            tracing::warn!(error = err.error, "watch_notify: server error");
-                        }
-                    }
-                    Some(Err(e)) => {
-                        tracing::warn!(error = %e, "watch_notify: stream error, reconnecting");
-                        break;
-                    }
-                    None => {
-                        tracing::info!("watch_notify: stream closed, reconnecting");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── crow-rpc reader loop (R117 path) ─────────────────────────────
+// ── crow-rpc reader loop ─────────────────────────────────────────
 
 /// crow-rpc reader loop: resolve leader, open connection, register
 /// push handlers, send `FBWatchSubscribe`, and periodically check
@@ -247,10 +133,10 @@ async fn crow_rpc_reader_loop(
 
         let Some(transport) = kv.rpc_transport() else {
             // Transport was unset between subscribe and the loop —
-            // fall back to the tonic path.
-            tracing::warn!("watch_notify(crow-rpc): transport unset, falling back to tonic");
-            tonic_reader_loop(kv, store_id, group_id, prefix, notify_tx, abort_rx).await;
-            return;
+            // log and backoff rather than proceeding.
+            tracing::warn!("watch_notify(crow-rpc): transport unset, backing off");
+            sleep_backoff(&mut backoff).await;
+            continue;
         };
 
         let conn = match transport.get_conn(&endpoint) {

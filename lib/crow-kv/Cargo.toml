@@ -24,8 +24,6 @@ test-util = []
 tokio = { workspace = true, features = ["rt", "macros", "time", "net", "fs", "sync", "io-util"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
-tonic = { workspace = true }
-prost = { workspace = true }
 bytes = "1"
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
@@ -46,9 +44,6 @@ crow-tree-ffi = { path = "../crow-tree/ffi" }
 crow-rpc-ffi = { path = "../crow-rpc/ffi" }
 flatbuffers = { workspace = true }
 
-[build-dependencies]
-tonic-build = "0.12"
-
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -57,6 +52,9 @@ crossbeam-skiplist = "0.1"
 # test/bench build so integration tests can reach the test-only hooks under
 # plain `cargo test` (no `--features` needed).
 crow-kv = { path = ".", features = ["test-util"] }
+# Used by integration-test helpers (`tests/common/test_client.rs`) to build
+# the crow-rpc `KvRpcTransport`/`PxRpcTransport` facades.
+crow-kv-client = { path = "../crow-kv-client" }
 tempfile = "3"
 
 [[bench]]

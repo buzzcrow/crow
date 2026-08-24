@@ -9,9 +9,8 @@ use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 use crow_kv::common::config::PxElectionConfig;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
-use crow_kv::rpc::px_service_client::PxServiceClient;
-use tonic::transport::Channel;
+
+use crate::common::test_client::{TestKvClient, TestPxClient};
 
 pub struct TestCluster {
     nodes: Vec<Arc<PxKvStore>>,
@@ -70,23 +69,21 @@ impl TestCluster {
     }
 
     #[allow(dead_code)]
-    pub async fn px_client(&self, node: &Arc<PxKvStore>) -> PxServiceClient<Channel> {
-        PxServiceClient::connect(format!(
+    pub async fn px_client(&self, node: &Arc<PxKvStore>) -> TestPxClient {
+        TestPxClient::connect(format!(
             "http://{}",
             node.listen_addr().expect("server not started")
         ))
         .await
-        .expect("connect PxService")
     }
 
     #[allow(dead_code)]
-    pub async fn kv_client(&self, node: &Arc<PxKvStore>) -> KvServiceClient<Channel> {
-        KvServiceClient::connect(format!(
+    pub async fn kv_client(&self, node: &Arc<PxKvStore>) -> TestKvClient {
+        TestKvClient::connect(format!(
             "http://{}",
             node.listen_addr().expect("server not started")
         ))
         .await
-        .expect("connect KvService")
     }
 }
 

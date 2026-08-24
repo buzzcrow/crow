@@ -30,7 +30,7 @@ async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64
 /// not-found / error this round.
 async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     let leader = cluster.elected_leader()?;
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,
@@ -61,7 +61,7 @@ async fn write_survives_forced_leader_step_down() {
         .expect("initial leader elected");
 
     let leader_node = cluster.elected_leader().expect("leader present");
-    let mut leader_client = cluster.kv_client(leader_node).await;
+    let leader_client = cluster.kv_client(leader_node).await;
     let put = leader_client
         .put(KvSetRequest {
             version: 1,

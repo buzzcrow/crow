@@ -43,7 +43,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
     );
 
     let leader = cluster.leader();
-    let mut kv = cluster.kv_client(leader).await;
+    let kv = cluster.kv_client(leader).await;
     let put_resp = kv
         .put(KvSetRequest {
             version: 1,

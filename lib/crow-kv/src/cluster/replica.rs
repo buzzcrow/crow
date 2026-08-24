@@ -23,8 +23,8 @@ use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
 /// Transport-neutral replica error.
 ///
 /// All [`ReplicaHandler`] and [`ReplicaClient`] methods return this. The gRPC
-/// adapter (`crate::rpc::px_service`) maps to/from `tonic::Status` at the
-/// network boundary so `crow_kv` library code never names `tonic::Status`
+/// adapter (`crate::rpc::px_rpc_service`) maps to/from `PxReplicaError` at the
+/// network boundary so `crow_kv` library code never names `PxReplicaError`
 /// outside of `rpc/`.
 #[derive(Debug, thiserror::Error)]
 pub enum PxReplicaError {
@@ -134,7 +134,7 @@ pub trait Replica {
 /// Server-side handler trait for local replicas.
 ///
 /// All errors are transport-neutral ([`PxReplicaError`]); the gRPC adapter
-/// translates to `tonic::Status` only at the network boundary.
+/// translates to `PxReplicaError` only at the network boundary.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaHandler: Replica {
     /// Phase-1 `Prepare` handler.

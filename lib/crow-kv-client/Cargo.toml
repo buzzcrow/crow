@@ -25,10 +25,10 @@ ffi = ["tokio/rt-multi-thread"]
 workspace = true
 
 [dependencies]
-# `crow-kv` gives us the generated tonic KV proto types (`crow_kv::rpc::*`) and
-# the `/topology` response shape (`crow_kv::cluster::status::*`, already
-# `Serialize`/`Deserialize`) without depending on `crow-kv-server` or
-# `crow-console` (see doc/.
+# `crow-kv` gives us the KV RPC types (`crow_kv::rpc::*`, hand-written
+# in `crow-protocol`) and the `/topology` response shape
+# (`crow_kv::cluster::status::*`, already `Serialize`/`Deserialize`)
+# without depending on `crow-kv-server` or `crow-console`.
 crow-kv = { path = "../crow-kv" }
 crow-protocol = { path = "../crow-protocol" }
 crow-common = { path = "../crow-common/rust" }
@@ -37,13 +37,11 @@ bytes = "1"
 flatbuffers = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tokio-stream = "0.1"
-tonic = { workspace = true }
 dashmap = "6"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-prost = "0.13"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

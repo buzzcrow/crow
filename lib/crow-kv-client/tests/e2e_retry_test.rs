@@ -22,16 +22,13 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::kv_server::KvServer;
 use crow_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::cluster::px_kv_store::PxKvStore;
 use crow_kv::cluster::remote_replica::PxRemoteReplica;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
-use crow_kv::rpc::KvSetRequest;
 
-use crow_kv_client::{ClientConfig, CrowkvClient};
+use crow_kv_client::{ClientConfig, CrowkvClient, KvRpcTransport};
 
 const STORE_ID: u64 = 1;
 const GROUP_ID: u64 = 1;
@@ -123,24 +120,11 @@ async fn client_follows_not_leader_hint_to_real_leader() {
     // Sanity check the test setup is real: a raw `Put` sent directly to the
     // follower is rejected with a non-empty `not_leader_hint` pointing at
     // the real leader, not silently accepted.
-    let mut raw = KvServiceClient::connect(format!("http://{follower_addr}"))
+    let raw_transport = KvRpcTransport::new();
+    let raw_resp = raw_transport
+        .send_put(&follower_addr, b"sanity", b"check", 999, 1, 1, 0, GROUP_ID)
         .await
-        .expect("connect follower directly");
-    let raw_resp = raw
-        .put(KvSetRequest {
-            version: 1,
-            key: Bytes::from_static(b"sanity"),
-            value: Bytes::from_static(b"check"),
-            seq: 1,
-            ttl_ms: 0,
-            client_id: 999,
-            request_id: 1,
-            request_create_ms: 0,
-            group_id: GROUP_ID,
-        })
-        .await
-        .expect("rpc")
-        .into_inner();
+        .expect("rpc");
     assert!(!raw_resp.ok, "a follower must reject a direct Put");
     assert_eq!(
         raw_resp.not_leader_hint, leader_addr,

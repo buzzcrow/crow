@@ -14,16 +14,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use dashmap::DashMap;
 
-use crow_kv::rpc::kv_service_client::KvServiceClient;
-use crow_kv::rpc::{
-    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvJournalScanRequest, KvScanRequest,
-    KvSetRequest, ReadMode,
-};
+use crow_kv::rpc::{KvBatchItem, ReadMode};
 
 use crate::config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
 use crate::error::{Error, Result};
 use crate::metrics::ClientMetrics;
-use crate::pool::ConnectionPool;
 use crate::topology::TopologyCache;
 
 /// Outcome of a successful `put`/`delete`/`batch_write`.
@@ -34,7 +29,7 @@ pub struct WriteOutcome {
 }
 
 /// Outcome of a successful `get`. `value` is zero-copy `Bytes` from the
-/// prost response frame, not a `Vec<u8>` copy.
+/// flatbuffer response frame, not a `Vec<u8>` copy.
 #[derive(Debug, Clone)]
 pub enum GetOutcome {
     Found { value: Bytes, revision: u64 },
@@ -42,7 +37,7 @@ pub enum GetOutcome {
 }
 
 /// Outcome of a successful `scan`. Items are zero-copy `Bytes` from the
-/// prost response frame, not per-entry `Vec<u8>` copies.
+/// flatbuffer response frame, not per-entry `Vec<u8>` copies.
 #[derive(Debug, Clone)]
 pub struct ScanOutcome {
     pub items: Vec<(Bytes, Bytes)>,
@@ -55,7 +50,7 @@ pub struct ScanOutcome {
 }
 
 /// One op from a `journal_scan` — a Put or Delete at a specific commit
-/// slot. `value` is empty for Delete. Zero-copy `Bytes` from the prost
+/// slot. `value` is empty for Delete. Zero-copy `Bytes` from the flatbuffer
 /// response frame.
 #[derive(Debug, Clone)]
 pub struct JournalOp {
@@ -163,7 +158,6 @@ impl Drop for InFlightGuard {
 /// `MinSlot` client-side slot tracking.
 pub struct CrowkvClient {
     pub(crate) topology: TopologyCache,
-    pub(crate) pool: ConnectionPool,
     pub(crate) retry: RetryConfig,
     client_id: u64,
     next_seq: AtomicU64,
@@ -196,7 +190,7 @@ pub struct CrowkvClient {
     /// Optional crow-rpc transport (R117). When set via
     /// `with_rpc_transport`, the KV methods (`put`/`get`/`delete`/
     /// `batch_write`/`scan`/`scan_count`/`journal_scan`) send via
-    /// crow-rpc instead of tonic. The retry/topology/`NotLeaderHint`
+    /// via crow-rpc. The retry/topology/`NotLeaderHint`
     /// logic is unchanged — only the wire send changes.
     rpc_transport: Option<Arc<crate::kv_rpc_transport::KvRpcTransport>>,
 }
@@ -221,7 +215,6 @@ impl CrowkvClient {
                 config.topology_min_refresh_interval,
                 Some(eviction_hook),
             ),
-            pool: ConnectionPool::new(config.pool_size_per_endpoint),
             retry: config.retry,
             client_id: new_client_id(),
             next_seq: AtomicU64::new(1),
@@ -237,7 +230,7 @@ impl CrowkvClient {
     /// Switch the client to use crow-rpc (R117) for KV operations.
     /// When set, `put`/`get`/`delete`/`batch_write`/`scan`/
     /// `scan_count`/`journal_scan` send via the transport instead of
-    /// tonic. The retry/topology/`NotLeaderHint` logic is unchanged.
+    /// via crow-rpc. The retry/topology/`NotLeaderHint` logic is unchanged.
     #[must_use]
     pub fn with_rpc_transport(mut self, transport: Arc<crate::kv_rpc_transport::KvRpcTransport>) -> Self {
         self.rpc_transport = Some(transport);
@@ -532,59 +525,31 @@ impl CrowkvClient {
         let (client_id, seq) =
             ids.unwrap_or_else(|| (self.client_id, self.next_seq.fetch_add(1, Ordering::Relaxed)));
         let mut endpoint = self.resolve_leader(store_id, group_id).await?;
+        let Some(t) = &self.rpc_transport else {
+            return Err(Error::Transport {
+                endpoint: endpoint.clone(),
+                status: "rpc transport not set".into(),
+            });
+        };
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         loop {
             let request_id = next_request_id();
             let request_create_ms = now_ms();
             let t0 = Instant::now();
-            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> =
-                if let Some(t) = &self.rpc_transport {
-                    t.send_put(
-                        &endpoint,
-                        key,
-                        value,
-                        client_id,
-                        seq,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                } else {
-                    let req = KvSetRequest {
-                        version: 1,
-                        key: Bytes::copy_from_slice(key),
-                        value: Bytes::copy_from_slice(value),
-                        seq,
-                        ttl_ms: 0,
-                        client_id,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                    };
-                    let channel = match self.pool.get(&endpoint) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.metrics.record_put_error();
-                            self.metrics.record_transport_error();
-                            self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                            endpoint = self
-                                .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                                .await;
-                            self.metrics
-                                .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                            attempts = self.count_other(attempts, &e.to_string())?;
-                            continue;
-                        }
-                    };
-                    KvServiceClient::new(channel)
-                        .put(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                        .map_err(|s| s.to_string())
-                };
+            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> = t
+                .send_put(
+                    &endpoint,
+                    key,
+                    value,
+                    client_id,
+                    seq,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                )
+                .await
+                .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
                     if resp.ok {
@@ -642,6 +607,12 @@ impl CrowkvClient {
     ) -> Result<GetOutcome> {
         let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let Some(t) = &self.rpc_transport else {
+            return Err(Error::Transport {
+                endpoint: endpoint.clone(),
+                status: "rpc transport not set".into(),
+            });
+        };
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         loop {
@@ -649,50 +620,18 @@ impl CrowkvClient {
             let request_create_ms = now_ms();
             let t0 = Instant::now();
             let _in_flight = self.incr_in_flight(&endpoint);
-            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> =
-                if let Some(t) = &self.rpc_transport {
-                    t.send_get(
-                        &endpoint,
-                        key,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                        read_mode,
-                        min_slot,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                } else {
-                    let req = KvGetRequest {
-                        version: 1,
-                        key: Bytes::copy_from_slice(key),
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                        read_mode: read_mode as i32,
-                        min_slot,
-                    };
-                    let channel = match self.pool.get(&endpoint) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.metrics.record_get_error();
-                            self.metrics.record_transport_error();
-                            self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                            endpoint = self
-                                .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                                .await;
-                            self.metrics
-                                .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                            attempts = self.count_other(attempts, &e.to_string())?;
-                            continue;
-                        }
-                    };
-                    KvServiceClient::new(channel)
-                        .get(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                        .map_err(|s| s.to_string())
-                };
+            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> = t
+                .send_get(
+                    &endpoint,
+                    key,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                    read_mode,
+                    min_slot,
+                )
+                .await
+                .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
@@ -764,56 +703,30 @@ impl CrowkvClient {
         let (client_id, seq) =
             ids.unwrap_or_else(|| (self.client_id, self.next_seq.fetch_add(1, Ordering::Relaxed)));
         let mut endpoint = self.resolve_leader(store_id, group_id).await?;
+        let Some(t) = &self.rpc_transport else {
+            return Err(Error::Transport {
+                endpoint: endpoint.clone(),
+                status: "rpc transport not set".into(),
+            });
+        };
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         loop {
             let request_id = next_request_id();
             let request_create_ms = now_ms();
             let t0 = Instant::now();
-            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> =
-                if let Some(t) = &self.rpc_transport {
-                    t.send_delete(
-                        &endpoint,
-                        key,
-                        client_id,
-                        seq,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                } else {
-                    let req = KvDeleteRequest {
-                        version: 1,
-                        key: Bytes::copy_from_slice(key),
-                        seq,
-                        client_id,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                    };
-                    let channel = match self.pool.get(&endpoint) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.metrics.record_delete_error();
-                            self.metrics.record_transport_error();
-                            self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                            endpoint = self
-                                .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                                .await;
-                            self.metrics
-                                .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                            attempts = self.count_other(attempts, &e.to_string())?;
-                            continue;
-                        }
-                    };
-                    KvServiceClient::new(channel)
-                        .delete(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                        .map_err(|s| s.to_string())
-                };
+            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> = t
+                .send_delete(
+                    &endpoint,
+                    key,
+                    client_id,
+                    seq,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                )
+                .await
+                .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
                     if resp.not_found {
@@ -888,56 +801,30 @@ impl CrowkvClient {
             })
             .collect();
         let mut endpoint = self.resolve_leader(store_id, group_id).await?;
+        let Some(t) = &self.rpc_transport else {
+            return Err(Error::Transport {
+                endpoint: endpoint.clone(),
+                status: "rpc transport not set".into(),
+            });
+        };
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         loop {
             let request_id = next_request_id();
             let request_create_ms = now_ms();
             let t0 = Instant::now();
-            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> =
-                if let Some(t) = &self.rpc_transport {
-                    t.send_batch_write(
-                        &endpoint,
-                        &items,
-                        self.client_id,
-                        seq,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                } else {
-                    let req = KvBatchWriteRequest {
-                        version: 1,
-                        items: items.clone(),
-                        seq,
-                        client_id: self.client_id,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                    };
-                    let channel = match self.pool.get(&endpoint) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.metrics.record_batch_write_error();
-                            self.metrics.record_transport_error();
-                            self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                            endpoint = self
-                                .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                                .await;
-                            self.metrics
-                                .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                            attempts = self.count_other(attempts, &e.to_string())?;
-                            continue;
-                        }
-                    };
-                    KvServiceClient::new(channel)
-                        .batch_write(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                        .map_err(|s| s.to_string())
-                };
+            let send_result: std::result::Result<crow_kv::rpc::KvResponse, String> = t
+                .send_batch_write(
+                    &endpoint,
+                    &items,
+                    self.client_id,
+                    seq,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                )
+                .await
+                .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
                     if resp.ok {
@@ -1013,6 +900,12 @@ impl CrowkvClient {
     ) -> Result<ScanOutcome> {
         let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let Some(t) = &self.rpc_transport else {
+            return Err(Error::Transport {
+                endpoint: endpoint.clone(),
+                status: "rpc transport not set".into(),
+            });
+        };
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         // Inner pagination state: collect pages until !truncated or limit reached.
@@ -1041,65 +934,24 @@ impl CrowkvClient {
             let request_create_ms = now_ms();
             let t0 = Instant::now();
             let _in_flight = self.incr_in_flight(&endpoint);
-            let send_result: std::result::Result<crow_kv::rpc::KvScanResponse, String> =
-                if let Some(t) = &self.rpc_transport {
-                    t.send_scan(
-                        &endpoint,
-                        prefix,
-                        &page_start_after,
-                        end_key,
-                        remaining_limit,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                        page_read_mode,
-                        page_min_slot,
-                        keys_only,
-                        false,
-                        deadline.unwrap_or(0),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                } else {
-                    let req = KvScanRequest {
-                        version: 1,
-                        prefix: Bytes::copy_from_slice(prefix),
-                        start_after: Bytes::copy_from_slice(&page_start_after),
-                        end_key: Bytes::copy_from_slice(end_key),
-                        limit: remaining_limit,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                        read_mode: page_read_mode as i32,
-                        min_slot: page_min_slot,
-                        keys_only,
-                        count_only: false,
-                        deadline_ms: deadline.unwrap_or(0),
-                    };
-                    let channel = match self.pool.get(&endpoint) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.metrics.record_scan_error();
-                            self.metrics.record_transport_error();
-                            self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                            endpoint = self
-                                .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                                .await;
-                            self.metrics
-                                .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                            page_start_after = all_items
-                                .last()
-                                .map_or_else(|| start_after.to_vec(), |(k, _)| k.to_vec());
-                            attempts = self.count_other(attempts, &e.to_string())?;
-                            continue;
-                        }
-                    };
-                    KvServiceClient::new(channel)
-                        .scan(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                        .map_err(|s| s.to_string())
-                };
+            let send_result: std::result::Result<crow_kv::rpc::KvScanResponse, String> = t
+                .send_scan(
+                    &endpoint,
+                    prefix,
+                    &page_start_after,
+                    end_key,
+                    remaining_limit,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                    page_read_mode,
+                    page_min_slot,
+                    keys_only,
+                    false,
+                    deadline.unwrap_or(0),
+                )
+                .await
+                .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
@@ -1235,6 +1087,12 @@ impl CrowkvClient {
     ) -> Result<u64> {
         let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let Some(t) = &self.rpc_transport else {
+            return Err(Error::Transport {
+                endpoint: endpoint.clone(),
+                status: "rpc transport not set".into(),
+            });
+        };
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         loop {
@@ -1242,62 +1100,24 @@ impl CrowkvClient {
             let request_create_ms = now_ms();
             let t0 = Instant::now();
             let _in_flight = self.incr_in_flight(&endpoint);
-            let send_result: std::result::Result<crow_kv::rpc::KvScanResponse, String> =
-                if let Some(t) = &self.rpc_transport {
-                    t.send_scan(
-                        &endpoint,
-                        prefix,
-                        start_after,
-                        end_key,
-                        limit,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                        read_mode,
-                        min_slot,
-                        false,
-                        true,
-                        deadline.unwrap_or(0),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                } else {
-                    let req = KvScanRequest {
-                        version: 1,
-                        prefix: Bytes::copy_from_slice(prefix),
-                        start_after: Bytes::copy_from_slice(start_after),
-                        end_key: Bytes::copy_from_slice(end_key),
-                        limit,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                        read_mode: read_mode as i32,
-                        min_slot,
-                        keys_only: false,
-                        count_only: true,
-                        deadline_ms: deadline.unwrap_or(0),
-                    };
-                    let channel = match self.pool.get(&endpoint) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.metrics.record_scan_error();
-                            self.metrics.record_transport_error();
-                            self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                            endpoint = self
-                                .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                                .await;
-                            self.metrics
-                                .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                            attempts = self.count_other(attempts, &e.to_string())?;
-                            continue;
-                        }
-                    };
-                    KvServiceClient::new(channel)
-                        .scan(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                        .map_err(|s| s.to_string())
-                };
+            let send_result: std::result::Result<crow_kv::rpc::KvScanResponse, String> = t
+                .send_scan(
+                    &endpoint,
+                    prefix,
+                    start_after,
+                    end_key,
+                    limit,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                    read_mode,
+                    min_slot,
+                    false,
+                    true,
+                    deadline.unwrap_or(0),
+                )
+                .await
+                .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
@@ -1367,6 +1187,12 @@ impl CrowkvClient {
     ) -> Result<JournalScanOutcome> {
         let min_slot_floor = self.resolve_min_slot(store_id, group_id, read_mode, None);
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let Some(t) = &self.rpc_transport else {
+            return Err(Error::Transport {
+                endpoint: endpoint.clone(),
+                status: "rpc transport not set".into(),
+            });
+        };
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         let mut all_ops: Vec<JournalOp> = Vec::new();
@@ -1378,54 +1204,20 @@ impl CrowkvClient {
             let request_create_ms = now_ms();
             let t0 = Instant::now();
             let _in_flight = self.incr_in_flight(&endpoint);
-            let send_result: std::result::Result<crow_kv::rpc::KvJournalScanResponse, String> =
-                if let Some(t) = &self.rpc_transport {
-                    t.send_journal_scan(
-                        &endpoint,
-                        page_min_slot,
-                        max_slot,
-                        key_prefix,
-                        remaining_page_limit,
-                        request_id,
-                        request_create_ms,
-                        group_id,
-                        read_mode,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                } else {
-                    let req = KvJournalScanRequest {
-                        version: 1,
-                        group_id,
-                        min_slot: page_min_slot,
-                        max_slot,
-                        key_prefix: Bytes::copy_from_slice(key_prefix),
-                        limit: remaining_page_limit,
-                        request_id,
-                        request_create_ms,
-                        read_mode: read_mode as i32,
-                    };
-                    let channel = match self.pool.get(&endpoint) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.metrics.record_scan_error();
-                            self.metrics.record_transport_error();
-                            self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                            endpoint = self
-                                .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                                .await;
-                            self.metrics
-                                .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                            attempts = self.count_other(attempts, &e.to_string())?;
-                            continue;
-                        }
-                    };
-                    KvServiceClient::new(channel)
-                        .journal_scan(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                        .map_err(|s| s.to_string())
-                };
+            let send_result: std::result::Result<crow_kv::rpc::KvJournalScanResponse, String> = t
+                .send_journal_scan(
+                    &endpoint,
+                    page_min_slot,
+                    max_slot,
+                    key_prefix,
+                    remaining_page_limit,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                    read_mode,
+                )
+                .await
+                .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);

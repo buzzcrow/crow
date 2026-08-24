@@ -1,26 +1,23 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! gRPC server lifecycle for a `PxKvStore`.
+//! Server lifecycle for a `PxKvStore`.
 //!
 //! Defines the [`KvServer`] trait (start / join / stop / `listen_addr`)
-//! and implements it on `Arc<PxKvStore>`, which multiplexes the
-//! `PxService` (Paxos peer RPCs) and `KvService` (client KV RPCs)
-//! tonic servers onto a single `tokio::net::TcpListener`. Server state
-//! (join handle, shutdown sender, bound address) lives on
-//! [`GrpcTaskState`] inside the store so [`PxKvStore::shutdown_server`]
-//! can drive a timed graceful stop from the cascade shutdown path.
+//! and implements it on `Arc<PxKvStore>`. The trait's `start` binds a
+//! TCP listener to record the listen address (used for endpoint
+//! derivation by the crow-rpc servers and peer discovery), then the
+//! crow-rpc servers (`start_rpc_server` for consensus,
+//! `start_client_rpc_server` for client-facing) handle the actual
+//! request serving. Server state (join handle, shutdown sender, bound
+//! address) lives on [`GrpcTaskState`] inside the store so
+//! [`PxKvStore::shutdown_server`] can drive a timed graceful stop from
+//! the cascade shutdown path.
 
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::cluster::px_kv_store::PxKvStore;
-use crate::rpc::kv_service_server::KvServiceServer;
-use crate::rpc::px_service_server::PxServiceServer;
-use crate::rpc::snapshot_service_server::SnapshotServiceServer;
-use crate::rpc::{
-    KvClientRpcForwarder, KvRpcService, KvStoreService, PxReplicaService, PxRpcService, PxRpcTransport,
-    PxSnapshotService,
-};
+use crate::rpc::{KvClientRpcForwarder, KvRpcService, PxRpcService, PxRpcTransport};
 use crow_protocol::{KV_CLIENT_RPC_BASE, KV_RPC_BASE, KV_SERVER_GRPC_BASE};
 use crow_rpc_ffi::RpcServer;
 use std::net::SocketAddr;
@@ -28,8 +25,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::runtime::Handle;
-use tokio_stream::Stream;
-use tonic::transport::Server;
 use tracing::{debug, error, info};
 
 #[allow(async_fn_in_trait)]
@@ -50,14 +45,11 @@ pub(crate) struct GrpcTaskState {
     pub(crate) listen_addr: Option<SocketAddr>,
 }
 
-/// crow-rpc server state (R32 migration). Holds the `RpcServer`
-/// handle + the shared `PxRpcTransport` for outbound RPCs to peers.
+/// crow-rpc server state. Holds the `RpcServer` handle + the shared
+/// `PxRpcTransport` for outbound RPCs to peers.
 #[derive(Default)]
 pub(crate) struct RpcServerState {
-    /// The crow-rpc server (listens on the crow-rpc port).
     pub(crate) server: Option<Arc<RpcServer>>,
-    /// Shared client-side transport for outbound RPCs. Wired into
-    /// `PxRemoteReplica` via `with_rpc_transport`.
     pub(crate) transport: Option<Arc<PxRpcTransport>>,
 }
 
@@ -94,27 +86,11 @@ impl KvServer for Arc<PxKvStore> {
             }
         };
 
-        let px_service = PxReplicaService::new(self.clone());
-        let kv_service = KvStoreService::new(self.clone());
-        let snapshot_service = PxSnapshotService::new(self.clone());
-        let px_service_server = PxServiceServer::new(px_service);
-        let kv_service_server = KvServiceServer::new(kv_service);
-        let snapshot_service_server = SnapshotServiceServer::new(snapshot_service);
-
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let handle = tokio::spawn(async move {
-            let incoming = NoDelayIncoming::new(listener);
-            let serve = Server::builder()
-                .add_service(px_service_server)
-                .add_service(kv_service_server)
-                .add_service(snapshot_service_server)
-                .serve_with_incoming(incoming);
-
-            tokio::select! {
-                _ = serve => {},
-                _ = rx => {},
-            }
+            drop(listener);
+            let _ = rx.await;
         });
 
         {
@@ -124,10 +100,6 @@ impl KvServer for Arc<PxKvStore> {
             state.shutdown_tx = Some(tx);
         }
 
-        // Update local replica endpoints on all groups with the actual
-        // bound address, so future persist_config calls write the correct
-        // endpoint. Groups added after start() get the endpoint in
-        // add_group_inner.
         for entry in &self.groups {
             entry.local_replica().set_endpoint(bound_addr.to_string());
         }
@@ -165,14 +137,12 @@ impl KvServer for Arc<PxKvStore> {
 }
 
 impl PxKvStore {
-    /// Stop the gRPC server task and await its join under a timeout.
+    /// Stop the server task and await its join under a timeout.
     ///
     /// Used by [`PxKvStore::shutdown`] as the first cascade step. Aborts the
     /// task on hang; idempotent.
     pub(crate) async fn shutdown_server(&self, timeout: Duration) -> Result<(), String> {
-        // R32: also stop the crow-rpc server.
         self.stop_rpc_server();
-        // R117: also stop the client-facing crow-rpc server.
         self.stop_client_rpc_server();
 
         let (handle, sender) = {
@@ -193,8 +163,6 @@ impl PxKvStore {
         }
 
         let Some(task) = handle else { return Ok(()) };
-        // abort_handle() lets us force-cancel on timeout; dropping a JoinHandle
-        // only detaches the task.
         let abort = task.abort_handle();
         match tokio::time::timeout(timeout, task).await {
             Ok(Ok(())) => {
@@ -212,7 +180,7 @@ impl PxKvStore {
             }
             Err(_elapsed) => {
                 abort.abort();
-                let msg = format!("critical: kv server shutdown hung > {timeout:?}; aborted task; next step: investigate stuck gRPC handlers");
+                let msg = format!("critical: kv server shutdown hung > {timeout:?}; aborted task; next step: investigate stuck handlers");
                 error!(
                     store_id = self.store_id,
                     timeout_ms = timeout.as_millis() as u64,
@@ -223,15 +191,15 @@ impl PxKvStore {
         }
     }
 
-    /// Start the crow-rpc server (R32 migration). Binds to the
-    /// crow-rpc port (derived from the gRPC port via a fixed offset),
-    /// registers all consensus handlers, and creates a shared
-    /// `PxRpcTransport` for outbound RPCs. The transport is stored in
-    /// `rpc_server_state` and can be retrieved via
-    /// [`Self::rpc_transport`] to wire into `PxRemoteReplica`.
+    /// Start the crow-rpc server. Binds to the crow-rpc port (derived
+    /// from the bound port via a fixed offset), registers all consensus
+    /// handlers, and creates a shared `PxRpcTransport` for outbound
+    /// RPCs. The transport is stored in `rpc_server_state` and can be
+    /// retrieved via [`Self::rpc_transport`] to wire into
+    /// `PxRemoteReplica`.
     ///
-    /// Must be called after [`KvServer::start`] (which binds the gRPC
-    /// port and sets `listen_addr`).
+    /// Must be called after [`KvServer::start`] (which binds the port
+    /// and sets `listen_addr`).
     ///
     /// # Errors
     /// Returns an error string if the crow-rpc port is out of range or
@@ -248,17 +216,16 @@ impl PxKvStore {
             }
         }
 
-        // Derive the crow-rpc port from the actual bound gRPC port.
         let bound_addr = self
             .server_state
             .lock()
             .listen_addr
-            .ok_or_else(|| "start_rpc_server called before gRPC start()".to_string())?;
+            .ok_or_else(|| "start_rpc_server called before start()".to_string())?;
         let grpc_port = bound_addr.port();
         let rpc_port = i32::from(grpc_port) + (i32::from(KV_RPC_BASE) - i32::from(KV_SERVER_GRPC_BASE));
         if !(1..=65535).contains(&rpc_port) {
             return Err(format!(
-                "crow-rpc port {rpc_port} out of range (gRPC port {grpc_port})"
+                "crow-rpc port {rpc_port} out of range (port {grpc_port})"
             ));
         }
         let rpc_addr = format!("{}:{}", bound_addr.ip(), rpc_port);
@@ -269,11 +236,9 @@ impl PxKvStore {
             .map_err(|e| format!("crow-rpc listen on {rpc_addr}: {e:?}"))?;
         server.start();
 
-        // Register consensus handlers.
         let service = Arc::new(PxRpcService::new(self.clone(), rt));
         service.register_handlers(&server);
 
-        // Create the shared client transport.
         let transport = Arc::new(PxRpcTransport::new());
 
         {
@@ -290,16 +255,14 @@ impl PxKvStore {
         Ok(())
     }
 
-    /// Get the shared `PxRpcTransport` for outbound RPCs (R32
-    /// migration). Returns `None` if `start_rpc_server` has not been
-    /// called.
-    #[allow(dead_code)] // Wired in Phase 8 (integration tests)
+    /// Get the shared `PxRpcTransport` for outbound RPCs. Returns
+    /// `None` if `start_rpc_server` has not been called.
     pub fn rpc_transport(&self) -> Option<Arc<PxRpcTransport>> {
         self.rpc_server_state.lock().transport.clone()
     }
 
-    /// Stop the crow-rpc server (R32 migration). Called from
-    /// [`Self::shutdown_server`] or directly for testing.
+    /// Stop the crow-rpc server. Called from [`Self::shutdown_server`]
+    /// or directly for testing.
     pub(crate) fn stop_rpc_server(&self) {
         let server = {
             let mut state = self.rpc_server_state.lock();
@@ -311,9 +274,9 @@ impl PxKvStore {
         }
     }
 
-    /// Start the client-facing crow-rpc server (R117 migration). Binds
-    /// to the client-facing crow-rpc port (derived from the gRPC port
-    /// via `KV_CLIENT_RPC_BASE - KV_SERVER_GRPC_BASE`), registers all
+    /// Start the client-facing crow-rpc server. Binds to the
+    /// client-facing crow-rpc port (derived from the port via
+    /// `KV_CLIENT_RPC_BASE - KV_SERVER_GRPC_BASE`), registers all
     /// client-facing handlers, and stores the server handle in
     /// `client_rpc_server_state`.
     ///
@@ -334,18 +297,17 @@ impl PxKvStore {
             }
         }
 
-        // Derive the client-facing crow-rpc port from the actual bound gRPC port.
         let bound_addr = self
             .server_state
             .lock()
             .listen_addr
-            .ok_or_else(|| "start_client_rpc_server called before gRPC start()".to_string())?;
+            .ok_or_else(|| "start_client_rpc_server called before start()".to_string())?;
         let grpc_port = bound_addr.port();
         let rpc_port =
             i32::from(grpc_port) + (i32::from(KV_CLIENT_RPC_BASE) - i32::from(KV_SERVER_GRPC_BASE));
         if !(1..=65535).contains(&rpc_port) {
             return Err(format!(
-                "client crow-rpc port {rpc_port} out of range (gRPC port {grpc_port})"
+                "client crow-rpc port {rpc_port} out of range (port {grpc_port})"
             ));
         }
         let rpc_addr = format!("{}:{}", bound_addr.ip(), rpc_port);
@@ -356,7 +318,6 @@ impl PxKvStore {
             .map_err(|e| format!("client crow-rpc listen on {rpc_addr}: {e:?}"))?;
         server.start();
 
-        // Register client-facing handlers.
         let forwarder = Arc::new(KvClientRpcForwarder::new());
         let service = Arc::new(KvRpcService::new(self.clone(), rt, forwarder));
         service.register_handlers(&server);
@@ -374,8 +335,8 @@ impl PxKvStore {
         Ok(())
     }
 
-    /// Stop the client-facing crow-rpc server (R117 migration). Called
-    /// from [`Self::shutdown_server`] or directly for testing.
+    /// Stop the client-facing crow-rpc server. Called from
+    /// [`Self::shutdown_server`] or directly for testing.
     pub(crate) fn stop_client_rpc_server(&self) {
         let server = {
             let mut state = self.client_rpc_server_state.lock();
@@ -385,35 +346,5 @@ impl PxKvStore {
             server.stop();
             info!(store_id = self.store_id, "client crow-rpc server stopped");
         }
-    }
-}
-
-pin_project_lite::pin_project! {
-    struct NoDelayIncoming {
-        #[pin]
-        inner: tokio_stream::wrappers::TcpListenerStream,
-    }
-}
-
-impl NoDelayIncoming {
-    fn new(listener: TcpListener) -> Self {
-        Self {
-            inner: tokio_stream::wrappers::TcpListenerStream::new(listener),
-        }
-    }
-}
-
-impl Stream for NoDelayIncoming {
-    type Item = std::io::Result<tokio::net::TcpStream>;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.project();
-        this.inner.poll_next(cx).map_ok(|stream| {
-            let _ = stream.set_nodelay(true);
-            stream
-        })
     }
 }

@@ -73,7 +73,7 @@ pub type SlotIndex = u64;
 /// is shared across:
 ///
 /// - per-peer Accept fanout (`AcceptedValue.payload` is also `Bytes`,
-///   mapped via `tonic_build` `.bytes(["."])` in `build.rs`);
+///   zero-copy from the flatbuffer response);
 /// - slot-retry attempts in the proposer's `'slot_retry` loop;
 /// - the on-wire response → log-entry conversion in
 ///   `accepted_value_to_log_entry`.

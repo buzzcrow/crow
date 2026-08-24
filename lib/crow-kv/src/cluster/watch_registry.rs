@@ -12,10 +12,8 @@ use std::sync::Arc;
 
 use flatbuffers::FlatBufferBuilder;
 use parking_lot::RwLock;
-use tokio::sync::mpsc;
 
 use crate::kv::{BatchOp, Op};
-use crate::rpc::{WatchNotify, WatchNotifyResponse};
 
 /// crow-rpc push target for `WatchNotify` (R117). The server pushes
 /// `FBWatchNotify` frames fire-and-forget via `RpcClient::send` on the
@@ -54,10 +52,9 @@ impl CrowRpcPushTarget {
     }
 }
 
-/// One watcher: an outbound push target. Tonic watchers use an mpsc
-/// channel; crow-rpc watchers use a `CrowRpcPushTarget` (R117).
+/// One watcher: an outbound push target. crow-rpc watchers use a
+/// `CrowRpcPushTarget` (persistent connection + fire-and-forget send).
 pub enum PushTarget {
-    Tonic(mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>),
     CrowRpc(Arc<CrowRpcPushTarget>),
 }
 
@@ -190,23 +187,13 @@ impl WatchRegistry {
         }
     }
 
-    /// Register a tonic watcher for `prefix`. Returns the `watcher_id`
-    /// for later removal. Sets `has_watchers = true`.
-    pub fn subscribe(
-        &self,
-        prefix: &[u8],
-        tx: mpsc::Sender<Result<WatchNotifyResponse, tonic::Status>>,
-    ) -> u64 {
-        self.subscribe_with_target(prefix, PushTarget::Tonic(tx))
-    }
-
-    /// Register a crow-rpc watcher for `prefix` (R117). Returns the
+    /// Register a crow-rpc watcher for `prefix`. Returns the
     /// `watcher_id` for later removal. Sets `has_watchers = true`.
     pub fn subscribe_crow_rpc(&self, prefix: &[u8], target: Arc<CrowRpcPushTarget>) -> u64 {
         self.subscribe_with_target(prefix, PushTarget::CrowRpc(target))
     }
 
-    /// Internal subscribe — shared by tonic + crow-rpc overloads.
+    /// Internal subscribe.
     fn subscribe_with_target(&self, prefix: &[u8], target: PushTarget) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut trie = self.trie.write();
@@ -299,36 +286,6 @@ impl WatchRegistry {
             if let Some(watchers) = trie.watchers_for(&prefix) {
                 for (_, watcher) in watchers {
                     match watcher {
-                        PushTarget::Tonic(tx) => {
-                            let notify = WatchNotify {
-                                group_id,
-                                prefix: prefix.clone(),
-                                keys: keys.iter().map(|k| k.to_vec()).collect(),
-                                slot,
-                                values: values.iter().map(|v| v.to_vec()).collect(),
-                            };
-                            let resp = WatchNotifyResponse {
-                                frame: Some(crate::rpc::watch_notify_response::Frame::Notify(notify)),
-                            };
-                            match tx.try_send(Ok(resp)) {
-                                Ok(()) => {}
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    self.dropped_notifies.fetch_add(1, Ordering::Relaxed);
-                                    tracing::error!(
-                                        "critical: watch notify dropped -- watcher channel full, \
-                                         client will catch up via safety-net poller"
-                                    );
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    self.closed_watchers.fetch_add(1, Ordering::Relaxed);
-                                    tracing::warn!(
-                                        "watch notify: watcher channel closed -- \
-                                         leaked watcher (stream-end cleanup missed it); \
-                                         client will catch up via safety-net poller"
-                                    );
-                                }
-                            }
-                        }
                         PushTarget::CrowRpc(target) => {
                             self.push_crow_rpc_notify(target, group_id, slot, &prefix, &keys, &values);
                         }

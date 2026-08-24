@@ -11,7 +11,7 @@
 //! crow-rpc handler set for the KV consensus service (R32 migration).
 //!
 //! Each handler dispatches by `msg_type` to the existing consensus
-//! logic — the same logic bodies as the tonic `PxReplicaService` in
+//! logic — the same logic bodies as the former `PxReplicaService` in
 //! `px_service.rs`. The response is a flatbuffer frame built per
 //! `design-crow-rpc.md` §6 (build → finish → attach) and submitted via
 //! `RpcServer::submit_response`.
@@ -32,9 +32,10 @@ use crow_protocol::kv_consensus_fb::{
     FBFetchGapResponseArgs, FBHeartbeatRequest, FBHeartbeatResponse, FBHeartbeatResponseArgs, FBKvRetCode,
     FBPreVoteRequest, FBPreVoteResponse, FBPreVoteResponseArgs, FBPrepareRequest, FBPromiseResponse,
     FBPromiseResponseArgs, FBRequestVoteRequest, FBRequestVoteResponse, FBRequestVoteResponseArgs,
-    FBStepDownRequest, FBStepDownResponse, FBStepDownResponseArgs,
+    FBSnapshotRequest, FBSnapshotResponse, FBSnapshotResponseArgs, FBStepDownRequest, FBStepDownResponse,
+    FBStepDownResponseArgs,
 };
-use crow_rpc_ffi::{RpcServer, ServerRequest};
+use crow_rpc_ffi::{Buffer, RpcServer, ServerRequest};
 use flatbuffers::FlatBufferBuilder;
 use tokio::runtime::Handle;
 use tracing::{debug, warn};
@@ -47,7 +48,7 @@ use crate::cluster::replica::{
 use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 
 /// crow-rpc handler set for the KV consensus service. Holds the same
-/// dependencies as the tonic `PxReplicaService` plus a tokio `Handle`
+/// dependencies as the former `PxReplicaService` plus a tokio `Handle`
 /// for spawning async work from the C++ I/O thread callback.
 pub struct PxRpcService {
     store: Arc<PxKvStore>,
@@ -96,6 +97,10 @@ impl PxRpcService {
         server.register_handler(
             FBMsgType::EFetchGapRequest.0 as u16,
             Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_fetch_gap),
+        );
+        server.register_handler(
+            FBMsgType::ESnapshotRequest.0 as u16,
+            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_snapshot),
         );
     }
 
@@ -1019,6 +1024,101 @@ impl PxRpcService {
                 "slot not yet chosen",
             );
         }
+    }
+
+    // ── Snapshot ─────────────────────────────────────────────────
+
+    fn handle_snapshot(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+        let req_id = req.request_id;
+        let create_nano = req.rpc_create_nano;
+        let msg_type = FBMsgType::ESnapshotResponse.0 as u16;
+
+        let Ok(fb_req) = flatbuffers::root::<FBSnapshotRequest>(req.control) else {
+            submit_error(
+                server,
+                req.conn_handle,
+                req_id,
+                create_nano,
+                msg_type,
+                FBKvRetCode::InvalidArgument,
+                "invalid snapshot request flatbuffer",
+            );
+            return;
+        };
+        let group_id = fb_req.group_id();
+
+        let Some(group) = self.store.get_group(group_id) else {
+            submit_error(
+                server,
+                req.conn_handle,
+                req_id,
+                create_nano,
+                msg_type,
+                FBKvRetCode::NotFound,
+                "px group not found",
+            );
+            return;
+        };
+
+        let replica = group.local_replica();
+        let export_result = replica.learner.engine().snapshot_export();
+        let (at_slot, bytes) = match export_result {
+            Ok(v) => v,
+            Err(e) => {
+                submit_error(
+                    server,
+                    req.conn_handle,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::Internal,
+                    &format!("snapshot export failed: {e}"),
+                );
+                return;
+            }
+        };
+
+        let membership_epoch = group.membership_epoch();
+        let conn_handle_usize = req.conn_handle as usize;
+        let store_id = self.store.store_id;
+        let server = Arc::clone(server);
+        self.rt.spawn(async move {
+            let term_at_slot = group
+                .local_replica()
+                .accepted_at(at_slot)
+                .await
+                .map_or(0, |entry| entry.term);
+
+            debug!(
+                store_id,
+                group_id,
+                at_slot,
+                term_at_slot,
+                membership_epoch,
+                snapshot_bytes = bytes.len(),
+                "serving snapshot export"
+            );
+
+            let mut builder = FlatBufferBuilder::new();
+            let args = FBSnapshotResponseArgs {
+                id: req_id,
+                rpc_create_nano: create_nano,
+                ret_code: FBKvRetCode::Success,
+                error_msg: None,
+                group_id,
+                term_at_slot,
+                membership_epoch,
+                at_slot,
+            };
+            let fb_resp = FBSnapshotResponse::create(&mut builder, &args);
+            builder.finish(fb_resp, None);
+            let ctrl = Buffer::from_bytes(builder.finished_data());
+            let data = bytes::Bytes::from(bytes);
+            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
+            unsafe {
+                let _ = server.submit_response(conn_handle, ctrl.bytes(), Some(&data), msg_type, req_id);
+            }
+        });
     }
 }
 

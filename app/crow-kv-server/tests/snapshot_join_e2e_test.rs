@@ -11,11 +11,11 @@ mod common;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
 
 use common::process::{start_test_server, ServerHandle};
+use common::test_client::TestKvClient;
 
 struct ServerNode {
     handle: ServerHandle,
@@ -165,13 +165,7 @@ async fn add_remote_replicas(target: &ServerNode, group_id: u64, remotes: &[(u64
     );
 }
 
-async fn kv_put(
-    kv: &mut KvServiceClient<tonic::transport::Channel>,
-    group_id: u64,
-    key: &[u8],
-    value: &[u8],
-    req_id: u64,
-) {
+async fn kv_put(kv: &TestKvClient, group_id: u64, key: &[u8], value: &[u8], req_id: u64) {
     let resp = kv
         .put(KvSetRequest {
             version: 1,
@@ -196,7 +190,7 @@ async fn kv_put(
 /// redirects a non-leader to the leader), which is what lets this test
 /// verify state on a still-non-voting newly-joined replica.
 async fn kv_get_local_until(
-    kv: &mut KvServiceClient<tonic::transport::Channel>,
+    kv: &TestKvClient,
     group_id: u64,
     key: &[u8],
     req_id: u64,
@@ -250,15 +244,13 @@ async fn e2e_new_member_joins_via_snapshot_then_catches_up_wal_tail() {
     let refs: Vec<&ServerNode> = nodes.iter().collect();
     let leader_idx = wait_for_leader(&refs, group_id, Duration::from_secs(20)).await;
     let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-    let mut leader_kv = KvServiceClient::connect(format!("http://{leader_addr}"))
-        .await
-        .expect("connect leader");
+    let leader_kv = TestKvClient::connect(format!("http://{leader_addr}")).await;
 
     // Pre-join writes: the new member must recover these via snapshot, not
     // via live Paxos repair (it's never wired into the topology until
     // after the join call below).
-    kv_put(&mut leader_kv, group_id, b"k1", b"v1", 9001).await;
-    kv_put(&mut leader_kv, group_id, b"k2", b"v2", 9002).await;
+    kv_put(&leader_kv, group_id, b"k1", b"v1", 9001).await;
+    kv_put(&leader_kv, group_id, b"k2", b"v2", 9002).await;
 
     // A brand-new store, no group yet.
     let mut new_node = start_bare_store(2).await;
@@ -287,17 +279,14 @@ async fn e2e_new_member_joins_via_snapshot_then_catches_up_wal_tail() {
     // Snapshot-imported state must already be visible on the new node,
     // with no topology wiring and no heartbeat catch-up having happened
     // yet.
-    let mut new_kv =
-        KvServiceClient::connect(format!("http://{}", node_endpoint(&topology(&new_node).await)))
-            .await
-            .expect("connect new node");
+    let new_kv = TestKvClient::connect(format!("http://{}", node_endpoint(&topology(&new_node).await))).await;
     assert_eq!(
-        kv_get_local_until(&mut new_kv, group_id, b"k1", 9101, Duration::from_secs(1)).await,
+        kv_get_local_until(&new_kv, group_id, b"k1", 9101, Duration::from_secs(1)).await,
         Some(b"v1".to_vec()),
         "k1 should already be present via snapshot import alone"
     );
     assert_eq!(
-        kv_get_local_until(&mut new_kv, group_id, b"k2", 9102, Duration::from_secs(1)).await,
+        kv_get_local_until(&new_kv, group_id, b"k2", 9102, Duration::from_secs(1)).await,
         Some(b"v2".to_vec()),
         "k2 should already be present via snapshot import alone"
     );
@@ -326,9 +315,9 @@ async fn e2e_new_member_joins_via_snapshot_then_catches_up_wal_tail() {
     // Post-join write: the new (non-voting) member must catch up on just
     // the WAL tail above the snapshot's at_slot via normal heartbeat
     // repair, not a full replay.
-    kv_put(&mut leader_kv, group_id, b"k3", b"v3", 9003).await;
+    kv_put(&leader_kv, group_id, b"k3", b"v3", 9003).await;
     assert_eq!(
-        kv_get_local_until(&mut new_kv, group_id, b"k3", 9103, Duration::from_secs(20)).await,
+        kv_get_local_until(&new_kv, group_id, b"k3", 9103, Duration::from_secs(20)).await,
         Some(b"v3".to_vec()),
         "k3 (written after join) should reach the new member via WAL-tail catch-up"
     );

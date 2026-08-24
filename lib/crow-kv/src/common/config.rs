@@ -113,7 +113,7 @@ pub struct ServerConfig {
     /// bounded regardless of value sizes. The engine always returns at
     /// least one entry even if it alone exceeds the budget (so the
     /// client makes progress). Default 3.5 MiB leaves ~0.5 MiB for
-    /// proto framing under tonic's 4 MiB default
+    /// proto framing under the default 4 MiB limit
     /// `max_decoding_message_size`; tune down for low-latency
     /// interactive scans or up for bulk-export workloads (stay below
     /// the RPC frame ceiling). Post-R32 (custom Rust RPC) the ceiling
