@@ -23,6 +23,8 @@ size_t query_block_size(int fd)
     if (ioctl(fd, BLKSSZGET, &blk_size) == 0 && blk_size > 0) {
         return static_cast<size_t>(blk_size);
     }
+#else
+    (void)fd;
 #endif
     return 512; // default
 }

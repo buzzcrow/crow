@@ -9,10 +9,10 @@
 // (startup, group-0 sync); the hot path is lock-free.
 #pragma once
 
+#include "disk/atomic_shared_ptr.h"
 #include "disk/disk.h"
 #include "disk/types.h"
 
-#include <atomic>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -26,6 +26,7 @@ class DiskSet
     DiskSet() : disk_map_(std::make_shared<const DiskMap>())
     {
     }
+
 
     ~DiskSet();
 
@@ -56,7 +57,7 @@ class DiskSet
     // Copy-on-write snapshot. Readers load a shared_ptr and do a lock-free
     // lookup; writers copy, modify, and store. The old snapshot stays alive
     // (via refcount) for any in-flight reader during a swap.
-    std::atomic<std::shared_ptr<const DiskMap>> disk_map_;
+    AtomicSharedPtr<const DiskMap> disk_map_;
 };
 
 } // namespace crow::diskio

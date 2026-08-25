@@ -137,7 +137,7 @@ TEST(SqFullBackpressureTest, BlockingEngineReadBackUnderLoad)
         off_t   offset   = static_cast<off_t>(i * DATA_SIZE);
         uint8_t expected = static_cast<uint8_t>(i % 256);
         engine->submit_read(disk.get(), offset, buf->data(), DATA_SIZE, 0,
-                            [buf, expected, &read_completed, &read_ok, DATA_SIZE](int result) {
+                            [buf, expected, &read_completed, &read_ok](int result) {
                                 if (result == DATA_SIZE) {
                                     read_ok.fetch_add(1, std::memory_order_relaxed);
                                     // Verify the pattern.
@@ -190,7 +190,7 @@ TEST(SqFullBackpressureTest, BlockingEngineMixedWriteFsync)
                                  write_completed.fetch_add(1, std::memory_order_release);
                              });
         if (i % 10 == 9) {
-            engine->submit_fsync(disk.get(), [&fsync_completed, DATA_SIZE](int result) {
+            engine->submit_fsync(disk.get(), [&fsync_completed](int result) {
                 EXPECT_GE(result, 0);
                 fsync_completed.fetch_add(1, std::memory_order_release);
             });
