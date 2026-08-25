@@ -3,6 +3,7 @@
 
 #include "crow-rpc/connection.h"
 
+#include "crow-common/log.h"
 #include "crow-rpc/transport/socket_transport.h" // TransportStats
 
 #include <sys/uio.h>
@@ -139,6 +140,8 @@ bool Connection::try_send(int fd, TransportStats *stats)
                     break;
                 }
                 // Hard error — close and free frames.
+                CR_LOG_WARN("try_send: writev hard error fd={} conn_id={} name={} errno={} ({})", fd,
+                            static_cast<long long>(id_), name_, errno, std::strerror(errno));
                 close();
                 for (int i = 0; i < n; i++) {
                     if (batch[i]->control != nullptr) {
@@ -231,6 +234,7 @@ void Connection::close()
     if (!open_.exchange(false, std::memory_order_acq_rel)) {
         return; // already closed
     }
+    CR_LOG_INFO("close: conn_id={} name={}", static_cast<long long>(id_), name_);
     if (on_close_callback_) {
         on_close_callback_(this);
     }

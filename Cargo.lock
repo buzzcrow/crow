@@ -853,6 +853,7 @@ dependencies = [
  "crow-kv",
  "crow-kv-client",
  "crow-protocol",
+ "crow-rpc-ffi",
  "crow-tree-ffi",
  "dashmap",
  "reqwest",

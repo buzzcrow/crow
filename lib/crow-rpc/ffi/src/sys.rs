@@ -224,6 +224,17 @@ extern "C" {
     // ── Server-side request-response correlation (R114) ───────────
     pub fn crow_rpc_server_set_request_client(server: crow_rpc_server_t, client: crow_rpc_client_t);
 
+    // ── Logging (mirrors crow-tree ct_*_logging) ─────────────────
+    pub fn crow_rpc_init_logging(
+        log_dir: *const c_char,
+        level: *const c_char,
+        max_file_mb: usize,
+        max_files: usize,
+        file_prefix: *const c_char,
+    );
+    pub fn crow_rpc_flush_logging();
+    pub fn crow_rpc_shutdown_logging();
+
     // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
     pub fn crow_rpc_co_spawn(
         client: crow_rpc_client_t,

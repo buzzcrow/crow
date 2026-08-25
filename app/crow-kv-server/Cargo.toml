@@ -24,6 +24,7 @@ crow-kv-client = { path = "../../lib/crow-kv-client" }
 crow-common = { path = "../../lib/crow-common/rust" }
 crow-protocol = { path = "../../lib/crow-protocol", features = ["schema"] }
 crow-tree-ffi = { path = "../../lib/crow-tree/ffi" }
+crow-rpc-ffi = { path = "../../lib/crow-rpc/ffi" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
 tracing = { workspace = true }
 clap = { version = "4", features = ["derive"] }

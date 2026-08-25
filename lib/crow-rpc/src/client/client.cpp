@@ -3,6 +3,7 @@
 
 #include "crow-rpc/client/client.h"
 
+#include "crow-common/log.h"
 #include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/rpc_client_metrics.h"
 #include "crow-rpc/server/handler.h"
@@ -111,6 +112,8 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
                             frame->data->release();
                         delete frame;
                         rpc_submit_fail().inc();
+                        CR_LOG_WARN("send: submit failed (slab) request_id={} conn_id={}",
+                                    static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
                         return false;
                     }
                     rpc_submit_ok().inc();
@@ -143,6 +146,8 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
                 frame->data->release();
             delete frame;
             rpc_submit_fail().inc();
+            CR_LOG_WARN("send: submit failed (map) request_id={} conn_id={}",
+                        static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
             return false;
         }
         rpc_submit_ok().inc();

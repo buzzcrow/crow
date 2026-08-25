@@ -9,6 +9,8 @@
 #    include "crow-rpc/transport/kqueue/kqueue_engine.h"
 #endif
 
+#include "crow-common/log.h"
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -120,6 +122,8 @@ void Worker::run_loop()
                             // level-triggered re-firing on the dead fd.
                             // Map erase is deferred to after the pending-write
                             // flush to avoid dangling raw pointers.
+                            CR_LOG_INFO("worker: conn closed on read fd={} conn_id={} name={}", ev.fd,
+                                        static_cast<long long>(ev.conn->id()), ev.conn->name());
                             engine_->remove_connection(ev.fd);
                             ::close(ev.fd);
                             closed_fds.push_back(ev.fd);
@@ -137,6 +141,8 @@ void Worker::run_loop()
                         bool has_more = on_writable_impl(ev.conn, ev.fd, stats_);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
+                            CR_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
+                                        static_cast<long long>(ev.conn->id()), ev.conn->name());
                             engine_->remove_connection(ev.fd);
                             ::close(ev.fd);
                             closed_fds.push_back(ev.fd);
@@ -160,6 +166,8 @@ void Worker::run_loop()
                     break;
                 case SocketEvent::Error:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
+                        CR_LOG_WARN("worker: socket error event fd={} conn_id={} name={}", ev.fd,
+                                    static_cast<long long>(ev.conn->id()), ev.conn->name());
                         ev.conn->close();
                         engine_->remove_connection(ev.fd);
                         ::close(ev.fd);
@@ -423,6 +431,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         auto &conn_ptr = lookup.value();
         if (conn_ptr == nullptr) {
             // Stale handle — connection has been closed/freed.
+            CR_LOG_WARN("submit: stale handle, dropping frame conn_id={}", static_cast<long long>(conn->id()));
             if (frame->control != nullptr) {
                 frame->control->release();
             }
@@ -441,6 +450,8 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     // offer to the queue and return. If writev hits EAGAIN, arm write
     // on the owning engine for retry.
     if (!conn->enqueue_send(frame)) {
+        CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
+                    static_cast<long long>(conn->id()), conn->name());
         return false; // backpressure or closed
     }
     int fd = static_cast<int>(conn->transport_handle);
@@ -518,6 +529,7 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
 {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
+        CR_LOG_WARN("connect: socket() failed addr={} port={} errno={} ({})", addr, port, errno, std::strerror(errno));
         return nullptr;
     }
 
@@ -525,11 +537,13 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
     sa.sin_family = AF_INET;
     sa.sin_port   = htons(static_cast<uint16_t>(port));
     if (::inet_pton(AF_INET, addr.c_str(), &sa.sin_addr) <= 0) {
+        CR_LOG_WARN("connect: inet_pton failed addr={} port={} errno={} ({})", addr, port, errno, std::strerror(errno));
         ::close(fd);
         return nullptr;
     }
 
     if (::connect(fd, reinterpret_cast<struct sockaddr *>(&sa), sizeof(sa)) < 0) {
+        CR_LOG_WARN("connect: connect() failed addr={} port={} errno={} ({})", addr, port, errno, std::strerror(errno));
         ::close(fd);
         return nullptr;
     }

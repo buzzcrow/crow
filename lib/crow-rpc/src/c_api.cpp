@@ -3,6 +3,7 @@
 
 #include "crow-rpc/c_api.h"
 
+#include "crow-common/log.h"
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/client.h"
@@ -766,4 +767,34 @@ void crow_rpc_server_set_request_client(crow_rpc_server_t server, crow_rpc_clien
     }
     catch (...) {
     }
+}
+
+// ── Logging ───────────────────────────────────────────────────────
+
+void crow_rpc_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
+                           const char *file_prefix)
+{
+    // If the default logger already exists (crow-tree called init_logging
+    // first), add a second file sink so rpc messages go to a separate file
+    // alongside the tree log. If no logger exists yet, create one — this
+    // handles standalone crow-rpc usage without crow-tree.
+    if (crow::common::logging_enabled()) {
+        crow::common::add_log_file(log_dir == nullptr ? "" : std::string(log_dir), max_file_mb, max_files,
+                                   file_prefix == nullptr ? "crow-rpc" : std::string(file_prefix));
+    }
+    else {
+        crow::common::init_logging(log_dir == nullptr ? "" : std::string(log_dir),
+                                   level == nullptr ? "info" : std::string(level), max_file_mb, max_files,
+                                   file_prefix == nullptr ? "crow-rpc" : std::string(file_prefix));
+    }
+}
+
+void crow_rpc_flush_logging()
+{
+    crow::common::flush_logging();
+}
+
+void crow_rpc_shutdown_logging()
+{
+    crow::common::shutdown_logging();
 }

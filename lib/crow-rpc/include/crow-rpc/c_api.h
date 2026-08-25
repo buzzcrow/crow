@@ -236,6 +236,21 @@ void crow_rpc_client_set_transport(crow_rpc_client_t client, crow_rpc_server_t s
 // behavior). The server sends requests via crow_rpc_client_send.
 void crow_rpc_server_set_request_client(crow_rpc_server_t server, crow_rpc_client_t client);
 
+// ── Logging (mirrors crow-tree ct_*_logging) ──────────────────────
+// Initialize the C++ spdlog async file logger. Call once at process
+// startup, before any crow_rpc_server_listen / crow_rpc_connect. No-op
+// when the library was built without spdlog (the FFI build without
+// CROW_HAVE_SPDLOG). All parameters map to crow::common::init_logging.
+//   log_dir      — directory for log files (empty => stderr)
+//   level        — spdlog level name (trace/debug/info/warn/error/off)
+//   max_file_mb  — max file size before rotation (0 => 30)
+//   max_files    — max rotated files to keep (0 => 5)
+//   file_prefix  — filename prefix (empty => "crow-rpc")
+void crow_rpc_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
+                           const char *file_prefix);
+void crow_rpc_flush_logging(void);
+void crow_rpc_shutdown_logging(void);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

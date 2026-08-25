@@ -60,6 +60,17 @@ async fn main() {
         "crow-kv-server-tree",
     );
 
+    // Initialize the crow-rpc C++ spdlog logger (connection failures,
+    // transport errors). Separate log files from the tree logger. No-op
+    // when the build has no spdlog.
+    crow_rpc_ffi::init_logging(
+        "log",
+        "info",
+        args.log_max_file_mb,
+        args.log_max_files,
+        "crow-kv-server-rpc",
+    );
+
     info!("crow-kv-server starting...");
 
     // Metrics runner: periodic flush to a dedicated metrics log file.
@@ -502,6 +513,7 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
     // Flush C++ logs before store shutdown so any in-flight engine messages
     // are on disk before the engines start tearing down.
     crow_tree_ffi::ct_flush_logging();
+    crow_rpc_ffi::flush_logging();
 
     let mut total_errors = 0usize;
     for entry in &registry.stores {
@@ -528,8 +540,10 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
         );
     }
 
-    // Final flush + stop the C++ spdlog async logger. All Crowtree instances
-    // are now dropped (or about to be), so this is safe.
+    // Final flush + stop the C++ spdlog async loggers. All Crowtree
+    // instances are now dropped (or about to be), so this is safe.
     crow_tree_ffi::ct_flush_logging();
     crow_tree_ffi::ct_shutdown_logging();
+    crow_rpc_ffi::flush_logging();
+    crow_rpc_ffi::shutdown_logging();
 }

@@ -13,11 +13,13 @@
 
 mod buffer;
 mod client;
+mod logging;
 mod server;
 pub mod sys;
 
 pub use buffer::{Buffer, BufferPool};
 pub use client::{noop_completion, CallFuture, ClientRequest, Response, RpcClient};
+pub use logging::{flush_logging, init_logging, shutdown_logging};
 pub use server::{Connection, RpcError, RpcServer, ServerRequest};
 
 pub use sys::{CrowRpcLatencyStats, CrowRpcTransportStats};
