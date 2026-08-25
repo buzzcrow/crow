@@ -118,11 +118,18 @@ impl KvServer for Arc<PxKvStore> {
         {
             let mut state = self.rpc_server_state.lock();
             state.server = Some(server);
-            state.transport = Some(transport);
+            state.transport = Some(transport.clone());
         }
 
         for entry in &self.groups {
             entry.local_replica().set_endpoint(bound_addr.to_string());
+            // Wire the shared transport into remote replicas that were
+            // created by apply_config during restore (before start()).
+            for remote in &entry.remote_replicas {
+                if let Some(real) = remote.as_real() {
+                    real.set_rpc_transport(transport.clone());
+                }
+            }
         }
 
         info!(store_id = self.store_id, listen_addr = %bound_addr, "kv server started");
