@@ -11,10 +11,51 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R118** — Bump this line in the same commit when adding a new item.
+**Next R number: R120** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
+  test port prober — Area: cluster / protocol / server —
+  `crow-protocol/src/ports.rs` already defines base ports + stride +
+  `ServicePort` for all services, but adoption is incomplete:
+  `crow-kv-server` has no CLI flag for the consensus (`KV_RPC_BASE`) or
+  client-facing (`KV_CLIENT_RPC_BASE`) RPC ports; `crow-diskdb` takes
+  listen addrs from TOML config (not CLI flags with `ports.rs` defaults);
+  and `KvServer::start` still supports port 0 (OS-assigned), contradicting
+  the project flow. Wire every server to accept explicit per-listener
+  port flags (defaults from `crow-protocol::ports`), reject port 0, and
+  add an in-process port-prober + flock-coordinated claim file (library
+  + `crow-port-alloc` CLI binary, no daemon) that is the single place
+  picking ports, so tests and cluster bootstrap run in parallel without
+  `Address already in use`. Console UI E2E shells out to the CLI binary
+  to replace its private `freePort()` counter. Open questions: claim-to-
+  bind TOCTOU mitigation, claim-file path/format, probe port range,
+  cross-host scope, paired-port override semantics.
+- **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
+  review & unification — Area: cluster / observability — CROW has
+  two logging stacks (Rust `tracing` in `crow-common/rust`, C++
+  `spdlog` in `crow-common/cpp`) and four servers + `crow-cli`, but
+  only `crow-kv-server` wires up file logging with rotation +
+  compression; `crow-diskdb`, `crow-chunkdb`, and `crow-web`
+  initialize console-only `tracing_subscriber::fmt().init()` and
+  lose every log line when daemonized. The `crow-rpc` C++ library
+  ships a `crow_rpc_init_logging` C API that no Rust caller ever
+  invokes (no FFI wrapper, no call site), so the consensus
+  transport layer is silent. Log directories diverge (`"log"`,
+  `~/.crow-kv/log`, temp paths), log formats differ between Rust
+  and C++, and no audit has been done of whether log lines are
+  meaningful and self-explaining. R119 does a two-prong audit
+  (code review of every logging call site + run each service's
+  e2e test and read the real log output), then unifies every
+  server on the shared rotating-file logging stack, wires the
+  crow-rpc C++ logging through an FFI bridge, adopts one log
+  directory + format convention, adds a "Logging" section to
+  `design-crow-kv-observability.md` (current design gap — the doc
+  covers metrics only), and fixes log lines that are opaque,
+  noisy, or missing context. Verification: each service's e2e
+  test asserts its log file exists, is non-empty, and contains
+  self-explaining key lines.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
