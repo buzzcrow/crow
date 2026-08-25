@@ -121,18 +121,28 @@ impl KvServer for Arc<PxKvStore> {
             state.transport = Some(transport.clone());
         }
 
+        let group_count = self.groups.len();
         for entry in &self.groups {
             entry.local_replica().set_endpoint(bound_addr.to_string());
             // Wire the shared transport into remote replicas that were
             // created by apply_config during restore (before start()).
+            let mut wired = 0usize;
             for remote in &entry.remote_replicas {
                 if let Some(real) = remote.as_real() {
                     real.set_rpc_transport(transport.clone());
+                    wired += 1;
                 }
             }
+            debug!(
+                store_id = self.store_id,
+                group_id = entry.group_id(),
+                remote_count = entry.remote_replicas.len(),
+                wired,
+                "start: wired rpc transport into remote replicas"
+            );
         }
 
-        info!(store_id = self.store_id, listen_addr = %bound_addr, "kv server started");
+        info!(store_id = self.store_id, listen_addr = %bound_addr, group_count, "kv server started");
         Ok(())
     }
 

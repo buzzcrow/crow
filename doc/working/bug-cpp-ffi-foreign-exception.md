@@ -2,8 +2,18 @@
 
 ## Status
 
-Open — try/catch guards added but do not fully fix. Crash still occurs
-~1 in 3 full-suite runs.
+**Partially resolved (Linux).** The foreign exception crash did NOT
+reproduce on Linux. Instead, `cluster_restart_incremental_test` failed
+deterministically with a Paxos election convergence failure ("group
+X/Y failed to converge to one leader within 3s"). Root cause traced to
+a **stale binary** — the `crow-kv-server` binary was built before
+commit `4704d356` (Wire RPC transport into remote replicas during
+restore), so the transport wiring in `start()` was missing. After
+rebuilding, all 25 tests pass consistently across 5 full-suite runs.
+
+The original macOS foreign-exception crash may be a separate issue
+that still needs investigation on macOS. See "Linux investigation"
+below.
 
 ## Failing test
 
@@ -188,3 +198,73 @@ The try/catch guards in `c_api.cpp`, `client.cpp`, `connection.cpp`,
 and `socket_transport.cpp` are kept — they are correct standard
 practice for C++ exposing a C ABI, even though they don't fix this
 specific crash. They prevent future crashes from explicit C++ throws.
+
+## Linux investigation (2026-08-25)
+
+### Symptom on Linux
+
+The foreign exception crash did **not** reproduce on Linux. Instead,
+`cluster_restart_incremental_test` failed deterministically with:
+
+```
+group 0/1 failed to converge to one leader within 3s
+```
+
+This is a Paxos election failure, not a crash. All nodes restart but
+never elect a leader because PreVote RPCs to peers fail silently.
+
+### Root cause: stale binary
+
+The `crow-kv-server` binary at
+`target/debug/crow-kv-server` was built at **12:51**, but commit
+`4704d356` ("Wire RPC transport into remote replicas during restore")
+was committed at **16:39**. That commit added the transport wiring
+loop in `KvServer::start()` (lines 124-133 of `kv_server.rs`) that
+calls `real.set_rpc_transport(transport.clone())` on each remote
+replica after the RPC server starts.
+
+Without this wiring, `PxRemoteReplica::transport_or_err()` returns
+`Err(Internal("crow-rpc transport unavailable: not set for peer N"))`
+for every PreVote/RequestVote/Heartbeat call. The election driver
+logs this at `debug!` level (filtered out at the default `INFO`
+level), so the failure was invisible without raising the log level.
+
+### Debug logging added
+
+Added a `debug!` log in `KvServer::start()` that reports
+`remote_count` and `wired` count per group, plus `group_count` in the
+"kv server started" info log. This confirms the transport is now wired
+correctly after rebuilding:
+
+```
+DEBUG start: wired rpc transport into remote replicas store_id=0 group_id=0 remote_count=4 wired=2
+INFO  kv server started store_id=0 listen_addr=0.0.0.0:42769 group_count=1
+```
+
+### Verification
+
+After rebuilding `crow-kv-server` (`pixi run cargo build -p
+crow-kv-server`), ran the full test suite 5 times:
+
+```
+for i in 1 2 3 4 5; do
+  pixi run cargo test -p crow-web --test cluster_restart_incremental_test -- --test-threads=1
+done
+```
+
+Result: **25/25 tests passed** (5 runs × 5 tests each). Zero PreVote
+transport errors in the logs; leaders elected successfully on all
+groups after restart.
+
+### Remaining concerns
+
+- The macOS foreign-exception crash may still occur — it was not
+  tested on macOS after the binary rebuild. The Linux election
+  failure and the macOS crash may share the same root cause (RPC
+  connection failures after restart) but manifest differently, or
+  they may be independent issues.
+- The C++ RPC layer (`SocketTransport::connect`, `RpcClient::send`)
+  still has no logging on connection failures and no retry logic.
+  Silent failures make debugging difficult. Consider adding `warn!`
+  or `error!` level logs in the C++ transport layer for connection
+  errors.
