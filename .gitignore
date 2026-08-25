@@ -80,7 +80,8 @@ lib/crow-rpc/build-tsan/
 lib/crow-rpc/build*/
 lib/crow-rpc/.cache/
 
-# crow-diskio build
+# crow-diskio build + clangd cache
 app/crow-diskio/build/
 app/crow-diskio/build*/
+app/crow-diskio/.cache/
 lib/crow-chunk-client/log/

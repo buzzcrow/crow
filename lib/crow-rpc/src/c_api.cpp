@@ -22,6 +22,11 @@
 #include <cstdlib>
 #include <cstring>
 
+// All C API functions wrap their body in try/catch(...) to prevent C++
+// exceptions from crossing the FFI boundary into Rust, which cannot
+// unwind foreign exceptions and would abort the process. This is the
+// standard practice for C++ code exposing a C ABI.
+
 // ── Handle wrappers ───────────────────────────────────────────────
 // The opaque C handles are wrappers around the C++ objects. The struct
 // names match the forward declarations in c_api.h (crow_rpc_pool_s, etc.).
@@ -39,137 +44,202 @@ struct crow_rpc_pool_s
 
 crow_rpc_buffer_t crow_rpc_buffer_alloc(crow_rpc_pool_t pool, uint32_t capacity)
 {
-    if (pool == nullptr || pool->pool == nullptr) {
+    try {
+        if (pool == nullptr || pool->pool == nullptr) {
+            return nullptr;
+        }
+        crow::rpc::Buffer *buf = pool->pool->alloc(capacity);
+        if (buf == nullptr) {
+            return nullptr;
+        }
+        return new crow_rpc_buffer_s{buf};
+    }
+    catch (...) {
         return nullptr;
     }
-    crow::rpc::Buffer *buf = pool->pool->alloc(capacity);
-    if (buf == nullptr) {
-        return nullptr;
-    }
-    return new crow_rpc_buffer_s{buf};
 }
 
 void crow_rpc_buffer_write(crow_rpc_buffer_t buf, const uint8_t *data, uint32_t len)
 {
-    if (buf == nullptr || buf->buf == nullptr) {
-        return;
+    try {
+        if (buf == nullptr || buf->buf == nullptr) {
+            return;
+        }
+        buf->buf->write(data, len);
     }
-    buf->buf->write(data, len);
+    catch (...) {
+    }
 }
 
 const uint8_t *crow_rpc_buffer_data(crow_rpc_buffer_t buf)
 {
-    if (buf == nullptr || buf->buf == nullptr) {
+    try {
+        if (buf == nullptr || buf->buf == nullptr) {
+            return nullptr;
+        }
+        return buf->buf->data;
+    }
+    catch (...) {
         return nullptr;
     }
-    return buf->buf->data;
 }
 
 uint32_t crow_rpc_buffer_len(crow_rpc_buffer_t buf)
 {
-    if (buf == nullptr || buf->buf == nullptr) {
+    try {
+        if (buf == nullptr || buf->buf == nullptr) {
+            return 0;
+        }
+        return buf->buf->len;
+    }
+    catch (...) {
         return 0;
     }
-    return buf->buf->len;
 }
 
 crow_rpc_buffer_t crow_rpc_buffer_ref(crow_rpc_buffer_t buf)
 {
-    if (buf == nullptr || buf->buf == nullptr) {
+    try {
+        if (buf == nullptr || buf->buf == nullptr) {
+            return nullptr;
+        }
+        buf->buf->ref_clone();
+        return buf;
+    }
+    catch (...) {
         return nullptr;
     }
-    buf->buf->ref_clone();
-    return buf;
 }
 
 void crow_rpc_buffer_release(crow_rpc_buffer_t buf)
 {
-    if (buf == nullptr || buf->buf == nullptr) {
-        return;
+    try {
+        if (buf == nullptr || buf->buf == nullptr) {
+            return;
+        }
+        // All buffers now have a refcount (pool-allocated or standalone).
+        // release() decrements and frees on last reference.
+        buf->buf->release();
+        buf->buf = nullptr;
+        delete buf;
     }
-    // All buffers now have a refcount (pool-allocated or standalone).
-    // release() decrements and frees on last reference.
-    buf->buf->release();
-    buf->buf = nullptr;
-    delete buf;
+    catch (...) {
+    }
 }
 
 crow_rpc_buffer_t crow_rpc_buffer_create(const uint8_t *data, uint32_t len)
 {
-    if (data == nullptr || len == 0) {
+    try {
+        if (data == nullptr || len == 0) {
+            return nullptr;
+        }
+        auto *buf = new crow::rpc::Buffer;
+        buf->data = static_cast<uint8_t *>(std::malloc(len));
+        if (buf->data == nullptr) {
+            delete buf;
+            return nullptr;
+        }
+        std::memcpy(buf->data, data, len);
+        buf->len      = len;
+        buf->capacity = len;
+        // Allocate a standalone refcount so ref_clone() works (the transport
+        // calls ref_clone on send). Pool-allocated buffers get their ref from
+        // the pool; standalone buffers need their own.
+        buf->ref  = new std::atomic<int32_t>(1);
+        buf->pool = nullptr;
+        return new crow_rpc_buffer_s{buf};
+    }
+    catch (...) {
         return nullptr;
     }
-    auto *buf = new crow::rpc::Buffer;
-    buf->data = static_cast<uint8_t *>(std::malloc(len));
-    if (buf->data == nullptr) {
-        delete buf;
-        return nullptr;
-    }
-    std::memcpy(buf->data, data, len);
-    buf->len      = len;
-    buf->capacity = len;
-    // Allocate a standalone refcount so ref_clone() works (the transport
-    // calls ref_clone on send). Pool-allocated buffers get their ref from
-    // the pool; standalone buffers need their own.
-    buf->ref  = new std::atomic<int32_t>(1);
-    buf->pool = nullptr;
-    return new crow_rpc_buffer_s{buf};
 }
 
 // ── Pool ──────────────────────────────────────────────────────────
 
 crow_rpc_pool_t crow_rpc_pool_create(uint32_t max_buffers)
 {
-    auto *pool = new crow::rpc::SystemBufferPool(max_buffers);
-    return new crow_rpc_pool_s{pool, true};
+    try {
+        auto *pool = new crow::rpc::SystemBufferPool(max_buffers);
+        return new crow_rpc_pool_s{pool, true};
+    }
+    catch (...) {
+        return nullptr;
+    }
 }
 
 void crow_rpc_pool_destroy(crow_rpc_pool_t pool)
 {
-    if (pool == nullptr) {
-        return;
+    try {
+        if (pool == nullptr) {
+            return;
+        }
+        if (pool->owns && pool->pool != nullptr) {
+            delete pool->pool;
+        }
+        delete pool;
     }
-    if (pool->owns && pool->pool != nullptr) {
-        delete pool->pool;
+    catch (...) {
     }
-    delete pool;
 }
 
 // ── Server ────────────────────────────────────────────────────────
 
 crow_rpc_server_t crow_rpc_server_create(crow_rpc_pool_t pool)
 {
-    crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
-    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, 1, 1)};
+    try {
+        crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
+        return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, 1, 1)};
+    }
+    catch (...) {
+        return nullptr;
+    }
 }
 
 crow_rpc_server_t crow_rpc_server_create_with_workers(crow_rpc_pool_t pool, uint32_t num_workers)
 {
-    crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
-    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, 1, num_workers)};
+    try {
+        crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
+        return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, 1, num_workers)};
+    }
+    catch (...) {
+        return nullptr;
+    }
 }
 
 crow_rpc_server_t crow_rpc_server_create_with_engines(crow_rpc_pool_t pool, uint32_t io_engines, uint32_t io_workers)
 {
-    crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
-    return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, io_engines, io_workers)};
+    try {
+        crow::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
+        return new crow_rpc_server_s{new crow::rpc::RpcServer(bp, io_engines, io_workers)};
+    }
+    catch (...) {
+        return nullptr;
+    }
 }
 
 void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t capacity)
 {
-    if (server == nullptr || capacity == 0) {
-        return;
+    try {
+        if (server == nullptr || capacity == 0) {
+            return;
+        }
+        server->server->transport()->set_send_queue_capacity(capacity);
     }
-    server->server->transport()->set_send_queue_capacity(capacity);
+    catch (...) {
+    }
 }
 
 void crow_rpc_server_destroy(crow_rpc_server_t server)
 {
-    if (server == nullptr) {
-        return;
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        delete server->server;
+        delete server;
     }
-    delete server->server;
-    delete server;
+    catch (...) {
+    }
 }
 
 static void copy_latency(crow_rpc_latency_stats_t *out, const crow::rpc::LatencyHistogram &h)
@@ -182,83 +252,118 @@ static void copy_latency(crow_rpc_latency_stats_t *out, const crow::rpc::Latency
 
 void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out)
 {
-    if (server == nullptr || out == nullptr) {
-        return;
+    try {
+        if (server == nullptr || out == nullptr) {
+            return;
+        }
+        auto *t = server->server->transport();
+        if (t == nullptr) {
+            return;
+        }
+        auto &s           = t->stats();
+        out->read_calls   = s.read_calls.load(std::memory_order_relaxed);
+        out->writev_calls = s.writev_calls.load(std::memory_order_relaxed);
+        copy_latency(&out->submit_to_writev, s.submit_to_writev);
+        copy_latency(&out->read_to_dispatch, s.read_to_dispatch);
+        copy_latency(&out->dispatch_to_enq, s.dispatch_to_enq);
     }
-    auto *t = server->server->transport();
-    if (t == nullptr) {
-        return;
+    catch (...) {
     }
-    auto &s           = t->stats();
-    out->read_calls   = s.read_calls.load(std::memory_order_relaxed);
-    out->writev_calls = s.writev_calls.load(std::memory_order_relaxed);
-    copy_latency(&out->submit_to_writev, s.submit_to_writev);
-    copy_latency(&out->read_to_dispatch, s.read_to_dispatch);
-    copy_latency(&out->dispatch_to_enq, s.dispatch_to_enq);
 }
 
 void crow_rpc_client_get_counters(crow_rpc_client_t /*client*/, crow_rpc_client_counters_t *out)
 {
-    if (out == nullptr) {
-        return;
+    try {
+        if (out == nullptr) {
+            return;
+        }
+        out->submit_ok     = crow::rpc::rpc_submit_ok().window();
+        out->submit_fail   = crow::rpc::rpc_submit_fail().window();
+        out->resp_matched  = crow::rpc::rpc_resp_matched().window();
+        out->resp_missed   = crow::rpc::rpc_resp_missed().window();
+        out->reaped        = crow::rpc::rpc_reaped().window();
+        out->slab_fallback = crow::rpc::rpc_slab_fallback().window();
     }
-    out->submit_ok     = crow::rpc::rpc_submit_ok().window();
-    out->submit_fail   = crow::rpc::rpc_submit_fail().window();
-    out->resp_matched  = crow::rpc::rpc_resp_matched().window();
-    out->resp_missed   = crow::rpc::rpc_resp_missed().window();
-    out->reaped        = crow::rpc::rpc_reaped().window();
-    out->slab_fallback = crow::rpc::rpc_slab_fallback().window();
+    catch (...) {
+    }
 }
 
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port)
 {
-    if (server == nullptr || addr == nullptr) {
-        return CROW_RPC_ERR_INVALID_ARG;
+    try {
+        if (server == nullptr || addr == nullptr) {
+            return CROW_RPC_ERR_INVALID_ARG;
+        }
+        if (!server->server->listen(addr, port)) {
+            return CROW_RPC_ERR_CONN_ERROR;
+        }
+        return CROW_RPC_OK;
     }
-    if (!server->server->listen(addr, port)) {
+    catch (...) {
         return CROW_RPC_ERR_CONN_ERROR;
     }
-    return CROW_RPC_OK;
 }
 
 void crow_rpc_server_start(crow_rpc_server_t server)
 {
-    if (server == nullptr) {
-        return;
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->start();
     }
-    server->server->start();
+    catch (...) {
+    }
 }
 
 void crow_rpc_server_stop(crow_rpc_server_t server)
 {
-    if (server == nullptr) {
-        return;
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->stop();
     }
-    server->server->stop();
+    catch (...) {
+    }
 }
 
 int crow_rpc_server_port(crow_rpc_server_t server)
 {
-    if (server == nullptr) {
+    try {
+        if (server == nullptr) {
+            return 0;
+        }
+        return server->server->listen_port();
+    }
+    catch (...) {
         return 0;
     }
-    return server->server->listen_port();
 }
 
 // ── Caller ────────────────────────────────────────────────────────
 
 crow_rpc_client_t crow_rpc_client_create(void)
 {
-    return new crow_rpc_client_s{new crow::rpc::RpcClient()};
+    try {
+        return new crow_rpc_client_s{new crow::rpc::RpcClient()};
+    }
+    catch (...) {
+        return nullptr;
+    }
 }
 
 void crow_rpc_client_destroy(crow_rpc_client_t client)
 {
-    if (client == nullptr) {
-        return;
+    try {
+        if (client == nullptr) {
+            return;
+        }
+        delete client->client;
+        delete client;
     }
-    delete client->client;
-    delete client;
+    catch (...) {
+    }
 }
 
 // ── Internal helpers (c_api_internal.h) ───────────────────────────
@@ -344,64 +449,85 @@ void invoke_c_complete(crow_rpc_on_complete cb, void *user_data, uint64_t reques
 
 void crow_rpc_client_attach(crow_rpc_client_t client, crow_rpc_conn_t conn)
 {
-    if (client == nullptr || conn == nullptr) {
-        return;
+    try {
+        if (client == nullptr || conn == nullptr) {
+            return;
+        }
+        client->client->attach(conn->conn.get());
     }
-    client->client->attach(conn->conn.get());
+    catch (...) {
+    }
 }
 
 void crow_rpc_client_set_completion_pool_size(crow_rpc_client_t client, uint32_t max_in_flight)
 {
-    if (client == nullptr || max_in_flight == 0) {
-        return;
+    try {
+        if (client == nullptr || max_in_flight == 0) {
+            return;
+        }
+        client->client->set_completion_pool_size(max_in_flight);
     }
-    client->client->set_completion_pool_size(max_in_flight);
+    catch (...) {
+    }
 }
 
 void crow_rpc_client_start_reaper(crow_rpc_client_t client, uint64_t timeout_ns, uint64_t scan_interval_ns)
 {
-    if (client == nullptr || timeout_ns == 0 || scan_interval_ns == 0) {
-        return;
+    try {
+        if (client == nullptr || timeout_ns == 0 || scan_interval_ns == 0) {
+            return;
+        }
+        client->client->start_reaper(timeout_ns, scan_interval_ns);
     }
-    client->client->start_reaper(timeout_ns, scan_interval_ns);
+    catch (...) {
+    }
 }
 
 void crow_rpc_client_stop_reaper(crow_rpc_client_t client)
 {
-    if (client == nullptr) {
-        return;
+    try {
+        if (client == nullptr) {
+            return;
+        }
+        client->client->stop_reaper();
     }
-    client->client->stop_reaper();
+    catch (...) {
+    }
 }
 
 crow_rpc_status crow_rpc_client_send(crow_rpc_client_t client, crow_rpc_server_t server, crow_rpc_conn_t conn,
                                      uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
                                      uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data)
 {
-    if (client == nullptr || server == nullptr || conn == nullptr || control == nullptr || on_complete == nullptr) {
-        return CROW_RPC_ERR_INVALID_ARG;
+    try {
+        if (client == nullptr || server == nullptr || conn == nullptr || control == nullptr || on_complete == nullptr) {
+            return CROW_RPC_ERR_INVALID_ARG;
+        }
+
+        crow::rpc::Buffer *ctrl_buf = control->buf;
+        crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
+
+        // Bump refcount so the client's handle stays valid after submit.
+        if (ctrl_buf != nullptr)
+            ctrl_buf->ref_clone();
+        if (data_buf != nullptr)
+            data_buf->ref_clone();
+
+        bool ok = client->client->send(server->server->transport(), conn->conn.get(), request_id, ctrl_buf, data_buf,
+                                       msg_type, on_complete, user_data);
+
+        // Release the caller's wrapper handles (decrements the ref bumped
+        // above and frees the crow_rpc_buffer_s struct).
+        crow_rpc_buffer_release(control);
+        if (data != nullptr) {
+            crow_rpc_buffer_release(data);
+        }
+
+        return ok ? CROW_RPC_OK : CROW_RPC_ERR_SEND_QUEUE;
     }
-
-    crow::rpc::Buffer *ctrl_buf = control->buf;
-    crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
-
-    // Bump refcount so the client's handle stays valid after submit.
-    if (ctrl_buf != nullptr)
-        ctrl_buf->ref_clone();
-    if (data_buf != nullptr)
-        data_buf->ref_clone();
-
-    bool ok = client->client->send(server->server->transport(), conn->conn.get(), request_id, ctrl_buf, data_buf,
-                                   msg_type, on_complete, user_data);
-
-    // Release the caller's wrapper handles (decrements the ref bumped
-    // above and frees the crow_rpc_buffer_s struct).
-    crow_rpc_buffer_release(control);
-    if (data != nullptr) {
-        crow_rpc_buffer_release(data);
+    catch (...) {
+        return CROW_RPC_ERR_CONN_ERROR;
     }
-
-    return ok ? CROW_RPC_OK : CROW_RPC_ERR_SEND_QUEUE;
 }
 
 // Variant of crow_rpc_client_send for server-handler use: conn_handle
@@ -415,46 +541,56 @@ crow_rpc_status crow_rpc_client_send_conn(crow_rpc_client_t client, crow_rpc_ser
                                           uint64_t request_id, crow_rpc_buffer_t control, crow_rpc_buffer_t data,
                                           uint16_t msg_type, crow_rpc_on_complete on_complete, void *user_data)
 {
-    if (client == nullptr || server == nullptr || conn_handle == nullptr || control == nullptr ||
-        on_complete == nullptr) {
-        return CROW_RPC_ERR_INVALID_ARG;
+    try {
+        if (client == nullptr || server == nullptr || conn_handle == nullptr || control == nullptr ||
+            on_complete == nullptr) {
+            return CROW_RPC_ERR_INVALID_ARG;
+        }
+
+        crow::rpc::Buffer *ctrl_buf = control->buf;
+        crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
+
+        if (ctrl_buf != nullptr) {
+            ctrl_buf->ref_clone();
+        }
+        if (data_buf != nullptr) {
+            data_buf->ref_clone();
+        }
+
+        auto *conn = static_cast<crow::rpc::Connection *>(conn_handle);
+        bool  ok   = client->client->send(server->server->transport(), conn, request_id, ctrl_buf, data_buf, msg_type,
+                                          on_complete, user_data);
+
+        crow_rpc_buffer_release(control);
+        if (data != nullptr) {
+            crow_rpc_buffer_release(data);
+        }
+
+        return ok ? CROW_RPC_OK : CROW_RPC_ERR_SEND_QUEUE;
     }
-
-    crow::rpc::Buffer *ctrl_buf = control->buf;
-    crow::rpc::Buffer *data_buf = (data != nullptr) ? data->buf : nullptr;
-
-    if (ctrl_buf != nullptr) {
-        ctrl_buf->ref_clone();
+    catch (...) {
+        return CROW_RPC_ERR_CONN_ERROR;
     }
-    if (data_buf != nullptr) {
-        data_buf->ref_clone();
-    }
-
-    auto *conn = static_cast<crow::rpc::Connection *>(conn_handle);
-    bool  ok   = client->client->send(server->server->transport(), conn, request_id, ctrl_buf, data_buf, msg_type,
-                                      on_complete, user_data);
-
-    crow_rpc_buffer_release(control);
-    if (data != nullptr) {
-        crow_rpc_buffer_release(data);
-    }
-
-    return ok ? CROW_RPC_OK : CROW_RPC_ERR_SEND_QUEUE;
 }
 
 // ── Connection ────────────────────────────────────────────────────
 
 crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int port)
 {
-    if (server == nullptr || addr == nullptr) {
-        return nullptr;
-    }
+    try {
+        if (server == nullptr || addr == nullptr) {
+            return nullptr;
+        }
 
-    auto conn = server->server->transport()->connect(addr, port);
-    if (conn == nullptr) {
+        auto conn = server->server->transport()->connect(addr, port);
+        if (conn == nullptr) {
+            return nullptr;
+        }
+        return new crow_rpc_conn_s{conn};
+    }
+    catch (...) {
         return nullptr;
     }
-    return new crow_rpc_conn_s{conn};
 }
 
 // ── Built-in echo handler ─────────────────────────────────────────
@@ -486,10 +622,14 @@ static crow::rpc::OutFrame *echo_handler(crow::rpc::Frame *request, crow::rpc::C
 
 void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t msg_type)
 {
-    if (server == nullptr) {
-        return;
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->register_handler(msg_type, echo_handler);
     }
-    server->server->register_handler(msg_type, echo_handler);
+    catch (...) {
+    }
 }
 
 // ── Custom handler dispatch (R115: Rust server handlers) ──────────
@@ -528,54 +668,63 @@ void crow::rpc::invoke_c_handler(crow_rpc_handler_fn callback, void *user_data, 
 void crow_rpc_server_register_handler(crow_rpc_server_t server, uint16_t msg_type, crow_rpc_handler_fn callback,
                                       void *user_data)
 {
-    if (server == nullptr || callback == nullptr) {
-        return;
+    try {
+        if (server == nullptr || callback == nullptr) {
+            return;
+        }
+        server->server->register_handler(msg_type,
+                                         [callback, user_data](crow::rpc::Frame *req, crow::rpc::Connection *conn) {
+                                             crow::rpc::invoke_c_handler(callback, user_data, req, conn);
+                                             return nullptr; // async — callback submits response later.
+                                         });
     }
-    server->server->register_handler(msg_type,
-                                     [callback, user_data](crow::rpc::Frame *req, crow::rpc::Connection *conn) {
-                                         crow::rpc::invoke_c_handler(callback, user_data, req, conn);
-                                         return nullptr; // async — callback submits response later.
-                                     });
+    catch (...) {
+    }
 }
 
 crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *conn_handle, const uint8_t *control,
                                                 uint32_t control_len, const uint8_t *data, uint32_t data_len,
                                                 uint16_t msg_type, uint64_t request_id)
 {
-    if (server == nullptr || conn_handle == nullptr) {
-        return CROW_RPC_ERR_INVALID_ARG;
-    }
-
-    auto *conn = static_cast<crow::rpc::Connection *>(conn_handle);
-    auto *pool = server->server->pool();
-
-    // Allocate response buffers from the pool and copy data.
-    crow::rpc::Buffer *resp_ctrl = nullptr;
-    if (control != nullptr && control_len > 0) {
-        resp_ctrl = pool->alloc(control_len);
-        if (resp_ctrl == nullptr) {
-            return CROW_RPC_ERR_SEND_QUEUE;
+    try {
+        if (server == nullptr || conn_handle == nullptr) {
+            return CROW_RPC_ERR_INVALID_ARG;
         }
-        resp_ctrl->write(control, control_len);
-    }
 
-    crow::rpc::Buffer *resp_data = nullptr;
-    if (data != nullptr && data_len > 0) {
-        resp_data = pool->alloc(data_len);
-        if (resp_data == nullptr) {
-            if (resp_ctrl != nullptr) {
-                resp_ctrl->release();
+        auto *conn = static_cast<crow::rpc::Connection *>(conn_handle);
+        auto *pool = server->server->pool();
+
+        // Allocate response buffers from the pool and copy data.
+        crow::rpc::Buffer *resp_ctrl = nullptr;
+        if (control != nullptr && control_len > 0) {
+            resp_ctrl = pool->alloc(control_len);
+            if (resp_ctrl == nullptr) {
+                return CROW_RPC_ERR_SEND_QUEUE;
             }
+            resp_ctrl->write(control, control_len);
+        }
+
+        crow::rpc::Buffer *resp_data = nullptr;
+        if (data != nullptr && data_len > 0) {
+            resp_data = pool->alloc(data_len);
+            if (resp_data == nullptr) {
+                if (resp_ctrl != nullptr) {
+                    resp_ctrl->release();
+                }
+                return CROW_RPC_ERR_SEND_QUEUE;
+            }
+            resp_data->write(data, data_len);
+        }
+
+        auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
+        if (!server->server->transport()->submit(conn, frame)) {
             return CROW_RPC_ERR_SEND_QUEUE;
         }
-        resp_data->write(data, data_len);
+        return CROW_RPC_OK;
     }
-
-    auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
-    if (!server->server->transport()->submit(conn, frame)) {
-        return CROW_RPC_ERR_SEND_QUEUE;
+    catch (...) {
+        return CROW_RPC_ERR_CONN_ERROR;
     }
-    return CROW_RPC_OK;
 }
 
 // ── Client-side request handler dispatch (R114) ──────────────────
@@ -583,26 +732,38 @@ crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *
 void crow_rpc_client_register_handler(crow_rpc_client_t client, uint16_t msg_type, crow_rpc_handler_fn callback,
                                       void *user_data)
 {
-    if (client == nullptr || callback == nullptr) {
-        return;
+    try {
+        if (client == nullptr || callback == nullptr) {
+            return;
+        }
+        client->client->register_handler(msg_type, callback, user_data);
     }
-    client->client->register_handler(msg_type, callback, user_data);
+    catch (...) {
+    }
 }
 
 void crow_rpc_client_set_transport(crow_rpc_client_t client, crow_rpc_server_t server)
 {
-    if (client == nullptr || server == nullptr) {
-        return;
+    try {
+        if (client == nullptr || server == nullptr) {
+            return;
+        }
+        client->client->set_transport(server->server->transport());
     }
-    client->client->set_transport(server->server->transport());
+    catch (...) {
+    }
 }
 
 // ── Server-side request-response correlation (R114) ──────────────
 
 void crow_rpc_server_set_request_client(crow_rpc_server_t server, crow_rpc_client_t client)
 {
-    if (server == nullptr || client == nullptr) {
-        return;
+    try {
+        if (server == nullptr || client == nullptr) {
+            return;
+        }
+        server->server->set_request_client(client->client);
     }
-    server->server->set_request_client(client->client);
+    catch (...) {
+    }
 }

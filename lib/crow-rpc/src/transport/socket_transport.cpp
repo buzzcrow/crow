@@ -92,114 +92,125 @@ void Worker::run_loop()
     // while raw pointers in pending_write_conns_ still reference it).
     std::vector<int> closed_fds;
 
-    while (running_.load(std::memory_order_relaxed)) {
-        int n = engine_->wait(events, MAX_EVENTS, 1000); // 1s timeout
-        closed_fds.clear();
-        for (int i = 0; i < n; i++) {
-            const auto &ev = events[i];
-            switch (ev.type) {
-            case SocketEvent::Notify:
-                // No cross-thread submit queue — submits are caller-thread
-                // writev. Notify is only used for shutdown wake.
-                break;
-            case SocketEvent::Timer:
-                // Scheduled tasks fire here (Phase 3).
-                break;
-            case SocketEvent::Readable:
-                if (ev.conn != nullptr && ev.conn->is_open()) {
-                    on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_, stats_);
-                    if (!ev.conn->is_open()) {
-                        // Connection closed (EOF or fatal read error).
-                        // Remove from epoll and close the fd to stop
-                        // level-triggered re-firing on the dead fd.
-                        // Map erase is deferred to after the pending-write
-                        // flush to avoid dangling raw pointers.
-                        engine_->remove_connection(ev.fd);
-                        ::close(ev.fd);
-                        closed_fds.push_back(ev.fd);
-                    }
-                    else if (engine_->oneshot()) {
-                        // In one-shot mode, re-arm read after processing
-                        // (EV_ONESHOT consumed the event). Without this, the
-                        // connection goes silent — no more read events fire.
-                        engine_->arm_read(ev.fd, ev.conn);
-                    }
-                }
-                break;
-            case SocketEvent::Writable:
-                if (ev.conn != nullptr && ev.conn->is_open()) {
-                    bool has_more = on_writable_impl(ev.conn, ev.fd, stats_);
-                    if (!ev.conn->is_open()) {
-                        // Connection closed during write (hard error).
-                        engine_->remove_connection(ev.fd);
-                        ::close(ev.fd);
-                        closed_fds.push_back(ev.fd);
-                    }
-                    else if (has_more) {
-                        // Still has data — re-arm write in one-shot mode.
-                        if (engine_->oneshot()) {
-                            engine_->arm_write(ev.fd, ev.conn);
+    // Wrap the entire event loop in try/catch to prevent C++ exceptions
+    // from propagating through the thread boundary (which would call
+    // std::terminate and abort the process).
+    try {
+
+        while (running_.load(std::memory_order_relaxed)) {
+            int n = engine_->wait(events, MAX_EVENTS, 1000); // 1s timeout
+            closed_fds.clear();
+            for (int i = 0; i < n; i++) {
+                const auto &ev = events[i];
+                switch (ev.type) {
+                case SocketEvent::Notify:
+                    // No cross-thread submit queue — submits are caller-thread
+                    // writev. Notify is only used for shutdown wake.
+                    break;
+                case SocketEvent::Timer:
+                    // Scheduled tasks fire here (Phase 3).
+                    break;
+                case SocketEvent::Readable:
+                    if (ev.conn != nullptr && ev.conn->is_open()) {
+                        on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_,
+                                         stats_);
+                        if (!ev.conn->is_open()) {
+                            // Connection closed (EOF or fatal read error).
+                            // Remove from epoll and close the fd to stop
+                            // level-triggered re-firing on the dead fd.
+                            // Map erase is deferred to after the pending-write
+                            // flush to avoid dangling raw pointers.
+                            engine_->remove_connection(ev.fd);
+                            ::close(ev.fd);
+                            closed_fds.push_back(ev.fd);
+                        }
+                        else if (engine_->oneshot()) {
+                            // In one-shot mode, re-arm read after processing
+                            // (EV_ONESHOT consumed the event). Without this, the
+                            // connection goes silent — no more read events fire.
+                            engine_->arm_read(ev.fd, ev.conn);
                         }
                     }
+                    break;
+                case SocketEvent::Writable:
+                    if (ev.conn != nullptr && ev.conn->is_open()) {
+                        bool has_more = on_writable_impl(ev.conn, ev.fd, stats_);
+                        if (!ev.conn->is_open()) {
+                            // Connection closed during write (hard error).
+                            engine_->remove_connection(ev.fd);
+                            ::close(ev.fd);
+                            closed_fds.push_back(ev.fd);
+                        }
+                        else if (has_more) {
+                            // Still has data — re-arm write in one-shot mode.
+                            if (engine_->oneshot()) {
+                                engine_->arm_write(ev.fd, ev.conn);
+                            }
+                        }
+                        else {
+                            // Queue empty — disarm write. In level-triggered
+                            // mode, this removes EPOLLOUT from the kernel. In
+                            // one-shot mode, the kernel already disarmed all
+                            // events; disarm_write re-arms with just EPOLLIN
+                            // so read events resume (EPOLLONESHOT disarms both
+                            // read and write, unlike kqueue's per-filter oneshot).
+                            engine_->disarm_write(ev.fd, ev.conn);
+                        }
+                    }
+                    break;
+                case SocketEvent::Error:
+                    if (ev.conn != nullptr && ev.conn->is_open()) {
+                        ev.conn->close();
+                        engine_->remove_connection(ev.fd);
+                        ::close(ev.fd);
+                        closed_fds.push_back(ev.fd);
+                    }
+                    break;
+                case SocketEvent::Accept:
+                    // Acceptor only — handled by the server (Phase 4).
+                    break;
+                }
+            }
+
+            // Send aggregation: after processing all events, batch writev
+            // pending responses collected during on_readable. This coalesces
+            // multiple responses (from multiple frames read in one read())
+            // into a single writev per connection.
+            if (!pending_write_conns_.empty()) {
+                for (Connection *conn : pending_write_conns_) {
+                    if (!conn->is_open()) {
+                        continue;
+                    }
+                    int fd = static_cast<int>(conn->transport_handle);
+                    if (!on_writable_impl(conn, fd, stats_)) {
+                        // All data sent — no need to arm write.
+                    }
                     else {
-                        // Queue empty — disarm write. In level-triggered
-                        // mode, this removes EPOLLOUT from the kernel. In
-                        // one-shot mode, the kernel already disarmed all
-                        // events; disarm_write re-arms with just EPOLLIN
-                        // so read events resume (EPOLLONESHOT disarms both
-                        // read and write, unlike kqueue's per-filter oneshot).
-                        engine_->disarm_write(ev.fd, ev.conn);
+                        // Partial write or EAGAIN — arm write for remaining.
+                        engine_->arm_write(fd, conn);
+                    }
+                    if (!conn->is_open()) {
+                        engine_->remove_connection(fd);
+                        ::close(fd);
+                        closed_fds.push_back(fd);
                     }
                 }
-                break;
-            case SocketEvent::Error:
-                if (ev.conn != nullptr && ev.conn->is_open()) {
-                    ev.conn->close();
-                    engine_->remove_connection(ev.fd);
-                    ::close(ev.fd);
-                    closed_fds.push_back(ev.fd);
-                }
-                break;
-            case SocketEvent::Accept:
-                // Acceptor only — handled by the server (Phase 4).
-                break;
+                pending_write_conns_.clear();
             }
-        }
 
-        // Send aggregation: after processing all events, batch writev
-        // pending responses collected during on_readable. This coalesces
-        // multiple responses (from multiple frames read in one read())
-        // into a single writev per connection.
-        if (!pending_write_conns_.empty()) {
-            for (Connection *conn : pending_write_conns_) {
-                if (!conn->is_open()) {
-                    continue;
-                }
-                int fd = static_cast<int>(conn->transport_handle);
-                if (!on_writable_impl(conn, fd, stats_)) {
-                    // All data sent — no need to arm write.
-                }
-                else {
-                    // Partial write or EAGAIN — arm write for remaining.
-                    engine_->arm_write(fd, conn);
-                }
-                if (!conn->is_open()) {
-                    engine_->remove_connection(fd);
-                    ::close(fd);
-                    closed_fds.push_back(fd);
+            // Now safe to release closed connections — pending_write_conns_
+            // has been flushed and won't access the raw pointers.
+            if (!closed_fds.empty()) {
+                std::lock_guard<std::mutex> lock(conns_mu_);
+                for (int fd : closed_fds) {
+                    connections_.erase(fd);
                 }
             }
-            pending_write_conns_.clear();
         }
-
-        // Now safe to release closed connections — pending_write_conns_
-        // has been flushed and won't access the raw pointers.
-        if (!closed_fds.empty()) {
-            std::lock_guard<std::mutex> lock(conns_mu_);
-            for (int fd : closed_fds) {
-                connections_.erase(fd);
-            }
-        }
+    }
+    catch (const std::exception &e) {
+    }
+    catch (...) {
     }
 }
 

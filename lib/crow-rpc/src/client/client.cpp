@@ -71,81 +71,89 @@ OutFrame *RpcClient::build_frame(uint64_t request_id, Buffer *control, Buffer *d
 bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
                      uint16_t msg_type, crow_rpc_on_complete cb, void *user_data)
 {
-    uint64_t timeout  = default_timeout_ns_.load(std::memory_order_relaxed);
-    uint64_t deadline = (timeout > 0) ? steady_now_ns() + timeout : 0;
+    try {
+        uint64_t timeout  = default_timeout_ns_.load(std::memory_order_relaxed);
+        uint64_t deadline = (timeout > 0) ? steady_now_ns() + timeout : 0;
 
-    // If no slab pool is sized, go directly to the map path. This is
-    // used by the oneshot call() path when the caller opts out of the
-    // slab (e.g. when per-call heap alloc already makes the slab's
-    // zero-alloc advantage marginal).
-    if (completion_pool_ == nullptr) {
-        goto map_path;
-    }
-
-    {
-        size_t idx  = request_id & pool_mask_;
-        auto  &slot = completion_pool_[idx];
-
-        // CAS first to claim the slot — the loser falls to the map before
-        // touching any slot fields, so the winner's fields are never
-        // corrupted. This eliminates the write-before-CAS race.
-        uint8_t st = slot.state.load(std::memory_order_acquire);
-        if (st == SLOT_FREE || st == SLOT_DONE) {
-            uint8_t expected = st;
-            if (slot.state.compare_exchange_strong(expected, SLOT_PENDING_CLAIMED, std::memory_order_acq_rel)) {
-                // We own the slot — write fields, then publish.
-                slot.request_id = request_id;
-                slot.cb         = cb;
-                slot.user_data  = user_data;
-                slot.conn       = conn;
-                slot.deadline_ns.store(deadline, std::memory_order_relaxed);
-                slot.state.store(SLOT_PENDING_READY, std::memory_order_release);
-
-                OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
-                if (!transport->submit(conn, frame)) {
-                    slot.state.store(SLOT_FREE, std::memory_order_release);
-                    if (frame->control != nullptr)
-                        frame->control->release();
-                    if (frame->data != nullptr)
-                        frame->data->release();
-                    delete frame;
-                    rpc_submit_fail().inc();
-                    return false;
-                }
-                rpc_submit_ok().inc();
-                return true;
-            }
-            // CAS failed — another submitter grabbed the slot between our
-            // load and CAS. Fall through to map fallback.
+        // If no slab pool is sized, go directly to the map path. This is
+        // used by the oneshot call() path when the caller opts out of the
+        // slab (e.g. when per-call heap alloc already makes the slab's
+        // zero-alloc advantage marginal).
+        if (completion_pool_ == nullptr) {
+            goto map_path;
         }
-    } // end slab block
 
-map_path:
-    // Slab slot occupied (PENDING_CLAIMED/PENDING_READY/PROCESSING), rare
-    // CAS race, or no slab pool sized — fall back to the pending map. One
-    // heap alloc for the std::function capture (overload path, not the
-    // hot path).
-    rpc_slab_fallback().inc();
-    auto wrapped = [cb, user_data, request_id](Frame *resp, RpcError err) {
-        invoke_c_complete(cb, user_data, request_id, resp, err);
-    };
-    pending_.insert_or_assign(request_id, PendingEntry{std::move(wrapped), deadline, conn});
+        {
+            size_t idx  = request_id & pool_mask_;
+            auto  &slot = completion_pool_[idx];
 
-    OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
-    if (!transport->submit(conn, frame)) {
-        // Submit failed — remove from map. Callback NOT invoked (caller
-        // handles the error, same as the slab path).
-        pending_.erase(request_id);
-        if (frame->control != nullptr)
-            frame->control->release();
-        if (frame->data != nullptr)
-            frame->data->release();
-        delete frame;
-        rpc_submit_fail().inc();
+            // CAS first to claim the slot — the loser falls to the map before
+            // touching any slot fields, so the winner's fields are never
+            // corrupted. This eliminates the write-before-CAS race.
+            uint8_t st = slot.state.load(std::memory_order_acquire);
+            if (st == SLOT_FREE || st == SLOT_DONE) {
+                uint8_t expected = st;
+                if (slot.state.compare_exchange_strong(expected, SLOT_PENDING_CLAIMED, std::memory_order_acq_rel)) {
+                    // We own the slot — write fields, then publish.
+                    slot.request_id = request_id;
+                    slot.cb         = cb;
+                    slot.user_data  = user_data;
+                    slot.conn       = conn;
+                    slot.deadline_ns.store(deadline, std::memory_order_relaxed);
+                    slot.state.store(SLOT_PENDING_READY, std::memory_order_release);
+
+                    OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
+                    if (!transport->submit(conn, frame)) {
+                        slot.state.store(SLOT_FREE, std::memory_order_release);
+                        if (frame->control != nullptr)
+                            frame->control->release();
+                        if (frame->data != nullptr)
+                            frame->data->release();
+                        delete frame;
+                        rpc_submit_fail().inc();
+                        return false;
+                    }
+                    rpc_submit_ok().inc();
+                    return true;
+                }
+                // CAS failed — another submitter grabbed the slot between our
+                // load and CAS. Fall through to map fallback.
+            }
+        } // end slab block
+
+    map_path:
+        // Slab slot occupied (PENDING_CLAIMED/PENDING_READY/PROCESSING), rare
+        // CAS race, or no slab pool sized — fall back to the pending map. One
+        // heap alloc for the std::function capture (overload path, not the
+        // hot path).
+        rpc_slab_fallback().inc();
+        auto wrapped = [cb, user_data, request_id](Frame *resp, RpcError err) {
+            invoke_c_complete(cb, user_data, request_id, resp, err);
+        };
+        pending_.insert_or_assign(request_id, PendingEntry{std::move(wrapped), deadline, conn});
+
+        OutFrame *frame = build_frame(request_id, control, data, msg_type, 0);
+        if (!transport->submit(conn, frame)) {
+            // Submit failed — remove from map. Callback NOT invoked (caller
+            // handles the error, same as the slab path).
+            pending_.erase(request_id);
+            if (frame->control != nullptr)
+                frame->control->release();
+            if (frame->data != nullptr)
+                frame->data->release();
+            delete frame;
+            rpc_submit_fail().inc();
+            return false;
+        }
+        rpc_submit_ok().inc();
+        return true;
+    }
+    catch (const std::exception &e) {
         return false;
     }
-    rpc_submit_ok().inc();
-    return true;
+    catch (...) {
+        return false;
+    }
 }
 
 void RpcClient::attach(Connection *conn)
