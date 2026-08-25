@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <thread>
 
 namespace crow::rpc
 {
@@ -130,6 +131,18 @@ void RpcServer::stop()
 
 void RpcServer::acceptor_loop(std::promise<void> ready)
 {
+    // Client-only server (no listen): sleep-loop on running_ so the
+    // acceptor thread doesn't busy-spin. On macOS, poll() with fd=-1
+    // returns immediately (POLLNVAL), causing 100% CPU; on Linux it
+    // times out, but either way there is nothing to accept.
+    if (listen_fd_ < 0) {
+        ready.set_value();
+        while (running_.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return;
+    }
+
     // Make the listen socket non-blocking and use poll() with a short
     // timeout. On Linux, close(listen_fd) from another thread does NOT
     // unblock a thread blocked in accept() (unlike macOS). The poll()

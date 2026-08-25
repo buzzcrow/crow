@@ -173,19 +173,16 @@ impl RpcClient {
         let (tx, rx) = oneshot::channel();
         let user_data = Box::into_raw(Box::new(tx)) as *mut std::ffi::c_void;
 
-        if self
-            .send(
-                server,
-                conn,
-                request_id,
-                control,
-                data,
-                msg_type,
-                Some(on_complete_cb),
-                user_data,
-            )
-            .is_err()
-        {
+        if let Err(e) = self.send(
+            server,
+            conn,
+            request_id,
+            control,
+            data,
+            msg_type,
+            Some(on_complete_cb),
+            user_data,
+        ) {
             // Reclaim the oneshot sender to avoid a leak (callback was
             // NOT invoked — caller must handle the error).
             unsafe {
@@ -193,7 +190,7 @@ impl RpcClient {
                     user_data as *mut oneshot::Sender<Result<Response, RpcError>>,
                 ))
             };
-            return Err(RpcError::SendQueueFull);
+            return Err(e);
         }
 
         Ok(CallFuture { rx })
@@ -269,25 +266,22 @@ impl RpcClient {
         let (tx, rx) = oneshot::channel();
         let user_data = Box::into_raw(Box::new(tx)) as *mut std::ffi::c_void;
 
-        if self
-            .send_to_handle(
-                server,
-                conn_handle,
-                request_id,
-                control,
-                data,
-                msg_type,
-                Some(on_complete_cb),
-                user_data,
-            )
-            .is_err()
-        {
+        if let Err(e) = self.send_to_handle(
+            server,
+            conn_handle,
+            request_id,
+            control,
+            data,
+            msg_type,
+            Some(on_complete_cb),
+            user_data,
+        ) {
             unsafe {
                 drop(Box::from_raw(
                     user_data as *mut oneshot::Sender<Result<Response, RpcError>>,
                 ))
             };
-            return Err(RpcError::SendQueueFull);
+            return Err(e);
         }
 
         Ok(CallFuture { rx })
