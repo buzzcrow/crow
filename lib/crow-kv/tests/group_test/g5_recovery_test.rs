@@ -146,11 +146,9 @@ async fn bulk_phase1_recovers_all_committed_values() {
         .await
         .expect("second leader elected after step-down");
 
-    // Give bulk Phase 1 time to complete (it runs asynchronously
-    // on leader entry).
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
     // All 10 keys must be readable through the new leader.
+    // poll_for_value retries until bulk Phase 1 completes — no
+    // fixed sleep needed.
     for i in 0u64..10 {
         let key = format!("recover-{i}");
         let val = format!("val-{i}");
@@ -188,7 +186,6 @@ async fn bulk_phase1_after_second_step_down() {
     let leader2 = wait_for_leader(&cluster, Duration::from_secs(5))
         .await
         .expect("second leader elected");
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Write more keys through second leader.
     assert!(put_via_leader(&cluster, b"b3", b"v3", 3).await);
@@ -198,7 +195,6 @@ async fn bulk_phase1_after_second_step_down() {
     wait_for_leader(&cluster, Duration::from_secs(5))
         .await
         .expect("third leader elected");
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // All keys must survive two leader changes.
     poll_for_value(&cluster, b"b1", b"v1", Duration::from_secs(5)).await;

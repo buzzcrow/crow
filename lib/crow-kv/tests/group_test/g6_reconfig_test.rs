@@ -58,6 +58,25 @@ async fn put_via_leader(cluster: &TestCluster, key: &[u8], val: &[u8], req_id: u
     resp.ok
 }
 
+/// Retry `put_via_leader` with a deadline — used after reconfig where
+/// the leader may briefly reject writes while membership propagates.
+async fn put_via_leader_retry(
+    cluster: &TestCluster,
+    key: &[u8],
+    val: &[u8],
+    req_id: u64,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if put_via_leader(cluster, key, val, req_id).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
 async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     let leader = cluster.elected_leader()?;
     let client = cluster.kv_client(leader).await;
@@ -209,12 +228,10 @@ async fn reconfig_add_replica() {
     // The key verification is that writes still commit after the reconfig.
     let _node4 = add_node_to_cluster(&cluster, 4).await;
 
-    // Give the cluster time to stabilize after reconfig.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Write after reconfig — should still commit (quorum is now 3-of-4).
+    // Write after reconfig — retry until the leader accepts (quorum
+    // is now 3-of-4, but membership may take a moment to propagate).
     assert!(
-        put_via_leader(&cluster, b"rc-add-2", b"val-2", 2).await,
+        put_via_leader_retry(&cluster, b"rc-add-2", b"val-2", 2, Duration::from_secs(5)).await,
         "write after add-replica should commit"
     );
     poll_for_value(&cluster, b"rc-add-2", b"val-2", Duration::from_secs(5)).await;
@@ -262,12 +279,10 @@ async fn reconfig_remove_non_leader() {
         }
     }
 
-    // Give the cluster time to stabilize.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Write after reconfig — should commit with reduced quorum.
+    // Write after reconfig — retry until the leader accepts with
+    // the reduced quorum.
     assert!(
-        put_via_leader(&cluster, b"rc-rm-2", b"val-2", 2).await,
+        put_via_leader_retry(&cluster, b"rc-rm-2", b"val-2", 2, Duration::from_secs(5)).await,
         "write after remove-replica should commit"
     );
     poll_for_value(&cluster, b"rc-rm-2", b"val-2", Duration::from_secs(5)).await;

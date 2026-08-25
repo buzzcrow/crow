@@ -29,6 +29,7 @@ use crow_kv::common::config::{PxElectionConfig, WalConfig};
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use crow_kv::wal::replay::replay_group;
 use crow_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
+use crow_kv_client::KvRpcTransport;
 
 use crate::common::test_client::TestKvClient;
 
@@ -43,6 +44,7 @@ struct WalNode {
 /// A 3-node cluster where every replica logs to its own `File`-backed WAL dir.
 struct WalCluster {
     nodes: Vec<WalNode>,
+    kv_transport: Arc<KvRpcTransport>,
     _tmp: tempfile::TempDir,
     _net: tokio::sync::MutexGuard<'static, ()>,
 }
@@ -142,6 +144,7 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
 
     WalCluster {
         nodes,
+        kv_transport: Arc::new(KvRpcTransport::new()),
         _tmp: tmp,
         _net: net,
     }
@@ -158,12 +161,11 @@ impl WalCluster {
         })
     }
 
-    async fn kv_client(&self, node: &WalNode) -> TestKvClient {
-        TestKvClient::connect(format!(
-            "http://{}",
-            node.store.listen_addr().expect("bound addr")
-        ))
-        .await
+    fn kv_client(&self, node: &WalNode) -> TestKvClient {
+        TestKvClient::with_transport(
+            Arc::clone(&self.kv_transport),
+            format!("http://{}", node.store.listen_addr().expect("bound addr")),
+        )
     }
 
     async fn wait_for_leader(&self, timeout: Duration) -> Option<u64> {
@@ -179,7 +181,7 @@ impl WalCluster {
 
     async fn read_via_leader(&self, key: &[u8]) -> Option<Vec<u8>> {
         let leader = self.elected_leader()?;
-        let client = self.kv_client(leader).await;
+        let client = self.kv_client(leader);
         let resp = client
             .get(KvGetRequest {
                 version: 1,
@@ -269,7 +271,7 @@ async fn commit_writes(cluster: &WalCluster, kvs: &[(Vec<u8>, Vec<u8>)]) {
                 "write {i} should commit on the leader before timeout"
             );
             if let Some(leader) = cluster.elected_leader() {
-                let client = cluster.kv_client(leader).await;
+                let client = cluster.kv_client(leader);
                 let resp = client
                     .put(KvSetRequest {
                         version: 1,

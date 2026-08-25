@@ -203,7 +203,7 @@ async fn wait_for_leader(nodes: &[KvNode], group_id: u64, timeout: Duration) -> 
         if leaders.len() == 1 {
             return leaders[0];
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("no unique leader for group {group_id} within {timeout:?}");
 }

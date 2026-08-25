@@ -175,7 +175,7 @@ lock_hold_warn_threshold_ms = 1000
                 let log = self.log_content();
                 panic!("crow-chunkdb did not become ready within 30s. Log:\n{log}");
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }

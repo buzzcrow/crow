@@ -12,6 +12,8 @@
 #![allow(dead_code)]
 #![allow(clippy::unused_async)]
 
+use std::sync::Arc;
+
 use crow_kv::paxos::roles::{PxBallot, PxPrepareReply};
 use crow_kv::rpc::PxRpcTransport;
 use crow_kv::rpc::{
@@ -60,18 +62,30 @@ fn read_mode_from_i32(v: i32) -> ReadMode {
 
 /// crow-rpc facade for the former `KvServiceClient<Channel>`. Construct
 /// with `TestKvClient::connect(endpoint).await` (the `.await` mirrors the
-/// old `KvServiceClient::connect(..).await` shape).
+/// old `KvServiceClient::connect(..).await` shape), or
+/// `TestKvClient::with_transport(transport, endpoint)` to share a
+/// single `KvRpcTransport` (and its underlying `RpcServer`/`RpcClient`)
+/// across many clients — avoiding per-call `RpcServer` creation in
+/// crash/restart tests that issue hundreds of sequential reads.
 pub struct TestKvClient {
-    transport: KvRpcTransport,
+    transport: Arc<KvRpcTransport>,
     endpoint: String,
 }
 
 impl TestKvClient {
     pub async fn connect(endpoint: String) -> Self {
         Self {
-            transport: KvRpcTransport::new(),
+            transport: Arc::new(KvRpcTransport::new()),
             endpoint,
         }
+    }
+
+    /// Create a client that shares an existing transport. The transport
+    /// holds the `RpcServer` (epoll loop) and `RpcClient` (reaper) —
+    /// sharing them avoids spawning a new event-loop thread per RPC.
+    #[must_use]
+    pub fn with_transport(transport: Arc<KvRpcTransport>, endpoint: String) -> Self {
+        Self { transport, endpoint }
     }
 
     pub async fn put(&self, req: KvSetRequest) -> Result<TestResponse<KvResponse>, TestRpcStatus> {

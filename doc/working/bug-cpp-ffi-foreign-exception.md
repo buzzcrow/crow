@@ -2,18 +2,30 @@
 
 ## Status
 
-**Partially resolved (Linux).** The foreign exception crash did NOT
-reproduce on Linux. Instead, `cluster_restart_incremental_test` failed
-deterministically with a Paxos election convergence failure ("group
-X/Y failed to converge to one leader within 3s"). Root cause traced to
-a **stale binary** — the `crow-kv-server` binary was built before
-commit `4704d356` (Wire RPC transport into remote replicas during
-restore), so the transport wiring in `start()` was missing. After
-rebuilding, all 25 tests pass consistently across 5 full-suite runs.
+**Linux: closed (stale binary, not the foreign-exception crash).**
+The foreign exception crash did NOT reproduce on Linux. Instead,
+`cluster_restart_incremental_test` failed deterministically with a
+Paxos election convergence failure ("group X/Y failed to converge to
+one leader within 3s"). Root cause traced to a **stale binary** — the
+`crow-kv-server` binary was built before commit `4704d356` (Wire RPC
+transport into remote replicas during restore), so the transport
+wiring in `start()` was missing. After rebuilding, all 25 tests pass
+consistently across 5 full-suite runs. This Linux failure is
+considered resolved; no further action.
 
-The original macOS foreign-exception crash may be a separate issue
-that still needs investigation on macOS. See "Linux investigation"
-below.
+**macOS: open (foreign-exception crash, not re-tested).** The original
+`fatal runtime error: Rust cannot catch foreign exceptions, aborting`
+crash was observed only on macOS and was **not re-tested on macOS**
+after the binary rebuild. The try/catch guards added in `9d9143ba`
+(35 catch blocks in `c_api.cpp`, plus guards in `client.cpp`,
+`connection.cpp`, `socket_transport.cpp`) are correct standard
+practice for a C++ C ABI and are kept, but they did **not** fix the
+macOS crash — the catch blocks were never hit (see "What was tried").
+The actual exception source remains unknown. The Linux election
+failure and the macOS crash may share the same root cause (RPC
+connection failures after restart) but manifest differently, or they
+may be independent issues. See "Next steps to investigate" for the
+open macOS work.
 
 ## Failing test
 
@@ -256,15 +268,14 @@ Result: **25/25 tests passed** (5 runs × 5 tests each). Zero PreVote
 transport errors in the logs; leaders elected successfully on all
 groups after restart.
 
-### Remaining concerns
+### Remaining concerns (macOS, open)
 
-- The macOS foreign-exception crash may still occur — it was not
-  tested on macOS after the binary rebuild. The Linux election
-  failure and the macOS crash may share the same root cause (RPC
-  connection failures after restart) but manifest differently, or
-  they may be independent issues.
+- The macOS foreign-exception crash has not been re-tested after the
+  binary rebuild. It may still reproduce, or it may have been a
+  downstream symptom of the same stale-binary transport gap. This is
+  the primary open question.
 - The C++ RPC layer (`SocketTransport::connect`, `RpcClient::send`)
   still has no logging on connection failures and no retry logic.
   Silent failures make debugging difficult. Consider adding `warn!`
   or `error!` level logs in the C++ transport layer for connection
-  errors.
+  errors. (This overlaps with R119 — log file usage review.)

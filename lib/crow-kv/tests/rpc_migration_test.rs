@@ -173,19 +173,20 @@ async fn crow_rpc_chosen_notification_fire_and_forget() {
         result.err()
     );
 
-    // Give the follower a moment to process the notification.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    // The follower should have recorded the chosen slot. The
-    // contiguous_chosen frontier may or may not have advanced
-    // depending on whether the apply loop ran, but the learner
-    // should at least know about slot 1.
+    // Poll until the follower has processed the chosen notification
+    // and recorded slot 1 as accepted.
     let follower_group = cluster.follower.get_group(1).expect("follower group");
     let follower_replica = follower_group.local_replica();
-    // The chosen notification updates the learner's chosen_set, not
-    // necessarily the contiguous frontier. Check that the value is
-    // at least accepted.
-    let accepted = follower_replica.accepted_at(1).await;
+    let poll_start = std::time::Instant::now();
+    let accepted = loop {
+        if let Some(a) = follower_replica.accepted_at(1).await {
+            break Some(a);
+        }
+        if poll_start.elapsed() >= std::time::Duration::from_secs(5) {
+            break None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
     assert!(
         accepted.is_some(),
         "follower should have accepted slot 1 after chosen notification"

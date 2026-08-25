@@ -51,30 +51,32 @@ job, not the sum.
 
 Measured on 2026-08-17 (warm build, macOS) and 2026-08-25 (warm build, Linux, build 1m32s).
 macOS times are wall-clock `time pixi run test-*` with build + test binaries cached.
+Linux times re-measured on 2026-08-25 after test speedup (shared `KvRpcTransport`,
+condition polling replacing fixed sleeps, reduced polling intervals).
 Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 416 | 20.1 s | 34.8 s |
-| `test-common-ct` | 21 | — | 19.5 s |
+| `test-tree-ct` | 416 | 20.1 s | 33.7 s |
+| `test-common-ct` | 21 | — | 19.1 s |
 | `test-tree-ffi` | 30 | 13.5 s | 0.5 s |
-| `test-rpc-ct` | 55 | — | 23.2 s |
+| `test-rpc-ct` | 55 | — | 21.4 s |
 | `test-rpc-ffi` | 13 | — | 0.7 s |
-| `test-diskio-ct` | 91 | — | 24.3 s |
+| `test-diskio-ct` | 91 | — | 24.7 s |
 | `test-common` | 65 | 21.9 s | 9.7 s |
 | `test-protocol` | 121 | 12.2 s | 0.1 s |
-| `test-kv-core` | 556 | 43.2 s | 168.5 s |
-| `test-kv-client` | 49 | 23.4 s | 4.6 s |
-| `test-chunkdb-client` | 10 | 13.8 s | 1.7 s |
-| `test-kv-server` | 82 | 53.0 s | 40.8 s |
-| `test-diskdb` | 127 | 42.8 s | 101.1 s |
-| `test-diskdb-client` | 7 | 13.9 s | 15.9 s |
-| `test-chunkdb` | 76 | 27.8 s | 57.9 s |
-| `test-chunk-client` | 49 | — | 20.2 s |
-| `test-diskio-client` | 4 | — | 43.5 s |
-| `test-console-shared` | 62 | 39.2 s | 82.0 s |
-| `test-console-cli` | 16 | 69.4 s | 294.8 s |
-| `test-console-server` | 71 | 50.7 s | 218.5 s |
+| `test-kv-core` | 556 | 43.2 s | 87.2 s |
+| `test-kv-client` | 49 | 23.4 s | 4.1 s |
+| `test-chunkdb-client` | 10 | 13.8 s | 1.4 s |
+| `test-kv-server` | 82 | 53.0 s | 39.3 s |
+| `test-diskdb` | 127 | 42.8 s | 65.2 s |
+| `test-diskdb-client` | 7 | 13.9 s | 14.7 s |
+| `test-chunkdb` | 76 | 27.8 s | 16.2 s |
+| `test-chunk-client` | 49 | — | 10.4 s |
+| `test-diskio-client` | 4 | — | 42.9 s |
+| `test-console-shared` | 62 | 39.2 s | 13.2 s |
+| `test-console-cli` | 16 | 69.4 s | 52.5 s |
+| `test-console-server` | 71 | 50.7 s | 84.2 s |
 | `test-console-ui` | 75 | 165.7 s | 179.6 s |
 
 ---

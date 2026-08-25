@@ -185,7 +185,7 @@ interval_secs = 2
                 let log = self.log_content();
                 panic!("crow-diskdb did not become ready within 30s. Log:\n{log}");
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
