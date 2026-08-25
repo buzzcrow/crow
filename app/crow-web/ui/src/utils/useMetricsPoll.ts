@@ -47,7 +47,11 @@ export function useMetricsPoll(
       controller.abort();
       clearInterval(id);
     };
-  }, [fetcherKey, fetcher, intervalMs]);
+    // Re-run only when the entity key or interval changes — not on every
+    // render. The fetcher identity is unstable (new arrow function from
+    // buildMetricsFetcher on each render), but fetcherRef.current always
+    // points at the latest one.
+  }, [fetcherKey, intervalMs]);
 
   return data;
 }

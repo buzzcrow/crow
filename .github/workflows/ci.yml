@@ -125,6 +125,8 @@ jobs:
       run: pixi run test-diskdb-client
     - name: Run chunkdb tests
       run: pixi run test-chunkdb
+    - name: Run chunk-client tests
+      run: pixi run test-chunk-client
     - name: Run diskio-client tests
       run: pixi run test-diskio-client
 

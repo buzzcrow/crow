@@ -162,6 +162,7 @@ set -e
 pixi run clean-env
 # CppTests
 pixi run test-tree-ct
+pixi run test-common-ct
 pixi run test-tree-ffi
 pixi run test-rpc-ct
 pixi run test-rpc-ffi

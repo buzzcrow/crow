@@ -107,6 +107,18 @@ impl KvStoreRegistry {
         }
     }
 
+    /// Peek at the first port in the pool without removing it. Used to
+    /// derive the RPC endpoint for store 0 in first-boot mode (before the
+    /// store is created via `/system/init`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn first_port(&self) -> Option<u16> {
+        self.port_pool.lock().unwrap().first().copied()
+    }
+
     pub fn add_store(&self, store_id: u64, store: Arc<PxKvStore>) {
         self.stores.insert(store_id, store);
     }

@@ -45,33 +45,17 @@ Per-type doc guides (open the matched one before writing that artifact):
 
 ## Test Commands
 
-Prefix server-spawning tests with `pixi run clean-env &&` to reset test
-state. Non-server tests can run back-to-back without clean-env.
+Discover test tasks with `pixi task list` (filter `test-*`); the set grows
+over time, so never rely on a fixed list. Run the task(s) for the impacted
+component(s):
 
-Non-server (no clean-env needed):
+- Library/unit tests — run directly.
+- Server-spawning tests — prefix with `pixi run clean-env &&` to reset
+  state. When unsure which category a task is in, prefix it (a spurious
+  reset is cheaper than a stale-state false failure).
 
-- `pixi run test-tree-ct`
-- `pixi run test-tree-ffi`
-- `pixi run test-rpc-ct`
-- `pixi run test-rpc-ffi`
-- `pixi run test-diskio-ct`
-- `pixi run test-common`
-- `pixi run test-protocol`
-- `pixi run test-kv-core`
-- `pixi run test-kv-client`
-- `pixi run test-diskdb-client`
-
-Server-spawning (prefix with `pixi run clean-env &&`):
-
-- `pixi run test-kv-server`
-- `pixi run test-diskdb`
-- `pixi run test-diskio-client`
-- `pixi run test-console-shared`
-- `pixi run test-console-cli`
-- `pixi run test-console-server`
-- `pixi run test-console-ui`
-
-Step 6 runs the subset affected by the changes; Step 9 runs all of them.
+Step 6 runs only the affected subset; Step 9 runs every `test-*` task,
+each separately.
 
 ## Blocking Conditions
 

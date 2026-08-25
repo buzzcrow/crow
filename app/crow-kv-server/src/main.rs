@@ -173,11 +173,12 @@ async fn main() {
 
     let bound_mgmt_addr: SocketAddr = listener.local_addr().unwrap_or(mgmt_addr);
     // Use 127.0.0.1 in the URL if binding to 0.0.0.0 for better local testing UX
-    let display_addr = if bound_mgmt_addr.ip().is_unspecified() {
-        format!("127.0.0.1:{}", bound_mgmt_addr.port())
+    let display_ip = if bound_mgmt_addr.ip().is_unspecified() {
+        "127.0.0.1".to_string()
     } else {
-        bound_mgmt_addr.to_string()
+        bound_mgmt_addr.ip().to_string()
     };
+    let display_addr = format!("{display_ip}:{}", bound_mgmt_addr.port());
 
     info!(
         management_addr = %display_addr,
@@ -236,11 +237,17 @@ async fn main() {
             id
         });
         let mgmt_endpoint = format!("http://{display_addr}");
-        // The group-0 gRPC endpoint is the first store's listen addr,
-        // or the management addr as a fallback (single-node dev).
+        // The group-0 RPC endpoint is the first store's listen addr.
+        // In first-boot mode (store 0 not created yet), derive it from
+        // the first port in --ports + the bind IP. Falling back to the
+        // HTTP management port would cause the crow-rpc client to
+        // connect to axum, which doesn't speak the crow-rpc binary
+        // protocol — the TCP connection succeeds but the client hangs
+        // forever waiting for a response, blocking graceful shutdown.
         let group0_ep = registry
             .get_store(0)
             .and_then(|s| s.listen_addr().map(|a| a.to_string()))
+            .or_else(|| registry.first_port().map(|p| format!("{display_ip}:{p}")))
             .unwrap_or_else(|| format!("http://{display_addr}"));
         Some(crow_kv_server::keepalive::KeepAliveLoop::spawn(
             registry.clone(),
@@ -266,6 +273,7 @@ async fn main() {
         let group0_ep = registry
             .get_store(0)
             .and_then(|s| s.listen_addr().map(|a| a.to_string()))
+            .or_else(|| registry.first_port().map(|p| format!("{display_ip}:{p}")))
             .unwrap_or_else(|| format!("http://{display_addr}"));
         Some(
             crow_kv_server::binding_monitor_wiring::spawn_chunkdb_binding_monitor(

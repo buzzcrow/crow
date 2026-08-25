@@ -35,7 +35,7 @@ job, not the sum.
 | **Lint** | `cargo fmt --check`, `cargo clippy` | none | Fast feedback; fails without blocking tests |
 | **CppTests** | `test-tree-ct`, `test-common-ct`, `test-rpc-ct`, `test-diskio-ct`, `test-tree-ffi`, `test-rpc-ffi` | `build-cpp` + `build-tests` | C++ ctest needs CMake; FFI tests are Rust but test C++ via cc::Build |
 | **UnitTests** | `test-common`, `test-protocol`, `test-kv-core`, `test-kv-client`, `test-chunkdb-client` | `build-tests` | Pure Rust, no subprocess spawning |
-| **ServerTests** | `test-kv-server`, `test-diskdb`, `test-diskdb-client`, `test-chunkdb`, `test-diskio-client` | `build-tests` | Spawns crow-kv-server / crow-diskdb / crow-diskio subprocesses |
+| **ServerTests** | `test-kv-server`, `test-diskdb`, `test-diskdb-client`, `test-chunkdb`, `test-chunk-client`, `test-diskio-client` | `build-tests` | Spawns crow-kv-server / crow-diskdb / crow-diskio subprocesses |
 | **ConsoleTests** | `test-console-shared`, `test-console-cli`, `test-console-server` | `build-tests` | Spawns crow-kv-server via lifecycle::deploy_local |
 | **UITests** | `test-console-ui` | `build-tests` + `install-ui-deps` | Playwright browser E2E + subprocess spawning |
 
@@ -49,26 +49,32 @@ job, not the sum.
 
 ## Suite Timing
 
-Measured on 2026-08-17 (warm build, macOS) and 2026-08-17 (warm build, Linux, build 1m32s).
+Measured on 2026-08-17 (warm build, macOS) and 2026-08-25 (warm build, Linux, build 1m32s).
 macOS times are wall-clock `time pixi run test-*` with build + test binaries cached.
 Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 395 | 20.1 s | 23.0 s |
-| `test-tree-ffi` | 30 | 13.5 s | 8.2 s |
-| `test-common` | 56 | 21.9 s | 18.8 s |
-| `test-protocol` | 89 | 12.2 s | 8.7 s |
-| `test-kv-core` | 560 | 43.2 s | 41.6 s |
-| `test-kv-client` | 49 | 23.4 s | 12.7 s |
-| `test-diskdb-client` | 6 | 13.9 s | 8.8 s |
-| `test-chunkdb-client` | 15 | 13.8 s | 8.2 s |
-| `test-kv-server` | 69 | 53.0 s | 31.6 s |
-| `test-diskdb` | 127 | 42.8 s | 16.6 s |
-| `test-chunkdb` | 76 | 27.8 s | 13.8 s |
-| `test-console-shared` | 62 | 39.2 s | 17.7 s |
-| `test-console-cli` | 16 | 69.4 s | 48.8 s |
-| `test-console-server` | 61 | 50.7 s | 46.6 s |
+| `test-tree-ct` | 416 | 20.1 s | 34.8 s |
+| `test-common-ct` | 21 | — | 19.5 s |
+| `test-tree-ffi` | 30 | 13.5 s | 0.5 s |
+| `test-rpc-ct` | 55 | — | 23.2 s |
+| `test-rpc-ffi` | 13 | — | 0.7 s |
+| `test-diskio-ct` | 91 | — | 24.3 s |
+| `test-common` | 65 | 21.9 s | 9.7 s |
+| `test-protocol` | 121 | 12.2 s | 0.1 s |
+| `test-kv-core` | 556 | 43.2 s | 168.5 s |
+| `test-kv-client` | 49 | 23.4 s | 4.6 s |
+| `test-chunkdb-client` | 10 | 13.8 s | 1.7 s |
+| `test-kv-server` | 82 | 53.0 s | 40.8 s |
+| `test-diskdb` | 127 | 42.8 s | 101.1 s |
+| `test-diskdb-client` | 7 | 13.9 s | 15.9 s |
+| `test-chunkdb` | 76 | 27.8 s | 57.9 s |
+| `test-chunk-client` | 49 | — | 20.2 s |
+| `test-diskio-client` | 4 | — | 43.5 s |
+| `test-console-shared` | 62 | 39.2 s | 82.0 s |
+| `test-console-cli` | 16 | 69.4 s | 294.8 s |
+| `test-console-server` | 71 | 50.7 s | 218.5 s |
 | `test-console-ui` | 75 | 165.7 s | 179.6 s |
 
 ---

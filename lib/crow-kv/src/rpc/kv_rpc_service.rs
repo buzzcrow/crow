@@ -81,6 +81,7 @@ impl KvClientRpcForwarder {
         server.start();
         let rpc = Arc::new(RpcClient::new());
         rpc.set_completion_pool_size(1024);
+        rpc.start_reaper(5_000_000_000, 500_000_000);
         Self {
             server,
             rpc,

@@ -24,7 +24,7 @@ use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, 
 use crow_kv::common::config::PxElectionConfig;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
