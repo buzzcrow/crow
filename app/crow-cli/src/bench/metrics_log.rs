@@ -49,6 +49,30 @@ fn parse_rpc_gauge(name: &str, value: u64, rpc: &mut super::report::TransportSta
     }
 }
 
+/// Update inter-replica metrics from a summary line. Takes the max
+/// across flush windows (steady state has the highest count/tps).
+/// Summary format: name count tps avg(us) max(us).
+/// Field indices: 2=tps, 3=avg(us).
+fn update_replica_metrics(replica: &mut super::report::ReplicaMetrics, name: &str, fields: &[&str]) {
+    let tps: u64 = fields.get(2).and_then(|f| f.parse().ok()).unwrap_or(0);
+    let avg: u64 = fields.get(3).and_then(|f| f.parse().ok()).unwrap_or(0);
+    if name.ends_with(".rpc.l@2") {
+        if tps > replica.r2_tps {
+            replica.r2_tps = tps;
+        }
+        if avg > replica.r2 {
+            replica.r2 = avg;
+        }
+    } else if name.ends_with(".rpc.l@3") {
+        if tps > replica.r3_tps {
+            replica.r3_tps = tps;
+        }
+        if avg > replica.r3 {
+            replica.r3 = avg;
+        }
+    }
+}
+
 /// Parse a `crow-kv-server` `log/metrics.log` file's full contents into a
 /// [`ServerMetrics`] summary spanning every flush block in the file.
 ///
@@ -114,6 +138,12 @@ pub(crate) fn parse_metrics_log(content: &str) -> ServerMetrics {
                 let count: u64 = fields[1].parse().unwrap_or(0);
                 if name.contains(".wal.") && name.contains(".append.") {
                     metrics.wal_append_count += count;
+                }
+                // Inter-replica latency: take the max avg across flush
+                // windows (steady state has the highest count). Only
+                // capture the active group (g.1), skip idle group 0.
+                if name.contains(".g.1.") {
+                    update_replica_metrics(&mut metrics.replica, name, &fields);
                 }
             }
             LogSection::Misc => {
@@ -181,6 +211,12 @@ pub(crate) fn aggregate_server_metrics(per_node: &[ServerMetrics]) -> ServerMetr
         agg.rpc.writev_bytes += m.rpc.writev_bytes;
         agg.rpc.submit_to_writev_count += m.rpc.submit_to_writev_count;
         agg.rpc.submit_to_writev_avg_us = agg.rpc.submit_to_writev_avg_us.max(m.rpc.submit_to_writev_avg_us);
+        // Inter-replica: leader-side metrics (rpc.l@2/3) take the max
+        // across nodes (only the leader has non-zero values).
+        agg.replica.r2 = agg.replica.r2.max(m.replica.r2);
+        agg.replica.r2_tps = agg.replica.r2_tps.max(m.replica.r2_tps);
+        agg.replica.r3 = agg.replica.r3.max(m.replica.r3);
+        agg.replica.r3_tps = agg.replica.r3_tps.max(m.replica.r3_tps);
     }
     agg
 }

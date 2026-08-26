@@ -250,6 +250,31 @@ pub(crate) struct ServerMetrics {
     /// syscall counts + frame aggregation, summed across the run.
     #[serde(default)]
     pub(crate) rpc: TransportStatsSnapshot,
+    /// Inter-replica consensus RPC latency (leader → followers):
+    /// `accept_quorum_rpc` avg (us), per-replica `rpc.l@2`/`@3` avg (us),
+    /// follower `engine_apply` avg (us). Last-window snapshot from the
+    /// leader's metrics log.
+    #[serde(default)]
+    pub(crate) replica: ReplicaMetrics,
+}
+
+/// Inter-replica consensus RPC metrics from the leader's perspective.
+/// Captured from the metrics-log flush windows (steady state). Latency
+/// values are avg microseconds; tps values are round-trips per second.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct ReplicaMetrics {
+    /// Leader → follower 2 RPC avg latency (us).
+    #[serde(default)]
+    pub(crate) r2: u64,
+    /// Leader → follower 2 RPC tps — round-trips per second.
+    #[serde(default)]
+    pub(crate) r2_tps: u64,
+    /// Leader → follower 3 RPC avg latency (us).
+    #[serde(default)]
+    pub(crate) r3: u64,
+    /// Leader → follower 3 RPC tps — round-trips per second.
+    #[serde(default)]
+    pub(crate) r3_tps: u64,
 }
 
 /// crow-rpc transport stats: syscall counts, frame aggregation, and
