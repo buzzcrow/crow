@@ -159,6 +159,10 @@ pub(crate) struct BenchReport {
     /// field existed still deserialize.
     #[serde(default)]
     pub(crate) client_metrics: ClientMetricsSnapshot,
+    /// Client-side crow-rpc transport stats (end-of-run cumulative
+    /// snapshot from the bench process's `CrowkvClient`).
+    #[serde(default)]
+    pub(crate) client_transport_stats: TransportStatsSnapshot,
 }
 
 impl BenchReport {
@@ -242,6 +246,30 @@ pub(crate) struct ServerMetrics {
     pub(crate) wal_rmw_count: u64,
     /// System resource usage (see `crow_kv::metrics::system`).
     pub(crate) system: SystemMetrics,
+    /// Server-side crow-rpc transport stats (aggregated across nodes):
+    /// syscall counts + frame aggregation, summed across the run.
+    #[serde(default)]
+    pub(crate) rpc: TransportStatsSnapshot,
+}
+
+/// crow-rpc transport stats: syscall counts, frame aggregation, and
+/// submit→writev queue-wait latency. Used for both server-side (summed
+/// from metrics-log window deltas) and client-side (end-of-run
+/// cumulative snapshot) reporting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct TransportStatsSnapshot {
+    pub read_calls: u64,
+    pub writev_calls: u64,
+    pub frames_sent: u64,
+    pub frames_parsed: u64,
+    pub read_bytes: u64,
+    pub writev_bytes: u64,
+    /// Cumulative count of submit→writev latency samples.
+    #[serde(default)]
+    pub submit_to_writev_count: u64,
+    /// Cumulative average submit→writev queue wait (microseconds).
+    #[serde(default)]
+    pub submit_to_writev_avg_us: u64,
 }
 
 /// Per-op outcome flags recorded into `OpStats`. Grouped as a struct

@@ -107,98 +107,101 @@ impl PxRpcService {
     fn make_handler(
         this: Arc<Self>,
         server: Arc<RpcServer>,
-        f: fn(&Self, &ServerRequest<'_>, &Arc<RpcServer>),
-    ) -> impl Fn(ServerRequest<'_>) + Send + 'static {
+        f: fn(&Self, ServerRequest, &Arc<RpcServer>),
+    ) -> impl Fn(ServerRequest) + Send + 'static {
         move |req| {
-            f(&this, &req, &server);
+            f(&this, req, &server);
         }
     }
 
     // ── Prepare ──────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
-    fn handle_prepare(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_prepare(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let msg_type = FBMsgType::EPromiseResponse.0 as u16;
-
-        let Ok(fb_req) = flatbuffers::root::<FBPrepareRequest>(req.control) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let slot = fb_req.slot();
-        let round = fb_req.round();
-        let leader_id = fb_req.leader_id();
-        let term = fb_req.term();
-        let membership_epoch = fb_req.membership_epoch();
-
-        let Some(group) = self.store.get_group(group_id) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::NotFound,
-                "px group not found",
-            );
-            return;
-        };
-        let responder_epoch = group.membership_epoch();
-
-        // Membership-epoch fence (same as px_service.rs L131-147).
-        if membership_epoch != responder_epoch {
-            let converged_epoch = group.adopt_membership_epoch(membership_epoch);
-            warn!(
-                store_id = self.store.store_id,
-                group_id,
-                slot,
-                round,
-                leader_id,
-                proposer_epoch = membership_epoch,
-                responder_epoch,
-                converged_epoch,
-                "prepare rejected by membership-epoch fence; adopting higher epoch from proposer"
-            );
-            let term = group.local_replica().current_term_snapshot();
-            let ctrl = build_promise_response(
-                req_id,
-                create_nano,
-                FBKvRetCode::Success,
-                None,
-                1,
-                slot,
-                round,
-                leader_id,
-                None,
-                false,
-                0,
-                0,
-                term,
-                false,
-                responder_epoch,
-                true,
-            );
-            unsafe {
-                let _ = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id);
-            }
-            return;
-        }
-
-        let ballot = PxBallot { round, leader_id };
-        let store = Arc::clone(&self.store);
         let conn_handle_usize = req.conn_handle as usize;
+        let msg_type = FBMsgType::EPromiseResponse.0 as u16;
+        let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBPrepareRequest>(req.control()) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let slot = fb_req.slot();
+            let round = fb_req.round();
+            let leader_id = fb_req.leader_id();
+            let term = fb_req.term();
+            let membership_epoch = fb_req.membership_epoch();
+
+            let Some(group) = store.get_group(group_id) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::NotFound,
+                    "px group not found",
+                );
+                return;
+            };
+            let responder_epoch = group.membership_epoch();
+
+            // Membership-epoch fence (same as px_service.rs L131-147).
+            if membership_epoch != responder_epoch {
+                let converged_epoch = group.adopt_membership_epoch(membership_epoch);
+                warn!(
+                    store_id = store.store_id,
+                    group_id,
+                    slot,
+                    round,
+                    leader_id,
+                    proposer_epoch = membership_epoch,
+                    responder_epoch,
+                    converged_epoch,
+                    "prepare rejected by membership-epoch fence; adopting higher epoch from proposer"
+                );
+                let term = group.local_replica().current_term_snapshot();
+                let ctrl = build_promise_response(
+                    req_id,
+                    create_nano,
+                    FBKvRetCode::Success,
+                    None,
+                    1,
+                    slot,
+                    round,
+                    leader_id,
+                    None,
+                    false,
+                    0,
+                    0,
+                    term,
+                    false,
+                    responder_epoch,
+                    true,
+                );
+                submit_fb_response(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    ctrl,
+                    msg_type,
+                    req_id,
+                );
+                return;
+            }
+
+            let ballot = PxBallot { round, leader_id };
             let replica = group.local_replica();
             let reply =
                 <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id).await;
@@ -220,7 +223,7 @@ impl PxRpcService {
                     });
                     let term = replica.current_term_snapshot();
                     finish_promise_response(
-                        &mut builder,
+                        builder,
                         req_id,
                         create_nano,
                         FBKvRetCode::Success,
@@ -314,133 +317,140 @@ impl PxRpcService {
                     )
                 }
             };
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── Accept ───────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
-    fn handle_accept(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_accept(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let msg_type = FBMsgType::EAcceptedResponse.0 as u16;
-
-        let Ok(fb_req) = flatbuffers::root::<FBAcceptRequest>(req.control) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let slot = fb_req.slot();
-        let round = fb_req.round();
-        let leader_id = fb_req.leader_id();
-        let term = fb_req.term();
-        let membership_epoch = fb_req.membership_epoch();
-
-        let Some(fb_value) = fb_req.value() else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "missing value",
-            );
-            return;
-        };
-        let payload_bytes: Vec<u8> = fb_value.payload().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let entry = PxLogEntry {
-            slot,
-            ballot: PxBallot { round, leader_id },
-            term,
-            payload: payload_bytes.into(),
-        };
-
-        // Dedup tags: prefer repeated dedup_tags, fall back to legacy client_id/seq.
-        let dedup_tags: Vec<DedupTag> = if let Some(tags) = fb_req.dedup_tags() {
-            tags.iter()
-                .map(|t| DedupTag {
-                    client_id: t.client_id(),
-                    seq: t.seq(),
-                })
-                .collect()
-        } else {
-            let cid = fb_req.client_id();
-            let seq = fb_req.seq();
-            if cid != 0 || seq != 0 {
-                vec![DedupTag { client_id: cid, seq }]
-            } else {
-                Vec::new()
-            }
-        };
-
-        let Some(group) = self.store.get_group(group_id) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::NotFound,
-                "px group not found",
-            );
-            return;
-        };
-        let responder_epoch = group.membership_epoch();
-
-        if membership_epoch != responder_epoch {
-            let converged_epoch = group.adopt_membership_epoch(membership_epoch);
-            warn!(
-                store_id = self.store.store_id,
-                group_id,
-                slot,
-                round,
-                leader_id,
-                proposer_epoch = membership_epoch,
-                responder_epoch,
-                converged_epoch,
-                "accept rejected by membership-epoch fence; adopting higher epoch from proposer"
-            );
-            let term = group.local_replica().current_term_snapshot();
-            let ctrl = build_accepted_response(
-                req_id,
-                create_nano,
-                FBKvRetCode::Success,
-                None,
-                1,
-                slot,
-                round,
-                leader_id,
-                false,
-                0,
-                0,
-                term,
-                false,
-                responder_epoch,
-                true,
-            );
-            unsafe {
-                let _ = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id);
-            }
-            return;
-        }
-
-        let store = Arc::clone(&self.store);
         let conn_handle_usize = req.conn_handle as usize;
+        let msg_type = FBMsgType::EAcceptedResponse.0 as u16;
+        let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBAcceptRequest>(req.control()) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let slot = fb_req.slot();
+            let round = fb_req.round();
+            let leader_id = fb_req.leader_id();
+            let term = fb_req.term();
+            let membership_epoch = fb_req.membership_epoch();
+
+            let Some(fb_value) = fb_req.value() else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "missing value",
+                );
+                return;
+            };
+            let payload_bytes: Vec<u8> = fb_value.payload().map(|v| v.bytes().to_vec()).unwrap_or_default();
+            let entry = PxLogEntry {
+                slot,
+                ballot: PxBallot { round, leader_id },
+                term,
+                payload: payload_bytes.into(),
+            };
+
+            // Dedup tags: prefer repeated dedup_tags, fall back to legacy client_id/seq.
+            let dedup_tags: Vec<DedupTag> = if let Some(tags) = fb_req.dedup_tags() {
+                tags.iter()
+                    .map(|t| DedupTag {
+                        client_id: t.client_id(),
+                        seq: t.seq(),
+                    })
+                    .collect()
+            } else {
+                let cid = fb_req.client_id();
+                let seq = fb_req.seq();
+                if cid != 0 || seq != 0 {
+                    vec![DedupTag { client_id: cid, seq }]
+                } else {
+                    Vec::new()
+                }
+            };
+
+            let Some(group) = store.get_group(group_id) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::NotFound,
+                    "px group not found",
+                );
+                return;
+            };
+            let responder_epoch = group.membership_epoch();
+
+            if membership_epoch != responder_epoch {
+                let converged_epoch = group.adopt_membership_epoch(membership_epoch);
+                warn!(
+                    store_id = store.store_id,
+                    group_id,
+                    slot,
+                    round,
+                    leader_id,
+                    proposer_epoch = membership_epoch,
+                    responder_epoch,
+                    converged_epoch,
+                    "accept rejected by membership-epoch fence; adopting higher epoch from proposer"
+                );
+                let term = group.local_replica().current_term_snapshot();
+                let ctrl = build_accepted_response(
+                    req_id,
+                    create_nano,
+                    FBKvRetCode::Success,
+                    None,
+                    1,
+                    slot,
+                    round,
+                    leader_id,
+                    false,
+                    0,
+                    0,
+                    term,
+                    false,
+                    responder_epoch,
+                    true,
+                );
+                submit_fb_response(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    ctrl,
+                    msg_type,
+                    req_id,
+                );
+                return;
+            }
+
             let replica = group.local_replica();
             let reply = <PxLocalReplica as ReplicaHandler>::on_accept(replica, &entry, group_id).await;
             if matches!(reply, Ok(PxAcceptReply::Accepted { .. })) {
@@ -494,10 +504,13 @@ impl PxRpcService {
                         responder_epoch,
                         false,
                     );
-                    let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-                    unsafe {
-                        let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-                    }
+                    submit_fb_response(
+                        &server,
+                        conn_handle_usize as *mut std::ffi::c_void,
+                        ctrl,
+                        msg_type,
+                        req_id,
+                    );
                     return;
                 }
             };
@@ -518,54 +531,58 @@ impl PxRpcService {
                 responder_epoch,
                 false,
             );
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── PreVote ──────────────────────────────────────────────────
 
-    fn handle_pre_vote(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_pre_vote(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let msg_type = FBMsgType::EPreVoteResponse.0 as u16;
-
-        let Ok(fb_req) = flatbuffers::root::<FBPreVoteRequest>(req.control) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let Some(group) = self.store.get_group(group_id) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::NotFound,
-                "px group not found",
-            );
-            return;
-        };
-        let payload = VoteRequestPayload {
-            term: fb_req.term(),
-            candidate_id: fb_req.candidate_id(),
-            accepted_log_tip_slot: fb_req.accepted_log_tip_slot(),
-            accepted_log_tip_term: fb_req.accepted_log_tip_term(),
-        };
         let conn_handle_usize = req.conn_handle as usize;
+        let msg_type = FBMsgType::EPreVoteResponse.0 as u16;
+        let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBPreVoteRequest>(req.control()) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let Some(group) = store.get_group(group_id) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::NotFound,
+                    "px group not found",
+                );
+                return;
+            };
+            let payload = VoteRequestPayload {
+                term: fb_req.term(),
+                candidate_id: fb_req.candidate_id(),
+                accepted_log_tip_slot: fb_req.accepted_log_tip_slot(),
+                accepted_log_tip_term: fb_req.accepted_log_tip_term(),
+            };
             let replica = group.local_replica();
             let reply = <PxLocalReplica as ReplicaHandler>::on_pre_vote(replica, payload, group_id).await;
             let ctrl = match reply {
@@ -599,54 +616,58 @@ impl PxRpcService {
                     )
                 }
             };
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── RequestVote ──────────────────────────────────────────────
 
-    fn handle_request_vote(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_request_vote(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let msg_type = FBMsgType::ERequestVoteResponse.0 as u16;
-
-        let Ok(fb_req) = flatbuffers::root::<FBRequestVoteRequest>(req.control) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let Some(group) = self.store.get_group(group_id) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::NotFound,
-                "px group not found",
-            );
-            return;
-        };
-        let payload = VoteRequestPayload {
-            term: fb_req.term(),
-            candidate_id: fb_req.candidate_id(),
-            accepted_log_tip_slot: fb_req.accepted_log_tip_slot(),
-            accepted_log_tip_term: fb_req.accepted_log_tip_term(),
-        };
         let conn_handle_usize = req.conn_handle as usize;
+        let msg_type = FBMsgType::ERequestVoteResponse.0 as u16;
+        let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBRequestVoteRequest>(req.control()) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let Some(group) = store.get_group(group_id) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::NotFound,
+                    "px group not found",
+                );
+                return;
+            };
+            let payload = VoteRequestPayload {
+                term: fb_req.term(),
+                candidate_id: fb_req.candidate_id(),
+                accepted_log_tip_slot: fb_req.accepted_log_tip_slot(),
+                accepted_log_tip_term: fb_req.accepted_log_tip_term(),
+            };
             let replica = group.local_replica();
             let reply = <PxLocalReplica as ReplicaHandler>::on_request_vote(replica, payload, group_id).await;
             let ctrl = match reply {
@@ -680,57 +701,61 @@ impl PxRpcService {
                     )
                 }
             };
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── Heartbeat ────────────────────────────────────────────────
 
-    fn handle_heartbeat(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_heartbeat(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let msg_type = FBMsgType::EHeartbeatResponse.0 as u16;
-
-        let Ok(fb_req) = flatbuffers::root::<FBHeartbeatRequest>(req.control) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let Some(group) = self.store.get_group(group_id) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::NotFound,
-                "px group not found",
-            );
-            return;
-        };
-        let payload = HeartbeatRequestPayload {
-            term: fb_req.term(),
-            leader_id: fb_req.leader_id(),
-            prev_log_slot: fb_req.prev_log_slot(),
-            prev_log_term: fb_req.prev_log_term(),
-            committed_safe_slot: fb_req.committed_safe_slot(),
-            lease_grant_until_ms_mono: fb_req.lease_grant_until_ms_mono(),
-            t_send_ms_mono: fb_req.t_send_ms_mono(),
-        };
         let conn_handle_usize = req.conn_handle as usize;
+        let msg_type = FBMsgType::EHeartbeatResponse.0 as u16;
+        let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBHeartbeatRequest>(req.control()) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let Some(group) = store.get_group(group_id) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::NotFound,
+                    "px group not found",
+                );
+                return;
+            };
+            let payload = HeartbeatRequestPayload {
+                term: fb_req.term(),
+                leader_id: fb_req.leader_id(),
+                prev_log_slot: fb_req.prev_log_slot(),
+                prev_log_term: fb_req.prev_log_term(),
+                committed_safe_slot: fb_req.committed_safe_slot(),
+                lease_grant_until_ms_mono: fb_req.lease_grant_until_ms_mono(),
+                t_send_ms_mono: fb_req.t_send_ms_mono(),
+            };
             let replica = group.local_replica();
             let reply = <PxLocalReplica as ReplicaHandler>::on_heartbeat(replica, payload, group_id).await;
             let ctrl = match reply {
@@ -768,54 +793,58 @@ impl PxRpcService {
                     )
                 }
             };
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── StepDown ─────────────────────────────────────────────────
 
-    fn handle_step_down(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_step_down(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let msg_type = FBMsgType::EStepDownResponse.0 as u16;
-
-        let Ok(fb_req) = flatbuffers::root::<FBStepDownRequest>(req.control) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let Some(group) = self.store.get_group(group_id) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::NotFound,
-                "px group not found",
-            );
-            return;
-        };
-        let reason = fb_req.reason().unwrap_or("").to_string();
-        let payload = StepDownRequestPayload {
-            term: fb_req.term(),
-            target_leader_id: fb_req.target_leader_id(),
-            reason,
-        };
         let conn_handle_usize = req.conn_handle as usize;
+        let msg_type = FBMsgType::EStepDownResponse.0 as u16;
+        let store = Arc::clone(&self.store);
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBStepDownRequest>(req.control()) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let Some(group) = store.get_group(group_id) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::NotFound,
+                    "px group not found",
+                );
+                return;
+            };
+            let reason = fb_req.reason().unwrap_or("").to_string();
+            let payload = StepDownRequestPayload {
+                term: fb_req.term(),
+                target_leader_id: fb_req.target_leader_id(),
+                reason,
+            };
             let replica = group.local_replica();
             let reply = <PxLocalReplica as ReplicaHandler>::on_step_down(replica, &payload, group_id).await;
             let ctrl = match reply {
@@ -835,17 +864,22 @@ impl PxRpcService {
                     build_step_down_response(req_id, create_nano, code, Some(&msg), 1, group_id, false, 0, 0)
                 }
             };
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── ChosenNotification (fire-and-forget) ─────────────────────
 
-    fn handle_chosen_notice(&self, req: &ServerRequest<'_>, _server: &Arc<RpcServer>) {
-        let Ok(fb_req) = flatbuffers::root::<FBChosenNotification>(req.control) else {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_chosen_notice(&self, req: ServerRequest, _server: &Arc<RpcServer>) {
+        let Ok(fb_req) = flatbuffers::root::<FBChosenNotification>(req.control()) else {
             debug!(
                 store_id = self.store.store_id,
                 "chosen notice: invalid flatbuffer"
@@ -907,8 +941,9 @@ impl PxRpcService {
 
     // ── BatchChosenNotification (fire-and-forget) ────────────────
 
-    fn handle_batch_chosen(&self, req: &ServerRequest<'_>, _server: &Arc<RpcServer>) {
-        let Ok(fb_req) = flatbuffers::root::<FBBatchChosenNotification>(req.control) else {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_batch_chosen(&self, req: ServerRequest, _server: &Arc<RpcServer>) {
+        let Ok(fb_req) = flatbuffers::root::<FBBatchChosenNotification>(req.control()) else {
             debug!(store_id = self.store.store_id, "batch chosen: invalid flatbuffer");
             return;
         };
@@ -959,15 +994,17 @@ impl PxRpcService {
 
     // ── FetchGap ─────────────────────────────────────────────────
 
-    fn handle_fetch_gap(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_fetch_gap(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle = req.conn_handle;
         let msg_type = FBMsgType::EFetchGapResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBFetchGapRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBFetchGapRequest>(req.control()) else {
             submit_error(
                 server,
-                req.conn_handle,
+                conn_handle,
                 req_id,
                 create_nano,
                 msg_type,
@@ -982,7 +1019,7 @@ impl PxRpcService {
         let Some(group) = self.store.get_group(group_id) else {
             submit_error(
                 server,
-                req.conn_handle,
+                conn_handle,
                 req_id,
                 create_nano,
                 msg_type,
@@ -1006,9 +1043,7 @@ impl PxRpcService {
                 resp.leader_id,
                 &payload_vec,
             );
-            unsafe {
-                let _ = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(server, conn_handle, ctrl, msg_type, req_id);
         } else {
             debug!(
                 store_id = self.store.store_id,
@@ -1016,7 +1051,7 @@ impl PxRpcService {
             );
             submit_error(
                 server,
-                req.conn_handle,
+                conn_handle,
                 req_id,
                 create_nano,
                 msg_type,
@@ -1024,65 +1059,66 @@ impl PxRpcService {
                 "slot not yet chosen",
             );
         }
+        // req dropped here, frame released
     }
 
     // ── Snapshot ─────────────────────────────────────────────────
 
-    fn handle_snapshot(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_snapshot(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let msg_type = FBMsgType::ESnapshotResponse.0 as u16;
-
-        let Ok(fb_req) = flatbuffers::root::<FBSnapshotRequest>(req.control) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::InvalidArgument,
-                "invalid snapshot request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-
-        let Some(group) = self.store.get_group(group_id) else {
-            submit_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvRetCode::NotFound,
-                "px group not found",
-            );
-            return;
-        };
-
-        let replica = group.local_replica();
-        let export_result = replica.learner.engine().snapshot_export();
-        let (at_slot, bytes) = match export_result {
-            Ok(v) => v,
-            Err(e) => {
-                submit_error(
-                    server,
-                    req.conn_handle,
-                    req_id,
-                    create_nano,
-                    msg_type,
-                    FBKvRetCode::Internal,
-                    &format!("snapshot export failed: {e}"),
-                );
-                return;
-            }
-        };
-
-        let membership_epoch = group.membership_epoch();
         let conn_handle_usize = req.conn_handle as usize;
+        let msg_type = FBMsgType::ESnapshotResponse.0 as u16;
+        let store = Arc::clone(&self.store);
         let store_id = self.store.store_id;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBSnapshotRequest>(req.control()) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::InvalidArgument,
+                    "invalid snapshot request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+
+            let Some(group) = store.get_group(group_id) else {
+                submit_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvRetCode::NotFound,
+                    "px group not found",
+                );
+                return;
+            };
+
+            let replica = group.local_replica();
+            let export_result = replica.learner.engine().snapshot_export();
+            let (at_slot, bytes) = match export_result {
+                Ok(v) => v,
+                Err(e) => {
+                    submit_error(
+                        &server,
+                        conn_handle_usize as *mut std::ffi::c_void,
+                        req_id,
+                        create_nano,
+                        msg_type,
+                        FBKvRetCode::Internal,
+                        &format!("snapshot export failed: {e}"),
+                    );
+                    return;
+                }
+            };
+
+            let membership_epoch = group.membership_epoch();
             let term_at_slot = group
                 .local_replica()
                 .accepted_at(at_slot)
@@ -1112,12 +1148,19 @@ impl PxRpcService {
             };
             let fb_resp = FBSnapshotResponse::create(&mut builder, &args);
             builder.finish(fb_resp, None);
-            let ctrl = Buffer::from_bytes(builder.finished_data());
-            let data = bytes::Bytes::from(bytes);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
+            let (ctrl_vec, ctrl_head) = builder.collapse();
+            let ctrl_buf = Buffer::from_vec_offset(ctrl_vec, ctrl_head);
+            let data_buf = Buffer::from_vec_offset(bytes, 0);
             unsafe {
-                let _ = server.submit_response(conn_handle, ctrl.bytes(), Some(&data), msg_type, req_id);
+                let _ = server.submit_response_buffer(
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    ctrl_buf,
+                    Some(data_buf),
+                    msg_type,
+                    req_id,
+                );
             }
+            // req dropped here, frame released
         });
     }
 }
@@ -1163,9 +1206,34 @@ fn submit_error(
     };
     let resp = FBPromiseResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
+    let ctrl = builder.collapse();
+    submit_fb_response(server, conn_handle, ctrl, msg_type, req_id);
+}
+
+// ── Zero-copy response submit helper ──────────────────────────────
+
+/// Submit a response from a collapsed `FlatBufferBuilder` (zero-copy).
+/// `ctrl` is the `(Vec<u8>, head)` tuple from `builder.collapse()` — the
+/// finished flatbuffer data is at `ctrl.0[ctrl.1..]`. The Vec allocation
+/// is wrapped as an external C++ Buffer (no copy); C++ uses it directly
+/// for the `OutFrame` and frees it when the write completes.
+fn submit_fb_response(
+    server: &RpcServer,
+    conn_handle: *mut std::ffi::c_void,
+    ctrl: (Vec<u8>, usize),
+    msg_type: u16,
+    req_id: u64,
+) {
+    let buf = Buffer::from_vec_offset(ctrl.0, ctrl.1);
+    if buf.is_null_handle() {
+        // Empty control — submit with raw bytes path.
+        unsafe {
+            let _ = server.submit_response(conn_handle, &[], None, msg_type, req_id);
+        }
+        return;
+    }
     unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
+        let _ = server.submit_response_buffer(conn_handle, buf, None, msg_type, req_id);
     }
 }
 
@@ -1176,7 +1244,7 @@ fn submit_error(
 /// The caller must have already created the offset in `builder`.
 #[allow(clippy::too_many_arguments)]
 fn finish_promise_response(
-    builder: &mut FlatBufferBuilder,
+    mut builder: FlatBufferBuilder,
     req_id: u64,
     create_nano: u64,
     ret_code: FBKvRetCode,
@@ -1193,7 +1261,7 @@ fn finish_promise_response(
     term_stale: bool,
     membership_epoch: u64,
     epoch_mismatch: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let error_msg = error_msg.map(|m| builder.create_string(m));
     let args = FBPromiseResponseArgs {
         id: req_id,
@@ -1213,9 +1281,9 @@ fn finish_promise_response(
         membership_epoch,
         epoch_mismatch,
     };
-    let resp = FBPromiseResponse::create(builder, &args);
+    let resp = FBPromiseResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1236,10 +1304,10 @@ fn build_promise_response(
     term_stale: bool,
     membership_epoch: u64,
     epoch_mismatch: bool,
-) -> Vec<u8> {
-    let mut builder = FlatBufferBuilder::new();
+) -> (Vec<u8>, usize) {
+    let builder = FlatBufferBuilder::new();
     finish_promise_response(
-        &mut builder,
+        builder,
         req_id,
         create_nano,
         ret_code,
@@ -1276,7 +1344,7 @@ fn build_accepted_response(
     term_stale: bool,
     membership_epoch: u64,
     epoch_mismatch: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = error_msg.map(|m| builder.create_string(m));
     let args = FBAcceptedResponseArgs {
@@ -1298,7 +1366,7 @@ fn build_accepted_response(
     };
     let resp = FBAcceptedResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1314,7 +1382,7 @@ fn build_pre_vote_response(
     contiguous_chosen: u64,
     last_chosen_term: u64,
     highest_seen_slot: u64,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = error_msg.map(|m| builder.create_string(m));
     let args = FBPreVoteResponseArgs {
@@ -1332,7 +1400,7 @@ fn build_pre_vote_response(
     };
     let resp = FBPreVoteResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1348,7 +1416,7 @@ fn build_request_vote_response(
     contiguous_chosen: u64,
     last_chosen_term: u64,
     highest_seen_slot: u64,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = error_msg.map(|m| builder.create_string(m));
     let args = FBRequestVoteResponseArgs {
@@ -1366,7 +1434,7 @@ fn build_request_vote_response(
     };
     let resp = FBRequestVoteResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1384,7 +1452,7 @@ fn build_heartbeat_response(
     contiguous_applied: u64,
     highest_seen_slot: u64,
     durable_snapshot_slot: u64,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = error_msg.map(|m| builder.create_string(m));
     let args = FBHeartbeatResponseArgs {
@@ -1404,7 +1472,7 @@ fn build_heartbeat_response(
     };
     let resp = FBHeartbeatResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1418,7 +1486,7 @@ fn build_step_down_response(
     accepted: bool,
     current_term: u64,
     current_leader_id: u64,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = error_msg.map(|m| builder.create_string(m));
     let args = FBStepDownResponseArgs {
@@ -1434,7 +1502,7 @@ fn build_step_down_response(
     };
     let resp = FBStepDownResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1450,7 +1518,7 @@ fn build_fetch_gap_response(
     ballot_round: u64,
     leader_id: u64,
     payload: &[u8],
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = error_msg.map(|m| builder.create_string(m));
     let payload_vec = builder.create_vector(payload);
@@ -1469,5 +1537,5 @@ fn build_fetch_gap_response(
     };
     let resp = FBFetchGapResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }

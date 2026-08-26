@@ -155,6 +155,31 @@ crow_rpc_buffer_t crow_rpc_buffer_create(const uint8_t *data, uint32_t len)
     }
 }
 
+// Create an external buffer wrapping externally-owned memory (zero-copy).
+// The data is NOT copied; free_cb(free_ctx) is called on release to drop
+// the external owner.
+crow_rpc_buffer_t crow_rpc_buffer_create_external(const uint8_t *data, uint32_t len, void (*free_cb)(void *),
+                                                  void *free_ctx)
+{
+    try {
+        if (data == nullptr || len == 0 || free_cb == nullptr) {
+            return nullptr;
+        }
+        auto *buf     = new crow::rpc::Buffer;
+        buf->data     = const_cast<uint8_t *>(data);
+        buf->len      = len;
+        buf->capacity = len;
+        buf->ref      = new std::atomic<int32_t>(1);
+        buf->pool     = nullptr;
+        buf->free_cb  = free_cb;
+        buf->free_ctx = free_ctx;
+        return new crow_rpc_buffer_s{buf};
+    }
+    catch (...) {
+        return nullptr;
+    }
+}
+
 // ── Pool ──────────────────────────────────────────────────────────
 
 crow_rpc_pool_t crow_rpc_pool_create(uint32_t max_buffers)
@@ -650,10 +675,14 @@ void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t ms
 // ── Custom handler dispatch (R115: Rust server handlers) ──────────
 
 // Shared handler trampoline: extracts request fields from the frame,
-// invokes the C dispatch callback, and deletes the frame. Used by both
-// server-side (c_handler_trampoline) and client-side (RpcClient::dispatch_request)
-// handler dispatch. The callback submits the response later via
-// crow_rpc_server_submit_response (async pattern).
+// invokes the C dispatch callback, and transfers frame ownership to the
+// callback. Used by both server-side (c_handler_trampoline) and client-side
+// (RpcClient::dispatch_request) handler dispatch. The callback submits the
+// response later via crow_rpc_server_submit_response (async pattern).
+//
+// The callback OWNS the frame via frame_handle — it must call
+// crow_rpc_frame_release(frame_handle) when done. The dispatch layer does
+// NOT delete the frame.
 void crow::rpc::invoke_c_handler(crow_rpc_handler_fn callback, void *user_data, Frame *request, Connection *conn)
 {
     if (callback == nullptr || request == nullptr) {
@@ -671,13 +700,21 @@ void crow::rpc::invoke_c_handler(crow_rpc_handler_fn callback, void *user_data, 
         data_ptr = request->data_buf->data;
         data_len = request->data_buf->len;
     }
-    void *conn_handle = static_cast<void *>(conn);
+    void *conn_handle  = static_cast<void *>(conn);
+    void *frame_handle = static_cast<void *>(request);
 
-    // Invoke the C callback with borrowed pointers (frame is released
-    // after the callback returns — the callback must copy what it needs).
-    callback(req_id, create_nano, msg_type, ctrl_ptr, ctrl_len, data_ptr, data_len, conn_handle, user_data);
+    // Transfer frame ownership to the callback. The callback must call
+    // crow_rpc_frame_release(frame_handle) when done.
+    callback(req_id, create_nano, msg_type, ctrl_ptr, ctrl_len, data_ptr, data_len, conn_handle, frame_handle,
+             user_data);
+}
 
-    delete request;
+// Release a frame_handle passed to a crow_rpc_handler_fn callback.
+void crow_rpc_frame_release(void *frame_handle)
+{
+    if (frame_handle != nullptr) {
+        delete static_cast<crow::rpc::Frame *>(frame_handle);
+    }
 }
 
 void crow_rpc_server_register_handler(crow_rpc_server_t server, uint16_t msg_type, crow_rpc_handler_fn callback,
@@ -729,6 +766,50 @@ crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *
                 return CROW_RPC_ERR_SEND_QUEUE;
             }
             resp_data->write(data, data_len);
+        }
+
+        auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
+        if (!server->server->transport()->submit(conn, frame)) {
+            return CROW_RPC_ERR_SEND_QUEUE;
+        }
+        return CROW_RPC_OK;
+    }
+    catch (...) {
+        return CROW_RPC_ERR_CONN_ERROR;
+    }
+}
+
+// Submit a response using pre-filled buffer handles (zero-copy). The
+// server takes ownership of the buffers.
+crow_rpc_status crow_rpc_server_submit_response_buffer(crow_rpc_server_t server, void *conn_handle,
+                                                       crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                                       uint16_t msg_type, uint64_t request_id)
+{
+    try {
+        if (server == nullptr || conn_handle == nullptr) {
+            // Release any provided buffers to avoid leaks.
+            if (control != nullptr)
+                crow_rpc_buffer_release(control);
+            if (data != nullptr)
+                crow_rpc_buffer_release(data);
+            return CROW_RPC_ERR_INVALID_ARG;
+        }
+
+        auto *conn = static_cast<crow::rpc::Connection *>(conn_handle);
+
+        // Extract Buffer* from handles (steal ownership — the handle's
+        // release is a no-op after this since we set buf = nullptr).
+        crow::rpc::Buffer *resp_ctrl = nullptr;
+        if (control != nullptr && control->buf != nullptr) {
+            resp_ctrl    = control->buf;
+            control->buf = nullptr;
+            delete control;
+        }
+        crow::rpc::Buffer *resp_data = nullptr;
+        if (data != nullptr && data->buf != nullptr) {
+            resp_data = data->buf;
+            data->buf = nullptr;
+            delete data;
         }
 
         auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);

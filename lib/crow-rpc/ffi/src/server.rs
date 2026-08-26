@@ -124,23 +124,26 @@ impl RpcServer {
     /// Register a custom Rust dispatch handler for the given msg_type.
     /// The handler is invoked on the C++ I/O worker thread for every
     /// incoming frame with that msg_type. It receives a `ServerRequest`
-    /// carrying the correlation fields, the control + data byte slices
-    /// (borrowed for the duration of the call only — copy what must
-    /// outlive the call), and the `conn_handle` to pass back to
+    /// that owns the C++ Frame — control and data bytes are accessed via
+    /// `control()` / `data()` and are valid as long as the
+    /// `ServerRequest` is alive. The `conn_handle` is passed back to
     /// `submit_response`.
     ///
     /// The handler must be non-blocking: spawn async work (e.g. onto a
     /// tokio runtime) and return; submit the response later via
-    /// `submit_response`. This mirrors the C++ async-handler pattern
-    /// (return nullptr, submit later). Re-registering the same msg_type
-    /// replaces the prior handler (the old closure is leaked — there is
-    /// no unregister API; handlers live for the server's lifetime, which
-    /// for a server registered once at startup is the process lifetime).
+    /// `submit_response`. Move the `ServerRequest` into the async task
+    /// for zero-copy flatbuffer parsing — the Frame is released when the
+    /// `ServerRequest` is dropped. This mirrors the C++ async-handler
+    /// pattern (return nullptr, submit later). Re-registering the same
+    /// msg_type replaces the prior handler (the old closure is leaked —
+    /// there is no unregister API; handlers live for the server's
+    /// lifetime, which for a server registered once at startup is the
+    /// process lifetime).
     pub fn register_handler<F>(&self, msg_type: u16, handler: F)
     where
-        F: Fn(ServerRequest<'_>) + Send + 'static,
+        F: Fn(ServerRequest) + Send + 'static,
     {
-        let box_ptr: *mut Box<dyn Fn(ServerRequest<'_>) + Send + 'static> =
+        let box_ptr: *mut Box<dyn Fn(ServerRequest) + Send + 'static> =
             Box::into_raw(Box::new(Box::new(handler)));
         unsafe {
             sys::crow_rpc_server_register_handler(
@@ -180,6 +183,40 @@ impl RpcServer {
                 control.len() as u32,
                 data_ptr,
                 data_len,
+                msg_type,
+                request_id,
+            )
+        };
+        if status == sys::CROW_RPC_OK {
+            Ok(())
+        } else {
+            Err(RpcError::from_status(status))
+        }
+    }
+
+    /// Submit a response using pre-filled buffer handles (zero-copy).
+    /// The server takes ownership of the buffers. Thread-safe.
+    ///
+    /// # Safety
+    /// `conn_handle` must be a valid `Connection*` obtained from the
+    /// dispatch callback. `control` and `data` buffers must not be reused
+    /// after this call (ownership is transferred to the server).
+    pub unsafe fn submit_response_buffer(
+        &self,
+        conn_handle: *mut std::ffi::c_void,
+        control: crate::Buffer,
+        data: Option<crate::Buffer>,
+        msg_type: u16,
+        request_id: u64,
+    ) -> Result<(), RpcError> {
+        let ctrl_handle = control.into_raw();
+        let data_handle = data.map(|d| d.into_raw()).unwrap_or(std::ptr::null_mut());
+        let status = unsafe {
+            sys::crow_rpc_server_submit_response_buffer(
+                self.handle,
+                conn_handle,
+                ctrl_handle,
+                data_handle,
                 msg_type,
                 request_id,
             )
@@ -345,29 +382,70 @@ impl std::error::Error for RpcError {}
 
 // ── Custom Rust dispatch handlers (R115: Rust server handlers) ──────
 
-/// A borrowed view of an incoming server request, passed to a handler
-/// registered via `RpcServer::register_handler`. All byte slices are
-/// borrowed for the duration of the handler call only — copy what must
-/// outlive the call. `conn_handle` is the opaque connection pointer to
-/// pass back to `RpcServer::submit_response` when the response is ready.
-pub struct ServerRequest<'a> {
+/// An incoming server request that owns its C++ Frame. Passed to a
+/// handler registered via `RpcServer::register_handler`. The control
+/// and data byte slices are accessed via `control()` / `data()` and
+/// are valid as long as the `ServerRequest` is alive. `conn_handle` is
+/// the opaque connection pointer to pass back to
+/// `RpcServer::submit_response` when the response is ready.
+///
+/// The Frame is released when `ServerRequest` is dropped. Handlers that
+/// spawn async work should move the `ServerRequest` into the async task
+/// so the Frame stays alive until parsing is complete (zero-copy).
+pub struct ServerRequest {
     pub request_id: u64,
     pub rpc_create_nano: u64,
     pub msg_type: u16,
-    pub control: &'a [u8],
-    pub data: Option<&'a [u8]>,
     pub conn_handle: *mut std::ffi::c_void,
+    frame_handle: *mut std::ffi::c_void,
+    control_ptr: *const u8,
+    control_len: u32,
+    data_ptr: *const u8,
+    data_len: u32,
 }
 
-// Safety: conn_handle is a raw pointer to a C++ Connection owned by the
-// transport. It is safe to send across threads (the transport's send
-// queue is mutex-protected); the handler stores it and later passes it
-// to submit_response from any thread.
-unsafe impl Send for ServerRequest<'_> {}
+impl ServerRequest {
+    /// Borrow the control (flatbuffer) bytes. Valid as long as `self`
+    /// is alive.
+    #[must_use]
+    pub fn control(&self) -> &[u8] {
+        if self.control_ptr.is_null() || self.control_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.control_ptr, self.control_len as usize) }
+        }
+    }
 
-// Trampoline invoked by the C++ dispatch layer. Reconstructs the borrowed
-// byte slices, builds a ServerRequest, and invokes the boxed Rust closure.
-// The closure box pointer is the user_data registered with the handler.
+    /// Borrow the data payload bytes. Valid as long as `self` is alive.
+    #[must_use]
+    pub fn data(&self) -> Option<&[u8]> {
+        if self.data_ptr.is_null() || self.data_len == 0 {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(self.data_ptr, self.data_len as usize) })
+        }
+    }
+}
+
+impl Drop for ServerRequest {
+    fn drop(&mut self) {
+        if !self.frame_handle.is_null() {
+            unsafe { crate::sys::crow_rpc_frame_release(self.frame_handle) };
+        }
+    }
+}
+
+// Safety: conn_handle and frame_handle are raw pointers to C++ objects
+// owned by the transport / Frame. conn_handle is safe to send across
+// threads (the transport's send queue is mutex-protected). frame_handle
+// is safe to send because crow_rpc_frame_release is thread-safe (plain
+// delete). The control/data pointers are valid as long as the Frame is
+// alive (released in Drop).
+unsafe impl Send for ServerRequest {}
+
+// Trampoline invoked by the C++ dispatch layer. Builds a ServerRequest
+// that owns the Frame, and invokes the boxed Rust closure. The closure
+// is responsible for releasing the Frame (via Drop on ServerRequest).
 #[allow(clippy::borrowed_box)] // FFI: borrowing a Box<dyn Fn> stored behind a raw pointer
 unsafe extern "C" fn rust_handler_trampoline(
     request_id: u64,
@@ -378,31 +456,30 @@ unsafe extern "C" fn rust_handler_trampoline(
     data: *const u8,
     data_len: u32,
     conn_handle: *mut std::ffi::c_void,
+    frame_handle: *mut std::ffi::c_void,
     user_data: *mut std::ffi::c_void,
 ) {
     if user_data.is_null() {
+        // No handler — release the frame to avoid a leak.
+        if !frame_handle.is_null() {
+            unsafe { crate::sys::crow_rpc_frame_release(frame_handle) };
+        }
         return;
     }
-    let boxed: &Box<dyn Fn(ServerRequest<'_>) + Send + 'static> =
-        unsafe { &*(user_data.cast::<Box<dyn Fn(ServerRequest<'_>) + Send + 'static>>()) };
-    let closure: &(dyn Fn(ServerRequest<'_>) + Send + 'static) = &**boxed;
-    let control_slice = if control.is_null() || control_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(control, control_len as usize) }
-    };
-    let data_slice = if data.is_null() || data_len == 0 {
-        None
-    } else {
-        Some(unsafe { std::slice::from_raw_parts(data, data_len as usize) })
-    };
+    let boxed: &Box<dyn Fn(ServerRequest) + Send + 'static> =
+        unsafe { &*(user_data.cast::<Box<dyn Fn(ServerRequest) + Send + 'static>>()) };
+    let closure: &(dyn Fn(ServerRequest) + Send + 'static) = &**boxed;
     let req = ServerRequest {
         request_id,
         rpc_create_nano,
         msg_type,
-        control: control_slice,
-        data: data_slice,
         conn_handle,
+        frame_handle,
+        control_ptr: control,
+        control_len,
+        data_ptr: data,
+        data_len,
     };
     closure(req);
+    // req is dropped here if the closure didn't move it — frame released.
 }

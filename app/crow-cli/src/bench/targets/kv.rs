@@ -695,6 +695,27 @@ impl BenchTarget for KvTarget {
             .map_or_else(crow_kv_client::ClientMetricsSnapshot::default, |c| c.metrics())
     }
 
+    fn client_transport_stats(&self) -> super::super::report::TransportStatsSnapshot {
+        self.client.as_ref().and_then(|c| c.transport_stats()).map_or(
+            super::super::report::TransportStatsSnapshot::default(),
+            |s| super::super::report::TransportStatsSnapshot {
+                read_calls: s.read_calls,
+                writev_calls: s.writev_calls,
+                frames_sent: s.frames_sent,
+                frames_parsed: s.frames_parsed,
+                read_bytes: s.read_bytes,
+                writev_bytes: s.writev_bytes,
+                submit_to_writev_count: s.submit_to_writev.count,
+                submit_to_writev_avg_us: s
+                    .submit_to_writev
+                    .sum_ns
+                    .checked_div(s.submit_to_writev.count)
+                    .unwrap_or(0)
+                    / 1000,
+            },
+        )
+    }
+
     fn node_ids(&self) -> Vec<u64> {
         self.fixture
             .as_ref()

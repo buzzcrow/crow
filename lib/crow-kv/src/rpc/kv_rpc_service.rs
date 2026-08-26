@@ -341,49 +341,48 @@ impl KvRpcService {
     fn make_handler(
         this: Arc<Self>,
         server: Arc<RpcServer>,
-        f: fn(&Self, &crow_rpc_ffi::ServerRequest<'_>, &Arc<RpcServer>),
-    ) -> impl Fn(crow_rpc_ffi::ServerRequest<'_>) + Send + 'static {
+        f: fn(&Self, crow_rpc_ffi::ServerRequest, &Arc<RpcServer>),
+    ) -> impl Fn(crow_rpc_ffi::ServerRequest) + Send + 'static {
         move |req| {
-            f(&this, &req, &server);
+            f(&this, req, &server);
         }
     }
 
     // ── Put ───────────────────────────────────────────────────────
 
-    fn handle_put(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_put(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EKvResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBKvSetRequest>(req.control) else {
-            submit_kv_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let key = fb_req.key().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let value = fb_req.value().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let client_id = fb_req.client_id();
-        let seq = fb_req.seq();
-        let request_id = fb_req.request_id();
-        let request_create_ms = fb_req.request_create_ms();
-
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBKvSetRequest>(req.control()) else {
+                submit_kv_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let key = fb_req.key().map(|v| v.bytes()).unwrap_or_default();
+            let value = fb_req.value().map(|v| v.bytes()).unwrap_or_default();
+            let client_id = fb_req.client_id();
+            let seq = fb_req.seq();
+            let request_id = fb_req.request_id();
+            let request_create_ms = fb_req.request_create_ms();
             let resp = store
                 .kv_put(
                     group_id,
-                    &key,
-                    &value,
+                    key,
+                    value,
                     client_id,
                     seq,
                     request_id,
@@ -391,93 +390,123 @@ impl KvRpcService {
                 )
                 .await;
             let ctrl = build_kv_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── Get ───────────────────────────────────────────────────────
 
-    fn handle_get(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_get(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EKvResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBKvGetRequest>(req.control) else {
-            submit_kv_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let key = fb_req.key().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let read_mode = fb_req.read_mode();
-        let min_slot = fb_req.min_slot();
-        let request_id = fb_req.request_id();
-        let request_create_ms = fb_req.request_create_ms();
-        let forwarded = fb_req.forwarded();
-
-        let linearizable = read_mode == FBReadMode::Linearizable;
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server_clone = Arc::clone(server);
 
         // Transparent leader-forward (linearizable only, loop-guard via `forwarded`).
-        if linearizable && !forwarded {
-            if let Some(endpoint) = self.store.forward_target_for(group_id) {
-                let fwd = Arc::clone(&self.forwarder);
-                let fb_req_owned = req.control.to_vec();
-                self.rt.spawn(async move {
-                    let parsed = flatbuffers::root::<FBKvGetRequest>(&fb_req_owned);
-                    if let Ok(parsed_req) = parsed {
-                        match fwd.forward_get(&endpoint, &parsed_req).await {
-                            Ok(leader_ctrl) => {
-                                debug!(group_id, request_id, leader = %endpoint, "kv get forwarded to leader");
-                                let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-                                unsafe {
-                                    let _ = server_clone.submit_response(conn_handle, &leader_ctrl, None, msg_type, req_id);
-                                }
-                                return;
-                            }
-                            Err(e) => {
-                                warn!(group_id, request_id, leader = %endpoint, error = %e, "kv get forward failed; serving stale local with hint");
-                            }
-                        }
+        // Parse the flatbuffer once to check forwarding, then move `req` into the
+        // async task for zero-copy access to key/control bytes.
+        let forward_info = {
+            let Ok(fb_req) = flatbuffers::root::<FBKvGetRequest>(req.control()) else {
+                submit_kv_error(
+                    server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let read_mode = fb_req.read_mode();
+            let forwarded = fb_req.forwarded();
+            let linearizable = read_mode == FBReadMode::Linearizable;
+            if linearizable && !forwarded {
+                self.store
+                    .forward_target_for(group_id)
+                    .map(|endpoint| (group_id, endpoint))
+            } else {
+                None
+            }
+        };
+
+        let fwd = Arc::clone(&self.forwarder);
+        self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBKvGetRequest>(req.control()) else {
+                // Should not happen — already validated above — but guard anyway.
+                submit_kv_error(
+                    &server_clone,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let key = fb_req.key().map(|v| v.bytes()).unwrap_or_default();
+            let read_mode = fb_req.read_mode();
+            let min_slot = fb_req.min_slot();
+            let request_id = fb_req.request_id();
+            let request_create_ms = fb_req.request_create_ms();
+
+            if let Some((_, endpoint)) = forward_info {
+                match fwd.forward_get(&endpoint, &fb_req).await {
+                    Ok(leader_ctrl) => {
+                        debug!(group_id, request_id, leader = %endpoint, "kv get forwarded to leader");
+                        submit_fb_response(
+                            &server_clone,
+                            conn_handle_usize as *mut std::ffi::c_void,
+                            (leader_ctrl, 0),
+                            msg_type,
+                            req_id,
+                        );
+                        return;
                     }
-                    // Forward failed or parse error: serve stale local + hint.
-                    let resp = store
-                        .kv_get(group_id, &key, ReadMode::Linearizable as i32, min_slot, request_id, request_create_ms)
-                        .await;
-                    let mut ctrl = build_kv_response(req_id, create_nano, &resp);
-                    patch_not_leader_hint(&mut ctrl, &endpoint);
-                    let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-                    unsafe {
-                        let _ = server_clone.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
+                    Err(e) => {
+                        warn!(group_id, request_id, leader = %endpoint, error = %e, "kv get forward failed; serving stale local with hint");
                     }
-                });
+                }
+                // Forward failed: serve stale local + hint.
+                let resp = store
+                    .kv_get(group_id, key, ReadMode::Linearizable as i32, min_slot, request_id, request_create_ms)
+                    .await;
+                let mut ctrl = build_kv_response(req_id, create_nano, &resp);
+                patch_not_leader_hint(&mut ctrl, &endpoint);
+                submit_fb_response(
+                    &server_clone,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    ctrl,
+                    msg_type,
+                    req_id,
+                );
                 return;
             }
-        }
 
-        // Serve locally.
-        let read_mode_i32 = if linearizable {
-            ReadMode::Linearizable as i32
-        } else {
-            ReadMode::MinSlot as i32
-        };
-        self.rt.spawn(async move {
+            // Serve locally.
+            let linearizable = read_mode == FBReadMode::Linearizable;
+            let read_mode_i32 = if linearizable {
+                ReadMode::Linearizable as i32
+            } else {
+                ReadMode::MinSlot as i32
+            };
             let resp = store
                 .kv_get(
                     group_id,
-                    &key,
+                    key,
                     read_mode_i32,
                     min_slot,
                     request_id,
@@ -485,198 +514,233 @@ impl KvRpcService {
                 )
                 .await;
             let ctrl = build_kv_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server_clone.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server_clone,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── Delete ────────────────────────────────────────────────────
 
-    fn handle_delete(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_delete(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EKvResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBKvDeleteRequest>(req.control) else {
-            submit_kv_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let key = fb_req.key().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let client_id = fb_req.client_id();
-        let seq = fb_req.seq();
-        let request_id = fb_req.request_id();
-        let request_create_ms = fb_req.request_create_ms();
-
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBKvDeleteRequest>(req.control()) else {
+                submit_kv_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let key = fb_req.key().map(|v| v.bytes()).unwrap_or_default();
+            let client_id = fb_req.client_id();
+            let seq = fb_req.seq();
+            let request_id = fb_req.request_id();
+            let request_create_ms = fb_req.request_create_ms();
             let resp = store
-                .kv_delete(group_id, &key, client_id, seq, request_id, request_create_ms)
+                .kv_delete(group_id, key, client_id, seq, request_id, request_create_ms)
                 .await;
             let ctrl = build_kv_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── BatchWrite ────────────────────────────────────────────────
 
-    fn handle_batch_write(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_batch_write(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EKvResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBKvBatchWriteRequest>(req.control) else {
-            submit_kv_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let items: Vec<KvBatchItem> = fb_req
-            .items()
-            .map(|v| {
-                v.iter()
-                    .map(|item| KvBatchItem {
-                        key: item.key().map(|k| k.bytes().to_vec()).unwrap_or_default().into(),
-                        value: item
-                            .value()
-                            .map(|v| v.bytes().to_vec())
-                            .unwrap_or_default()
-                            .into(),
-                        is_delete: item.is_delete(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let client_id = fb_req.client_id();
-        let seq = fb_req.seq();
-        let request_id = fb_req.request_id();
-        let request_create_ms = fb_req.request_create_ms();
-
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBKvBatchWriteRequest>(req.control()) else {
+                submit_kv_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let items: Vec<KvBatchItem> = fb_req
+                .items()
+                .map(|v| {
+                    v.iter()
+                        .map(|item| KvBatchItem {
+                            key: item.key().map(|k| k.bytes().to_vec()).unwrap_or_default().into(),
+                            value: item
+                                .value()
+                                .map(|v| v.bytes().to_vec())
+                                .unwrap_or_default()
+                                .into(),
+                            is_delete: item.is_delete(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let client_id = fb_req.client_id();
+            let seq = fb_req.seq();
+            let request_id = fb_req.request_id();
+            let request_create_ms = fb_req.request_create_ms();
             let resp = store
                 .kv_batch_write(group_id, items, client_id, seq, request_id, request_create_ms)
                 .await;
             let ctrl = build_kv_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── Scan ──────────────────────────────────────────────────────
 
-    fn handle_scan(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_scan(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EKvScanResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBKvScanRequest>(req.control) else {
-            submit_scan_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let prefix = fb_req.prefix().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let start_after = fb_req
-            .start_after()
-            .map(|v| v.bytes().to_vec())
-            .unwrap_or_default();
-        let end_key = fb_req.end_key().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let limit = fb_req.limit();
-        let read_mode = fb_req.read_mode();
-        let min_slot = fb_req.min_slot();
-        let keys_only = fb_req.keys_only();
-        let count_only = fb_req.count_only();
-        let deadline_ms = fb_req.deadline_ms();
-        let request_id = fb_req.request_id();
-        let request_create_ms = fb_req.request_create_ms();
-        let forwarded = fb_req.forwarded();
-
-        let linearizable = read_mode == FBReadMode::Linearizable;
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server_clone = Arc::clone(server);
 
-        if linearizable && !forwarded {
-            if let Some(endpoint) = self.store.forward_target_for(group_id) {
-                let fwd = Arc::clone(&self.forwarder);
-                let fb_req_owned = req.control.to_vec();
-                self.rt.spawn(async move {
-                    if let Ok(parsed_req) = flatbuffers::root::<FBKvScanRequest>(&fb_req_owned) {
-                        match fwd.forward_scan(&endpoint, &parsed_req).await {
-                            Ok(leader_ctrl) => {
-                                debug!(group_id, request_id, leader = %endpoint, "kv scan forwarded to leader");
-                                let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-                                unsafe {
-                                    let _ = server_clone.submit_response(conn_handle, &leader_ctrl, None, msg_type, req_id);
-                                }
-                                return;
-                            }
-                            Err(e) => {
-                                warn!(group_id, request_id, leader = %endpoint, error = %e, "kv scan forward failed; serving stale local with hint");
-                            }
-                        }
+        // Determine forwarding decision up front (parses the flatbuffer once
+        // on the dispatch thread), then move `req` into the async task for
+        // zero-copy access to the request bytes.
+        let forward_info = {
+            let Ok(fb_req) = flatbuffers::root::<FBKvScanRequest>(req.control()) else {
+                submit_scan_error(
+                    server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let read_mode = fb_req.read_mode();
+            let forwarded = fb_req.forwarded();
+            let linearizable = read_mode == FBReadMode::Linearizable;
+            if linearizable && !forwarded {
+                self.store
+                    .forward_target_for(group_id)
+                    .map(|endpoint| (group_id, endpoint))
+            } else {
+                None
+            }
+        };
+
+        let fwd = Arc::clone(&self.forwarder);
+        self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBKvScanRequest>(req.control()) else {
+                submit_scan_error(
+                    &server_clone,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let prefix = fb_req.prefix().map(|v| v.bytes()).unwrap_or_default();
+            let start_after = fb_req.start_after().map(|v| v.bytes()).unwrap_or_default();
+            let end_key = fb_req.end_key().map(|v| v.bytes()).unwrap_or_default();
+            let limit = fb_req.limit();
+            let read_mode = fb_req.read_mode();
+            let min_slot = fb_req.min_slot();
+            let keys_only = fb_req.keys_only();
+            let count_only = fb_req.count_only();
+            let deadline_ms = fb_req.deadline_ms();
+            let request_id = fb_req.request_id();
+            let request_create_ms = fb_req.request_create_ms();
+
+            if let Some((_, endpoint)) = forward_info {
+                match fwd.forward_scan(&endpoint, &fb_req).await {
+                    Ok(leader_ctrl) => {
+                        debug!(group_id, request_id, leader = %endpoint, "kv scan forwarded to leader");
+                        submit_fb_response(
+                            &server_clone,
+                            conn_handle_usize as *mut std::ffi::c_void,
+                            (leader_ctrl, 0),
+                            msg_type,
+                            req_id,
+                        );
+                        return;
                     }
-                    let read_mode_i32 = ReadMode::Linearizable as i32;
-                    let resp = store
-                        .kv_scan(group_id, &prefix, &start_after, &end_key, limit, read_mode_i32, min_slot, keys_only, count_only, deadline_ms, request_id, request_create_ms)
-                        .await;
-                    let mut ctrl = build_scan_response(req_id, create_nano, &resp);
-                    patch_scan_not_leader_hint(&mut ctrl, &endpoint);
-                    let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-                    unsafe {
-                        let _ = server_clone.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
+                    Err(e) => {
+                        warn!(group_id, request_id, leader = %endpoint, error = %e, "kv scan forward failed; serving stale local with hint");
                     }
-                });
+                }
+                let read_mode_i32 = ReadMode::Linearizable as i32;
+                let resp = store
+                    .kv_scan(group_id, prefix, start_after, end_key, limit, read_mode_i32, min_slot, keys_only, count_only, deadline_ms, request_id, request_create_ms)
+                    .await;
+                let mut ctrl = build_scan_response(req_id, create_nano, &resp);
+                patch_scan_not_leader_hint(&mut ctrl, &endpoint);
+                submit_fb_response(
+                    &server_clone,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    ctrl,
+                    msg_type,
+                    req_id,
+                );
                 return;
             }
-        }
 
-        let read_mode_i32 = if linearizable {
-            ReadMode::Linearizable as i32
-        } else {
-            ReadMode::MinSlot as i32
-        };
-        self.rt.spawn(async move {
+            // Serve locally.
+            let linearizable = read_mode == FBReadMode::Linearizable;
+            let read_mode_i32 = if linearizable {
+                ReadMode::Linearizable as i32
+            } else {
+                ReadMode::MinSlot as i32
+            };
             let resp = store
                 .kv_scan(
                     group_id,
-                    &prefix,
-                    &start_after,
-                    &end_key,
+                    prefix,
+                    start_after,
+                    end_key,
                     limit,
                     read_mode_i32,
                     min_slot,
@@ -688,97 +752,126 @@ impl KvRpcService {
                 )
                 .await;
             let ctrl = build_scan_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server_clone.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server_clone,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── JournalScan ───────────────────────────────────────────────
 
-    fn handle_journal_scan(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_journal_scan(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EKvJournalScanResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBKvJournalScanRequest>(req.control) else {
-            submit_journal_scan_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let min_slot = fb_req.min_slot();
-        let max_slot = fb_req.max_slot();
-        let key_prefix = fb_req
-            .key_prefix()
-            .map(|v| v.bytes().to_vec())
-            .unwrap_or_default();
-        let limit = fb_req.limit();
-        let read_mode = fb_req.read_mode();
-        let request_id = fb_req.request_id();
-        let request_create_ms = fb_req.request_create_ms();
-        let forwarded = fb_req.forwarded();
-
-        let linearizable = read_mode == FBReadMode::Linearizable;
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server_clone = Arc::clone(server);
 
-        if linearizable && !forwarded {
-            if let Some(endpoint) = self.store.forward_target_for(group_id) {
-                let fwd = Arc::clone(&self.forwarder);
-                let fb_req_owned = req.control.to_vec();
-                self.rt.spawn(async move {
-                    if let Ok(parsed_req) = flatbuffers::root::<FBKvJournalScanRequest>(&fb_req_owned) {
-                        match fwd.forward_journal_scan(&endpoint, &parsed_req).await {
-                            Ok(leader_ctrl) => {
-                                debug!(group_id, request_id, leader = %endpoint, "kv journal_scan forwarded to leader");
-                                let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-                                unsafe {
-                                    let _ = server_clone.submit_response(conn_handle, &leader_ctrl, None, msg_type, req_id);
-                                }
-                                return;
-                            }
-                            Err(e) => {
-                                warn!(group_id, request_id, leader = %endpoint, error = %e, "kv journal_scan forward failed; serving stale local with hint");
-                            }
-                        }
+        // Determine forwarding decision up front (parses the flatbuffer once
+        // on the dispatch thread), then move `req` into the async task for
+        // zero-copy access to the request bytes.
+        let forward_info = {
+            let Ok(fb_req) = flatbuffers::root::<FBKvJournalScanRequest>(req.control()) else {
+                submit_journal_scan_error(
+                    server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let read_mode = fb_req.read_mode();
+            let forwarded = fb_req.forwarded();
+            let linearizable = read_mode == FBReadMode::Linearizable;
+            if linearizable && !forwarded {
+                self.store
+                    .forward_target_for(group_id)
+                    .map(|endpoint| (group_id, endpoint))
+            } else {
+                None
+            }
+        };
+
+        let fwd = Arc::clone(&self.forwarder);
+        self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<FBKvJournalScanRequest>(req.control()) else {
+                submit_journal_scan_error(
+                    &server_clone,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let min_slot = fb_req.min_slot();
+            let max_slot = fb_req.max_slot();
+            let key_prefix = fb_req.key_prefix().map(|v| v.bytes()).unwrap_or_default();
+            let limit = fb_req.limit();
+            let read_mode = fb_req.read_mode();
+            let request_id = fb_req.request_id();
+            let request_create_ms = fb_req.request_create_ms();
+
+            if let Some((_, endpoint)) = forward_info {
+                match fwd.forward_journal_scan(&endpoint, &fb_req).await {
+                    Ok(leader_ctrl) => {
+                        debug!(group_id, request_id, leader = %endpoint, "kv journal_scan forwarded to leader");
+                        submit_fb_response(
+                            &server_clone,
+                            conn_handle_usize as *mut std::ffi::c_void,
+                            (leader_ctrl, 0),
+                            msg_type,
+                            req_id,
+                        );
+                        return;
                     }
-                    let read_mode_i32 = ReadMode::Linearizable as i32;
-                    let resp = store
-                        .kv_journal_scan(group_id, min_slot, max_slot, &key_prefix, limit, read_mode_i32, request_id, request_create_ms)
-                        .await;
-                    let mut ctrl = build_journal_scan_response(req_id, create_nano, &resp);
-                    patch_journal_scan_not_leader_hint(&mut ctrl, &endpoint);
-                    let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-                    unsafe {
-                        let _ = server_clone.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
+                    Err(e) => {
+                        warn!(group_id, request_id, leader = %endpoint, error = %e, "kv journal_scan forward failed; serving stale local with hint");
                     }
-                });
+                }
+                let read_mode_i32 = ReadMode::Linearizable as i32;
+                let resp = store
+                    .kv_journal_scan(group_id, min_slot, max_slot, key_prefix, limit, read_mode_i32, request_id, request_create_ms)
+                    .await;
+                let mut ctrl = build_journal_scan_response(req_id, create_nano, &resp);
+                patch_journal_scan_not_leader_hint(&mut ctrl, &endpoint);
+                submit_fb_response(
+                    &server_clone,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    ctrl,
+                    msg_type,
+                    req_id,
+                );
                 return;
             }
-        }
 
-        let read_mode_i32 = if linearizable {
-            ReadMode::Linearizable as i32
-        } else {
-            ReadMode::MinSlot as i32
-        };
-        self.rt.spawn(async move {
+            // Serve locally.
+            let linearizable = read_mode == FBReadMode::Linearizable;
+            let read_mode_i32 = if linearizable {
+                ReadMode::Linearizable as i32
+            } else {
+                ReadMode::MinSlot as i32
+            };
             let resp = store
                 .kv_journal_scan(
                     group_id,
                     min_slot,
                     max_slot,
-                    &key_prefix,
+                    key_prefix,
                     limit,
                     read_mode_i32,
                     request_id,
@@ -786,170 +879,185 @@ impl KvRpcService {
                 )
                 .await;
             let ctrl = build_journal_scan_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server_clone.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server_clone,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── CreateSnapshot ────────────────────────────────────────────
 
-    fn handle_create_snapshot(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_create_snapshot(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::ECreateSnapshotResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBCreateSnapshotRequest>(req.control) else {
-            submit_create_snapshot_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let read_mode = fb_req.read_mode();
-        let min_slot = fb_req.min_slot();
-        let read_mode_i32 = if read_mode == FBReadMode::Linearizable {
-            ReadMode::Linearizable as i32
-        } else {
-            ReadMode::MinSlot as i32
-        };
-
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBCreateSnapshotRequest>(req.control()) else {
+                submit_create_snapshot_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let read_mode = fb_req.read_mode();
+            let min_slot = fb_req.min_slot();
+            let read_mode_i32 = if read_mode == FBReadMode::Linearizable {
+                ReadMode::Linearizable as i32
+            } else {
+                ReadMode::MinSlot as i32
+            };
             let resp = store.kv_create_snapshot(group_id, read_mode_i32, min_slot).await;
             let ctrl = build_create_snapshot_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── ListSnapshots ─────────────────────────────────────────────
 
-    fn handle_list_snapshots(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_list_snapshots(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EListSnapshotsResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBListSnapshotsRequest>(req.control) else {
-            submit_list_snapshots_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBListSnapshotsRequest>(req.control()) else {
+                submit_list_snapshots_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
             let resp = store.kv_list_snapshots(group_id).await;
             let ctrl = build_list_snapshots_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── SnapshotScan ──────────────────────────────────────────────
 
-    fn handle_snapshot_scan(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_snapshot_scan(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::ESnapshotScanResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBSnapshotScanRequest>(req.control) else {
-            submit_snapshot_scan_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let snapshot_handle = fb_req.snapshot_handle();
-        let prefix = fb_req.prefix().map(|v| v.bytes().to_vec()).unwrap_or_default();
-        let start_after = fb_req
-            .start_after()
-            .map(|v| v.bytes().to_vec())
-            .unwrap_or_default();
-        let limit = fb_req.limit();
-
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBSnapshotScanRequest>(req.control()) else {
+                submit_snapshot_scan_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let snapshot_handle = fb_req.snapshot_handle();
+            let prefix = fb_req.prefix().map(|v| v.bytes()).unwrap_or_default();
+            let start_after = fb_req.start_after().map(|v| v.bytes()).unwrap_or_default();
+            let limit = fb_req.limit();
             let resp = store
-                .kv_snapshot_scan(group_id, snapshot_handle, &prefix, &start_after, limit)
+                .kv_snapshot_scan(group_id, snapshot_handle, prefix, start_after, limit)
                 .await;
             let ctrl = build_snapshot_scan_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── ReleaseSnapshot ───────────────────────────────────────────
 
-    fn handle_release_snapshot(&self, req: &crow_rpc_ffi::ServerRequest<'_>, server: &Arc<RpcServer>) {
+    fn handle_release_snapshot(&self, req: crow_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
+        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EReleaseSnapshotResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBReleaseSnapshotRequest>(req.control) else {
-            submit_release_snapshot_error(
-                server,
-                req.conn_handle,
-                req_id,
-                create_nano,
-                msg_type,
-                FBKvClientRetCode::InvalidArgument,
-                "invalid request flatbuffer",
-            );
-            return;
-        };
-        let group_id = fb_req.group_id();
-        let snapshot_handle = fb_req.snapshot_handle();
-
         let store = Arc::clone(&self.store);
-        let conn_handle_usize = req.conn_handle as usize;
         let server = Arc::clone(server);
         self.rt.spawn(async move {
+            let Ok(fb_req) = flatbuffers::root::<crate::rpc::FBReleaseSnapshotRequest>(req.control()) else {
+                submit_release_snapshot_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "invalid request flatbuffer",
+                );
+                return;
+            };
+            let group_id = fb_req.group_id();
+            let snapshot_handle = fb_req.snapshot_handle();
             let resp = store.kv_release_snapshot(group_id, snapshot_handle).await;
             let ctrl = build_release_snapshot_response(req_id, create_nano, &resp);
-            let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
-            unsafe {
-                let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-            }
+            submit_fb_response(
+                &server,
+                conn_handle_usize as *mut std::ffi::c_void,
+                ctrl,
+                msg_type,
+                req_id,
+            );
+            // req dropped here, frame released
         });
     }
 
     // ── WatchSubscribe (fire-and-forget, no response) ─────────────
 
-    fn handle_watch_subscribe(&self, req: &crow_rpc_ffi::ServerRequest<'_>, _server: &Arc<RpcServer>) {
-        let Ok(fb_req) = flatbuffers::root::<FBWatchSubscribe>(req.control) else {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_watch_subscribe(&self, req: crow_rpc_ffi::ServerRequest, _server: &Arc<RpcServer>) {
+        let conn_handle_usize = req.conn_handle as usize;
+        let Ok(fb_req) = flatbuffers::root::<FBWatchSubscribe>(req.control()) else {
             debug!(
                 store_id = self.store.store_id,
                 "watch subscribe: invalid flatbuffer"
@@ -960,7 +1068,7 @@ impl KvRpcService {
         let prefix = fb_req.prefix().map_or(&[][..], |v| v.bytes()).to_vec();
 
         let Some(group) = self.store.get_group(group_id) else {
-            let conn = Connection::from_handle(req.conn_handle as crow_rpc_ffi::sys::crow_rpc_conn_t);
+            let conn = Connection::from_handle(conn_handle_usize as crow_rpc_ffi::sys::crow_rpc_conn_t);
             self.forwarder.send_watch_notify_error(
                 &conn,
                 group_id,
@@ -971,11 +1079,11 @@ impl KvRpcService {
         };
         if !group.local_replica().is_leader() {
             let hint = group.leader_endpoint().unwrap_or_default();
-            let conn = Connection::from_handle(req.conn_handle as crow_rpc_ffi::sys::crow_rpc_conn_t);
+            let conn = Connection::from_handle(conn_handle_usize as crow_rpc_ffi::sys::crow_rpc_conn_t);
             self.forwarder.send_watch_notify_error(&conn, group_id, &hint, "");
             return;
         }
-        let conn = Connection::from_handle(req.conn_handle as crow_rpc_ffi::sys::crow_rpc_conn_t);
+        let conn = Connection::from_handle(conn_handle_usize as crow_rpc_ffi::sys::crow_rpc_conn_t);
         let target = Arc::new(crate::cluster::watch_registry::CrowRpcPushTarget::new(
             conn,
             Arc::clone(&self.forwarder.rpc),
@@ -990,12 +1098,14 @@ impl KvRpcService {
             prefix_len = prefix.len(),
             "watch subscribed (crow-rpc push target)"
         );
+        // req dropped here, frame released
     }
 
     // ── WatchUnsubscribe (fire-and-forget, no response) ───────────
 
-    fn handle_watch_unsubscribe(&self, req: &crow_rpc_ffi::ServerRequest<'_>, _server: &Arc<RpcServer>) {
-        let Ok(fb_req) = flatbuffers::root::<FBWatchUnsubscribe>(req.control) else {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_watch_unsubscribe(&self, req: crow_rpc_ffi::ServerRequest, _server: &Arc<RpcServer>) {
+        let Ok(fb_req) = flatbuffers::root::<FBWatchUnsubscribe>(req.control()) else {
             debug!(
                 store_id = self.store.store_id,
                 "watch unsubscribe: invalid flatbuffer"
@@ -1019,6 +1129,7 @@ impl KvRpcService {
             prefix_len = prefix.len(),
             "watch unsubscribe received (crow-rpc: lazy cleanup via dead-connection detection)"
         );
+        // req dropped here, frame released
     }
 }
 
@@ -1037,7 +1148,7 @@ fn kv_error_code_to_fb(code: i32) -> FBKvClientRetCode {
 
 // ── Response builders ────────────────────────────────────────────
 
-fn build_kv_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvResponse) -> Vec<u8> {
+fn build_kv_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvResponse) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = if resp.error.is_empty() {
         None
@@ -1072,10 +1183,10 @@ fn build_kv_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvRespons
     };
     let fb = FBKvResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
-fn build_scan_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvScanResponse) -> Vec<u8> {
+fn build_scan_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvScanResponse) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = if resp.error.is_empty() {
         None
@@ -1125,14 +1236,14 @@ fn build_scan_response(req_id: u64, create_nano: u64, resp: &crate::rpc::KvScanR
     };
     let fb = FBKvScanResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 fn build_journal_scan_response(
     req_id: u64,
     create_nano: u64,
     resp: &crate::rpc::KvJournalScanResponse,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = if resp.error.is_empty() {
         None
@@ -1183,14 +1294,14 @@ fn build_journal_scan_response(
     };
     let fb = FBKvJournalScanResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 fn build_create_snapshot_response(
     req_id: u64,
     create_nano: u64,
     resp: &crate::rpc::CreateSnapshotResponse,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = if resp.error.is_empty() {
         None
@@ -1214,14 +1325,14 @@ fn build_create_snapshot_response(
     };
     let fb = FBCreateSnapshotResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 fn build_list_snapshots_response(
     req_id: u64,
     create_nano: u64,
     resp: &crate::rpc::ListSnapshotsResponse,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = if resp.error.is_empty() {
         None
@@ -1261,14 +1372,14 @@ fn build_list_snapshots_response(
     };
     let fb = crate::rpc::FBListSnapshotsResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 fn build_snapshot_scan_response(
     req_id: u64,
     create_nano: u64,
     resp: &crate::rpc::SnapshotScanResponse,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = if resp.error.is_empty() {
         None
@@ -1306,14 +1417,14 @@ fn build_snapshot_scan_response(
     };
     let fb = FBSnapshotScanResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 fn build_release_snapshot_response(
     req_id: u64,
     create_nano: u64,
     resp: &crate::rpc::ReleaseSnapshotResponse,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = if resp.error.is_empty() {
         None
@@ -1333,7 +1444,7 @@ fn build_release_snapshot_response(
     };
     let fb = FBReleaseSnapshotResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    builder.finished_data().to_vec()
+    builder.collapse()
 }
 
 // ── NotLeaderHint patching (forward-failed fallback) ─────────────
@@ -1341,8 +1452,8 @@ fn build_release_snapshot_response(
 /// Rebuild a `FBKvResponse` with `not_leader_hint` set to `endpoint`.
 /// Used when a leader-forward fails and the handler serves a stale
 /// local read with the known leader endpoint as the hint.
-fn patch_not_leader_hint(ctrl: &mut Vec<u8>, endpoint: &str) {
-    let view = FBKvResponseRef::new(ctrl);
+fn patch_not_leader_hint(ctrl: &mut (Vec<u8>, usize), endpoint: &str) {
+    let view = FBKvResponseRef::new(&ctrl.0[ctrl.1..]);
     if !view.valid() {
         return;
     }
@@ -1371,11 +1482,14 @@ fn patch_not_leader_hint(ctrl: &mut Vec<u8>, endpoint: &str) {
     };
     let fb = FBKvResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    *ctrl = builder.finished_data().to_vec();
+    {
+        let (v, h) = builder.collapse();
+        *ctrl = (v, h);
+    }
 }
 
-fn patch_scan_not_leader_hint(ctrl: &mut Vec<u8>, endpoint: &str) {
-    let view = FBKvScanResponseRef::new(ctrl);
+fn patch_scan_not_leader_hint(ctrl: &mut (Vec<u8>, usize), endpoint: &str) {
+    let view = FBKvScanResponseRef::new(&ctrl.0[ctrl.1..]);
     if !view.valid() {
         return;
     }
@@ -1433,11 +1547,14 @@ fn patch_scan_not_leader_hint(ctrl: &mut Vec<u8>, endpoint: &str) {
     };
     let fb = FBKvScanResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    *ctrl = builder.finished_data().to_vec();
+    {
+        let (v, h) = builder.collapse();
+        *ctrl = (v, h);
+    }
 }
 
-fn patch_journal_scan_not_leader_hint(ctrl: &mut Vec<u8>, endpoint: &str) {
-    let view = FBKvJournalScanResponseRef::new(ctrl);
+fn patch_journal_scan_not_leader_hint(ctrl: &mut (Vec<u8>, usize), endpoint: &str) {
+    let view = FBKvJournalScanResponseRef::new(&ctrl.0[ctrl.1..]);
     if !view.valid() {
         return;
     }
@@ -1494,7 +1611,37 @@ fn patch_journal_scan_not_leader_hint(ctrl: &mut Vec<u8>, endpoint: &str) {
     };
     let fb = FBKvJournalScanResponse::create(&mut builder, &args);
     builder.finish(fb, None);
-    *ctrl = builder.finished_data().to_vec();
+    {
+        let (v, h) = builder.collapse();
+        *ctrl = (v, h);
+    }
+}
+
+// ── Zero-copy response submit helper ──────────────────────────────
+
+/// Submit a response from a collapsed `FlatBufferBuilder` (zero-copy).
+/// `ctrl` is the `(Vec<u8>, head)` tuple from `builder.collapse()` — the
+/// finished flatbuffer data is at `ctrl.0[ctrl.1..]`. The Vec allocation
+/// is wrapped as an external C++ Buffer (no copy); C++ uses it directly
+/// for the `OutFrame` and frees it when the write completes.
+fn submit_fb_response(
+    server: &RpcServer,
+    conn_handle: *mut std::ffi::c_void,
+    ctrl: (Vec<u8>, usize),
+    msg_type: u16,
+    req_id: u64,
+) {
+    let buf = Buffer::from_vec_offset(ctrl.0, ctrl.1);
+    if buf.is_null_handle() {
+        // Empty control — submit with raw bytes path.
+        unsafe {
+            let _ = server.submit_response(conn_handle, &[], None, msg_type, req_id);
+        }
+        return;
+    }
+    unsafe {
+        let _ = server.submit_response_buffer(conn_handle, buf, None, msg_type, req_id);
+    }
 }
 
 // ── Submit-error helpers ─────────────────────────────────────────
@@ -1528,10 +1675,8 @@ fn submit_kv_error(
     };
     let resp = FBKvResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
-    unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
-    }
+    let (vec, head) = builder.collapse();
+    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
 }
 
 fn submit_scan_error(
@@ -1563,10 +1708,8 @@ fn submit_scan_error(
     };
     let resp = FBKvScanResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
-    unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
-    }
+    let (vec, head) = builder.collapse();
+    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
 }
 
 fn submit_journal_scan_error(
@@ -1597,10 +1740,8 @@ fn submit_journal_scan_error(
     };
     let resp = FBKvJournalScanResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
-    unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
-    }
+    let (vec, head) = builder.collapse();
+    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
 }
 
 fn submit_create_snapshot_error(
@@ -1626,10 +1767,8 @@ fn submit_create_snapshot_error(
     };
     let resp = FBCreateSnapshotResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
-    unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
-    }
+    let (vec, head) = builder.collapse();
+    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
 }
 
 fn submit_list_snapshots_error(
@@ -1653,10 +1792,8 @@ fn submit_list_snapshots_error(
     };
     let resp = crate::rpc::FBListSnapshotsResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
-    unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
-    }
+    let (vec, head) = builder.collapse();
+    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
 }
 
 fn submit_snapshot_scan_error(
@@ -1681,10 +1818,8 @@ fn submit_snapshot_scan_error(
     };
     let resp = FBSnapshotScanResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
-    unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
-    }
+    let (vec, head) = builder.collapse();
+    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
 }
 
 fn submit_release_snapshot_error(
@@ -1707,10 +1842,8 @@ fn submit_release_snapshot_error(
     };
     let resp = FBReleaseSnapshotResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let buf = builder.finished_data();
-    unsafe {
-        let _ = server.submit_response(conn_handle, buf, None, msg_type, req_id);
-    }
+    let (vec, head) = builder.collapse();
+    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
 }
 
 // ── Endpoint parsing (shared with px_rpc_transport) ──────────────

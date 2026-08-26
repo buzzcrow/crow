@@ -86,7 +86,7 @@ impl KvServer for Arc<PxKvStore> {
         // consensus (PxRpcService) and client (KvRpcService) handlers
         // are registered on the same server — their handler names
         // don't conflict.
-        let server = Arc::new(RpcServer::new(None));
+        let server = Arc::new(RpcServer::with_engines(None, 1, 2));
         server
             .listen(&bound_addr.ip().to_string(), i32::from(bound_addr.port()))
             .map_err(|e| format!("crow-rpc listen on {bound_addr}: {e:?}"))?;
@@ -247,6 +247,17 @@ impl PxKvStore {
     /// `None` if `start_rpc_server` has not been called.
     pub fn rpc_transport(&self) -> Option<Arc<PxRpcTransport>> {
         self.rpc_server_state.lock().transport.clone()
+    }
+
+    /// Sample transport-level stats (syscall counts, frame aggregation,
+    /// submit→writev queue wait) from the crow-rpc server. Returns
+    /// `None` if the server has not been started.
+    pub fn rpc_transport_stats(&self) -> Option<crow_rpc_ffi::CrowRpcTransportStats> {
+        self.rpc_server_state
+            .lock()
+            .server
+            .as_ref()
+            .map(|s| s.transport_stats())
     }
 
     /// Wire the shared `PxRpcTransport` into all existing remote

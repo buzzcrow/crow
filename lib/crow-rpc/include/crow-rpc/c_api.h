@@ -44,6 +44,13 @@ void              crow_rpc_buffer_release(crow_rpc_buffer_t buf);
 // buffer owns a malloc'd copy of the data; release frees it. Used by
 // client-side code to build control messages without a pool reference.
 crow_rpc_buffer_t crow_rpc_buffer_create(const uint8_t *data, uint32_t len);
+// Create an external buffer wrapping externally-owned memory. The buffer
+// does NOT copy the data — `data` must remain valid until `free_cb` is
+// called. On release (when refcount hits zero), `free_cb(free_ctx)` is
+// called to drop the external owner. Used for zero-copy response paths
+// where Rust passes a Vec allocation directly to C++ without copying.
+crow_rpc_buffer_t crow_rpc_buffer_create_external(const uint8_t *data, uint32_t len, void (*free_cb)(void *),
+                                                  void *free_ctx);
 
 // ── Pool ──────────────────────────────────────────────────────────
 crow_rpc_pool_t crow_rpc_pool_create(uint32_t max_buffers);
@@ -193,9 +200,19 @@ void crow_rpc_server_register_echo_handler(crow_rpc_server_t server, uint16_t ms
 // the C++ async-handler pattern (return nullptr, submit later).
 //
 // data is null (data_len == 0) for control-only requests.
+//
+// frame_handle is an opaque pointer to the C++ Frame. The callback OWNS
+// this frame — the dispatch layer does NOT delete it. The callback must
+// call crow_rpc_frame_release(frame_handle) when done (typically via
+// Drop on the Rust wrapper). The control/data pointers are valid only
+// while the frame is alive.
 typedef void (*crow_rpc_handler_fn)(uint64_t request_id, uint64_t rpc_create_nano, uint16_t msg_type,
                                     const uint8_t *control, uint32_t control_len, const uint8_t *data,
-                                    uint32_t data_len, void *conn_handle, void *user_data);
+                                    uint32_t data_len, void *conn_handle, void *frame_handle, void *user_data);
+
+// Release a frame_handle previously passed to a crow_rpc_handler_fn.
+// Must be called exactly once per frame_handle. Passing nullptr is a no-op.
+void crow_rpc_frame_release(void *frame_handle);
 
 // Register a custom dispatch callback for the given msg_type. The
 // callback is invoked for every incoming frame with that msg_type. This
@@ -213,6 +230,14 @@ void crow_rpc_server_register_handler(crow_rpc_server_t server, uint16_t msg_typ
 crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *conn_handle, const uint8_t *control,
                                                 uint32_t control_len, const uint8_t *data, uint32_t data_len,
                                                 uint16_t msg_type, uint64_t request_id);
+
+// Submit a response using pre-filled buffer handles (zero-copy). The
+// server takes ownership of the buffers (they are released when the
+// OutFrame is sent). control or data may be NULL (no control / no data
+// payload). Thread-safe.
+crow_rpc_status crow_rpc_server_submit_response_buffer(crow_rpc_server_t server, void *conn_handle,
+                                                       crow_rpc_buffer_t control, crow_rpc_buffer_t data,
+                                                       uint16_t msg_type, uint64_t request_id);
 
 // ── Client-side request handler dispatch (R114) ───────────────────
 

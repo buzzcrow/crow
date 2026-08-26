@@ -77,9 +77,43 @@ impl Buffer {
         Self::from_bytes(&data)
     }
 
+    /// Create an external buffer wrapping a Vec allocation (zero-copy).
+    /// The buffer's `data` points to `vec[head..]`; the entire Vec
+    /// allocation is kept alive until the Buffer is released, at which
+    /// point the Vec is dropped. No copy occurs.
+    ///
+    /// Use `head = 0` to wrap the entire Vec, or `head > 0` when using
+    /// `FlatBufferBuilder::collapse()` (which returns the finished data
+    /// at offset `head` within the internal Vec).
+    pub fn from_vec_offset(vec: Vec<u8>, head: usize) -> Self {
+        let len = vec.len().saturating_sub(head);
+        if len == 0 {
+            // Empty — no buffer needed, just drop the Vec.
+            drop(vec);
+            // Create a null handle — submit_response_buffer handles null.
+            return Buffer {
+                handle: std::ptr::null_mut(),
+            };
+        }
+        let data_ptr = vec.as_ptr().wrapping_add(head);
+        // Box the Vec to get a stable pointer for the free callback.
+        // The callback drops the Box<Vec<u8>>, freeing the allocation.
+        let boxed = Box::new(vec);
+        let ctx = Box::into_raw(boxed).cast::<std::ffi::c_void>();
+        let handle =
+            unsafe { sys::crow_rpc_buffer_create_external(data_ptr, len as u32, Some(free_vec_cb), ctx) };
+        Buffer { handle }
+    }
+
     /// Read-only access to the buffer's data as a byte slice.
     pub fn as_slice(&self) -> &[u8] {
         self.bytes()
+    }
+
+    /// Returns true if this Buffer has no underlying C++ handle (e.g.
+    /// created from an empty Vec via `from_vec_offset`).
+    pub fn is_null_handle(&self) -> bool {
+        self.handle.is_null()
     }
 }
 
@@ -139,3 +173,15 @@ impl Drop for BufferPool {
 // threads (the pool uses a mutex-protected free list + atomic refcounts).
 unsafe impl Send for BufferPool {}
 unsafe impl Sync for BufferPool {}
+
+// Free callback for external buffers created via `Buffer::from_vec_offset`.
+// Drops the Box<Vec<u8>>, freeing the allocation that the Buffer's `data`
+// pointer points into.
+extern "C" fn free_vec_cb(ctx: *mut std::ffi::c_void) {
+    if !ctx.is_null() {
+        // SAFETY: ctx was created by Box::into_raw(Box::new(Vec<u8>)) in
+        // from_vec_offset. We reclaim it here exactly once (the C++ Buffer
+        // release() calls free_cb once when refcount hits zero).
+        unsafe { drop(Box::from_raw(ctx.cast::<Vec<u8>>())) };
+    }
+}

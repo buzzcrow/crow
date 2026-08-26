@@ -263,8 +263,8 @@ fn register_crow_rpc_handlers(
     let notify_tx_h = Arc::clone(notify_tx);
     rpc.register_handler(
         FBMsgType::EWatchNotify.0 as u16,
-        move |req: crow_rpc_ffi::ClientRequest<'_>| {
-            let r = FBWatchNotifyRef::new(req.control);
+        move |req: crow_rpc_ffi::ClientRequest| {
+            let r = FBWatchNotifyRef::new(req.control());
             if !r.valid() {
                 tracing::warn!("watch_notify(crow-rpc): malformed FBWatchNotify frame");
                 return;
@@ -298,8 +298,8 @@ fn register_crow_rpc_handlers(
     let reconnect_tx_h = reconnect_tx;
     rpc.register_handler(
         FBMsgType::EWatchNotifyError.0 as u16,
-        move |req: crow_rpc_ffi::ClientRequest<'_>| {
-            let Ok(fb) = flatbuffers::root::<FBWatchNotifyError>(req.control) else {
+        move |req: crow_rpc_ffi::ClientRequest| {
+            let Ok(fb) = flatbuffers::root::<FBWatchNotifyError>(req.control()) else {
                 tracing::warn!("watch_notify(crow-rpc): malformed FBWatchNotifyError frame");
                 return;
             };

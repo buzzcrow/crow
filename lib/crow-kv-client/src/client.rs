@@ -244,6 +244,14 @@ impl CrowkvClient {
         self.rpc_transport.as_ref()
     }
 
+    /// Sample client-side crow-rpc transport stats (syscall counts,
+    /// frame aggregation, submit→writev queue wait). Returns `None`
+    /// if no RPC transport is configured.
+    #[must_use]
+    pub fn transport_stats(&self) -> Option<crow_rpc_ffi::CrowRpcTransportStats> {
+        self.rpc_transport.as_ref().map(|t| t.server().transport_stats())
+    }
+
     /// This client session's opaque `client_id`.
     #[must_use]
     pub fn client_id(&self) -> u64 {

@@ -146,6 +146,7 @@ pub(crate) async fn bench_benchmark_kv(args: super::KvArgs, json: bool) -> ExitC
 
     let (server_metrics, _) = target.collect_artifacts();
     report.server_metrics = server_metrics;
+    report.client_transport_stats = target.client_transport_stats();
 
     let artifacts_dir = run_dir.join("artifacts");
     let node_ids = target.node_ids();

@@ -319,9 +319,9 @@ impl RpcClient {
     /// handler (`RpcServer::register_handler`).
     pub fn register_handler<F>(&self, msg_type: u16, handler: F)
     where
-        F: Fn(ClientRequest<'_>) + Send + 'static,
+        F: Fn(ClientRequest) + Send + 'static,
     {
-        let box_ptr: *mut Box<dyn Fn(ClientRequest<'_>) + Send + 'static> =
+        let box_ptr: *mut Box<dyn Fn(ClientRequest) + Send + 'static> =
             Box::into_raw(Box::new(Box::new(handler)));
         unsafe {
             sys::crow_rpc_client_register_handler(
@@ -431,28 +431,62 @@ unsafe extern "C" fn on_complete_cb(
 
 // ── Client-side request handler dispatch (R114) ────────────────────
 
-/// A borrowed view of an incoming client-side request (server→client
-/// direction), passed to a handler registered via
+/// An incoming client-side request (server→client direction) that owns
+/// its C++ Frame, passed to a handler registered via
 /// `RpcClient::register_handler`. Same shape as `ServerRequest` — the
 /// handler submits the response via `RpcServer::submit_response` using
-/// the captured server handle. All byte slices are borrowed for the
-/// duration of the handler call only — copy what must outlive the call.
-pub struct ClientRequest<'a> {
+/// the captured server handle. Control and data bytes are accessed via
+/// `control()` / `data()` and are valid as long as the `ClientRequest`
+/// is alive. The Frame is released on Drop.
+pub struct ClientRequest {
     pub request_id: u64,
     pub rpc_create_nano: u64,
     pub msg_type: u16,
-    pub control: &'a [u8],
-    pub data: Option<&'a [u8]>,
     pub conn_handle: *mut std::ffi::c_void,
+    frame_handle: *mut std::ffi::c_void,
+    control_ptr: *const u8,
+    control_len: u32,
+    data_ptr: *const u8,
+    data_len: u32,
 }
 
-// Safety: conn_handle is a raw pointer to a C++ Connection owned by the
-// transport. Safe to send across threads (same rationale as ServerRequest).
-unsafe impl Send for ClientRequest<'_> {}
+impl ClientRequest {
+    /// Borrow the control (flatbuffer) bytes. Valid as long as `self`
+    /// is alive.
+    #[must_use]
+    pub fn control(&self) -> &[u8] {
+        if self.control_ptr.is_null() || self.control_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.control_ptr, self.control_len as usize) }
+        }
+    }
 
-// Trampoline invoked by the C++ client dispatch layer. Reconstructs the
-// borrowed byte slices, builds a ClientRequest, and invokes the boxed
-// Rust closure. Same pattern as rust_handler_trampoline in server.rs.
+    /// Borrow the data payload bytes. Valid as long as `self` is alive.
+    #[must_use]
+    pub fn data(&self) -> Option<&[u8]> {
+        if self.data_ptr.is_null() || self.data_len == 0 {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(self.data_ptr, self.data_len as usize) })
+        }
+    }
+}
+
+impl Drop for ClientRequest {
+    fn drop(&mut self) {
+        if !self.frame_handle.is_null() {
+            unsafe { crate::sys::crow_rpc_frame_release(self.frame_handle) };
+        }
+    }
+}
+
+// Safety: same rationale as ServerRequest.
+unsafe impl Send for ClientRequest {}
+
+// Trampoline invoked by the C++ client dispatch layer. Builds a
+// ClientRequest that owns the Frame, and invokes the boxed Rust closure.
+// Same pattern as rust_handler_trampoline in server.rs.
 #[allow(clippy::borrowed_box)]
 unsafe extern "C" fn rust_client_handler_trampoline(
     request_id: u64,
@@ -463,31 +497,28 @@ unsafe extern "C" fn rust_client_handler_trampoline(
     data: *const u8,
     data_len: u32,
     conn_handle: *mut std::ffi::c_void,
+    frame_handle: *mut std::ffi::c_void,
     user_data: *mut std::ffi::c_void,
 ) {
     if user_data.is_null() {
+        if !frame_handle.is_null() {
+            unsafe { crate::sys::crow_rpc_frame_release(frame_handle) };
+        }
         return;
     }
-    let boxed: &Box<dyn Fn(ClientRequest<'_>) + Send + 'static> =
-        unsafe { &*(user_data.cast::<Box<dyn Fn(ClientRequest<'_>) + Send + 'static>>()) };
-    let closure: &(dyn Fn(ClientRequest<'_>) + Send + 'static) = &**boxed;
-    let control_slice = if control.is_null() || control_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(control, control_len as usize) }
-    };
-    let data_slice = if data.is_null() || data_len == 0 {
-        None
-    } else {
-        Some(unsafe { std::slice::from_raw_parts(data, data_len as usize) })
-    };
+    let boxed: &Box<dyn Fn(ClientRequest) + Send + 'static> =
+        unsafe { &*(user_data.cast::<Box<dyn Fn(ClientRequest) + Send + 'static>>()) };
+    let closure: &(dyn Fn(ClientRequest) + Send + 'static) = &**boxed;
     let req = ClientRequest {
         request_id,
         rpc_create_nano,
         msg_type,
-        control: control_slice,
-        data: data_slice,
         conn_handle,
+        frame_handle,
+        control_ptr: control,
+        control_len,
+        data_ptr: data,
+        data_len,
     };
     closure(req);
 }

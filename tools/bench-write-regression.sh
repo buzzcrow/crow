@@ -46,7 +46,7 @@ run_bench() {
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
+        echo -e "$label\t0\t0\t0\t0\t0\t0\t1\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
     local ops_s avg_us p50_us p99_us p999_us errors wal
@@ -57,8 +57,17 @@ run_bench() {
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
     wal=$(echo "$json" | jq -r '.server_metrics.wal_append_count')
+    # RPC aggregation ratios: frames per syscall (send_agg = frames_sent/writev_calls, recv_agg = frames_parsed/read_calls)
+    local srv_sa srv_ra cli_sa cli_ra srv_s2w cli_s2w
+    srv_sa=$(echo "$json" | jq -r 'if .server_metrics.rpc.writev_calls > 0 then (.server_metrics.rpc.frames_sent / .server_metrics.rpc.writev_calls) else 0 end | . * 10 | floor / 10')
+    srv_ra=$(echo "$json" | jq -r 'if .server_metrics.rpc.read_calls > 0 then (.server_metrics.rpc.frames_parsed / .server_metrics.rpc.read_calls) else 0 end | . * 10 | floor / 10')
+    cli_sa=$(echo "$json" | jq -r 'if .client_transport_stats.writev_calls > 0 then (.client_transport_stats.frames_sent / .client_transport_stats.writev_calls) else 0 end | . * 10 | floor / 10')
+    cli_ra=$(echo "$json" | jq -r 'if .client_transport_stats.read_calls > 0 then (.client_transport_stats.frames_parsed / .client_transport_stats.read_calls) else 0 end | . * 10 | floor / 10')
+    srv_s2w=$(echo "$json" | jq -r '.server_metrics.rpc.submit_to_writev_avg_us // 0')
+    cli_s2w=$(echo "$json" | jq -r '.client_transport_stats.submit_to_writev_avg_us // 0')
     echo "    ops/s=$ops_s wal=$wal avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors"
-    echo -e "$label\t$ops_s\t$wal\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors" >> "$RESULTS_FILE"
+    echo "    rpc_agg: srv send=${srv_sa} recv=${srv_ra} s2w=${srv_s2w}us | cli send=${cli_sa} recv=${cli_ra} s2w=${cli_s2w}us"
+    echo -e "$label\t$ops_s\t$wal\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra" >> "$RESULTS_FILE"
 }
 
 # --- regression sentinel configs ---
@@ -82,9 +91,25 @@ run_bench() {
 #
 # Coalescing lifts the ceiling from ~29K (non-coalesced) to ~87K at 256T.
 # WAL amortization reaches ~30x at 256T. Zero errors across all configs.
-# Linux (AMD 5950X) reaches ~124K at 256T — see kv-write-flow-analysis.md.
+#
+# Linux retest (2026-08-04, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
+#   same workload, same parameters.
+#
+#   T    C    ops/s     WAL      avg    p50    p99    p999    err
+#   1    1    3,029     90,870   327    350    428    564     0
+#   4    2    12,681    274,197  313    300    496    826     0
+#   16   4    32,935    180,596  483    472    804    1,761   0
+#   32   16   52,688    141,915  604    576    1,180  3,708   0
+#   64   32   75,280    109,862  846    800    1,850  4,988   0
+#   128  32   105,779   105,226  1,204  1,124  2,592  9,632   0
+#   256  32   123,745   116,944  2,058  1,911  4,392  14,976  0
+#
+# Linux peak ~124K at 256T (vs macOS ~87K). The 32-thread SMT AMD has
+# more headroom than the non-SMT 18-core M5 Pro at high concurrency.
+# WAL amortization reaches ~11x at 256T. Zero errors across all configs.
+# See doc/design/kv/kv-write-flow-analysis.md for full analysis.
 
-echo -e "label\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
+echo -e "label\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tsrv_send_agg\tsrv_recv_agg\tcli_send_agg\tcli_recv_agg" > "$RESULTS_FILE"
 
 echo "=== write (mi=32, coalesce=32, drain=1) ==="
 run_bench 1 1 32 32 1 "write_1t_1c_mi32_coales32_drain1"        # ref: 3,029 ops/s

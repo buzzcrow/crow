@@ -15,6 +15,7 @@ use crow_kv::cluster::px_kv_store::PxKvStore;
 use crow_kv::kv::CrowTreeEngine;
 use crow_kv::metrics::{Counter, Gauge, MetricsRegistry, MetricsRunner};
 use crow_kv::wal::wal_engine::BlockDeviceSnapshot;
+use crow_rpc_ffi::CrowRpcTransportStats;
 
 /// Registered Rust handles for one (store, group): Paxos gauges +
 /// snapshot.pages.c bridge counter.
@@ -42,6 +43,37 @@ impl EngineHandles {
                 .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.inflight_slots.g")),
             snapshot_pages: registry
                 .register_counter(format!("s.{store_id}.g.{group_id}.tree.snapshot.pages.c")),
+        }
+    }
+}
+
+/// Registered Rust handles for one store's crow-rpc transport stats:
+/// syscall/frame aggregation counters (window-delta) + submit→writev
+/// queue-wait gauges (cumulative snapshot).
+struct RpcTransportHandles {
+    read_calls: Arc<Counter>,
+    writev_calls: Arc<Counter>,
+    frames_sent: Arc<Counter>,
+    frames_parsed: Arc<Counter>,
+    read_bytes: Arc<Counter>,
+    writev_bytes: Arc<Counter>,
+    submit_to_writev_avg_us: Arc<Gauge>,
+    submit_to_writev_count: Arc<Gauge>,
+}
+
+impl RpcTransportHandles {
+    fn register(registry: &mut MetricsRegistry, store_id: u64) -> Self {
+        Self {
+            read_calls: registry.register_counter(format!("s.{store_id}.rpc.read_calls.c")),
+            writev_calls: registry.register_counter(format!("s.{store_id}.rpc.writev_calls.c")),
+            frames_sent: registry.register_counter(format!("s.{store_id}.rpc.frames_sent.c")),
+            frames_parsed: registry.register_counter(format!("s.{store_id}.rpc.frames_parsed.c")),
+            read_bytes: registry.register_counter(format!("s.{store_id}.rpc.read_bytes.c")),
+            writev_bytes: registry.register_counter(format!("s.{store_id}.rpc.writev_bytes.c")),
+            submit_to_writev_avg_us: registry
+                .register_gauge(format!("s.{store_id}.rpc.submit_to_writev.avg_us.g")),
+            submit_to_writev_count: registry
+                .register_gauge(format!("s.{store_id}.rpc.submit_to_writev.count.g")),
         }
     }
 }
@@ -97,6 +129,7 @@ pub fn setup_engine_collector(
     type Key = (u64, u64);
 
     let mut handles: Vec<(Key, EngineHandles)> = Vec::new();
+    let mut rpc_handles: Vec<(u64, RpcTransportHandles)> = Vec::new();
     {
         let mut reg = registry.lock().expect("metrics registry poisoned");
         for entry in &store_registry.stores {
@@ -108,6 +141,7 @@ pub fn setup_engine_collector(
                     EngineHandles::register(&mut reg, store_id, group.group_id()),
                 ));
             });
+            rpc_handles.push((store_id, RpcTransportHandles::register(&mut reg, store_id)));
         }
     }
 
@@ -115,12 +149,23 @@ pub fn setup_engine_collector(
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let last_block_device: Arc<Mutex<std::collections::HashMap<Key, BlockDeviceSnapshot>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let last_rpc_stats: Arc<Mutex<std::collections::HashMap<u64, CrowRpcTransportStats>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     let handles: Arc<Mutex<Vec<(Key, EngineHandles)>>> = Arc::new(Mutex::new(handles));
+    let rpc_handles: Arc<Mutex<Vec<(u64, RpcTransportHandles)>>> = Arc::new(Mutex::new(rpc_handles));
     let known_keys: Arc<Mutex<std::collections::HashSet<Key>>> = Arc::new(Mutex::new(
         handles
             .lock()
             .expect("handles poisoned")
+            .iter()
+            .map(|(k, _)| *k)
+            .collect(),
+    ));
+    let known_rpc_stores: Arc<Mutex<std::collections::HashSet<u64>>> = Arc::new(Mutex::new(
+        rpc_handles
+            .lock()
+            .expect("rpc_handles poisoned")
             .iter()
             .map(|(k, _)| *k)
             .collect(),
@@ -153,6 +198,26 @@ pub fn setup_engine_collector(
             for key @ (sid, gid) in new_keys {
                 h.push((key, EngineHandles::register(&mut reg, sid, gid)));
                 known.insert(key);
+            }
+        }
+
+        // Dynamically register RPC transport handles for new stores.
+        let new_rpc_stores: Vec<u64> = {
+            let known = known_rpc_stores.lock().expect("known_rpc_stores poisoned");
+            stores
+                .stores
+                .iter()
+                .map(|e| *e.key())
+                .filter(|sid| !known.contains(sid))
+                .collect()
+        };
+        if !new_rpc_stores.is_empty() {
+            let mut reg = reg.lock().expect("metrics registry poisoned");
+            let mut rh = rpc_handles.lock().expect("rpc_handles poisoned");
+            let mut known = known_rpc_stores.lock().expect("known_rpc_stores poisoned");
+            for sid in new_rpc_stores {
+                rh.push((sid, RpcTransportHandles::register(&mut reg, sid)));
+                known.insert(sid);
             }
         }
 
@@ -227,6 +292,49 @@ pub fn setup_engine_collector(
                     }
                 }
             });
+        }
+
+        // RPC transport stats: delta from cumulative crow-rpc counters.
+        let rh = rpc_handles.lock().expect("rpc_handles poisoned");
+        for (store_id, hd) in &*rh {
+            let Some(store) = stores.get_store(*store_id) else {
+                continue;
+            };
+            let Some(cur) = store.rpc_transport_stats() else {
+                continue;
+            };
+            let mut last = last_rpc_stats.lock().expect("last_rpc_stats poisoned");
+            let prev = last.entry(*store_id).or_default();
+            let d_read = cur.read_calls.saturating_sub(prev.read_calls);
+            let d_writev = cur.writev_calls.saturating_sub(prev.writev_calls);
+            let d_sent = cur.frames_sent.saturating_sub(prev.frames_sent);
+            let d_parsed = cur.frames_parsed.saturating_sub(prev.frames_parsed);
+            let d_rd_bytes = cur.read_bytes.saturating_sub(prev.read_bytes);
+            let d_wr_bytes = cur.writev_bytes.saturating_sub(prev.writev_bytes);
+            let sw = cur.submit_to_writev;
+            *prev = cur;
+            drop(last);
+            if d_read > 0 {
+                hd.read_calls.inc_by(d_read);
+            }
+            if d_writev > 0 {
+                hd.writev_calls.inc_by(d_writev);
+            }
+            if d_sent > 0 {
+                hd.frames_sent.inc_by(d_sent);
+            }
+            if d_parsed > 0 {
+                hd.frames_parsed.inc_by(d_parsed);
+            }
+            if d_rd_bytes > 0 {
+                hd.read_bytes.inc_by(d_rd_bytes);
+            }
+            if d_wr_bytes > 0 {
+                hd.writev_bytes.inc_by(d_wr_bytes);
+            }
+            hd.submit_to_writev_avg_us
+                .set(sw.sum_ns.checked_div(sw.count).unwrap_or(0) / 1000);
+            hd.submit_to_writev_count.set(sw.count);
         }
     });
 

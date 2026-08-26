@@ -43,7 +43,7 @@ use crow_protocol::diskdb_fb::{
     FBZoneCompactionResultArgs, FBZoneRecalcResult, FBZoneRecalcResultArgs, FBZoneUsage, FBZoneUsageArgs,
 };
 use crow_protocol::fb::FBMsgType;
-use crow_rpc_ffi::{RpcServer, ServerRequest};
+use crow_rpc_ffi::{Buffer, RpcServer, ServerRequest};
 use flatbuffers::FlatBufferBuilder;
 use tokio::runtime::Handle;
 
@@ -168,21 +168,22 @@ impl DiskdbRpcService {
     fn make_handler(
         this: Arc<Self>,
         server: Arc<RpcServer>,
-        f: fn(&Self, &ServerRequest<'_>, &Arc<RpcServer>),
-    ) -> impl Fn(ServerRequest<'_>) + Send + 'static {
+        f: fn(&Self, ServerRequest, &Arc<RpcServer>),
+    ) -> impl Fn(ServerRequest) + Send + 'static {
         move |req| {
-            f(&this, &req, &server);
+            f(&this, req, &server);
         }
     }
 
     // ── AllocateBlocks ───────────────────────────────────────────
 
-    fn handle_allocate(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_allocate(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EAllocateBlocksResponse.0 as u16;
 
-        let params = match self.validate_allocate(req) {
+        let params = match self.validate_allocate(&req) {
             Ok(p) => p,
             Err((code, msg)) => {
                 submit_error(server, req.conn_handle, req_id, create_nano, msg_type, code, msg);
@@ -221,11 +222,7 @@ impl DiskdbRpcService {
                         None,
                         &segments,
                     );
-                    unsafe {
-                        if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                            tracing::warn!(?e, "allocate_blocks crow-rpc submit failed");
-                        }
-                    }
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
                 Err(AllocError::NoSpace) => {
                     let ctrl = build_allocate_response(
@@ -235,11 +232,7 @@ impl DiskdbRpcService {
                         Some("no space available"),
                         &[],
                     );
-                    unsafe {
-                        if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                            tracing::warn!(?e, "allocate_blocks NoSpace submit failed");
-                        }
-                    }
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
             }
         });
@@ -247,9 +240,9 @@ impl DiskdbRpcService {
 
     fn validate_allocate(
         &self,
-        req: &ServerRequest<'_>,
+        req: &ServerRequest,
     ) -> Result<AllocateParams, (FBDiskdbRetCode, &'static str)> {
-        let Ok(fb_req) = flatbuffers::root::<FBAllocateBlocksRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBAllocateBlocksRequest>(req.control()) else {
             return Err((FBDiskdbRetCode::InvalidArgument, "invalid request flatbuffer"));
         };
 
@@ -314,12 +307,13 @@ impl DiskdbRpcService {
     // ── FreeBlocks ───────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
-    fn handle_free(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_free(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EFreeBlocksResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBFreeBlocksRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBFreeBlocksRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -336,9 +330,7 @@ impl DiskdbRpcService {
             Some(s) if !s.is_empty() => s,
             _ => {
                 let ctrl = build_free_response(req_id, create_nano, FBDiskdbRetCode::Success, None, 0);
-                unsafe {
-                    let _ = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id);
-                }
+                submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
                 return;
             }
         };
@@ -422,20 +414,12 @@ impl DiskdbRpcService {
                     metrics.free_rpc_latency.observe(elapsed_ns(rpc_start));
                     let ctrl =
                         build_free_response(req_id, create_nano, FBDiskdbRetCode::Success, None, freed_count);
-                    unsafe {
-                        if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                            tracing::warn!(?e, "free_blocks crow-rpc submit failed");
-                        }
-                    }
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
                 Err(e) => {
                     let (code, msg) = map_free_error(&e);
                     let ctrl = build_free_response(req_id, create_nano, code, Some(&msg), 0);
-                    unsafe {
-                        if let Err(e2) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                            tracing::warn!(?e2, "free_blocks error submit failed");
-                        }
-                    }
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
             }
         });
@@ -443,12 +427,13 @@ impl DiskdbRpcService {
 
     // ── CommitBlocks ─────────────────────────────────────────────
 
-    fn handle_commit(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_commit(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ECommitBlocksResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBCommitBlocksRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBCommitBlocksRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -465,9 +450,7 @@ impl DiskdbRpcService {
             Some(s) if !s.is_empty() => s,
             _ => {
                 let ctrl = build_commit_response(req_id, create_nano, FBDiskdbRetCode::Success, None, 0);
-                unsafe {
-                    let _ = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id);
-                }
+                submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
                 return;
             }
         };
@@ -510,20 +493,12 @@ impl DiskdbRpcService {
                 Ok(committed) => {
                     let ctrl =
                         build_commit_response(req_id, create_nano, FBDiskdbRetCode::Success, None, committed);
-                    unsafe {
-                        if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                            tracing::warn!(?e, "commit_blocks crow-rpc submit failed");
-                        }
-                    }
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
                 Err(e) => {
                     let (code, msg) = map_free_error(&e);
                     let ctrl = build_commit_response(req_id, create_nano, code, Some(&msg), 0);
-                    unsafe {
-                        if let Err(e2) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                            tracing::warn!(?e2, "commit_blocks error submit failed");
-                        }
-                    }
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                 }
             }
         });
@@ -532,12 +507,13 @@ impl DiskdbRpcService {
     // ── QueryCapacityStats ───────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
-    fn handle_query_capacity(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_query_capacity(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EQueryCapacityStatsResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBQueryCapacityStatsRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBQueryCapacityStatsRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -607,11 +583,7 @@ impl DiskdbRpcService {
                 let _ = zu; // zone-level bitmap handled in builder
                 let agg = dg.aggregate_usage();
                 let ctrl = build_query_capacity_response_zone(req_id, create_nano, &dg, &agg, &disk, zi);
-                unsafe {
-                    if let Err(e) = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id) {
-                        tracing::warn!(?e, "query_capacity zone submit failed");
-                    }
-                }
+                submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
                 return;
             }
             // Disk-level.
@@ -656,21 +628,18 @@ impl DiskdbRpcService {
 
         let ctrl =
             build_query_capacity_response(req_id, create_nano, &disk_groups, disk_id.is_some() && !has_zone);
-        unsafe {
-            if let Err(e) = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id) {
-                tracing::warn!(?e, "query_capacity submit failed");
-            }
-        }
+        submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── GetDiskGroupInfo ─────────────────────────────────────────
 
-    fn handle_get_disk_group_info(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_get_disk_group_info(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EGetDiskGroupInfoResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBGetDiskGroupInfoRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBGetDiskGroupInfoRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -711,21 +680,18 @@ impl DiskdbRpcService {
             &disk_ids,
             &[],
         );
-        unsafe {
-            if let Err(e) = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id) {
-                tracing::warn!(?e, "get_disk_group_info submit failed");
-            }
-        }
+        submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── GetDiskInfo ──────────────────────────────────────────────
 
-    fn handle_get_disk_info(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_get_disk_info(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EGetDiskInfoResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBGetDiskInfoRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBGetDiskInfoRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -785,22 +751,19 @@ impl DiskdbRpcService {
         };
         let ctrl =
             build_get_disk_info_response(req_id, create_nano, FBDiskdbRetCode::Success, None, &disk, false);
-        unsafe {
-            if let Err(e) = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id) {
-                tracing::warn!(?e, "get_disk_info submit failed");
-            }
-        }
+        submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── RebuildZoneBitmap ────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
-    fn handle_rebuild_zone_bitmap(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_rebuild_zone_bitmap(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ERebuildZoneBitmapResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBRebuildZoneBitmapRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBRebuildZoneBitmapRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -922,9 +885,7 @@ impl DiskdbRpcService {
                     0,
                     0,
                 );
-                unsafe {
-                    let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-                }
+                submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
             } else {
                 let ctrl = build_rebuild_zone_bitmap_response(
                     req_id,
@@ -935,23 +896,20 @@ impl DiskdbRpcService {
                     total_busy_units,
                     total_free_units,
                 );
-                unsafe {
-                    if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                        tracing::warn!(?e, "rebuild_zone_bitmap submit failed");
-                    }
-                }
+                submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
             }
         });
     }
 
     // ── RecalcDiskUsage ──────────────────────────────────────────
 
-    fn handle_recalc_disk_usage(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_recalc_disk_usage(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ERecalcDiskUsageResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBRecalcDiskUsageRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBRecalcDiskUsageRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -996,9 +954,7 @@ impl DiskdbRpcService {
                         Some("disk-group not owned"),
                         &[],
                     );
-                    unsafe {
-                        let _ = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id);
-                    }
+                    submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
                     return;
                 }
             } else {
@@ -1006,23 +962,20 @@ impl DiskdbRpcService {
             };
             let conn_handle = conn_handle_usize as *mut std::ffi::c_void;
             let ctrl = build_recalc_response(req_id, create_nano, FBDiskdbRetCode::Success, None, &results);
-            unsafe {
-                if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                    tracing::warn!(?e, "recalc_disk_usage submit failed");
-                }
-            }
+            submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
         });
     }
 
     // ── CompactZone ──────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
-    fn handle_compact_zone(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_compact_zone(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ECompactZoneResponse.0 as u16;
 
-        let Ok(fb_req) = flatbuffers::root::<FBCompactZoneRequest>(req.control) else {
+        let Ok(fb_req) = flatbuffers::root::<FBCompactZoneRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -1158,22 +1111,19 @@ impl DiskdbRpcService {
                 total_deleted,
                 &results,
             );
-            unsafe {
-                if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-                    tracing::warn!(?e, "compact_zone submit failed");
-                }
-            }
+            submit_fb_response(&server, conn_handle, ctrl, msg_type, req_id);
         });
     }
 
     // ── TriggerScan ──────────────────────────────────────────────
 
-    fn handle_trigger_scan(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_trigger_scan(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::ETriggerScanResponse.0 as u16;
 
-        let Ok(_fb_req) = flatbuffers::root::<FBTriggerScanRequest>(req.control) else {
+        let Ok(_fb_req) = flatbuffers::root::<FBTriggerScanRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -1196,21 +1146,18 @@ impl DiskdbRpcService {
             &summary,
             in_progress,
         );
-        unsafe {
-            if let Err(e) = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id) {
-                tracing::warn!(?e, "trigger_scan submit failed");
-            }
-        }
+        submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── GetScanStatus ────────────────────────────────────────────
 
-    fn handle_get_scan_status(&self, req: &ServerRequest<'_>, server: &Arc<RpcServer>) {
+    #[allow(clippy::needless_pass_by_value, reason = "make_handler uniform signature")]
+    fn handle_get_scan_status(&self, req: ServerRequest, server: &Arc<RpcServer>) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
         let msg_type = FBMsgType::EGetScanStatusResponse.0 as u16;
 
-        let Ok(_fb_req) = flatbuffers::root::<FBGetScanStatusRequest>(req.control) else {
+        let Ok(_fb_req) = flatbuffers::root::<FBGetScanStatusRequest>(req.control()) else {
             submit_error(
                 server,
                 req.conn_handle,
@@ -1235,11 +1182,7 @@ impl DiskdbRpcService {
             &summary,
             has_run,
         );
-        unsafe {
-            if let Err(e) = server.submit_response(req.conn_handle, &ctrl, None, msg_type, req_id) {
-                tracing::warn!(?e, "get_scan_status submit failed");
-            }
-        }
+        submit_fb_response(server, req.conn_handle, ctrl, msg_type, req_id);
     }
 
     // ── Helpers ──────────────────────────────────────────────────
@@ -1344,6 +1287,28 @@ fn map_free_error(e: &FreeError) -> (FBDiskdbRetCode, String) {
     }
 }
 
+/// Submit a flatbuffer response via the zero-copy `submit_response_buffer`
+/// path. Takes ownership of `ctrl` (moved). If the buffer is empty (null
+/// handle), falls back to `submit_response` with an empty control slice.
+fn submit_fb_response(
+    server: &RpcServer,
+    conn_handle: *mut std::ffi::c_void,
+    ctrl: (Vec<u8>, usize),
+    msg_type: u16,
+    req_id: u64,
+) {
+    let buf = Buffer::from_vec_offset(ctrl.0, ctrl.1);
+    if buf.is_null_handle() {
+        unsafe {
+            let _ = server.submit_response(conn_handle, &[], None, msg_type, req_id);
+        }
+        return;
+    }
+    unsafe {
+        let _ = server.submit_response_buffer(conn_handle, buf, None, msg_type, req_id);
+    }
+}
+
 /// Submit an error response (synchronous, from the dispatch thread).
 fn submit_error(
     server: &RpcServer,
@@ -1355,11 +1320,7 @@ fn submit_error(
     msg: &str,
 ) {
     let ctrl = build_error_response(req_id, create_nano, ret_code, Some(msg), msg_type);
-    unsafe {
-        if let Err(e) = server.submit_response(conn_handle, &ctrl, None, msg_type, req_id) {
-            tracing::warn!(?e, "diskdb crow-rpc error submit failed");
-        }
-    }
+    submit_fb_response(server, conn_handle, ctrl, msg_type, req_id);
 }
 
 // ── Response builders ────────────────────────────────────────────
@@ -1374,7 +1335,7 @@ fn build_error_response(
     ret_code: FBDiskdbRetCode,
     error_msg: Option<&str>,
     msg_type: u16,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     // Dispatch on msg_type to build the right response table. All
     // response tables have the same first 4 fields, so we use the
     // allocate response as a generic carrier for error-only responses
@@ -1403,7 +1364,7 @@ fn build_allocate_response(
     ret_code: FBDiskdbRetCode,
     error_msg: Option<&str>,
     segments: &[Segment],
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let seg_vec: Vec<FBSegment> = segments
@@ -1432,7 +1393,7 @@ fn build_allocate_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 fn build_free_response(
@@ -1441,7 +1402,7 @@ fn build_free_response(
     ret_code: FBDiskdbRetCode,
     error_msg: Option<&str>,
     freed_count: u32,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let off = FBFreeResponse::create(
@@ -1455,7 +1416,7 @@ fn build_free_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 fn build_commit_response(
@@ -1464,7 +1425,7 @@ fn build_commit_response(
     ret_code: FBDiskdbRetCode,
     error_msg: Option<&str>,
     committed_count: u32,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let off = FBCommitBlocksResponse::create(
@@ -1478,7 +1439,7 @@ fn build_commit_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1487,7 +1448,7 @@ fn build_query_capacity_response(
     create_nano: u64,
     disk_groups: &[DiskGroupQueryEntry],
     include_zones: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let dg_offs: Vec<flatbuffers::WIPOffset<FBDiskGroupInfo>> = disk_groups
         .iter()
@@ -1507,7 +1468,7 @@ fn build_query_capacity_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1518,7 +1479,7 @@ fn build_query_capacity_response_zone(
     usage: &DiskGroupUsage,
     disk: &Arc<DdbDisk>,
     zone_index: u32,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     // Build the disk info with the single zone + bitmap.
     let zu = dg.zone_usage(disk.disk_id, zone_index).unwrap_or(ZoneUsage {
@@ -1571,7 +1532,7 @@ fn build_query_capacity_response_zone(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1584,7 +1545,7 @@ fn build_get_disk_group_info_response(
     usage: &DiskGroupUsage,
     disk_ids: &[DiskId],
     disks: &[Arc<DdbDisk>],
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let dg_off = if ret_code == FBDiskdbRetCode::Success {
@@ -1605,7 +1566,7 @@ fn build_get_disk_group_info_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 fn build_get_disk_info_response(
@@ -1615,7 +1576,7 @@ fn build_get_disk_info_response(
     error_msg: Option<&str>,
     disk: &Arc<DdbDisk>,
     include_zones: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let disk_off = if ret_code == FBDiskdbRetCode::Success {
@@ -1634,7 +1595,7 @@ fn build_get_disk_info_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1646,7 +1607,7 @@ fn build_rebuild_zone_bitmap_response(
     rebuilt_zone_count: u32,
     total_busy_units: u64,
     total_free_units: u64,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let off = FBRebuildZoneBitmapResponse::create(
@@ -1662,7 +1623,7 @@ fn build_rebuild_zone_bitmap_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 fn build_recalc_response(
@@ -1671,7 +1632,7 @@ fn build_recalc_response(
     ret_code: FBDiskdbRetCode,
     error_msg: Option<&str>,
     results: &[DiskGroupRecalcResult],
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let result_offs: Vec<flatbuffers::WIPOffset<FBDiskGroupRecalcResult>> = results
@@ -1721,7 +1682,7 @@ fn build_recalc_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1733,7 +1694,7 @@ fn build_compact_zone_response(
     compacted_zone_count: u32,
     total_free_records_deleted: u32,
     zones: &[(u32, bool, u32, Option<String>)],
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let zone_offs: Vec<flatbuffers::WIPOffset<FBZoneCompactionResult>> = zones
@@ -1765,7 +1726,7 @@ fn build_compact_zone_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 fn build_trigger_scan_response(
@@ -1775,7 +1736,7 @@ fn build_trigger_scan_response(
     error_msg: Option<&str>,
     summary: &ScanSummary,
     scan_in_progress: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let leak_off = fbb.create_string(&summary.leak_status);
@@ -1808,7 +1769,7 @@ fn build_trigger_scan_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 fn build_get_scan_status_response(
@@ -1818,7 +1779,7 @@ fn build_get_scan_status_response(
     error_msg: Option<&str>,
     summary: &ScanSummary,
     has_run: bool,
-) -> Vec<u8> {
+) -> (Vec<u8>, usize) {
     let mut fbb = FlatBufferBuilder::new();
     let err_off = error_msg.map(|m| fbb.create_string(m));
     let leak_off = fbb.create_string(&summary.leak_status);
@@ -1851,7 +1812,7 @@ fn build_get_scan_status_response(
         },
     );
     fbb.finish(off, None);
-    fbb.finished_data().to_vec()
+    fbb.collapse()
 }
 
 // ── Flatbuffer offset builders (shared) ──────────────────────────

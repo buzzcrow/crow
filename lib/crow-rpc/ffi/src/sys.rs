@@ -35,7 +35,7 @@ pub struct crow_rpc_server_s {
 }
 
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct CrowRpcLatencyStats {
     pub count: u64,
     pub sum_ns: u64,
@@ -44,7 +44,7 @@ pub struct CrowRpcLatencyStats {
 }
 
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct CrowRpcTransportStats {
     pub read_calls: u64,
     pub writev_calls: u64,
@@ -98,6 +98,7 @@ pub type crow_rpc_handler_fn = Option<
         data: *const u8,
         data_len: u32,
         conn_handle: *mut c_void,
+        frame_handle: *mut c_void,
         user_data: *mut c_void,
     ),
 >;
@@ -131,6 +132,12 @@ extern "C" {
     pub fn crow_rpc_buffer_ref(buf: crow_rpc_buffer_t) -> crow_rpc_buffer_t;
     pub fn crow_rpc_buffer_release(buf: crow_rpc_buffer_t);
     pub fn crow_rpc_buffer_create(data: *const u8, len: u32) -> crow_rpc_buffer_t;
+    pub fn crow_rpc_buffer_create_external(
+        data: *const u8,
+        len: u32,
+        free_cb: Option<extern "C" fn(ctx: *mut std::ffi::c_void)>,
+        free_ctx: *mut std::ffi::c_void,
+    ) -> crow_rpc_buffer_t;
 
     pub fn crow_rpc_pool_create(max_buffers: u32) -> crow_rpc_pool_t;
     pub fn crow_rpc_pool_destroy(pool: crow_rpc_pool_t);
@@ -196,6 +203,8 @@ extern "C" {
 
     pub fn crow_rpc_server_register_echo_handler(server: crow_rpc_server_t, msg_type: u16);
 
+    pub fn crow_rpc_frame_release(frame_handle: *mut c_void);
+
     pub fn crow_rpc_server_register_handler(
         server: crow_rpc_server_t,
         msg_type: u16,
@@ -210,6 +219,15 @@ extern "C" {
         control_len: u32,
         data: *const u8,
         data_len: u32,
+        msg_type: u16,
+        request_id: u64,
+    ) -> crow_rpc_status;
+
+    pub fn crow_rpc_server_submit_response_buffer(
+        server: crow_rpc_server_t,
+        conn_handle: *mut c_void,
+        control: crow_rpc_buffer_t,
+        data: crow_rpc_buffer_t,
         msg_type: u16,
         request_id: u64,
     ) -> crow_rpc_status;

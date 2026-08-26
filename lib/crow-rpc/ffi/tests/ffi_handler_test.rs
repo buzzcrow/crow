@@ -117,7 +117,7 @@ async fn custom_rust_handler_with_data() {
         );
         fbb.finish(resp, None);
         let ctrl_bytes = fbb.finished_data().to_vec();
-        let data_bytes = req.data.map(|d| d.to_vec());
+        let data_bytes = req.data().map(|d| d.to_vec());
         let resp_msg_type = FBMsgType::EConnectionPingResponse.0 as u16;
         unsafe {
             let _ = server_for_handler.submit_response(

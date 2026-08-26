@@ -283,6 +283,37 @@ impl BenchReport {
         let _ = writeln!(out, "- **tcp_retransmits:** {}", sys.tcp_retransmits);
         let _ = writeln!(out, "- **tcp_lost:** {}", sys.tcp_lost);
         let _ = writeln!(out);
+        let _ = writeln!(out, "### RPC Transport Stats");
+        let _ = writeln!(out);
+        let sr = &sm.rpc;
+        let cr = &self.client_transport_stats;
+        #[allow(clippy::cast_precision_loss, reason = "display-only ratio")]
+        let s_send_agg = if sr.writev_calls > 0 {
+            sr.frames_sent as f64 / sr.writev_calls as f64
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_precision_loss, reason = "display-only ratio")]
+        let s_recv_agg = if sr.read_calls > 0 {
+            sr.frames_parsed as f64 / sr.read_calls as f64
+        } else {
+            0.0
+        };
+        let _ = writeln!(out, "- **server_rpc:** read_calls={} writev_calls={} frames_sent={} frames_parsed={} send_agg={:.1} recv_agg={:.1} submit_to_writev={}us({})", sr.read_calls, sr.writev_calls, sr.frames_sent, sr.frames_parsed, s_send_agg, s_recv_agg, sr.submit_to_writev_avg_us, sr.submit_to_writev_count);
+        #[allow(clippy::cast_precision_loss, reason = "display-only ratio")]
+        let c_send_agg = if cr.writev_calls > 0 {
+            cr.frames_sent as f64 / cr.writev_calls as f64
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_precision_loss, reason = "display-only ratio")]
+        let c_recv_agg = if cr.read_calls > 0 {
+            cr.frames_parsed as f64 / cr.read_calls as f64
+        } else {
+            0.0
+        };
+        let _ = writeln!(out, "- **client_rpc:** read_calls={} writev_calls={} frames_sent={} frames_parsed={} send_agg={:.1} recv_agg={:.1} submit_to_writev={}us({})", cr.read_calls, cr.writev_calls, cr.frames_sent, cr.frames_parsed, c_send_agg, c_recv_agg, cr.submit_to_writev_avg_us, cr.submit_to_writev_count);
+        let _ = writeln!(out);
 
         // ── Anomalies ──
         let mut anomalies: Vec<String> = Vec::new();
@@ -386,6 +417,10 @@ impl BenchReport {
             physical = sm.wal_physical_bytes,
             rmw = sm.wal_rmw_count,
         );
+        let sr = &sm.rpc;
+        let cr = &self.client_transport_stats;
+        write_rpc_summary(&mut out, "server_rpc", sr);
+        write_rpc_summary(&mut out, "client_rpc", cr);
         let lc = &cm.leader_changes;
         if lc.is_empty() {
             let _ = writeln!(out, "leader_changes   : none");
@@ -402,4 +437,31 @@ impl BenchReport {
         }
         out
     }
+}
+
+/// Write one `server_rpc`/`client_rpc` summary line with aggregation ratios.
+#[allow(clippy::cast_precision_loss, reason = "display-only ratio")]
+fn write_rpc_summary(out: &mut String, label: &str, s: &super::report::TransportStatsSnapshot) {
+    let send_agg = if s.writev_calls > 0 {
+        s.frames_sent as f64 / s.writev_calls as f64
+    } else {
+        0.0
+    };
+    let recv_agg = if s.read_calls > 0 {
+        s.frames_parsed as f64 / s.read_calls as f64
+    } else {
+        0.0
+    };
+    let _ = writeln!(
+        out,
+        "{label:<16}: read_calls={rc} writev_calls={wc} frames_sent={fs} frames_parsed={fp} send_agg={sa:.1} recv_agg={ra:.1} submit_to_writev={sw_avg}us({sw_c})",
+        rc = s.read_calls,
+        wc = s.writev_calls,
+        fs = s.frames_sent,
+        fp = s.frames_parsed,
+        sa = send_agg,
+        ra = recv_agg,
+        sw_avg = s.submit_to_writev_avg_us,
+        sw_c = s.submit_to_writev_count,
+    );
 }

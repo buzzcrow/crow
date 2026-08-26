@@ -404,6 +404,7 @@ pub(crate) async fn run_bench<T: BenchTarget>(
         by_op: per_op_map(by_kind),
         server_metrics: super::report::ServerMetrics::default(),
         client_metrics,
+        client_transport_stats: super::report::TransportStatsSnapshot::default(),
     };
 
     let dir = cfg.report_dir.clone().unwrap_or_else(BenchReport::default_dir);

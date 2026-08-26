@@ -21,6 +21,34 @@ enum LogSection {
     Misc,
 }
 
+/// Parse an `.rpc.*.c` counter line into the transport stats snapshot.
+fn parse_rpc_counter(name: &str, count: u64, rpc: &mut super::report::TransportStatsSnapshot) {
+    if name.contains(".read_calls.") {
+        rpc.read_calls += count;
+    } else if name.contains(".writev_calls.") {
+        rpc.writev_calls += count;
+    } else if name.contains(".frames_sent.") {
+        rpc.frames_sent += count;
+    } else if name.contains(".frames_parsed.") {
+        rpc.frames_parsed += count;
+    } else if name.contains(".read_bytes.") {
+        rpc.read_bytes += count;
+    } else if name.contains(".writev_bytes.") {
+        rpc.writev_bytes += count;
+    }
+}
+
+/// Parse an `.rpc.*.g` gauge line into the transport stats snapshot.
+fn parse_rpc_gauge(name: &str, value: u64, rpc: &mut super::report::TransportStatsSnapshot) {
+    if name.contains(".submit_to_writev.") {
+        if name.contains(".avg_us.") {
+            rpc.submit_to_writev_avg_us = value;
+        } else if name.contains(".count.") {
+            rpc.submit_to_writev_count = value;
+        }
+    }
+}
+
 /// Parse a `crow-kv-server` `log/metrics.log` file's full contents into a
 /// [`ServerMetrics`] summary spanning every flush block in the file.
 ///
@@ -60,6 +88,10 @@ pub(crate) fn parse_metrics_log(content: &str) -> ServerMetrics {
             } else {
                 LogSection::None
             };
+            continue;
+        }
+        if line == "value" {
+            section = LogSection::Gauge;
             continue;
         }
 
@@ -104,9 +136,18 @@ pub(crate) fn parse_metrics_log(content: &str) -> ServerMetrics {
                     metrics.wal_physical_bytes += count;
                 } else if name.contains(".wal.") && name.contains(".rmw.") {
                     metrics.wal_rmw_count += count;
+                } else if name.contains(".rpc.") {
+                    parse_rpc_counter(name, count, &mut metrics.rpc);
                 }
             }
-            LogSection::Bandwidth | LogSection::Gauge | LogSection::None => {}
+            LogSection::Gauge => {
+                let name = fields[0];
+                let value: u64 = fields[1].parse().unwrap_or(0);
+                if name.contains(".rpc.") {
+                    parse_rpc_gauge(name, value, &mut metrics.rpc);
+                }
+            }
+            LogSection::Bandwidth | LogSection::None => {}
         }
     }
 
@@ -132,6 +173,14 @@ pub(crate) fn aggregate_server_metrics(per_node: &[ServerMetrics]) -> ServerMetr
         agg.system.rss_kb = agg.system.rss_kb.max(m.system.rss_kb);
         agg.system.tcp_retransmits = agg.system.tcp_retransmits.max(m.system.tcp_retransmits);
         agg.system.tcp_lost = agg.system.tcp_lost.max(m.system.tcp_lost);
+        agg.rpc.read_calls += m.rpc.read_calls;
+        agg.rpc.writev_calls += m.rpc.writev_calls;
+        agg.rpc.frames_sent += m.rpc.frames_sent;
+        agg.rpc.frames_parsed += m.rpc.frames_parsed;
+        agg.rpc.read_bytes += m.rpc.read_bytes;
+        agg.rpc.writev_bytes += m.rpc.writev_bytes;
+        agg.rpc.submit_to_writev_count += m.rpc.submit_to_writev_count;
+        agg.rpc.submit_to_writev_avg_us = agg.rpc.submit_to_writev_avg_us.max(m.rpc.submit_to_writev_avg_us);
     }
     agg
 }
@@ -215,6 +264,7 @@ sys.tcp_lost     1
                 tcp_retransmits: 1,
                 tcp_lost: 0,
             },
+            ..Default::default()
         };
         let node_b = ServerMetrics {
             wal_append_count: 15,
@@ -230,6 +280,7 @@ sys.tcp_lost     1
                 tcp_retransmits: 3,
                 tcp_lost: 2,
             },
+            ..Default::default()
         };
         let agg = aggregate_server_metrics(&[node_a, node_b]);
         assert_eq!(agg.wal_append_count, 25);
