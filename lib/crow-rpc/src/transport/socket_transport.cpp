@@ -28,6 +28,8 @@
 namespace crow::rpc
 {
 
+thread_local Worker *tl_current_worker = nullptr;
+
 // Forward declarations — defined after Worker (shared I/O logic).
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
                              std::vector<Connection *> &pending_writes, TransportStats *stats);
@@ -69,8 +71,10 @@ void Worker::start()
 {
     running_.store(true, std::memory_order_relaxed);
     thread_ = std::thread([this] {
-        thread_id_ = std::this_thread::get_id();
+        thread_id_        = std::this_thread::get_id();
+        tl_current_worker = this;
         run_loop();
+        tl_current_worker = nullptr;
     });
 }
 
@@ -125,28 +129,27 @@ void Worker::run_loop()
                 const auto &ev = events[i];
                 switch (ev.type) {
                 case SocketEvent::Notify:
-                    // Cross-thread submit: drain pending connections and
-                    // batch writev. The pending list is transport-level
-                    // (shared across all workers/engines) so any worker
-                    // that picks up the Notify can drain all pending sends.
+                    // Cross-thread submit: drain this worker's lock-free
+                    // pending queue and batch writev. Each worker only
+                    // drains its own connections — no global mutex.
                     {
-                        std::vector<Connection *> pending;
-                        {
-                            std::lock_guard<std::mutex> lock(transport_->cross_thread_mu_);
-                            pending.swap(transport_->cross_thread_pending_);
-                            transport_->cross_thread_notified_.store(false, std::memory_order_release);
-                        }
-                        for (Connection *c : pending) {
-                            if (!c->is_open()) {
-                                continue;
-                            }
-                            int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
-                            if (!c->try_send(wfd, stats_)) {
-                                // All sent.
-                            }
-                            else {
-                                // Partial/EAGAIN — arm write for retry.
-                                engine_->arm_write(wfd, c);
+                        cross_thread_notified_.store(false, std::memory_order_release);
+                        Connection *tmp[64];
+                        int         n;
+                        while ((n = cross_thread_pending_.drain(tmp, 64)) > 0) {
+                            for (int j = 0; j < n; j++) {
+                                Connection *c = tmp[j];
+                                if (!c->is_open()) {
+                                    continue;
+                                }
+                                int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
+                                if (!c->try_send(wfd, stats_)) {
+                                    // All sent.
+                                }
+                                else {
+                                    // Partial/EAGAIN — arm write for retry.
+                                    engine_->arm_write(wfd, c);
+                                }
                             }
                         }
                     }
@@ -456,18 +459,12 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     if (workers_.empty()) {
         return false;
     }
-    // Look up the connection in the live-connection registry. This
-    // protects against stale handles: if the connection was closed
-    // between the handler spawn and submit, lookup_conn returns a
-    // null shared_ptr and we free the frame instead of crashing.
-    // Connections not in the registry (nullopt) are test/direct
-    // connections — fall through to direct access.
-    auto lookup = lookup_conn(conn);
-    if (lookup.has_value()) {
-        auto &conn_ptr = lookup.value();
-        if (conn_ptr == nullptr) {
-            // Stale handle — connection has been closed/freed.
-            CR_LOG_WARN("submit: stale handle, dropping frame conn_id={}", static_cast<long long>(conn->id()));
+    // Worker-thread fast path: if we're on an I/O worker thread, the
+    // connection is guaranteed alive (held by this worker's connections_
+    // map). Skip lookup_conn and its global mutex entirely.
+    if (tl_current_worker != nullptr) {
+        if (!conn->is_open()) {
+            CR_LOG_WARN("submit: closed conn on worker thread conn_id={}", static_cast<long long>(conn->id()));
             if (frame->control != nullptr) {
                 frame->control->release();
             }
@@ -477,7 +474,26 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
             delete frame;
             return false;
         }
-        conn = conn_ptr.get();
+    }
+    else {
+        // Cross-thread submit (tokio mode): look up the connection in
+        // the live-connection registry to protect against stale handles.
+        auto lookup = lookup_conn(conn);
+        if (lookup.has_value()) {
+            auto &conn_ptr = lookup.value();
+            if (conn_ptr == nullptr) {
+                CR_LOG_WARN("submit: stale handle, dropping frame conn_id={}", static_cast<long long>(conn->id()));
+                if (frame->control != nullptr) {
+                    frame->control->release();
+                }
+                if (frame->data != nullptr) {
+                    frame->data->release();
+                }
+                delete frame;
+                return false;
+            }
+            conn = conn_ptr.get();
+        }
     }
     frame->create_nano = now_nano();
     // Direct-write mode: skip the ring buffer, writev immediately.
@@ -496,41 +512,41 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         }
         return true;
     }
-    // Deferred writev: enqueue only, then notify the owning I/O worker.
-    // The worker drains all pending connections on Notify, batching
-    // multiple frames per writev. This gives application-level send
-    // aggregation without relying on Nagle (TCP_NODELAY safe).
+    // Deferred writev: enqueue only. On an I/O worker thread, the
+    // post-event flush drains it (send aggregation). Cross-thread
+    // submits notify the owning worker via a lock-free MPSC queue.
+    // Throughput is lower than direct writev (the original submit path)
+    // because frames wait for the post-event flush — this is the
+    // intended tradeoff for TCP_NODELAY + send-queue aggregation: fewer
+    // syscalls (higher saggr) at the cost of per-frame queue wait.
     if (!conn->enqueue_send(frame)) {
         CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
                     static_cast<long long>(conn->id()), conn->name());
-        return false; // backpressure or closed
+        return false;
     }
 
-    // If the submit is from an I/O worker thread (e.g. coroutine resumed
-    // by co_on_complete on the I/O worker), the frame is already enqueued
-    // — the worker's post-event flush will drain it. No notify needed
-    // (avoids eventfd thundering herd + ONESHOT read event interference).
     auto *worker = static_cast<Worker *>(conn->io_worker);
     if (worker != nullptr && worker->is_current_thread()) {
-        // Frame is already in the send queue (enqueued above).
-        // The post-event flush will drain it via pending_write_conns_.
         return true;
     }
 
-    // Cross-thread path: enqueue + notify the I/O worker to drain.
-    auto *engine = static_cast<SocketEngine *>(conn->io_engine);
-    if (engine != nullptr) {
-        {
-            std::lock_guard<std::mutex> lock(cross_thread_mu_);
-            cross_thread_pending_.push_back(conn);
+    if (worker != nullptr) {
+        if (!worker->cross_thread_pending_.try_push(conn)) {
+            int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
+            if (!conn->try_send(wfd, &stats_)) {
+                auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
+                if (engine2 != nullptr) {
+                    engine2->arm_write(wfd, conn);
+                }
+            }
+            return true;
         }
         bool expected = false;
-        if (cross_thread_notified_.compare_exchange_strong(expected, true)) {
-            engine->notify_worker();
+        if (worker->cross_thread_notified_.compare_exchange_strong(expected, true)) {
+            worker->engine()->notify_worker();
         }
     }
     else {
-        // No engine (test/direct connection) — fall back to immediate send.
         int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
         if (!conn->try_send(wfd, &stats_)) {
             auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);

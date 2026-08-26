@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "crow-common/mpsc_queue.h"
 #include "crow-rpc/connection.h"
 #include "crow-rpc/transport.h"
 
@@ -235,6 +236,12 @@ class Worker
         return id_;
     }
 
+    // Per-worker lock-free cross-thread pending queue. Producers (tokio
+    // tasks, other worker threads) push Connection* via try_push; the
+    // worker drains on Notify. Eliminates the global cross_thread_mu_.
+    crow::common::MpscQueue<Connection *> cross_thread_pending_{1024};
+    std::atomic<bool>                     cross_thread_notified_{false};
+
   private:
     int               id_;
     SocketEngine     *engine_;    // non-owning; transport owns all engines
@@ -385,26 +392,27 @@ class SocketTransport : public Transport
 
     // Direct-write mode: try_send immediately per submit (no ring buffer
     // aggregation). When false (default), submit enqueues and the I/O
-    // worker drains + writev in batches.
+    // worker drains + writev in batches. The default trades per-frame
+    // queue-wait latency for higher syscall aggregation (saggr) under
+    // TCP_NODELAY — lower throughput than direct writev, by design.
     bool direct_write_{false};
 
     // Connection registry: maps raw Connection* to shared_ptr, so
     // submit() can safely access connections from arbitrary threads
     // (e.g. tokio tasks spawned by Rust handlers). When a connection
     // closes, it is removed from this map; submit() on a stale handle
-    // returns false instead of crashing.
+    // returns false instead of crashing. Only used for cross-thread
+    // submits (tokio mode); worker-thread submits skip this lookup.
     std::mutex                                                  live_conns_mu_;
     std::unordered_map<Connection *, std::weak_ptr<Connection>> live_conns_;
 
-    // Cross-thread submit pending: connections that have frames enqueued
-    // by non-I/O-worker threads (via submit). Shared across all workers
-    // on all engines — any worker that picks up a Notify event drains
-    // this list. Protected by cross_thread_mu_.
-    std::mutex                cross_thread_mu_;
-    std::vector<Connection *> cross_thread_pending_;
-    std::atomic<bool>         cross_thread_notified_{false};
-
     friend class Worker;
 };
+
+// Thread-local pointer to the current worker thread's Worker object.
+// Set in Worker::start(), cleared after run_loop() returns. submit()
+// checks this to skip lookup_conn (and its global mutex) when called
+// from an I/O worker thread — the connection is guaranteed alive there.
+extern thread_local Worker *tl_current_worker;
 
 } // namespace crow::rpc

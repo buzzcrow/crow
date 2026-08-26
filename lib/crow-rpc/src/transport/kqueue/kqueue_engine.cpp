@@ -57,6 +57,7 @@ void KqueueEngine::add_listen_fd(int fd)
 
 void KqueueEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 {
+    (void)write_fd;
     {
         std::lock_guard<std::mutex> lock(conn_mu_);
         connections_[read_fd] = conn;
@@ -72,6 +73,7 @@ void KqueueEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 
 void KqueueEngine::remove_connection(int read_fd, int write_fd)
 {
+    (void)write_fd;
     {
         std::lock_guard<std::mutex> lock(conn_mu_);
         connections_.erase(read_fd);
