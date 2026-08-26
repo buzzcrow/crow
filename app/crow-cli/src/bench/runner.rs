@@ -172,8 +172,8 @@ pub(crate) struct BenchConfig {
     /// Direct-write mode: skip deferred writev, writev immediately per
     /// submit (RPC target only). Default false (deferred writev).
     pub(crate) direct_write: bool,
-    /// Disable `TCP_NODELAY` (allow Nagle coalescing). Default false (Nagle on).
-    pub(crate) no_tcp_nodelay: bool,
+    /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
+    pub(crate) enable_nagle: bool,
 }
 
 impl BenchConfig {
@@ -212,7 +212,7 @@ impl BenchConfig {
             rpc_worker_mode: RpcWorkerMode::Coroutine,
             send_queue_capacity: 1024,
             direct_write: false,
-            no_tcp_nodelay: false,
+            enable_nagle: false,
         }
     }
 

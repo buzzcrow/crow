@@ -59,12 +59,12 @@ int main(int argc, char *argv[])
         else if (arg == "--direct-write") {
             direct_write = 1;
         }
-        else if (arg == "--no-tcp-nodelay") {
+        else if (arg == "--enable-nagle") {
             tcp_nodelay = 0;
         }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-rpc-echo-server --port <port> "
-                        "[--io-engines N] [--io-workers M] [--direct-write] [--no-tcp-nodelay]\n");
+                        "[--io-engines N] [--io-workers M] [--direct-write] [--enable-nagle]\n");
             return 0;
         }
         else {

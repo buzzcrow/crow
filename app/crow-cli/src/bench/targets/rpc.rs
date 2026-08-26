@@ -174,8 +174,8 @@ impl BenchTarget for RpcTarget {
         if cfg.direct_write {
             cmd.arg("--direct-write");
         }
-        if cfg.no_tcp_nodelay {
-            cmd.arg("--no-tcp-nodelay");
+        if cfg.enable_nagle {
+            cmd.arg("--enable-nagle");
         }
         cmd.stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_stderr));
@@ -236,7 +236,7 @@ impl BenchTarget for RpcTarget {
         };
         server.set_send_queue_capacity(sq_cap);
         server.set_direct_write(cfg.direct_write);
-        server.set_tcp_nodelay(!cfg.no_tcp_nodelay);
+        server.set_tcp_nodelay(!cfg.enable_nagle);
         server.start();
 
         // Connect to the external echo server. These connections live
