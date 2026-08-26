@@ -66,18 +66,21 @@ bool Connection::try_send(int fd, TransportStats *stats)
             uint64_t now = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 
             OutFrame *tmp[BATCH_MAX];
-            while (true) {
+            bool      ring_full = false;
+            while (!ring_full) {
                 int n = drain_send_queue(tmp, BATCH_MAX);
                 if (n == 0) {
                     break;
                 }
                 for (int i = 0; i < n; i++) {
                     if (!ring_.offer(tmp[i])) {
-                        // Ring full — re-enqueue to MPSC queue for next cycle.
+                        // Ring full — re-enqueue to MPSC queue, then flush
+                        // the ring via ring_.send() below before retrying.
                         enqueue_send(tmp[i]);
                         for (int j = i + 1; j < n; j++) {
                             enqueue_send(tmp[j]);
                         }
+                        ring_full = true;
                         break;
                     }
                     if (stats != nullptr) {
@@ -88,7 +91,7 @@ bool Connection::try_send(int fd, TransportStats *stats)
                     }
                     frames_offered++;
                 }
-                if (n < BATCH_MAX) {
+                if (!ring_full && n < BATCH_MAX) {
                     break; // queue drained
                 }
             }
