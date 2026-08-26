@@ -32,10 +32,10 @@ KEYSPACE=1000000
 VALUE_SIZE=512
 
 run_bench() {
-    local threads="$1" conn="$2" mi="$3" coalesce="$4" drain="$5" label="$6"
+    local threads="$1" conn="$2" mi="$3" coalesce="$4" drain="$5" workers="$6" label="$7"
     echo ">>> $label ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
+    output=$(CROW_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crow-cli -- bench kv \
         --mode mem --workload write --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$conn" \
         --max-inflight "$mi" \
@@ -46,7 +46,7 @@ run_bench() {
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t0\t0\t0\t0\t0\t0\t1\t0\t0\t0\t0" >> "$RESULTS_FILE"
+        echo -e "$label\t$mi\t$coalesce\t$workers\t0\t0\t0\t0\t0\t0\t1\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
     local ops_s avg_us p50_us p99_us p999_us errors wal
@@ -57,7 +57,7 @@ run_bench() {
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
     wal=$(echo "$json" | jq -r '.server_metrics.wal_append_count')
-    # RPC aggregation ratios: frames per syscall (send_agg = frames_sent/writev_calls, recv_agg = frames_parsed/read_calls)
+    # RPC aggregation ratios: frames per syscall (sagg = frames_sent/writev_calls, ragg = frames_parsed/read_calls)
     local srv_sa srv_ra cli_sa cli_ra srv_s2w cli_s2w
     srv_sa=$(echo "$json" | jq -r 'if .server_metrics.rpc.writev_calls > 0 then (.server_metrics.rpc.frames_sent / .server_metrics.rpc.writev_calls) else 0 end | . * 10 | floor / 10')
     srv_ra=$(echo "$json" | jq -r 'if .server_metrics.rpc.read_calls > 0 then (.server_metrics.rpc.frames_parsed / .server_metrics.rpc.read_calls) else 0 end | . * 10 | floor / 10')
@@ -66,8 +66,8 @@ run_bench() {
     srv_s2w=$(echo "$json" | jq -r '.server_metrics.rpc.submit_to_writev_avg_us // 0')
     cli_s2w=$(echo "$json" | jq -r '.client_transport_stats.submit_to_writev_avg_us // 0')
     echo "    ops/s=$ops_s wal=$wal avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors"
-    echo "    rpc_agg: srv send=${srv_sa} recv=${srv_ra} s2w=${srv_s2w}us | cli send=${cli_sa} recv=${cli_ra} s2w=${cli_s2w}us"
-    echo -e "$label\t$ops_s\t$wal\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra" >> "$RESULTS_FILE"
+    echo "    rpc_agg: srv sagg=${srv_sa} ragg=${srv_ra} s2w=${srv_s2w}us | cli sagg=${cli_sa} ragg=${cli_ra} s2w=${cli_s2w}us"
+    echo -e "$label\t$mi\t$coalesce\t$workers\t$ops_s\t$wal\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra" >> "$RESULTS_FILE"
 }
 
 # --- regression sentinel configs ---
@@ -112,30 +112,32 @@ run_bench() {
 # Linux retest (2026-08-26, same AMD 5950X, zero-copy crow-rpc handlers):
 #   Request: C++ Frame ownership transferred to Rust, flatbuffer parsed
 #   zero-copy in tokio task. Response: FlatBufferBuilder::collapse() +
-#   Buffer::from_vec_offset (external C++ Buffer, no copy). 2 I/O workers.
+#   Buffer::from_vec_offset (external C++ Buffer, no copy).
+#   mi=128, coalesce=32, drain=1. Server+client workers configurable via
+#   CROW_RPC_WORKERS env var. IovecRing slot.frame is atomic (CAS claim
+#   prevents double-free between send() and clear()).
 #
-#   T    C    ops/s     WAL      avg    p50    p99    p999    err
-#   1    1    4,160     124,857  239    248    380    715     0
-#   4    2    17,539    290,300  227    204    475    913     0
-#   16   4    65,360    282,846  243    224    616    1,272   0
-#   32   16   87,865    234,863  366    326    908    1,975   0
-#   64   32   125,908   213,067  506    459    1,163  2,618   0
-#   128  32   144,605   180,928  886    870    1,625  7,936   0
-#   256  32   148,605   174,238  1,726  1,620  3,366  10,824  0
+#   T    C    W    mi   co  ops/s     WAL      avg    p50    p99    p999    err  sagg  ragg
+#   1    1    2    128  32  4,566     137,044  218    211    349    687     0    1     1
+#   16   2    2    128  32  65,109    283,489  244    227    631    1,196   0    2.1   1.7
+#   64   4    2    128  32  156,206   235,232  408    381    934    3,274   0    4.4   3.1
+#   128  4    4    128  32  189,737   206,749  681    601    1,502  7,940   0    5.8   4.9
+#   256  8    4    128  32  205,451   216,935  1,269  1,095  2,484  11,824  0    6.7   5.7
 #
 # Zero-copy crow-rpc beats gRPC at every thread count (+20% to +98%).
-# Peak ~149K at 256T (was ~124K with gRPC). WAL amortization ~34x at 256T.
+# Peak ~205K at 256T (was ~124K with gRPC). WAL amortization ~34x at 256T.
+# 512T+ with 8 workers hangs — under investigation (IovecRing clear/send race).
 
-echo -e "label\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tsrv_send_agg\tsrv_recv_agg\tcli_send_agg\tcli_recv_agg" > "$RESULTS_FILE"
+echo -e "label\tmi\tcoalesce\tworkers\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tsrv_sagg\tsrv_ragg\tcli_sagg\tcli_ragg" > "$RESULTS_FILE"
 
-echo "=== write (mi=32, coalesce=32, drain=1) ==="
-run_bench 1 1 32 32 1 "write_1t_1c_mi32_coales32_drain1"        # ref: 3,029 ops/s
-run_bench 4 2 32 32 1 "write_4t_2c_mi32_coales32_drain1"        # ref: 12,681 ops/s
-run_bench 16 4 32 32 1 "write_16t_4c_mi32_coales32_drain1"      # ref: 32,935 ops/s
-run_bench 32 16 32 32 1 "write_32t_16c_mi32_coales32_drain1"    # ref: 52,688 ops/s
-run_bench 64 32 32 32 1 "write_64t_32c_mi32_coales32_drain1"    # ref: 75,280 ops/s
-run_bench 128 32 32 32 1 "write_128t_32c_mi32_coales32_drain1"  # ref: 105,779 ops/s
-run_bench 256 32 32 32 1 "write_256t_32c_mi32_coales32_drain1"  # ref: 123,745 ops/s
+echo "=== write (mi=128, coalesce=32, drain=1) ==="
+run_bench 1 1 128 32 1 2 "write_1t_1c_mi128_coales32_drain1"         # ref: 4,566 ops/s
+run_bench 16 2 128 32 1 2 "write_16t_2c_mi128_coales32_drain1"       # ref: 65,109 ops/s
+run_bench 64 4 128 32 1 2 "write_64t_4c_mi128_coales32_drain1"       # ref: 156,206 ops/s
+run_bench 128 4 128 32 1 4 "write_128t_4c_mi128_coales32_drain1"     # ref: 189,737 ops/s
+run_bench 256 8 128 32 1 4 "write_256t_8c_mi128_coales32_drain1"     # ref: 205,451 ops/s
+run_bench 512 16 128 32 1 8 "write_512t_16c_mi128_coales32_drain1"   # ref: TBD (hang — skip)
+run_bench 1000 16 128 32 1 8 "write_1000t_16c_mi128_coales32_drain1" # ref: TBD (hang — skip)
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

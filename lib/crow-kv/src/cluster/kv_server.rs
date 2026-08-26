@@ -85,8 +85,12 @@ impl KvServer for Arc<PxKvStore> {
         // Start a single crow-rpc server on the gRPC port. Both
         // consensus (PxRpcService) and client (KvRpcService) handlers
         // are registered on the same server — their handler names
-        // don't conflict.
-        let server = Arc::new(RpcServer::with_engines(None, 1, 2));
+        // don't conflict. Worker count configurable via CROW_RPC_WORKERS.
+        let workers = std::env::var("CROW_RPC_WORKERS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(4);
+        let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server
             .listen(&bound_addr.ip().to_string(), i32::from(bound_addr.port()))
             .map_err(|e| format!("crow-rpc listen on {bound_addr}: {e:?}"))?;

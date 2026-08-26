@@ -770,6 +770,9 @@ crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *
 
         auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
         if (!server->server->transport()->submit(conn, frame)) {
+            if (frame->control != nullptr) frame->control->release();
+            if (frame->data != nullptr) frame->data->release();
+            delete frame;
             return CROW_RPC_ERR_SEND_QUEUE;
         }
         return CROW_RPC_OK;
@@ -814,6 +817,9 @@ crow_rpc_status crow_rpc_server_submit_response_buffer(crow_rpc_server_t server,
 
         auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
         if (!server->server->transport()->submit(conn, frame)) {
+            if (frame->control != nullptr) frame->control->release();
+            if (frame->data != nullptr) frame->data->release();
+            delete frame;
             return CROW_RPC_ERR_SEND_QUEUE;
         }
         return CROW_RPC_OK;

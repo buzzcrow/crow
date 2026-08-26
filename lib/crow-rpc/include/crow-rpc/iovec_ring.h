@@ -75,14 +75,18 @@ class IovecRing
 
   private:
     // Per-frame slot: up to 3 iovecs + metadata for cleanup.
+    // frame is atomic to prevent double-release between send() (writev
+    // completion on worker thread) and clear() (connection close on
+    // another thread). Both use compare_exchange to claim the frame
+    // before releasing — whoever loses the CAS skips.
     struct Slot
     {
-        iovec     iovs[3];
-        int       iov_count = 0;
-        OutFrame *frame     = nullptr;
-        uint8_t   header_buf[HEADER_SIZE];
+        iovec                   iovs[3];
+        int                     iov_count = 0;
+        std::atomic<OutFrame *> frame{nullptr};
+        uint8_t                 header_buf[HEADER_SIZE];
         // Total bytes across all iovecs (for sent_offset tracking).
-        ssize_t total_bytes = 0;
+        ssize_t                 total_bytes = 0;
     };
 
     // Fixed-size ring of slots. begin_/end_ are atomic counters (not

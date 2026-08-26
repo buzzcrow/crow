@@ -70,7 +70,11 @@ impl KvRpcTransport {
     /// establish connections to remote endpoints.
     #[must_use]
     pub fn new() -> Self {
-        let server = Arc::new(RpcServer::new(None));
+        let workers = std::env::var("CROW_RPC_WORKERS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(4);
+        let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server.start();
         let rpc = Arc::new(RpcClient::new());
         rpc.set_completion_pool_size(1024);

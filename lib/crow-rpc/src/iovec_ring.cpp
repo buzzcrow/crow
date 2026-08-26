@@ -23,7 +23,7 @@ IovecRing::IovecRing()
 {
     for (auto &slot : slots_) {
         slot.iov_count   = 0;
-        slot.frame       = nullptr;
+        slot.frame.store(nullptr, std::memory_order_relaxed);
         slot.total_bytes = 0;
     }
 }
@@ -81,7 +81,7 @@ bool IovecRing::offer(OutFrame *frame)
     }
 
     slot.iov_count   = count;
-    slot.frame       = frame;
+    slot.frame.store(frame, std::memory_order_release);
     slot.total_bytes = total + (frame->control ? frame->control->len : 0) + (frame->data ? frame->data->len : 0);
 
     end_.store(end + 1, std::memory_order_release);
@@ -143,17 +143,18 @@ ssize_t IovecRing::send(int fd, TransportStats *stats)
             }
 
             if (remaining >= slot_remaining) {
-                // Full slot sent — release frame, advance begin_.
+                // Full slot sent — claim frame via CAS, release, advance.
                 remaining -= slot_remaining;
-                if (slot.frame != nullptr) {
-                    if (slot.frame->control != nullptr) {
-                        slot.frame->control->release();
+                OutFrame *frame = slot.frame.load(std::memory_order_acquire);
+                if (frame != nullptr
+                    && slot.frame.compare_exchange_strong(frame, nullptr, std::memory_order_acq_rel)) {
+                    if (frame->control != nullptr) {
+                        frame->control->release();
                     }
-                    if (slot.frame->data != nullptr) {
-                        slot.frame->data->release();
+                    if (frame->data != nullptr) {
+                        frame->data->release();
                     }
-                    delete slot.frame;
-                    slot.frame = nullptr;
+                    delete frame;
                 }
                 slot.iov_count = 0;
                 begin_.store(slot_start + 1, std::memory_order_release);
@@ -189,23 +190,24 @@ ssize_t IovecRing::send(int fd, TransportStats *stats)
 
 void IovecRing::clear()
 {
-    uint32_t begin = begin_.load(std::memory_order_relaxed);
+    uint32_t begin = begin_.load(std::memory_order_acquire);
     uint32_t end   = end_.load(std::memory_order_relaxed);
     for (uint32_t i = begin; i < end; i++) {
-        Slot &slot = slots_[i % IOVEC_RING_FRAMES];
-        if (slot.frame != nullptr) {
-            if (slot.frame->control != nullptr) {
-                slot.frame->control->release();
+        Slot    &slot = slots_[i % IOVEC_RING_FRAMES];
+        OutFrame *frame = slot.frame.load(std::memory_order_acquire);
+        if (frame != nullptr
+            && slot.frame.compare_exchange_strong(frame, nullptr, std::memory_order_acq_rel)) {
+            if (frame->control != nullptr) {
+                frame->control->release();
             }
-            if (slot.frame->data != nullptr) {
-                slot.frame->data->release();
+            if (frame->data != nullptr) {
+                frame->data->release();
             }
-            delete slot.frame;
-            slot.frame = nullptr;
+            delete frame;
         }
         slot.iov_count = 0;
     }
-    begin_.store(end, std::memory_order_relaxed);
+    begin_.store(end, std::memory_order_release);
 }
 
 } // namespace crow::rpc
