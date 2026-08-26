@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "crow-common/mpsc_queue.h"
 #include "crow-rpc/connection.h"
 #include "crow-rpc/transport.h"
 
@@ -236,12 +235,6 @@ class Worker
         return id_;
     }
 
-    // Per-worker lock-free cross-thread pending queue. Producers (tokio
-    // tasks, other worker threads) push Connection* via try_push; the
-    // worker drains on Notify. Eliminates the global cross_thread_mu_.
-    crow::common::MpscQueue<Connection *> cross_thread_pending_{1024};
-    std::atomic<bool>                     cross_thread_notified_{false};
-
   private:
     int               id_;
     SocketEngine     *engine_;    // non-owning; transport owns all engines
@@ -405,6 +398,13 @@ class SocketTransport : public Transport
     // submits (tokio mode); worker-thread submits skip this lookup.
     std::mutex                                                  live_conns_mu_;
     std::unordered_map<Connection *, std::weak_ptr<Connection>> live_conns_;
+
+    // Cross-thread submit pending: connections with enqueued frames from
+    // non-I/O-worker threads. Shared across all workers — any worker that
+    // picks up a Notify event drains this list. Protected by cross_thread_mu_.
+    std::mutex                cross_thread_mu_;
+    std::vector<Connection *> cross_thread_pending_;
+    std::atomic<bool>         cross_thread_notified_{false};
 
     friend class Worker;
 };

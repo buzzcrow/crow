@@ -103,8 +103,8 @@ pub struct Cli {
     pub coalesce_max_keys: Option<usize>,
 
     /// R45b drain threshold: skip draining the pending batch when
-    /// in-flight slot-tasks >= this count. Default `max_inflight / 4`.
-    /// `0` = always drain (disables the heuristic).
+    /// in-flight slot-tasks >= this count. Defaults to `max_inflight / 4`
+    /// (derived when omitted). `0` = always drain (disables the heuristic).
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
 

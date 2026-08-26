@@ -111,11 +111,11 @@ bool Connection::try_send(int fd, TransportStats *stats)
             bool all_sent;
             if (result < 0) {
                 if (result == -2) {
-                    // Hard error — close and clear ring.
+                    // Hard error — close. The is_open() check below will
+                    // clear the ring (close() can't — we hold in_send_).
                     CR_LOG_WARN("try_send: writev hard error fd={} conn_id={} name={} errno={} ({})", fd,
                                 static_cast<long long>(id_), name_, errno, std::strerror(errno));
                     close();
-                    ring_.clear();
                 }
                 // EAGAIN (-1): partials stay in ring, caller arms EPOLLOUT.
                 all_sent = false;

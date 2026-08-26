@@ -129,27 +129,27 @@ void Worker::run_loop()
                 const auto &ev = events[i];
                 switch (ev.type) {
                 case SocketEvent::Notify:
-                    // Cross-thread submit: drain this worker's lock-free
-                    // pending queue and batch writev. Each worker only
-                    // drains its own connections — no global mutex.
+                    // Cross-thread submit: drain the shared pending list
+                    // and batch writev. Any worker that picks up the
+                    // Notify can drain all pending sends.
                     {
-                        cross_thread_notified_.store(false, std::memory_order_release);
-                        Connection *tmp[64];
-                        int         n;
-                        while ((n = cross_thread_pending_.drain(tmp, 64)) > 0) {
-                            for (int j = 0; j < n; j++) {
-                                Connection *c = tmp[j];
-                                if (!c->is_open()) {
-                                    continue;
-                                }
-                                int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
-                                if (!c->try_send(wfd, stats_)) {
-                                    // All sent.
-                                }
-                                else {
-                                    // Partial/EAGAIN — arm write for retry.
-                                    engine_->arm_write(wfd, c);
-                                }
+                        std::vector<Connection *> pending;
+                        {
+                            std::lock_guard<std::mutex> lock(transport_->cross_thread_mu_);
+                            pending.swap(transport_->cross_thread_pending_);
+                            transport_->cross_thread_notified_.store(false, std::memory_order_release);
+                        }
+                        for (Connection *c : pending) {
+                            if (!c->is_open()) {
+                                continue;
+                            }
+                            int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
+                            if (!c->try_send(wfd, stats_)) {
+                                // All sent.
+                            }
+                            else {
+                                // Partial/EAGAIN — arm write for retry.
+                                engine_->arm_write(wfd, c);
                             }
                         }
                     }
@@ -514,7 +514,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     }
     // Deferred writev: enqueue only. On an I/O worker thread, the
     // post-event flush drains it (send aggregation). Cross-thread
-    // submits notify the owning worker via a lock-free MPSC queue.
+    // submits notify the owning worker via the shared pending list.
     // Throughput is lower than direct writev (the original submit path)
     // because frames wait for the post-event flush — this is the
     // intended tradeoff for TCP_NODELAY + send-queue aggregation: fewer
@@ -527,26 +527,25 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
 
     auto *worker = static_cast<Worker *>(conn->io_worker);
     if (worker != nullptr && worker->is_current_thread()) {
+        // Frame is already in the send queue (enqueued above).
+        // The post-event flush will drain it via pending_write_conns_.
         return true;
     }
 
-    if (worker != nullptr) {
-        if (!worker->cross_thread_pending_.try_push(conn)) {
-            int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
-            if (!conn->try_send(wfd, &stats_)) {
-                auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
-                if (engine2 != nullptr) {
-                    engine2->arm_write(wfd, conn);
-                }
-            }
-            return true;
+    // Cross-thread path: enqueue + notify the I/O worker to drain.
+    auto *engine = static_cast<SocketEngine *>(conn->io_engine);
+    if (engine != nullptr) {
+        {
+            std::lock_guard<std::mutex> lock(cross_thread_mu_);
+            cross_thread_pending_.push_back(conn);
         }
         bool expected = false;
-        if (worker->cross_thread_notified_.compare_exchange_strong(expected, true)) {
-            worker->engine()->notify_worker();
+        if (cross_thread_notified_.compare_exchange_strong(expected, true)) {
+            engine->notify_worker();
         }
     }
     else {
+        // No engine (test/direct connection) — fall back to immediate send.
         int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
         if (!conn->try_send(wfd, &stats_)) {
             auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);

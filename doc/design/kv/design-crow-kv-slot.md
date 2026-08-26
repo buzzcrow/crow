@@ -563,8 +563,8 @@ idle (if empty).
 At high load, drains almost never fire (many slot-tasks in flight);
 the `max_keys` overflow path produces full batches. At low load,
 drains always fire (few slot-tasks, threshold not exceeded), so there
-is no latency floor; a lone op flushes immediately. Default
-`coalesce_drain_threshold = 1` (see §23.5).
+is no latency floor; a lone op flushes immediately. CLI default
+`coalesce_drain_threshold = max_inflight / 4` (see §23.5).
 
 ### 23.3 Coalescer Design
 
@@ -664,10 +664,12 @@ paths pass `&[]` (no tags → no dedup recording, identical to the old
 - `coalesce_max_keys: usize` — max ops per batch (cap 65535, the
   payload count field is `u16`). `0` disables coalescing (default).
 - `coalesce_drain_threshold: usize` — skip drain when in-flight
-  slot-task count >= this. Default `1` (skip drain only when another
-  slot-task is still in flight; the last finisher always drains).
-  `0` = always drain (pure event mode); higher values skip the drain
-  at high load so the `max_keys` overflow path produces full batches.
+  slot-task count >= this. Library default `1`; the `crow-kv-server`
+  CLI derives `max_inflight / 4` when `--coalesce-drain-threshold` is
+  omitted (skip drain once the pipeline is a quarter full; the last
+  finisher always drains). `0` = always drain (pure event mode);
+  higher values skip the drain at high load so the `max_keys` overflow
+  path produces full batches.
 
 CLI: `--coalesce-max-keys`, `--coalesce-drain-threshold` on
 `crow-kv-server`, applied in `main.rs` into `config.paxos`. Wired into

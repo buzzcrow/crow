@@ -77,8 +77,9 @@ pub struct PaxosConfig {
     /// in `coalesce_drain_after_round` when the in-flight slot-task
     /// count (`occupied`) is at or above this value. Lets the
     /// `max_keys` overflow path handle high load (full batches) while
-    /// the drain maintains concurrency at low-moderate load. Default
-    /// `1` (set via CLI when coalescing is enabled). `0` = always
+    /// the drain maintains concurrency at low-moderate load. Library
+    /// default `1`; the `crow-kv-server` CLI derives `max_inflight / 4`
+    /// when `--coalesce-drain-threshold` is omitted. `0` = always
     /// drain (disables the heuristic).
     pub coalesce_drain_threshold: usize,
 }
