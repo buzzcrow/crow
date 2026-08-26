@@ -302,6 +302,8 @@ class SocketTransport : public Transport
     // Inline submit: enqueue a frame to the connection's send queue and
     // try direct write. Called from the worker thread (e.g. server dispatch)
     // to bypass the cross-thread notify path. Returns true if all data sent.
+    // When direct_write_ is true, calls send_direct (Path A). When false,
+    // enqueues only — the post-event flush drains it (Path B).
     bool submit_inline(Connection *conn, OutFrame *frame);
 
     // Create a platform-specific engine (EpollEngine on Linux,
@@ -363,8 +365,11 @@ class SocketTransport : public Transport
         send_queue_capacity_ = cap;
     }
 
-    // Direct-write mode: skip deferred writev aggregation and call
-    // try_send immediately on each submit. Default false (deferred).
+    // Direct-write mode: when true, all submits use Path A (send_direct
+    // with mutex — immediate writev). When false (default), all submits
+    // use Path B (enqueue + worker flush — send aggregation). The flag
+    // selects the path for the entire transport; mixing paths on the same
+    // connection would corrupt the frame stream.
     void set_direct_write(bool enabled)
     {
         direct_write_ = enabled;
@@ -383,11 +388,9 @@ class SocketTransport : public Transport
     // Per-connection send queue capacity (backpressure bound).
     uint32_t send_queue_capacity_{1024};
 
-    // Direct-write mode: try_send immediately per submit (no ring buffer
-    // aggregation). When false (default), submit enqueues and the I/O
-    // worker drains + writev in batches. The default trades per-frame
-    // queue-wait latency for higher syscall aggregation (saggr) under
-    // TCP_NODELAY — lower throughput than direct writev, by design.
+    // Direct-write mode: when true, submits use Path A (send_direct with
+    // mutex). When false (default), submits use Path B (enqueue + worker
+    // flush). See set_direct_write for details.
     bool direct_write_{false};
 
     // Connection registry: maps raw Connection* to shared_ptr, so

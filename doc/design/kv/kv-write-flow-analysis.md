@@ -339,27 +339,38 @@ response via `FlatBufferBuilder::collapse()` + external C++ Buffer).
 `CROW_RPC_WORKERS` tuned per config (2 for low T, 4 for high T).
 Raw TSV: `doc/working/bench-write-regression.tsv`.
 
-| Threads | Conn | Workers | win | co | Throughput (ops/s) | WAL append | p50 (µs) | p99 (µs) | Errors | r2 avg (µs) | r2 tps | r3 avg (µs) | r3 tps |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 2 | 32 | 0.3/16 | 3,750 | 112,564 | 272 | 371 | 0 | 0 | 3,682 | 0 | 3,682 |
-| 16 | 2 | 2 | 32 | 2.3/16 | 65,007 | 287,707 | 224 | 635 | 0 | 100 | 9,356 | 6 | 9,356 |
-| 64 | 4 | 2 | 32 | 4.9/16 | 171,837 | 349,547 | 339 | 882 | 0 | 64 | 11,041 | 36 | 11,041 |
-| 128 | 4 | 4 | 32 | 5.1/16 | 192,504 | 376,352 | 582 | 1,442 | 0 | 32 | 12,273 | 28 | 12,272 |
-| 256 | 8 | 4 | 32 | 5.1/16 | 197,495 | 388,642 | 1,126 | 2,904 | 0 | 54 | 12,532 | 74 | 12,531 |
-| 512 | 16 | 4 | 64 | 5.2/16 | 180,121 | 349,664 | 2,586 | 7,012 | 0 | 228 | 11,642 | 325 | 11,644 |
-| 1000 | 16 | 4 | 64 | 5.2/16 | 178,122 | 342,042 | 5,060 | 15,240 | 0 | 1,028 | 11,550 | 1,388 | 11,550 |
+| Threads | Conn | Workers | win | co | Throughput (ops/s) | WAL/node | p50 (µs) | p99 (µs) | Errors | r2 avg (µs) | r2 tps | r3 avg (µs) | r3 tps | inflight enq | inflight wait (µs) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 2 | 32 | 1.0/16 | 3,770 | 37,722 | 273 | 366 | 0 | 0 | 3,803 | 0 | 3,803 | 0 | 0 |
+| 16 | 2 | 2 | 32 | 6.7/16 | 63,393 | 94,137 | 231 | 625 | 0 | 2 | 9,206 | 5 | 9,206 | 0 | 0 |
+| 64 | 4 | 2 | 32 | 14.7/16 | 171,582 | 116,476 | 339 | 858 | 0 | 131 | 11,297 | 38 | 11,297 | 0 | 0 |
+| 128 | 4 | 4 | 32 | 15.3/16 | 191,411 | 124,957 | 582 | 1,448 | 0 | 29 | 12,504 | 70 | 12,504 | 0 | 0 |
+| 256 | 8 | 4 | 32 | 15.4/16 | 190,769 | 123,974 | 1,173 | 2,970 | 0 | 157 | 13,440 | 78 | 13,440 | 0 | 0 |
+| 512 | 16 | 4 | 64 | 35.0/64 | 178,024 | 50,815 | 2,738 | 5,444 | 0 | 68 | 5,102 | 68 | 5,102 | 0 | 0 |
+| 1000 | 16 | 4 | 64 | 27.5/32 | 182,541 | 66,376 | 5,204 | 12,832 | 0 | 381 | 6,450 | 499 | 6,449 | 0 | 0 |
 
 Zero-copy crow-rpc lifts the ceiling from ~124K (gRPC, 2026-08-04) to
-~197K at 256T — a 1.6× gain from eliminating the gRPC serialization
-copy and thread-pool handoff. WAL amortization ~5× (coalesce batches
-~5 keys per accept round). Zero errors across all configs.
+~191K at 128-256T — a 1.5× gain from eliminating the gRPC serialization
+copy and thread-pool handoff. Coalesce batches fill to 97% at co=16
+(256T); larger co at 512T+ (co=64) reduces accept rounds from 13.4K to
+5.1K, carrying 35 keys per round. Zero errors across all configs.
 
 **Inter-replica RPC analysis:** `r2 ≈ r3` at every config confirms
 symmetric follower replication. Per-follower RPC tps peaks at ~12.5K
-at 256T (total inter-replica traffic ~25K round-trips/s). RPC latency
+at 256T — matching the ~12.5K accept rounds/s (WAL/node). RPC latency
 stays low (0-100µs) until 512T+ where queue depth builds (228-1388µs).
 The `rpc.l@N` summary includes all RPC types (accept, prepare, chosen
 notice, fetch-gap), so tps is slightly higher than accept-only rounds.
+
+**Bottleneck at 512T+:** throughput plateaus at ~191K ops/s. At co=16,
+batches are 97% full (15.4/16) but the accept round rate (~13.4K/s) is
+the ceiling: 13.4K × 15.4 ≈ 206K ops/s. Increasing co to 64 at 512T
+reduces accept rounds to 5.1K/s but carries 35 keys/round. CPU is
+70-80% at saturation. The inflight window is **never full** (enq=0 at
+all configs) — the bottleneck is coalescer/accept-round serialization,
+not window size. The coalescer only pipelines ~4 concurrent rounds
+despite 32-64 available slots, suggesting it does not overlap enough
+batches to fill the inflight window.
 
 #### macOS M5 Pro comparison (2026-08-19)
 

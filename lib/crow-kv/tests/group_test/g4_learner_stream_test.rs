@@ -96,7 +96,7 @@ async fn poll_for_value(cluster: &TestCluster, key: &[u8], expected: &[u8], time
 /// correlation-id matching (`request_id` → oneshot) works correctly
 /// when many `Accept` frames are in flight back-to-back. Each write
 /// must receive its own `AcceptedResponse` on the correct oneshot.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn learner_stream_rapid_fire_writes() {
     let cluster = start_cluster_no_leader(&[1, 2, 3]).await;
 

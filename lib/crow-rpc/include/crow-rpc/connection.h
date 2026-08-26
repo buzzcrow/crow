@@ -6,14 +6,15 @@
 #include "crow-common/mpsc_queue.h"
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/framing.h"
-#include "crow-rpc/iovec_ring.h"
 #include "crow-rpc/transport.h"
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <sys/uio.h>
 
 namespace crow::rpc
 {
@@ -67,19 +68,23 @@ class Connection
     // pointers (must release their buffers after send completes).
     int drain_send_queue(OutFrame **out, int max);
 
-    // Try to send all queued frames via writev directly on the caller's
-    // thread. Uses in_send_ to serialize: only one thread
-    // does writev at a time; others just offer to the queue and return.
-    // Returns true if all data was sent, false if partial/EAGAIN (the
-    // I/O worker will retry via arm_write).
-    bool try_send(int fd, TransportStats *stats);
+    // Path A: direct writev with mutex. Sends a single frame immediately,
+    // keeping any partial in direct_partial_ for the next call. Thread-safe
+    // via send_mu_. Returns true if all data sent, false if partial/EAGAIN
+    // (caller arms EPOLLOUT for retry).
+    bool send_direct(int fd, OutFrame *frame, TransportStats *stats);
 
-    // Check if the send queue has pending frames (without draining).
-    // Lock-free; conservative — may return true when a producer has
-    // claimed a slot but not yet filled it.
+    // Path B: worker-thread flush. Drains the MPSC queue into the flat
+    // iovec array (partials from a previous EAGAIN are already at front),
+    // writev's, and keeps any remaining partials at front for next time.
+    // No lock — only the I/O worker calls this. Returns true if all data
+    // sent, false if partial/EAGAIN (caller arms EPOLLOUT for retry).
+    bool flush_send(int fd, TransportStats *stats);
+
+    // Check if the connection has pending send data (queue or partials).
     bool has_pending_send() const
     {
-        return send_queue_.has_pending() || ring_.has_pending();
+        return send_queue_.has_pending() || flush_iov_count_ > 0;
     }
 
     // Close the connection, fail pending requests, signal reconnect.
@@ -153,20 +158,29 @@ class Connection
     std::atomic<bool> open_{true};
 
     // Lock-free bounded MPSC ring buffer (crow::common::MpscQueue). Multiple
-    // producer threads push via enqueue_send (Transport::submit); the single
-    // consumer (whichever thread holds in_send_) drains via drain_send_queue
-    // for writev. Defined in crow-common/cpp/include/crow-common/mpsc_queue.h.
+    // producer threads push via enqueue_send (Transport::submit); the I/O
+    // worker drains via drain_send_queue for writev (Path B).
     SendQueue send_queue_;
 
-    // Pre-allocated iovec ring for writev scatter-gather (buzz-cpp pattern).
-    // try_send drains the MPSC queue into this ring, then calls ring.send()
-    // which does writev directly on the ring's iovecs. On partial write,
-    // iovecs are modified in place — no re-enqueue, no per-call allocation.
-    IovecRing ring_;
+    // Path A: direct writev state. send_mu_ serializes concurrent writev
+    // across threads. direct_partial_ holds a single partially-sent frame
+    // (nullptr when no partial). On the next send_direct call, the partial's
+    // remaining iovecs are prepended before the new frame's iovecs.
+    std::mutex  send_mu_;
+    OutFrame   *direct_partial_{nullptr};
 
-    // Caller-thread direct-write flag. Only one thread
-    // does writev at a time; others just offer to the queue and return.
-    std::atomic<bool> in_send_{false};
+    // Path B: flat iovec array for worker-thread flush. Partials from a
+    // previous EAGAIN stay at the front (flush_iov_count_ > 0 with adjusted
+    // iov_base/iov_len). New frames from the MPSC queue are appended after.
+    // flush_frames_[] tracks the OutFrame* backing each group of iovecs so
+    // they can be released after full send. flush_hdrs_[] holds the
+    // serialized header bytes for each frame (the header is not stored in
+    // the frame itself — it must be serialized into stable storage).
+    iovec     flush_iovs_[3 * BATCH_MAX];
+    OutFrame *flush_frames_[BATCH_MAX];
+    uint8_t   flush_hdrs_[BATCH_MAX][HEADER_SIZE];
+    int       flush_iov_count_{0};
+    int       flush_frame_count_{0};
 
     OnFrameCallback on_frame_callback_;
     OnCloseCallback on_close_callback_;

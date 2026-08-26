@@ -45,7 +45,7 @@ run_bench() {
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t$win\t$coalesce\t$workers\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
+        echo -e "$label\t$win\t$coalesce\t$workers\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
     local ops_s p50_us p99_us errors wal
@@ -53,7 +53,9 @@ run_bench() {
     p50_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p50_us')
     p99_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p99_us')
     errors=$(echo "$json" | jq -r '.total_errors')
+    # WAL append: aggregated across 3 nodes; per-node = wal/3 = accept rounds/s
     wal=$(echo "$json" | jq -r '.server_metrics.wal_append_count')
+    wal_per_node=$((wal / 3))
     # RPC aggregation ratios: frames per syscall (sagg = frames_sent/writev_calls, ragg = frames_parsed/read_calls)
     local srv_sa srv_ra cli_sa cli_ra srv_s2w cli_s2w
     srv_sa=$(echo "$json" | jq -r 'if .server_metrics.rpc.writev_calls > 0 then (.server_metrics.rpc.frames_sent / .server_metrics.rpc.writev_calls) else 0 end | . * 10 | floor / 10')
@@ -68,10 +70,17 @@ run_bench() {
     r2_tps=$(echo "$json" | jq -r '.server_metrics.replica.r2_tps // 0')
     r3_avg=$(echo "$json" | jq -r '.server_metrics.replica.r3 // 0')
     r3_tps=$(echo "$json" | jq -r '.server_metrics.replica.r3_tps // 0')
-    echo "    ops/s=$ops_s wal=$wal p50=${p50_us}us p99=${p99_us}us err=$errors"
+    # Inflight window pressure: enqueued = window-full hits, wait = avg queue time
+    local inflight_enq inflight_wait
+    inflight_enq=$(echo "$json" | jq -r '.server_metrics.inflight_enqueued // 0')
+    inflight_wait=$(echo "$json" | jq -r '.server_metrics.inflight_wait_avg_us // 0')
+    local co_factor
+    co_factor=$(awk "BEGIN { if ($wal_per_node > 0) printf \"%.1f\", $ops_s * 10 / $wal_per_node }")
+    echo "    ops/s=$ops_s wal/node=$wal_per_node co=${co_factor}/${coalesce} p50=${p50_us}us p99=${p99_us}us err=$errors"
     echo "    rpc_agg: srv sagg=${srv_sa} ragg=${srv_ra} s2w=${srv_s2w}us | cli sagg=${cli_sa} ragg=${cli_ra} s2w=${cli_s2w}us"
     echo "    replica: r2=${r2_avg}us/${r2_tps}tps r3=${r3_avg}us/${r3_tps}tps"
-    echo -e "$label\t$win\t$coalesce\t$workers\t$ops_s\t$wal\t$p50_us\t$p99_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra\t$r2_avg\t$r2_tps\t$r3_avg\t$r3_tps" >> "$RESULTS_FILE"
+    echo "    inflight: enq=${inflight_enq} wait_avg=${inflight_wait}us"
+    echo -e "$label\t$win\t$coalesce\t$workers\t$ops_s\t$wal_per_node\t$p50_us\t$p99_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra\t$r2_avg\t$r2_tps\t$r3_avg\t$r3_tps\t$inflight_enq\t$inflight_wait" >> "$RESULTS_FILE"
 }
 
 # --- regression sentinel configs ---
@@ -88,20 +97,22 @@ run_bench() {
 #   win=32 (64 for 512T+), coalesce=16, 10s mem mode, 3-node cluster,
 #   512B values, 1M keys. CROW_RPC_WORKERS tuned per config.
 #
-#   T    C    W    win  co       ops/s     WAL      p50    p99    err  sagg  ragg  r2    r2tps    r3    r3tps
-#   1    1    2    32   0.3/16   3,750     112,564  272    371    0    1     1     0     3,682    0     3,682
-#   16   2    2    32   2.3/16   65,007    287,707  224    635    0    2.1   1.7   100   9,356    6     9,356
-#   64   4    2    32   4.9/16   171,837   349,547  339    882    0    4.4   3.1   64    11,041   36    11,041
-#   128  4    4    32   5.1/16   192,504   376,352  582    1442   0    5.8   4.9   32    12,273   28    12,272
-#   256  8    4    32   5.1/16   197,495   388,642  1126   2904   0    6.7   5.7   54    12,532   74    12,531
-#   512  16   4    64   5.2/16   180,121   349,664  2586   7012   0    6.9   6.3   228   11,642   325   11,644
-#   1000 16   4    64   5.2/16   178,122   342,042  5060   15240  0    6.7   6.2   1028  11,550   1388  11,550
+#   T    C    W    win  co        ops/s     WAL/node  p50    p99    err  sagg  ragg  r2    r2tps    r3    r3tps    enq   wait
+#   1    1    2    32   1.0/16    3,770     37,722    273    366    0    1     1     0     3,803    0     3,803    0     0
+#   16   2    2    32   6.7/16    63,393    94,137    231    625    0    2.1   1.7   2     9,206    5     9,206    0     0
+#   64   4    2    32   14.7/16   171,582   116,476   339    858    0    4.4   3.1   131   11,297   38    11,297   0     0
+#   128  4    4    32   15.3/16   191,411   124,957   582    1448   0    5.8   4.9   29    12,504   70    12,504   0     0
+#   256  8    4    32   15.4/16   190,769   123,974   1173   2970   0    6.7   5.7   157   13,440   78    13,440   0     0
+#   512  16   4    64   35.0/64   178,024   50,815    2738   5444   0    6.9   6.3   68    5,102    68    5,102    0     0
+#   1000 16   4    64   27.5/32   182,541   66,376    5204   12832  0    6.7   6.2   381   6,450    499   6,449    0     0
 #
 # Zero-copy crow-rpc beats gRPC at every thread count (+20% to +98%).
-# Peak ~197K at 256T (was ~124K with gRPC). WAL amortization ~5x.
+# Peak ~191K at 128-256T (was ~124K with gRPC). Coalesce batches fill
+# to 97% at co=16 (256T), 55% at co=64 (512T), 86% at co=32 (1000T).
+# Inflight window NEVER full (enq=0 at all configs) — bottleneck is
+# coalescer/accept-round serialization, not window size.
 # 512T/1000T fixed (drain loop spin when iovec ring full).
-# Inter-replica: r2≈r3 (symmetric), ~12.5K tps/follower at peak.
-# Zero errors across all configs.
+# Inter-replica: r2≈r3 (symmetric). Zero errors across all configs.
 # See doc/design/kv/kv-write-flow-analysis.md for full analysis.
 #
 # macOS M5 Pro (2026-08-19, gRPC transport, pre-zero-copy):
@@ -120,17 +131,18 @@ run_bench() {
 # due to lower per-op overhead, but saturates earlier (non-SMT 18-core vs
 # 32-thread SMT AMD). Zero-copy comparison on M5 Pro pending.
 
-echo -e "label\twin\tcoalesce\tworkers\tops_s\twal_append\tp50_us\tp99_us\terrors\tsrv_sagg\tsrv_ragg\tcli_sagg\tcli_ragg\tr2_avg\tr2_tps\tr3_avg\tr3_tps" > "$RESULTS_FILE"
+echo -e "label\twin\tcoalesce\tworkers\tops_s\twal_per_node\tp50_us\tp99_us\terrors\tsrv_sagg\tsrv_ragg\tcli_sagg\tcli_ragg\tr2_avg\tr2_tps\tr3_avg\tr3_tps\tinflight_enq\tinflight_wait_us" > "$RESULTS_FILE"
 
 echo "=== write (win=32, coalesce=16) ==="
-run_bench 1 1 32 16 2 "write_1t_1c_win32_coales16"           # ref: 3,750 ops/s
-run_bench 16 2 32 16 2 "write_16t_2c_win32_coales16"         # ref: 65,007 ops/s
-run_bench 64 4 32 16 2 "write_64t_4c_win32_coales16"         # ref: 171,837 ops/s
-run_bench 128 4 32 16 4 "write_128t_4c_win32_coales16"       # ref: 192,504 ops/s
-run_bench 256 8 32 16 4 "write_256t_8c_win32_coales16"       # ref: 197,495 ops/s
-echo "=== write (win=64, coalesce=16) ==="
-run_bench 512 16 64 16 4 "write_512t_16c_win64_coales16"     # ref: 180,121 ops/s
-run_bench 1000 16 64 16 4 "write_1000t_16c_win64_coales16"   # ref: 178,122 ops/s
+run_bench 1 1 32 16 2 "write_1t_1c_win32_coales16"           # ref: 3,770 ops/s
+run_bench 16 2 32 16 2 "write_16t_2c_win32_coales16"         # ref: 63,393 ops/s
+run_bench 64 4 32 16 2 "write_64t_4c_win32_coales16"         # ref: 171,582 ops/s
+run_bench 128 4 32 16 4 "write_128t_4c_win32_coales16"       # ref: 191,411 ops/s
+run_bench 256 8 32 16 4 "write_256t_8c_win32_coales16"       # ref: 190,769 ops/s
+echo "=== write (win=64, coalesce=64) ==="
+run_bench 512 16 64 64 4 "write_512t_16c_win64_coales64"     # ref: 178,024 ops/s
+echo "=== write (win=64, coalesce=32) ==="
+run_bench 1000 16 64 32 4 "write_1000t_16c_win64_coales32"   # ref: 182,541 ops/s
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

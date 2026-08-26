@@ -84,7 +84,7 @@ async fn get_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn membership_epoch_mismatch_stalls_writes_until_fanout_completes() {
     let cluster = start_cluster_no_leader(&[1, 2, 3]).await;
 

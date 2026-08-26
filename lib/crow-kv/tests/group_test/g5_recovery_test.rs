@@ -116,7 +116,7 @@ fn force_step_down(cluster: &TestCluster, leader_id: u64, reason: &str) -> bool 
 /// two consecutive step-downs: this test writes more data (10 keys)
 /// to exercise a larger bulk Phase 1 repair range, and verifies
 /// every key individually.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bulk_phase1_recovers_all_committed_values() {
     let cluster = start_cluster_no_leader(&[1, 2, 3]).await;
 

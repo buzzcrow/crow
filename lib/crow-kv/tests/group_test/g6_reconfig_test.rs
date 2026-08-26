@@ -211,7 +211,7 @@ async fn add_node_to_cluster(cluster: &TestCluster, new_id: u64) -> Arc<PxKvStor
 
 /// Adding a 4th replica to a running 3-node cluster: existing data
 /// survives, and new writes commit with the expanded membership.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconfig_add_replica() {
     let cluster = start_cluster_no_leader(&[1, 2, 3]).await;
 

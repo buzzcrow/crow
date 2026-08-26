@@ -144,10 +144,8 @@ void Worker::run_loop()
                                 continue;
                             }
                             int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
-                            if (!c->try_send(wfd, stats_)) {
-                                // All sent.
-                            }
-                            else {
+                            // Path B: flush the flat iovec array.
+                            if (!c->flush_send(wfd, stats_)) {
                                 // Partial/EAGAIN — arm write for retry.
                                 engine_->arm_write(wfd, c);
                             }
@@ -246,10 +244,8 @@ void Worker::run_loop()
                     }
                     int rfd = static_cast<int>(conn->transport_handle);
                     int wfd = conn->write_fd >= 0 ? conn->write_fd : rfd;
-                    if (!on_writable_impl(conn, wfd, stats_)) {
-                        // All data sent — no need to arm write.
-                    }
-                    else {
+                    // Path B: flush the flat iovec array (send aggregation).
+                    if (!conn->flush_send(wfd, stats_)) {
                         // Partial write or EAGAIN — arm write for remaining.
                         engine_->arm_write(wfd, conn);
                     }
@@ -391,9 +387,8 @@ done:
 
 static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats)
 {
-    // Delegate to Connection::try_send — the writev logic now lives there
-    // (shared between caller-thread submit and I/O-worker write retry).
-    return !conn->try_send(fd, stats);
+    // Path B: flush the flat iovec array (partials at front + queued frames).
+    return conn->flush_send(fd, stats);
 }
 
 // ── SocketTransport ───────────────────────────────────────────────
@@ -496,15 +491,10 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         }
     }
     frame->create_nano = now_nano();
-    // Direct-write mode: skip the ring buffer, writev immediately.
+    // Path A: direct writev with mutex (immediate send, no aggregation).
     if (direct_write_) {
         int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
-        if (!conn->enqueue_send(frame)) {
-            CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
-                        static_cast<long long>(conn->id()), conn->name());
-            return false;
-        }
-        if (!conn->try_send(wfd, &stats_)) {
+        if (!conn->send_direct(wfd, frame, &stats_)) {
             auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
             if (engine2 != nullptr) {
                 engine2->arm_write(wfd, conn);
@@ -512,13 +502,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         }
         return true;
     }
-    // Deferred writev: enqueue only. On an I/O worker thread, the
-    // post-event flush drains it (send aggregation). Cross-thread
-    // submits notify the owning worker via the shared pending list.
-    // Throughput is lower than direct writev (the original submit path)
-    // because frames wait for the post-event flush — this is the
-    // intended tradeoff for TCP_NODELAY + send-queue aggregation: fewer
-    // syscalls (higher saggr) at the cost of per-frame queue wait.
+    // Path B: enqueue + worker flush (send aggregation).
     if (!conn->enqueue_send(frame)) {
         CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
                     static_cast<long long>(conn->id()), conn->name());
@@ -527,8 +511,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
 
     auto *worker = static_cast<Worker *>(conn->io_worker);
     if (worker != nullptr && worker->is_current_thread()) {
-        // Frame is already in the send queue (enqueued above).
-        // The post-event flush will drain it via pending_write_conns_.
+        // Frame is in the send queue. The post-event flush will drain it.
         return true;
     }
 
@@ -545,9 +528,9 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         }
     }
     else {
-        // No engine (test/direct connection) — fall back to immediate send.
+        // No engine (test/direct connection) — fall back to flush_send.
         int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
-        if (!conn->try_send(wfd, &stats_)) {
+        if (!conn->flush_send(wfd, &stats_)) {
             auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
             if (engine2 != nullptr) {
                 engine2->arm_write(wfd, conn);
@@ -560,13 +543,10 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
 bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
 {
     frame->create_nano = now_nano();
-    // Direct-write mode: writev immediately instead of deferring.
+    // Path A: direct writev with mutex.
     if (direct_write_) {
         int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
-        if (!conn->enqueue_send(frame)) {
-            return false;
-        }
-        if (!conn->try_send(wfd, &stats_)) {
+        if (!conn->send_direct(wfd, frame, &stats_)) {
             auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
             if (engine2 != nullptr) {
                 engine2->arm_write(wfd, conn);
@@ -574,12 +554,7 @@ bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
         }
         return true;
     }
-    // Enqueue only — the actual writev is deferred to the worker's
-    // post-event flush (send aggregation). This coalesces multiple
-    // responses from one read() into a single writev per connection,
-    // and multiple connections' responses into one event-loop batch.
-    // Bypasses the cross-thread submit queue + notify, eliminating a
-    // Notify event per response on the server side.
+    // Path B: enqueue only — the post-event flush drains it (send aggregation).
     return conn->enqueue_send(frame);
 }
 

@@ -12,7 +12,7 @@ use crow_protocol::fb::{
     ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, ConnectionPingResponseArgs,
     FBMsgType, FBRetCode,
 };
-use crow_rpc_ffi::{BufferPool, CallFuture, RpcClient, RpcServer};
+use crow_rpc_ffi::{Buffer, BufferPool, CallFuture, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -317,9 +317,10 @@ async fn client_handler_dispatch_via_server_chain() {
         fbb.finish(nreq, None);
         let fb_bytes = fbb.finished_data();
 
-        let pool = BufferPool::new(256);
-        let mut ctrl = pool.alloc_buffer(fb_bytes.len() as u32).expect("alloc control");
-        ctrl.write(fb_bytes);
+        // Standalone buffer (no pool): the buffer is queued for send and
+        // released by the I/O worker after this handler returns, so a
+        // pool-allocated buffer would dangle when the local pool drops.
+        let ctrl = Buffer::from_vec(fb_bytes.to_vec());
 
         // Send the NOTIFY request via request_client.call_to_handle()
         // on the server-side connection (raw conn_handle from the
@@ -515,9 +516,10 @@ async fn server_to_client_timeout_no_handler() {
         fbb.finish(nreq, None);
         let fb_bytes = fbb.finished_data();
 
-        let pool = BufferPool::new(256);
-        let mut ctrl = pool.alloc_buffer(fb_bytes.len() as u32).expect("alloc control");
-        ctrl.write(fb_bytes);
+        // Standalone buffer (no pool): the buffer is queued for send and
+        // released by the I/O worker after this handler returns, so a
+        // pool-allocated buffer would dangle when the local pool drops.
+        let ctrl = Buffer::from_vec(fb_bytes.to_vec());
 
         // Send via request_client.call() on the server-side connection.
         // The client will drop the frame (no handler, no transport) →

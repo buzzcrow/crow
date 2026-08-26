@@ -256,6 +256,16 @@ pub(crate) struct ServerMetrics {
     /// leader's metrics log.
     #[serde(default)]
     pub(crate) replica: ReplicaMetrics,
+    /// Total proposals that hit the inflight window slow path (window
+    /// was full, had to queue). From `*.write.inflight_enqueued.c`
+    /// counter, summed across the run. Zero means the window was never
+    /// full — increasing `max_inflight` won't help.
+    #[serde(default)]
+    pub(crate) inflight_enqueued: u64,
+    /// Avg wait time (us) for queued proposals (window-full events).
+    /// From `*.write.inflight_wait.l` summary, max avg across windows.
+    #[serde(default)]
+    pub(crate) inflight_wait_avg_us: u64,
 }
 
 /// Inter-replica consensus RPC metrics from the leader's perspective.

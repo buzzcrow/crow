@@ -49,6 +49,20 @@ fn parse_rpc_gauge(name: &str, value: u64, rpc: &mut super::report::TransportSta
     }
 }
 
+/// Update g.1 (active group) summary metrics: inflight wait avg and
+/// inter-replica RPC latency/tps. Takes the max avg across flush
+/// windows (steady state has the highest count). Summary format:
+/// name count tps avg(us) max(us). Field indices: 2=tps, 3=avg(us).
+fn update_g1_summary(metrics: &mut ServerMetrics, name: &str, fields: &[&str]) {
+    if name.contains(".inflight_wait.") {
+        let avg: u64 = fields.get(3).and_then(|f| f.parse().ok()).unwrap_or(0);
+        if avg > metrics.inflight_wait_avg_us {
+            metrics.inflight_wait_avg_us = avg;
+        }
+    }
+    update_replica_metrics(&mut metrics.replica, name, fields);
+}
+
 /// Update inter-replica metrics from a summary line. Takes the max
 /// across flush windows (steady state has the highest count/tps).
 /// Summary format: name count tps avg(us) max(us).
@@ -139,11 +153,9 @@ pub(crate) fn parse_metrics_log(content: &str) -> ServerMetrics {
                 if name.contains(".wal.") && name.contains(".append.") {
                     metrics.wal_append_count += count;
                 }
-                // Inter-replica latency: take the max avg across flush
-                // windows (steady state has the highest count). Only
-                // capture the active group (g.1), skip idle group 0.
+                // g.1 summaries: inflight wait + inter-replica RPC.
                 if name.contains(".g.1.") {
-                    update_replica_metrics(&mut metrics.replica, name, &fields);
+                    update_g1_summary(&mut metrics, name, &fields);
                 }
             }
             LogSection::Misc => {
@@ -166,6 +178,8 @@ pub(crate) fn parse_metrics_log(content: &str) -> ServerMetrics {
                     metrics.wal_physical_bytes += count;
                 } else if name.contains(".wal.") && name.contains(".rmw.") {
                     metrics.wal_rmw_count += count;
+                } else if name.contains(".inflight_enqueued.") {
+                    metrics.inflight_enqueued += count;
                 } else if name.contains(".rpc.") {
                     parse_rpc_counter(name, count, &mut metrics.rpc);
                 }
@@ -217,6 +231,10 @@ pub(crate) fn aggregate_server_metrics(per_node: &[ServerMetrics]) -> ServerMetr
         agg.replica.r2_tps = agg.replica.r2_tps.max(m.replica.r2_tps);
         agg.replica.r3 = agg.replica.r3.max(m.replica.r3);
         agg.replica.r3_tps = agg.replica.r3_tps.max(m.replica.r3_tps);
+        // Inflight: enqueued is summed (total window-full hits across
+        // nodes), wait avg takes max (only the leader enqueues).
+        agg.inflight_enqueued += m.inflight_enqueued;
+        agg.inflight_wait_avg_us = agg.inflight_wait_avg_us.max(m.inflight_wait_avg_us);
     }
     agg
 }

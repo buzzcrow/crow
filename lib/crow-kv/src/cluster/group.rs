@@ -28,7 +28,9 @@ use crate::paxos::roles::{Acceptor, DedupTag, PxBallot, PxLogEntry, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
 
 pub(crate) use crate::cluster::group_accept::AcceptAttempt;
-pub(crate) use crate::cluster::group_inflight::{InflightAdmission, RemoteFoldCtx, ReplyFold};
+pub(crate) use crate::cluster::group_inflight::{
+    InflightAdmission, InflightRegistryHandles, RemoteFoldCtx, ReplyFold,
+};
 pub(crate) use crate::cluster::group_prepare::PrepareAttempt;
 
 /// Registry-based metric handles for write-path instrumentation.
@@ -546,6 +548,11 @@ impl PxGroup {
         }
         let mut r = registry.lock().expect("metrics registry poisoned");
         let prefix = format!("s.{store_id}.g.{group_id}");
+        let inflight_handles = InflightRegistryHandles {
+            enqueued: r.register_counter(format!("{prefix}.write.inflight_enqueued.c")),
+            wait_us: r.register_summary(format!("{prefix}.write.inflight_wait.l")),
+        };
+        let _ = self.inflight.handles.set(inflight_handles);
         let read_handles = ReadRegistryHandles {
             lease_path: r.register_counter(format!("{prefix}.read.lease_path.c")),
             readindex_path: r.register_counter(format!("{prefix}.read.readindex_path.c")),

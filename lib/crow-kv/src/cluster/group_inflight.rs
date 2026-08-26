@@ -5,11 +5,13 @@
 #![allow(clippy::missing_fields_in_debug)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use tracing::warn;
 
 use crate::cluster::group::PxGroup;
 use crate::common::config::AdmissionPolicy;
+use crate::metrics::{Counter, LatencySummary};
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 
@@ -27,6 +29,16 @@ pub(crate) struct InflightAdmission {
     pub(crate) total_wait_us: AtomicU64,
     /// Current number of proposals waiting on `acquire().await`.
     pub(crate) waiting: AtomicU64,
+    /// Registry handles for metrics-log export of window-full events.
+    pub(crate) handles: OnceLock<InflightRegistryHandles>,
+}
+
+/// Metrics handles for inflight admission events.
+pub(crate) struct InflightRegistryHandles {
+    /// Counter: total proposals that hit the slow path (window full).
+    pub(crate) enqueued: Arc<Counter>,
+    /// Summary: wait time in microseconds for queued proposals.
+    pub(crate) wait_us: Arc<LatencySummary>,
 }
 
 impl InflightAdmission {
@@ -38,6 +50,7 @@ impl InflightAdmission {
             total_enqueued: AtomicU64::new(0),
             total_wait_us: AtomicU64::new(0),
             waiting: AtomicU64::new(0),
+            handles: OnceLock::new(),
         }
     }
 
@@ -71,6 +84,10 @@ impl InflightAdmission {
                 self.waiting.fetch_sub(1, Ordering::Relaxed);
                 self.total_wait_us
                     .fetch_add(u64::try_from(wait_us).unwrap_or(u64::MAX), Ordering::Relaxed);
+                if let Some(h) = self.handles.get() {
+                    h.enqueued.inc();
+                    h.wait_us.observe(u64::try_from(wait_us).unwrap_or(u64::MAX));
+                }
                 Some(permit)
             }
         }
