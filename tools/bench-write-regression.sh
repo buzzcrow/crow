@@ -108,6 +108,23 @@ run_bench() {
 # more headroom than the non-SMT 18-core M5 Pro at high concurrency.
 # WAL amortization reaches ~11x at 256T. Zero errors across all configs.
 # See doc/design/kv/kv-write-flow-analysis.md for full analysis.
+#
+# Linux retest (2026-08-26, same AMD 5950X, zero-copy crow-rpc handlers):
+#   Request: C++ Frame ownership transferred to Rust, flatbuffer parsed
+#   zero-copy in tokio task. Response: FlatBufferBuilder::collapse() +
+#   Buffer::from_vec_offset (external C++ Buffer, no copy). 2 I/O workers.
+#
+#   T    C    ops/s     WAL      avg    p50    p99    p999    err
+#   1    1    4,160     124,857  239    248    380    715     0
+#   4    2    17,539    290,300  227    204    475    913     0
+#   16   4    65,360    282,846  243    224    616    1,272   0
+#   32   16   87,865    234,863  366    326    908    1,975   0
+#   64   32   125,908   213,067  506    459    1,163  2,618   0
+#   128  32   144,605   180,928  886    870    1,625  7,936   0
+#   256  32   148,605   174,238  1,726  1,620  3,366  10,824  0
+#
+# Zero-copy crow-rpc beats gRPC at every thread count (+20% to +98%).
+# Peak ~149K at 256T (was ~124K with gRPC). WAL amortization ~34x at 256T.
 
 echo -e "label\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tsrv_send_agg\tsrv_recv_agg\tcli_send_agg\tcli_recv_agg" > "$RESULTS_FILE"
 
