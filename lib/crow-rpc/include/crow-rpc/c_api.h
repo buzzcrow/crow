@@ -67,6 +67,9 @@ void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t 
 // Direct-write mode: skip deferred writev aggregation, writev immediately
 // per submit. Default 0 (deferred). Must be called before listen/connect.
 void            crow_rpc_server_set_direct_write(crow_rpc_server_t server, int enabled);
+// TCP_NODELAY for new connections. Default 1 (Nagle disabled).
+// Set to 0 to allow Nagle coalescing (better with direct-write batching).
+void            crow_rpc_server_set_tcp_nodelay(crow_rpc_server_t server, int enabled);
 void            crow_rpc_server_destroy(crow_rpc_server_t server);
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port);
 void            crow_rpc_server_start(crow_rpc_server_t server);

@@ -33,7 +33,7 @@ thread_local Worker *tl_current_worker = nullptr;
 // Forward declarations — defined after Worker (shared I/O logic).
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
                              std::vector<Connection *> &pending_writes, TransportStats *stats);
-static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats);
+static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats, bool direct_write);
 
 static inline uint64_t now_nano()
 {
@@ -144,8 +144,15 @@ void Worker::run_loop()
                                 continue;
                             }
                             int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
-                            // Path B: flush the flat iovec array.
-                            if (!c->flush_send(wfd, stats_)) {
+                            // Flush: Path A uses retry_direct, Path B uses flush_send.
+                            bool ok;
+                            if (transport_->direct_write_) {
+                                ok = c->retry_direct(wfd, stats_);
+                            }
+                            else {
+                                ok = c->flush_send(wfd, stats_);
+                            }
+                            if (!ok) {
                                 // Partial/EAGAIN — arm write for retry.
                                 engine_->arm_write(wfd, c);
                             }
@@ -186,7 +193,7 @@ void Worker::run_loop()
                 case SocketEvent::Writable:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
                         // ev.fd is the write fd (dup'd). try_send uses it.
-                        bool has_more = on_writable_impl(ev.conn, ev.fd, stats_);
+                        bool has_more = on_writable_impl(ev.conn, ev.fd, stats_, transport_->direct_write_);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
                             CR_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
@@ -244,8 +251,16 @@ void Worker::run_loop()
                     }
                     int rfd = static_cast<int>(conn->transport_handle);
                     int wfd = conn->write_fd >= 0 ? conn->write_fd : rfd;
-                    // Path B: flush the flat iovec array (send aggregation).
-                    if (!conn->flush_send(wfd, stats_)) {
+                    // Flush: Path A uses retry_direct (drain queue), Path B
+                    // uses flush_send (flat iovec array).
+                    bool ok;
+                    if (transport_->direct_write_) {
+                        ok = conn->retry_direct(wfd, stats_);
+                    }
+                    else {
+                        ok = conn->flush_send(wfd, stats_);
+                    }
+                    if (!ok) {
                         // Partial write or EAGAIN — arm write for remaining.
                         engine_->arm_write(wfd, conn);
                     }
@@ -385,8 +400,12 @@ done:
     }
 }
 
-static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats)
+static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats, bool direct_write)
 {
+    if (direct_write) {
+        // Path A: retry direct writev (drain queue, no new frame).
+        return conn->retry_direct(fd, stats);
+    }
     // Path B: flush the flat iovec array (partials at front + queued frames).
     return conn->flush_send(fd, stats);
 }
@@ -491,7 +510,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         }
     }
     frame->create_nano = now_nano();
-    // Path A: direct writev with mutex (immediate send, no aggregation).
+    // Path A: direct batched writev (enqueue + drain all, caller thread).
     if (direct_write_) {
         int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
         if (!conn->send_direct(wfd, frame, &stats_)) {
@@ -543,18 +562,10 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
 bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
 {
     frame->create_nano = now_nano();
-    // Path A: direct writev with mutex.
-    if (direct_write_) {
-        int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
-        if (!conn->send_direct(wfd, frame, &stats_)) {
-            auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
-            if (engine2 != nullptr) {
-                engine2->arm_write(wfd, conn);
-            }
-        }
-        return true;
-    }
-    // Path B: enqueue only — the post-event flush drains it (send aggregation).
+    // Both paths: enqueue only. The post-event flush drains the queue
+    // (retry_direct for Path A, flush_send for Path B), batching all
+    // frames accumulated during the read loop into a single writev.
+    // send_direct is only used by submit() for cross-thread sends.
     return conn->enqueue_send(frame);
 }
 
@@ -640,7 +651,7 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-    int nodelay = 1;
+    int nodelay = tcp_nodelay_ ? 1 : 0;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     return create_connection(fd, addr + ":" + std::to_string(port));

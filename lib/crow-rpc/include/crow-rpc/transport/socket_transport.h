@@ -241,7 +241,7 @@ class Worker
     TransportStats   *stats_;     // aggregation counters
     SocketTransport  *transport_; // non-owning; for cross-thread pending drain
     std::thread       thread_;
-    std::thread::id   thread_id_{};
+    std::thread::id   thread_id_;
     std::atomic<bool> running_{false};
 
     // Connections owned by this worker (one worker per connection).
@@ -251,7 +251,7 @@ class Worker
     // Per-worker receive buffer: one big read() grabs data for multiple
     // frames, then feed_data processes them all. Reduces syscalls when
     // multiple frames are pending on one connection.
-    static constexpr size_t RECV_BUF_SIZE = 64 * 1024;
+    static constexpr size_t RECV_BUF_SIZE = 64 * 1024ULL;
     std::vector<uint8_t>    recv_buf_;
 
     // Pending sends accumulated during on_readable (send aggregation).
@@ -375,6 +375,19 @@ class SocketTransport : public Transport
         direct_write_ = enabled;
     }
 
+    // TCP_NODELAY control. Default true (disable Nagle). Set to false to
+    // allow Nagle's algorithm to coalesce small frames into larger segments.
+    // Must be called before listen/connect.
+    void set_tcp_nodelay(bool enabled)
+    {
+        tcp_nodelay_ = enabled;
+    }
+
+    bool tcp_nodelay() const
+    {
+        return tcp_nodelay_;
+    }
+
   private:
     BufferPool                                *pool_;
     std::vector<std::unique_ptr<Worker>>       workers_;
@@ -392,6 +405,9 @@ class SocketTransport : public Transport
     // mutex). When false (default), submits use Path B (enqueue + worker
     // flush). See set_direct_write for details.
     bool direct_write_{false};
+
+    // TCP_NODELAY setting for new connections. Default true.
+    bool tcp_nodelay_{true};
 
     // Connection registry: maps raw Connection* to shared_ptr, so
     // submit() can safely access connections from arbitrary threads

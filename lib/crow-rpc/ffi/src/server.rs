@@ -91,6 +91,11 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_set_direct_write(self.handle, if enabled { 1 } else { 0 }) };
     }
 
+    /// TCP_NODELAY for new connections. Default true (Nagle disabled).
+    pub fn set_tcp_nodelay(&self, enabled: bool) {
+        unsafe { sys::crow_rpc_server_set_tcp_nodelay(self.handle, if enabled { 1 } else { 0 }) };
+    }
+
     /// Sample transport-level stats: syscall counts + latency histograms.
     /// Aggregation ratios:
     ///   tcp_recv_agg = frames_parsed / read_calls   (frames per read)

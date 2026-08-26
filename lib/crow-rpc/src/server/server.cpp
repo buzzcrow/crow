@@ -175,7 +175,7 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-        int nodelay = 1;
+        int nodelay = transport_->tcp_nodelay() ? 1 : 0;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         auto conn = transport_->create_connection(fd, "client");

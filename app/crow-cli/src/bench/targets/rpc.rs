@@ -174,6 +174,9 @@ impl BenchTarget for RpcTarget {
         if cfg.direct_write {
             cmd.arg("--direct-write");
         }
+        if cfg.no_tcp_nodelay {
+            cmd.arg("--no-tcp-nodelay");
+        }
         cmd.stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_stderr));
         let mut child = cmd
@@ -233,6 +236,7 @@ impl BenchTarget for RpcTarget {
         };
         server.set_send_queue_capacity(sq_cap);
         server.set_direct_write(cfg.direct_write);
+        server.set_tcp_nodelay(!cfg.no_tcp_nodelay);
         server.start();
 
         // Connect to the external echo server. These connections live

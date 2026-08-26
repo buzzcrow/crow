@@ -215,6 +215,10 @@ pub struct RpcArgs {
     #[arg(long, default_value_t = false)]
     pub direct_write: bool,
 
+    /// Disable `TCP_NODELAY` (allow Nagle coalescing). Default false.
+    #[arg(long, default_value_t = false)]
+    pub no_tcp_nodelay: bool,
+
     #[arg(long, default_value_t = 1_000_000)]
     pub key_space: u64,
 
