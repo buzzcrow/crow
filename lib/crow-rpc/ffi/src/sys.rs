@@ -48,9 +48,11 @@ pub struct CrowRpcLatencyStats {
 pub struct CrowRpcTransportStats {
     pub read_calls: u64,
     pub writev_calls: u64,
+    pub frames_sent: u64,
+    pub frames_parsed: u64,
+    pub read_bytes: u64,
+    pub writev_bytes: u64,
     pub submit_to_writev: CrowRpcLatencyStats,
-    pub read_to_dispatch: CrowRpcLatencyStats,
-    pub dispatch_to_enq: CrowRpcLatencyStats,
 }
 
 #[repr(C)]
@@ -150,6 +152,7 @@ extern "C" {
     pub fn crow_rpc_server_stop(server: crow_rpc_server_t);
     pub fn crow_rpc_server_port(server: crow_rpc_server_t) -> c_int;
     pub fn crow_rpc_server_set_send_queue_capacity(server: crow_rpc_server_t, capacity: u32);
+    pub fn crow_rpc_server_set_direct_write(server: crow_rpc_server_t, enabled: c_int);
 
     pub fn crow_rpc_server_transport_stats(server: crow_rpc_server_t, out: *mut CrowRpcTransportStats);
 

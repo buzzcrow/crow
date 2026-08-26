@@ -6,7 +6,6 @@
 #include "crow-rpc/buffer.h"
 
 #include <cassert>
-#include <chrono>
 #include <cstdlib>
 #include <new>
 
@@ -96,7 +95,6 @@ Frame *FrameParser::yield_frame()
     frame_->request_id      = parsed_request_id_;
     frame_->rpc_create_nano = parsed_rpc_create_nano_;
     frame_->data_buf        = data_buf_;
-    frame_->parsed_nano     = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 
     // Copy control bytes into the Frame for service-specific handlers.
     // Common handlers (ping, unknown) ignore this field.

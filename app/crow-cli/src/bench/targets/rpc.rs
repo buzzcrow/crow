@@ -170,8 +170,11 @@ impl BenchTarget for RpcTarget {
             .arg("--io-engines")
             .arg(cfg.io_engines.to_string())
             .arg("--io-workers")
-            .arg(cfg.io_workers.to_string())
-            .stdout(Stdio::from(log_file))
+            .arg(cfg.io_workers.to_string());
+        if cfg.direct_write {
+            cmd.arg("--direct-write");
+        }
+        cmd.stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_stderr));
         let mut child = cmd
             .spawn()
@@ -229,6 +232,7 @@ impl BenchTarget for RpcTarget {
             RpcWorkerMode::Tokio => cfg.send_queue_capacity,
         };
         server.set_send_queue_capacity(sq_cap);
+        server.set_direct_write(cfg.direct_write);
         server.start();
 
         // Connect to the external echo server. These connections live
@@ -297,9 +301,26 @@ impl BenchTarget for RpcTarget {
             };
             eprintln!(
                 "client_transport_stats : read_calls={rc} writev_calls={wc} \
+                 frames_sent={fs} frames_parsed={fp} \
+                 read_bytes={rb} writev_bytes={wb} \
+                 app_send_agg={saggr:.1} tcp_recv_agg={raggr:.1} \
                  submit_to_writev={sw_avg:.1}us({sw_c})",
                 rc = s.read_calls,
                 wc = s.writev_calls,
+                fs = s.frames_sent,
+                fp = s.frames_parsed,
+                rb = s.read_bytes,
+                wb = s.writev_bytes,
+                saggr = if s.writev_calls > 0 {
+                    s.frames_sent as f64 / s.writev_calls as f64
+                } else {
+                    0.0
+                },
+                raggr = if s.read_calls > 0 {
+                    s.frames_parsed as f64 / s.read_calls as f64
+                } else {
+                    0.0
+                },
                 sw_avg = avg_us(&s.submit_to_writev),
                 sw_c = s.submit_to_writev.count,
             );

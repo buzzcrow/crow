@@ -39,9 +39,10 @@ static uint32_t parse_u32(const char *s, const char *name)
 
 int main(int argc, char *argv[])
 {
-    int      port       = 0;
-    uint32_t io_engines = 1;
-    uint32_t io_workers = 1;
+    int      port         = 0;
+    uint32_t io_engines   = 1;
+    uint32_t io_workers   = 1;
+    int      direct_write = 0;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -54,9 +55,12 @@ int main(int argc, char *argv[])
         else if (arg == "--io-workers" && i + 1 < argc) {
             io_workers = parse_u32(argv[++i], "io-workers");
         }
+        else if (arg == "--direct-write") {
+            direct_write = 1;
+        }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-rpc-echo-server --port <port> "
-                        "[--io-engines N] [--io-workers M]\n");
+                        "[--io-engines N] [--io-workers M] [--direct-write]\n");
             return 0;
         }
         else {
@@ -73,6 +77,8 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "error: failed to create server\n");
         return 1;
     }
+
+    crow_rpc_server_set_direct_write(server, direct_write);
 
     if (crow_rpc_server_listen(server, "127.0.0.1", port) != CROW_RPC_OK) {
         std::fprintf(stderr, "error: failed to listen on port %d\n", port);
@@ -105,16 +111,15 @@ int main(int argc, char *argv[])
     std::memset(&stats, 0, sizeof(stats));
     crow_rpc_server_transport_stats(server, &stats);
     std::printf("stats read_calls=%llu writev_calls=%llu "
-                "submit_to_writev_count=%llu submit_to_writev_sum_ns=%llu "
-                "read_to_dispatch_count=%llu read_to_dispatch_sum_ns=%llu "
-                "dispatch_to_enq_count=%llu dispatch_to_enq_sum_ns=%llu\n",
+                "frames_sent=%llu frames_parsed=%llu "
+                "read_bytes=%llu writev_bytes=%llu "
+                "submit_to_writev_count=%llu submit_to_writev_sum_ns=%llu\n",
                 static_cast<unsigned long long>(stats.read_calls), static_cast<unsigned long long>(stats.writev_calls),
+                static_cast<unsigned long long>(stats.frames_sent),
+                static_cast<unsigned long long>(stats.frames_parsed), static_cast<unsigned long long>(stats.read_bytes),
+                static_cast<unsigned long long>(stats.writev_bytes),
                 static_cast<unsigned long long>(stats.submit_to_writev.count),
-                static_cast<unsigned long long>(stats.submit_to_writev.sum_ns),
-                static_cast<unsigned long long>(stats.read_to_dispatch.count),
-                static_cast<unsigned long long>(stats.read_to_dispatch.sum_ns),
-                static_cast<unsigned long long>(stats.dispatch_to_enq.count),
-                static_cast<unsigned long long>(stats.dispatch_to_enq.sum_ns));
+                static_cast<unsigned long long>(stats.submit_to_writev.sum_ns));
     std::fflush(stdout);
 
     crow_rpc_server_stop(server);

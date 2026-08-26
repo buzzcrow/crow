@@ -55,60 +55,55 @@ void KqueueEngine::add_listen_fd(int fd)
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::add_connection(int fd, Connection *conn)
+void KqueueEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 {
     {
         std::lock_guard<std::mutex> lock(conn_mu_);
-        connections_[fd] = conn;
+        connections_[read_fd] = conn;
     }
-    // Register read with udata = Connection* so wait() can dispatch
-    // without a map lookup. EV_ONESHOT in multi-worker mode prevents
-    // races (only one worker wakes per event; re-arm after processing).
+    // kqueue uses separate filters (EVFILT_READ, EVFILT_WRITE) on the
+    // same fd, so read and write are already independent — no dup needed.
+    // Register read with udata = Connection* for zero-lock dispatch.
     int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
     struct kevent change;
-    EV_SET(&change, fd, EVFILT_READ, flags, 0, 0, conn);
+    EV_SET(&change, read_fd, EVFILT_READ, flags, 0, 0, conn);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::remove_connection(int fd)
+void KqueueEngine::remove_connection(int read_fd, int write_fd)
 {
     {
         std::lock_guard<std::mutex> lock(conn_mu_);
-        connections_.erase(fd);
+        connections_.erase(read_fd);
     }
-    // Delete both read and write filters.
+    // Delete both read and write filters (kqueue uses same fd for both).
     struct kevent changes[2];
-    EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-    EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+    EV_SET(&changes[0], read_fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+    EV_SET(&changes[1], read_fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
     ::kevent(kq_, changes, 2, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::arm_read(int fd, Connection *conn)
+void KqueueEngine::arm_read(int read_fd, Connection *conn)
 {
-    // Caller passes conn directly — no map lookup or mutex.
-    // In one-shot mode, EV_ADD re-arms the filter after a one-shot event.
     int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
     struct kevent change;
-    EV_SET(&change, fd, EVFILT_READ, flags, 0, 0, conn);
+    EV_SET(&change, read_fd, EVFILT_READ, flags, 0, 0, conn);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::arm_write(int fd, Connection *conn)
+void KqueueEngine::arm_write(int write_fd, Connection *conn)
 {
-    // Level-triggered (no EV_CLEAR): fires whenever the socket is
-    // writable. We disarm via disarm_write when the send queue is empty
-    // to avoid a busy-loop. udata = Connection* for zero-lock dispatch.
-    // In one-shot mode, EV_ONESHOT ensures only one worker processes write.
+    // kqueue uses EVFILT_WRITE on the same fd — independent from EVFILT_READ.
     int           flags = EV_ADD | (oneshot_ ? EV_ONESHOT : 0);
     struct kevent change;
-    EV_SET(&change, fd, EVFILT_WRITE, flags, 0, 0, conn);
+    EV_SET(&change, write_fd, EVFILT_WRITE, flags, 0, 0, conn);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
-void KqueueEngine::disarm_write(int fd, Connection * /*conn*/)
+void KqueueEngine::disarm_write(int write_fd, Connection * /*conn*/)
 {
     struct kevent change;
-    EV_SET(&change, fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+    EV_SET(&change, write_fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 

@@ -6,6 +6,7 @@
 #include "crow-common/mpsc_queue.h"
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/framing.h"
+#include "crow-rpc/iovec_ring.h"
 #include "crow-rpc/transport.h"
 
 #include <atomic>
@@ -78,7 +79,7 @@ class Connection
     // claimed a slot but not yet filled it.
     bool has_pending_send() const
     {
-        return send_queue_.has_pending();
+        return send_queue_.has_pending() || ring_.has_pending();
     }
 
     // Close the connection, fail pending requests, signal reconnect.
@@ -107,13 +108,26 @@ class Connection
 
     // Transport-specific I/O handle. TcpTransport casts to int (socket fd);
     // RdmaTransport casts to ibv_qp*. The connection itself never uses this.
+    // For TCP with dup'd read/write fds, this is the read fd.
     uint64_t transport_handle = 0;
+
+    // For TCP with dup'd read/write fds (buzz-cpp pattern): the write fd
+    // is a dup() of the read fd, registered separately with epoll so
+    // EPOLLONESHOT on read and write are independent. Arming write does
+    // not re-arm read, preventing multi-worker races. 0 if not used.
+    int write_fd = -1;
 
     // Back-pointer to the owning SocketEngine (set by Worker::add_connection).
     // SocketTransport::submit uses this to arm write on the correct engine
     // when caller-thread writev hits EAGAIN. Type-erased (void*) to avoid
     // a layering dependency on socket_transport.h.
     void *io_engine = nullptr;
+
+    // Back-pointer to the owning Worker (set by Worker::add_connection).
+    // SocketTransport::submit uses this to find the worker's cross-thread
+    // pending list for deferred writev. Type-erased (void*) to avoid a
+    // layering dependency on socket_transport.h.
+    void *io_worker = nullptr;
 
     // User data slot (for caller-side bookkeeping).
     void *user_data = nullptr;
@@ -143,6 +157,12 @@ class Connection
     // consumer (whichever thread holds in_send_) drains via drain_send_queue
     // for writev. Defined in crow-common/cpp/include/crow-common/mpsc_queue.h.
     SendQueue send_queue_;
+
+    // Pre-allocated iovec ring for writev scatter-gather (buzz-cpp pattern).
+    // try_send drains the MPSC queue into this ring, then calls ring.send()
+    // which does writev directly on the ring's iovecs. On partial write,
+    // iovecs are modified in place — no re-enqueue, no per-call allocation.
+    IovecRing ring_;
 
     // Caller-thread direct-write flag. Only one thread
     // does writev at a time; others just offer to the queue and return.

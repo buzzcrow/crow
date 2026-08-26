@@ -56,7 +56,10 @@ crow_rpc_server_t crow_rpc_server_create_with_engines(crow_rpc_pool_t pool, uint
 // Set per-connection send queue capacity (backpressure bound). Must be
 // called before listen/connect creates connections. Default 1024.
 // Rounded up to next power of two internally.
-void            crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t capacity);
+void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t capacity);
+// Direct-write mode: skip deferred writev aggregation, writev immediately
+// per submit. Default 0 (deferred). Must be called before listen/connect.
+void            crow_rpc_server_set_direct_write(crow_rpc_server_t server, int enabled);
 void            crow_rpc_server_destroy(crow_rpc_server_t server);
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port);
 void            crow_rpc_server_start(crow_rpc_server_t server);
@@ -79,9 +82,11 @@ typedef struct crow_rpc_transport_stats
 {
     uint64_t                 read_calls;       // ::read() syscalls
     uint64_t                 writev_calls;     // ::writev() syscalls
+    uint64_t                 frames_sent;      // frames drained + writev'd
+    uint64_t                 frames_parsed;    // frames parsed from read()
+    uint64_t                 read_bytes;       // bytes returned by ::read()
+    uint64_t                 writev_bytes;     // bytes written by ::writev()
     crow_rpc_latency_stats_t submit_to_writev; // submit → writev (queue wait)
-    crow_rpc_latency_stats_t read_to_dispatch; // read → handler (parse time)
-    crow_rpc_latency_stats_t dispatch_to_enq;  // handler → submit_inline (handler time)
 } crow_rpc_transport_stats_t;
 
 void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out);

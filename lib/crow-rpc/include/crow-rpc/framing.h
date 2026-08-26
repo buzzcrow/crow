@@ -50,7 +50,6 @@ struct Frame
     uint64_t request_id      = 0;       // extracted from control during parse
     uint64_t rpc_create_nano = 0;       // extracted from control during parse
     Buffer  *data_buf        = nullptr; // pool-allocated; nullptr if control-only
-    uint64_t parsed_nano     = 0;       // steady_clock ns when parser yielded this frame
 
     // Raw control message bytes (flatbuffer). Populated for all frames with
     // msg_size > 0. Common handlers (ping, unknown) use only request_id +

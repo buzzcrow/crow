@@ -16,21 +16,19 @@
 namespace crow::rpc
 {
 
-// Forward declaration — Worker references SocketTransport for multi-worker mode.
+// Forward declarations — Worker references SocketTransport, SocketEngine
+// references Worker for the owner-worker back-pointer.
 class SocketTransport;
+class Worker;
 
 // ── TransportStats: aggregation + latency counters ────────────────
 //
 // Atomic counters sampled after a bench run. Two groups:
 //   - Aggregation counts: measure coalescing (frames per syscall)
-//   - Latency histograms: measure time spent in each pipeline step
+//   - Latency histograms: measure queue wait time
 //
 // Latency steps (nanoseconds, log2 buckets 0..30 = 1ns..1s):
 //   submit_to_writev : submit() → actual writev (request queue wait)
-//   read_to_dispatch : read() → handler entry (parse time)
-//   dispatch_to_enq  : handler entry → submit_inline (handler time)
-//   enq_to_writev    : submit_inline → actual writev (send agg wait)
-//   writev_to_read    : response writev → client read (kernel socket RTT)
 struct LatencyHistogram
 {
     static constexpr int  NUM_BUCKETS = 31; // log2: 0..30 (1ns..~1s)
@@ -79,13 +77,21 @@ struct TransportStats
     std::atomic<uint64_t> read_calls{0};   // ::read() syscalls
     std::atomic<uint64_t> writev_calls{0}; // ::writev() syscalls
 
-    // Latency histograms (nanoseconds). Each has .count, .sum_ns, .min, .max.
-    // Aggregation ratios:
-    //   recv_agg = read_to_dispatch.count / read_calls
-    //   send_agg = submit_to_writev.count  / writev_calls
-    LatencyHistogram submit_to_writev; // submit/submit_inline → writev (queue wait)
-    LatencyHistogram read_to_dispatch; // read() → handler entry (parse time)
-    LatencyHistogram dispatch_to_enq;  // handler entry → submit_inline (handler time)
+    // App-level aggregation counts: frames processed per syscall.
+    //   app_send_agg = frames_sent / writev_calls  (frames per writev)
+    //   tcp_recv_agg = frames_parsed / read_calls   (frames per read)
+    std::atomic<uint64_t> frames_sent{0};   // frames drained + writev'd
+    std::atomic<uint64_t> frames_parsed{0}; // frames parsed from read()
+
+    // Bandwidth: total bytes moved by read()/writev() syscalls.
+    //   recv_bw = read_bytes / duration
+    //   send_bw = writev_bytes / duration
+    std::atomic<uint64_t> read_bytes{0};   // bytes returned by ::read()
+    std::atomic<uint64_t> writev_bytes{0}; // bytes written by ::writev()
+
+    // Latency histogram (nanoseconds).
+    //   submit_to_writev : submit() → actual writev (queue wait)
+    LatencyHistogram submit_to_writev;
 };
 
 // ── SocketEngine: platform-specific event loop primitives ─────────
@@ -116,7 +122,25 @@ struct EngineEvent
 class SocketEngine
 {
   public:
+    SocketEngine() = default;
+
+    explicit SocketEngine(Worker *owner) : owner_(owner)
+    {
+    }
+
     virtual ~SocketEngine() = default;
+
+    // The worker that owns this engine (set by SocketTransport). Used by
+    // submit() to find the worker's cross-thread pending list.
+    Worker *owner_worker() const
+    {
+        return owner_;
+    }
+
+    void set_owner_worker(Worker *w)
+    {
+        owner_ = w;
+    }
 
     // Initialize the engine for a worker thread. Returns 0 on success.
     virtual int init() = 0;
@@ -134,20 +158,20 @@ class SocketEngine
     // Register a listen socket (acceptor only). fd is the listening socket.
     virtual void add_listen_fd(int fd) = 0;
 
-    // Connection management.
-    virtual void add_connection(int fd, Connection *conn) = 0;
-    virtual void remove_connection(int fd)                = 0;
+    // Connection management. read_fd and write_fd are separate fds
+    // (write_fd = dup(read_fd)) so EPOLLONESHOT on read and write are
+    // independent — arming write does not re-arm read. When write_fd
+    // is -1 (no dup), both read and write use read_fd.
+    virtual void add_connection(int read_fd, int write_fd, Connection *conn) = 0;
+    virtual void remove_connection(int read_fd, int write_fd)                = 0;
 
     // Arm/disarm read/write events. Read is always armed (level-triggered);
     // write is armed on-demand (when send queue has data) and disarmed when
     // the queue drains. In one-shot mode, arm re-arms after processing.
-    // The caller passes the Connection* directly (it already has it from
-    // the event or the submit path) so the engine avoids a map lookup.
-    // epoll_ctl/kevent are kernel-serialized, so arm/disarm call MOD
-    // directly — no userspace mask tracking, no mutex on the hot path.
-    virtual void arm_read(int fd, Connection *conn)     = 0;
-    virtual void arm_write(int fd, Connection *conn)    = 0;
-    virtual void disarm_write(int fd, Connection *conn) = 0;
+    // arm_read uses the read fd; arm_write uses the write fd (independent).
+    virtual void arm_read(int read_fd, Connection *conn)      = 0;
+    virtual void arm_write(int write_fd, Connection *conn)    = 0;
+    virtual void disarm_write(int write_fd, Connection *conn) = 0;
 
     // Notify the worker for a cross-thread submit. Wakes the event loop.
     virtual void notify_worker() = 0;
@@ -162,6 +186,9 @@ class SocketEngine
 
     // Shutdown the engine (closes the epoll/kqueue fd).
     virtual void shutdown() = 0;
+
+  private:
+    Worker *owner_ = nullptr; // set by SocketTransport when creating workers
 };
 
 // ── Worker: one thread driving I/O for a set of connections ────────
@@ -175,7 +202,8 @@ class Worker
 {
   public:
     // engine is non-owning (SocketTransport owns all engines).
-    Worker(int id, SocketEngine *engine, TransportStats *stats);
+    // transport is non-owning — used to drain cross-thread pending sends.
+    Worker(int id, SocketEngine *engine, TransportStats *stats, SocketTransport *transport);
 
     ~Worker();
 
@@ -186,7 +214,16 @@ class Worker
     void stop();
 
     // Add a connection to this worker (called by the acceptor).
-    void add_connection(int fd, std::shared_ptr<Connection> conn);
+    // read_fd and write_fd are dup'd fds for independent epoll arming.
+    void add_connection(int read_fd, int write_fd, std::shared_ptr<Connection> conn);
+
+    // Check if the current thread is this worker's thread. Used by
+    // submit() to detect inline calls (coroutine resumed on I/O worker
+    // thread) and use submit_inline instead of notify.
+    bool is_current_thread() const
+    {
+        return std::this_thread::get_id() == thread_id_;
+    }
 
     SocketEngine *engine()
     {
@@ -200,9 +237,11 @@ class Worker
 
   private:
     int               id_;
-    SocketEngine     *engine_; // non-owning; transport owns all engines
-    TransportStats   *stats_;  // aggregation counters
+    SocketEngine     *engine_;    // non-owning; transport owns all engines
+    TransportStats   *stats_;     // aggregation counters
+    SocketTransport  *transport_; // non-owning; for cross-thread pending drain
     std::thread       thread_;
+    std::thread::id   thread_id_{};
     std::atomic<bool> running_{false};
 
     // Connections owned by this worker (one worker per connection).
@@ -212,7 +251,7 @@ class Worker
     // Per-worker receive buffer: one big read() grabs data for multiple
     // frames, then feed_data processes them all. Reduces syscalls when
     // multiple frames are pending on one connection.
-    static constexpr size_t RECV_BUF_SIZE = 256 * 1024;
+    static constexpr size_t RECV_BUF_SIZE = 64 * 1024;
     std::vector<uint8_t>    recv_buf_;
 
     // Pending sends accumulated during on_readable (send aggregation).
@@ -324,6 +363,13 @@ class SocketTransport : public Transport
         send_queue_capacity_ = cap;
     }
 
+    // Direct-write mode: skip deferred writev aggregation and call
+    // try_send immediately on each submit. Default false (deferred).
+    void set_direct_write(bool enabled)
+    {
+        direct_write_ = enabled;
+    }
+
   private:
     BufferPool                                *pool_;
     std::vector<std::unique_ptr<Worker>>       workers_;
@@ -337,6 +383,11 @@ class SocketTransport : public Transport
     // Per-connection send queue capacity (backpressure bound).
     uint32_t send_queue_capacity_{1024};
 
+    // Direct-write mode: try_send immediately per submit (no ring buffer
+    // aggregation). When false (default), submit enqueues and the I/O
+    // worker drains + writev in batches.
+    bool direct_write_{false};
+
     // Connection registry: maps raw Connection* to shared_ptr, so
     // submit() can safely access connections from arbitrary threads
     // (e.g. tokio tasks spawned by Rust handlers). When a connection
@@ -344,6 +395,14 @@ class SocketTransport : public Transport
     // returns false instead of crashing.
     std::mutex                                                  live_conns_mu_;
     std::unordered_map<Connection *, std::weak_ptr<Connection>> live_conns_;
+
+    // Cross-thread submit pending: connections that have frames enqueued
+    // by non-I/O-worker threads (via submit). Shared across all workers
+    // on all engines — any worker that picks up a Notify event drains
+    // this list. Protected by cross_thread_mu_.
+    std::mutex                cross_thread_mu_;
+    std::vector<Connection *> cross_thread_pending_;
+    std::atomic<bool>         cross_thread_notified_{false};
 
     friend class Worker;
 };

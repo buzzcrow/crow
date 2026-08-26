@@ -85,10 +85,16 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_set_send_queue_capacity(self.handle, capacity) };
     }
 
+    /// Direct-write mode: skip deferred writev aggregation, writev
+    /// immediately per submit. Default false (deferred writev).
+    pub fn set_direct_write(&self, enabled: bool) {
+        unsafe { sys::crow_rpc_server_set_direct_write(self.handle, if enabled { 1 } else { 0 }) };
+    }
+
     /// Sample transport-level stats: syscall counts + latency histograms.
     /// Aggregation ratios:
-    ///   recv_agg = submit_to_writev.count / read_calls  (frames per read)
-    ///   send_agg = submit_to_writev.count / writev_calls (frames per writev)
+    ///   tcp_recv_agg = frames_parsed / read_calls   (frames per read)
+    ///   app_send_agg = frames_sent / writev_calls   (frames per writev)
     pub fn transport_stats(&self) -> sys::CrowRpcTransportStats {
         let mut stats = sys::CrowRpcTransportStats::default();
         unsafe { sys::crow_rpc_server_transport_stats(self.handle, &mut stats) };

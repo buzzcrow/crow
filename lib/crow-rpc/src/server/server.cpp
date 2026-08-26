@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -21,11 +22,6 @@
 
 namespace crow::rpc
 {
-
-static inline uint64_t now_nano()
-{
-    return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-}
 
 RpcServer::RpcServer(BufferPool *pool, uint32_t io_engines, uint32_t io_workers)
     : pool_(pool),
@@ -179,6 +175,9 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
+        int nodelay = 1;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
         auto conn = transport_->create_connection(fd, "client");
         conn->set_on_frame([this](Frame *frame, Connection *c) { dispatch(frame, c); });
         // Fail pending server-initiated requests when the connection closes.
@@ -193,13 +192,6 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
 
 void RpcServer::dispatch(Frame *frame, Connection *conn)
 {
-    auto    &stats         = transport_->stats();
-    uint64_t dispatch_nano = 0;
-    if (frame->parsed_nano > 0) {
-        dispatch_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-        stats.read_to_dispatch.record(dispatch_nano - frame->parsed_nano);
-    }
-
     uint16_t msg_type   = frame->header.msg_type;
     bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
 
@@ -211,9 +203,6 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
     if (handler) {
         OutFrame *response = handler(frame, conn);
         if (response != nullptr) {
-            if (dispatch_nano > 0) {
-                stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
-            }
             transport_->submit_inline(conn, response);
         }
         return;
@@ -232,9 +221,6 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
         handler            = handle_unknown;
         OutFrame *response = handler(frame, conn);
         if (response != nullptr) {
-            if (dispatch_nano > 0) {
-                stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
-            }
             transport_->submit_inline(conn, response);
         }
     }

@@ -210,6 +210,11 @@ pub struct RpcArgs {
     #[arg(long, default_value_t = 1)]
     pub io_workers: u32,
 
+    /// Direct-write mode: skip deferred writev aggregation, writev
+    /// immediately per submit (RPC target only). Default false.
+    #[arg(long, default_value_t = false)]
+    pub direct_write: bool,
+
     #[arg(long, default_value_t = 1_000_000)]
     pub key_space: u64,
 

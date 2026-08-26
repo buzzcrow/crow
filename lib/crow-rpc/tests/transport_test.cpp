@@ -221,3 +221,104 @@ TEST_F(TransportLoopbackTest, EofCloseStopsWorkerSpin)
 
     transport.stop();
 }
+
+// Large data payload: header+control fit in recv_buf, but the 1MB data
+// payload exceeds recv_buf (64KB). After process_recv_bytes parses the
+// header+control and drains recv_buf, the parser enters ReadingData state.
+// The direct-read path must read the remaining data bytes straight into
+// data_buf_ — no extra copy through recv_buf. Verifies the frame arrives
+// intact with correct data content.
+TEST_F(TransportLoopbackTest, LargeDataPayloadDirectRead)
+{
+    SocketTransport transport(1, 1);
+    transport.start();
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    struct sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(port_);
+    ASSERT_EQ(::connect(client_fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)), 0);
+
+    int server_fd = ::accept(listen_fd_, nullptr, nullptr);
+    ASSERT_GE(server_fd, 0);
+
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    auto server_conn = transport.create_connection(server_fd, "server");
+
+    // 1MB data payload — exceeds recv_buf (64KB), forces direct-read path.
+    constexpr uint32_t DATA_SIZE = 1024 * 1024;
+    constexpr uint32_t CTRL_SIZE = 32;
+
+    std::atomic<bool>    got_frame{false};
+    uint16_t             recv_msg_type  = 0;
+    uint32_t             recv_data_size = 0;
+    std::vector<uint8_t> recv_data;
+
+    server_conn->set_on_frame([&](Frame *frame, Connection *) {
+        recv_msg_type  = frame->header.msg_type;
+        recv_data_size = frame->header.data_size;
+        if (frame->data_buf != nullptr) {
+            recv_data.assign(frame->data_buf->data, frame->data_buf->data + frame->data_buf->len);
+        }
+        got_frame.store(true, std::memory_order_release);
+        delete frame;
+    });
+
+    // Build the frame: header + control + 1MB data.
+    Header h;
+    h.msg_type  = 99;
+    h.msg_size  = CTRL_SIZE;
+    h.data_size = DATA_SIZE;
+
+    std::vector<uint8_t> ctrl(CTRL_SIZE, 0xAB);
+    std::vector<uint8_t> data(DATA_SIZE);
+    for (uint32_t i = 0; i < DATA_SIZE; i++) {
+        data[i] = static_cast<uint8_t>(i % 256);
+    }
+
+    std::vector<uint8_t> buf(crow::rpc::HEADER_SIZE + CTRL_SIZE + DATA_SIZE);
+    crow::rpc::serialize_header(buf.data(), h);
+    std::memcpy(buf.data() + crow::rpc::HEADER_SIZE, ctrl.data(), CTRL_SIZE);
+    std::memcpy(buf.data() + crow::rpc::HEADER_SIZE + CTRL_SIZE, data.data(), DATA_SIZE);
+
+    // Write in chunks — the kernel send buffer may not accept 1MB at once.
+    size_t total_written = 0;
+    while (total_written < buf.size()) {
+        ssize_t n = ::write(client_fd, buf.data() + total_written, buf.size() - total_written);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            break;
+        }
+        total_written += static_cast<size_t>(n);
+    }
+    ASSERT_EQ(total_written, buf.size());
+
+    // Wait for the frame to arrive (up to 5 seconds — 1MB over loopback).
+    for (int i = 0; i < 500 && !got_frame.load(std::memory_order_acquire); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_TRUE(got_frame.load(std::memory_order_acquire));
+    EXPECT_EQ(recv_msg_type, 99u);
+    EXPECT_EQ(recv_data_size, DATA_SIZE);
+    ASSERT_EQ(recv_data.size(), DATA_SIZE);
+
+    // Verify data content — catches corruption from the direct-read path.
+    for (uint32_t i = 0; i < DATA_SIZE; i++) {
+        EXPECT_EQ(recv_data[i], static_cast<uint8_t>(i % 256)) << "mismatch at byte " << i;
+        if (recv_data[i] != static_cast<uint8_t>(i % 256)) {
+            break; // don't spam 1M failures
+        }
+    }
+
+    transport.stop();
+    ::close(client_fd);
+}

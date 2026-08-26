@@ -14,6 +14,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -39,19 +40,38 @@ static inline uint64_t now_nano()
 
 // ── Worker ────────────────────────────────────────────────────────
 
-Worker::Worker(int id, SocketEngine *engine, TransportStats *stats) : id_(id), engine_(engine), stats_(stats)
+Worker::Worker(int id, SocketEngine *engine, TransportStats *stats, SocketTransport *transport)
+    : id_(id),
+      engine_(engine),
+      stats_(stats),
+      transport_(transport)
 {
 }
 
 Worker::~Worker()
 {
     stop();
+    // Close dup'd write fds. The read fds are closed by the caller
+    // (server/client shutdown). The engine may already be destroyed
+    // (engines_ is destroyed before workers_ in SocketTransport), so
+    // we only close the fds — no epoll_ctl calls.
+    std::lock_guard<std::mutex> lock(conns_mu_);
+    for (auto &[fd, conn] : connections_) {
+        if (conn->write_fd >= 0 && conn->write_fd != fd) {
+            ::close(conn->write_fd);
+            conn->write_fd = -1;
+        }
+    }
+    connections_.clear();
 }
 
 void Worker::start()
 {
     running_.store(true, std::memory_order_relaxed);
-    thread_ = std::thread([this] { run_loop(); });
+    thread_ = std::thread([this] {
+        thread_id_ = std::this_thread::get_id();
+        run_loop();
+    });
 }
 
 void Worker::stop()
@@ -65,18 +85,17 @@ void Worker::stop()
     }
 }
 
-void Worker::add_connection(int fd, std::shared_ptr<Connection> conn)
+void Worker::add_connection(int read_fd, int write_fd, std::shared_ptr<Connection> conn)
 {
-    // Set the engine back-pointer so SocketTransport::submit can route
-    // arm_write to the correct engine on EAGAIN. Done before registering
-    // the fd with the engine so the field is visible before any event.
     conn->io_engine = engine_;
+    conn->io_worker = this;
     {
         std::lock_guard<std::mutex> lock(conns_mu_);
-        connections_[fd] = std::move(conn);
+        connections_[read_fd] = std::move(conn);
     }
-    engine_->add_connection(fd, connections_.at(fd).get());
-    engine_->arm_read(fd, connections_.at(fd).get());
+    engine_->add_connection(read_fd, write_fd, connections_.at(read_fd).get());
+    // arm_read is called by add_connection (EPOLLIN armed at ADD time).
+    // In ONESHOT mode, the read fd is already armed.
 }
 
 void Worker::run_loop()
@@ -106,8 +125,31 @@ void Worker::run_loop()
                 const auto &ev = events[i];
                 switch (ev.type) {
                 case SocketEvent::Notify:
-                    // No cross-thread submit queue — submits are caller-thread
-                    // writev. Notify is only used for shutdown wake.
+                    // Cross-thread submit: drain pending connections and
+                    // batch writev. The pending list is transport-level
+                    // (shared across all workers/engines) so any worker
+                    // that picks up the Notify can drain all pending sends.
+                    {
+                        std::vector<Connection *> pending;
+                        {
+                            std::lock_guard<std::mutex> lock(transport_->cross_thread_mu_);
+                            pending.swap(transport_->cross_thread_pending_);
+                            transport_->cross_thread_notified_.store(false, std::memory_order_release);
+                        }
+                        for (Connection *c : pending) {
+                            if (!c->is_open()) {
+                                continue;
+                            }
+                            int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
+                            if (!c->try_send(wfd, stats_)) {
+                                // All sent.
+                            }
+                            else {
+                                // Partial/EAGAIN — arm write for retry.
+                                engine_->arm_write(wfd, c);
+                            }
+                        }
+                    }
                     break;
                 case SocketEvent::Timer:
                     // Scheduled tasks fire here (Phase 3).
@@ -124,8 +166,12 @@ void Worker::run_loop()
                             // flush to avoid dangling raw pointers.
                             CR_LOG_INFO("worker: conn closed on read fd={} conn_id={} name={}", ev.fd,
                                         static_cast<long long>(ev.conn->id()), ev.conn->name());
-                            engine_->remove_connection(ev.fd);
+                            int wfd = ev.conn->write_fd;
+                            engine_->remove_connection(ev.fd, wfd);
                             ::close(ev.fd);
+                            if (wfd >= 0 && wfd != ev.fd) {
+                                ::close(wfd);
+                            }
                             closed_fds.push_back(ev.fd);
                         }
                         else if (engine_->oneshot()) {
@@ -138,14 +184,19 @@ void Worker::run_loop()
                     break;
                 case SocketEvent::Writable:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
+                        // ev.fd is the write fd (dup'd). try_send uses it.
                         bool has_more = on_writable_impl(ev.conn, ev.fd, stats_);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
                             CR_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
                                         static_cast<long long>(ev.conn->id()), ev.conn->name());
-                            engine_->remove_connection(ev.fd);
+                            int rfd = static_cast<int>(ev.conn->transport_handle);
+                            engine_->remove_connection(rfd, ev.fd);
                             ::close(ev.fd);
-                            closed_fds.push_back(ev.fd);
+                            if (rfd != ev.fd) {
+                                // read fd will be closed by the map erase below
+                            }
+                            closed_fds.push_back(rfd);
                         }
                         else if (has_more) {
                             // Still has data — re-arm write in one-shot mode.
@@ -154,12 +205,8 @@ void Worker::run_loop()
                             }
                         }
                         else {
-                            // Queue empty — disarm write. In level-triggered
-                            // mode, this removes EPOLLOUT from the kernel. In
-                            // one-shot mode, the kernel already disarmed all
-                            // events; disarm_write re-arms with just EPOLLIN
-                            // so read events resume (EPOLLONESHOT disarms both
-                            // read and write, unlike kqueue's per-filter oneshot).
+                            // Queue empty — disarm write (MOD with 0 events).
+                            // Read fd is independent — no need to re-arm read.
                             engine_->disarm_write(ev.fd, ev.conn);
                         }
                     }
@@ -168,10 +215,15 @@ void Worker::run_loop()
                     if (ev.conn != nullptr && ev.conn->is_open()) {
                         CR_LOG_WARN("worker: socket error event fd={} conn_id={} name={}", ev.fd,
                                     static_cast<long long>(ev.conn->id()), ev.conn->name());
+                        int rfd = static_cast<int>(ev.conn->transport_handle);
+                        int wfd = ev.conn->write_fd;
                         ev.conn->close();
-                        engine_->remove_connection(ev.fd);
+                        engine_->remove_connection(rfd, wfd);
                         ::close(ev.fd);
-                        closed_fds.push_back(ev.fd);
+                        if (wfd >= 0 && wfd != ev.fd && wfd != rfd) {
+                            ::close(wfd);
+                        }
+                        closed_fds.push_back(rfd);
                     }
                     break;
                 case SocketEvent::Accept:
@@ -189,18 +241,22 @@ void Worker::run_loop()
                     if (!conn->is_open()) {
                         continue;
                     }
-                    int fd = static_cast<int>(conn->transport_handle);
-                    if (!on_writable_impl(conn, fd, stats_)) {
+                    int rfd = static_cast<int>(conn->transport_handle);
+                    int wfd = conn->write_fd >= 0 ? conn->write_fd : rfd;
+                    if (!on_writable_impl(conn, wfd, stats_)) {
                         // All data sent — no need to arm write.
                     }
                     else {
                         // Partial write or EAGAIN — arm write for remaining.
-                        engine_->arm_write(fd, conn);
+                        engine_->arm_write(wfd, conn);
                     }
                     if (!conn->is_open()) {
-                        engine_->remove_connection(fd);
-                        ::close(fd);
-                        closed_fds.push_back(fd);
+                        engine_->remove_connection(rfd, wfd);
+                        ::close(rfd);
+                        if (wfd >= 0 && wfd != rfd) {
+                            ::close(wfd);
+                        }
+                        closed_fds.push_back(rfd);
                     }
                 }
                 pending_write_conns_.clear();
@@ -231,7 +287,12 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
                              std::vector<Connection *> &pending_writes, TransportStats *stats)
 {
     auto &parser      = conn->parser();
-    auto  on_frame_cb = [conn](Frame *frame) { conn->on_frame(frame); };
+    auto  on_frame_cb = [conn, stats](Frame *frame) {
+        if (stats != nullptr) {
+            stats->frames_parsed.fetch_add(1, std::memory_order_relaxed);
+        }
+        conn->on_frame(frame);
+    };
 
     // Process bytes from recv_buf starting at offset `pos`, up to `end`.
     // Handles header+control (via feed_data) and data (direct copy to
@@ -271,10 +332,32 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
         return true;
     };
 
+    // Buzz-cpp read strategy: one big read() into recv_buf pulls a TCP
+    // segment (possibly multiple frames). process_recv_bytes handles
+    // header+control+small data from recv_buf (memcpy, no extra syscall).
+    // When recv_buf is exhausted and parser still needs data (large data
+    // payload spanning multiple TCP segments), read() directly into
+    // data_buf_ — no extra copy. read_calls counts only the main recv_buf
+    // read (TCP segment arrivals), so raggr = frames_parsed / read_calls
+    // reflects true kernel-level coalescing.
     while (true) {
-        // If parser is waiting for data, read directly into the data
-        // buffer (separate read for data into pool Buffer).
-        if (parser.state() == ParseState::ReadingData) {
+        ssize_t n = ::read(fd, recv_buf, recv_buf_size);
+        if (n <= 0) {
+            if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+                conn->close();
+            }
+            break;
+        }
+        if (stats != nullptr) {
+            stats->read_calls.fetch_add(1, std::memory_order_relaxed);
+            stats->read_bytes.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+        }
+        // Process all bytes in recv_buf — header+control via feed_data,
+        // data via direct copy from recv_buf. Handles multiple frames.
+        process_recv_bytes(0, static_cast<uint32_t>(n));
+        // If parser still needs data bytes (recv_buf exhausted mid-frame),
+        // read directly into data_buf_ — no extra copy for large payloads.
+        while (parser.state() == ParseState::ReadingData) {
             auto target = parser.next_read_target();
             if (target.len == 0) {
                 break;
@@ -287,60 +370,13 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
                 goto done;
             }
             if (stats != nullptr) {
-                stats->read_calls.fetch_add(1, std::memory_order_relaxed);
+                stats->read_bytes.fetch_add(static_cast<uint64_t>(n2), std::memory_order_relaxed);
             }
             Frame *frame = parser.advance(static_cast<uint32_t>(n2));
             if (frame != nullptr) {
-                conn->on_frame(frame);
+                on_frame_cb(frame);
             }
-            continue;
         }
-
-        // Header + control: read into recv_buf (batching multiple frames).
-        ssize_t n = ::read(fd, recv_buf, recv_buf_size);
-        if (n <= 0) {
-            if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-                conn->close();
-            }
-            break;
-        }
-        if (stats != nullptr) {
-            stats->read_calls.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        // Process all bytes in recv_buf — header+control via feed_data,
-        // data via direct copy. Handles multiple frames in one read.
-        process_recv_bytes(0, static_cast<uint32_t>(n));
-
-        // If parser is now waiting for data, loop back for direct read.
-        if (parser.state() == ParseState::ReadingData) {
-            continue;
-        }
-
-        // Check if parser needs more bytes (partial header/control).
-        auto target = parser.next_read_target();
-        if (target.len == 0) {
-            break;
-        }
-        // Read directly into parser buffer until header/control completes.
-        while (target.len > 0 && parser.state() != ParseState::ReadingData) {
-            ssize_t n2 = ::read(fd, target.ptr, target.len);
-            if (n2 <= 0) {
-                if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-                    conn->close();
-                }
-                goto done;
-            }
-            if (stats != nullptr) {
-                stats->read_calls.fetch_add(1, std::memory_order_relaxed);
-            }
-            Frame *frame = parser.advance(static_cast<uint32_t>(n2));
-            if (frame != nullptr) {
-                conn->on_frame(frame);
-            }
-            target = parser.next_read_target();
-        }
-        // If parser transitioned to ReadingData, loop back for direct read.
     }
 done:
     // If on_frame enqueued responses (via submit_inline), collect this
@@ -381,7 +417,7 @@ SocketTransport::SocketTransport(uint32_t io_engines, uint32_t io_workers, Buffe
         engines_.push_back(std::move(engine));
         for (uint32_t w = 0; w < workers_per_engine; w++) {
             int  worker_id = static_cast<int>(e * workers_per_engine + w);
-            auto worker    = std::make_unique<Worker>(worker_id, engine_ptr, &stats_);
+            auto worker    = std::make_unique<Worker>(worker_id, engine_ptr, &stats_, this);
             workers_.push_back(std::move(worker));
         }
     }
@@ -444,22 +480,63 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         conn = conn_ptr.get();
     }
     frame->create_nano = now_nano();
-    // Buzz model: enqueue to the connection's send queue, then try to
-    // writev directly on the caller's thread. The in_send_ flag serializes
-    // concurrent senders — only one does writev at a time; others just
-    // offer to the queue and return. If writev hits EAGAIN, arm write
-    // on the owning engine for retry.
+    // Direct-write mode: skip the ring buffer, writev immediately.
+    if (direct_write_) {
+        int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
+        if (!conn->enqueue_send(frame)) {
+            CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
+                        static_cast<long long>(conn->id()), conn->name());
+            return false;
+        }
+        if (!conn->try_send(wfd, &stats_)) {
+            auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
+            if (engine2 != nullptr) {
+                engine2->arm_write(wfd, conn);
+            }
+        }
+        return true;
+    }
+    // Deferred writev: enqueue only, then notify the owning I/O worker.
+    // The worker drains all pending connections on Notify, batching
+    // multiple frames per writev. This gives application-level send
+    // aggregation without relying on Nagle (TCP_NODELAY safe).
     if (!conn->enqueue_send(frame)) {
         CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
                     static_cast<long long>(conn->id()), conn->name());
         return false; // backpressure or closed
     }
-    int fd = static_cast<int>(conn->transport_handle);
-    if (!conn->try_send(fd, &stats_)) {
-        // Partial write or EAGAIN — arm write on the owning engine.
-        auto *engine = static_cast<SocketEngine *>(conn->io_engine);
-        if (engine != nullptr) {
-            engine->arm_write(fd, conn);
+
+    // If the submit is from an I/O worker thread (e.g. coroutine resumed
+    // by co_on_complete on the I/O worker), the frame is already enqueued
+    // — the worker's post-event flush will drain it. No notify needed
+    // (avoids eventfd thundering herd + ONESHOT read event interference).
+    auto *worker = static_cast<Worker *>(conn->io_worker);
+    if (worker != nullptr && worker->is_current_thread()) {
+        // Frame is already in the send queue (enqueued above).
+        // The post-event flush will drain it via pending_write_conns_.
+        return true;
+    }
+
+    // Cross-thread path: enqueue + notify the I/O worker to drain.
+    auto *engine = static_cast<SocketEngine *>(conn->io_engine);
+    if (engine != nullptr) {
+        {
+            std::lock_guard<std::mutex> lock(cross_thread_mu_);
+            cross_thread_pending_.push_back(conn);
+        }
+        bool expected = false;
+        if (cross_thread_notified_.compare_exchange_strong(expected, true)) {
+            engine->notify_worker();
+        }
+    }
+    else {
+        // No engine (test/direct connection) — fall back to immediate send.
+        int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
+        if (!conn->try_send(wfd, &stats_)) {
+            auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
+            if (engine2 != nullptr) {
+                engine2->arm_write(wfd, conn);
+            }
         }
     }
     return true;
@@ -468,6 +545,20 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
 bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
 {
     frame->create_nano = now_nano();
+    // Direct-write mode: writev immediately instead of deferring.
+    if (direct_write_) {
+        int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
+        if (!conn->enqueue_send(frame)) {
+            return false;
+        }
+        if (!conn->try_send(wfd, &stats_)) {
+            auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
+            if (engine2 != nullptr) {
+                engine2->arm_write(wfd, conn);
+            }
+        }
+        return true;
+    }
     // Enqueue only — the actual writev is deferred to the worker's
     // post-event flush (send aggregation). This coalesces multiple
     // responses from one read() into a single writev per connection,
@@ -491,13 +582,21 @@ std::shared_ptr<Connection> SocketTransport::create_connection(int fd, const std
     int64_t id             = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
     auto    conn           = std::make_shared<Connection>(id, name, pool_, 4 << 20, send_queue_capacity_);
     conn->transport_handle = static_cast<uint64_t>(fd);
+    // dup() the fd for independent read/write epoll registration (buzz-cpp
+    // pattern). This allows EPOLLONESHOT on read and write to be independent
+    // — arming write does not re-arm read, preventing multi-worker races.
+    int write_fd = ::dup(fd);
+    if (write_fd < 0) {
+        write_fd = fd; // fallback: same fd for read and write
+    }
+    conn->write_fd = write_fd;
     // Set the on_close callback to unregister from the live-conn
     // registry. This ensures submit() on a stale handle returns false
     // instead of crashing (use-after-free).
     conn->set_on_close([this](Connection *c) { unregister_conn(c); });
     Worker *w = get_worker();
     if (w != nullptr) {
-        w->add_connection(fd, conn);
+        w->add_connection(fd, write_fd, conn);
     }
     register_conn(conn);
     return conn;
@@ -550,6 +649,9 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
 
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    int nodelay = 1;
+    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     return create_connection(fd, addr + ":" + std::to_string(port));
 }

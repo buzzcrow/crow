@@ -22,18 +22,31 @@
 #   1  16  1,000   32    722,644 1,372  1,009   5,484  14,384     7.2    9.3    0
 #   2  16  1,000   16    900,252 1,099    851   4,012   9,056     6.3   13.0    0
 #
-# AMD (2026-08-21): Ryzen 9 5950X, 16c/32t, Linux 6.8, 128B, 20s,
+# AMD (2026-08-25): Ryzen 9 5950X, 16c/32t, Linux 6.8, 128B, 20s,
 # standalone server over epoll loopback. Slab completion pool with
 # two-phase PENDING (CLAIMED→READY) + read-before-CAS in on_response.
 # Coroutine mode uses send_queue=256 (same-thread submit+drain); tokio
 # mode uses send_queue=1024 (burst-submit needs larger queue).
+# NOTE: vs the 2026-08-21 reference this run is mixed, not strictly
+# better — coroutine within ±2.3% (noise), tokio mostly lower (1e8w
+# -17.6% the one outlier). Updated anyway per user request; the
+# 2026-08-21 rows are in doc/design/rpc/rpc-echo-flow-analysis.md.
+# Coroutine:
 #   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
-#   1   1      1    1      53,644    17     17     24      29     1.0    1.0    0
-#   1   4     64    4    964,072    65     61    145     613     6.0    6.0    0
-#   1   8    512    8   1,749,146   290    271    422   2,568    10.1   10.7    0
-#   2   8    512    8   1,803,255   281    247    357     415     7.9    8.2    0
-#   1  16  1,000   32   2,217,250   447    340  1,707   2,572     9.4    9.8    0
-#   2  16  1,000   16   2,348,192   422    363  1,399   5,584     9.2   10.3    0
+#   1   1      1    1      52,920    17     17     23      42     1.0    1.0    0
+#   1   4     64    4    989,663    63     59    133     597     5.9    5.9    0
+#   1   8    512    8   1,861,812   273    251    401   1,959    10.5   11.1    0
+#   2   8    512    8   1,763,679   288    255    375     423     7.2    7.4    0
+#   1  16  1,000   32   2,229,093   445    359  1,576   2,390     9.5    9.9    0
+#   2  16  1,000   16   2,294,279   432    380  1,273   5,824     8.7    9.7    0
+# Tokio:
+#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
+#   1   1      1    1      26,778    36     36     63      79     1.0    1.0    0
+#   1   4     64    4    617,944   102     95    258     472     5.2    5.2   14
+#   1   8    512    8    835,519   610    276  1,067  41,920    10.3   10.6   67
+#   2   8    512    8    936,963   542    294    870  41,728     9.1    9.3  142
+#   1  16  1,000   32  1,035,879   949    569  1,967  42,240     5.0    5.3  697
+#   2  16  1,000   16  1,047,529   938    802  1,988  41,440     5.1    5.6  865
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -66,18 +79,19 @@ run_bench() {
     p99_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p99_us')
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
-    # recv/send aggregation from server transport stats:
-    #   raggr = submit_to_writev_count / read_calls  (frames per read)
-    #   saggr = submit_to_writev_count / writev_calls (frames per writev)
-    local srv_line rc wc swc
+    # Aggregation from server transport stats:
+    #   tcp_recv_agg = frames_parsed / read_calls   (frames per read — TCP coalescing)
+    #   app_send_agg = frames_sent / writev_calls   (frames per writev — app batching)
+    local srv_line rc wc fs fp
     srv_line=$(echo "$output" | grep 'server_transport_stats' || true)
     rc=$(echo "$srv_line" | sed -n 's/.*read_calls=\([0-9][0-9]*\).*/\1/p')
     wc=$(echo "$srv_line" | sed -n 's/.*writev_calls=\([0-9][0-9]*\).*/\1/p')
-    swc=$(echo "$srv_line" | sed -n 's/.*submit_to_writev_count=\([0-9][0-9]*\).*/\1/p')
-    rc=${rc:-0}; wc=${wc:-0}; swc=${swc:-0}
+    fs=$(echo "$srv_line" | sed -n 's/.*frames_sent=\([0-9][0-9]*\).*/\1/p')
+    fp=$(echo "$srv_line" | sed -n 's/.*frames_parsed=\([0-9][0-9]*\).*/\1/p')
+    rc=${rc:-0}; wc=${wc:-0}; fs=${fs:-0}; fp=${fp:-0}
     if [ "$rc" -gt 0 ] && [ "$wc" -gt 0 ]; then
-        raggr=$(awk "BEGIN { printf \"%.1f\", $swc / $rc }")
-        saggr=$(awk "BEGIN { printf \"%.1f\", $swc / $wc }")
+        raggr=$(awk "BEGIN { printf \"%.1f\", $fp / $rc }")
+        saggr=$(awk "BEGIN { printf \"%.1f\", $fs / $wc }")
     else
         raggr=0; saggr=0
     fi

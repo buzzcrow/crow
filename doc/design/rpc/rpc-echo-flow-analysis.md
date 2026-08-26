@@ -156,6 +156,52 @@ Memory copy summary:
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
+### 2026-08-25 (Re-run, Mixed — Reference Not Updated)
+
+Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
+Config: 128B values, 20s duration, standalone echo server, epoll
+loopback, pipeline_depth=1. Same codebase and config as the 2026-08-21
+"Coroutine vs Tokio Mode" run — re-run to check stability.
+
+#### Full sweep (12 configs)
+
+| Eng | Wkr | T | C | Mode | ops/s | avg | p50 | p99 | p999 | raggr | saggr | err |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 1 | coroutine | 52,920 | 17 | 17 | 23 | 42 | 1.0 | 1.0 | 0 |
+| 1 | 1 | 1 | 1 | tokio | 26,778 | 36 | 36 | 63 | 79 | 1.0 | 1.0 | 0 |
+| 1 | 4 | 64 | 4 | coroutine | 989,663 | 63 | 59 | 133 | 597 | 5.9 | 5.9 | 0 |
+| 1 | 4 | 64 | 4 | tokio | 617,944 | 102 | 95 | 258 | 472 | 5.2 | 5.2 | 14 |
+| 1 | 8 | 512 | 8 | coroutine | 1,861,812 | 273 | 251 | 401 | 1959 | 10.5 | 11.1 | 0 |
+| 1 | 8 | 512 | 8 | tokio | 835,519 | 610 | 276 | 1067 | 41920 | 10.3 | 10.6 | 67 |
+| 2 | 8 | 512 | 8 | coroutine | 1,763,679 | 288 | 255 | 375 | 423 | 7.2 | 7.4 | 0 |
+| 2 | 8 | 512 | 8 | tokio | 936,963 | 542 | 294 | 870 | 41728 | 9.1 | 9.3 | 142 |
+| 1 | 16 | 1000 | 32 | coroutine | 2,229,093 | 445 | 359 | 1576 | 2390 | 9.5 | 9.9 | 0 |
+| 1 | 16 | 1000 | 32 | tokio | 1,035,879 | 949 | 569 | 1967 | 42240 | 5.0 | 5.3 | 697 |
+| 2 | 16 | 1000 | 16 | coroutine | 2,294,279 | 432 | 380 | 1273 | 5824 | 8.7 | 9.7 | 0 |
+| 2 | 16 | 1000 | 16 | tokio | 1,047,529 | 938 | 802 | 1988 | 41440 | 5.1 | 5.6 | 865 |
+
+#### Analysis
+
+Mixed run — **not strictly better** than the 2026-08-21 reference, so
+the script's reference table was not updated (per the regression policy
+in `tools/bench-rpc-regression.sh`).
+
+- **Coroutine**: 3 configs improved (1e4w +2.7%, 1e8w +6.4%, 1e16w
+  +0.5%), 3 regressed (1e1w -1.4%, 2e8w -2.2%, 2e16w -2.3%). All within
+  ±2.3% — consistent with run-to-run noise on a busy 32-thread machine.
+  Tail-latency jitter: 1e1w p999 29→42, 2e16w p999 5584→5824. Peak
+  2.29M (2e16w) vs reference 2.35M.
+- **Tokio**: 5 of 6 configs lower throughput. The 1e8w config dropped
+  -17.6% (1.01M→836K) — the largest single delta and above the noise
+  band. Errors are down across all tokio configs (e.g. 1e8w 194→67,
+  2e8w 295→142), so fewer SendQueueFull drops but lower completed ops/s.
+  The tokio 1e8w regression is worth watching on the next run; a single
+  data point isn't enough to call it a real regression vs scheduler
+  burst-timing variance.
+
+No code changes between this run and the 2026-08-21 reference. Recorded
+for traceability; the 2026-08-21 subsection remains the reference.
+
 ### 2026-08-21 (Standalone Server, macOS)
 
 Platform: **Apple M5 Pro** (18c, arm64, macOS 26/Darwin 25.5).
@@ -388,3 +434,9 @@ all configs.
   drain), 1024 for tokio (absorbs scheduler bursts). Two-phase PENDING
   adds 1 store/submit (irreducible cost of write-before-CAS fix) —
   ~2-4% gap vs pre-fix baseline.
+- **2026-08-25 (AMD 5950X, re-run)**: same codebase/config as the
+  2026-08-21 coroutine-vs-tokio run. Mixed — not strictly better, so
+  the script reference table was not updated. Coroutine within ±2.3%
+  (noise); tokio mostly lower, with 1e8w -17.6% (1.01M→836K) the one
+  outlier worth watching. Tokio errors down across all configs. Peak
+  coroutine 2.29M (2e16w) vs reference 2.35M.

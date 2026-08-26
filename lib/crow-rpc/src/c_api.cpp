@@ -230,6 +230,18 @@ void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t 
     }
 }
 
+void crow_rpc_server_set_direct_write(crow_rpc_server_t server, int enabled)
+{
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->transport()->set_direct_write(enabled != 0);
+    }
+    catch (...) {
+    }
+}
+
 void crow_rpc_server_destroy(crow_rpc_server_t server)
 {
     try {
@@ -261,12 +273,14 @@ void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transpor
         if (t == nullptr) {
             return;
         }
-        auto &s           = t->stats();
-        out->read_calls   = s.read_calls.load(std::memory_order_relaxed);
-        out->writev_calls = s.writev_calls.load(std::memory_order_relaxed);
+        auto &s            = t->stats();
+        out->read_calls    = s.read_calls.load(std::memory_order_relaxed);
+        out->writev_calls  = s.writev_calls.load(std::memory_order_relaxed);
+        out->frames_sent   = s.frames_sent.load(std::memory_order_relaxed);
+        out->frames_parsed = s.frames_parsed.load(std::memory_order_relaxed);
+        out->read_bytes    = s.read_bytes.load(std::memory_order_relaxed);
+        out->writev_bytes  = s.writev_bytes.load(std::memory_order_relaxed);
         copy_latency(&out->submit_to_writev, s.submit_to_writev);
-        copy_latency(&out->read_to_dispatch, s.read_to_dispatch);
-        copy_latency(&out->dispatch_to_enq, s.dispatch_to_enq);
     }
     catch (...) {
     }
