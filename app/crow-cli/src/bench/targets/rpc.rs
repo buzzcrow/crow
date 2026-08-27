@@ -125,6 +125,8 @@ pub(crate) struct RpcTarget {
     /// `request_id` collisions (the C API uses the flatbuffer's `id` field
     /// as the `request_id` for response correlation).
     request_id_counter: Arc<AtomicU64>,
+    /// Show transport stats on console (from --verbose).
+    verbose: bool,
 }
 
 impl RpcTarget {
@@ -139,6 +141,7 @@ impl RpcTarget {
             conns: Vec::new(),
             next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
+            verbose: false,
         }
     }
 }
@@ -151,6 +154,7 @@ impl BenchTarget for RpcTarget {
     }
 
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
+        self.verbose = cfg.verbose;
         let pool = Arc::new(BufferPool::new(8192));
 
         // Spawn the external echo server process. It gets its own
@@ -161,7 +165,13 @@ impl BenchTarget for RpcTarget {
                 "could not locate crow-rpc-echo-server binary; set $CROW_RPC_ECHO_SERVER_BIN".to_string(),
             )
         })?;
-        let log_path = std::env::temp_dir().join(format!("crow-rpc-echo-server-{}.log", std::process::id()));
+        let log_path = cfg.report_dir.as_ref().map_or_else(
+            || std::env::temp_dir().join(format!("crow-rpc-echo-server-{}.log", std::process::id())),
+            |d| d.join("server.log"),
+        );
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let log_file = std::fs::File::create(&log_path)?;
         let log_file_stderr = log_file.try_clone()?;
         let mut cmd = Command::new(&binary);
@@ -299,7 +309,7 @@ impl BenchTarget for RpcTarget {
                     0.0
                 }
             };
-            eprintln!(
+            let client_line = format!(
                 "client_transport_stats : read_calls={rc} writev_calls={wc} \
                  frames_sent={fs} frames_parsed={fp} \
                  read_bytes={rb} writev_bytes={wb} \
@@ -331,6 +341,15 @@ impl BenchTarget for RpcTarget {
                 rns = s.read_ns_sum,
                 fns = s.flush_ns_sum,
             );
+            // Write to file in the run directory.
+            if let Some(ref log_path) = self.server_log_path {
+                if let Some(stats_path) = log_path.parent() {
+                    let _ = std::fs::write(stats_path.join("client-stats.log"), &client_line);
+                }
+            }
+            if self.verbose {
+                eprintln!("{client_line}");
+            }
         }
         // Stop the local client-side transport.
         if let Some(server) = self.server.take() {
@@ -346,8 +365,15 @@ impl BenchTarget for RpcTarget {
         if let Some(ref log_path) = self.server_log_path {
             if let Ok(content) = std::fs::read_to_string(log_path) {
                 for line in content.lines() {
-                    if line.starts_with("stats ") {
-                        eprintln!("server_transport_stats : {line}");
+                    if let Some(rest) = line.strip_prefix("stats ") {
+                        let server_line = format!("server_transport_stats : stats {rest}");
+                        // Write to file in the run directory.
+                        if let Some(stats_path) = log_path.parent() {
+                            let _ = std::fs::write(stats_path.join("server-stats.log"), &server_line);
+                        }
+                        if self.verbose {
+                            eprintln!("{server_line}");
+                        }
                         break;
                     }
                 }

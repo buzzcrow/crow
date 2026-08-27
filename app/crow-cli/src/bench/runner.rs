@@ -171,6 +171,8 @@ pub(crate) struct BenchConfig {
     pub(crate) send_queue_capacity: u32,
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
     pub(crate) enable_nagle: bool,
+    /// Show transport stats on console (default: files only).
+    pub(crate) verbose: bool,
 }
 
 impl BenchConfig {
@@ -209,6 +211,7 @@ impl BenchConfig {
             rpc_worker_mode: RpcWorkerMode::Coroutine,
             send_queue_capacity: 1024,
             enable_nagle: false,
+            verbose: false,
         }
     }
 

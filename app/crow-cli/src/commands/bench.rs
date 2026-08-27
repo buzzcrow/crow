@@ -224,6 +224,11 @@ pub struct RpcArgs {
     /// sequence number.
     #[arg(long)]
     pub run_id: Option<String>,
+
+    /// Show transport stats on console (default: stats go to
+    /// `bench-runs/<run>/` files only).
+    #[arg(long, short = 'v', default_value_t = false)]
+    pub verbose: bool,
 }
 
 /// Arguments for `crow-cli bench`.
