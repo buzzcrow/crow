@@ -61,46 +61,47 @@ serialization. The scan path is zero-copy from packed buffer to client
 
 ---
 
-## Change History
+## Latest Benchmark Results — 2026-08-28 (Linux)
 
-- **R6** — Zero-copy value returns: L1 hits borrow directly from the
-  resident leaf frame (no `std::string` staging). Scan values are
-  zero-copy from packed buffer to client `Bytes`.
-- **R38/R44/R49** — Zero-copy scan values + streaming scan RPC.
-  Unblocked `full_100k` (previously 0 scans/s, 4 MiB unary cap) and
-  `valuesize_16KiB` (previously 0 scans/s). 15-20% improvement on
-  large scans.
-- **R48** — Lazy `LeafChainCursor`: replaced eager whole-leaf
-  resolution with an on-demand k-way cursor. Scan cost went from
-  O(entries-per-leaf) to O(limit). Fixed the 1 KiB anomaly.
-- **R50** — Epoch-protected lock-free MemTable: replaced
-  `absl::btree_map` under `mu_` with a `ConcurrentSkipList`.
-  Eliminated the O(N_l0) `snapshot()` copy; readers traverse L0
-  lock-free with zero copy.
-- **R58** — 2-source fast path + loser tree in the scan merge loop:
-  when only L0+L1 are active (the common case), a straight 2-way
-  merge avoids the loser-tree heap. 3+ sources fall back to a loser
-  tree. Reduces merge-loop overhead per entry.
-- **R57** — Zero-copy scan result staging: the `consider` lambda
-  packs the wire format directly into a `ScanPackedBuf` (growing
-  `malloc`/`realloc` buffer), and ownership is transferred across
-  the FFI via `release()` — no `std::vector<scan_entry>` staging,
-  no re-pack loop, no `make_buf` malloc+memcpy. Reduces C++ copies
-  from 3 to 1 per scan.
-- **R59** — Two scan modes + snapshot versioning API: the existing
-  `scan` RPC (mode 1, list scan) is now documented as S3-list
-  semantics (per-page-consistent, not cross-page snapshot). A new
-  snapshot versioning API (mode 2) pins a point-in-time-consistent
-  L1 view via `CreateSnapshot` (flush + `snapshot_view`), iterates
-  it with `SnapshotScan` (binary-search + linear scan over the
-  frozen `Vec<ViewEntry>`), and releases it with `ReleaseSnapshot`.
-  Per-group handle registry with 5-min lease/expiry reaps abandoned
-  snapshots. No new engine machinery — the existing `snapshot_view`
-  FFI is reused.
+**Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
+**Setup**: 20s mem mode, 3-node cluster, 100k pre-populated keys, 64B
+values except `largeval_16k` (16KiB). Script wall time: 12m05.070s.
+Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
----
+### Single-thread (1T:1C) — per-scan engine cost
 
-## Latest Benchmark Results — 2026-08-19 (post-R48+R50)
+| Label | Limit | Val B | Mode | scans/s | avg us | p50 us | p99 us | p999 us | err |
+|-------|------:|------:|------|--------:|-------:|-------:|-------:|--------:|----:|
+| bounded_10 | 10 | 64 | lin | 12999 | 76 | 81 | 113 | 149 | 0 |
+| bounded_1k | 1000 | 64 | lin | 1436 | 695 | 708 | 873 | 988 | 0 |
+| bounded_10k | 10000 | 64 | lin | 118 | 8495 | 8672 | 11592 | 13256 | 0 |
+| full_100k | 100000 | 64 | lin | 20 | 49126 | 45696 | 92032 | 149120 | 0 |
+| deep_pag_10 | 10 | 64 | lin | 12553 | 79 | 83 | 113 | 144 | 0 |
+| mixed_1k | 1000 | mixed | lin | 194 | 5162 | 4916 | 7880 | 9624 | 0 |
+| minslot_1k | 1000 | 64 | minslot | 1426 | 700 | 708 | 920 | 1057 | 0 |
+| largeval_16k | 1000 | 16384 | lin | 20 | 50462 | 48096 | 72832 | 124672 | 0 |
+
+### Multi-thread — max throughput + read-mode split
+
+| Label | Limit | Val B | Mode | T:C | scans/s | avg us | p50 us | p99 us | p999 us | err |
+|-------|------:|------:|------|-----|--------:|-------:|-------:|-------:|--------:|----:|
+| lin_4t | 1000 | 64 | lin | 4:4 | 4732 | 844 | 847 | 1232 | 1380 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 4:4 | 4935 | 809 | 808 | 1181 | 1332 | 0 |
+| lin_16t | 1000 | 64 | lin | 16:16 | 23960 | 666 | 652 | 1016 | 1184 | 0 |
+| minslot_16t | 1000 | 64 | minslot | 16:16 | 23328 | 684 | 667 | 1045 | 1234 | 0 |
+| lin_32t | 1000 | 64 | lin | 32:32 | 26232 | 1218 | 1191 | 2450 | 3172 | 0 |
+| minslot_32t | 1000 | 64 | minslot | 32:32 | 26545 | 1203 | 1177 | 2064 | 2442 | 0 |
+
+MinSlot leads Linearizable by 4.3% at 4T and is nearly equal at 16T.
+At 32T it is 1.2% faster and has a 15.8% lower p99 (2064us vs 2450us).
+The HTTP/2 6T:3C sentinel is recorded in the read benchmark rather than
+this scan benchmark.
+
+All 14 configurations completed with zero scan errors. The large-value
+sentinel remained error-free at 20 scans/s; its high latency is expected for
+1000-entry scans over 16KiB values.
+
+## macOS Baseline Results — 2026-08-19 (post-R48+R50)
 
 **Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5.
 **Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
@@ -146,55 +147,51 @@ MinSlot shows a clear advantage at 4T:
   MinSlot's p99 is 41% better (1416us vs 2416us). Load distribution
   keeps tail latency low even when throughput is capped by the engine.
 
-### Linux results — 2026-08-10 (post-R67)
+### Linux results — 2026-08-28
 
 **Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
-**Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
-Single-thread numbers are from one full regression run (post-R67 fix).
-macOS column is the 2026-08-19 baseline (unchanged).
-Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
+**Setup**: 20s mem mode, 3-node cluster, 100k pre-populated keys, 64B
+values except `largeval_16k` (16KiB). macOS columns retain the 2026-08-19
+baseline. Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
 #### Single-thread (1T:1C)
 
 | Label | Limit | Start_after | Val B | Mode | Linux scans/s | macOS scans/s | Δ% | L/M | Linux p99 us | macOS p99 us | err |
 |-------|------:|-------------|------:|------|--------:|--------:|---:|----:|-------:|-------:|----:|
-| bounded_10 | 10 | | 64 | lin | 5093 | 19558 | -74% | 0.26 | 249 | 79 | 0 |
-| bounded_1k | 1000 | | 64 | lin | 1274 | 4339 | -71% | 0.29 | 904 | 258 | 0 |
-| bounded_10k | 10000 | | 64 | lin | 141 | 518 | -73% | 0.27 | 8528 | 2060 | 0 |
-| full_100k | 100000 | | 64 | lin | 14 | 50 | -72% | 0.28 | 96512 | 20848 | 0 |
-| deep_pag_10 | 10 | k...99989 | 64 | lin | 5373 | 20681 | -74% | 0.26 | 264 | 66 | 0 |
-| mixed_1k | 1000 | | mixed | lin | 330 | 991 | -67% | 0.33 | 4116 | 1222 | 0 |
-| minslot_1k | 1000 | | 64 | minslot | 1292 | 4293 | -70% | 0.30 | 925 | 262 | 0 |
-| largeval_16k | 1000 | | 16384 | lin | 35 | — | — | — | 46720 | — | 0 |
+| bounded_10 | 10 | | 64 | lin | 12999 | 19558 | -33.5% | 0.66 | 113 | 79 | 0 |
+| bounded_1k | 1000 | | 64 | lin | 1436 | 4339 | -66.9% | 0.33 | 873 | 258 | 0 |
+| bounded_10k | 10000 | | 64 | lin | 118 | 518 | -77.2% | 0.23 | 11592 | 2060 | 0 |
+| full_100k | 100000 | | 64 | lin | 20 | 50 | -60.0% | 0.40 | 92032 | 20848 | 0 |
+| deep_pag_10 | 10 | k...99989 | 64 | lin | 12553 | 20681 | -39.3% | 0.61 | 113 | 66 | 0 |
+| mixed_1k | 1000 | | mixed | lin | 194 | 991 | -80.4% | 0.20 | 7880 | 1222 | 0 |
+| minslot_1k | 1000 | | 64 | minslot | 1426 | 4293 | -66.8% | 0.33 | 920 | 262 | 0 |
+| largeval_16k | 1000 | | 16384 | lin | 20 | — | — | — | 72832 | — | 0 |
 
 #### Multi-thread
 
 | Label | Limit | Val B | Mode | T:C | Linux scans/s | macOS scans/s | Δ% | L/M | Linux p99 us | macOS p99 us | err |
 |-------|------:|------:|------|-----|--------:|--------:|---:|----:|-------:|-------:|----:|
-| lin_4t | 1000 | 64 | lin | 4:4 | 6999 | 14264 | -51% | 0.49 | 1064 | 473 | 0 |
-| minslot_4t | 1000 | 64 | minslot | 4:4 | 6586 | 14810 | -55% | 0.45 | 1231 | 385 | 0 |
-| lin_16t | 1000 | 64 | lin | 16:16 | 21247 | 30799 | -31% | 0.69 | 1226 | 822 | 0 |
-| minslot_16t | 1000 | 64 | minslot | 16:16 | 20520 | 33015 | -38% | 0.62 | 1309 | 791 | 0 |
-| lin_32t | 1000 | 64 | lin | 32:32 | 27922 | 37840 | -26% | 0.74 | 2408 | 3600 | 0 |
-| minslot_32t | 1000 | 64 | minslot | 32:32 | 28613 | 38256 | -25% | 0.75 | 2226 | 2028 | 0 |
+| lin_4t | 1000 | 64 | lin | 4:4 | 4732 | 14264 | -66.8% | 0.33 | 1232 | 473 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 4:4 | 4935 | 14810 | -66.7% | 0.33 | 1181 | 385 | 0 |
+| lin_16t | 1000 | 64 | lin | 16:16 | 23960 | 30799 | -22.2% | 0.78 | 1016 | 822 | 0 |
+| minslot_16t | 1000 | 64 | minslot | 16:16 | 23328 | 33015 | -29.3% | 0.71 | 1045 | 791 | 0 |
+| lin_32t | 1000 | 64 | lin | 32:32 | 26232 | 37840 | -30.7% | 0.69 | 2450 | 3600 | 0 |
+| minslot_32t | 1000 | 64 | minslot | 32:32 | 26545 | 38256 | -30.6% | 0.69 | 2064 | 2028 | 0 |
 
-Linux is ~3.5x slower than macOS on single-thread bounded scans
-(5093 vs 19558 for `bounded_10`), consistent with the x86_64 build
-running under a slower single-core memory subsystem. Multi-thread
-scaling: 16T reaches 21247 scans/s, and 32T saturates at ~28k scans/s
-with p99 down to 2408 us for linearizable. MinSlot still does **not**
-show the throughput advantage seen on macOS; linearizable is faster at
-4T and 16T on Linux. At 32T MinSlot edges ahead (28613 vs 27922, +2.5%)
-with p99 7.6% better (2226 vs 2408 us). The MinSlot advantage appears
-platform-dependent and may relate to the different cache hierarchy and
-inter-core latency of x86_64 vs arm64.
+Linux remains slower than macOS across the scan workload. The gap is
+smallest for `bounded_10` at 33.5% (12999 vs 19558 scans/s) and largest
+for `mixed_1k` at 80.4% (194 vs 991 scans/s). At 32T, Linux reaches
+26232 scans/s for Linearizable and 26545 for MinSlot, compared with
+37840 and 38256 on macOS. MinSlot is slightly faster than Linearizable
+at 4T (+4.3%) and 32T (+1.2%) on Linux, while it is faster at 4T
+(+4.7%) but slower at 16T (-0.5%) and 32T (-5.6%) on macOS. The scan
+engine remains the throughput bottleneck on both platforms.
 
-The `largeval_16k` config (100k × 16KiB = 1.6 GB values) is the R67
-regression sentinel: 35 scans/s with 0 errors post-fix (was 653-8111
-errors before the `spawn_blocking` fix). The low throughput is expected;
-each scan returns up to 1000 × 16KiB = 16 MB of data, and the
-snapshot/flush/GC path now runs on blocking threads without stalling
-the election driver.
+The `largeval_16k` config (100k × 16KiB = 1.6 GB values) remains the
+regression sentinel: 20 scans/s with 0 errors. The low throughput is
+expected; each scan returns up to 1000 × 16KiB = 16 MB of data, and the
+snapshot/flush/GC path runs on blocking threads without stalling the
+election driver.
 
 ### Improvement summary (2026-08-06 → 2026-08-09, Linux)
 
@@ -334,3 +331,82 @@ noted.
   `start_after` keying gives. The same production/transfer overlap is
   available without a schema change via client-side page prefetch
   (request page N+1 while consuming page N). No backlog entry.
+
+---
+
+## Change History
+
+- **R6** — Zero-copy value returns: L1 hits borrow directly from the
+  resident leaf frame (no `std::string` staging). Scan values are
+  zero-copy from packed buffer to client `Bytes`.
+- **R38/R44/R49** — Zero-copy scan values + streaming scan RPC.
+  Unblocked `full_100k` (previously 0 scans/s, 4 MiB unary cap) and
+  `valuesize_16KiB` (previously 0 scans/s). 15-20% improvement on
+  large scans.
+- **R48** — Lazy `LeafChainCursor`: replaced eager whole-leaf
+  resolution with an on-demand k-way cursor. Scan cost went from
+  O(entries-per-leaf) to O(limit). Fixed the 1 KiB anomaly.
+- **R50** — Epoch-protected lock-free MemTable: replaced
+  `absl::btree_map` under `mu_` with a `ConcurrentSkipList`.
+  Eliminated the O(N_l0) `snapshot()` copy; readers traverse L0
+  lock-free with zero copy.
+- **R58** — 2-source fast path + loser tree in the scan merge loop:
+  when only L0+L1 are active (the common case), a straight 2-way
+  merge avoids the loser-tree heap. 3+ sources fall back to a loser
+  tree. Reduces merge-loop overhead per entry.
+- **R57** — Zero-copy scan result staging: the `consider` lambda
+  packs the wire format directly into a `ScanPackedBuf` (growing
+  `malloc`/`realloc` buffer), and ownership is transferred across
+  the FFI via `release()` — no `std::vector<scan_entry>` staging,
+  no re-pack loop, no `make_buf` malloc+memcpy. Reduces C++ copies
+  from 3 to 1 per scan.
+- **R59** — Two scan modes + snapshot versioning API: the existing
+  `scan` RPC (mode 1, list scan) is now documented as S3-list
+  semantics (per-page-consistent, not cross-page snapshot). A new
+  snapshot versioning API (mode 2) pins a point-in-time-consistent
+  L1 view via `CreateSnapshot` (flush + `snapshot_view`), iterates
+  it with `SnapshotScan` (binary-search + linear scan over the
+  frozen `Vec<ViewEntry>`), and releases it with `ReleaseSnapshot`.
+  Per-group handle registry with 5-min lease/expiry reaps abandoned
+  snapshots. No new engine machinery — the existing `snapshot_view`
+  FFI is reused.
+- **Benchmark update (2026-08-28)** — Replaced the previous Linux/gRPC
+  comparison with the latest Linux/crow-rpc run while retaining the macOS
+  baseline. Compared with the previous Linux values, throughput changed by
+  +155.2% / +12.7% / −16.3% / +42.9% for `bounded_10`, `bounded_1k`,
+  `bounded_10k`, and `full_100k`; +133.6% / −41.2% / +10.4% for
+  `deep_pag_10`, `mixed_1k`, and `minslot_1k`; and −42.9% for
+  `largeval_16k`. Multi-thread throughput changed by −32.4% / −25.1%
+  at 4T, +12.8% / +13.7% at 16T, and −6.1% / −7.2% at 32T for
+  Linearizable / MinSlot. The corresponding p99 changes were
+  −54.6% / −3.4% / +35.9% / −4.6% / −57.2% / +91.4% / −0.5% / +55.9%
+  for the eight single-thread configurations in table order, and
+  +15.8% / −4.1% at 4T, −17.1% / −20.2% at 16T, and +1.7% / −7.3%
+  at 32T for Linearizable / MinSlot. The latest Linux run completes all
+  14 configurations with zero scan errors.
+
+- **Linux update comparison (2026-08-28)** — The current Linux run uses
+  crow-rpc and the previous Linux baseline used the legacy gRPC path.
+  Positive throughput changes and negative p99 changes are improvements.
+
+| Config | Old scans/s | New scans/s | Δ scans/s | Old p99 us | New p99 us | Δ p99 |
+|--------|------------:|------------:|----------:|-----------:|-----------:|------:|
+| `bounded_10` | 5093 | 12999 | +155.2% | 249 | 113 | −54.6% |
+| `bounded_1k` | 1274 | 1436 | +12.7% | 904 | 873 | −3.4% |
+| `bounded_10k` | 141 | 118 | −16.3% | 8528 | 11592 | +35.9% |
+| `full_100k` | 14 | 20 | +42.9% | 96512 | 92032 | −4.6% |
+| `deep_pag_10` | 5373 | 12553 | +133.6% | 264 | 113 | −57.2% |
+| `mixed_1k` | 330 | 194 | −41.2% | 4116 | 7880 | +91.4% |
+| `minslot_1k` | 1292 | 1426 | +10.4% | 925 | 920 | −0.5% |
+| `largeval_16k` | 35 | 20 | −42.9% | 46720 | 72832 | +55.9% |
+| `lin_4t` | 6999 | 4732 | −32.4% | 1064 | 1232 | +15.8% |
+| `minslot_4t` | 6586 | 4935 | −25.1% | 1231 | 1181 | −4.1% |
+| `lin_16t` | 21247 | 23960 | +12.8% | 1226 | 1016 | −17.1% |
+| `minslot_16t` | 20520 | 23328 | +13.7% | 1309 | 1045 | −20.2% |
+| `lin_32t` | 27922 | 26232 | −6.1% | 2408 | 2450 | +1.7% |
+| `minslot_32t` | 28613 | 26545 | −7.2% | 2226 | 2064 | −7.3% |
+
+The strongest improvement is `bounded_10` at **+155.2%** throughput,
+while the largest regression is `mixed_1k` at **−41.2%** throughput and
+**+91.4%** p99 latency. The update improves the common bounded and
+16T paths, but large and mixed-value scans remain engine-limited.

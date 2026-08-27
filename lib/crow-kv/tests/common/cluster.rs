@@ -116,8 +116,9 @@ pub async fn start_cluster_classic(ids: &[u64], leader_id: u64) -> TestCluster {
 
 /// Step 12c: start a cluster with no pre-set leader. All replicas come
 /// up as `Follower` and the election driver picks a leader using the
-/// `PxElectionConfig::for_e2e()` profile, which remains stable under real
-/// runtime scheduling and transport jitter.
+/// `PxElectionConfig::for_tests()` profile (5 ms heartbeat / 30–60 ms
+/// election timer / 25 ms lease) so tests resolve within a few hundred
+/// milliseconds without `tokio::time::advance`.
 ///
 /// Note on small clusters:
 /// - 1-node: the lone replica auto-promotes on the first election tick
@@ -129,7 +130,7 @@ pub async fn start_cluster_classic(ids: &[u64], leader_id: u64) -> TestCluster {
 /// election has completed.
 #[allow(dead_code)]
 pub async fn start_cluster_no_leader(ids: &[u64]) -> TestCluster {
-    start_cluster_no_leader_inner(ids, PxElectionConfig::for_e2e()).await
+    start_cluster_no_leader_inner(ids, PxElectionConfig::for_tests()).await
 }
 
 /// Like `start_cluster_no_leader` but with a relaxed election timer

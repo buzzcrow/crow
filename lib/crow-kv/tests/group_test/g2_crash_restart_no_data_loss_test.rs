@@ -107,7 +107,7 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
     let net = crate::common::net_lock::lock().await;
     crate::common::logging::init_test_subscriber();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let cfg = PxElectionConfig::for_e2e();
+    let cfg = PxElectionConfig::for_tests();
 
     // Pass 1: bind each store on an ephemeral port (peers are placeholders).
     let mut nodes = Vec::with_capacity(ids.len());
@@ -218,7 +218,7 @@ impl WalCluster {
     }
 
     async fn restart(&mut self, id: u64, wal_dir: PathBuf) {
-        let cfg = PxElectionConfig::for_e2e();
+        let cfg = PxElectionConfig::for_tests();
         let conf_dir = wal_dir.parent().expect("wal_dir parent").join("conf");
         let peers: Vec<(u64, String)> = self
             .nodes

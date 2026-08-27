@@ -100,7 +100,7 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
     let net = crate::common::net_lock::lock().await;
     crate::common::logging::init_test_subscriber();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let cfg = PxElectionConfig::for_e2e();
+    let cfg = PxElectionConfig::for_tests();
 
     let mut nodes = Vec::with_capacity(ids.len());
     for &id in ids {
@@ -199,7 +199,7 @@ impl WalCluster {
     }
 
     async fn restart_all(&mut self) {
-        let cfg = PxElectionConfig::for_e2e();
+        let cfg = PxElectionConfig::for_tests();
         // Snapshot ids + wal dirs, shut every node down, then rebuild all.
         let mut ids_dirs: Vec<(u64, PathBuf)> =
             self.nodes.iter().map(|n| (n.id, n.wal_dir.clone())).collect();

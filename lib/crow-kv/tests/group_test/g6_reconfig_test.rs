@@ -24,7 +24,7 @@ use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, 
 use crow_kv::common::config::PxElectionConfig;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -179,7 +179,7 @@ fn remove_replica_from_node(node: &Arc<PxKvStore>, remove_id: u64) {
 /// replica of group 1 with all existing nodes as remotes, start it,
 /// then update all existing nodes to include the new node.
 async fn add_node_to_cluster(cluster: &TestCluster, new_id: u64) -> Arc<PxKvStore> {
-    let cfg = PxElectionConfig::for_e2e();
+    let cfg = PxElectionConfig::for_tests();
     let store = PxKvStore::new(new_id, "127.0.0.1:0".parse().unwrap());
     let server = Arc::new(store);
 

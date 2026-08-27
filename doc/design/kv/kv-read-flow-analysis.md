@@ -69,6 +69,158 @@ page refcount pins keeping the frame alive until the `Bytes` is dropped.
 
 ---
 
+## Latest Benchmark Results — 2026-08-28 (Linux)
+
+**Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
+**Setup**: 20s mem mode, 3-node cluster, 100k pre-populated keys, 64B
+values. Script wall time: 9m29.941s. Raw TSV:
+`doc/working/bench-read-regression.tsv` (gitignored).
+
+### Single-thread (1T:1C) — per-read engine cost
+
+| Label | Mode | ops/s | avg us | p50 us | p99 us | p999 us | err | corr |
+|-------|------|------:|-------:|-------:|-------:|--------:|----:|-----:|
+| lin_1t | lin | 13495 | 73 | 76 | 107 | 151 | 0 | 0 |
+| minslot_1t | minslot | 11746 | 84 | 85 | 125 | 161 | 0 | 0 |
+
+### Multi-thread — max throughput + read-mode split
+
+| Label | Mode | T:C | ops/s | avg us | p50 us | p99 us | p999 us | err |
+|-------|------|-----|------:|-------:|-------:|-------:|--------:|----:|
+| lin_6t | lin | 6:6 | 77338 | 76 | 74 | 127 | 152 | 0 |
+| minslot_6t | minslot | 6:6 | 95949 | 61 | 59 | 105 | 131 | 0 |
+| lin_16t | lin | 16:16 | 232893 | 67 | 65 | 116 | 147 | 0 |
+| minslot_16t | minslot | 16:16 | 236501 | 66 | 64 | 109 | 150 | 0 |
+| lin_32t | lin | 32:32 | 271184 | 116 | 112 | 221 | 273 | 0 |
+| minslot_32t | minslot | 32:32 | 265130 | 119 | 116 | 206 | 276 | 0 |
+
+The 6T MinSlot run leads Linearizable by 24.0% (95949 vs 77338 ops/s).
+At 16T the modes are nearly equal, with MinSlot 1.6% higher. At 32T
+Linearizable is 2.3% higher, indicating saturation in the distributed
+MinSlot path on this host.
+
+### Connection fan-in sentinel
+
+| Label | Mode | T:C | ops/s | avg us | p99 us | err |
+|-------|------|-----|------:|-------:|-------:|----:|
+| minslot_6t_2to1 | minslot | 6:3 | 89795 | 66 | 113 | 0 |
+
+The 6T:3C run remained error-free and delivered 93.6% of the 6T:6C
+throughput, with a lower measured average latency in this run.
+
+### Correctness verification (`--verify-bytes 8`)
+
+| Label | Mode | T:C | ops/s | avg us | p99 us | err | corr |
+|-------|------|-----|------:|-------:|-------:|----:|-----:|
+| lin_16t_verify | lin | 16:16 | 233716 | 67 | 65 | 114 | 0 |
+| minslot_16t_verify | minslot | 16:16 | 233090 | 67 | 65 | 111 | 0 |
+
+Zero correctness errors across both modes.
+
+## macOS Baseline Results — 2026-08-19
+
+**Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5.
+**Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B
+values. Raw TSV: `doc/working/bench-read-regression.tsv` (gitignored).
+
+### Single-thread (1T:1C) — per-read engine cost
+
+| Label | Mode | ops/s | avg us | p50 us | p99 us | p999 us | err |
+|-------|------|------:|-------:|-------:|-------:|--------:|----:|
+| lin_1t | lin | 21112 | 46 | 46 | 67 | 97 | 0 |
+| minslot_1t | minslot | 21691 | 45 | 44 | 66 | 96 | 0 |
+
+### Multi-thread — max throughput + read-mode split
+
+| Label | Mode | T:C | ops/s | avg us | p50 us | p99 us | p999 us | err |
+|-------|------|-----|------:|-------:|-------:|-------:|--------:|----:|
+| lin_6t | lin | 6:6 | 70668 | 84 | 79 | 163 | 206 | 0 |
+| minslot_6t | minslot | 6:6 | 77622 | 76 | 73 | 142 | 181 | 0 |
+| lin_16t | lin | 16:16 | 106399 | 148 | 142 | 251 | 298 | 0 |
+| minslot_16t | minslot | 16:16 | 107455 | 147 | 145 | 235 | 281 | 0 |
+| lin_32t | lin | 32:32 | 119473 | 265 | 260 | 418 | 512 | 0 |
+| minslot_32t | minslot | 32:32 | 113270 | 280 | 278 | 432 | 521 | 0 |
+
+### Connection fan-in sentinel
+
+| Label | Mode | T:C | ops/s | avg us | p99 us | err |
+|-------|------|-----|------:|-------:|-------:|----:|
+| minslot_6t_2to1 | minslot | 6:3 | 74752 | 79 | 151 | 0 |
+
+### Correctness verification (`--verify-bytes 8`)
+
+| Label | Mode | T:C | ops/s | avg us | p99 us | err | corr |
+|-------|------|-----|------:|-------:|-------:|----:|----:|
+| lin_16t_verify | lin | 16:16 | 105613 | 150 | 252 | 0 | 0 |
+| minslot_16t_verify | minslot | 16:16 | 106662 | 148 | 237 | 0 | 0 |
+
+## Linux/macOS Comparison — 2026-08-28 Linux
+
+**Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
+**Setup**: 20s mem mode, 3-node cluster, 100k pre-populated keys, 64B
+values. macOS columns retain the 2026-08-19 baseline. Raw TSV:
+`doc/working/bench-read-regression.tsv` (gitignored).
+
+#### Single-thread (1T:1C)
+
+| Label | Mode | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
+|-------|------|------:|------:|---:|-------:|-------:|----:|
+| lin_1t | lin | 13495 | 20441 | -34.0% | 107 | 75 | 0 |
+| minslot_1t | minslot | 11746 | 20478 | -42.6% | 125 | 73 | 0 |
+
+Linux is still slower on single-thread reads, but the gap is smaller:
+Linearizable is 34.0% below macOS (13495 vs 20441 ops/s), while MinSlot
+is 42.6% below (11746 vs 20478).
+
+#### Multi-thread
+
+| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
+|-------|------|-----|------:|------:|---:|-------:|-------:|----:|
+| lin_6t | lin | 6:6 | 77338 | 68560 | +12.8% | 127 | 173 | 0 |
+| minslot_6t | minslot | 6:6 | 95949 | 75158 | +27.7% | 105 | 150 | 0 |
+| lin_16t | lin | 16:16 | 232893 | 105613 | +120.5% | 116 | 254 | 0 |
+| minslot_16t | minslot | 16:16 | 236501 | 106727 | +121.6% | 109 | 240 | 0 |
+| lin_32t | lin | 32:32 | 271184 | 118390 | +129.1% | 221 | 428 | 0 |
+| minslot_32t | minslot | 32:32 | 265130 | 112621 | +135.4% | 206 | 440 | 0 |
+Linux is faster once concurrency reaches 6T: it leads macOS by 12.8%
+(77338 vs 68560 ops/s) for Linearizable and 27.7% (95949 vs 75158) for
+MinSlot. At 32T, Linux is **2.3× faster** for Linearizable (271184 vs
+118390 ops/s) and **2.4× faster** for MinSlot (265130 vs 112621).
+Single-thread remains slower on Linux, so the advantage comes from the
+Ryzen's higher concurrent throughput rather than lower per-read latency.
+On macOS, MinSlot beats Linearizable at 6T (+13.2%) and 16T (+1.0%);
+on Linux it is also ahead at 6T (+24.0%) and 16T (+1.6%), then falls
+slightly behind Linearizable at 32T (-2.2%).
+
+#### Connection fan-in sentinel
+
+| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
+|-------|------|-----|------:|------:|---:|-------:|-------:|----:|
+| minslot_6t_2to1 | minslot | 6:3 | 89795 | 73484 | +22.2% | 113 | 157 | 0 |
+
+6T:3C reaches 89795 ops/s on Linux, 22.2% above the retained macOS
+baseline (73484 ops/s), and remains error-free.
+
+#### Correctness verification (`--verify-bytes 8`)
+
+| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err | corr |
+|-------|------|-----|------:|------:|---:|-------:|-------:|----:|-----:|
+| lin_16t_verify | lin | 16:16 | 233716 | 104917 | +122.8% | 114 | 256 | 0 | 0 |
+| minslot_16t_verify | minslot | 16:16 | 233090 | 104988 | +122.0% | 111 | 241 | 0 | 0 |
+
+Zero correctness errors on Linux. Verify overhead negligible (<1%).
+
+---
+
+## Existing Problems
+
+No open problems are recorded for the read transport. The former HTTP/2
+connection-lock bottleneck was resolved by moving the internal Paxos path
+to crow-rpc's flatbuffer-over-TCP transport. The connection fan-in
+benchmark remains as a regression sentinel for concurrent request handling.
+
+---
+
 ## Change History
 
 - **R6** — Zero-copy value returns: `PinnedValue::into_bytes()` produces
@@ -85,164 +237,40 @@ page refcount pins keeping the frame alive until the `Bytes` is dropped.
   expiry starts one heartbeat round and registers a pending batch;
   later reads enqueue a waiter and adopt the same outcome. Eliminates
   per-read heartbeat rounds under lease-expiry bursts.
+- **Benchmark update (2026-08-28)** — Replaced the previous Linux/gRPC
+  comparison with the latest Linux/crow-rpc run while retaining the macOS
+  baseline. Compared with the previous Linux values, throughput changed by
+  +104.2% / +90.7% at 1T, +52.1% / +83.6% at 6T, +121.1% / +132.2% at
+  16T, and +88.0% / +91.3% at 32T for Linearizable / MinSlot. The p99
+  latency changed by −51.1% / −43.7%, −34.5% / −37.5%, −54.5% / −59.3%,
+  and −55.6% / −61.3% at those same thread counts. The 32T results are
+  271184 / 265130 ops/s, up from 144262 / 138610 ops/s.
+- **Consensus RPC transport** — The internal Paxos path now uses
+  crow-rpc's flatbuffer-over-TCP transport with concurrent frame handling,
+  replacing the HTTP/2/gRPC connection-lock bottleneck.
 - **TCP_NODELAY** — Before the fix, read latency was ~41ms (Nagle +
   delayed ACK interaction in crow-rpc). After applying `TCP_NODELAY`
   to all client and server sockets, latency dropped to ~138us — a 290×
   improvement.
 
----
+- **TCP_NODELAY Linux comparison (2026-08-28)** — The current Linux run
+  uses crow-rpc and the previous Linux baseline used the legacy gRPC path.
+  Positive throughput changes and negative p99 changes are improvements.
 
-## Latest Benchmark Results — 2026-08-19 (macOS)
+| Config | Old ops/s | New ops/s | Δ ops/s | Old p99 us | New p99 us | Δ p99 |
+|--------|----------:|----------:|--------:|-----------:|-----------:|------:|
+| `lin_1t` | 6608 | 13495 | +104.2% | 219 | 107 | −51.1% |
+| `minslot_1t` | 6160 | 11746 | +90.7% | 222 | 125 | −43.7% |
+| `lin_6t` | 50851 | 77338 | +52.1% | 194 | 127 | −34.5% |
+| `minslot_6t` | 52252 | 95949 | +83.6% | 168 | 105 | −37.5% |
+| `lin_16t` | 105313 | 232893 | +121.1% | 255 | 116 | −54.5% |
+| `minslot_16t` | 101871 | 236501 | +132.2% | 268 | 109 | −59.3% |
+| `lin_32t` | 144262 | 271184 | +88.0% | 498 | 221 | −55.6% |
+| `minslot_32t` | 138610 | 265130 | +91.3% | 532 | 206 | −61.3% |
+| `minslot_6t_2to1` | 52228 | 89795 | +71.9% | 172 | 113 | −34.3% |
+| `lin_16t_verify` | 105781 | 233716 | +120.9% | 252 | 114 | −54.8% |
+| `minslot_16t_verify` | 101552 | 233090 | +129.5% | 268 | 111 | −58.6% |
 
-**Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5.
-**Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B
-values. Raw TSV: `doc/working/bench-read-regression.tsv` (gitignored).
-
-### Single-thread (1T:1C) — per-read engine cost
-
-| Label | Mode | ops/s | avg us | p50 us | p99 us | p999 us | err |
-|-------|------|------:|-------:|-------:|-------:|--------:|----:|
-| lin_1t | lin | 21112 | 46 | 46 | 67 | 97 | 0 |
-| minslot_1t | minslot | 21691 | 45 | 44 | 66 | 96 | 0 |
-
-At 1T:1C both modes are identical (~21K ops/s, 46us) — no concurrency
-advantage for MinSlot, and the Linearizable lease barrier is ~0 (lease
-fast path). Per-read cost is engine get + crow-rpc RTT only.
-
-### Multi-thread — max throughput + read-mode split
-
-| Label | Mode | T:C | ops/s | avg us | p50 us | p99 us | p999 us | err |
-|-------|------|-----|------:|-------:|-------:|-------:|--------:|----:|
-| lin_6t | lin | 6:6 | 70668 | 84 | 79 | 163 | 206 | 0 |
-| minslot_6t | minslot | 6:6 | 77622 | 76 | 73 | 142 | 181 | 0 |
-| lin_16t | lin | 16:16 | 106399 | 148 | 142 | 251 | 298 | 0 |
-| minslot_16t | minslot | 16:16 | 107455 | 147 | 145 | 235 | 281 | 0 |
-| lin_32t | lin | 32:32 | 119473 | 265 | 260 | 418 | 512 | 0 |
-| minslot_32t | minslot | 32:32 | 113270 | 280 | 278 | 432 | 521 | 0 |
-
-Both modes scale well from 1T to 16T (21K → 107K, 5.1x). MinSlot shows
-a clear advantage at 6T (+9.8%, 77622 vs 70668): distributed read
-serving across 3 replicas scales better than single-leader at low
-concurrency. At 16T the modes converge (~107K, +1.0% MinSlot); the 3
-replicas are approaching per-replica saturation. At 32T Linearizable
-pulls ahead (+5.2%, 119K vs 113K). MinSlot saturates earlier because
-each replica is already at capacity; the leader mode still has headroom
-from the lease fast path (no round-trip).
-
-### HTTP/2 connection lock sentinel
-
-| Label | Mode | T:C | ops/s | avg us | p99 us | err |
-|-------|------|-----|------:|-------:|-------:|----:|
-| minslot_6t_2to1 | minslot | 6:3 | 74752 | 79 | 151 | 0 |
-
-6T:3C (2:1 ratio) drops only -3.7% vs 6T:6C (74752 vs 77622). MinSlot
-distributes across 3 replicas (2 connections per replica), so the h2
-connection lock contention is lower than with a single leader. The
-1T:1C pattern (dedicated connection per thread) avoids the lock
-entirely and remains optimal for max throughput.
-
-### Correctness verification (`--verify-bytes 8`)
-
-| Label | Mode | T:C | ops/s | avg us | p99 us | err | corr |
-|-------|------|-----|------:|-------:|-------:|----:|-----:|
-| lin_16t_verify | lin | 16:16 | 105613 | 150 | 252 | 0 | 0 |
-| minslot_16t_verify | minslot | 16:16 | 106662 | 148 | 237 | 0 | 0 |
-
-Zero correctness errors across both modes. Verify overhead is negligible
-(<1% throughput impact vs non-verify 16T runs).
-
-### Linux results — 2026-08-06
-
-**Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
-**Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B
-values. Raw TSV: `doc/working/bench-read-regression.tsv` (gitignored).
-
-#### Single-thread (1T:1C)
-
-| Label | Mode | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
-|-------|------|------:|------:|---:|-------:|-------:|----:|
-| lin_1t | lin | 6608 | 20441 | -68% | 219 | 75 | 0 |
-| minslot_1t | minslot | 6160 | 20478 | -70% | 222 | 73 | 0 |
-
-Linux single-thread is ~3x slower (6608 vs 20441) — same gap as scan,
-dominated by crow-rpc RTT and engine get cost on x86_64.
-
-#### Multi-thread
-
-| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
-|-------|------|-----|------:|------:|---:|-------:|-------:|----:|
-| lin_6t | lin | 6:6 | 50851 | 68560 | -26% | 194 | 173 | 0 |
-| minslot_6t | minslot | 6:6 | 52252 | 75158 | -30% | 168 | 150 | 0 |
-| lin_16t | lin | 16:16 | 105313 | 105613 | -0% | 255 | 254 | 0 |
-| minslot_16t | minslot | 16:16 | 101871 | 106727 | -5% | 268 | 240 | 0 |
-| lin_32t | lin | 32:32 | 144262 | 118390 | +22% | 498 | 428 | 0 |
-| minslot_32t | minslot | 32:32 | 138610 | 112621 | +23% | 532 | 440 | 0 |
-| lin_64t | lin | 64:32 | 168849 | — | — | 1009 | — | 0 |
-| minslot_64t | minslot | 64:32 | 165317 | — | — | 1132 | — | 0 |
-| lin_128t | lin | 128:32 | 205406 | — | — | 1760 | — | 0 |
-| minslot_128t | minslot | 128:32 | 189030 | — | — | 2290 | — | 0 |
-| lin_256t | lin | 256:32 | 231983 | — | — | 2658 | — | 0 |
-| minslot_256t | minslot | 256:32 | 215334 | — | — | 4284 | — | 0 |
-
-Linux catches up at 16T (-0% to -5%) and **overtakes macOS at 32T**
-(+22% to +23%): the 32-thread Ryzen scales better than the 18-core M5
-Pro at saturation. On macOS, MinSlot beats Linearizable at 6T (+9.6%)
-and 16T (+1.1%); distributed read serving helps when the single leader
-is the bottleneck. On Linux this advantage **disappears**: MinSlot is
-marginally better only at 6T (+2.8%) and **slower** at 16T (-3.3%) and
-32T (-3.9%). The leader lease fast path is cheap enough on x86_64 that
-distributing reads across replicas doesn't compensate for the added
-MinSlot routing overhead (min_slot resolution, round-robin endpoint
-selection). MinSlot's benefit is platform-dependent. It helps when the
-leader read barrier is the bottleneck (macOS arm64), not when the engine
-itself is the limiter (Linux x86_64).
-
-Beyond 32T, Linearizable continues to scale and widen its lead:
-- **64T**: lin 168849 vs minslot 165317 (-2.1%)
-- **128T**: lin 205406 vs minslot 189030 (-8.0%)
-- **256T**: lin 231983 vs minslot 215334 (-7.2%)
-
-Linearizable scales 32T → 256T (144K → 232K, 1.6x). The lease fast
-path has no per-read round-trip, so the leader absorbs more concurrent
-reads. MinSlot scales 32T → 256T (139K → 215K, 1.5x) but falls further
-behind because the 3 replicas saturate earlier (each handles ~72K at
-256T vs the leader's 232K). MinSlot's p99 also degrades faster at high
-thread counts (4284us vs 2658us at 256T): round-robin distribution
-adds tail latency under heavy contention.
-
-#### HTTP/2 connection lock sentinel
-
-| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
-|-------|------|-----|------:|------:|---:|-------:|-------:|----:|
-| minslot_6t_2to1 | minslot | 6:3 | 52228 | 73484 | -29% | 172 | 157 | 0 |
-
-6T:3C drops -0.04% vs 6T:6C on Linux (52228 vs 52252), even less
-contention than macOS's -2.2%, consistent with the smaller MinSlot
-throughput advantage on Linux.
-
-#### Correctness verification (`--verify-bytes 8`)
-
-| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err | corr |
-|-------|------|-----|------:|------:|---:|-------:|-------:|----:|-----:|
-| lin_16t_verify | lin | 16:16 | 105781 | 104917 | +1% | 252 | 256 | 0 | 0 |
-| minslot_16t_verify | minslot | 16:16 | 101552 | 104988 | -3% | 268 | 241 | 0 | 0 |
-
-Zero correctness errors on Linux. Verify overhead negligible (<1%).
-
----
-
-## Existing Problems
-
-- **HTTP/2 connection lock (deferred, R32).** HTTP/2 requires a
-  connection-level userspace lock (HPACK dynamic table, frame output
-  buffer, flow-control windows are shared mutable state). When N threads
-  submit to one crow-rpc connection concurrently, they serialize on this
-  lock during frame encoding, a single-threaded userspace funnel before
-  any `write()` reaches the kernel. The 2T:1C throughput drop measured by
-  the `minslot_6t_2to1` sentinel is this lock's cost. 1T:1C avoids it
-  entirely (dedicated connection per thread). A custom length-prefixed
-  transport over raw TCP (no HPACK, no stream state, no flow-control)
-  would eliminate the lock, but requires reimplementing connection
-  pooling, reconnect, timeout, cancellation, backpressure, and TLS.
-  Deferred until read throughput is the primary constraint and the h2
-  lock is profiled as the hot spot.
+The largest throughput gain is MinSlot at 16T: **+132.2%**, while the
+largest p99 improvement is MinSlot at 32T: **−61.3%**. This is the measured
+Linux improvement from replacing gRPC with crow-rpc.

@@ -20,7 +20,7 @@
 #     - lin_4t:        linearizable (all scans serialize on leader)
 #     - minslot_4t:    minslot (scans distributed across replicas)
 #
-# 14 runs × 10s ≈ 140s + pre-pop overhead.
+# 14 runs × 20s ≈ 280s + pre-pop overhead.
 #
 # Reference platform: see doc/design/kv/kv-scan-flow-analysis.md. After
 # a run, update the "Latest Benchmark Results" section there with the
@@ -113,6 +113,25 @@ run_bench() {
 #   minslot_32t      1000    32:32 36684    869     1416     0    -5.6% throughput, -41% p99
 #
 # Analysis: doc/design/kv/kv-scan-flow-analysis.md § Latest Benchmark Results.
+#
+# Latest measured results (2026-08-28, Linux x86_64, AMD Ryzen 9 5950X,
+# 16 cores / 32 threads; 20s mem mode, 3-node cluster, 100k keys;
+# script wall time: 12m05.070s):
+#   label          mode          T:C     scans/s  avg_us  p50_us  p99_us  p999_us  err
+#   bounded_10    linearizable  1:1      12999       76      81     113      149    0
+#   bounded_1k    linearizable  1:1       1436      695     708     873      988    0
+#   bounded_10k   linearizable  1:1        118     8495    8672   11592    13256    0
+#   full_100k     linearizable  1:1         20    49126   45696   92032   149120    0
+#   deep_pag_10   linearizable  1:1      12553       79      83     113      144    0
+#   mixed_1k      linearizable  1:1        194     5162    4916    7880     9624    0
+#   minslot_1k    minslot       1:1       1426      700     708     920     1057    0
+#   largeval_16k  linearizable  1:1         20    50462   48096   72832   124672    0
+#   lin_4t        linearizable  4:4       4732      844     847    1232     1380    0
+#   minslot_4t    minslot       4:4       4935      809     808    1181     1332    0
+#   lin_16t       linearizable 16:16     23960      666     652    1016     1184    0
+#   minslot_16t   minslot      16:16     23328      684     667    1045     1234    0
+#   lin_32t       linearizable 32:32     26232     1218    1191    2450     3172    0
+#   minslot_32t   minslot      32:32     26545     1203    1177    2064     2442    0
 
 echo -e "label\tlimit\tprefix\tstart_after\tvalue_size\tread_mode\tT:C\tscans_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 

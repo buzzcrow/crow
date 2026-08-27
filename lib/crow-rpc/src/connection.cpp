@@ -148,6 +148,19 @@ bool Connection::try_send(int fd, TransportStats *stats)
         return true; // another thread is sending; our frame is queued
     }
 
+    if (!is_open()) {
+        OutFrame *discarded[BATCH_MAX];
+        int       discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        while (discarded_count > 0) {
+            for (int i = 0; i < discarded_count; ++i) {
+                release_frame(discarded[i]);
+            }
+            discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        }
+        in_send_.store(false, std::memory_order_release);
+        return false;
+    }
+
     bool all_sent = true;
 retry:
     while (true) {
@@ -260,6 +273,20 @@ retry:
         }
     }
 
+    if (!is_open()) {
+        for (int i = 0; i < pending_count_; ++i) {
+            release_frame(pending_frames_[i]);
+        }
+        pending_count_ = 0;
+        OutFrame *discarded[BATCH_MAX];
+        int       discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        while (discarded_count > 0) {
+            for (int i = 0; i < discarded_count; ++i) {
+                release_frame(discarded[i]);
+            }
+            discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        }
+    }
     in_send_.store(false, std::memory_order_release);
 
     // Race check: if more frames arrived while we were sending, retry.
@@ -278,10 +305,22 @@ void Connection::close()
         return; // already closed
     }
     CR_LOG_INFO("close: conn_id={} name={}", static_cast<long long>(id_), name_);
-    for (int i = 0; i < pending_count_; i++) {
-        release_frame(pending_frames_[i]);
+    bool expected = false;
+    if (in_send_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        for (int i = 0; i < pending_count_; i++) {
+            release_frame(pending_frames_[i]);
+        }
+        pending_count_ = 0;
+        OutFrame *discarded[BATCH_MAX];
+        int       discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        while (discarded_count > 0) {
+            for (int i = 0; i < discarded_count; ++i) {
+                release_frame(discarded[i]);
+            }
+            discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        }
+        in_send_.store(false, std::memory_order_release);
     }
-    pending_count_ = 0;
     if (on_close_callback_) {
         on_close_callback_(this);
     }

@@ -49,72 +49,54 @@ job, not the sum.
 
 ## Suite Timing
 
-Measured on 2026-08-17 (warm build, macOS) and 2026-08-25 (warm build, Linux, build 1m32s).
-macOS times are wall-clock `time pixi run test-*` with build + test binaries cached.
-Linux times re-measured on 2026-08-25 after test speedup (shared `KvRpcTransport`,
-condition polling replacing fixed sleeps, reduced polling intervals).
-Run `pixi run clean` before measuring for reproducible results.
-The **Linux (08-27)** column is the first run after rebase to origin/task-fb
-(RPC tunables, send_queue_rejects counter, conn_for divide-by-zero fix, bench
-rpc test fix). Times include compilation overhead (cold build); warm-build
-times for `test-common`, `test-protocol`, and `test-chunkdb-client` match the
-08-25 baseline. The large gaps on `test-kv-core` (245 s vs 87 s) and
-`test-console-server` (351 s vs 84 s) are partly cold-build + partly parallel
-test-load contention (see Test Failures section below).
+Measured on 2026-08-28 on Linux in the sequential pixi test run after the
+RPC shutdown fix. The C++ test execution totals were 15.94 s for tree, 2.71 s
+for RPC, and 4.61 s for diskio. Rust suite timings include their subprocess
+startup and shutdown work. The console-server suite completed; the console UI
+suite was stopped after Playwright test 24 entered a one-minute timeout, so its
+row is marked incomplete rather than assigning a misleading total.
 
-| Suite | Tests | macOS | Linux | Linux (08-27) |
-| --- | --- | --- | --- | --- |
-| `test-tree-ct` | 416 | 20.1 s | 33.7 s | 65.1 s |
-| `test-common-ct` | 21 | — | 19.1 s | 45.5 s |
-| `test-tree-ffi` | 30 | 13.5 s | 0.5 s | 0.5 s |
-| `test-rpc-ct` | 56 | — | 21.4 s | 20.5 s |
-| `test-rpc-ffi` | 13 | — | 0.7 s | 0.8 s |
-| `test-diskio-ct` | 92 | — | 24.7 s | 43.2 s |
-| `test-common` | 65 | 21.9 s | 9.7 s | 9.7 s |
-| `test-protocol` | 121 | 12.2 s | 0.1 s | 0.1 s |
-| `test-kv-core` | 556 | 43.2 s | 87.2 s | 245.8 s |
-| `test-kv-client` | 49 | 23.4 s | 4.1 s | 44.5 s |
-| `test-chunkdb-client` | 10 | 13.8 s | 1.4 s | 1.4 s |
-| `test-kv-server` | 81 | 53.0 s | 39.3 s | 76.5 s |
-| `test-diskdb` | 127 | 42.8 s | 65.2 s | 55.3 s |
-| `test-diskdb-client` | 7 | 13.9 s | 14.7 s | 30.9 s |
-| `test-chunkdb` | 76 | 27.8 s | 16.2 s | 40.5 s |
-| `test-chunk-client` | 49 | — | 10.4 s | 22.3 s |
-| `test-diskio-client` | 4 | — | 42.9 s | 48.7 s |
-| `test-console-shared` | 62 | 39.2 s | 13.2 s | 44.4 s |
-| `test-console-cli` | 17 | 69.4 s | 52.5 s | 74.6 s |
-| `test-console-server` | 71 | 50.7 s | 84.2 s | 351.5 s |
-| `test-console-ui` | 75 | 165.7 s | 179.6 s | 1028.3 s |
+| Suite | Tests | macOS | Linux (08-28) |
+| --- | --- | --- | --- |
+| `test-tree-ct` | 416 | 20.1 s | 15.94 s |
+| `test-common-ct` | 21 | — | 17.76 s |
+| `test-tree-ffi` | 30 | 13.5 s | 0.54 s |
+| `test-rpc-ct` | 57 | — | 2.71 s |
+| `test-rpc-ffi` | 13 | — | 1.13 s |
+| `test-diskio-ct` | 93 | — | 4.61 s |
+| `test-common` | 65 | 21.9 s | 9.71 s |
+| `test-protocol` | 121 | 12.2 s | 0.15 s |
+| `test-kv-core` | 556 | 43.2 s | 68.02 s |
+| `test-kv-client` | 49 | 23.4 s | 4.54 s |
+| `test-chunkdb-client` | 10 | 13.8 s | 5.63 s |
+| `test-kv-server` | 81 | 53.0 s | 39.57 s |
+| `test-diskdb` | 127 | 42.8 s | 25.43 s |
+| `test-diskdb-client` | 7 | 13.9 s | 19.39 s |
+| `test-chunkdb` | 76 | 27.8 s | 20.73 s |
+| `test-chunk-client` | 49 | — | 15.18 s |
+| `test-diskio-client` | 4 | — | 42.89 s |
+| `test-console-shared` | 62 | 39.2 s | 24.31 s |
+| `test-console-cli` | 17 | 69.4 s | 58.42 s |
+| `test-console-server` | 71 | 50.7 s | 25.02 s (passed) |
+| `test-console-ui` | 102 | 165.7 s | incomplete (stopped at test 24) |
 
 ---
 
-## Test Failures (2026-08-27 post-rebase run)
+## Test Failures (2026-08-28 run)
 
-Flaky failures observed under parallel test load. All pass in isolation.
+- [ ] **`test-console-ui` / store isolation flow**:
+  Playwright test #24 in the full UI suite, implemented in
+  `22-kv-cluster-topology.spec.ts` as `put/get/delete on store A does not
+  affect store B`, failed when the store-A scan response arrived before the
+  table displayed `iso-a-key1`; the isolated run reproduced the same
+  assertion at the 3-second UI assertion boundary. This is a separate
+  UI-state synchronization issue and was not weakened by extending the wait.
 
-- [ ] **`test-kv-core` / `t1_early_ack_crash::t1_1_kill_in_cas_persist_window_value_survives`**:
-  "leader present after write" — election timing under parallel load. Passes in
-  isolation (4.5 s). Root cause: election timeout too tight when CPU is
-  saturated by concurrent test suites.
-- [ ] **`test-kv-core` / `election::single_voter_with_prevote_enabled_becomes_leader`**:
-  `Follower != Leader` — single-voter PreVote path doesn't reach Leader in time
-  under load. Passes in isolation.
-- [ ] **`test-kv-core` / `election::leader_heartbeat_tick_renews_lease`**:
-  `Follower != Leader` — same timing issue as above. Passes in isolation.
-- [ ] **`test-console-server` / `restart_5node_1group`**:
-  "WAL did not converge for store 10 group 1 within 5s: slots=[0, 106, 106, 106, 106]"
-  — node 1 has 0 accepted slots while others have 106. Passes in isolation
-  (122 s). Root cause: WAL convergence 5 s timeout too tight under parallel load.
-- [ ] **`test-console-server` / `restart_6node_2group_overlap`**:
-  "restart 4: 502 Bad Gateway ... did not become healthy within timeout" —
-  node fails to become healthy during restart under load. Passes in isolation.
-- [ ] **`test-diskio-ct` (18 tests, parallel ctest only)**:
-  `DiskioStartupTest.WriteReadRoundTrip`, `DiskSet.*`, `BlockDisk.*`,
-  `DummyDisk.*`, `SqFullBackpressureTest.*`, `UringEngine.*` — all 18 fail
-  when `ctest` runs in parallel with other C++ suites (resource/port
-  conflict). All 92 pass when run alone. Root cause: parallel ctest
-  execution across separate build directories conflicts on shared
-  resources (likely `/tmp` or port allocation).
+The native shutdown fix was verified with the focused restart tests, the
+complete five-test `cluster_restart_incremental_test` file, the ASan
+`TransportLoopbackTest.*` run, the complete `ffi_handler_test`, and the
+targeted two-test Playwright flow. No timeout, assertion, or error was
+weakened.
 
 ---
 

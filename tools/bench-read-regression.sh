@@ -23,7 +23,7 @@
 #     - lin_16t_verify:   linearizable correctness
 #     - minslot_16t_verify: minslot correctness
 #
-# 11 runs × 10s ≈ 110s + pre-pop overhead.
+# 11 runs × 20s ≈ 220s + pre-pop overhead.
 #
 # Reference platform: see doc/design/kv/kv-read-flow-analysis.md. After
 # a run, update the "Latest Benchmark Results" section there with the
@@ -103,6 +103,22 @@ run_bench() {
 #   minslot_16t_verify minslot      16:16 106662   148     237     0    corr=0
 #
 # Analysis: doc/design/kv/kv-read-flow-analysis.md § Latest Benchmark Results.
+#
+# Latest measured results (2026-08-28, Linux x86_64, AMD Ryzen 9 5950X,
+# 16 cores / 32 threads; 20s mem mode, 3-node cluster, 100k keys, 64B values;
+# script wall time: 9m29.941s):
+#   label              mode          T:C     ops/s   avg_us  p50_us  p99_us  p999_us  err  corr
+#   lin_1t             linearizable  1:1      13495       73      76     107      151    0    0
+#   minslot_1t         minslot       1:1      11746       84      85     125      161    0    0
+#   lin_6t             linearizable  6:6      77338       76      74     127      152    0    0
+#   minslot_6t         minslot       6:6      95949       61      59     105      131    0    0
+#   lin_16t            linearizable 16:16    232893       67      65     116      147    0    0
+#   minslot_16t        minslot      16:16    236501       66      64     109      150    0    0
+#   lin_32t            linearizable 32:32    271184      116     112     221      273    0    0
+#   minslot_32t        minslot      32:32    265130      119     116     206      276    0    0
+#   minslot_6t_2to1    minslot       6:3      89795       66      64     113      143    0    0
+#   lin_16t_verify     linearizable 16:16    233716       67      65     114      141    0    0
+#   minslot_16t_verify minslot      16:16    233090       67      65     111      147    0    0
 
 echo -e "label\tread_mode\tT:C\tverify\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tcorrectness_errors" > "$RESULTS_FILE"
 

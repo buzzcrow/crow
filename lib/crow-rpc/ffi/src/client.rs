@@ -430,22 +430,23 @@ unsafe extern "C" fn on_complete_cb(
     let result = if status == sys::CROW_RPC_OK {
         Ok(Response {
             request_id,
-            control: if !control.is_null() {
-                Some(Buffer::from_raw(control))
-            } else {
-                None
-            },
-            data: if !data.is_null() {
-                Some(Buffer::from_raw(data))
-            } else {
-                None
-            },
+            control: standalone_buffer(control),
+            data: standalone_buffer(data),
         })
     } else {
         Err(RpcError::from_status(status))
     };
 
     let _ = tx.send((result, io_thread_ts));
+}
+
+fn standalone_buffer(handle: sys::crow_rpc_buffer_t) -> Option<Buffer> {
+    if handle.is_null() {
+        return None;
+    }
+    let pooled = Buffer::from_raw(handle);
+    let bytes = pooled.bytes().to_vec();
+    Some(Buffer::from_bytes(&bytes))
 }
 
 // Rust-side histograms (registered with the Rust MetricsRegistry::global(),

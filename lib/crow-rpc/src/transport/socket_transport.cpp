@@ -201,6 +201,7 @@ void Worker::run_loop()
                             if (wfd >= 0 && wfd != ev.fd) {
                                 ::close(wfd);
                             }
+                            ev.conn->write_fd = -1;
                             closed_fds.push_back(ev.fd);
                         }
                         else if (engine_->oneshot()) {
@@ -227,6 +228,7 @@ void Worker::run_loop()
                             if (rfd != ev.fd) {
                                 // read fd will be closed by the map erase below
                             }
+                            ev.conn->write_fd = -1;
                             closed_fds.push_back(rfd);
                         }
                         else if (has_more) {
@@ -254,6 +256,7 @@ void Worker::run_loop()
                         if (wfd >= 0 && wfd != ev.fd && wfd != rfd) {
                             ::close(wfd);
                         }
+                        ev.conn->write_fd = -1;
                         closed_fds.push_back(rfd);
                     }
                     break;
@@ -284,6 +287,7 @@ void Worker::run_loop()
                         if (wfd >= 0 && wfd != rfd) {
                             ::close(wfd);
                         }
+                        conn->write_fd = -1;
                         closed_fds.push_back(rfd);
                     }
                 }
