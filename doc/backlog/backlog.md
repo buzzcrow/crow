@@ -330,7 +330,7 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   `persist_snapshot` / `collect_garbage` in `spawn_blocking`, but
   verified it only on the scan path. The maintenance loop runs
   identically under write load, yet the write regression sentinel
-  (`bench-write-regression.sh`) only exercises 512 B values — there is
+  (`bench-kv-write-regression.sh`) only exercises 512 B values — there is
   no large-value write config. Add a `largeval_16k` write config
   (`--value-size 16384`, 100k keys, 10s mem mode) and verify 0 write
   errors across 3 consecutive runs on Linux. If errors appear, RCA into
@@ -410,7 +410,7 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   `persist_snapshot` / `collect_garbage` in `spawn_blocking`, but
   verified it only on the scan path. The maintenance loop runs
   identically under write load, yet the write regression sentinel
-  (`bench-write-regression.sh`) only exercises 512 B values — there is
+  (`bench-kv-write-regression.sh`) only exercises 512 B values — there is
   no large-value write config. Add a `largeval_16k` write config
   (`--value-size 16384`, 100k keys, 10s mem mode) and verify 0 write
   errors across 3 consecutive runs on Linux. If errors appear, RCA into

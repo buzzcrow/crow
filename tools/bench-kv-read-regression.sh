@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # --- CrowKV read regression benchmark ---
-# Usage: bash tools/bench-read-regression.sh
+# Usage: bash tools/bench-kv-read-regression.sh
 #
 # Regression sentinel for point-read (get) throughput and latency. Covers
 # the core read code paths with a minimal config set, plus a multi-thread

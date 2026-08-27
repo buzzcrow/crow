@@ -130,7 +130,7 @@ typedef void (*crow_rpc_on_complete)(uint64_t request_id, crow_rpc_buffer_t cont
 // any send(). The pool is sized to the next power of two >=
 // max_in_flight. Slots are indexed by request_id & mask. Zero per-call
 // heap allocation — the callback + user_data live in pre-allocated slots.
-// Flow: doc/design/rpc/rpc-echo-flow-analysis.md § "Flow".
+// Flow: doc/design/rpc/rpc-flow-analysis.md § "Flow".
 void crow_rpc_client_set_completion_pool_size(crow_rpc_client_t client, uint32_t max_in_flight);
 
 // Start the timeout reaper thread. Scans the slab pool + pending map

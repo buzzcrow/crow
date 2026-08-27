@@ -445,7 +445,7 @@ the point of L0 is that it is no longer on the scan or get path.
 Scan is part of the read flow but a separate perf track from random
 point reads (different cost shapes: per-entry overhead vs leaf-chain
 traversal vs per-byte copy). The regression sentinel is
-`tools/bench-scan-regression.sh` driving `crow-cli bench run --workload
+`tools/bench-kv-scan-regression.sh` driving `crow-cli bench run --workload
 list` with `--scan-limit`, `--scan-prefix`, `--scan-start-after` flags
 against a 3-node mem-mode cluster, mirroring the write/read regression
 sentinels. The sync `scan` `start_after` pushdown correctness is

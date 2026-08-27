@@ -74,5 +74,4 @@ L0) is stable; profiling it now reflects the production code shape.
   filed with the profiling evidence referenced.
 
 **Note**: the saturation observation lives in
-`doc/design/kv/kv-scan-flow-analysis.md` "Existing Problems" section
-("High-concurrency read-mode split (MEASURED)").
+`doc/design/kv/kv-scan-flow-analysis.md` benchmark and flow analysis.

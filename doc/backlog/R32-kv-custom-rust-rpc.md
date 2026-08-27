@@ -152,11 +152,11 @@ semantics and recovering the h2-lock throughput loss.
    kv`) against both the gRPC path (baseline) and the R104 path.
    Verifies the ~17% loss is recovered. Also runs 1T:1C to verify no
    regression at the uncontended point. Added to the regression
-   sentinel suite alongside `bench-read-regression.sh` and
-   `bench-write-regression.sh`. Prerequisite: capture the gRPC
+   sentinel suite alongside `bench-kv-read-regression.sh` and
+   `bench-kv-write-regression.sh`. Prerequisite: capture the gRPC
    baseline before starting the migration (todo_fb.md §6 — the
    baseline goes in `doc/design/rpc/rpc-migration-baselines.md`, new,
-   or extends `rpc-echo-flow-analysis.md`). Note:
+   or extends `rpc-flow-analysis.md`). Note:
    `tools/bench-rpc-regression.sh` is the RPC-echo sentinel (R104
    transport only, no KV layer) — distinct from this KV-path bench.
 

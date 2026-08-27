@@ -95,7 +95,7 @@ impl RpcClient {
     /// The callback must be non-blocking (it runs on the I/O thread).
     /// Returns `Ok(())` on success, `Err` on submit error (callback NOT
     /// invoked — caller must handle the error).
-    /// Flow: doc/design/rpc/rpc-echo-flow-analysis.md § "Flow".
+    /// Flow: doc/design/rpc/rpc-flow-analysis.md § "Flow".
     ///
     /// # Safety
     ///

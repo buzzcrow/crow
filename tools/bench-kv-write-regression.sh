@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # --- CrowKV write regression benchmark ---
-# Usage: bash tools/bench-write-regression.sh
+# Usage: bash tools/bench-kv-write-regression.sh
 #
 # Regression sentinel for write throughput with coalescing enabled.
 # WAL append count tracks coalescing efficiency. Results are appended

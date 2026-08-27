@@ -6,7 +6,7 @@
 # then runs crow-cli bench rpc against it for each config. The server is
 # restarted per config so its io_engines/io_workers match the client.
 #
-# After a run, update doc/design/rpc/rpc-echo-flow-analysis.md: add a
+# After a run, update doc/design/rpc/rpc-flow-analysis.md: add a
 # dated subsection under "Current Data" with the results table and
 # scaling analysis, plus a "History" entry. Always record the CPU model.
 #

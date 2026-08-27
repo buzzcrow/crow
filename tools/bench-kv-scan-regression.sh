@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # --- CrowKV scan regression benchmark ---
-# Usage: bash tools/bench-scan-regression.sh
+# Usage: bash tools/bench-kv-scan-regression.sh
 #
 # Regression sentinel for scan (list) throughput and latency. Covers
 # the core scan code paths with a minimal config set, plus a
