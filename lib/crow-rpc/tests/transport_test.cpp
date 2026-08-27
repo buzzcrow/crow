@@ -64,6 +64,18 @@ class TransportLoopbackTest : public ::testing::Test
     uint16_t port_      = 0;
 };
 
+TEST_F(TransportLoopbackTest, StopWakesIdleWorker)
+{
+    SocketTransport transport(1, 1);
+    transport.start();
+
+    const auto started = std::chrono::steady_clock::now();
+    transport.stop();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_LT(elapsed, std::chrono::milliseconds(500));
+}
+
 TEST_F(TransportLoopbackTest, SendAndReceiveFrame)
 {
     // Start the transport with 1 worker.

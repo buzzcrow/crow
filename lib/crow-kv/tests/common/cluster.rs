@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::common::logging::init_test_subscriber;
 use crate::common::net_lock::{lock, unique_port};
@@ -9,12 +10,14 @@ use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 use crow_kv::common::config::PxElectionConfig;
+use crow_kv_client::KvRpcTransport;
 
 use crate::common::test_client::{TestKvClient, TestPxClient};
 
 pub struct TestCluster {
     nodes: Vec<Arc<PxKvStore>>,
     leader_id: u64,
+    kv_transport: Arc<KvRpcTransport>,
     _net: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -23,6 +26,7 @@ impl TestCluster {
         Self {
             nodes,
             leader_id,
+            kv_transport: Arc::new(KvRpcTransport::new()),
             _net: net,
         }
     }
@@ -61,6 +65,11 @@ impl TestCluster {
     #[allow(dead_code)]
     pub async fn shutdown(self) {
         for node in &self.nodes {
+            if let Some(group) = node.get_group(1) {
+                let _ = group.shutdown(Duration::from_secs(5)).await;
+            }
+        }
+        for node in &self.nodes {
             node.stop();
         }
         for node in self.nodes {
@@ -77,8 +86,16 @@ impl TestCluster {
         .await
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn kv_client(&self, node: &Arc<PxKvStore>) -> TestKvClient {
+        TestKvClient::with_transport(
+            Arc::clone(&self.kv_transport),
+            format!("http://{}", node.listen_addr().expect("server not started")),
+        )
+    }
+
+    #[allow(dead_code)]
+    pub async fn isolated_kv_client(&self, node: &Arc<PxKvStore>) -> TestKvClient {
         TestKvClient::connect(format!(
             "http://{}",
             node.listen_addr().expect("server not started")
@@ -99,9 +116,8 @@ pub async fn start_cluster_classic(ids: &[u64], leader_id: u64) -> TestCluster {
 
 /// Step 12c: start a cluster with no pre-set leader. All replicas come
 /// up as `Follower` and the election driver picks a leader using the
-/// `PxElectionConfig::for_tests()` profile (5 ms heartbeat / 30–60 ms
-/// election timer / 25 ms lease) so tests resolve within a few hundred
-/// milliseconds without `tokio::time::advance`.
+/// `PxElectionConfig::for_e2e()` profile, which remains stable under real
+/// runtime scheduling and transport jitter.
 ///
 /// Note on small clusters:
 /// - 1-node: the lone replica auto-promotes on the first election tick
@@ -113,7 +129,7 @@ pub async fn start_cluster_classic(ids: &[u64], leader_id: u64) -> TestCluster {
 /// election has completed.
 #[allow(dead_code)]
 pub async fn start_cluster_no_leader(ids: &[u64]) -> TestCluster {
-    start_cluster_no_leader_inner(ids, PxElectionConfig::for_tests()).await
+    start_cluster_no_leader_inner(ids, PxElectionConfig::for_e2e()).await
 }
 
 /// Like `start_cluster_no_leader` but with a relaxed election timer
@@ -152,7 +168,7 @@ async fn start_cluster_no_leader_inner(ids: &[u64], cfg: PxElectionConfig) -> Te
         group.set_election_config(cfg);
         // Deliberately no `set_leader_id` — let the driver elect.
 
-        server.add_group(group);
+        server.add_group_without_election(group);
         server.start().await.expect("failed to start KvStore");
         running.push(server);
     }
@@ -230,7 +246,7 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
             group.set_force_classic(true);
         }
 
-        server.add_group(group);
+        server.add_group_without_election(group);
 
         server.start().await.expect("failed to start KvStore");
 

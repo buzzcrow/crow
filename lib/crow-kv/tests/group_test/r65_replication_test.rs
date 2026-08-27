@@ -4,9 +4,7 @@
 //! R65 replication tests: async catch-up, `ChosenNotice` ballot verification,
 //! out-of-order apply, `FetchGap` follower-driven catch-up, heartbeat strip.
 
-use crate::common::cluster::{
-    start_cluster, start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster,
-};
+use crate::common::cluster::{start_cluster, start_cluster_no_leader, TestCluster};
 use bytes::Bytes;
 use crow_kv::rpc::{KvDeleteRequest, KvSetRequest};
 use std::time::{Duration, Instant};

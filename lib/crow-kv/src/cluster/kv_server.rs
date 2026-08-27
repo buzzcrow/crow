@@ -211,7 +211,6 @@ impl PxKvStore {
             let _ = tx.send(());
             info!(store_id = self.store_id, "kv server shutdown requested");
         }
-
         let Some(task) = handle else { return Ok(()) };
         let abort = task.abort_handle();
         match tokio::time::timeout(timeout, task).await {

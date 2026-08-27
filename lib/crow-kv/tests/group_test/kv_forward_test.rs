@@ -82,7 +82,7 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
 
     // 4. Read via the follower's RPC. The transparent forward should
     //    return the leader's value, not not_found.
-    let follower_client = cluster.kv_client(follower).await;
+    let follower_client = cluster.isolated_kv_client(follower).await;
     let resp = follower_client
         .get(KvGetRequest {
             version: 1,
@@ -151,7 +151,7 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
     let follower_group = follower.get_group(1).expect("group");
     follower_group.local_replica().learner.engine().clear();
 
-    let follower_client = cluster.kv_client(follower).await;
+    let follower_client = cluster.isolated_kv_client(follower).await;
     let resp = follower_client
         .scan(KvScanRequest {
             version: 1,
@@ -186,12 +186,35 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
     cluster.shutdown().await;
 }
 
-// The loop-guard header test relied on tonic metadata injection
-// (`tonic::Request` + `x-crow-kv-forwarded` header) to prove a follower
-// does not re-forward an already-forwarded request. The crow-rpc
-// flatbuffer wire does not carry arbitrary gRPC metadata, so the
-// loop-guard now lives in the flatbuffer `forwarded` flag and needs a
-// dedicated test path. Tracked for a follow-up migration.
 #[tokio::test]
-#[ignore = "needs migration to crow-rpc forwarded-flag path"]
-async fn forwarded_request_does_not_re_forward() {}
+async fn forwarded_request_does_not_re_forward() {
+    let cluster = start_cluster(&[0, 1], 0).await;
+    let follower = cluster.followers().into_iter().next().expect("follower");
+    let follower_client = cluster.isolated_kv_client(follower).await;
+
+    let resp = follower_client
+        .get_with_forwarded(
+            KvGetRequest {
+                version: 1,
+                key: Bytes::from_static(b"loop-guard-key"),
+                request_id: 301,
+                request_create_ms: 1301,
+                group_id: 1,
+                read_mode: 0,
+                min_slot: 0,
+            },
+            true,
+        )
+        .await
+        .expect("forwarded get on follower")
+        .into_inner();
+
+    assert!(!resp.ok, "forwarded follower request must not be served locally");
+    assert!(
+        !resp.not_leader_hint.is_empty(),
+        "forwarded follower request must return a leader hint"
+    );
+
+    drop(follower_client);
+    cluster.shutdown().await;
+}

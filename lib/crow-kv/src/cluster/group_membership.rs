@@ -527,7 +527,6 @@ impl PxGroup {
                 report.merge(sub);
             }
         }
-
         // 2. Shutdown local replica.
         let sub = self.local_replica.shutdown(per_layer_timeout).await;
         report.merge(sub);

@@ -79,15 +79,35 @@ void Worker::start()
     });
 }
 
-void Worker::stop()
+bool Worker::request_stop()
 {
     if (!running_.exchange(false, std::memory_order_acq_rel)) {
+        CR_LOG_DEBUG("worker {} stop skipped: already stopped", id_);
+        return false;
+    }
+    CR_LOG_INFO("worker {} stop requested", id_);
+    return true;
+}
+
+void Worker::join()
+{
+    if (!thread_.joinable()) {
         return;
     }
-    engine_->notify_worker(); // wake the loop
-    if (thread_.joinable()) {
-        thread_.join();
+    const auto join_started = std::chrono::steady_clock::now();
+    CR_LOG_INFO("worker {} joining event-loop thread", id_);
+    thread_.join();
+    const auto join_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - join_started);
+    CR_LOG_INFO("worker {} event-loop thread joined after {} ms", id_, join_ms.count());
+}
+
+void Worker::stop()
+{
+    if (request_stop()) {
+        engine_->notify_stop();
     }
+    join();
 }
 
 void Worker::add_connection(int read_fd, int write_fd, std::shared_ptr<Connection> conn)
@@ -284,6 +304,7 @@ void Worker::run_loop()
                 hist_round().observe(now_nanos() - round_start);
             }
         }
+        CR_LOG_INFO("worker {} event loop exited", id_);
     }
     catch (const std::exception &e) {
     }
@@ -450,7 +471,13 @@ void SocketTransport::start()
 void SocketTransport::stop()
 {
     for (auto &w : workers_) {
-        w->stop();
+        w->request_stop();
+    }
+    for (auto &engine : engines_) {
+        engine->notify_stop();
+    }
+    for (auto &w : workers_) {
+        w->join();
     }
 }
 

@@ -9,10 +9,13 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use bytes::Bytes;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
+use crow_kv_client::KvRpcTransport;
 use serde_json::Value;
-use std::time::{Duration, Instant};
 
 use common::process::{start_test_server, ServerHandle};
 use common::test_client::TestKvClient;
@@ -158,11 +161,12 @@ async fn kv_put(nodes: &[ServerNode], group_id: u64, key: &[u8], val: &[u8], req
 
 async fn kv_put_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8], val: &[u8], req_id: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(15);
+    let transport = Arc::new(KvRpcTransport::new());
     let mut last_err = String::new();
     while Instant::now() < deadline {
         let leader_idx = wait_for_leader_ref(nodes, group_id, Duration::from_secs(10)).await;
         let addr = node_endpoint(&topology(nodes[leader_idx]).await);
-        let client = TestKvClient::connect(format!("http://{addr}")).await;
+        let client = TestKvClient::with_transport(Arc::clone(&transport), format!("http://{addr}"));
         match client
             .put(KvSetRequest {
                 version: 1,

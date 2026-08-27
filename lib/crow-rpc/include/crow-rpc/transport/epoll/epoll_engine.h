@@ -38,15 +38,17 @@ class EpollEngine : public SocketEngine
     void arm_write(int write_fd, Connection *conn) override;
     void disarm_write(int write_fd, Connection *conn) override;
     void notify_worker() override;
+    void notify_stop() override;
     void set_timer(int timeout_ms) override;
     int  wait(EngineEvent *out_events, int max_events, int timeout_ms) override;
     void shutdown() override;
 
   private:
-    int  epoll_fd_  = -1;
-    int  notify_fd_ = -1;    // eventfd
-    int  timer_fd_  = -1;    // timerfd
-    bool oneshot_   = false; // multi-worker safety
+    int               epoll_fd_  = -1;
+    int               notify_fd_ = -1;    // eventfd
+    int               timer_fd_  = -1;    // timerfd
+    bool              oneshot_   = false; // multi-worker safety
+    std::atomic<bool> stop_notified_{false};
 
     // fd → Connection* map (only used for add/remove; wait() uses data.ptr).
     std::mutex                            conn_mu_;

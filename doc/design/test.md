@@ -54,30 +54,67 @@ macOS times are wall-clock `time pixi run test-*` with build + test binaries cac
 Linux times re-measured on 2026-08-25 after test speedup (shared `KvRpcTransport`,
 condition polling replacing fixed sleeps, reduced polling intervals).
 Run `pixi run clean` before measuring for reproducible results.
+The **Linux (08-27)** column is the first run after rebase to origin/task-fb
+(RPC tunables, send_queue_rejects counter, conn_for divide-by-zero fix, bench
+rpc test fix). Times include compilation overhead (cold build); warm-build
+times for `test-common`, `test-protocol`, and `test-chunkdb-client` match the
+08-25 baseline. The large gaps on `test-kv-core` (245 s vs 87 s) and
+`test-console-server` (351 s vs 84 s) are partly cold-build + partly parallel
+test-load contention (see Test Failures section below).
 
-| Suite | Tests | macOS | Linux |
-| --- | --- | --- | --- |
-| `test-tree-ct` | 416 | 20.1 s | 33.7 s |
-| `test-common-ct` | 21 | — | 19.1 s |
-| `test-tree-ffi` | 30 | 13.5 s | 0.5 s |
-| `test-rpc-ct` | 55 | — | 21.4 s |
-| `test-rpc-ffi` | 13 | — | 0.7 s |
-| `test-diskio-ct` | 91 | — | 24.7 s |
-| `test-common` | 65 | 21.9 s | 9.7 s |
-| `test-protocol` | 121 | 12.2 s | 0.1 s |
-| `test-kv-core` | 556 | 43.2 s | 87.2 s |
-| `test-kv-client` | 49 | 23.4 s | 4.1 s |
-| `test-chunkdb-client` | 10 | 13.8 s | 1.4 s |
-| `test-kv-server` | 82 | 53.0 s | 39.3 s |
-| `test-diskdb` | 127 | 42.8 s | 65.2 s |
-| `test-diskdb-client` | 7 | 13.9 s | 14.7 s |
-| `test-chunkdb` | 76 | 27.8 s | 16.2 s |
-| `test-chunk-client` | 49 | — | 10.4 s |
-| `test-diskio-client` | 4 | — | 42.9 s |
-| `test-console-shared` | 62 | 39.2 s | 13.2 s |
-| `test-console-cli` | 16 | 69.4 s | 52.5 s |
-| `test-console-server` | 71 | 50.7 s | 84.2 s |
-| `test-console-ui` | 75 | 165.7 s | 179.6 s |
+| Suite | Tests | macOS | Linux | Linux (08-27) |
+| --- | --- | --- | --- | --- |
+| `test-tree-ct` | 416 | 20.1 s | 33.7 s | 65.1 s |
+| `test-common-ct` | 21 | — | 19.1 s | 45.5 s |
+| `test-tree-ffi` | 30 | 13.5 s | 0.5 s | 0.5 s |
+| `test-rpc-ct` | 56 | — | 21.4 s | 20.5 s |
+| `test-rpc-ffi` | 13 | — | 0.7 s | 0.8 s |
+| `test-diskio-ct` | 92 | — | 24.7 s | 43.2 s |
+| `test-common` | 65 | 21.9 s | 9.7 s | 9.7 s |
+| `test-protocol` | 121 | 12.2 s | 0.1 s | 0.1 s |
+| `test-kv-core` | 556 | 43.2 s | 87.2 s | 245.8 s |
+| `test-kv-client` | 49 | 23.4 s | 4.1 s | 44.5 s |
+| `test-chunkdb-client` | 10 | 13.8 s | 1.4 s | 1.4 s |
+| `test-kv-server` | 81 | 53.0 s | 39.3 s | 76.5 s |
+| `test-diskdb` | 127 | 42.8 s | 65.2 s | 55.3 s |
+| `test-diskdb-client` | 7 | 13.9 s | 14.7 s | 30.9 s |
+| `test-chunkdb` | 76 | 27.8 s | 16.2 s | 40.5 s |
+| `test-chunk-client` | 49 | — | 10.4 s | 22.3 s |
+| `test-diskio-client` | 4 | — | 42.9 s | 48.7 s |
+| `test-console-shared` | 62 | 39.2 s | 13.2 s | 44.4 s |
+| `test-console-cli` | 17 | 69.4 s | 52.5 s | 74.6 s |
+| `test-console-server` | 71 | 50.7 s | 84.2 s | 351.5 s |
+| `test-console-ui` | 75 | 165.7 s | 179.6 s | 1028.3 s |
+
+---
+
+## Test Failures (2026-08-27 post-rebase run)
+
+Flaky failures observed under parallel test load. All pass in isolation.
+
+- [ ] **`test-kv-core` / `t1_early_ack_crash::t1_1_kill_in_cas_persist_window_value_survives`**:
+  "leader present after write" — election timing under parallel load. Passes in
+  isolation (4.5 s). Root cause: election timeout too tight when CPU is
+  saturated by concurrent test suites.
+- [ ] **`test-kv-core` / `election::single_voter_with_prevote_enabled_becomes_leader`**:
+  `Follower != Leader` — single-voter PreVote path doesn't reach Leader in time
+  under load. Passes in isolation.
+- [ ] **`test-kv-core` / `election::leader_heartbeat_tick_renews_lease`**:
+  `Follower != Leader` — same timing issue as above. Passes in isolation.
+- [ ] **`test-console-server` / `restart_5node_1group`**:
+  "WAL did not converge for store 10 group 1 within 5s: slots=[0, 106, 106, 106, 106]"
+  — node 1 has 0 accepted slots while others have 106. Passes in isolation
+  (122 s). Root cause: WAL convergence 5 s timeout too tight under parallel load.
+- [ ] **`test-console-server` / `restart_6node_2group_overlap`**:
+  "restart 4: 502 Bad Gateway ... did not become healthy within timeout" —
+  node fails to become healthy during restart under load. Passes in isolation.
+- [ ] **`test-diskio-ct` (18 tests, parallel ctest only)**:
+  `DiskioStartupTest.WriteReadRoundTrip`, `DiskSet.*`, `BlockDisk.*`,
+  `DummyDisk.*`, `SqFullBackpressureTest.*`, `UringEngine.*` — all 18 fail
+  when `ctest` runs in parallel with other C++ suites (resource/port
+  conflict). All 92 pass when run alone. Root cause: parallel ctest
+  execution across separate build directories conflicts on shared
+  resources (likely `/tmp` or port allocation).
 
 ---
 

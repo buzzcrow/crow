@@ -628,7 +628,6 @@ impl PxLocalReplica {
                 debug!(replica_l_id = self.id, "WAL flush_all completed during shutdown");
             }
         }
-
         let engine = self.learner.engine();
         engine.flush();
         let snap_slot = engine.persist_snapshot();

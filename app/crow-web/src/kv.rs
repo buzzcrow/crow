@@ -298,7 +298,7 @@ pub async fn http_kv_get(
     let key = decode_key(q.key, q.key_hex)?;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
+    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -382,7 +382,7 @@ pub async fn http_kv_scan(
     let limit = q.limit;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
+    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -434,7 +434,7 @@ pub async fn http_kv_put(
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
+    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -462,7 +462,7 @@ pub async fn http_kv_delete(
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
+    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }

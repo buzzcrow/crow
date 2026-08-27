@@ -222,6 +222,32 @@ impl KvRpcTransport {
         read_mode: ReadMode,
         min_slot: u64,
     ) -> Result<KvResponse> {
+        self.send_get_with_forwarded(
+            rpc_endpoint,
+            key,
+            request_id,
+            request_create_ms,
+            group_id,
+            read_mode,
+            min_slot,
+            false,
+        )
+        .await
+    }
+
+    /// Send a `Get` request with an explicit forwarded loop-guard flag.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_get_with_forwarded(
+        &self,
+        rpc_endpoint: &str,
+        key: &[u8],
+        request_id: u64,
+        request_create_ms: u64,
+        group_id: u64,
+        read_mode: ReadMode,
+        min_slot: u64,
+        forwarded: bool,
+    ) -> Result<KvResponse> {
         let req_id = self.next_id();
         let conn = self.conn_for(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
@@ -236,7 +262,7 @@ impl KvRpcTransport {
             group_id,
             read_mode: read_mode_to_fb(read_mode),
             min_slot,
-            forwarded: false,
+            forwarded,
         };
         let req = FBKvGetRequest::create(&mut builder, &args);
         builder.finish(req, None);

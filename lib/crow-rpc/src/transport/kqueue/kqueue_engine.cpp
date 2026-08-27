@@ -120,6 +120,11 @@ void KqueueEngine::notify_worker()
     ::kevent(kq_, &change, 1, nullptr, 0, nullptr);
 }
 
+void KqueueEngine::notify_stop()
+{
+    notify_worker();
+}
+
 void KqueueEngine::set_timer(int timeout_ms)
 {
     if (timeout_ms <= 0) {

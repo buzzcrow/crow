@@ -198,6 +198,19 @@ pub struct CrowkvClient {
 impl CrowkvClient {
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
+        Self::build(config, None)
+    }
+
+    /// Create a client using an existing shared RPC transport.
+    #[must_use]
+    pub fn new_with_rpc_transport(
+        config: ClientConfig,
+        transport: Arc<crate::kv_rpc_transport::KvRpcTransport>,
+    ) -> Self {
+        Self::build(config, Some(transport))
+    }
+
+    fn build(config: ClientConfig, transport: Option<Arc<crate::kv_rpc_transport::KvRpcTransport>>) -> Self {
         // The eviction hook removes stale `write_slot_highwater` entries
         // when a group disappears from the topology. The hook captures a
         // raw pointer pattern via `Arc<DashMap>` — we create the DashMap
@@ -223,15 +236,15 @@ impl CrowkvClient {
             read_endpoint_policy: config.read_endpoint_policy,
             read_rr: DashMap::new(),
             endpoint_stats: DashMap::new(),
-            rpc_transport: Some(std::sync::Arc::new(
-                crate::kv_rpc_transport::KvRpcTransport::with_pool_size(
+            rpc_transport: Some(transport.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::kv_rpc_transport::KvRpcTransport::with_pool_size(
                     config.pool_size_per_endpoint,
                     config.enable_nagle,
                     config.event_write,
                     config.send_queue_capacity,
                     config.rpc_workers,
-                ),
-            )),
+                ))
+            })),
         }
     }
 

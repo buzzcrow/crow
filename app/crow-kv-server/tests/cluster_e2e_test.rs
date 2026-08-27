@@ -5,8 +5,11 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvSetRequest};
+use crow_kv_client::KvRpcTransport;
 use serde_json::Value;
 
 use common::process::{start_test_server, ServerHandle};
@@ -100,11 +103,12 @@ enum KvOp {
 /// churn on the same physical host.
 async fn run_kv_op_with_retry(nodes: &[ServerNode], group_id: u64, op: &KvOp) -> crow_kv::rpc::KvResponse {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let transport = Arc::new(KvRpcTransport::new());
     let mut last_err = String::new();
     while std::time::Instant::now() < deadline {
         let leader_idx = wait_for_leader(nodes, group_id, std::time::Duration::from_secs(10)).await;
         let addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-        let client = TestKvClient::connect(format!("http://{addr}")).await;
+        let client = TestKvClient::with_transport(Arc::clone(&transport), format!("http://{addr}"));
         let result = match op {
             KvOp::Put(req) => client.put(req.clone()).await,
             KvOp::Get(req) => client.get(req.clone()).await,

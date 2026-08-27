@@ -15,7 +15,7 @@ use crow_kv::cluster::{KvServer, PxLocalReplica, PxLocalReplicaRole, PxRemoteRep
 use crow_kv::common::config::PxElectionConfig;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader, TestCluster};
 use crate::common::test_client::TestKvClient;
 
 async fn wait_for_leader_in_group(cluster: &TestCluster, group_id: u64, timeout: Duration) -> Option<u64> {
@@ -80,7 +80,7 @@ fn add_second_group_to_cluster(cluster: &TestCluster) {
         election_min_ms: 500,
         election_max_ms: 1000,
         lease_duration_ms: 1100,
-        ..PxElectionConfig::for_tests()
+        ..PxElectionConfig::for_e2e()
     };
 
     // First pass: create group 2 on each node with placeholder remotes.

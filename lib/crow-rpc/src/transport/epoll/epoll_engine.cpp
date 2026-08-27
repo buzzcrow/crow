@@ -167,6 +167,15 @@ void EpollEngine::notify_worker()
     }
 }
 
+void EpollEngine::notify_stop()
+{
+    if (notify_fd_ >= 0) {
+        stop_notified_.store(true, std::memory_order_release);
+        uint64_t val = 1;
+        ::write(notify_fd_, &val, sizeof(val));
+    }
+}
+
 void EpollEngine::set_timer(int timeout_ms)
 {
     if (timer_fd_ < 0) {
@@ -205,8 +214,10 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
         int fd = ev.data.fd;
 
         if (fd == notify_fd_) {
-            uint64_t val;
-            ::read(notify_fd_, &val, sizeof(val));
+            if (!stop_notified_.load(std::memory_order_acquire)) {
+                uint64_t val;
+                ::read(notify_fd_, &val, sizeof(val));
+            }
             out_events[out++] = {SocketEvent::Notify, -1, nullptr};
             continue;
         }

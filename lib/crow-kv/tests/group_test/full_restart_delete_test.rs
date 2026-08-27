@@ -100,7 +100,7 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
     let net = crate::common::net_lock::lock().await;
     crate::common::logging::init_test_subscriber();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let cfg = PxElectionConfig::for_tests();
+    let cfg = PxElectionConfig::for_e2e();
 
     let mut nodes = Vec::with_capacity(ids.len());
     for &id in ids {
@@ -199,7 +199,7 @@ impl WalCluster {
     }
 
     async fn restart_all(&mut self) {
-        let cfg = PxElectionConfig::for_tests();
+        let cfg = PxElectionConfig::for_e2e();
         // Snapshot ids + wal dirs, shut every node down, then rebuild all.
         let mut ids_dirs: Vec<(u64, PathBuf)> =
             self.nodes.iter().map(|n| (n.id, n.wal_dir.clone())).collect();
@@ -208,7 +208,6 @@ impl WalCluster {
         for node in self.nodes.drain(..) {
             node.store.shutdown(Duration::from_secs(2)).await;
         }
-
         // Pass 1: bind each store with NO remotes wired yet — exactly the
         // web-console restore window where `add_group` runs before
         // `add_remote_replicas`. With zero remotes the group is quorum=1 and
@@ -250,7 +249,6 @@ impl WalCluster {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-
         // Pass 2: rewire peers to the actual bound endpoints.
         let endpoints: Vec<(u64, String)> = nodes
             .iter()

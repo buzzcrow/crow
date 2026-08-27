@@ -34,6 +34,7 @@ class KqueueEngine : public SocketEngine
     void arm_write(int write_fd, Connection *conn) override;
     void disarm_write(int write_fd, Connection *conn) override;
     void notify_worker() override;
+    void notify_stop() override;
     void set_timer(int timeout_ms) override;
     int  wait(EngineEvent *out_events, int max_events, int timeout_ms) override;
     void shutdown() override;

@@ -108,9 +108,17 @@ impl TestKvClient {
     }
 
     pub async fn get(&self, req: KvGetRequest) -> Result<TestResponse<KvResponse>, TestRpcStatus> {
+        self.get_with_forwarded(req, false).await
+    }
+
+    pub async fn get_with_forwarded(
+        &self,
+        req: KvGetRequest,
+        forwarded: bool,
+    ) -> Result<TestResponse<KvResponse>, TestRpcStatus> {
         let r = self
             .transport
-            .send_get(
+            .send_get_with_forwarded(
                 &self.endpoint,
                 &req.key,
                 req.request_id,
@@ -118,6 +126,7 @@ impl TestKvClient {
                 req.group_id,
                 read_mode_from_i32(req.read_mode),
                 req.min_slot,
+                forwarded,
             )
             .await
             .map_err(status)?;

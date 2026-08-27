@@ -15,11 +15,10 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::group_election::LeaderElection;
-use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxRemoteReplica};
+use crow_kv::cluster::{PxKvStore, PxLocalReplica, PxRemoteReplica};
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
-use crate::common::test_client::TestKvClient;
+use crate::common::cluster::{start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -49,12 +48,14 @@ async fn wait_for_leader_in(nodes: &[&Arc<PxKvStore>], timeout: Duration) -> Opt
     None
 }
 
-async fn kv_client_for(node: &Arc<PxKvStore>) -> TestKvClient {
-    TestKvClient::connect(format!("http://{}", node.listen_addr().expect("server started"))).await
-}
-
-async fn put_via_node(node: &Arc<PxKvStore>, key: &[u8], val: &[u8], req_id: u64) -> bool {
-    let client = kv_client_for(node).await;
+async fn put_via_node(
+    cluster: &TestCluster,
+    node: &Arc<PxKvStore>,
+    key: &[u8],
+    val: &[u8],
+    req_id: u64,
+) -> bool {
+    let client = cluster.kv_client(node).await;
     let resp = client
         .put(KvSetRequest {
             version: 1,
@@ -73,8 +74,8 @@ async fn put_via_node(node: &Arc<PxKvStore>, key: &[u8], val: &[u8], req_id: u64
     resp.ok
 }
 
-async fn read_via_node(node: &Arc<PxKvStore>, key: &[u8]) -> Option<Vec<u8>> {
-    let client = kv_client_for(node).await;
+async fn read_via_node(cluster: &TestCluster, node: &Arc<PxKvStore>, key: &[u8]) -> Option<Vec<u8>> {
+    let client = cluster.kv_client(node).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,
@@ -158,7 +159,7 @@ async fn reconfig_remove_leader() {
 
     // Write data before reconfig.
     let leader_node = cluster.elected_leader().expect("leader present");
-    assert!(put_via_node(leader_node, b"rc-rmldr-1", b"val-1", 1).await);
+    assert!(put_via_node(&cluster, leader_node, b"rc-rmldr-1", b"val-1", 1).await);
 
     // 1. Force the current leader to step down.
     let reply = leader_node
@@ -207,7 +208,7 @@ async fn reconfig_remove_leader() {
     let start = Instant::now();
     let mut recovered = None;
     while start.elapsed() < Duration::from_secs(5) {
-        if let Some(v) = read_via_node(new_leader, b"rc-rmldr-1").await {
+        if let Some(v) = read_via_node(&cluster, new_leader, b"rc-rmldr-1").await {
             recovered = Some(v);
             break;
         }
@@ -221,14 +222,14 @@ async fn reconfig_remove_leader() {
 
     // New write commits with the 2-node quorum.
     assert!(
-        put_via_node(new_leader, b"rc-rmldr-2", b"val-2", 2).await,
+        put_via_node(&cluster, new_leader, b"rc-rmldr-2", b"val-2", 2).await,
         "write after leader removal should commit"
     );
 
     let start = Instant::now();
     let mut confirmed = None;
     while start.elapsed() < Duration::from_secs(5) {
-        if let Some(v) = read_via_node(new_leader, b"rc-rmldr-2").await {
+        if let Some(v) = read_via_node(&cluster, new_leader, b"rc-rmldr-2").await {
             confirmed = Some(v);
             break;
         }

@@ -23,7 +23,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::test_client::TestKvClient;
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -36,9 +37,7 @@ async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64
     None
 }
 
-async fn put_via_leader(cluster: &TestCluster, key: &[u8], val: &[u8], req_id: u64) -> bool {
-    let leader = cluster.elected_leader().expect("leader present");
-    let client = cluster.kv_client(leader).await;
+async fn put_via_client(client: &TestKvClient, key: &[u8], val: &[u8], req_id: u64) -> bool {
     let resp = client
         .put(KvSetRequest {
             version: 1,
@@ -57,9 +56,7 @@ async fn put_via_leader(cluster: &TestCluster, key: &[u8], val: &[u8], req_id: u
     resp.ok
 }
 
-async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
-    let leader = cluster.elected_leader()?;
-    let client = cluster.kv_client(leader).await;
+async fn read_via_client(client: &TestKvClient, key: &[u8]) -> Option<Vec<u8>> {
     let resp = client
         .get(KvGetRequest {
             version: 1,
@@ -80,10 +77,10 @@ async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-async fn poll_for_value(cluster: &TestCluster, key: &[u8], expected: &[u8], timeout: Duration) {
+async fn poll_for_value(client: &TestKvClient, key: &[u8], expected: &[u8], timeout: Duration) {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if let Some(v) = read_via_leader(cluster, key).await {
+        if let Some(v) = read_via_client(client, key).await {
             assert_eq!(v.as_slice(), expected, "key {key:?} mismatch");
             return;
         }
@@ -100,15 +97,17 @@ async fn poll_for_value(cluster: &TestCluster, key: &[u8], expected: &[u8], time
 async fn learner_stream_rapid_fire_writes() {
     let cluster = start_cluster_no_leader(&[1, 2, 3]).await;
 
-    let _leader_id = wait_for_leader(&cluster, Duration::from_secs(5))
+    wait_for_leader(&cluster, Duration::from_secs(5))
         .await
         .expect("initial leader elected");
+    let leader = cluster.elected_leader().expect("leader present");
+    let client = cluster.kv_client(leader).await;
 
     for i in 0u64..20 {
         let key = format!("rapid-{i}");
         let val = format!("val-{i}");
         assert!(
-            put_via_leader(&cluster, key.as_bytes(), val.as_bytes(), i + 1).await,
+            put_via_client(&client, key.as_bytes(), val.as_bytes(), i + 1).await,
             "write {i} should commit"
         );
     }
@@ -116,7 +115,7 @@ async fn learner_stream_rapid_fire_writes() {
     for i in 0u64..20 {
         let key = format!("rapid-{i}");
         let val = format!("val-{i}");
-        poll_for_value(&cluster, key.as_bytes(), val.as_bytes(), Duration::from_secs(3)).await;
+        poll_for_value(&client, key.as_bytes(), val.as_bytes(), Duration::from_secs(3)).await;
     }
 
     cluster.shutdown().await;
@@ -131,24 +130,26 @@ async fn learner_stream_rapid_fire_writes() {
 async fn chosen_notification_advances_follower_frontier() {
     let cluster = start_cluster_no_leader(&[1, 2, 3]).await;
 
-    let _leader_id = wait_for_leader(&cluster, Duration::from_secs(5))
+    wait_for_leader(&cluster, Duration::from_secs(5))
         .await
         .expect("initial leader elected");
+    let leader = cluster.elected_leader().expect("leader present");
+    let client = cluster.kv_client(leader).await;
 
     assert!(
-        put_via_leader(&cluster, b"chosen-1", b"val-1", 1).await,
+        put_via_client(&client, b"chosen-1", b"val-1", 1).await,
         "first write should commit"
     );
-    poll_for_value(&cluster, b"chosen-1", b"val-1", Duration::from_secs(3)).await;
+    poll_for_value(&client, b"chosen-1", b"val-1", Duration::from_secs(3)).await;
 
     assert!(
-        put_via_leader(&cluster, b"chosen-2", b"val-2", 2).await,
+        put_via_client(&client, b"chosen-2", b"val-2", 2).await,
         "second write should commit"
     );
-    poll_for_value(&cluster, b"chosen-2", b"val-2", Duration::from_secs(3)).await;
+    poll_for_value(&client, b"chosen-2", b"val-2", Duration::from_secs(3)).await;
 
-    poll_for_value(&cluster, b"chosen-1", b"val-1", Duration::from_secs(3)).await;
-    poll_for_value(&cluster, b"chosen-2", b"val-2", Duration::from_secs(3)).await;
+    poll_for_value(&client, b"chosen-1", b"val-1", Duration::from_secs(3)).await;
+    poll_for_value(&client, b"chosen-2", b"val-2", Duration::from_secs(3)).await;
 
     cluster.shutdown().await;
 }

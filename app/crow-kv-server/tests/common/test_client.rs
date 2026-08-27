@@ -10,6 +10,8 @@
 #![allow(dead_code)]
 #![allow(clippy::unused_async)]
 
+use std::sync::Arc;
+
 use crow_kv::rpc::{
     KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanRequest, KvScanResponse,
     KvSetRequest, ReadMode,
@@ -58,7 +60,7 @@ fn read_mode_from_i32(v: i32) -> ReadMode {
 /// with `TestKvClient::connect(endpoint).await` (the `.await` mirrors the
 /// old `KvServiceClient::connect(..).await` shape).
 pub struct TestKvClient {
-    transport: KvRpcTransport,
+    transport: Arc<KvRpcTransport>,
     endpoint: String,
 }
 
@@ -66,9 +68,14 @@ impl TestKvClient {
     #[allow(clippy::unused_async_trait_impl)]
     pub async fn connect(endpoint: String) -> Self {
         Self {
-            transport: KvRpcTransport::new(),
+            transport: Arc::new(KvRpcTransport::new()),
             endpoint,
         }
+    }
+
+    #[must_use]
+    pub fn with_transport(transport: Arc<KvRpcTransport>, endpoint: String) -> Self {
+        Self { transport, endpoint }
     }
 
     pub async fn put(&self, req: KvSetRequest) -> Result<TestResponse<KvResponse>, TestRpcStatus> {

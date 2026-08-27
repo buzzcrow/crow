@@ -163,6 +163,10 @@ class SocketEngine
     // Notify the worker for a cross-thread submit. Wakes the event loop.
     virtual void notify_worker() = 0;
 
+    // Notify all workers that the engine is stopping. The shutdown wake stays
+    // readable so every worker sharing this engine can exit.
+    virtual void notify_stop() = 0;
+
     // Set the timer to fire after timeout_ms (0 = disable). Called when
     // scheduled tasks are due.
     virtual void set_timer(int timeout_ms) = 0;
@@ -199,6 +203,8 @@ class Worker
 
     // Stop the worker thread (signals shutdown, joins).
     void stop();
+    bool request_stop();
+    void join();
 
     // Add a connection to this worker (called by the acceptor).
     // read_fd and write_fd are dup'd fds for independent epoll arming.
@@ -412,7 +418,7 @@ class SocketTransport : public Transport
     // closes, it is removed from this map; submit() on a stale handle
     // returns false instead of crashing. Only used for cross-thread
     // submits (tokio mode); worker-thread submits skip this lookup.
-    mutable std::mutex                                           live_conns_mu_;
+    mutable std::mutex                                          live_conns_mu_;
     std::unordered_map<Connection *, std::weak_ptr<Connection>> live_conns_;
 
     // Cross-thread submit pending: connections with enqueued frames from
