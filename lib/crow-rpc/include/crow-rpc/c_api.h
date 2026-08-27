@@ -94,6 +94,12 @@ typedef struct crow_rpc_transport_stats
     uint64_t                 read_bytes;       // bytes returned by ::read()
     uint64_t                 writev_bytes;     // bytes written by ::writev()
     crow_rpc_latency_stats_t submit_to_writev; // submit → writev (queue wait)
+    // Event-loop timing (nanoseconds) — regression diagnosis.
+    uint64_t                 loop_count;       // run_loop iterations
+    uint64_t                 event_count_sum;  // total events processed
+    uint64_t                 wait_ns_sum;      // time in engine_->wait()
+    uint64_t                 read_ns_sum;      // time in on_readable_impl
+    uint64_t                 flush_ns_sum;     // time in post-event flush
 } crow_rpc_transport_stats_t;
 
 void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out);

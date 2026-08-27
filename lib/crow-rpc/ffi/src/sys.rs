@@ -53,6 +53,11 @@ pub struct CrowRpcTransportStats {
     pub read_bytes: u64,
     pub writev_bytes: u64,
     pub submit_to_writev: CrowRpcLatencyStats,
+    pub loop_count: u64,
+    pub event_count_sum: u64,
+    pub wait_ns_sum: u64,
+    pub read_ns_sum: u64,
+    pub flush_ns_sum: u64,
 }
 
 #[repr(C)]

@@ -29,7 +29,6 @@ static inline int build_frame_iovecs(OutFrame *frame, uint8_t *hdr_buf, iovec *i
     ssize_t off   = static_cast<ssize_t>(frame->sent_offset);
     int     count = 0;
 
-    // Header region.
     if (off < HEADER_SIZE) {
         iovs[count++] = {hdr_buf + off, static_cast<size_t>(HEADER_SIZE - off)};
     }
@@ -37,7 +36,6 @@ static inline int build_frame_iovecs(OutFrame *frame, uint8_t *hdr_buf, iovec *i
         off -= HEADER_SIZE;
     }
 
-    // Control region.
     if (frame->control != nullptr && frame->control->len > 0) {
         ssize_t clen = static_cast<ssize_t>(frame->control->len);
         if (off < clen) {
@@ -49,7 +47,6 @@ static inline int build_frame_iovecs(OutFrame *frame, uint8_t *hdr_buf, iovec *i
         }
     }
 
-    // Data region.
     if (frame->data != nullptr && frame->data->len > 0) {
         ssize_t dlen = static_cast<ssize_t>(frame->data->len);
         if (off < dlen) {
@@ -85,6 +82,29 @@ static inline void release_frame(OutFrame *frame)
     delete frame;
 }
 
+// Restore pending frames to the frames array (cold path — partials
+// from a previous EAGAIN). Returns the number restored.
+int __attribute__((noinline)) restore_pending(OutFrame **pending, int pending_count,
+                                                      OutFrame **frames, ssize_t *frame_totals,
+                                                      iovec *iovs, uint8_t (*hdr_bufs)[HEADER_SIZE],
+                                                      int *iov_count)
+{
+    int n = pending_count;
+    if (n > BATCH_MAX) {
+        n = BATCH_MAX;
+    }
+    int fc = 0;
+    int ic = 0;
+    for (int i = 0; i < n; i++) {
+        frames[fc]       = pending[i];
+        frame_totals[fc] = frame_total(frames[fc]);
+        ic += build_frame_iovecs(frames[fc], hdr_bufs[fc], &iovs[ic]);
+        fc++;
+    }
+    *iov_count = ic;
+    return fc;
+}
+
 } // namespace
 
 Connection::Connection(int64_t id, std::string name, BufferPool *pool, uint32_t max_data_size,
@@ -118,20 +138,12 @@ int Connection::drain_send_queue(OutFrame **out, int max)
 // at a time. Others just offer to the queue and return — the ongoing
 // writev will pick up their frames.
 //
-// On EAGAIN/partial, unsent frames are kept in the persistent iovec
-// buffer (pending_[] + pending_iovs_[] + pending_hdrs_[]) — NOT
+// On EAGAIN/partial, unsent frames are kept in pending_frames_[] (NOT
 // re-enqueued to the MPSC queue, which would break order with concurrent
-// enqueues. The next try_send sends partials first, then drains the queue.
+// enqueues). The next try_send sends partials first, then drains the queue.
 // The caller arms EPOLLOUT for retry.
-//
-// Common case (no existing partials): uses stack-local arrays for hot
-// L1 cache. Only spills to the persistent buffer on EAGAIN.
 bool Connection::try_send(int fd, TransportStats *stats)
 {
-    if (!is_open()) {
-        return false;
-    }
-
     bool expected = false;
     if (!in_send_.compare_exchange_strong(expected, true)) {
         return true; // another thread is sending; our frame is queued
@@ -147,53 +159,34 @@ retry:
         uint8_t   hdr_bufs[BATCH_MAX][HEADER_SIZE];
         int       iov_count = 0;
 
-        // If we have partials from a previous EAGAIN, send them first.
+        // Partials from a previous EAGAIN go first (preserve order).
         if (pending_count_ > 0) {
-            for (int i = 0; i < pending_count_ && frame_count < BATCH_MAX; i++) {
-                frames[frame_count] = pending_frames_[i];
-                frame_totals[frame_count] = frame_total(frames[frame_count]);
-                iov_count += build_frame_iovecs(frames[frame_count], hdr_bufs[frame_count],
-                                                &iovs[iov_count]);
-                frame_count++;
-            }
+            frame_count = restore_pending(pending_frames_, pending_count_, frames, frame_totals,
+                                          iovs, hdr_bufs, &iov_count);
             pending_count_ = 0;
         }
 
-        // Drain the MPSC queue for new frames.
-        while (frame_count < BATCH_MAX) {
-            OutFrame *tmp[BATCH_MAX];
-            int       n = drain_send_queue(tmp, BATCH_MAX - frame_count);
-            if (n == 0) {
-                break;
-            }
+        // Drain the MPSC queue for new frames (single call).
+        OutFrame *batch[BATCH_MAX];
+        int       n = drain_send_queue(batch, BATCH_MAX - frame_count);
+        if (stats != nullptr) {
+            uint64_t now =
+                static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
             for (int i = 0; i < n; i++) {
-                frames[frame_count]     = tmp[i];
-                frame_totals[frame_count] = frame_total(tmp[i]);
-                iov_count += build_frame_iovecs(tmp[i], hdr_bufs[frame_count], &iovs[iov_count]);
-                if (stats != nullptr && tmp[i]->create_nano > 0) {
-                    uint64_t now =
-                        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-                    stats->submit_to_writev.record(now - tmp[i]->create_nano);
+                if (batch[i]->create_nano > 0) {
+                    stats->submit_to_writev.record(now - batch[i]->create_nano);
                 }
-                frame_count++;
             }
-            if (n < BATCH_MAX - frame_count) {
-                break;
-            }
+        }
+        for (int i = 0; i < n; i++) {
+            frames[frame_count]       = batch[i];
+            frame_totals[frame_count] = frame_total(batch[i]);
+            iov_count += build_frame_iovecs(batch[i], hdr_bufs[frame_count], &iovs[iov_count]);
+            frame_count++;
         }
 
         if (frame_count == 0) {
             break;
-        }
-
-        if (iov_count == 0) {
-            for (int i = 0; i < frame_count; i++) {
-                release_frame(frames[i]);
-                if (stats != nullptr) {
-                    stats->frames_sent.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-            continue;
         }
 
         if (stats != nullptr) {
@@ -207,7 +200,6 @@ retry:
 
         if (written < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Socket buffer full. Store unsent frames in pending buffer.
                 pending_count_ = 0;
                 for (int i = 0; i < frame_count; i++) {
                     pending_frames_[pending_count_++] = frames[i];
@@ -226,9 +218,8 @@ retry:
             break;
         }
 
-        // Consume written bytes across frames.
-        ssize_t remaining     = written;
-        int     first_partial = -1;
+        // Advance sent_offset across the batch.
+        ssize_t remaining = written;
         for (int i = 0; i < frame_count && remaining > 0; i++) {
             ssize_t left = frame_totals[i] - frames[i]->sent_offset;
             if (remaining >= left) {
@@ -237,51 +228,41 @@ retry:
             }
             else {
                 frames[i]->sent_offset += static_cast<uint32_t>(remaining);
-                remaining     = 0;
-                first_partial = i;
+                remaining = 0;
             }
         }
 
-        if (first_partial == -1) {
-            // All fully sent.
-            for (int i = 0; i < frame_count; i++) {
+        // Release fully-sent frames; store partials in pending chain.
+        bool has_partial = false;
+        pending_count_   = 0;
+        for (int i = 0; i < frame_count; i++) {
+            if (frames[i]->sent_offset >= frame_totals[i]) {
                 release_frame(frames[i]);
                 if (stats != nullptr) {
                     stats->frames_sent.fetch_add(1, std::memory_order_relaxed);
                 }
             }
-            pending_count_ = 0;
-        }
-        else {
-            // Store partial + unsent frames in pending buffer.
-            pending_count_ = 0;
-            for (int i = first_partial; i < frame_count; i++) {
+            else {
                 pending_frames_[pending_count_++] = frames[i];
+                has_partial       = true;
             }
-            // Release fully-sent frames before the partial.
-            for (int i = 0; i < first_partial; i++) {
-                release_frame(frames[i]);
-                if (stats != nullptr) {
-                    stats->frames_sent.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
+        }
+        if (has_partial) {
             all_sent = false;
             break;
         }
-        // If we drained a full batch, loop to get more.
-        if (frame_count < BATCH_MAX) {
+        // If we drained a full batch, loop for more.
+        if (n < BATCH_MAX) {
             break;
         }
     }
 
     in_send_.store(false, std::memory_order_release);
 
-    // Race check: if more frames were offered while we were sending,
-    // try again (another thread may have missed the in_send_ window).
-    if (all_sent && (send_queue_.has_pending() || pending_count_ > 0)) {
+    // Race check: if more frames arrived while we were sending, retry.
+    if (all_sent && send_queue_.has_pending()) {
         expected = false;
         if (in_send_.compare_exchange_strong(expected, true)) {
-            all_sent = true;
             goto retry;
         }
     }
@@ -294,7 +275,6 @@ void Connection::close()
         return; // already closed
     }
     CR_LOG_INFO("close: conn_id={} name={}", static_cast<long long>(id_), name_);
-    // Release pending frames from a previous EAGAIN.
     for (int i = 0; i < pending_count_; i++) {
         release_frame(pending_frames_[i]);
     }

@@ -304,7 +304,9 @@ impl BenchTarget for RpcTarget {
                  frames_sent={fs} frames_parsed={fp} \
                  read_bytes={rb} writev_bytes={wb} \
                  app_send_agg={saggr:.1} tcp_recv_agg={raggr:.1} \
-                 submit_to_writev={sw_avg:.1}us({sw_c})",
+                 submit_to_writev={sw_avg:.1}us({sw_c}) \
+                 loop_count={lc} event_count_sum={ec} \
+                 wait_ns_sum={wns} read_ns_sum={rns} flush_ns_sum={fns}",
                 rc = s.read_calls,
                 wc = s.writev_calls,
                 fs = s.frames_sent,
@@ -323,6 +325,11 @@ impl BenchTarget for RpcTarget {
                 },
                 sw_avg = avg_us(&s.submit_to_writev),
                 sw_c = s.submit_to_writev.count,
+                lc = s.loop_count,
+                ec = s.event_count_sum,
+                wns = s.wait_ns_sum,
+                rns = s.read_ns_sum,
+                fns = s.flush_ns_sum,
             );
         }
         // Stop the local client-side transport.

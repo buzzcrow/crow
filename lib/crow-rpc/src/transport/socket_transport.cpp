@@ -123,7 +123,12 @@ void Worker::run_loop()
     try {
 
         while (running_.load(std::memory_order_relaxed)) {
+            auto t0 = std::chrono::steady_clock::now();
             int n = engine_->wait(events, MAX_EVENTS, 1000); // 1s timeout
+            auto t1 = std::chrono::steady_clock::now();
+            stats_->wait_ns_sum.fetch_add(static_cast<uint64_t>((t1 - t0).count()), std::memory_order_relaxed);
+            stats_->loop_count.fetch_add(1, std::memory_order_relaxed);
+            stats_->event_count_sum.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
             closed_fds.clear();
             for (int i = 0; i < n; i++) {
                 const auto &ev = events[i];
@@ -156,8 +161,12 @@ void Worker::run_loop()
                     break;
                 case SocketEvent::Readable:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
+                        auto tr0 = std::chrono::steady_clock::now();
                         on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_,
                                          stats_);
+                        auto tr1 = std::chrono::steady_clock::now();
+                        stats_->read_ns_sum.fetch_add(static_cast<uint64_t>((tr1 - tr0).count()),
+                                                      std::memory_order_relaxed);
                         if (!ev.conn->is_open()) {
                             // Connection closed (EOF or fatal read error).
                             // Remove from epoll and close the fd to stop
@@ -237,6 +246,7 @@ void Worker::run_loop()
             // multiple responses (from multiple frames read in one read())
             // into a single writev per connection.
             if (!pending_write_conns_.empty()) {
+                auto tf0 = std::chrono::steady_clock::now();
                 for (Connection *conn : pending_write_conns_) {
                     if (!conn->is_open()) {
                         continue;
@@ -257,6 +267,9 @@ void Worker::run_loop()
                     }
                 }
                 pending_write_conns_.clear();
+                auto tf1 = std::chrono::steady_clock::now();
+                stats_->flush_ns_sum.fetch_add(static_cast<uint64_t>((tf1 - tf0).count()),
+                                               std::memory_order_relaxed);
             }
 
             // Now safe to release closed connections — pending_write_conns_

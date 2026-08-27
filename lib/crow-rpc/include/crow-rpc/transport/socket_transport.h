@@ -92,6 +92,14 @@ struct TransportStats
     // Latency histogram (nanoseconds).
     //   submit_to_writev : submit() → actual writev (queue wait)
     LatencyHistogram submit_to_writev;
+
+    // Event-loop timing metrics (nanoseconds). Added for regression
+    // diagnosis: measure where the worker thread spends time.
+    std::atomic<uint64_t> loop_count{0};       // iterations of run_loop
+    std::atomic<uint64_t> event_count_sum{0};  // total events processed
+    std::atomic<uint64_t> wait_ns_sum{0};      // time in engine_->wait()
+    std::atomic<uint64_t> read_ns_sum{0};      // time in on_readable_impl
+    std::atomic<uint64_t> flush_ns_sum{0};     // time in post-event flush
 };
 
 // ── SocketEngine: platform-specific event loop primitives ─────────

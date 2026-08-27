@@ -113,13 +113,20 @@ int main(int argc, char *argv[])
     std::printf("stats read_calls=%llu writev_calls=%llu "
                 "frames_sent=%llu frames_parsed=%llu "
                 "read_bytes=%llu writev_bytes=%llu "
-                "submit_to_writev_count=%llu submit_to_writev_sum_ns=%llu\n",
+                "submit_to_writev_count=%llu submit_to_writev_sum_ns=%llu "
+                "loop_count=%llu event_count_sum=%llu "
+                "wait_ns_sum=%llu read_ns_sum=%llu flush_ns_sum=%llu\n",
                 static_cast<unsigned long long>(stats.read_calls), static_cast<unsigned long long>(stats.writev_calls),
                 static_cast<unsigned long long>(stats.frames_sent),
                 static_cast<unsigned long long>(stats.frames_parsed), static_cast<unsigned long long>(stats.read_bytes),
                 static_cast<unsigned long long>(stats.writev_bytes),
                 static_cast<unsigned long long>(stats.submit_to_writev.count),
-                static_cast<unsigned long long>(stats.submit_to_writev.sum_ns));
+                static_cast<unsigned long long>(stats.submit_to_writev.sum_ns),
+                static_cast<unsigned long long>(stats.loop_count),
+                static_cast<unsigned long long>(stats.event_count_sum),
+                static_cast<unsigned long long>(stats.wait_ns_sum),
+                static_cast<unsigned long long>(stats.read_ns_sum),
+                static_cast<unsigned long long>(stats.flush_ns_sum));
     std::fflush(stdout);
 
     crow_rpc_server_stop(server);

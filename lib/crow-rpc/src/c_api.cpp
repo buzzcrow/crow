@@ -306,6 +306,11 @@ void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transpor
         out->read_bytes    = s.read_bytes.load(std::memory_order_relaxed);
         out->writev_bytes  = s.writev_bytes.load(std::memory_order_relaxed);
         copy_latency(&out->submit_to_writev, s.submit_to_writev);
+        out->loop_count      = s.loop_count.load(std::memory_order_relaxed);
+        out->event_count_sum = s.event_count_sum.load(std::memory_order_relaxed);
+        out->wait_ns_sum     = s.wait_ns_sum.load(std::memory_order_relaxed);
+        out->read_ns_sum     = s.read_ns_sum.load(std::memory_order_relaxed);
+        out->flush_ns_sum    = s.flush_ns_sum.load(std::memory_order_relaxed);
     }
     catch (...) {
     }
