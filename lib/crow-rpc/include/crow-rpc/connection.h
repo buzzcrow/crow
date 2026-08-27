@@ -68,31 +68,19 @@ class Connection
     // pointers (must release their buffers after send completes).
     int drain_send_queue(OutFrame **out, int max);
 
-    // Path A: direct writev with in_send_ CAS lock. Enqueues the frame,
-    // then drains the ENTIRE send queue and batches up to BATCH_MAX frames
-    // into a single writev. The in_send_ flag serializes concurrent callers
-    // — only one does writev; others just enqueue and return. The winner
-    // picks up all queued frames. Returns true if all data sent, false if
-    // partial/EAGAIN (caller arms EPOLLOUT for retry).
-    bool send_direct(int fd, OutFrame *frame, TransportStats *stats);
-
-    // Path A retry: drain the queue without enqueuing a new frame. Called
-    // from on_writable (EPOLLOUT) after a previous EAGAIN. Same in_send_
-    // CAS lock — if another thread is already sending, returns true.
-    bool retry_direct(int fd, TransportStats *stats);
-
-    // Path B: worker-thread flush. Drains the MPSC queue into the flat
-    // iovec array (partials from a previous EAGAIN are already at front),
-    // writev's, and keeps any remaining partials at front for next time.
-    // No lock — only the I/O worker calls this. Returns true if all data
+    // Unified writev: drains the MPSC send queue into the persistent iovec
+    // buffer (partials from a previous EAGAIN are at front), writev's, and
+    // keeps unsent frames in the buffer. The in_send_ CAS flag serializes
+    // concurrent callers — only one does writev; others just enqueue and
+    // return (the winner picks up their frames). Returns true if all data
     // sent, false if partial/EAGAIN (caller arms EPOLLOUT for retry).
-    bool flush_send(int fd, TransportStats *stats);
+    // Called from submit() (cross-thread), post-event flush, and on_writable.
+    bool try_send(int fd, TransportStats *stats);
 
     // Check if the connection has pending send data (queue or partials).
     bool has_pending_send() const
     {
-        return send_queue_.has_pending() || flush_iov_count_ > 0 || direct_partial_ != nullptr ||
-               direct_pending_count_ > 0;
+        return send_queue_.has_pending() || pending_count_ > 0;
     }
 
     // Close the connection, fail pending requests, signal reconnect.
@@ -170,35 +158,16 @@ class Connection
     // worker drains via drain_send_queue for writev (Path B).
     SendQueue send_queue_;
 
-    // Path A: direct writev state. in_send_ CAS lock serializes concurrent
-    // writev — only one thread drains+send at a time; others just enqueue.
-    // On EAGAIN, unsent frames are kept in a pending chain (NOT re-enqueued
-    // to the MPSC queue, which would break order with concurrent enqueues):
-    //   direct_partial_   — first unsent frame (may have sent_offset > 0)
-    //   direct_pending_[] — remaining unsent frames after the partial
-    // Next call sends partial + pending first, then drains the MPSC queue.
+    // in_send_ CAS lock serializes concurrent writev — only one thread
+    // drains+sends at a time; others just enqueue and return. The winner
+    // picks up all queued frames.
     std::atomic<bool> in_send_{false};
-    OutFrame         *direct_partial_{nullptr};
-    OutFrame         *direct_pending_[BATCH_MAX];
-    int               direct_pending_count_{0};
 
-    // Path B: flat iovec array for worker-thread flush. Partials from a
-    // previous EAGAIN stay at the front (flush_iov_count_ > 0 with adjusted
-    // iov_base/iov_len). New frames from the MPSC queue are appended after.
-    // flush_frames_[] tracks the OutFrame* backing each group of iovecs so
-    // they can be released after full send. flush_hdrs_[] holds the
-    // serialized header bytes for each frame (the header is not stored in
-    // the frame itself — it must be serialized into stable storage).
-    // in_flush_ CAS flag ensures only one worker flushes at a time — with
-    // num_workers>1 sharing one engine, the Notify handler and the post-event
-    // flush can race on the same connection. Losers skip (their frames are
-    // in the MPSC queue; the winner drains them).
-    std::atomic<bool> in_flush_{false};
-    iovec             flush_iovs_[3 * BATCH_MAX];
-    OutFrame         *flush_frames_[BATCH_MAX];
-    uint8_t           flush_hdrs_[BATCH_MAX][HEADER_SIZE];
-    int               flush_iov_count_{0};
-    int               flush_frame_count_{0};
+    // Pending frames from a previous EAGAIN. Stored (NOT re-enqueued to
+    // the MPSC queue) to preserve order vs concurrent enqueues. The next
+    // try_send sends these first, then drains the queue for new frames.
+    OutFrame *pending_frames_[BATCH_MAX];
+    int       pending_count_{0};
 
     OnFrameCallback on_frame_callback_;
     OnCloseCallback on_close_callback_;

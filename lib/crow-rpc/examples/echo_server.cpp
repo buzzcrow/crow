@@ -42,7 +42,6 @@ int main(int argc, char *argv[])
     int      port         = 0;
     uint32_t io_engines   = 1;
     uint32_t io_workers   = 1;
-    int      direct_write = 0;
     int      tcp_nodelay  = 1;
 
     for (int i = 1; i < argc; i++) {
@@ -56,15 +55,12 @@ int main(int argc, char *argv[])
         else if (arg == "--io-workers" && i + 1 < argc) {
             io_workers = parse_u32(argv[++i], "io-workers");
         }
-        else if (arg == "--direct-write") {
-            direct_write = 1;
-        }
         else if (arg == "--enable-nagle") {
             tcp_nodelay = 0;
         }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-rpc-echo-server --port <port> "
-                        "[--io-engines N] [--io-workers M] [--direct-write] [--enable-nagle]\n");
+                        "[--io-engines N] [--io-workers M] [--enable-nagle]\n");
             return 0;
         }
         else {
@@ -82,7 +78,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    crow_rpc_server_set_direct_write(server, direct_write);
     crow_rpc_server_set_tcp_nodelay(server, tcp_nodelay);
 
     if (crow_rpc_server_listen(server, "127.0.0.1", port) != CROW_RPC_OK) {

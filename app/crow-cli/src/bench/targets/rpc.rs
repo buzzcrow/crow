@@ -171,9 +171,6 @@ impl BenchTarget for RpcTarget {
             .arg(cfg.io_engines.to_string())
             .arg("--io-workers")
             .arg(cfg.io_workers.to_string());
-        if cfg.direct_write {
-            cmd.arg("--direct-write");
-        }
         if cfg.enable_nagle {
             cmd.arg("--enable-nagle");
         }
@@ -235,7 +232,6 @@ impl BenchTarget for RpcTarget {
             RpcWorkerMode::Tokio => cfg.send_queue_capacity,
         };
         server.set_send_queue_capacity(sq_cap);
-        server.set_direct_write(cfg.direct_write);
         server.set_tcp_nodelay(!cfg.enable_nagle);
         server.start();
 

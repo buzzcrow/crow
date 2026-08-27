@@ -33,7 +33,7 @@ thread_local Worker *tl_current_worker = nullptr;
 // Forward declarations — defined after Worker (shared I/O logic).
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
                              std::vector<Connection *> &pending_writes, TransportStats *stats);
-static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats, bool direct_write);
+static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats);
 
 static inline uint64_t now_nano()
 {
@@ -144,15 +144,7 @@ void Worker::run_loop()
                                 continue;
                             }
                             int wfd = c->write_fd >= 0 ? c->write_fd : static_cast<int>(c->transport_handle);
-                            // Flush: Path A uses retry_direct, Path B uses flush_send.
-                            bool ok;
-                            if (transport_->direct_write_) {
-                                ok = c->retry_direct(wfd, stats_);
-                            }
-                            else {
-                                ok = c->flush_send(wfd, stats_);
-                            }
-                            if (!ok) {
+                            if (!c->try_send(wfd, stats_)) {
                                 // Partial/EAGAIN — arm write for retry.
                                 engine_->arm_write(wfd, c);
                             }
@@ -193,7 +185,7 @@ void Worker::run_loop()
                 case SocketEvent::Writable:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
                         // ev.fd is the write fd (dup'd). try_send uses it.
-                        bool has_more = on_writable_impl(ev.conn, ev.fd, stats_, transport_->direct_write_);
+                        bool has_more = on_writable_impl(ev.conn, ev.fd, stats_);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
                             CR_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
@@ -251,16 +243,7 @@ void Worker::run_loop()
                     }
                     int rfd = static_cast<int>(conn->transport_handle);
                     int wfd = conn->write_fd >= 0 ? conn->write_fd : rfd;
-                    // Flush: Path A uses retry_direct (drain queue), Path B
-                    // uses flush_send (flat iovec array).
-                    bool ok;
-                    if (transport_->direct_write_) {
-                        ok = conn->retry_direct(wfd, stats_);
-                    }
-                    else {
-                        ok = conn->flush_send(wfd, stats_);
-                    }
-                    if (!ok) {
+                    if (!conn->try_send(wfd, stats_)) {
                         // Partial write or EAGAIN — arm write for remaining.
                         engine_->arm_write(wfd, conn);
                     }
@@ -400,14 +383,10 @@ done:
     }
 }
 
-static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats, bool direct_write)
+static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats)
 {
-    if (direct_write) {
-        // Path A: retry direct writev (drain queue, no new frame).
-        return conn->retry_direct(fd, stats);
-    }
-    // Path B: flush the flat iovec array (partials at front + queued frames).
-    return conn->flush_send(fd, stats);
+    // Drain partials (at front of iovec buffer) + queued frames.
+    return conn->try_send(fd, stats);
 }
 
 // ── SocketTransport ───────────────────────────────────────────────
@@ -510,50 +489,21 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         }
     }
     frame->create_nano = now_nano();
-    // Path A: direct batched writev (enqueue + drain all, caller thread).
-    if (direct_write_) {
-        int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
-        if (!conn->send_direct(wfd, frame, &stats_)) {
-            auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
-            if (engine2 != nullptr) {
-                engine2->arm_write(wfd, conn);
-            }
-        }
-        return true;
-    }
-    // Path B: enqueue + worker flush (send aggregation).
+    // Enqueue the frame, then try to writev directly on the caller's
+    // thread. The in_send_ CAS serializes concurrent senders — only one
+    // does writev; others just enqueue and return. If writev hits EAGAIN,
+    // arm write on the owning engine for retry.
     if (!conn->enqueue_send(frame)) {
         CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
                     static_cast<long long>(conn->id()), conn->name());
         return false;
     }
 
-    auto *worker = static_cast<Worker *>(conn->io_worker);
-    if (worker != nullptr && worker->is_current_thread()) {
-        // Frame is in the send queue. The post-event flush will drain it.
-        return true;
-    }
-
-    // Cross-thread path: enqueue + notify the I/O worker to drain.
-    auto *engine = static_cast<SocketEngine *>(conn->io_engine);
-    if (engine != nullptr) {
-        {
-            std::lock_guard<std::mutex> lock(cross_thread_mu_);
-            cross_thread_pending_.push_back(conn);
-        }
-        bool expected = false;
-        if (cross_thread_notified_.compare_exchange_strong(expected, true)) {
-            engine->notify_worker();
-        }
-    }
-    else {
-        // No engine (test/direct connection) — fall back to flush_send.
-        int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
-        if (!conn->flush_send(wfd, &stats_)) {
-            auto *engine2 = static_cast<SocketEngine *>(conn->io_engine);
-            if (engine2 != nullptr) {
-                engine2->arm_write(wfd, conn);
-            }
+    int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
+    if (!conn->try_send(wfd, &stats_)) {
+        auto *engine = static_cast<SocketEngine *>(conn->io_engine);
+        if (engine != nullptr) {
+            engine->arm_write(wfd, conn);
         }
     }
     return true;
@@ -583,6 +533,9 @@ std::shared_ptr<Connection> SocketTransport::create_connection(int fd, const std
     int64_t id             = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
     auto    conn           = std::make_shared<Connection>(id, name, pool_, 4 << 20, send_queue_capacity_);
     conn->transport_handle = static_cast<uint64_t>(fd);
+    // dup() the fd for independent read/write epoll registration (buzz-cpp
+    // pattern). This allows EPOLLONESHOT on read and write to be independent
+    // — arming write does not re-arm read, preventing multi-worker races.
     // dup() the fd for independent read/write epoll registration (buzz-cpp
     // pattern). This allows EPOLLONESHOT on read and write to be independent
     // — arming write does not re-arm read, preventing multi-worker races.

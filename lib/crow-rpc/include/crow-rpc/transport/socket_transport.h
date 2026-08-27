@@ -365,16 +365,6 @@ class SocketTransport : public Transport
         send_queue_capacity_ = cap;
     }
 
-    // Direct-write mode: when true, all submits use Path A (send_direct
-    // with mutex — immediate writev). When false (default), all submits
-    // use Path B (enqueue + worker flush — send aggregation). The flag
-    // selects the path for the entire transport; mixing paths on the same
-    // connection would corrupt the frame stream.
-    void set_direct_write(bool enabled)
-    {
-        direct_write_ = enabled;
-    }
-
     // TCP_NODELAY control. Default true (disable Nagle). Set to false to
     // allow Nagle's algorithm to coalesce small frames into larger segments.
     // Must be called before listen/connect.
@@ -402,10 +392,6 @@ class SocketTransport : public Transport
     uint32_t send_queue_capacity_{1024};
 
     // Direct-write mode: when true, submits use Path A (send_direct with
-    // mutex). When false (default), submits use Path B (enqueue + worker
-    // flush). See set_direct_write for details.
-    bool direct_write_{false};
-
     // TCP_NODELAY setting for new connections. Default true.
     bool tcp_nodelay_{true};
 

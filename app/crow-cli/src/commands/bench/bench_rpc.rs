@@ -33,7 +33,6 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
     cfg.value_size = args.value_size;
     cfg.io_engines = args.io_engines;
     cfg.io_workers = args.io_workers;
-    cfg.direct_write = args.direct_write;
     cfg.enable_nagle = args.enable_nagle;
     cfg.rpc_worker_mode = match args.mode.as_str() {
         "tokio" => crate::bench::runner::RpcWorkerMode::Tokio,

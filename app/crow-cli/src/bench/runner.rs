@@ -169,9 +169,6 @@ pub(crate) struct BenchConfig {
     pub(crate) rpc_worker_mode: RpcWorkerMode,
     /// Per-connection send queue capacity (RPC target only). Default 1024.
     pub(crate) send_queue_capacity: u32,
-    /// Direct-write mode: skip deferred writev, writev immediately per
-    /// submit (RPC target only). Default false (deferred writev).
-    pub(crate) direct_write: bool,
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
     pub(crate) enable_nagle: bool,
 }
@@ -211,7 +208,6 @@ impl BenchConfig {
             io_workers: 1,
             rpc_worker_mode: RpcWorkerMode::Coroutine,
             send_queue_capacity: 1024,
-            direct_write: false,
             enable_nagle: false,
         }
     }

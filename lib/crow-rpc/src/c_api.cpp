@@ -255,18 +255,6 @@ void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t 
     }
 }
 
-void crow_rpc_server_set_direct_write(crow_rpc_server_t server, int enabled)
-{
-    try {
-        if (server == nullptr) {
-            return;
-        }
-        server->server->transport()->set_direct_write(enabled != 0);
-    }
-    catch (...) {
-    }
-}
-
 void crow_rpc_server_set_tcp_nodelay(crow_rpc_server_t server, int enabled)
 {
     try {
