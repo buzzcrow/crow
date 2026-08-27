@@ -24,7 +24,7 @@
 
 static std::atomic<bool> g_running{true};
 
-static void on_signal(int)
+static void on_signal(int /*signo*/)
 {
     g_running.store(false);
 }
