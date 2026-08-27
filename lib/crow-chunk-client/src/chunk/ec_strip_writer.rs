@@ -182,7 +182,7 @@ impl EcStripWriter {
     /// caller (`ChunkWriter`) collects the handles and joins them at
     /// `seal()` time — strip N+1's data writes overlap with strip N's
     /// parity writes + fsyncs.
-    #[allow(clippy::unused_async)] // signature matches MirrorStripWriter for enum dispatch
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // signature matches MirrorStripWriter for enum dispatch
     pub async fn finish(&mut self) -> Result<StripResult> {
         if self.finished {
             return Err(IoError::Finished);

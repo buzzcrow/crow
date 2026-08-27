@@ -629,6 +629,18 @@ pub struct DeployNodeServerBody {
     /// `--coalesce-drain-threshold` value for R45b drain heuristic.
     #[serde(default)]
     coalesce_drain_threshold: Option<usize>,
+    /// `--peer-pool-size` value for inter-server RPC connection pool.
+    #[serde(default)]
+    peer_pool_size: Option<usize>,
+    /// `--enable-nagle` flag for RPC connections.
+    #[serde(default)]
+    enable_nagle: Option<bool>,
+    /// `--event-write` flag for RPC transports.
+    #[serde(default)]
+    event_write: Option<bool>,
+    /// `--send-queue-capacity` value for per-connection send queue.
+    #[serde(default)]
+    send_queue_capacity: Option<u32>,
     /// Optional `--config` JSON path passed to the spawned `crow-kv-server`.
     #[serde(default)]
     config: Option<String>,
@@ -724,6 +736,10 @@ pub async fn http_deploy_node_server(
         max_inflight: body.max_inflight,
         coalesce_max_keys: body.coalesce_max_keys,
         coalesce_drain_threshold: body.coalesce_drain_threshold,
+        peer_pool_size: body.peer_pool_size,
+        enable_nagle: body.enable_nagle,
+        event_write: body.event_write,
+        send_queue_capacity: body.send_queue_capacity,
         config: body.config.clone().map(std::path::PathBuf::from),
         rpc_workers: body.rpc_workers,
     };

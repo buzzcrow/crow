@@ -133,6 +133,10 @@ pub async fn load_local_groups(
             store.set_metrics_registry(Arc::clone(mr));
         }
         store.set_scan_byte_budget(registry.config.server.scan_byte_budget);
+        store.set_peer_pool_size(registry.config.server.peer_pool_size);
+        store.set_enable_nagle(registry.config.server.enable_nagle);
+        store.set_event_write(registry.config.server.event_write);
+        store.set_send_queue_capacity(registry.config.server.send_queue_capacity);
         let store = Arc::new(store);
 
         for group_id in group_ids {

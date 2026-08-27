@@ -6,6 +6,7 @@ use crow_protocol::KV_SERVER_MGMT_BASE;
 
 /// `CrowKV` server — reference implementation wrapping the `crow_kv` library.
 #[derive(Parser, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 #[command(name = "crow-kv-server", about = "CrowKV server daemon")]
 pub struct Cli {
     /// HTTP management API listen port. Default: 9910.
@@ -107,6 +108,29 @@ pub struct Cli {
     /// (derived when omitted). `0` = always drain (disables the heuristic).
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
+
+    /// Number of crow-rpc connections per peer endpoint for inter-server
+    /// consensus RPCs. Round-robined to distribute send-queue pressure.
+    /// Default: 2. Raise to 4 for high-concurrency benchmarks.
+    #[arg(long, default_value_t = 2)]
+    pub peer_pool_size: usize,
+
+    /// Enable Nagle's algorithm (disable `TCP_NODELAY`) on RPC connections.
+    /// Default: false (Nagle off). Nagle degrades Paxos latency.
+    #[arg(long, default_value_t = false)]
+    pub enable_nagle: bool,
+
+    /// Event-write mode: `submit()` enqueues to the I/O worker instead of
+    /// calling `writev()` directly. Coalesces multiple frames into one
+    /// writev at the cost of ~20-40us epoll wake latency. Default: false.
+    /// Enable for high-concurrency write workloads.
+    #[arg(long, default_value_t = false)]
+    pub event_write: bool,
+
+    /// Per-connection send queue capacity (backpressure bound). Default:
+    /// 4096. Raise if `enqueue_send` failures appear under load.
+    #[arg(long, default_value_t = 4096)]
+    pub send_queue_capacity: u32,
 
     /// Instance ID for service-registry keep-alive. If omitted, a
     /// unique ID is generated at startup.

@@ -2,7 +2,7 @@
 # CrowRPC echo regression benchmark.
 # Usage: bash tools/bench-rpc-regression.sh
 #
-# Starts a standalone crow-rpc-echo-server (built via `pixi run build-cpp`),
+# Starts a standalone crow-rpc-fb-server (built via `pixi run build-cpp`),
 # then runs crow-cli bench rpc against it for each config. The server is
 # restarted per config so its io_engines/io_workers match the client.
 #
@@ -54,14 +54,13 @@ cd "$(dirname "$0")/.."
 
 RESULTS_FILE="doc/working/bench-rpc-regression.tsv"
 DURATION=20
-KEYSPACE=1000
 VALUE_SIZE=128
-SERVER_BIN="lib/crow-rpc/build/crow-rpc-echo-server"
+SERVER_BIN="lib/crow-rpc/build/crow-rpc-fb-server"
 SERVER_LOG_DIR="/tmp/crow-rpc-bench-server"
 SERVER_PORT=18080
 SERVER_PID=""
 
-# Start echo server with matching io_engines/io_workers/nagle.
+# Start fb server with matching io_engines/io_workers/nagle.
 # Sets SERVER_PID and waits for "listening port=" on stdout.
 start_server() {
     local io_engines="$1" io_workers="$2" nagle="$3"
@@ -93,7 +92,7 @@ start_server() {
     return 1
 }
 
-# Stop echo server (SIGTERM, wait up to 5s).
+# Stop fb server (SIGTERM, wait up to 5s).
 stop_server() {
     if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill -TERM "$SERVER_PID" 2>/dev/null
@@ -136,7 +135,7 @@ run_bench() {
     local loaders="$1" conn="$2" label="$3" io_engines="${4:-1}" wkr="${5:-1}" mode="${6:-coroutine}" nagle="${7:-0}"
     echo ">>> $label (io_engines=$io_engines, io_workers=$wkr, mode=$mode, nagle=$nagle) ..."
 
-    # Start echo server with matching config.
+    # Start fb server with matching config.
     if ! start_server "$io_engines" "$wkr" "$nagle"; then
         echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t0\t$nagle\t1" >> "$RESULTS_FILE"
         return
@@ -150,7 +149,7 @@ run_bench() {
     local client_cmd="pixi run -- ./target/release/crow-cli bench rpc \
         --duration-secs $DURATION \
         --loader-num $loaders --connections $conn \
-        --key-space $KEYSPACE --value-size $VALUE_SIZE \
+        --value-size $VALUE_SIZE \
         --io-engines $io_engines --io-workers $wkr \
         --mode $mode \
         --server-port $SERVER_PORT \

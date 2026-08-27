@@ -63,6 +63,7 @@ pub struct TestKvClient {
 }
 
 impl TestKvClient {
+    #[allow(clippy::unused_async_trait_impl)]
     pub async fn connect(endpoint: String) -> Self {
         Self {
             transport: KvRpcTransport::new(),

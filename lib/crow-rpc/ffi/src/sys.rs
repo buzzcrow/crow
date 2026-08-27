@@ -47,6 +47,7 @@ pub struct CrowRpcLatencyStats {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct CrowRpcTransportStats {
     pub submit_to_writev: CrowRpcLatencyStats,
+    pub send_queue_rejects: u64,
 }
 
 #[repr(C)]
@@ -151,6 +152,7 @@ extern "C" {
     pub fn crow_rpc_server_port(server: crow_rpc_server_t) -> c_int;
     pub fn crow_rpc_server_set_send_queue_capacity(server: crow_rpc_server_t, capacity: u32);
     pub fn crow_rpc_server_set_tcp_nodelay(server: crow_rpc_server_t, enabled: c_int);
+    pub fn crow_rpc_server_set_event_write(server: crow_rpc_server_t, enabled: c_int);
 
     pub fn crow_rpc_server_transport_stats(server: crow_rpc_server_t, out: *mut CrowRpcTransportStats);
 
@@ -254,6 +256,7 @@ extern "C" {
         console: c_int,
     );
     pub fn crow_rpc_metrics_stop();
+    pub fn crow_rpc_server_register_conn_count_gauge(server: crow_rpc_server_t, name: *const c_char);
 
     // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
     pub fn crow_rpc_co_spawn(

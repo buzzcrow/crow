@@ -47,12 +47,14 @@ use crate::error::{Error, Result};
 
 /// crow-rpc transport for the KV client-facing service. Holds the
 /// client-side `RpcServer` (manages connections), `RpcClient`
-/// (request/response correlation), and a `Connection` cache per
-/// endpoint.
+/// (request/response correlation), and a connection pool per
+/// endpoint (round-robin across `pool_size` connections).
 pub struct KvRpcTransport {
     server: Arc<RpcServer>,
     rpc: Arc<RpcClient>,
-    connections: DashMap<String, Connection>,
+    connections: DashMap<String, Vec<Connection>>,
+    pool_size: usize,
+    conn_rr: AtomicU64,
     next_req_id: AtomicU64,
 }
 
@@ -65,16 +67,25 @@ impl std::fmt::Debug for KvRpcTransport {
 }
 
 impl KvRpcTransport {
-    /// Create a new crow-rpc transport with a custom I/O worker count.
-    /// The `RpcServer` is the client-side transport — it does not listen
-    /// but is used to establish connections to remote endpoints.
-    /// `workers` controls the number of C++ I/O worker threads; fewer
-    /// threads reduce scheduler contention on low-concurrency callers
-    /// (e.g. the management console).
+    /// Create a new crow-rpc transport with `pool_size` connections
+    /// per endpoint, using the given RPC tunables and `workers` I/O
+    /// worker threads. The `RpcServer` is the client-side transport —
+    /// it does not listen but is used to establish connections to
+    /// remote endpoints.
     #[must_use]
-    pub fn with_workers(workers: u32) -> Self {
+    pub fn with_pool_size(
+        pool_size: usize,
+        enable_nagle: bool,
+        event_write: bool,
+        send_queue_capacity: u32,
+        workers: u32,
+    ) -> Self {
         let server = Arc::new(RpcServer::with_engines(None, 1, workers));
+        server.set_tcp_nodelay(!enable_nagle);
+        server.set_event_write(event_write);
+        server.set_send_queue_capacity(send_queue_capacity);
         server.start();
+        server.register_conn_count_gauge("rpc.client.connections");
         let rpc = Arc::new(RpcClient::new());
         rpc.set_completion_pool_size(1024);
         rpc.start_reaper(5_000_000_000, 500_000_000);
@@ -82,16 +93,17 @@ impl KvRpcTransport {
             server,
             rpc,
             connections: DashMap::new(),
+            pool_size: pool_size.max(1),
+            conn_rr: AtomicU64::new(0),
             next_req_id: AtomicU64::new(1),
         }
     }
 
-    /// Create a new crow-rpc transport with the default 2 I/O workers.
-    /// The `RpcServer` is the client-side transport — it does not listen
-    /// but is used to establish connections to remote endpoints.
+    /// Create a new crow-rpc transport with a single connection per
+    /// endpoint and default tunables (backward-compatible).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_workers(2)
+        Self::with_pool_size(1, false, false, 4096, 2)
     }
 
     fn next_id(&self) -> u64 {
@@ -104,25 +116,49 @@ impl KvRpcTransport {
         self.connections.clear();
     }
 
-    /// Get or create a `Connection` for the given endpoint. The
-    /// crow-rpc server listens on the same port as the gRPC endpoint
-    /// (no port derivation).
+    /// Get or create a `Connection` for the given endpoint, round-
+    /// robining across the pool. The crow-rpc server listens on the
+    /// same port as the gRPC endpoint (no port derivation).
     fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection> {
         let normalized = normalize_endpoint(rpc_endpoint);
-        if let Some(conn) = self.connections.get(&normalized) {
-            return Ok(conn.clone());
+        if let Some(entry) = self.connections.get(&normalized) {
+            let pool = entry.value();
+            if pool.is_empty() {
+                // Pool was cleared (e.g. via clear_connections after a
+                // server restart). Fall through to re-populate below.
+            } else if pool.len() == 1 {
+                return Ok(pool[0].clone());
+            } else {
+                let idx =
+                    usize::try_from(self.conn_rr.fetch_add(1, Ordering::Relaxed)).unwrap_or(0) % pool.len();
+                return Ok(pool[idx].clone());
+            }
+        }
+        // Slow path: create the pool under a per-entry lock to avoid
+        // duplicate connections from concurrent callers.
+        let mut entry = self.connections.entry(normalized.clone()).or_default();
+        let pool = entry.value_mut();
+        if !pool.is_empty() {
+            // Another thread won the race.
+            if pool.len() == 1 {
+                return Ok(pool[0].clone());
+            }
+            let idx = usize::try_from(self.conn_rr.fetch_add(1, Ordering::Relaxed)).unwrap_or(0) % pool.len();
+            return Ok(pool[idx].clone());
         }
         let (host, port) = parse_endpoint(&normalized).map_err(|e| Error::InvalidEndpoint {
             endpoint: rpc_endpoint.to_string(),
             reason: e,
         })?;
-        let conn = self.server.connect(&host, port).map_err(|e| Error::Transport {
-            endpoint: rpc_endpoint.to_string(),
-            status: format!("rpc connect to {host}:{port}: {e:?}"),
-        })?;
-        self.rpc.attach(&conn);
-        self.connections.insert(normalized, conn.clone());
-        Ok(conn)
+        for _ in 0..self.pool_size {
+            let conn = self.server.connect(&host, port).map_err(|e| Error::Transport {
+                endpoint: rpc_endpoint.to_string(),
+                status: format!("rpc connect to {host}:{port}: {e:?}"),
+            })?;
+            self.rpc.attach(&conn);
+            pool.push(conn);
+        }
+        Ok(pool[0].clone())
     }
 
     /// Send a `Put` request via crow-rpc. Returns the
@@ -646,8 +682,18 @@ impl KvRpcTransport {
 
     /// Get or create a `Connection` for the given gRPC endpoint
     /// (public — used by `WatchNotifyClient` for the persistent
-    /// connection).
+    /// connection). Always returns the first connection in the pool
+    /// (index 0) so the watch subscription stays on one connection.
     pub fn get_conn(&self, rpc_endpoint: &str) -> Result<Connection> {
+        let normalized = normalize_endpoint(rpc_endpoint);
+        if let Some(entry) = self.connections.get(&normalized) {
+            let pool = entry.value();
+            if let Some(conn) = pool.first() {
+                return Ok(conn.clone());
+            }
+        }
+        // Pool not yet created — fall through to conn_for which will
+        // create it and return index 0.
         self.conn_for(rpc_endpoint)
     }
 

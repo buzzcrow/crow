@@ -141,6 +141,26 @@ pub struct KvArgs {
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
 
+    /// Inter-server RPC connection pool size (--peer-pool-size on each
+    /// spawned server). Default 2. Raise to 4 for high-concurrency.
+    #[arg(long, default_value_t = 2)]
+    pub peer_pool_size: usize,
+
+    /// Enable Nagle on RPC connections (--enable-nagle on each spawned
+    /// server). Default false.
+    #[arg(long, default_value_t = false)]
+    pub enable_nagle: bool,
+
+    /// Event-write mode (--event-write on each spawned server).
+    /// Coalesces frames via I/O worker. Default false.
+    #[arg(long, default_value_t = false)]
+    pub event_write: bool,
+
+    /// Per-connection send queue capacity (--send-queue-capacity on
+    /// each spawned server). Default 4096.
+    #[arg(long, default_value_t = 4096)]
+    pub send_queue_capacity: u32,
+
     /// Scan limit (max entries per scan op) for `--workload list`.
     /// Default 1 (the historical stub behavior). Set higher for
     /// bounded-limit / full-keyspace scan benches.
@@ -190,7 +210,7 @@ pub struct RpcArgs {
     #[arg(long, default_value = "coroutine")]
     pub mode: String,
 
-    /// Number of TCP connections to the echo server.
+    /// Number of TCP connections to the fb server.
     #[arg(short = 'c', long, default_value_t = 4)]
     pub connections: u32,
 
@@ -222,15 +242,15 @@ pub struct RpcArgs {
     #[arg(long)]
     pub run_id: Option<String>,
 
-    /// Echo server port. Defaults to 18080 (the echo server's default
+    /// FB server port. Defaults to 18080 (the fb server's default
     /// port). The server must be started manually (e.g.
-    /// `crow-rpc-echo-server --port=18080`); no auto-spawn. Use
+    /// `crow-rpc-fb-server --port=18080`); no auto-spawn. Use
     /// `tools/bench-rpc-regression.sh` for the wrapper that manages
     /// the server lifecycle.
     #[arg(short = 'P', long, default_value_t = 18080)]
     pub server_port: i32,
 
-    /// Log directory for the echo server and client logs. Defaults to
+    /// Log directory for the fb server and client logs. Defaults to
     /// `bench-runs/<run>/`. All logs (server.log, metrics.log) go here.
     #[arg(long)]
     pub log_dir: Option<String>,

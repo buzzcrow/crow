@@ -121,12 +121,33 @@ pub struct ServerConfig {
     /// may change — only this default's constraint value needs
     /// revisiting, not the knob itself.
     pub scan_byte_budget: usize,
+    /// static: number of crow-rpc connections per peer endpoint for
+    /// inter-server consensus RPCs (Prepare/Accept/Heartbeat etc).
+    /// Round-robined to distribute send-queue pressure. Default 2;
+    /// raise to 4 for high-concurrency benchmarks.
+    pub peer_pool_size: usize,
+    /// static: enable Nagle's algorithm (disable `TCP_NODELAY`) on RPC
+    /// connections. Default false (Nagle off). Nagle degrades Paxos
+    /// latency — leave off unless coalescing tiny frames on a WAN.
+    pub enable_nagle: bool,
+    /// static: event-write mode — `submit()` enqueues to the I/O worker
+    /// instead of calling `writev()` directly. Coalesces multiple frames
+    /// into one writev at the cost of ~20-40us epoll wake latency.
+    /// Default false. Enable for high-concurrency write workloads.
+    pub event_write: bool,
+    /// static: per-connection send queue capacity (backpressure bound).
+    /// Default 4096. Raise if `enqueue_send` failures appear under load.
+    pub send_queue_capacity: u32,
 }
 
 impl ServerConfig {
     pub const DEFAULT: Self = Self {
         shutdown_timeout_ms: 10_000,
         scan_byte_budget: 3 * 1024 * 1024 + 512 * 1024, // 3.5 MiB
+        peer_pool_size: 2,
+        enable_nagle: false,
+        event_write: false,
+        send_queue_capacity: 4096,
     };
 }
 

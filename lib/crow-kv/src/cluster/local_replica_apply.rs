@@ -220,13 +220,13 @@ impl PxLocalReplica {
     }
 
     /// Read the currently accepted value at a slot (for verification).
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn accepted_at(&self, slot: u64) -> Option<PxLogEntry> {
         self.acceptor.accepted_at(slot)
     }
 
     /// Read the currently promised ballot at a slot (for verification).
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn promised_at(&self, slot: u64) -> Option<PxBallot> {
         self.acceptor.promised_at(slot)
     }

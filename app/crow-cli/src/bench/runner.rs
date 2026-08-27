@@ -171,11 +171,11 @@ pub(crate) struct BenchConfig {
     pub(crate) send_queue_capacity: u32,
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
     pub(crate) enable_nagle: bool,
-    /// Connect to external echo server on this port (RPC target only).
+    /// Connect to external fb server on this port (RPC target only).
     /// The server must be started manually (e.g. via
     /// `tools/bench-rpc-regression.sh`). No auto-spawn.
     pub(crate) server_port: Option<i32>,
-    /// Log directory for echo server and client logs (RPC target only).
+    /// Log directory for fb server and client logs (RPC target only).
     /// Defaults to the bench run directory.
     pub(crate) log_dir: Option<String>,
     /// Metrics flush interval in seconds (RPC target only). Default 5.

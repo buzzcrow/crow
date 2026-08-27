@@ -43,6 +43,22 @@ pub struct PxKvStore {
     /// Number of crow-rpc I/O worker threads for the server's `RpcServer`.
     /// Set from `--rpc-workers` CLI before `start()`. Default: 2.
     pub rpc_workers: u32,
+    /// Number of crow-rpc connections per peer endpoint for inter-server
+    /// consensus RPCs. Defaults to `ServerConfig::DEFAULT.peer_pool_size`;
+    /// overridden via `set_peer_pool_size` before `start()`.
+    pub(crate) peer_pool_size: usize,
+    /// Enable Nagle on RPC connections. Defaults to
+    /// `ServerConfig::DEFAULT.enable_nagle`; overridden via
+    /// `set_enable_nagle` before `start()`.
+    pub(crate) enable_nagle: bool,
+    /// Event-write mode for RPC transports. Defaults to
+    /// `ServerConfig::DEFAULT.event_write`; overridden via
+    /// `set_event_write` before `start()`.
+    pub(crate) event_write: bool,
+    /// Per-connection send queue capacity. Defaults to
+    /// `ServerConfig::DEFAULT.send_queue_capacity`; overridden via
+    /// `set_send_queue_capacity` before `start()`.
+    pub(crate) send_queue_capacity: u32,
     /// Test-only delay injected into `kv_get` before `resolve_read_point`.
     /// Set via `set_get_delay_for_tests` under the `test-util` feature;
     /// `None` in production.
@@ -64,6 +80,10 @@ impl PxKvStore {
             metrics_registry: None,
             scan_byte_budget: ServerConfig::DEFAULT.scan_byte_budget,
             rpc_workers: 2,
+            peer_pool_size: ServerConfig::DEFAULT.peer_pool_size,
+            enable_nagle: ServerConfig::DEFAULT.enable_nagle,
+            event_write: ServerConfig::DEFAULT.event_write,
+            send_queue_capacity: ServerConfig::DEFAULT.send_queue_capacity,
             #[cfg(feature = "test-util")]
             get_delay: Mutex::new(None),
         }
@@ -79,6 +99,30 @@ impl PxKvStore {
     /// `CrowKVConfig.server.scan_byte_budget`. Called before `start()`.
     pub fn set_scan_byte_budget(&mut self, budget: usize) {
         self.scan_byte_budget = budget;
+    }
+
+    /// Override the peer connection pool size from the loaded
+    /// `CrowKVConfig.server.peer_pool_size`. Called before `start()`.
+    pub fn set_peer_pool_size(&mut self, size: usize) {
+        self.peer_pool_size = size;
+    }
+
+    /// Override the Nagle setting from the loaded
+    /// `CrowKVConfig.server.enable_nagle`. Called before `start()`.
+    pub fn set_enable_nagle(&mut self, enabled: bool) {
+        self.enable_nagle = enabled;
+    }
+
+    /// Override the event-write mode from the loaded
+    /// `CrowKVConfig.server.event_write`. Called before `start()`.
+    pub fn set_event_write(&mut self, enabled: bool) {
+        self.event_write = enabled;
+    }
+
+    /// Override the send queue capacity from the loaded
+    /// `CrowKVConfig.server.send_queue_capacity`. Called before `start()`.
+    pub fn set_send_queue_capacity(&mut self, capacity: u32) {
+        self.send_queue_capacity = capacity;
     }
 
     /// Reap expired snapshot handles from a group's registry. Called

@@ -34,7 +34,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RESULTS_FILE="doc/working/bench-scan-regression.tsv"
-DURATION=10
+DURATION=20
 KEYSPACE=100000
 
 # Keys are k{id:020} (zero-padded to 20 digits after 'k'), per

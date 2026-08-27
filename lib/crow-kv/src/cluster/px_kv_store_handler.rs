@@ -342,6 +342,7 @@ impl KvStore for PxKvStore {
         }
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn kv_list_snapshots(&self, group_id: u64) -> crate::rpc::ListSnapshotsResponse {
         let Some(group) = self.get_group(group_id) else {
             return crate::rpc::ListSnapshotsResponse {
@@ -367,6 +368,7 @@ impl KvStore for PxKvStore {
         }
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn kv_snapshot_scan(
         &self,
         group_id: u64,
@@ -442,6 +444,7 @@ impl KvStore for PxKvStore {
         }
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn kv_release_snapshot(
         &self,
         group_id: u64,

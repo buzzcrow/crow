@@ -269,6 +269,18 @@ void crow_rpc_server_set_tcp_nodelay(crow_rpc_server_t server, int enabled)
     }
 }
 
+void crow_rpc_server_set_event_write(crow_rpc_server_t server, int enabled)
+{
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->transport()->set_event_write(enabled != 0);
+    }
+    catch (...) {
+    }
+}
+
 void crow_rpc_server_destroy(crow_rpc_server_t server)
 {
     try {
@@ -302,6 +314,7 @@ void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transpor
         }
         auto &s = t->stats();
         copy_latency(&out->submit_to_writev, s.submit_to_writev);
+        out->send_queue_rejects = s.send_queue_rejects.load(std::memory_order_relaxed);
     }
     catch (...) {
     }
@@ -914,4 +927,21 @@ void crow_rpc_metrics_start(const char *log_path, double interval_secs, size_t m
 void crow_rpc_metrics_stop(void)
 {
     crow::common::metrics::MetricsRegistry::global().stop();
+}
+
+void crow_rpc_server_register_conn_count_gauge(crow_rpc_server_t server, const char *name)
+{
+    try {
+        if (server == nullptr || name == nullptr) {
+            return;
+        }
+        auto *transport = server->server->transport();
+        if (transport == nullptr) {
+            return;
+        }
+        crow::common::metrics::MetricsRegistry::global().register_callback_gauge(
+            std::string(name), [transport]() { return static_cast<uint64_t>(transport->connection_count()); });
+    }
+    catch (...) {
+    }
 }

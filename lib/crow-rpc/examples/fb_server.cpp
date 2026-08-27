@@ -1,15 +1,16 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Example: standalone echo server using the crow-rpc C API.
+// Example: standalone fb server using the crow-rpc C API.
 //
 // Listens on a port, registers the built-in echo handler, and runs
 // until SIGTERM/SIGINT. On shutdown, prints transport stats to stdout
 // as key=value lines (parsed by the CLI bench runner).
 //
-// Usage: crow-rpc-echo-server [--port=18080] [--io-engines=1] [--io-workers=1]
-//        [--enable-nagle] [--log-dir=./log] [--metrics-interval=5]
-// Defaults --log-dir to ./log (relative to CWD) when not specified.
+// Usage: crow-rpc-fb-server [--port=18080] [--io-engines=1] [--io-workers=1]
+//        [--enable-nagle] [--logdir=./log] [--metrics-interval=5]
+// Short aliases: -p -e -w -n -l -m (e.g. -p=18080 -e=2 -w=4).
+// Defaults --logdir to ./log (relative to CWD) when not specified.
 
 #include "crow-rpc/c_api.h"
 
@@ -31,18 +32,22 @@ static void on_signal(int /*signo*/)
 }
 
 // gflags definitions. gflags auto-generates --help and validates types.
+// gflags has no native alias support, so short forms (-p, -e, etc.) are
+// separate flags forwarded to the long ones after parse (see main).
 DEFINE_int32(port, 18080, "Listen port");
-DEFINE_uint32(io_engines, 1,
-              "Number of independent epoll instances (each owns its own fd + connections, round-robin). "
-              "1 = single-engine. >1 parallelizes event processing across independent kernel queues.");
-DEFINE_uint32(io_workers, 1,
-              "Total C++ I/O worker threads (across all engines). Per-engine = M / N. "
-              "1 = single-worker (fast path). >1 per engine enables EPOLLONESHOT for multi-worker safety. "
-              "Must be divisible by --io_engines.");
-DEFINE_bool(enable_nagle, false,
-            "Enable Nagle's algorithm (disable TCP_NODELAY). Default false (Nagle off, low latency).");
-DEFINE_string(logdir, "", "Log directory for server + metrics logs. Default: ./log (relative to CWD)");
-DEFINE_uint32(metrics_interval, 5, "Metrics flush interval in seconds (counters + latency histograms)");
+DEFINE_int32(p, 18080, "Alias for --port");
+DEFINE_uint32(io_engines, 1, "Independent epoll instances (round-robin). >1 parallelizes event queues.");
+DEFINE_uint32(e, 1, "Alias for --io_engines");
+DEFINE_uint32(io_workers, 1, "Total I/O worker threads. Must be divisible by --io_engines.");
+DEFINE_uint32(w, 1, "Alias for --io_workers");
+DEFINE_bool(enable_nagle, false, "Enable Nagle's algorithm (disable TCP_NODELAY).");
+DEFINE_bool(n, false, "Alias for --enable_nagle");
+DEFINE_bool(event_write, false, "Event-write mode: submit() enqueues to I/O worker for coalesced writev.");
+DEFINE_uint32(send_queue_capacity, 4096, "Per-connection send queue capacity (backpressure bound).");
+DEFINE_string(logdir, "", "Log directory for server + metrics logs. Default: ./log.");
+DEFINE_string(l, "", "Alias for --logdir");
+DEFINE_uint32(metrics_interval, 5, "Metrics flush interval in seconds.");
+DEFINE_uint32(m, 5, "Alias for --metrics_interval");
 
 int main(int argc, char *argv[])
 {
@@ -51,16 +56,33 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--help" || a == "-h" || a == "-help") {
-            // Replace with --helpon=echo_server so gflags shows only our flags.
-            argv[i] = const_cast<char *>("--helpon=echo_server");
+            // Replace with --helpon=fb_server so gflags shows only our flags.
+            argv[i] = const_cast<char *>("--helpon=fb_server");
             break;
         }
     }
 
-    gflags::SetUsageMessage("crow-rpc-echo-server — standalone RPC echo server for bench rpc.\n"
+    gflags::SetUsageMessage("crow-rpc-fb-server — standalone RPC fb server for bench rpc.\n"
                             "The server listens on --port and echoes back any request with a data payload.\n"
                             "Use with `crow-cli bench rpc --server_port <PORT>`.");
     gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+    // Forward short aliases to long flags. A short flag "is set" when
+    // is_default is false (explicitly passed on the CLI). Short wins
+    // over long when both are given.
+    gflags::CommandLineFlagInfo info;
+    if (gflags::GetCommandLineFlagInfo("p", &info) && !info.is_default)
+        FLAGS_port = FLAGS_p;
+    if (gflags::GetCommandLineFlagInfo("e", &info) && !info.is_default)
+        FLAGS_io_engines = FLAGS_e;
+    if (gflags::GetCommandLineFlagInfo("w", &info) && !info.is_default)
+        FLAGS_io_workers = FLAGS_w;
+    if (gflags::GetCommandLineFlagInfo("n", &info) && !info.is_default)
+        FLAGS_enable_nagle = FLAGS_n;
+    if (gflags::GetCommandLineFlagInfo("l", &info) && !info.is_default)
+        FLAGS_logdir = FLAGS_l;
+    if (gflags::GetCommandLineFlagInfo("m", &info) && !info.is_default)
+        FLAGS_metrics_interval = FLAGS_m;
 
     // Init logging — default to ./log (relative to CWD) so a manually-
     // started server always writes files alongside the bench run.
@@ -70,7 +92,7 @@ int main(int argc, char *argv[])
     }
     std::error_code ec;
     std::filesystem::create_directories(log_dir_arg, ec);
-    crow_rpc_init_logging(log_dir_arg.c_str(), "info", 30, 5, "echo-server");
+    crow_rpc_init_logging(log_dir_arg.c_str(), "info", 30, 5, "fb-server");
 
     std::signal(SIGTERM, on_signal);
     std::signal(SIGINT, on_signal);
@@ -82,6 +104,8 @@ int main(int argc, char *argv[])
     }
 
     crow_rpc_server_set_tcp_nodelay(server, FLAGS_enable_nagle ? 0 : 1);
+    crow_rpc_server_set_event_write(server, FLAGS_event_write ? 1 : 0);
+    crow_rpc_server_set_send_queue_capacity(server, FLAGS_send_queue_capacity);
 
     if (crow_rpc_server_listen(server, "127.0.0.1", FLAGS_port) != CROW_RPC_OK) {
         std::fprintf(stderr, "error: failed to listen on port %d\n", FLAGS_port);
@@ -121,9 +145,10 @@ int main(int argc, char *argv[])
     crow_rpc_transport_stats_t stats;
     std::memset(&stats, 0, sizeof(stats));
     crow_rpc_server_transport_stats(server, &stats);
-    std::printf("stats submit_to_writev_count=%llu submit_to_writev_sum_ns=%llu\n",
+    std::printf("stats submit_to_writev_count=%llu submit_to_writev_sum_ns=%llu send_queue_rejects=%llu\n",
                 static_cast<unsigned long long>(stats.submit_to_writev.count),
-                static_cast<unsigned long long>(stats.submit_to_writev.sum_ns));
+                static_cast<unsigned long long>(stats.submit_to_writev.sum_ns),
+                static_cast<unsigned long long>(stats.send_queue_rejects));
     std::fflush(stdout);
 
     crow_rpc_server_stop(server);

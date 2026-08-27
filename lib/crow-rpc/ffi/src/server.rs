@@ -111,6 +111,20 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_set_tcp_nodelay(self.handle, if enabled { 1 } else { 0 }) };
     }
 
+    /// Event-write mode. Default false (direct writev on caller thread).
+    /// When true, submit() notifies the I/O worker to drain + writev.
+    pub fn set_event_write(&self, enabled: bool) {
+        unsafe { sys::crow_rpc_server_set_event_write(self.handle, if enabled { 1 } else { 0 }) };
+    }
+
+    /// Register a callback gauge that reports this server's live
+    /// connection count at metrics flush time. The name must be unique
+    /// across all registered gauges (e.g. "rpc.server.connections").
+    pub fn register_conn_count_gauge(&self, name: &str) {
+        let c_name = std::ffi::CString::new(name).unwrap_or_default();
+        unsafe { sys::crow_rpc_server_register_conn_count_gauge(self.handle, c_name.as_ptr()) };
+    }
+
     /// Sample transport-level stats: submit_to_writev latency histogram.
     pub fn transport_stats(&self) -> sys::CrowRpcTransportStats {
         let mut stats = sys::CrowRpcTransportStats::default();

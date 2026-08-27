@@ -57,17 +57,17 @@ pub fn crow_cli_bin() -> PathBuf {
     p
 }
 
-/// Locate the CMake-built `crow-rpc-echo-server` binary. Mirrors the
-/// search order in `bench/targets/rpc.rs::echo_server_bin`:
+/// Locate the CMake-built `crow-rpc-fb-server` binary. Mirrors the
+/// search order in `bench/targets/rpc.rs::fb_server_bin`:
 ///
-/// 1. `$CROW_RPC_ECHO_SERVER_BIN`
-/// 2. `lib/crow-rpc/build/crow-rpc-echo-server` relative to the
+/// 1. `$CROW_RPC_FB_SERVER_BIN`
+/// 2. `lib/crow-rpc/build/crow-rpc-fb-server` relative to the
 ///    workspace root (pixi `build-cpp` output)
 ///
 /// Returns `None` when not found (e.g. C++ libs not built).
 #[must_use]
-pub fn crow_rpc_echo_server_bin() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("CROW_RPC_ECHO_SERVER_BIN") {
+pub fn crow_rpc_fb_server_bin() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CROW_RPC_FB_SERVER_BIN") {
         return Some(PathBuf::from(p));
     }
     let cli = crow_cli_bin();
@@ -77,7 +77,7 @@ pub fn crow_rpc_echo_server_bin() -> Option<PathBuf> {
             .join("lib")
             .join("crow-rpc")
             .join("build")
-            .join("crow-rpc-echo-server");
+            .join("crow-rpc-fb-server");
         if candidate.exists() {
             return Some(candidate);
         }

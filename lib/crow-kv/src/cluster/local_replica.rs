@@ -343,6 +343,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.on_accept(entry).await)
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn on_pre_vote(
         &self,
         req: VoteRequestPayload,
@@ -359,6 +360,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.handle_request_vote(req).await)
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn on_heartbeat(
         &self,
         req: HeartbeatRequestPayload,
@@ -367,6 +369,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.handle_heartbeat(req))
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn on_step_down(
         &self,
         req: &StepDownRequestPayload,

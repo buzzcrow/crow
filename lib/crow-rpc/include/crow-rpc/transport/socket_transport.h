@@ -77,6 +77,8 @@ struct TransportStats
     // Latency histogram (nanoseconds).
     //   submit_to_writev : submit() → actual writev (queue wait)
     LatencyHistogram submit_to_writev;
+    // Total enqueue_send rejections (queue full or connection closed).
+    std::atomic<uint64_t> send_queue_rejects{0};
 };
 
 // ── SocketEngine: platform-specific event loop primitives ─────────
@@ -330,6 +332,10 @@ class SocketTransport : public Transport
     //   - nullopt if the connection was never registered (test/direct connection)
     std::optional<std::shared_ptr<Connection>> lookup_conn(Connection *conn);
 
+    // Current live connection count (for metrics reporting). Takes the
+    // live_conns_ mutex — call only from the metrics flush thread.
+    size_t connection_count() const;
+
     // The buffer pool (for callers that allocate request buffers).
     BufferPool *pool() const
     {
@@ -363,6 +369,22 @@ class SocketTransport : public Transport
         return tcp_nodelay_;
     }
 
+    // Event-write mode: when true, submit() enqueues the frame and
+    // notifies the I/O worker to drain + writev (old Path B). When
+    // false (default), submit() calls try_send() directly on the
+    // caller's thread. Event-write batches better (worker drains all
+    // accumulated frames in one writev) but adds epoll-wake latency.
+    // Must be called before listen/connect.
+    void set_event_write(bool enabled)
+    {
+        event_write_ = enabled;
+    }
+
+    bool event_write() const
+    {
+        return event_write_;
+    }
+
   private:
     BufferPool                                *pool_;
     std::vector<std::unique_ptr<Worker>>       workers_;
@@ -380,13 +402,17 @@ class SocketTransport : public Transport
     // TCP_NODELAY setting for new connections. Default true.
     bool tcp_nodelay_{true};
 
+    // Event-write mode: when true, submit() notifies the I/O worker
+    // instead of calling try_send() directly. Default false.
+    bool event_write_{false};
+
     // Connection registry: maps raw Connection* to shared_ptr, so
     // submit() can safely access connections from arbitrary threads
     // (e.g. tokio tasks spawned by Rust handlers). When a connection
     // closes, it is removed from this map; submit() on a stale handle
     // returns false instead of crashing. Only used for cross-thread
     // submits (tokio mode); worker-thread submits skip this lookup.
-    std::mutex                                                  live_conns_mu_;
+    mutable std::mutex                                           live_conns_mu_;
     std::unordered_map<Connection *, std::weak_ptr<Connection>> live_conns_;
 
     // Cross-thread submit pending: connections with enqueued frames from

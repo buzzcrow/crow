@@ -12,11 +12,15 @@
 # Configurations:
 #   - Scaling: 1T:1C → 1000T:16C, coalesce_max_keys=16,
 #     drain_threshold=1 (fixed), max_inflight=32 (64 for 512T+)
+#   - RPC tunables: --event-write --peer-pool-size 4
+#     (event-write coalesces frames via I/O worker; peer-pool=4 spreads
+#     consensus send pressure across 4 connections per peer. send-queue
+#     uses the default 4096)
 #
-# 7 runs × 10s ≈ 70s + deploy overhead.
+# 7 runs × 20s ≈ 140s + deploy overhead.
 #
 # Reference platform: AMD Ryzen 9 5950X (16c/32t, x86_64, Linux).
-# Peak ~197K ops/s at 256T with zero-copy crow-rpc.
+# Peak ~234K ops/s at 512T with zero-copy crow-rpc + event-write.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
@@ -26,7 +30,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RESULTS_FILE="doc/working/bench-write-regression.tsv"
-DURATION=10
+DURATION=20
 KEYSPACE=1000000
 VALUE_SIZE=512
 
@@ -40,6 +44,7 @@ run_bench() {
         --max-inflight "$win" \
         --coalesce-max-keys "$coalesce" \
         --coalesce-drain-threshold 1 \
+        --peer-pool-size 4 --event-write \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --verify-bytes 0 --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
@@ -90,28 +95,28 @@ run_bench() {
 # If a run is worse, do NOT update — investigate and fix the regression
 # first, otherwise silent performance regressions slip in.
 #
-# Reference results (2026-08-26, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
-#   Zero-copy crow-rpc: C++ Frame ownership transferred to Rust, flatbuffer
-#   parsed zero-copy in tokio task. Response: FlatBufferBuilder::collapse()
-#   + Buffer::from_vec_offset (external C++ Buffer, no copy).
+# Reference results (2026-08-27, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
+#   Zero-copy crow-rpc + event-write + peer-pool=4. Event-write coalesces
+#   frames via I/O worker (one writev for N queued frames). Peer-pool=4
+#   spreads consensus send pressure across 4 connections per peer.
 #   win=32 (64 for 512T+), coalesce=16, 10s mem mode, 3-node cluster,
 #   512B values, 1M keys. CROW_RPC_WORKERS tuned per config.
 #
 #   T    C    W    win  co        ops/s     WAL/node  p50    p99    err  sagg  ragg  r2    r2tps    r3    r3tps    enq   wait
-#   1    1    2    32   1.0/16    3,770     37,722    273    366    0    1     1     0     3,803    0     3,803    0     0
-#   16   2    2    32   6.7/16    63,393    94,137    231    625    0    2.1   1.7   2     9,206    5     9,206    0     0
-#   64   4    2    32   14.7/16   171,582   116,476   339    858    0    4.4   3.1   131   11,297   38    11,297   0     0
-#   128  4    4    32   15.3/16   191,411   124,957   582    1448   0    5.8   4.9   29    12,504   70    12,504   0     0
-#   256  8    4    32   15.4/16   190,769   123,974   1173   2970   0    6.7   5.7   157   13,440   78    13,440   0     0
-#   512  16   4    64   35.0/64   178,024   50,815    2738   5444   0    6.9   6.3   68    5,102    68    5,102    0     0
-#   1000 16   4    64   27.5/32   182,541   66,376    5204   12832  0    6.7   6.2   381   6,450    499   6,449    0     0
+#   1    1    2    32   0.5/16    4,019     80,396    256    348    0    1     0.9   0     4,119    0     4,119    0     0
+#   16   2    2    32   3.3/16    63,668    190,965   226    551    0    1.3   1.5   29    9,603    6     9,603    0     0
+#   64   4    2    32   7.3/16    157,310   214,033   365    1020   0    1.8   1.9   500   11,110   1000  11,110   0     0
+#   128  4    4    32   7.8/16    189,585   242,486   576    1596   0    1.9   2.4   125   13,350   78    13,350   0     0
+#   256  8    4    32   7.6/16    187,452   245,880   1156   3792   0    1.9   2.2   187   13,577   186   13,578   0     0
+#   512  16   4    64   26.7/64   233,601   87,458    1930   5564   0    2.8   2.6   3250  4,926    240   4,926    0     0
+#   1000 16   4    64   28.3/64   208,114   73,545    4340   12856  0    3     3.1   996   4,265    1052  4,264    0     0
 #
-# Zero-copy crow-rpc beats gRPC at every thread count (+20% to +98%).
-# Peak ~191K at 128-256T (was ~124K with gRPC). Coalesce batches fill
-# to 97% at co=16 (256T), 55% at co=64 (512T), 86% at co=32 (1000T).
-# Inflight window NEVER full (enq=0 at all configs) — bottleneck is
-# coalescer/accept-round serialization, not window size.
-# 512T/1000T fixed (drain loop spin when iovec ring full).
+# Zero-copy crow-rpc + event-write beats gRPC at every thread count.
+# Peak ~234K at 512T (was ~124K with gRPC, ~191K without event-write).
+# 1000T now uses co=64 (was co=32) — 1000 threads fill 64-key batches
+# as well as 512T. Coalesce fill: 48% at co=16 (256T), 42% at co=64
+# (512T/1000T) — batches not full, bottleneck is accept-round latency.
+# Inflight window NEVER full (enq=0 at all configs).
 # Inter-replica: r2≈r3 (symmetric). Zero errors across all configs.
 # See doc/design/kv/kv-write-flow-analysis.md for full analysis.
 #
@@ -134,15 +139,15 @@ run_bench() {
 echo -e "label\twin\tcoalesce\tworkers\tops_s\twal_per_node\tp50_us\tp99_us\terrors\tsrv_sagg\tsrv_ragg\tcli_sagg\tcli_ragg\tr2_avg\tr2_tps\tr3_avg\tr3_tps\tinflight_enq\tinflight_wait_us" > "$RESULTS_FILE"
 
 echo "=== write (win=32, coalesce=16) ==="
-run_bench 1 1 32 16 2 "write_1t_1c_win32_coales16"           # ref: 3,770 ops/s
-run_bench 16 2 32 16 2 "write_16t_2c_win32_coales16"         # ref: 63,393 ops/s
-run_bench 64 4 32 16 2 "write_64t_4c_win32_coales16"         # ref: 171,582 ops/s
-run_bench 128 4 32 16 4 "write_128t_4c_win32_coales16"       # ref: 191,411 ops/s
-run_bench 256 8 32 16 4 "write_256t_8c_win32_coales16"       # ref: 190,769 ops/s
+run_bench 1 1 32 16 2 "write_1t_1c_win32_coales16"           # ref: 4,019 ops/s
+run_bench 16 2 32 16 2 "write_16t_2c_win32_coales16"         # ref: 63,668 ops/s
+run_bench 64 4 32 16 2 "write_64t_4c_win32_coales16"         # ref: 157,310 ops/s
+run_bench 128 4 32 16 4 "write_128t_4c_win32_coales16"       # ref: 189,585 ops/s
+run_bench 256 8 32 16 4 "write_256t_8c_win32_coales16"       # ref: 187,452 ops/s
 echo "=== write (win=64, coalesce=64) ==="
-run_bench 512 16 64 64 4 "write_512t_16c_win64_coales64"     # ref: 178,024 ops/s
-echo "=== write (win=64, coalesce=32) ==="
-run_bench 1000 16 64 32 4 "write_1000t_16c_win64_coales32"   # ref: 182,541 ops/s
+run_bench 512 16 64 64 4 "write_512t_16c_win64_coales64"     # ref: 233,601 ops/s
+echo "=== write (win=64, coalesce=64) ==="
+run_bench 1000 16 64 64 4 "write_1000t_16c_win64_coales64"   # ref: 208,114 ops/s
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

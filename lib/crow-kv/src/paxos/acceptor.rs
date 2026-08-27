@@ -106,7 +106,7 @@ impl PxAcceptor {
 
     // ---------- internals ----------
 
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn prepare(&self, slot: SlotIndex, ballot: PxBallot) -> PxPrepareReply {
         let Some(node) = get_or_prepare_slot(&self.slot_list, slot) else {
             return PxPrepareReply::Rejected {
@@ -166,7 +166,7 @@ impl PxAcceptor {
 }
 
 impl Acceptor for PxAcceptor {
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn accept(&self, entry: &PxLogEntry) -> PxAcceptReply {
         let slot = entry.slot;
         match self.inner_accept(entry) {
@@ -183,7 +183,7 @@ impl Acceptor for PxAcceptor {
             },
         }
     }
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn prepare(&self, slot: SlotIndex, ballot: PxBallot) -> PxPrepareReply {
         self.prepare(slot, ballot).await
     }

@@ -67,6 +67,10 @@ void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t 
 // TCP_NODELAY for new connections. Default 1 (Nagle disabled).
 // Set to 0 to allow Nagle coalescing.
 void            crow_rpc_server_set_tcp_nodelay(crow_rpc_server_t server, int enabled);
+// Event-write mode. Default 0 (direct writev on caller thread).
+// Set to 1 to notify I/O worker to drain + writev (better batching,
+// adds epoll-wake latency).
+void            crow_rpc_server_set_event_write(crow_rpc_server_t server, int enabled);
 void            crow_rpc_server_destroy(crow_rpc_server_t server);
 crow_rpc_status crow_rpc_server_listen(crow_rpc_server_t server, const char *addr, int port);
 void            crow_rpc_server_start(crow_rpc_server_t server);
@@ -88,6 +92,7 @@ typedef struct crow_rpc_latency_stats
 typedef struct crow_rpc_transport_stats
 {
     crow_rpc_latency_stats_t submit_to_writev; // submit → writev (queue wait)
+    uint64_t send_queue_rejects;               // enqueue_send rejected (queue full/closed)
 } crow_rpc_transport_stats_t;
 
 void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out);
@@ -280,6 +285,12 @@ void crow_rpc_shutdown_logging(void);
 void crow_rpc_metrics_start(const char *log_path, double interval_secs, size_t max_file_mb, size_t max_files,
                             int console);
 void crow_rpc_metrics_stop(void);
+
+// Register a callback gauge that reports the server's live connection
+// count. The gauge name (e.g. "rpc.server.connections") must be unique
+// across all registered gauges. The callback reads the transport's
+// live-connection count at flush time — no manual increment/decrement.
+void crow_rpc_server_register_conn_count_gauge(crow_rpc_server_t server, const char *name);
 
 #ifdef __cplusplus
 } // extern "C"

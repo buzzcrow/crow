@@ -312,6 +312,9 @@ pub(crate) struct TransportStatsSnapshot {
     /// Cumulative average submit→writev queue wait (microseconds).
     #[serde(default)]
     pub submit_to_writev_avg_us: u64,
+    /// Total `enqueue_send` rejections (queue full or connection closed).
+    #[serde(default)]
+    pub send_queue_rejects: u64,
 }
 
 /// Per-op outcome flags recorded into `OpStats`. Grouped as a struct

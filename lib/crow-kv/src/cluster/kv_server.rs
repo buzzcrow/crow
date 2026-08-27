@@ -89,10 +89,14 @@ impl KvServer for Arc<PxKvStore> {
         // (via `PxKvStore::rpc_workers`).
         let workers = self.rpc_workers;
         let server = Arc::new(RpcServer::with_engines(None, 1, workers));
+        server.set_tcp_nodelay(!self.enable_nagle);
+        server.set_event_write(self.event_write);
+        server.set_send_queue_capacity(self.send_queue_capacity);
         server
             .listen(&bound_addr.ip().to_string(), i32::from(bound_addr.port()))
             .map_err(|e| format!("crow-rpc listen on {bound_addr}: {e:?}"))?;
         server.start();
+        server.register_conn_count_gauge("rpc.server.connections");
 
         let rt = tokio::runtime::Handle::current();
         let px_service = Arc::new(PxRpcService::new(self.clone(), rt.clone()));
@@ -102,7 +106,13 @@ impl KvServer for Arc<PxKvStore> {
         let kv_service = Arc::new(KvRpcService::new(self.clone(), rt, forwarder));
         kv_service.register_handlers(&server);
 
-        let transport = Arc::new(PxRpcTransport::with_workers(self.rpc_workers));
+        let transport = Arc::new(PxRpcTransport::with_pool_size(
+            self.peer_pool_size,
+            self.enable_nagle,
+            self.event_write,
+            self.send_queue_capacity,
+            self.rpc_workers,
+        ));
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let server_clone = Arc::clone(&server);

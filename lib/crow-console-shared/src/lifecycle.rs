@@ -53,6 +53,18 @@ pub struct DeployRequest {
     /// `--coalesce-drain-threshold` value. `None` leaves the spawned
     /// server's own default in effect.
     pub coalesce_drain_threshold: Option<usize>,
+    /// `--peer-pool-size` value. `None` leaves the spawned server's
+    /// own default in effect.
+    pub peer_pool_size: Option<usize>,
+    /// `--enable-nagle` flag. `None` leaves the spawned server's own
+    /// default in effect.
+    pub enable_nagle: Option<bool>,
+    /// `--event-write` flag. `None` leaves the spawned server's own
+    /// default in effect.
+    pub event_write: Option<bool>,
+    /// `--send-queue-capacity` value. `None` leaves the spawned
+    /// server's own default in effect.
+    pub send_queue_capacity: Option<u32>,
     /// Optional `--config` TOML path for `crow-kv-server` (first-boot
     /// tunable overrides only; ignored in restore mode).
     pub config: Option<PathBuf>,
@@ -142,6 +154,18 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(workers) = req.rpc_workers {
         cmd.arg("--rpc-workers").arg(workers.to_string());
+    }
+    if let Some(pool_size) = req.peer_pool_size {
+        cmd.arg("--peer-pool-size").arg(pool_size.to_string());
+    }
+    if let Some(true) = req.enable_nagle {
+        cmd.arg("--enable-nagle");
+    }
+    if let Some(true) = req.event_write {
+        cmd.arg("--event-write");
+    }
+    if let Some(cap) = req.send_queue_capacity {
+        cmd.arg("--send-queue-capacity").arg(cap.to_string());
     }
 }
 

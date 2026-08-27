@@ -5,7 +5,7 @@
 // FFI dispatch callback + raw pointer handoff requires unsafe.
 
 //! RPC bench target: connects to an externally-started
-//! `crow-rpc-echo-server` (separate process, separate epoll fd), then
+//! `crow-rpc-fb-server` (separate process, separate epoll fd), then
 //! builds `RpcClient`-backed workers in the CLI process that send ping
 //! requests with data payloads and verify the echo response.
 //!
@@ -15,7 +15,7 @@
 //! server), eliminating the single-epoll-fd contention of the
 //! in-process model.
 //!
-//! The echo server must be started manually before the bench — see
+//! The fb server must be started manually before the bench — see
 //! `tools/bench-rpc-regression.sh` for the wrapper that starts/stops
 //! it per config. Pass `--server-port` to point the client at it.
 
@@ -52,7 +52,7 @@ thread_local! {
 /// Return a reference to the thread-local payload buffer of `size`
 /// bytes, passing it to `f`. The buffer is filled once (on first call
 /// or when the size changes) with a fixed pattern and reused unchanged
-/// on subsequent calls — the echo server just bounces the bytes back,
+/// on subsequent calls — the fb server just bounces the bytes back,
 /// so the content does not need to vary per request.
 #[allow(
     clippy::cast_possible_truncation,
@@ -73,11 +73,11 @@ fn with_payload<R>(size: usize, f: impl FnOnce(&[u8]) -> R) -> R {
     })
 }
 
-/// RPC bench target: connects to an external echo server process.
+/// RPC bench target: connects to an external fb server process.
 pub(crate) struct RpcTarget {
     /// Local `RpcServer` used only for its client-side transport (epoll
     /// fd + I/O workers). No listening — connections go to the external
-    /// echo server process.
+    /// fb server process.
     server: Option<Arc<RpcServer>>,
     pool: Option<Arc<BufferPool>>,
     port: i32,
@@ -119,16 +119,17 @@ impl BenchTarget for RpcTarget {
         "rpc"
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
         self.log_dir.clone_from(&cfg.log_dir);
         self.metrics_interval = cfg.metrics_interval;
         let pool = Arc::new(BufferPool::new(8192));
 
-        // Connect to an external echo server on cfg.server_port.
+        // Connect to an external fb server on cfg.server_port.
         // The server must be started manually (e.g.
-        // `crow-rpc-echo-server --port=18080 --io_workers=2`).
+        // `crow-rpc-fb-server --port=18080 --io_workers=2`).
         self.port = cfg.server_port.ok_or_else(|| {
-            Error::Config("echo server port is required (start crow-rpc-echo-server first)".to_string())
+            Error::Config("fb server port is required (start crow-rpc-fb-server first)".to_string())
         })?;
 
         // Create a local RpcServer (no listen) — used only for its
@@ -152,7 +153,7 @@ impl BenchTarget for RpcTarget {
         server.set_tcp_nodelay(!cfg.enable_nagle);
         server.start();
 
-        // Connect to the external echo server. These connections live
+        // Connect to the external fb server. These connections live
         // on the local transport's epoll fd.
         let client = Arc::new(RpcClient::new());
         let mut conns = Vec::with_capacity(cfg.connections as usize);
@@ -186,6 +187,7 @@ impl BenchTarget for RpcTarget {
         Ok(())
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn build_client(&self) -> Result<RpcBenchClient> {
         let server = self
             .server
@@ -215,6 +217,7 @@ impl BenchTarget for RpcTarget {
         })
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn pre_populate(&self, _client: &RpcBenchClient, _cfg: &BenchConfig) -> Result<(u64, u64)> {
         Ok((0, 0))
     }
@@ -251,7 +254,7 @@ impl BenchTarget for RpcTarget {
         if self.log_dir.is_some() {
             crow_rpc_ffi::logging::shutdown_logging();
         }
-        // The echo server is external — the user started it manually,
+        // The fb server is external — the user started it manually,
         // so we don't stop it here. Server-side stats are in the
         // server's own metrics.log (printed by the server process).
         self.client = None;

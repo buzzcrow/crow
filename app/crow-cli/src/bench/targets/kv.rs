@@ -121,6 +121,10 @@ impl BenchFixture {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
+        peer_pool_size: usize,
+        enable_nagle: bool,
+        event_write: bool,
+        send_queue_capacity: u32,
     ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
 
@@ -141,6 +145,10 @@ impl BenchFixture {
             node_config,
             coalesce_max_keys,
             coalesce_drain_threshold,
+            peer_pool_size,
+            enable_nagle,
+            event_write,
+            send_queue_capacity,
         )
         .await
         {
@@ -201,6 +209,10 @@ impl BenchFixture {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
+        peer_pool_size: usize,
+        enable_nagle: bool,
+        event_write: bool,
+        send_queue_capacity: u32,
     ) -> Result<(Vec<u64>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
@@ -240,6 +252,10 @@ impl BenchFixture {
                 max_inflight: Some(max_inflight),
                 coalesce_max_keys,
                 coalesce_drain_threshold,
+                peer_pool_size: Some(peer_pool_size),
+                enable_nagle: Some(enable_nagle),
+                event_write: Some(event_write),
+                send_queue_capacity: Some(send_queue_capacity),
                 ..Default::default()
             };
             mode.apply_to(&mut body);
@@ -535,6 +551,10 @@ pub(crate) struct KvTarget {
     node_config: Option<String>,
     coalesce_max_keys: Option<usize>,
     coalesce_drain_threshold: Option<usize>,
+    peer_pool_size: usize,
+    enable_nagle: bool,
+    event_write: bool,
+    send_queue_capacity: u32,
     fixture: Option<BenchFixture>,
     /// The shared client used by all workers + progress/metrics tasks.
     client: Option<Arc<CrowkvClient>>,
@@ -550,6 +570,10 @@ impl KvTarget {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
+        peer_pool_size: usize,
+        enable_nagle: bool,
+        event_write: bool,
+        send_queue_capacity: u32,
     ) -> Self {
         Self {
             mode,
@@ -559,6 +583,10 @@ impl KvTarget {
             node_config,
             coalesce_max_keys,
             coalesce_drain_threshold,
+            peer_pool_size,
+            enable_nagle,
+            event_write,
+            send_queue_capacity,
             fixture: None,
             client: None,
         }
@@ -581,6 +609,10 @@ impl BenchTarget for KvTarget {
             self.node_config.clone(),
             self.coalesce_max_keys,
             self.coalesce_drain_threshold,
+            self.peer_pool_size,
+            self.enable_nagle,
+            self.event_write,
+            self.send_queue_capacity,
         )
         .await?;
 
@@ -597,6 +629,9 @@ impl BenchTarget for KvTarget {
         let mut client_config = ClientConfig::new(topology_seed.map(|s| vec![s]).unwrap_or_default());
         client_config.pool_size_per_endpoint = cfg.connections as usize;
         client_config.read_endpoint_policy = cfg.read_endpoint_policy;
+        client_config.enable_nagle = self.enable_nagle;
+        client_config.event_write = self.event_write;
+        client_config.send_queue_capacity = self.send_queue_capacity;
         let client = CrowkvClient::new(client_config);
         client.seed_leader(cfg.store_id, cfg.group_id, fixture.leader_endpoint().to_string());
         self.client = Some(Arc::new(client));
@@ -604,6 +639,7 @@ impl BenchTarget for KvTarget {
         Ok(())
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn build_client(&self) -> Result<KvBenchClient> {
         let client = self
             .client
@@ -706,6 +742,7 @@ impl BenchTarget for KvTarget {
                     .checked_div(s.submit_to_writev.count)
                     .unwrap_or(0)
                     / 1000,
+                send_queue_rejects: s.send_queue_rejects,
                 ..Default::default()
             },
         )

@@ -108,6 +108,18 @@ pub struct DeployNodeServerBody {
     /// `--coalesce-drain-threshold` value for R45b drain heuristic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_drain_threshold: Option<usize>,
+    /// `--peer-pool-size` value for inter-server RPC connection pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_pool_size: Option<usize>,
+    /// `--enable-nagle` flag for RPC connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_nagle: Option<bool>,
+    /// `--event-write` flag for RPC transports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_write: Option<bool>,
+    /// `--send-queue-capacity` value for per-connection send queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_queue_capacity: Option<u32>,
     /// Optional `--config` JSON path passed to the spawned `crow-kv-server`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,

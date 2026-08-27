@@ -119,6 +119,10 @@ async fn main() {
     config.paxos.coalesce_drain_threshold = args
         .coalesce_drain_threshold
         .unwrap_or(config.paxos.max_inflight_proposals / 4);
+    config.server.peer_pool_size = args.peer_pool_size;
+    config.server.enable_nagle = args.enable_nagle;
+    config.server.event_write = args.event_write;
+    config.server.send_queue_capacity = args.send_queue_capacity;
 
     let registry = Arc::new(
         KvStoreRegistry::with_config(config.clone())
@@ -449,6 +453,10 @@ async fn create_and_start_stores(
             store.set_metrics_registry(Arc::clone(mr));
         }
         store.set_scan_byte_budget(registry.config.server.scan_byte_budget);
+        store.set_peer_pool_size(registry.config.server.peer_pool_size);
+        store.set_enable_nagle(registry.config.server.enable_nagle);
+        store.set_event_write(registry.config.server.event_write);
+        store.set_send_queue_capacity(registry.config.server.send_queue_capacity);
         let store = Arc::new(store);
 
         // Create groups with the single local replica for this store, if group_ids provided.

@@ -9,7 +9,7 @@ benchmark). Mirrors the structure of
 
 The echo benchmark measures raw RPC transport throughput (epoll/kqueue
 + framing + request/response correlation) with no KV/storage layer. The
-CLI starts a standalone echo-server process and connects over loopback.
+CLI starts a standalone fb-server process and connects over loopback.
 The echo handler copies request data to response data, so the benchmark
 is purely I/O-bound.
 
@@ -159,7 +159,7 @@ Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 ### 2026-08-27 (Nagle Comparison + Metrics Shutdown Fix)
 
 Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
-Config: 128B values, 20s duration, standalone echo server, epoll
+Config: 128B values, 20s duration, standalone fb server, epoll
 loopback, pipeline_depth=1. Same codebase as 2026-08-25 plus a
 metrics shutdown fix (condition_variable wake in
 `MetricsRegistry::stop` — shutdown latency dropped from up to 5s to
@@ -222,7 +222,7 @@ reference (697).
 ### 2026-08-25 (Re-run, Mixed — Reference Not Updated)
 
 Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
-Config: 128B values, 20s duration, standalone echo server, epoll
+Config: 128B values, 20s duration, standalone fb server, epoll
 loopback, pipeline_depth=1. Same codebase and config as the 2026-08-21
 "Coroutine vs Tokio Mode" run — re-run to check stability.
 
@@ -268,7 +268,7 @@ for traceability; the 2026-08-21 subsection remains the reference.
 ### 2026-08-21 (Standalone Server, macOS)
 
 Platform: **Apple M5 Pro** (18c, arm64, macOS 26/Darwin 25.5).
-Config: 128B values, 20s duration, standalone echo server, kqueue
+Config: 128B values, 20s duration, standalone fb server, kqueue
 loopback, pipeline_depth=1. After `send()` unification + global static
 counters (removed per-instance atomics from the hot path).
 
@@ -309,7 +309,7 @@ hot-path contention under high dispatch-thread counts.
 ### 2026-08-21 (Standalone Server, Linux)
 
 Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
-Config: 128B values, 20s duration, standalone echo server, epoll
+Config: 128B values, 20s duration, standalone fb server, epoll
 loopback, pipeline_depth=1. After `send()` unification + global static
 counters (removed per-instance atomics from the hot path) — same
 codebase state as the 2026-08-21 macOS run, different platform.
@@ -356,7 +356,7 @@ lower tail latency (p99 391 vs 1446 at 1e8w).
 ### 2026-08-21 (Coroutine vs Tokio Mode, Linux)
 
 Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
-Config: 128B values, 20s duration, standalone echo server, epoll
+Config: 128B values, 20s duration, standalone fb server, epoll
 loopback, pipeline_depth=1. Slab completion pool with two-phase
 PENDING (CLAIMED→READY) + read-before-CAS in on_response (no
 PROCESSING state). Coroutine mode uses send_queue=256 (same-thread

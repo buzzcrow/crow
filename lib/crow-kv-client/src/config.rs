@@ -102,6 +102,19 @@ pub struct ClientConfig {
     /// [`ReadEndpointPolicy`]. Default `Leader` preserves the pre-R26
     /// behavior; `AnyReplica` enables follower read distribution.
     pub read_endpoint_policy: ReadEndpointPolicy,
+    /// Enable Nagle's algorithm (disable `TCP_NODELAY`) on client RPC
+    /// connections. Default false.
+    pub enable_nagle: bool,
+    /// Event-write mode — `submit()` enqueues to the I/O worker instead
+    /// of calling `writev()` directly. Coalesces frames. Default false.
+    pub event_write: bool,
+    /// Per-connection send queue capacity (backpressure bound).
+    /// Default 4096.
+    pub send_queue_capacity: u32,
+    /// Number of crow-rpc I/O worker threads for the client transport.
+    /// Default 2. Fewer threads reduce scheduler contention on
+    /// low-concurrency callers (e.g. the management console).
+    pub rpc_workers: u32,
 }
 
 impl ClientConfig {
@@ -113,6 +126,10 @@ impl ClientConfig {
             topology_min_refresh_interval: Duration::from_millis(200),
             retry: RetryConfig::default(),
             read_endpoint_policy: ReadEndpointPolicy::default(),
+            enable_nagle: false,
+            event_write: false,
+            send_queue_capacity: 4096,
+            rpc_workers: 2,
         }
     }
 }

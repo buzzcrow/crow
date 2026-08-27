@@ -38,6 +38,30 @@ fn parse_rpc_counter(name: &str, count: u64, rpc: &mut super::report::TransportS
         rpc.read_bytes += count;
     } else if name.contains(".writev_bytes.") {
         rpc.writev_bytes += count;
+    } else if name.contains(".send_queue_reject.") {
+        rpc.send_queue_rejects += count;
+    }
+}
+
+/// Parse a `rpc.transport.*` histogram line from `[cpp-metrics-global]`.
+/// The `total` column (cumulative) is assigned — not added — so the
+/// last flush block leaves the final cumulative value.
+fn parse_rpc_transport_histogram(
+    name: &str,
+    fields: &[&str],
+    rpc: &mut super::report::TransportStatsSnapshot,
+) {
+    // Histogram format: name count tps avg p50 p99 max total
+    if fields.len() < 8 {
+        return;
+    }
+    let total: u64 = fields[7].parse().unwrap_or(0);
+    match name {
+        "rpc.transport.read_handle" => rpc.read_calls = total,
+        "rpc.transport.writev" => rpc.writev_calls = total,
+        "rpc.transport.submit_to_writev" => rpc.frames_sent = total,
+        "rpc.transport.read_to_parse" => rpc.frames_parsed = total,
+        _ => {}
     }
 }
 
@@ -148,6 +172,8 @@ pub(crate) fn parse_metrics_log(content: &str) -> ServerMetrics {
                     metrics.kv_put_count += count;
                 } else if name.contains(".kv.get.") {
                     metrics.kv_get_count += count;
+                } else if name.starts_with("rpc.transport.") {
+                    parse_rpc_transport_histogram(name, &fields, &mut metrics.rpc);
                 }
             }
             LogSection::Summary => {
@@ -228,6 +254,7 @@ pub(crate) fn aggregate_server_metrics(per_node: &[ServerMetrics]) -> ServerMetr
         agg.rpc.writev_bytes += m.rpc.writev_bytes;
         agg.rpc.submit_to_writev_count += m.rpc.submit_to_writev_count;
         agg.rpc.submit_to_writev_avg_us = agg.rpc.submit_to_writev_avg_us.max(m.rpc.submit_to_writev_avg_us);
+        agg.rpc.send_queue_rejects += m.rpc.send_queue_rejects;
         // Inter-replica: leader-side metrics (rpc.l@2/3) take the max
         // across nodes (only the leader has non-zero values).
         agg.replica.r2 = agg.replica.r2.max(m.replica.r2);

@@ -37,7 +37,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RESULTS_FILE="doc/working/bench-read-regression.tsv"
-DURATION=10
+DURATION=20
 KEYSPACE=100000
 
 run_bench() {

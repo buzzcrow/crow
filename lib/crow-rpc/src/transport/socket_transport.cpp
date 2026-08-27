@@ -501,16 +501,36 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         }
     }
     frame->create_nano = now_nano();
-    // Enqueue the frame, then try to writev directly on the caller's
-    // thread. The in_send_ CAS serializes concurrent senders — only one
-    // does writev; others just enqueue and return. If writev hits EAGAIN,
-    // arm write on the owning engine for retry.
     if (!conn->enqueue_send(frame)) {
+        cnt_send_queue_reject().inc();
+        stats_.send_queue_rejects.fetch_add(1, std::memory_order_relaxed);
         CR_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
                     static_cast<long long>(conn->id()), conn->name());
         return false;
     }
 
+    if (event_write_) {
+        // Event-write mode: notify the I/O worker to drain + writev.
+        // The worker's Notify handler calls try_send, batching all
+        // frames accumulated in the queue into one writev.
+        auto *engine = static_cast<SocketEngine *>(conn->io_engine);
+        if (engine != nullptr) {
+            {
+                std::lock_guard<std::mutex> lock(cross_thread_mu_);
+                cross_thread_pending_.push_back(conn);
+            }
+            bool expected = false;
+            if (cross_thread_notified_.compare_exchange_strong(expected, true)) {
+                engine->notify_worker();
+            }
+        }
+        return true;
+    }
+
+    // Direct-write mode (default): try writev on the caller's thread.
+    // The in_send_ CAS serializes concurrent senders — only one does
+    // writev; others just enqueue and return. If writev hits EAGAIN,
+    // arm write on the owning engine for retry.
     int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
     if (!conn->try_send(wfd, &stats_)) {
         auto *engine = static_cast<SocketEngine *>(conn->io_engine);
@@ -588,6 +608,12 @@ std::optional<std::shared_ptr<Connection>> SocketTransport::lookup_conn(Connecti
         return std::nullopt; // not registered (test/direct connection)
     }
     return it->second.lock(); // null if expired (stale), non-null if alive
+}
+
+size_t SocketTransport::connection_count() const
+{
+    std::lock_guard<std::mutex> lock(live_conns_mu_);
+    return live_conns_.size();
 }
 
 std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, int port)

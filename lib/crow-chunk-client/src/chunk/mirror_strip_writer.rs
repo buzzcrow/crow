@@ -30,16 +30,19 @@ impl MirrorStripWriter {
     }
 
     /// Push a data block to the strip.
+    #[allow(clippy::unused_async_trait_impl)]
     pub async fn push(&mut self, _buffer: Bytes) -> Result<FeedStatus> {
         Err(IoError::Internal("MirrorStripWriter not yet implemented".into()))
     }
 
     /// End of strip: return the strip result.
+    #[allow(clippy::unused_async_trait_impl)]
     pub async fn finish(&mut self) -> Result<StripResult> {
         Err(IoError::Internal("MirrorStripWriter not yet implemented".into()))
     }
 
     /// Abort: return already-durable state.
+    #[allow(clippy::unused_async_trait_impl)]
     pub async fn abort(&mut self) -> Result<StripResult> {
         Err(IoError::Internal("MirrorStripWriter not yet implemented".into()))
     }

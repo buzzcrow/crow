@@ -223,7 +223,15 @@ impl CrowkvClient {
             read_endpoint_policy: config.read_endpoint_policy,
             read_rr: DashMap::new(),
             endpoint_stats: DashMap::new(),
-            rpc_transport: Some(std::sync::Arc::new(crate::kv_rpc_transport::KvRpcTransport::new())),
+            rpc_transport: Some(std::sync::Arc::new(
+                crate::kv_rpc_transport::KvRpcTransport::with_pool_size(
+                    config.pool_size_per_endpoint,
+                    config.enable_nagle,
+                    config.event_write,
+                    config.send_queue_capacity,
+                    config.rpc_workers,
+                ),
+            )),
         }
     }
 

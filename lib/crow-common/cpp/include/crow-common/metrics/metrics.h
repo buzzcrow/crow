@@ -19,6 +19,7 @@
 #pragma once
 
 #include "crow-common/metrics/bandwidth.h"
+#include "crow-common/metrics/callback_gauge.h"
 #include "crow-common/metrics/counter.h"
 #include "crow-common/metrics/gauge.h"
 #include "crow-common/metrics/latency_histogram.h"
@@ -55,6 +56,7 @@ class MetricsRegistry
 
     Counter          *register_counter(const std::string &name);
     Gauge            *register_gauge(const std::string &name);
+    CallbackGauge    *register_callback_gauge(const std::string &name, CallbackGauge::Callback cb);
     Bandwidth        *register_bandwidth(const std::string &name);
     LatencyHistogram *register_histogram(const std::string &name);
     LatencySummary   *register_summary(const std::string &name);
@@ -81,6 +83,7 @@ class MetricsRegistry
   private:
     std::vector<std::unique_ptr<Counter>>          counters_;
     std::vector<std::unique_ptr<Gauge>>            gauges_;
+    std::vector<std::unique_ptr<CallbackGauge>>    callback_gauges_;
     std::vector<std::unique_ptr<Bandwidth>>        bandwidths_;
     std::vector<std::unique_ptr<LatencyHistogram>> histograms_;
     std::vector<std::unique_ptr<LatencySummary>>   summaries_;

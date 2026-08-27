@@ -48,6 +48,14 @@ Gauge *MetricsRegistry::register_gauge(const std::string &name)
     return raw;
 }
 
+CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name, CallbackGauge::Callback cb)
+{
+    auto             h   = std::make_unique<CallbackGauge>(name, std::move(cb));
+    CallbackGauge   *raw = h.get();
+    callback_gauges_.push_back(std::move(h));
+    return raw;
+}
+
 Bandwidth *MetricsRegistry::register_bandwidth(const std::string &name)
 {
     auto       h   = std::make_unique<Bandwidth>(name);
@@ -218,13 +226,24 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
         }
     }
 
-    // Gauges (always printed, even if 0)
-    if (!gauges_.empty()) {
+    // Gauges (always printed, even if 0). Regular gauges and callback
+    // gauges are merged into one sorted list for a unified output section.
+    if (!gauges_.empty() || !callback_gauges_.empty()) {
+        // Collect (name, value) pairs from both gauge types, then sort.
+        std::vector<std::pair<std::string, uint64_t>> all_gauges;
+        all_gauges.reserve(gauges_.size() + callback_gauges_.size());
+        for (const auto &g : gauges_) {
+            all_gauges.emplace_back(g->name(), g->get());
+        }
+        for (const auto &g : callback_gauges_) {
+            all_gauges.emplace_back(g->name(), g->get());
+        }
+        std::sort(all_gauges.begin(), all_gauges.end(),
+                  [](const auto &a, const auto &b) { return a.first < b.first; });
         std::fprintf(fp, "%-*s  value\n", static_cast<int>(name_w), "");
-        auto idx = sorted_indices(gauges_);
-        for (size_t i : idx) {
-            std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(name_w), gauges_[i]->name().c_str(),
-                         static_cast<unsigned long long>(gauges_[i]->get()));
+        for (const auto &[name, value] : all_gauges) {
+            std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(name_w), name.c_str(),
+                         static_cast<unsigned long long>(value));
         }
     }
 
@@ -247,6 +266,9 @@ size_t MetricsRegistry::max_name_len() const
         max_len = std::max(max_len, e->name().size());
     }
     for (const auto &e : gauges_) {
+        max_len = std::max(max_len, e->name().size());
+    }
+    for (const auto &e : callback_gauges_) {
         max_len = std::max(max_len, e->name().size());
     }
     return max_len;

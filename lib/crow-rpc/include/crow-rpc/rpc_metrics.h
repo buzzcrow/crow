@@ -25,6 +25,7 @@
 // Counters (error/failure paths + message type):
 //   rpc.transport.read_error.c      — hard read errors
 //   rpc.transport.write_error.c     — hard writev errors
+//   rpc.transport.send_queue_reject.c — enqueue_send rejected (queue full/closed)
 //   rpc.request.submit_fail.c       — submit failed
 //   rpc.request.resp_missed.c       — late/dup/wrong_id response
 //   rpc.request.reaped.c            — timeout reaped
@@ -140,6 +141,13 @@ inline crow::common::metrics::Counter &cnt_write_error()
 {
     static crow::common::metrics::Counter *c =
         crow::common::metrics::MetricsRegistry::global().register_counter("rpc.transport.write_error.c");
+    return *c;
+}
+
+inline crow::common::metrics::Counter &cnt_send_queue_reject()
+{
+    static crow::common::metrics::Counter *c =
+        crow::common::metrics::MetricsRegistry::global().register_counter("rpc.transport.send_queue_reject.c");
     return *c;
 }
 
