@@ -91,10 +91,11 @@ FramingError FrameParser::validate_header() const
 Frame *FrameParser::yield_frame()
 {
     assert(frame_ != nullptr);
-    frame_->header          = header_;
-    frame_->request_id      = parsed_request_id_;
-    frame_->rpc_create_nano = parsed_rpc_create_nano_;
-    frame_->data_buf        = data_buf_;
+    frame_->header               = header_;
+    frame_->request_id           = parsed_request_id_;
+    frame_->rpc_create_nano      = parsed_rpc_create_nano_;
+    frame_->response_create_nano = parsed_response_create_nano_;
+    frame_->data_buf             = data_buf_;
 
     // Copy control bytes into the Frame for service-specific handlers.
     // Common handlers (ping, unknown) ignore this field.
@@ -112,10 +113,11 @@ Frame *FrameParser::yield_frame()
     state_         = ParseState::ReadingHeader;
     header_offset_ = 0;
     control_buf_.clear();
-    control_offset_         = 0;
-    data_offset_            = 0;
-    parsed_request_id_      = 0;
-    parsed_rpc_create_nano_ = 0;
+    control_offset_              = 0;
+    data_offset_                 = 0;
+    parsed_request_id_           = 0;
+    parsed_rpc_create_nano_      = 0;
+    parsed_response_create_nano_ = 0;
 
     return out;
 }
@@ -156,8 +158,9 @@ Frame *FrameParser::advance(uint32_t bytes_read)
         }
         if (header_.msg_size == 0) {
             // No control message.
-            parsed_request_id_      = 0;
-            parsed_rpc_create_nano_ = 0;
+            parsed_request_id_           = 0;
+            parsed_rpc_create_nano_      = 0;
+            parsed_response_create_nano_ = 0;
             if (header_.data_size == 0) {
                 // Control-only, data-less frame (e.g. one-way ping).
                 frame_ = new Frame;
@@ -189,7 +192,7 @@ Frame *FrameParser::advance(uint32_t bytes_read)
         }
         // Control complete — extract fields.
         extract_control_fields(control_buf_.data(), static_cast<uint32_t>(control_buf_.size()), parsed_request_id_,
-                               parsed_rpc_create_nano_);
+                               parsed_rpc_create_nano_, parsed_response_create_nano_);
         if (header_.data_size == 0) {
             // Control-only frame.
             frame_ = new Frame;

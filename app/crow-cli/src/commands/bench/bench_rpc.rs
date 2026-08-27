@@ -29,12 +29,12 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
     cfg.connections = args.connections;
     cfg.loader_num = args.loader_num;
     cfg.duration = Duration::from_secs(args.duration_secs);
-    cfg.key_space = args.key_space;
+    cfg.key_space = 1; // RPC echo has no keys; set to 1 for OpGen.
     cfg.value_size = args.value_size;
     cfg.io_engines = args.io_engines;
     cfg.io_workers = args.io_workers;
     cfg.enable_nagle = args.enable_nagle;
-    cfg.server_port = args.server_port;
+    cfg.server_port = Some(args.server_port);
     cfg.log_dir = args
         .log_dir
         .clone()

@@ -46,29 +46,15 @@ pub struct CrowRpcLatencyStats {
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy)]
 pub struct CrowRpcTransportStats {
-    pub read_calls: u64,
-    pub writev_calls: u64,
-    pub frames_sent: u64,
-    pub frames_parsed: u64,
-    pub read_bytes: u64,
-    pub writev_bytes: u64,
     pub submit_to_writev: CrowRpcLatencyStats,
-    pub loop_count: u64,
-    pub event_count_sum: u64,
-    pub wait_ns_sum: u64,
-    pub read_ns_sum: u64,
-    pub flush_ns_sum: u64,
 }
 
 #[repr(C)]
 #[derive(Default, Debug)]
 pub struct CrowRpcClientCounters {
-    pub submit_ok: u64,
     pub submit_fail: u64,
-    pub resp_matched: u64,
     pub resp_missed: u64,
     pub reaped: u64,
-    pub slab_fallback: u64,
 }
 
 pub type crow_rpc_status = i32;

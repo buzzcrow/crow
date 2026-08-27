@@ -28,9 +28,7 @@ using crow::rpc::Frame;
 using crow::rpc::OutFrame;
 using crow::rpc::reset_rpc_client_counters;
 using crow::rpc::rpc_reaped;
-using crow::rpc::rpc_resp_matched;
 using crow::rpc::rpc_resp_missed;
-using crow::rpc::rpc_slab_fallback;
 using crow::rpc::RpcClient;
 using crow::rpc::RpcError;
 using crow::rpc::ScheduledExecutor;
@@ -379,8 +377,6 @@ TEST_F(CallerLoopbackTest, SlabFallbackToMapWhenSlotOccupied)
     bool ok2 = caller.send(&transport, client_conn.get(), req2, ctrl2, nullptr, 42, slab_test_cb, &state2);
     EXPECT_TRUE(ok2);
 
-    EXPECT_EQ(rpc_slab_fallback().window(), 1u);
-
     // Deliver response for req1 — slab path.
     auto *resp1            = new Frame;
     resp1->request_id      = req1;
@@ -399,7 +395,6 @@ TEST_F(CallerLoopbackTest, SlabFallbackToMapWhenSlotOccupied)
     EXPECT_EQ(state1.last_status.load(std::memory_order_relaxed), CROW_RPC_OK);
     EXPECT_EQ(state2.call_count.load(std::memory_order_acquire), 1);
     EXPECT_EQ(state2.last_status.load(std::memory_order_relaxed), CROW_RPC_OK);
-    EXPECT_EQ(rpc_resp_matched().window(), 2u); // slab + map
 
     transport.stop();
     ::close(client_fd);
@@ -532,8 +527,6 @@ TEST_F(CallerLoopbackTest, ReaperTimesOutMapFallback)
     caller.send(&transport, client_conn.get(), 1, ctrl1, nullptr, 42, slab_test_cb, &state1);
     // req_id=5 → slot 1 occupied → map fallback (no response).
     caller.send(&transport, client_conn.get(), 5, ctrl2, nullptr, 42, slab_test_cb, &state2);
-
-    EXPECT_EQ(rpc_slab_fallback().window(), 1u);
 
     // Wait for reaper to time out both (up to 200ms).
     for (int i = 0; i < 40; i++) {

@@ -87,7 +87,7 @@ TEST(LoadTest, MultiThreadEcho)
         uint64_t req_id = request->request_id;
 
         BufferPool *pool      = conn->pool();
-        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
+        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0, 0);
 
         Buffer *resp_data = nullptr;
         if (request->data_buf != nullptr && request->data_buf->len > 0) {
@@ -227,7 +227,7 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
         uint64_t req_id = request->request_id;
 
         BufferPool *pool      = conn->pool();
-        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
+        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0, 0);
 
         Buffer *resp_data = nullptr;
         if (request->data_buf != nullptr && request->data_buf->len > 0) {
@@ -359,7 +359,7 @@ TEST(LoadTest, SharedTransportOneshotEcho)
     server.register_handler(ECHO_MSG_TYPE, [](Frame *request, Connection *conn) -> OutFrame * {
         uint64_t    req_id    = request->request_id;
         BufferPool *pool      = conn->pool();
-        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
+        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0, 0);
         Buffer     *resp_data = nullptr;
         if (request->data_buf != nullptr && request->data_buf->len > 0) {
             resp_data = pool->alloc(request->data_buf->len);

@@ -175,11 +175,11 @@ pub struct KvArgs {
 #[derive(Args, Debug)]
 pub struct RpcArgs {
     /// Test duration in seconds.
-    #[arg(long, default_value_t = 20)]
+    #[arg(short = 'd', long, default_value_t = 20)]
     pub duration_secs: u64,
 
     /// Number of C++ coroutines (load generators).
-    #[arg(long, default_value_t = 8)]
+    #[arg(short = 'L', long, default_value_t = 128)]
     pub loader_num: u32,
 
     /// Worker execution model: `coroutine` (C++ coroutines on I/O
@@ -191,7 +191,7 @@ pub struct RpcArgs {
     pub mode: String,
 
     /// Number of TCP connections to the echo server.
-    #[arg(long, default_value_t = 4)]
+    #[arg(short = 'c', long, default_value_t = 4)]
     pub connections: u32,
 
     /// Number of independent epoll/kqueue instances. Each engine owns
@@ -199,7 +199,7 @@ pub struct RpcArgs {
     /// partitioned). 1 = single-engine (default). More than 1
     /// parallelizes event processing across independent kernel event
     /// queues with no ONESHOT re-arm overhead.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 'e', long, default_value_t = 1)]
     pub io_engines: u32,
 
     /// Total number of C++ I/O worker threads (across all engines).
@@ -207,17 +207,14 @@ pub struct RpcArgs {
     /// path, no ONESHOT re-arm). More than 1 per engine enables
     /// `EV_ONESHOT`/`EPOLLONESHOT` within that engine for multi-worker
     /// safety. Must be divisible by `io_engines`.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 't', long, default_value_t = 2)]
     pub io_workers: u32,
 
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'n', long, default_value_t = false)]
     pub enable_nagle: bool,
 
-    #[arg(long, default_value_t = 1_000_000)]
-    pub key_space: u64,
-
-    #[arg(long, default_value_t = 512)]
+    #[arg(short = 's', long, default_value_t = 128)]
     pub value_size: usize,
 
     /// Optional explicit run id; defaults to an auto-incremented
@@ -225,11 +222,11 @@ pub struct RpcArgs {
     #[arg(long)]
     pub run_id: Option<String>,
 
-    /// Connect to an external echo server on this port instead of
-    /// auto-spawning one. Use with a manually-started
-    /// `crow-rpc-echo-server --port <port>`.
-    #[arg(long)]
-    pub server_port: Option<i32>,
+    /// Echo server port. Defaults to 18080 (the echo server's default
+    /// port). Pass a different value to connect to a manually-started
+    /// server on another port.
+    #[arg(short = 'P', long, default_value_t = 18080)]
+    pub server_port: i32,
 
     /// Log directory for the echo server and client logs. Defaults to
     /// `bench-runs/<run>/`. All logs (server.log, metrics.log) go here.
@@ -238,7 +235,7 @@ pub struct RpcArgs {
 
     /// Metrics flush interval in seconds (counters + latency histogram).
     /// Default 5.
-    #[arg(long, default_value_t = 5)]
+    #[arg(short = 'm', long, default_value_t = 5)]
     pub metrics_interval: u64,
 }
 

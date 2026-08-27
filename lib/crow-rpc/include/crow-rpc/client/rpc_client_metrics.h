@@ -10,7 +10,6 @@
 // window (flush() accumulates into total and resets window).
 #pragma once
 
-#include "crow-common/metrics/counter.h"
 #include "crow-common/metrics/metrics.h"
 
 namespace crow::rpc
@@ -19,20 +18,14 @@ namespace crow::rpc
 using crow::common::metrics::Counter;
 using crow::common::metrics::MetricsRegistry;
 
-// 6 global counters (reduced from 12 per-instance atomics):
-//   submit_ok      — send() succeeded (slab or map)
+// 3 error counters (success path count is in the e2e histogram):
 //   submit_fail    — send() submit failed
-//   resp_matched   — on_response matched (slab or map)
 //   resp_missed    — on_response: late/dup/wrong_id/dropped
 //   reaped         — reaper timed out (slab or map)
-//   slab_fallback  — send() fell back to map (slab slot occupied)
 
-Counter &rpc_submit_ok();
 Counter &rpc_submit_fail();
-Counter &rpc_resp_matched();
 Counter &rpc_resp_missed();
 Counter &rpc_reaped();
-Counter &rpc_slab_fallback();
 
 // Reset all window values to 0 (accumulates into total). Call at the
 // start of a test to isolate counter deltas.

@@ -6,7 +6,9 @@
 
 use crate::sys;
 use crate::{Buffer, Connection, RpcError, RpcServer};
+use crow_common::metrics;
 use std::ptr;
+use std::time::Instant;
 use tokio::sync::oneshot;
 
 /// Default slab completion pool size for `call()` (next power of two).
@@ -170,8 +172,9 @@ impl RpcClient {
         // even with the per-call Box<oneshot::Sender> heap alloc.
         self.set_completion_pool_size(DEFAULT_POOL_SIZE);
 
+        let send_ts = Instant::now();
         let (tx, rx) = oneshot::channel();
-        let user_data = Box::into_raw(Box::new(tx)) as *mut std::ffi::c_void;
+        let user_data = Box::into_raw(Box::new((tx, send_ts))) as *mut std::ffi::c_void;
 
         if let Err(e) = self.send(
             server,
@@ -187,7 +190,7 @@ impl RpcClient {
             // NOT invoked — caller must handle the error).
             unsafe {
                 drop(Box::from_raw(
-                    user_data as *mut oneshot::Sender<Result<Response, RpcError>>,
+                    user_data as *mut (oneshot::Sender<(Result<Response, RpcError>, Instant)>, Instant),
                 ))
             };
             return Err(e);
@@ -263,8 +266,9 @@ impl RpcClient {
     ) -> Result<CallFuture, RpcError> {
         self.set_completion_pool_size(DEFAULT_POOL_SIZE);
 
+        let send_ts = Instant::now();
         let (tx, rx) = oneshot::channel();
-        let user_data = Box::into_raw(Box::new(tx)) as *mut std::ffi::c_void;
+        let user_data = Box::into_raw(Box::new((tx, send_ts))) as *mut std::ffi::c_void;
 
         if let Err(e) = self.send_to_handle(
             server,
@@ -278,7 +282,7 @@ impl RpcClient {
         ) {
             unsafe {
                 drop(Box::from_raw(
-                    user_data as *mut oneshot::Sender<Result<Response, RpcError>>,
+                    user_data as *mut (oneshot::Sender<(Result<Response, RpcError>, Instant)>, Instant),
                 ))
             };
             return Err(e);
@@ -357,7 +361,7 @@ unsafe impl Sync for RpcClient {}
 
 /// A future that resolves to the RPC response or an error.
 pub struct CallFuture {
-    rx: oneshot::Receiver<Result<Response, RpcError>>,
+    rx: oneshot::Receiver<(Result<Response, RpcError>, Instant)>,
 }
 
 impl std::fmt::Debug for CallFuture {
@@ -375,6 +379,12 @@ impl std::future::Future for CallFuture {
     ) -> std::task::Poll<Self::Output> {
         std::pin::Pin::new(&mut self.rx)
             .poll(cx)
+            .map_ok(|(result, io_thread_ts)| {
+                // response_schedule: I/O thread → tokio task resume.
+                let schedule_ns = io_thread_ts.elapsed().as_nanos() as u64;
+                response_schedule_histogram().observe(schedule_ns);
+                result
+            })
             .map(|r| r.unwrap_or(Err(RpcError::ConnectionClosed)))
     }
 }
@@ -398,7 +408,10 @@ pub fn noop_completion() -> sys::crow_rpc_on_complete {
 }
 
 // The C++→Rust callback — O(1), non-blocking, runs on the C++ I/O thread.
-// It looks up the oneshot sender, sends the result, returns.
+// It unpacks the (oneshot sender, send timestamp) pair, observes e2e
+// (send → I/O thread receive), and sends the result + I/O thread timestamp
+// to the oneshot. The I/O thread timestamp is used by CallFuture::poll to
+// measure response_schedule (I/O thread → tokio task resume latency).
 unsafe extern "C" fn on_complete_cb(
     request_id: u64,
     control: sys::crow_rpc_buffer_t,
@@ -406,7 +419,13 @@ unsafe extern "C" fn on_complete_cb(
     status: i32,
     user_data: *mut std::ffi::c_void,
 ) {
-    let tx = Box::from_raw(user_data as *mut oneshot::Sender<Result<Response, RpcError>>);
+    let (tx, send_ts) =
+        *Box::from_raw(user_data as *mut (oneshot::Sender<(Result<Response, RpcError>, Instant)>, Instant));
+    let io_thread_ts = Instant::now();
+
+    // e2e: send → I/O thread receive (client clock, same domain as
+    // the coroutine path in co_client.cpp).
+    e2e_histogram().observe(io_thread_ts.duration_since(send_ts).as_nanos() as u64);
 
     let result = if status == sys::CROW_RPC_OK {
         Ok(Response {
@@ -426,7 +445,23 @@ unsafe extern "C" fn on_complete_cb(
         Err(RpcError::from_status(status))
     };
 
-    let _ = tx.send(result);
+    let _ = tx.send((result, io_thread_ts));
+}
+
+// Rust-side histograms (registered with the Rust MetricsRegistry::global(),
+// flushed in the [metrics] section).
+fn response_schedule_histogram() -> std::sync::Arc<metrics::LatencyHistogram> {
+    use std::sync::OnceLock;
+    static H: OnceLock<std::sync::Arc<metrics::LatencyHistogram>> = OnceLock::new();
+    H.get_or_init(|| metrics::global_histogram("rpc.request.response_schedule"))
+        .clone()
+}
+
+fn e2e_histogram() -> std::sync::Arc<metrics::LatencyHistogram> {
+    use std::sync::OnceLock;
+    static H: OnceLock<std::sync::Arc<metrics::LatencyHistogram>> = OnceLock::new();
+    H.get_or_init(|| metrics::global_histogram("rpc.request.e2e"))
+        .clone()
 }
 
 // ── Client-side request handler dispatch (R114) ────────────────────

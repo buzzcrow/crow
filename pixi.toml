@@ -214,10 +214,12 @@ cargo clean
 echo "[clean] tarpaulin report"
 rm -f tarpaulin-report.html
 
-# ── C++ (crow-tree) build artifacts ──
-echo "[clean] crow-tree build dirs"
+# ── C++ build artifacts (crow-tree, crow-rpc, crow-diskio) ──
+echo "[clean] C++ build dirs"
 rm -rf lib/crow-tree/build lib/crow-tree/build-*
 rm -rf lib/crow-tree/Testing lib/crow-tree/.cache
+rm -rf lib/crow-rpc/build lib/crow-rpc/build-* lib/crow-rpc/.cache
+rm -rf app/crow-diskio/build app/crow-diskio/build-* app/crow-diskio/.cache
 
 # ── Frontend build artifacts (keep node_modules) ──
 echo "[clean] frontend build artifacts"
@@ -228,13 +230,16 @@ rm -f app/crow-web/ui/*.tsbuildinfo
 echo "[clean] test runtime data"
 rm -rf test-logs runtime-data .test-tmp lib/crow-tree/.test-tmp
 rm -rf app/crow-web/ui/e2e/runtime-data
-rm -rf app/crow-cli/bench-runs
+rm -rf app/crow-web/ctdata app/crow-web/waldata
+rm -rf app/crow-cli/bench-runs bench-runs/*
 
 # `log/` is dangerous as a glob (common Rust module name) — explicit per crate.
 # Repo-root `log/` is where crow-kv-server writes (CWD-relative); the per-crate
 # paths are future-proofing (those bins currently log under runtime-data/).
 echo "[clean] log dirs"
-rm -rf log app/crow-kv-server/log app/crow-diskdb/log app/crow-cli/log lib/crow-console-shared/log app/crow-web/log
+rm -rf log app/crow-kv-server/log app/crow-diskdb/log app/crow-chunkdb/log \
+  app/crow-cli/log lib/crow-console-shared/log app/crow-web/log \
+  lib/crow-chunk-client/log lib/crow-diskdb-client/log lib/crow-diskio-client/log
 
 # ── Profiling artifacts ──
 echo "[clean] profiling artifacts"

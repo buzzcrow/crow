@@ -4,7 +4,7 @@
 #include "crow-rpc/connection.h"
 
 #include "crow-common/log.h"
-#include "crow-common/metrics/metrics.h"
+#include "crow-rpc/rpc_metrics.h"
 #include "crow-rpc/transport/socket_transport.h" // TransportStats
 
 #include <sys/uio.h>
@@ -12,7 +12,6 @@
 
 #include <cassert>
 #include <cerrno>
-#include <chrono>
 #include <cstring>
 
 namespace crow::rpc
@@ -85,10 +84,9 @@ static inline void release_frame(OutFrame *frame)
 
 // Restore pending frames to the frames array (cold path — partials
 // from a previous EAGAIN). Returns the number restored.
-int __attribute__((noinline)) restore_pending(OutFrame **pending, int pending_count,
-                                                      OutFrame **frames, ssize_t *frame_totals,
-                                                      iovec *iovs, uint8_t (*hdr_bufs)[HEADER_SIZE],
-                                                      int *iov_count)
+int __attribute__((noinline)) restore_pending(OutFrame **pending, int pending_count, OutFrame **frames,
+                                              ssize_t *frame_totals, iovec *iovs, uint8_t (*hdr_bufs)[HEADER_SIZE],
+                                              int *iov_count)
 {
     int n = pending_count;
     if (n > BATCH_MAX) {
@@ -162,8 +160,8 @@ retry:
 
         // Partials from a previous EAGAIN go first (preserve order).
         if (pending_count_ > 0) {
-            frame_count = restore_pending(pending_frames_, pending_count_, frames, frame_totals,
-                                          iovs, hdr_bufs, &iov_count);
+            frame_count =
+                restore_pending(pending_frames_, pending_count_, frames, frame_totals, iovs, hdr_bufs, &iov_count);
             pending_count_ = 0;
         }
 
@@ -171,19 +169,19 @@ retry:
         OutFrame *batch[BATCH_MAX];
         int       n = drain_send_queue(batch, BATCH_MAX - frame_count);
         if (stats != nullptr) {
-            uint64_t now =
-                static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+            uint64_t now = now_nanos();
             for (int i = 0; i < n; i++) {
                 if (batch[i]->create_nano > 0) {
                     uint64_t delta = now - batch[i]->create_nano;
                     stats->submit_to_writev.record(delta);
-                    // Also observe in the global crow-common histogram for
-                    // periodic metrics flush (percentile distribution).
-                    static crow::common::metrics::LatencyHistogram *h =
-                        crow::common::metrics::MetricsRegistry::global().register_histogram(
-                            "rpc.transport.submit_to_writev");
-                    h->observe(delta);
+                    hist_submit_to_writev().observe(delta);
                 }
+                // Request payload bandwidth: data bytes per frame (no header).
+                uint64_t payload = 0;
+                if (batch[i]->data != nullptr) {
+                    payload = batch[i]->data->len;
+                }
+                bw_request_payload().observe(payload);
             }
         }
         for (int i = 0; i < n; i++) {
@@ -197,13 +195,12 @@ retry:
             break;
         }
 
-        if (stats != nullptr) {
-            stats->writev_calls.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        ssize_t written = ::writev(fd, iovs, iov_count);
-        if (stats != nullptr && written > 0) {
-            stats->writev_bytes.fetch_add(static_cast<uint64_t>(written), std::memory_order_relaxed);
+        uint64_t writev_start = now_nanos();
+        ssize_t  written      = ::writev(fd, iovs, iov_count);
+        uint64_t writev_end   = now_nanos();
+        hist_writev().observe(writev_end - writev_start);
+        if (written > 0) {
+            bw_writev().observe(static_cast<uint64_t>(written));
         }
 
         if (written < 0) {
@@ -215,6 +212,7 @@ retry:
                 all_sent = false;
                 break;
             }
+            cnt_write_error().inc();
             CR_LOG_WARN("try_send: writev hard error fd={} conn_id={} name={} errno={} ({})", fd,
                         static_cast<long long>(id_), name_, errno, std::strerror(errno));
             for (int i = 0; i < frame_count; i++) {
@@ -246,13 +244,10 @@ retry:
         for (int i = 0; i < frame_count; i++) {
             if (frames[i]->sent_offset >= frame_totals[i]) {
                 release_frame(frames[i]);
-                if (stats != nullptr) {
-                    stats->frames_sent.fetch_add(1, std::memory_order_relaxed);
-                }
             }
             else {
                 pending_frames_[pending_count_++] = frames[i];
-                has_partial       = true;
+                has_partial                       = true;
             }
         }
         if (has_partial) {

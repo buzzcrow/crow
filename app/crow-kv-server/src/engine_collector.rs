@@ -48,15 +48,8 @@ impl EngineHandles {
 }
 
 /// Registered Rust handles for one store's crow-rpc transport stats:
-/// syscall/frame aggregation counters (window-delta) + submit→writev
-/// queue-wait gauges (cumulative snapshot).
+/// submit→writev queue-wait gauges (cumulative snapshot).
 struct RpcTransportHandles {
-    read_calls: Arc<Counter>,
-    writev_calls: Arc<Counter>,
-    frames_sent: Arc<Counter>,
-    frames_parsed: Arc<Counter>,
-    read_bytes: Arc<Counter>,
-    writev_bytes: Arc<Counter>,
     submit_to_writev_avg_us: Arc<Gauge>,
     submit_to_writev_count: Arc<Gauge>,
 }
@@ -64,12 +57,6 @@ struct RpcTransportHandles {
 impl RpcTransportHandles {
     fn register(registry: &mut MetricsRegistry, store_id: u64) -> Self {
         Self {
-            read_calls: registry.register_counter(format!("s.{store_id}.rpc.read_calls.c")),
-            writev_calls: registry.register_counter(format!("s.{store_id}.rpc.writev_calls.c")),
-            frames_sent: registry.register_counter(format!("s.{store_id}.rpc.frames_sent.c")),
-            frames_parsed: registry.register_counter(format!("s.{store_id}.rpc.frames_parsed.c")),
-            read_bytes: registry.register_counter(format!("s.{store_id}.rpc.read_bytes.c")),
-            writev_bytes: registry.register_counter(format!("s.{store_id}.rpc.writev_bytes.c")),
             submit_to_writev_avg_us: registry
                 .register_gauge(format!("s.{store_id}.rpc.submit_to_writev.avg_us.g")),
             submit_to_writev_count: registry
@@ -305,33 +292,9 @@ pub fn setup_engine_collector(
             };
             let mut last = last_rpc_stats.lock().expect("last_rpc_stats poisoned");
             let prev = last.entry(*store_id).or_default();
-            let d_read = cur.read_calls.saturating_sub(prev.read_calls);
-            let d_writev = cur.writev_calls.saturating_sub(prev.writev_calls);
-            let d_sent = cur.frames_sent.saturating_sub(prev.frames_sent);
-            let d_parsed = cur.frames_parsed.saturating_sub(prev.frames_parsed);
-            let d_rd_bytes = cur.read_bytes.saturating_sub(prev.read_bytes);
-            let d_wr_bytes = cur.writev_bytes.saturating_sub(prev.writev_bytes);
             let sw = cur.submit_to_writev;
             *prev = cur;
             drop(last);
-            if d_read > 0 {
-                hd.read_calls.inc_by(d_read);
-            }
-            if d_writev > 0 {
-                hd.writev_calls.inc_by(d_writev);
-            }
-            if d_sent > 0 {
-                hd.frames_sent.inc_by(d_sent);
-            }
-            if d_parsed > 0 {
-                hd.frames_parsed.inc_by(d_parsed);
-            }
-            if d_rd_bytes > 0 {
-                hd.read_bytes.inc_by(d_rd_bytes);
-            }
-            if d_wr_bytes > 0 {
-                hd.writev_bytes.inc_by(d_wr_bytes);
-            }
             hd.submit_to_writev_avg_us
                 .set(sw.sum_ns.checked_div(sw.count).unwrap_or(0) / 1000);
             hd.submit_to_writev_count.set(sw.count);

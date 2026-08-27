@@ -143,4 +143,4 @@ gtest_discover_tests(crow_rpc_tests DISCOVERY_MODE PRE_TEST)
 
 # ── Example: standalone echo server ────────────────────────────────
 add_executable(crow-rpc-echo-server examples/echo_server.cpp)
-target_link_libraries(crow-rpc-echo-server PRIVATE crow-rpc)
+target_link_libraries(crow-rpc-echo-server PRIVATE crow-rpc gflags)

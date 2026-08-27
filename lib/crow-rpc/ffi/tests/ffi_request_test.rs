@@ -98,6 +98,7 @@ async fn server_dispatch_handler_first_order() {
             &ConnectionPingResponseArgs {
                 id: req.request_id,
                 rpc_create_nano: req.rpc_create_nano,
+                response_create_nano: 0,
                 ret: FBRetCode::Success,
             },
         );
@@ -286,6 +287,7 @@ async fn client_handler_dispatch_via_server_chain() {
             &ConnectionPingResponseArgs {
                 id: req.request_id,
                 rpc_create_nano: req.rpc_create_nano,
+                response_create_nano: 0,
                 ret: FBRetCode::Success,
             },
         );
@@ -355,6 +357,7 @@ async fn client_handler_dispatch_via_server_chain() {
             &ConnectionPingResponseArgs {
                 id: req.request_id,
                 rpc_create_nano: req.rpc_create_nano,
+                response_create_nano: 0,
                 ret: FBRetCode::Success,
             },
         );
@@ -486,6 +489,7 @@ async fn server_to_client_timeout_no_handler() {
             &ConnectionPingResponseArgs {
                 id: req.request_id,
                 rpc_create_nano: req.rpc_create_nano,
+                response_create_nano: 0,
                 ret: FBRetCode::Success,
             },
         );

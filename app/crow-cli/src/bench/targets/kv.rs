@@ -699,12 +699,6 @@ impl BenchTarget for KvTarget {
         self.client.as_ref().and_then(|c| c.transport_stats()).map_or(
             super::super::report::TransportStatsSnapshot::default(),
             |s| super::super::report::TransportStatsSnapshot {
-                read_calls: s.read_calls,
-                writev_calls: s.writev_calls,
-                frames_sent: s.frames_sent,
-                frames_parsed: s.frames_parsed,
-                read_bytes: s.read_bytes,
-                writev_bytes: s.writev_bytes,
                 submit_to_writev_count: s.submit_to_writev.count,
                 submit_to_writev_avg_us: s
                     .submit_to_writev
@@ -712,6 +706,7 @@ impl BenchTarget for KvTarget {
                     .checked_div(s.submit_to_writev.count)
                     .unwrap_or(0)
                     / 1000,
+                ..Default::default()
             },
         )
     }

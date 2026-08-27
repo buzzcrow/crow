@@ -11,6 +11,7 @@ name = "crow_rpc_ffi"
 path = "src/lib.rs"
 
 [dependencies]
+crow-common = { path = "../../crow-common/rust" }
 tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]

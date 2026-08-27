@@ -16,15 +16,11 @@
 //! single-epoll-fd contention of the in-process model.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crow_common::metrics::PreciseHistogram;
 use crow_console_shared::error::{Error, Result};
-use crow_console_shared::lifecycle::stop_pid_with_timeout;
 use crow_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs};
 use crow_rpc_ffi::sys;
 use crow_rpc_ffi::{Buffer, BufferPool, Connection, CrowRpcLatencyStats, RpcClient, RpcServer};
@@ -73,47 +69,12 @@ fn with_payload<R>(size: usize, f: impl FnOnce(&[u8]) -> R) -> R {
     })
 }
 
-/// Locate the `crow-rpc-echo-server` binary. Search order:
-/// 1. `$CROW_RPC_ECHO_SERVER_BIN`
-/// 2. `lib/crow-rpc/build/crow-rpc-echo-server` relative to the
-///    workspace root (pixi build output)
-/// 3. Sibling next to the current executable
-fn echo_server_bin() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("CROW_RPC_ECHO_SERVER_BIN") {
-        return Some(PathBuf::from(p));
-    }
-    // Pixi build output: lib/crow-rpc/build/crow-rpc-echo-server
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let mut p = dir.to_path_buf();
-            for _ in 0..5 {
-                let candidate = p
-                    .join("lib")
-                    .join("crow-rpc")
-                    .join("build")
-                    .join("crow-rpc-echo-server");
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-                if !p.pop() {
-                    break;
-                }
-            }
-        }
-    }
-    None
-}
-
-/// RPC bench target: 2-process echo server (child) + client (CLI).
+/// RPC bench target: connects to an external echo server process.
 pub(crate) struct RpcTarget {
     /// Local `RpcServer` used only for its client-side transport (epoll
     /// fd + I/O workers). No listening — connections go to the external
     /// echo server process.
     server: Option<Arc<RpcServer>>,
-    /// The spawned echo server child process.
-    server_child: Option<Child>,
-    /// Path to the server's stdout log (contains transport stats).
-    server_log_path: Option<PathBuf>,
     pool: Option<Arc<BufferPool>>,
     port: i32,
     /// The shared RPC client used by all workers.
@@ -135,8 +96,6 @@ impl RpcTarget {
     pub(crate) fn new() -> Self {
         Self {
             server: None,
-            server_child: None,
-            server_log_path: None,
             pool: None,
             port: 0,
             client: None,
@@ -156,93 +115,17 @@ impl BenchTarget for RpcTarget {
         "rpc"
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "provision orchestrates server spawn + client setup"
-    )]
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
         self.log_dir.clone_from(&cfg.log_dir);
         self.metrics_interval = cfg.metrics_interval;
         let pool = Arc::new(BufferPool::new(8192));
 
-        if let Some(port) = cfg.server_port {
-            // External server mode: connect to a manually-started echo
-            // server. Skip spawning; no server.log to read stats from.
-            self.port = port;
-            self.server_child = None;
-            self.server_log_path = None;
-        } else {
-            // Auto-spawn the external echo server process. It gets its
-            // own epoll fd — the client-side transport (below) gets a
-            // separate one, giving 2 independent epoll fds.
-            let binary = echo_server_bin().ok_or_else(|| {
-                Error::Config(
-                    "could not locate crow-rpc-echo-server binary; set $CROW_RPC_ECHO_SERVER_BIN".to_string(),
-                )
-            })?;
-            let log_dir = cfg.log_dir.as_deref().unwrap_or(".");
-            let log_path = std::path::PathBuf::from(log_dir).join("server.log");
-            if let Some(parent) = log_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let log_file = std::fs::File::create(&log_path)?;
-            let log_file_stderr = log_file.try_clone()?;
-            let mut cmd = Command::new(&binary);
-            cmd.arg("--port")
-                .arg("0")
-                .arg("--io-engines")
-                .arg(cfg.io_engines.to_string())
-                .arg("--io-workers")
-                .arg(cfg.io_workers.to_string())
-                .arg("--log-dir")
-                .arg(log_dir)
-                .arg("--metrics-interval")
-                .arg(cfg.metrics_interval.to_string());
-            if cfg.enable_nagle {
-                cmd.arg("--enable-nagle");
-            }
-            cmd.stdout(Stdio::from(log_file))
-                .stderr(Stdio::from(log_file_stderr));
-            let mut child = cmd.spawn().map_err(|e| {
-                Error::Config(format!("failed to spawn echo server {}: {e}", binary.display()))
-            })?;
-
-            // Wait for the server to print its listening port. Read stdout
-            // from the log file (the child's stdout is redirected there).
-            // Poll the file until we see "listening port=NNNN".
-            let port = {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                let mut found = None;
-                while std::time::Instant::now() < deadline {
-                    if let Ok(content) = std::fs::read_to_string(&log_path) {
-                        for line in content.lines() {
-                            if let Some(rest) = line.strip_prefix("listening port=") {
-                                if let Ok(p) = rest.trim().parse::<i32>() {
-                                    found = Some(p);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if found.is_some() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                found.ok_or_else(|| {
-                    // Check if the child already exited.
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            Error::Config(format!("echo server exited before binding: {status}"))
-                        }
-                        _ => Error::Config("echo server did not bind within 5s".to_string()),
-                    }
-                })?
-            };
-            self.port = port;
-            self.server_child = Some(child);
-            self.server_log_path = Some(log_path);
-        }
+        // Connect to an external echo server on cfg.server_port.
+        // The server must be started manually (e.g.
+        // `crow-rpc-echo-server --port=18080 --io_workers=2`).
+        self.port = cfg.server_port.ok_or_else(|| {
+            Error::Config("echo server port is required (start crow-rpc-echo-server first)".to_string())
+        })?;
 
         // Create a local RpcServer (no listen) — used only for its
         // client-side transport (epoll fd + I/O workers). Connections
@@ -348,36 +231,9 @@ impl BenchTarget for RpcTarget {
                 }
             };
             eprintln!(
-                "client_transport_stats : read_calls={rc} writev_calls={wc} \
-                 frames_sent={fs} frames_parsed={fp} \
-                 read_bytes={rb} writev_bytes={wb} \
-                 app_send_agg={saggr:.1} tcp_recv_agg={raggr:.1} \
-                 submit_to_writev={sw_avg:.1}us({sw_c}) \
-                 loop_count={lc} event_count_sum={ec} \
-                 wait_ns_sum={wns} read_ns_sum={rns} flush_ns_sum={fns}",
-                rc = s.read_calls,
-                wc = s.writev_calls,
-                fs = s.frames_sent,
-                fp = s.frames_parsed,
-                rb = s.read_bytes,
-                wb = s.writev_bytes,
-                saggr = if s.writev_calls > 0 {
-                    s.frames_sent as f64 / s.writev_calls as f64
-                } else {
-                    0.0
-                },
-                raggr = if s.read_calls > 0 {
-                    s.frames_parsed as f64 / s.read_calls as f64
-                } else {
-                    0.0
-                },
+                "client_transport_stats : submit_to_writev={sw_avg:.1}us({sw_c})",
                 sw_avg = avg_us(&s.submit_to_writev),
                 sw_c = s.submit_to_writev.count,
-                lc = s.loop_count,
-                ec = s.event_count_sum,
-                wns = s.wait_ns_sum,
-                rns = s.read_ns_sum,
-                fns = s.flush_ns_sum,
             );
         }
         // Stop the local client-side transport. This closes all
@@ -391,23 +247,9 @@ impl BenchTarget for RpcTarget {
         if self.log_dir.is_some() {
             crow_rpc_ffi::logging::shutdown_logging();
         }
-        // Stop the external echo server (SIGTERM, then read its stats).
-        if let Some(mut child) = self.server_child.take() {
-            let pid = child.id();
-            let _ = stop_pid_with_timeout(pid, Duration::from_secs(5));
-            let _ = child.wait();
-        }
-        // Print server-side stats from the log file.
-        if let Some(ref log_path) = self.server_log_path {
-            if let Ok(content) = std::fs::read_to_string(log_path) {
-                for line in content.lines() {
-                    if let Some(rest) = line.strip_prefix("stats ") {
-                        eprintln!("server_transport_stats : stats {rest}");
-                        break;
-                    }
-                }
-            }
-        }
+        // The echo server is external — the user started it manually,
+        // so we don't stop it here. Server-side stats are in the
+        // server's own metrics.log (printed by the server process).
         self.client = None;
         self.pool = None;
         self.conns.clear();
@@ -524,9 +366,8 @@ impl RpcTarget {
             let mut cc = sys::CrowRpcClientCounters::default();
             unsafe { sys::crow_rpc_client_get_counters(client_handle, &mut cc) };
             eprintln!(
-                "client_counters : submit_ok={} submit_fail={} resp_matched={} resp_missed={} \
-                 reaped={} slab_fallback={}",
-                cc.submit_ok, cc.submit_fail, cc.resp_matched, cc.resp_missed, cc.reaped, cc.slab_fallback,
+                "client_counters : submit_fail={} resp_missed={} reaped={}",
+                cc.submit_fail, cc.resp_missed, cc.reaped,
             );
 
             // Read stats from the Rust-side atomics (written by FFI callbacks).

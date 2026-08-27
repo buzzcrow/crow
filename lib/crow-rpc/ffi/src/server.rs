@@ -90,10 +90,7 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_set_tcp_nodelay(self.handle, if enabled { 1 } else { 0 }) };
     }
 
-    /// Sample transport-level stats: syscall counts + latency histograms.
-    /// Aggregation ratios:
-    ///   tcp_recv_agg = frames_parsed / read_calls   (frames per read)
-    ///   app_send_agg = frames_sent / writev_calls   (frames per writev)
+    /// Sample transport-level stats: submit_to_writev latency histogram.
     pub fn transport_stats(&self) -> sys::CrowRpcTransportStats {
         let mut stats = sys::CrowRpcTransportStats::default();
         unsafe { sys::crow_rpc_server_transport_stats(self.handle, &mut stats) };

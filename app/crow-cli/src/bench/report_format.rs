@@ -439,28 +439,11 @@ impl BenchReport {
     }
 }
 
-/// Write one `server_rpc`/`client_rpc` summary line with aggregation ratios.
-#[allow(clippy::cast_precision_loss, reason = "display-only ratio")]
+/// Write one `server_rpc`/`client_rpc` summary line.
 fn write_rpc_summary(out: &mut String, label: &str, s: &super::report::TransportStatsSnapshot) {
-    let send_agg = if s.writev_calls > 0 {
-        s.frames_sent as f64 / s.writev_calls as f64
-    } else {
-        0.0
-    };
-    let recv_agg = if s.read_calls > 0 {
-        s.frames_parsed as f64 / s.read_calls as f64
-    } else {
-        0.0
-    };
     let _ = writeln!(
         out,
-        "{label:<16}: read_calls={rc} writev_calls={wc} frames_sent={fs} frames_parsed={fp} send_agg={sa:.1} recv_agg={ra:.1} submit_to_writev={sw_avg}us({sw_c})",
-        rc = s.read_calls,
-        wc = s.writev_calls,
-        fs = s.frames_sent,
-        fp = s.frames_parsed,
-        sa = send_agg,
-        ra = recv_agg,
+        "{label:<16}: submit_to_writev={sw_avg}us({sw_c})",
         sw_avg = s.submit_to_writev_avg_us,
         sw_c = s.submit_to_writev_count,
     );

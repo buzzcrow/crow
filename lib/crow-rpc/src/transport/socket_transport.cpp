@@ -10,6 +10,7 @@
 #endif
 
 #include "crow-common/log.h"
+#include "crow-rpc/rpc_metrics.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -32,7 +33,7 @@ thread_local Worker *tl_current_worker = nullptr;
 
 // Forward declarations — defined after Worker (shared I/O logic).
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
-                             std::vector<Connection *> &pending_writes, TransportStats *stats);
+                             std::vector<Connection *> &pending_writes);
 static bool on_writable_impl(Connection *conn, int fd, TransportStats *stats);
 
 static inline uint64_t now_nano()
@@ -123,13 +124,15 @@ void Worker::run_loop()
     try {
 
         while (running_.load(std::memory_order_relaxed)) {
-            auto t0 = std::chrono::steady_clock::now();
             int n = engine_->wait(events, MAX_EVENTS, 1000); // 1s timeout
-            auto t1 = std::chrono::steady_clock::now();
-            stats_->wait_ns_sum.fetch_add(static_cast<uint64_t>((t1 - t0).count()), std::memory_order_relaxed);
-            stats_->loop_count.fetch_add(1, std::memory_order_relaxed);
-            stats_->event_count_sum.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
             closed_fds.clear();
+
+            // Round timing: skip empty wakes (n == 0 = timeout, no work done).
+            uint64_t round_start = 0;
+            if (n > 0) {
+                round_start = now_nanos();
+            }
+
             for (int i = 0; i < n; i++) {
                 const auto &ev = events[i];
                 switch (ev.type) {
@@ -161,12 +164,9 @@ void Worker::run_loop()
                     break;
                 case SocketEvent::Readable:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
-                        auto tr0 = std::chrono::steady_clock::now();
-                        on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_,
-                                         stats_);
-                        auto tr1 = std::chrono::steady_clock::now();
-                        stats_->read_ns_sum.fetch_add(static_cast<uint64_t>((tr1 - tr0).count()),
-                                                      std::memory_order_relaxed);
+                        uint64_t rh_start = now_nanos();
+                        on_readable_impl(ev.conn, ev.fd, recv_buf_.data(), recv_buf_.size(), pending_write_conns_);
+                        hist_read_handle().observe(now_nanos() - rh_start);
                         if (!ev.conn->is_open()) {
                             // Connection closed (EOF or fatal read error).
                             // Remove from epoll and close the fd to stop
@@ -194,7 +194,9 @@ void Worker::run_loop()
                 case SocketEvent::Writable:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
                         // ev.fd is the write fd (dup'd). try_send uses it.
-                        bool has_more = on_writable_impl(ev.conn, ev.fd, stats_);
+                        uint64_t wh_start = now_nanos();
+                        bool     has_more = on_writable_impl(ev.conn, ev.fd, stats_);
+                        hist_write_handle().observe(now_nanos() - wh_start);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
                             CR_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
@@ -246,7 +248,6 @@ void Worker::run_loop()
             // multiple responses (from multiple frames read in one read())
             // into a single writev per connection.
             if (!pending_write_conns_.empty()) {
-                auto tf0 = std::chrono::steady_clock::now();
                 for (Connection *conn : pending_write_conns_) {
                     if (!conn->is_open()) {
                         continue;
@@ -267,9 +268,6 @@ void Worker::run_loop()
                     }
                 }
                 pending_write_conns_.clear();
-                auto tf1 = std::chrono::steady_clock::now();
-                stats_->flush_ns_sum.fetch_add(static_cast<uint64_t>((tf1 - tf0).count()),
-                                               std::memory_order_relaxed);
             }
 
             // Now safe to release closed connections — pending_write_conns_
@@ -279,6 +277,11 @@ void Worker::run_loop()
                 for (int fd : closed_fds) {
                     connections_.erase(fd);
                 }
+            }
+
+            // Round latency: epoll wake → round complete (skip empty wakes).
+            if (round_start > 0) {
+                hist_round().observe(now_nanos() - round_start);
             }
         }
     }
@@ -294,13 +297,13 @@ void Worker::run_loop()
 // read/write, and these do the actual I/O + parsing.
 
 static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t recv_buf_size,
-                             std::vector<Connection *> &pending_writes, TransportStats *stats)
+                             std::vector<Connection *> &pending_writes)
 {
-    auto &parser      = conn->parser();
-    auto  on_frame_cb = [conn, stats](Frame *frame) {
-        if (stats != nullptr) {
-            stats->frames_parsed.fetch_add(1, std::memory_order_relaxed);
-        }
+    auto    &parser          = conn->parser();
+    uint64_t read_entry_nano = now_nanos();
+    auto     on_frame_cb     = [conn, read_entry_nano](Frame *frame) {
+        // read_to_parse: epoll wake → frame parsed (read() syscall + parse).
+        hist_read_to_parse().observe(now_nanos() - read_entry_nano);
         conn->on_frame(frame);
     };
 
@@ -354,14 +357,12 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
         ssize_t n = ::read(fd, recv_buf, recv_buf_size);
         if (n <= 0) {
             if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+                cnt_read_error().inc();
                 conn->close();
             }
             break;
         }
-        if (stats != nullptr) {
-            stats->read_calls.fetch_add(1, std::memory_order_relaxed);
-            stats->read_bytes.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
-        }
+        bw_read().observe(static_cast<uint64_t>(n));
         // Process all bytes in recv_buf — header+control via feed_data,
         // data via direct copy from recv_buf. Handles multiple frames.
         process_recv_bytes(0, static_cast<uint32_t>(n));
@@ -379,9 +380,7 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
                 }
                 goto done;
             }
-            if (stats != nullptr) {
-                stats->read_bytes.fetch_add(static_cast<uint64_t>(n2), std::memory_order_relaxed);
-            }
+            bw_read().observe(static_cast<uint64_t>(n2));
             Frame *frame = parser.advance(static_cast<uint32_t>(n2));
             if (frame != nullptr) {
                 on_frame_cb(frame);

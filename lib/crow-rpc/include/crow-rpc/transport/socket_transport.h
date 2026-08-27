@@ -23,9 +23,10 @@ class Worker;
 
 // ── TransportStats: aggregation + latency counters ────────────────
 //
-// Atomic counters sampled after a bench run. Two groups:
-//   - Aggregation counts: measure coalescing (frames per syscall)
-//   - Latency histograms: measure queue wait time
+// Latency histogram for the submit → writev queue wait. The raw
+// aggregation counters and event-loop timing that used to live here
+// have been replaced by crow-common metrics (rpc.transport.* histograms,
+// bandwidths, and counters registered via rpc_metrics.h).
 //
 // Latency steps (nanoseconds, log2 buckets 0..30 = 1ns..1s):
 //   submit_to_writev : submit() → actual writev (request queue wait)
@@ -73,33 +74,9 @@ struct LatencyHistogram
 
 struct TransportStats
 {
-    // Syscall-level counts (not derivable from histogram .count).
-    std::atomic<uint64_t> read_calls{0};   // ::read() syscalls
-    std::atomic<uint64_t> writev_calls{0}; // ::writev() syscalls
-
-    // App-level aggregation counts: frames processed per syscall.
-    //   app_send_agg = frames_sent / writev_calls  (frames per writev)
-    //   tcp_recv_agg = frames_parsed / read_calls   (frames per read)
-    std::atomic<uint64_t> frames_sent{0};   // frames drained + writev'd
-    std::atomic<uint64_t> frames_parsed{0}; // frames parsed from read()
-
-    // Bandwidth: total bytes moved by read()/writev() syscalls.
-    //   recv_bw = read_bytes / duration
-    //   send_bw = writev_bytes / duration
-    std::atomic<uint64_t> read_bytes{0};   // bytes returned by ::read()
-    std::atomic<uint64_t> writev_bytes{0}; // bytes written by ::writev()
-
     // Latency histogram (nanoseconds).
     //   submit_to_writev : submit() → actual writev (queue wait)
     LatencyHistogram submit_to_writev;
-
-    // Event-loop timing metrics (nanoseconds). Added for regression
-    // diagnosis: measure where the worker thread spends time.
-    std::atomic<uint64_t> loop_count{0};       // iterations of run_loop
-    std::atomic<uint64_t> event_count_sum{0};  // total events processed
-    std::atomic<uint64_t> wait_ns_sum{0};      // time in engine_->wait()
-    std::atomic<uint64_t> read_ns_sum{0};      // time in on_readable_impl
-    std::atomic<uint64_t> flush_ns_sum{0};     // time in post-event flush
 };
 
 // ── SocketEngine: platform-specific event loop primitives ─────────

@@ -4,6 +4,7 @@
 #include "crow-rpc/server/server.h"
 
 #include "crow-rpc/client/client.h" // RpcClient, RpcError (for request_client_ + fail_all)
+#include "crow-rpc/rpc_metrics.h"
 #include "crow-rpc/server/handler.h"
 #include "msg_type_generated.h"
 
@@ -192,8 +193,9 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
 
 void RpcServer::dispatch(Frame *frame, Connection *conn)
 {
-    uint16_t msg_type   = frame->header.msg_type;
-    bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
+    uint16_t msg_type          = frame->header.msg_type;
+    bool     is_one_way        = (frame->header.flags & FLAG_ONE_WAY) != 0;
+    uint64_t frame_parsed_nano = now_nanos();
 
     // Try request dispatch first — if a handler is registered for
     // this msg_type, dispatch as a request. This ensures request
@@ -201,10 +203,19 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
     // request_id and can't distinguish a request from its ack).
     HandlerFn handler = handlers_.get_handler(msg_type);
     if (handler) {
+        if (msg_type == static_cast<uint16_t>(proto::FBMsgType_EConnectionPingRequest)) {
+            cnt_response_ping().inc();
+        }
         OutFrame *response = handler(frame, conn);
         if (response != nullptr) {
+            // Inline path: handler returned response immediately (sync).
+            hist_response_inline().observe(now_nanos() - frame_parsed_nano);
             transport_->submit_inline(conn, response);
         }
+        // Async path: handler returned nullptr, will call submit_response
+        // later. The dispatched latency is not tracked — it would require
+        // per-request context to span the trampoline return → submit_response
+        // call. The inline histogram covers the sync path.
         return;
     }
 
@@ -221,6 +232,7 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
         handler            = handle_unknown;
         OutFrame *response = handler(frame, conn);
         if (response != nullptr) {
+            hist_response_inline().observe(now_nanos() - frame_parsed_nano);
             transport_->submit_inline(conn, response);
         }
     }

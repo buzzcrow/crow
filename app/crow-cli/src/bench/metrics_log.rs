@@ -22,6 +22,9 @@ enum LogSection {
 }
 
 /// Parse an `.rpc.*.c` counter line into the transport stats snapshot.
+/// Legacy raw counters (`read_calls`, etc.) are no longer emitted — the
+/// branches are kept for historical metrics logs but will not match
+/// new logs.
 fn parse_rpc_counter(name: &str, count: u64, rpc: &mut super::report::TransportStatsSnapshot) {
     if name.contains(".read_calls.") {
         rpc.read_calls += count;

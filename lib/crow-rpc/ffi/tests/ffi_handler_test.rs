@@ -36,6 +36,7 @@ async fn custom_rust_handler_loopback() {
             &ConnectionPingResponseArgs {
                 id: req.request_id,
                 rpc_create_nano: req.rpc_create_nano,
+                response_create_nano: 0,
                 ret: FBRetCode::Success,
             },
         );
@@ -112,6 +113,7 @@ async fn custom_rust_handler_with_data() {
             &ConnectionPingResponseArgs {
                 id: req.request_id,
                 rpc_create_nano: req.rpc_create_nano,
+                response_create_nano: 0,
                 ret: FBRetCode::Success,
             },
         );

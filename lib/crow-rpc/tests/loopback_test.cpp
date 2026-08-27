@@ -122,7 +122,7 @@ TEST(LoopbackTest, EchoHandler512B)
 
         // Allocate a response control buffer (echo back request_id).
         BufferPool *pool      = conn->pool();
-        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
+        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0, 0);
 
         // Echo the request data back.
         Buffer *resp_data = nullptr;

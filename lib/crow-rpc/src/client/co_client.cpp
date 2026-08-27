@@ -8,6 +8,7 @@
 #include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/client.h"
 #include "crow-rpc/connection.h"
+#include "crow-rpc/rpc_metrics.h"
 #include "crow-rpc/transport.h"
 
 #include <atomic>
@@ -211,7 +212,11 @@ static CoTask co_run(CoState *s)
             break;
         }
 
-        // 2. Record start time.
+        // 2. Record start time (after build, before submit).
+        // e2e = now - start measures submit + network + parse + callback.
+        // This excludes the build time (negligible for echo). The design
+        // suggests using rpc_create_nano from the echoed response, but
+        // that requires passing it through the C callback ABI.
         auto start = std::chrono::steady_clock::now();
 
         // 3. Submit via send(). user_data = s (CoState*).
@@ -242,6 +247,9 @@ static CoTask co_run(CoState *s)
         // 5. Process response via Rust callback.
         auto elapsed    = std::chrono::steady_clock::now() - start;
         auto elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+
+        // Observe e2e latency into crow-common histogram (client clock).
+        hist_e2e().observe(elapsed_ns);
 
         bool keep_going =
             s->on_response_fn(s->rust_ctx, req_id, s->resp_control, s->resp_data, s->resp_status, elapsed_ns);

@@ -207,8 +207,6 @@ async fn bench_benchmark_rpc_end_to_end() {
             "2",
             "--connections",
             "2",
-            "--key-space",
-            "100",
             "--value-size",
             "64",
         ],

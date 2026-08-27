@@ -47,9 +47,10 @@ struct Header
 struct Frame
 {
     Header   header;
-    uint64_t request_id      = 0;       // extracted from control during parse
-    uint64_t rpc_create_nano = 0;       // extracted from control during parse
-    Buffer  *data_buf        = nullptr; // pool-allocated; nullptr if control-only
+    uint64_t request_id           = 0;       // extracted from control during parse
+    uint64_t rpc_create_nano      = 0;       // extracted from control during parse
+    uint64_t response_create_nano = 0;       // extracted from control during parse (responses only)
+    Buffer  *data_buf             = nullptr; // pool-allocated; nullptr if control-only
 
     // Raw control message bytes (flatbuffer). Populated for all frames with
     // msg_size > 0. Common handlers (ping, unknown) use only request_id +
@@ -78,11 +79,12 @@ void serialize_header(uint8_t *buf, const Header &h);
 // Parse a 12-byte buffer into a header (little-endian, field-by-field).
 Header parse_header(const uint8_t *buf);
 
-// Extract request_id + rpc_create_nano from a flatbuffer control
-// message. All common messages (ConnectionPingRequest/Response,
-// UnknownMessage) share the same layout for these two fields.
+// Extract request_id + rpc_create_nano + response_create_nano from a
+// flatbuffer control message. All common messages
+// (ConnectionPingRequest/Response, UnknownMessage) share the same
+// layout for these fields. response_create_nano is 0 for requests.
 void extract_control_fields(const uint8_t *control, uint32_t len, uint64_t &out_request_id,
-                            uint64_t &out_rpc_create_nano);
+                            uint64_t &out_rpc_create_nano, uint64_t &out_response_create_nano);
 
 // ── FrameParser — pull-based zero-copy state machine ──────────────
 //
@@ -203,8 +205,9 @@ class FrameParser
     BufferPool *pool_ = nullptr;
 
     // Extracted during parse (stored in Frame on yield).
-    uint64_t parsed_request_id_      = 0;
-    uint64_t parsed_rpc_create_nano_ = 0;
+    uint64_t parsed_request_id_           = 0;
+    uint64_t parsed_rpc_create_nano_      = 0;
+    uint64_t parsed_response_create_nano_ = 0;
 
     // The completed frame (returned by advance, owned by the caller).
     Frame *frame_ = nullptr;

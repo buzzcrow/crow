@@ -116,7 +116,6 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
                                     static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
                         return false;
                     }
-                    rpc_submit_ok().inc();
                     return true;
                 }
                 // CAS failed — another submitter grabbed the slot between our
@@ -129,7 +128,6 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
         // CAS race, or no slab pool sized — fall back to the pending map. One
         // heap alloc for the std::function capture (overload path, not the
         // hot path).
-        rpc_slab_fallback().inc();
         auto wrapped = [cb, user_data, request_id](Frame *resp, RpcError err) {
             invoke_c_complete(cb, user_data, request_id, resp, err);
         };
@@ -150,7 +148,6 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
                         static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
             return false;
         }
-        rpc_submit_ok().inc();
         return true;
     }
     catch (const std::exception &e) {
@@ -241,7 +238,6 @@ bool RpcClient::on_response(uint64_t request_id, Frame *response)
             auto    ud       = slot.user_data;
             uint8_t expected = SLOT_PENDING_READY;
             if (slot.state.compare_exchange_strong(expected, SLOT_DONE, std::memory_order_acq_rel)) {
-                rpc_resp_matched().inc();
                 invoke_c_complete(cb, ud, request_id, response, RpcError::Ok);
                 return true;
             }
@@ -263,7 +259,6 @@ bool RpcClient::on_response(uint64_t request_id, Frame *response)
     }
     CompletionCallback cb = std::move(it->second.cb);
     pending_.erase(it);
-    rpc_resp_matched().inc();
     if (cb) {
         cb(response, RpcError::Ok);
     }

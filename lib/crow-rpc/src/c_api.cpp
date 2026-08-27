@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
@@ -299,19 +300,8 @@ void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transpor
         if (t == nullptr) {
             return;
         }
-        auto &s            = t->stats();
-        out->read_calls    = s.read_calls.load(std::memory_order_relaxed);
-        out->writev_calls  = s.writev_calls.load(std::memory_order_relaxed);
-        out->frames_sent   = s.frames_sent.load(std::memory_order_relaxed);
-        out->frames_parsed = s.frames_parsed.load(std::memory_order_relaxed);
-        out->read_bytes    = s.read_bytes.load(std::memory_order_relaxed);
-        out->writev_bytes  = s.writev_bytes.load(std::memory_order_relaxed);
+        auto &s = t->stats();
         copy_latency(&out->submit_to_writev, s.submit_to_writev);
-        out->loop_count      = s.loop_count.load(std::memory_order_relaxed);
-        out->event_count_sum = s.event_count_sum.load(std::memory_order_relaxed);
-        out->wait_ns_sum     = s.wait_ns_sum.load(std::memory_order_relaxed);
-        out->read_ns_sum     = s.read_ns_sum.load(std::memory_order_relaxed);
-        out->flush_ns_sum    = s.flush_ns_sum.load(std::memory_order_relaxed);
     }
     catch (...) {
     }
@@ -323,12 +313,9 @@ void crow_rpc_client_get_counters(crow_rpc_client_t /*client*/, crow_rpc_client_
         if (out == nullptr) {
             return;
         }
-        out->submit_ok     = crow::rpc::rpc_submit_ok().window();
-        out->submit_fail   = crow::rpc::rpc_submit_fail().window();
-        out->resp_matched  = crow::rpc::rpc_resp_matched().window();
-        out->resp_missed   = crow::rpc::rpc_resp_missed().window();
-        out->reaped        = crow::rpc::rpc_reaped().window();
-        out->slab_fallback = crow::rpc::rpc_slab_fallback().window();
+        out->submit_fail = crow::rpc::rpc_submit_fail().window();
+        out->resp_missed = crow::rpc::rpc_resp_missed().window();
+        out->reaped      = crow::rpc::rpc_reaped().window();
     }
     catch (...) {
     }
@@ -646,9 +633,11 @@ crow_rpc_conn_t crow_rpc_connect(crow_rpc_server_t server, const char *addr, int
 // logic as the load_test.cpp echo handler, compiled into the library.
 static crow::rpc::OutFrame *echo_handler(crow::rpc::Frame *request, crow::rpc::Connection *conn)
 {
-    uint64_t               req_id    = request->request_id;
-    crow::rpc::BufferPool *pool      = conn->pool();
-    crow::rpc::Buffer     *resp_ctrl = crow::rpc::build_ping_response(pool, req_id, 0);
+    uint64_t               req_id      = request->request_id;
+    uint64_t               create_nano = request->rpc_create_nano;
+    crow::rpc::BufferPool *pool        = conn->pool();
+    uint64_t           resp_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    crow::rpc::Buffer *resp_ctrl = crow::rpc::build_ping_response(pool, req_id, create_nano, resp_nano);
 
     crow::rpc::Buffer *resp_data = nullptr;
     if (request->data_buf != nullptr && request->data_buf->len > 0) {
@@ -776,8 +765,10 @@ crow_rpc_status crow_rpc_server_submit_response(crow_rpc_server_t server, void *
 
         auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
         if (!server->server->transport()->submit(conn, frame)) {
-            if (frame->control != nullptr) frame->control->release();
-            if (frame->data != nullptr) frame->data->release();
+            if (frame->control != nullptr)
+                frame->control->release();
+            if (frame->data != nullptr)
+                frame->data->release();
             delete frame;
             return CROW_RPC_ERR_SEND_QUEUE;
         }
@@ -823,8 +814,10 @@ crow_rpc_status crow_rpc_server_submit_response_buffer(crow_rpc_server_t server,
 
         auto *frame = crow::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
         if (!server->server->transport()->submit(conn, frame)) {
-            if (frame->control != nullptr) frame->control->release();
-            if (frame->data != nullptr) frame->data->release();
+            if (frame->control != nullptr)
+                frame->control->release();
+            if (frame->data != nullptr)
+                frame->data->release();
             delete frame;
             return CROW_RPC_ERR_SEND_QUEUE;
         }
@@ -913,9 +906,9 @@ void crow_rpc_shutdown_logging()
 void crow_rpc_metrics_start(const char *log_path, double interval_secs, size_t max_file_mb, size_t max_files,
                             int console)
 {
-    crow::common::metrics::MetricsRegistry::global().start(
-        log_path != nullptr ? std::string(log_path) : std::string(), interval_secs,
-        max_file_mb == 0 ? 30 : max_file_mb, max_files == 0 ? 5 : max_files, console != 0);
+    crow::common::metrics::MetricsRegistry::global().start(log_path != nullptr ? std::string(log_path) : std::string(),
+                                                           interval_secs, max_file_mb == 0 ? 30 : max_file_mb,
+                                                           max_files == 0 ? 5 : max_files, console != 0);
 }
 
 void crow_rpc_metrics_stop(void)

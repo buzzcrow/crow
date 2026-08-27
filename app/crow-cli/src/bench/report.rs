@@ -287,17 +287,24 @@ pub(crate) struct ReplicaMetrics {
     pub(crate) r3_tps: u64,
 }
 
-/// crow-rpc transport stats: syscall counts, frame aggregation, and
-/// submit→writev queue-wait latency. Used for both server-side (summed
-/// from metrics-log window deltas) and client-side (end-of-run
-/// cumulative snapshot) reporting.
+/// crow-rpc transport stats: submit→writev queue-wait latency.
+/// Used for both server-side (summed from metrics-log window deltas)
+/// and client-side (end-of-run cumulative snapshot) reporting.
+/// Legacy fields (`read_calls`, etc.) kept for deserialization of
+/// historical reports — always zero in new reports.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct TransportStatsSnapshot {
+    #[serde(default)]
     pub read_calls: u64,
+    #[serde(default)]
     pub writev_calls: u64,
+    #[serde(default)]
     pub frames_sent: u64,
+    #[serde(default)]
     pub frames_parsed: u64,
+    #[serde(default)]
     pub read_bytes: u64,
+    #[serde(default)]
     pub writev_bytes: u64,
     /// Cumulative count of submit→writev latency samples.
     #[serde(default)]
