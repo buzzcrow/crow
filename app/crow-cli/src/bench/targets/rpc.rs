@@ -127,6 +127,8 @@ pub(crate) struct RpcTarget {
     request_id_counter: Arc<AtomicU64>,
     /// Log directory for server and client logs.
     log_dir: Option<String>,
+    /// Metrics flush interval in seconds.
+    metrics_interval: u64,
 }
 
 impl RpcTarget {
@@ -142,6 +144,7 @@ impl RpcTarget {
             next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
             log_dir: None,
+            metrics_interval: 5,
         }
     }
 }
@@ -153,8 +156,13 @@ impl BenchTarget for RpcTarget {
         "rpc"
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "provision orchestrates server spawn + client setup"
+    )]
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
         self.log_dir.clone_from(&cfg.log_dir);
+        self.metrics_interval = cfg.metrics_interval;
         let pool = Arc::new(BufferPool::new(8192));
 
         if let Some(port) = cfg.server_port {
@@ -187,7 +195,9 @@ impl BenchTarget for RpcTarget {
                 .arg("--io-workers")
                 .arg(cfg.io_workers.to_string())
                 .arg("--log-dir")
-                .arg(log_dir);
+                .arg(log_dir)
+                .arg("--metrics-interval")
+                .arg(cfg.metrics_interval.to_string());
             if cfg.enable_nagle {
                 cmd.arg("--enable-nagle");
             }
@@ -278,7 +288,9 @@ impl BenchTarget for RpcTarget {
         // registered in rpc_client_metrics.cpp.
         if let Some(ref log_dir) = self.log_dir {
             let metrics_path = std::path::PathBuf::from(log_dir).join("client-metrics.log");
-            crow_rpc_ffi::logging::metrics_start(metrics_path.to_str().unwrap_or(""), 5.0, 30, 5, true);
+            #[allow(clippy::cast_precision_loss, reason = "interval fits in f64")]
+            let interval = self.metrics_interval as f64;
+            crow_rpc_ffi::logging::metrics_start(metrics_path.to_str().unwrap_or(""), interval, 30, 5, true);
         }
 
         Ok(())

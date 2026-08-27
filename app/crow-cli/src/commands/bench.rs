@@ -235,6 +235,11 @@ pub struct RpcArgs {
     /// `bench-runs/<run>/`. All logs (server.log, metrics.log) go here.
     #[arg(long)]
     pub log_dir: Option<String>,
+
+    /// Metrics flush interval in seconds (counters + latency histogram).
+    /// Default 5.
+    #[arg(long, default_value_t = 5)]
+    pub metrics_interval: u64,
 }
 
 /// Arguments for `crow-cli bench`.

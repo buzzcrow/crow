@@ -39,6 +39,7 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
         .log_dir
         .clone()
         .or_else(|| Some(run_dir.to_string_lossy().to_string()));
+    cfg.metrics_interval = args.metrics_interval;
     cfg.rpc_worker_mode = match args.mode.as_str() {
         "tokio" => crate::bench::runner::RpcWorkerMode::Tokio,
         "coroutine" => crate::bench::runner::RpcWorkerMode::Coroutine,

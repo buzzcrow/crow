@@ -89,11 +89,12 @@ struct TransportMetricsBridge
 
 int main(int argc, char *argv[])
 {
-    int      port         = 0;
-    uint32_t io_engines   = 1;
-    uint32_t io_workers   = 1;
-    int      tcp_nodelay  = 1;
-    const char *log_dir   = nullptr;
+    int      port              = 0;
+    uint32_t io_engines        = 1;
+    uint32_t io_workers        = 1;
+    int      tcp_nodelay       = 1;
+    const char *log_dir        = nullptr;
+    double   metrics_interval  = 5.0;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -112,10 +113,13 @@ int main(int argc, char *argv[])
         else if (arg == "--log-dir" && i + 1 < argc) {
             log_dir = argv[++i];
         }
+        else if (arg == "--metrics-interval" && i + 1 < argc) {
+            metrics_interval = static_cast<double>(parse_u32(argv[++i], "metrics-interval"));
+        }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-rpc-echo-server --port <port> "
                         "[--io-engines N] [--io-workers M] [--enable-nagle] "
-                        "[--log-dir <dir>]\n");
+                        "[--log-dir <dir>] [--metrics-interval N]\n");
             return 0;
         }
         else {
@@ -162,7 +166,7 @@ int main(int argc, char *argv[])
     TransportMetricsBridge bridge;
     std::string metrics_log_path =
         log_dir != nullptr ? std::string(log_dir) + "/metrics.log" : std::string("/tmp/echo-server-metrics.log");
-    crow_rpc_metrics_start(metrics_log_path.c_str(), 5.0, 30, 5, 1);
+    crow_rpc_metrics_start(metrics_log_path.c_str(), metrics_interval, 30, 5, 1);
 
     // Run until signaled. Sample transport stats every ~1s to feed
     // deltas into the crow-common metrics counters.

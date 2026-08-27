@@ -177,6 +177,8 @@ pub(crate) struct BenchConfig {
     /// Log directory for echo server and client logs (RPC target only).
     /// Defaults to the bench run directory.
     pub(crate) log_dir: Option<String>,
+    /// Metrics flush interval in seconds (RPC target only). Default 5.
+    pub(crate) metrics_interval: u64,
 }
 
 impl BenchConfig {
@@ -217,6 +219,7 @@ impl BenchConfig {
             enable_nagle: false,
             server_port: None,
             log_dir: None,
+            metrics_interval: 5,
         }
     }
 
