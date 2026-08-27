@@ -128,6 +128,7 @@ pub async fn load_local_groups(
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
         debug!(store_id, bind_addr = %addr, "restore: creating PxKvStore");
         let mut store = PxKvStore::new(store_id, addr);
+        store.rpc_workers = registry.rpc_workers;
         if let Some(ref mr) = registry.metrics_registry {
             store.set_metrics_registry(Arc::clone(mr));
         }

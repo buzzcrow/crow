@@ -85,11 +85,9 @@ impl KvServer for Arc<PxKvStore> {
         // Start a single crow-rpc server on the gRPC port. Both
         // consensus (PxRpcService) and client (KvRpcService) handlers
         // are registered on the same server — their handler names
-        // don't conflict. Worker count configurable via CROW_RPC_WORKERS.
-        let workers = std::env::var("CROW_RPC_WORKERS")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(4);
+        // don't conflict. Worker count set from `--rpc-workers` CLI
+        // (via `PxKvStore::rpc_workers`).
+        let workers = self.rpc_workers;
         let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server
             .listen(&bound_addr.ip().to_string(), i32::from(bound_addr.port()))
@@ -100,11 +98,11 @@ impl KvServer for Arc<PxKvStore> {
         let px_service = Arc::new(PxRpcService::new(self.clone(), rt.clone()));
         px_service.register_handlers(&server);
 
-        let forwarder = Arc::new(KvClientRpcForwarder::new());
+        let forwarder = Arc::new(KvClientRpcForwarder::with_workers(self.rpc_workers));
         let kv_service = Arc::new(KvRpcService::new(self.clone(), rt, forwarder));
         kv_service.register_handlers(&server);
 
-        let transport = Arc::new(PxRpcTransport::new());
+        let transport = Arc::new(PxRpcTransport::with_workers(self.rpc_workers));
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let server_clone = Arc::clone(&server);

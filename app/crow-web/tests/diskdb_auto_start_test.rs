@@ -82,6 +82,8 @@ async fn diskdb_auto_starts_on_console_restart() {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Diskdb,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
 

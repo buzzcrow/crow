@@ -301,6 +301,15 @@ pub struct ServerEntry {
     /// backward compatibility with pre-R77 persisted configs.
     #[serde(default, skip_serializing_if = "is_default_service_type")]
     pub service_type: ServiceType,
+    /// `--rpc-workers` value passed to the spawned `crow-kv-server`.
+    /// `None` means the server's default (2) is used. Persisted so
+    /// restart reuses the same value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_workers: Option<u32>,
+    /// `--no-fsync` flag passed to the spawned `crow-kv-server`.
+    /// Persisted so restart reuses the same value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_fsync: bool,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -410,6 +419,10 @@ struct PersistedServerEntry {
     election_profile: Option<String>,
     #[serde(default, skip_serializing_if = "is_default_service_type")]
     service_type: ServiceType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rpc_workers: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    no_fsync: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,6 +456,8 @@ impl ServerEntry {
             election_profile: None,
             pid: None,
             service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
         }
     }
 }
@@ -932,6 +947,8 @@ impl ConsoleConfig {
                         binary: entry.binary.clone(),
                         election_profile: entry.election_profile.clone(),
                         service_type: entry.service_type,
+                        rpc_workers: entry.rpc_workers,
+                        no_fsync: entry.no_fsync,
                     },
                 )
             })
@@ -1046,6 +1063,8 @@ impl ConsoleConfig {
                 election_profile: entry.election_profile,
                 pid: None,
                 service_type: entry.service_type,
+                rpc_workers: entry.rpc_workers,
+                no_fsync: entry.no_fsync,
             })
             .collect();
         servers.sort_by(|a, b| a.id.cmp(&b.id));

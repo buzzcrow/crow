@@ -110,6 +110,8 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

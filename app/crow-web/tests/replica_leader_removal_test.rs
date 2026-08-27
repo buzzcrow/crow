@@ -160,6 +160,8 @@ async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
             election_profile: None,
             pid: Some(u.pid),
             service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
         })
         .unwrap();
     }

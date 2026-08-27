@@ -632,6 +632,9 @@ pub struct DeployNodeServerBody {
     /// Optional `--config` JSON path passed to the spawned `crow-kv-server`.
     #[serde(default)]
     config: Option<String>,
+    /// `--rpc-workers` value for the spawned `crow-kv-server`.
+    #[serde(default)]
+    rpc_workers: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -722,6 +725,7 @@ pub async fn http_deploy_node_server(
         coalesce_max_keys: body.coalesce_max_keys,
         coalesce_drain_threshold: body.coalesce_drain_threshold,
         config: body.config.clone().map(std::path::PathBuf::from),
+        rpc_workers: body.rpc_workers,
     };
 
     let deployed = if node.ssh_enabled() {
@@ -755,6 +759,8 @@ pub async fn http_deploy_node_server(
             .or_else(|| std::env::var("CROW_KV_SERVER_ELECTION_PROFILE").ok()),
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: body.rpc_workers,
+        no_fsync: body.no_fsync,
     };
     state.set_runtime_pid(node_id, deployed.pid);
     {
@@ -856,6 +862,8 @@ pub async fn http_restart_node_server(
             .clone()
             .or_else(|| std::env::var("CROW_KV_SERVER_ELECTION_PROFILE").ok()),
         binary: None,
+        rpc_workers: entry.rpc_workers,
+        no_fsync: entry.no_fsync,
         ..Default::default()
     };
     let deployed = if node.ssh_enabled() {
@@ -884,8 +892,15 @@ pub async fn http_restart_node_server(
         election_profile: entry.election_profile.clone(),
         pid: None,
         service_type: entry.service_type,
+        rpc_workers: entry.rpc_workers,
+        no_fsync: entry.no_fsync,
     };
     state.set_runtime_pid(node_id, deployed.pid);
+    // Clear cached KV RPC connections so the next KV request reconnects
+    // to the restarted server instead of reusing a stale TCP connection.
+    if let Some(t) = state.kv_rpc_transport.read().await.as_ref() {
+        t.clear_connections();
+    }
     {
         let mut cfg = state.config.write().unwrap();
         // The old entry is still keyed by node_id; replace it.
@@ -966,6 +981,12 @@ pub async fn http_stop_node_server(
             .map_err(|e| err_500(format!("stop_pid: {e}")))?,
     };
     state.clear_runtime_pid(node_id);
+    // Clear cached KV RPC connections — the server is stopping, so any
+    // cached TCP connection is now dead. The next KV request (after a
+    // restart) must reconnect.
+    if let Some(t) = state.kv_rpc_transport.read().await.as_ref() {
+        t.clear_connections();
+    }
     // Only mark the shared node record Down when no DDB instance is still
     // running on this node. The record is shared between KV and DDB; an
     // unconditional mark_down would flip the node-level badge (and any

@@ -116,6 +116,7 @@ pub(super) async fn add_store(
         "creating PxKvStore via management API"
     );
     let mut store = PxKvStore::new(req.store_id, addr);
+    store.rpc_workers = state.rpc_workers;
     if let Some(ref mr) = state.metrics_registry {
         store.set_metrics_registry(Arc::clone(mr));
     }

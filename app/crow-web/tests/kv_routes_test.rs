@@ -94,6 +94,8 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -244,6 +246,8 @@ async fn kv_get_returns_502_when_leader_unreachable() {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

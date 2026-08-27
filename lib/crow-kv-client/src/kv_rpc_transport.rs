@@ -65,15 +65,14 @@ impl std::fmt::Debug for KvRpcTransport {
 }
 
 impl KvRpcTransport {
-    /// Create a new crow-rpc transport. The `RpcServer` is the
-    /// client-side transport — it does not listen but is used to
-    /// establish connections to remote endpoints.
+    /// Create a new crow-rpc transport with a custom I/O worker count.
+    /// The `RpcServer` is the client-side transport — it does not listen
+    /// but is used to establish connections to remote endpoints.
+    /// `workers` controls the number of C++ I/O worker threads; fewer
+    /// threads reduce scheduler contention on low-concurrency callers
+    /// (e.g. the management console).
     #[must_use]
-    pub fn new() -> Self {
-        let workers = std::env::var("CROW_RPC_WORKERS")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(4);
+    pub fn with_workers(workers: u32) -> Self {
         let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server.start();
         let rpc = Arc::new(RpcClient::new());
@@ -87,8 +86,22 @@ impl KvRpcTransport {
         }
     }
 
+    /// Create a new crow-rpc transport with the default 2 I/O workers.
+    /// The `RpcServer` is the client-side transport — it does not listen
+    /// but is used to establish connections to remote endpoints.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_workers(2)
+    }
+
     fn next_id(&self) -> u64 {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Clear all cached connections. Called after a server restart to
+    /// force reconnection on the next request.
+    pub fn clear_connections(&self) {
+        self.connections.clear();
     }
 
     /// Get or create a `Connection` for the given endpoint. The

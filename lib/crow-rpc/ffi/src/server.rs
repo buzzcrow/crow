@@ -45,9 +45,30 @@ impl RpcServer {
     /// engine with no ONESHOT (fast path). When per-engine>1, the workers
     /// share the engine's fd with EV_ONESHOT/EPOLLONESHOT (re-arm only
     /// within that engine).
+    ///
+    /// On macOS (kqueue), `io_workers` is clamped to 1 regardless of the
+    /// requested value. Multiple kqueue I/O worker threads cause severe
+    /// scheduler contention with the Tokio runtime on macOS — observed
+    /// ~8x latency regression (100 puts: 10s → 80s) due to P/E core
+    /// migration, kqueue EV_ONESHOT re-arm overhead, and CLPC scheduling
+    /// differences. Linux (epoll) is unaffected. A warning is logged
+    /// once per process when the clamp activates.
     pub fn with_engines(pool: Option<&crate::BufferPool>, io_engines: u32, io_workers: u32) -> Self {
+        static MACOS_CLAMP_WARNED: std::sync::Once = std::sync::Once::new();
+        let effective_workers = if cfg!(target_os = "macos") && io_workers > 1 {
+            MACOS_CLAMP_WARNED.call_once(|| {
+                eprintln!(
+                    "warn: crow-rpc: macOS kqueue clamps I/O workers to 1 (requested {io_workers}); \
+                     multiple workers cause scheduler contention with Tokio — see RpcServer::with_engines docs"
+                );
+            });
+            1
+        } else {
+            io_workers
+        };
         let pool_handle = pool.map(|p| p.handle()).unwrap_or(ptr::null_mut());
-        let handle = unsafe { sys::crow_rpc_server_create_with_engines(pool_handle, io_engines, io_workers) };
+        let handle =
+            unsafe { sys::crow_rpc_server_create_with_engines(pool_handle, io_engines, effective_workers) };
         RpcServer { handle }
     }
 

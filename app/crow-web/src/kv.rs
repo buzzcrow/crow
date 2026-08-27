@@ -297,7 +297,8 @@ pub async fn http_kv_get(
 ) -> Result<Json<KvGetResponse>, (StatusCode, Json<ErrorBody>)> {
     let key = decode_key(q.key, q.key_hex)?;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let transport = state.kv_rpc_transport().await;
+    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -380,7 +381,11 @@ pub async fn http_kv_scan(
     };
     let limit = q.limit;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let transport = state.kv_rpc_transport().await;
+    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
+    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
+        client.seed_leader(sid, gid, endpoint);
+    }
     let ScanOutcome { items, truncated, .. } = client
         .scan(
             sid,
@@ -428,7 +433,8 @@ pub async fn http_kv_put(
     let client_id = body.client_id;
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let transport = state.kv_rpc_transport().await;
+    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -455,7 +461,8 @@ pub async fn http_kv_delete(
     let client_id = body.client_id;
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let transport = state.kv_rpc_transport().await;
+    let client = CrowkvClient::new(ClientConfig::new(seeds)).with_rpc_transport(transport);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }

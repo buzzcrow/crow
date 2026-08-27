@@ -31,6 +31,10 @@ pub struct AppState {
     pub monitor_cache: Arc<MonitorCache>,
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     pub diskdb_client: Arc<tokio::sync::RwLock<Option<crow_diskdb_client::DiskdbClient>>>,
+    /// Cached crow-rpc transport reused across KV requests to avoid
+    /// spawning 6+ threads per request. Shared by all `CrowkvClient`
+    /// instances created in `kv.rs`.
+    pub kv_rpc_transport: Arc<tokio::sync::RwLock<Option<Arc<crow_kv_client::KvRpcTransport>>>>,
     /// Rate-limiter for repeated gRPC failure warnings: maps
     /// `endpoint` → last-warned timestamp. Prevents flooding the
     /// console with identical "instance query failed" warnings every
@@ -84,6 +88,7 @@ impl AppState {
             monitor_cache: Arc::new(MonitorCache::new()),
             runtime_pids: Arc::new(std::sync::Mutex::new(HashMap::new())),
             diskdb_client: Arc::new(tokio::sync::RwLock::new(None)),
+            kv_rpc_transport: Arc::new(tokio::sync::RwLock::new(None)),
             warn_dedup: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -246,6 +251,24 @@ impl AppState {
         std::fs::create_dir_all(base.join("log")).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("waldata")).map_err(Error::Io)?;
         std::fs::canonicalize(base).map_err(Error::Io)
+    }
+
+    /// Get or create a cached `KvRpcTransport`. The transport (and its
+    /// crow-rpc server/client + I/O thread) is reused across KV requests
+    /// to avoid spawning threads per request. A fresh `CrowkvClient` is
+    /// still created per request (cheap — no threads), sharing this
+    /// transport via `with_rpc_transport`.
+    pub async fn kv_rpc_transport(&self) -> Arc<crow_kv_client::KvRpcTransport> {
+        if let Some(t) = self.kv_rpc_transport.read().await.as_ref() {
+            return Arc::clone(t);
+        }
+        let mut guard = self.kv_rpc_transport.write().await;
+        if let Some(t) = guard.as_ref() {
+            return Arc::clone(t);
+        }
+        let t = Arc::new(crow_kv_client::KvRpcTransport::new());
+        *guard = Some(Arc::clone(&t));
+        t
     }
 }
 

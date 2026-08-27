@@ -112,6 +112,7 @@ pub(super) async fn system_init(
             .parse()
             .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
         let mut store = PxKvStore::new(SYSTEM_STORE_ID, addr);
+        store.rpc_workers = state.rpc_workers;
         if let Some(ref mr) = state.metrics_registry {
             store.set_metrics_registry(Arc::clone(mr));
         }

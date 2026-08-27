@@ -63,12 +63,18 @@ impl std::fmt::Debug for DiskdbRpcTransport {
 }
 
 impl DiskdbRpcTransport {
-    /// Create a new crow-rpc transport. The `RpcServer` is the
-    /// client-side transport — it does not listen but is used to
-    /// establish connections to remote endpoints.
+    /// Create a new crow-rpc transport with 2 I/O workers (default).
+    /// The `RpcServer` is the client-side transport — it does not listen
+    /// but is used to establish connections to remote endpoints.
     #[must_use]
     pub fn new() -> Self {
-        let server = Arc::new(RpcServer::new(None));
+        Self::with_workers(2)
+    }
+
+    /// Create a new crow-rpc transport with `workers` I/O worker threads.
+    #[must_use]
+    pub fn with_workers(workers: u32) -> Self {
+        let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server.start();
         let rpc = RpcClient::new();
         rpc.set_completion_pool_size(1024);

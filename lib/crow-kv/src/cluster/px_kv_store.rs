@@ -40,6 +40,9 @@ pub struct PxKvStore {
     /// Defaults to `ServerConfig::DEFAULT.scan_byte_budget`; overridden via
     /// `set_scan_byte_budget` from the loaded `CrowKVConfig` before `start()`.
     pub(crate) scan_byte_budget: usize,
+    /// Number of crow-rpc I/O worker threads for the server's `RpcServer`.
+    /// Set from `--rpc-workers` CLI before `start()`. Default: 2.
+    pub rpc_workers: u32,
     /// Test-only delay injected into `kv_get` before `resolve_read_point`.
     /// Set via `set_get_delay_for_tests` under the `test-util` feature;
     /// `None` in production.
@@ -60,6 +63,7 @@ impl PxKvStore {
             shutdown_started: AtomicBool::new(false),
             metrics_registry: None,
             scan_byte_budget: ServerConfig::DEFAULT.scan_byte_budget,
+            rpc_workers: 2,
             #[cfg(feature = "test-util")]
             get_delay: Mutex::new(None),
         }

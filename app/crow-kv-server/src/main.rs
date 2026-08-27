@@ -121,12 +121,12 @@ async fn main() {
         .unwrap_or(config.paxos.max_inflight_proposals / 4);
 
     let registry = Arc::new(
-        KvStoreRegistry::with_config(config.clone()).with_metrics_registry(
-            metrics_runner.as_ref().map_or_else(
+        KvStoreRegistry::with_config(config.clone())
+            .with_rpc_workers(args.rpc_workers)
+            .with_metrics_registry(metrics_runner.as_ref().map_or_else(
                 || Arc::new(std::sync::Mutex::new(crow_kv::metrics::MetricsRegistry::new())),
                 |r| r.registry().clone(),
-            ),
-        ),
+            )),
     );
 
     // Spawn a config file watcher for diff logging. Only when --config is
@@ -444,6 +444,7 @@ async fn create_and_start_stores(
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
         debug!(store_id, bind_addr = %addr, "creating PxKvStore");
         let mut store = PxKvStore::new(store_id, addr);
+        store.rpc_workers = registry.rpc_workers;
         if let Some(ref mr) = registry.metrics_registry {
             store.set_metrics_registry(Arc::clone(mr));
         }

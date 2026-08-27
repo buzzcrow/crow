@@ -85,6 +85,8 @@ async fn spawn_web_with_node(upstream: &Upstream) -> SocketAddr {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -273,6 +275,8 @@ async fn openapi_proxy_cache_is_per_node() {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     cfg.add_server(ServerEntry {
@@ -287,6 +291,8 @@ async fn openapi_proxy_cache_is_per_node() {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

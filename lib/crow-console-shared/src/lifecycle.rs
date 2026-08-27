@@ -56,6 +56,9 @@ pub struct DeployRequest {
     /// Optional `--config` TOML path for `crow-kv-server` (first-boot
     /// tunable overrides only; ignored in restore mode).
     pub config: Option<PathBuf>,
+    /// `--rpc-workers` value for the spawned `crow-kv-server`. `None`
+    /// leaves the server's default (2) in effect.
+    pub rpc_workers: Option<u32>,
 }
 
 /// Result of a successful deploy. Persist these fields onto the
@@ -136,6 +139,9 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(threshold) = req.coalesce_drain_threshold {
         cmd.arg("--coalesce-drain-threshold").arg(threshold.to_string());
+    }
+    if let Some(workers) = req.rpc_workers {
+        cmd.arg("--rpc-workers").arg(workers.to_string());
     }
 }
 

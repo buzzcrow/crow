@@ -105,6 +105,8 @@ pub async fn http_deploy_diskdb(
         election_profile: None,
         pid: None,
         service_type: ServiceType::Diskdb,
+        rpc_workers: None,
+        no_fsync: false,
     };
     state.set_diskdb_runtime_pid(node_id, deployed.pid);
     {
@@ -238,6 +240,8 @@ pub async fn http_restart_diskdb(
         election_profile: None,
         pid: None,
         service_type: ServiceType::Diskdb,
+        rpc_workers: None,
+        no_fsync: false,
     };
     state.set_diskdb_runtime_pid(node_id, deployed.pid);
     {

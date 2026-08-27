@@ -124,6 +124,12 @@ pub struct Cli {
     /// but skip the write. Default: 30.
     #[arg(long, default_value_t = 30)]
     pub binding_monitor_interval: u64,
+
+    /// Number of crow-rpc I/O worker threads. Default: 2. Lower values
+    /// reduce scheduler contention under low-concurrency workloads (e.g.
+    /// the management console driving a single-node test cluster).
+    #[arg(long, default_value_t = 2)]
+    pub rpc_workers: u32,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

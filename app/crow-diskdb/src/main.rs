@@ -39,6 +39,10 @@ struct Cli {
     /// HTTP management listen address (overrides config).
     #[arg(long)]
     http_addr: Option<String>,
+
+    /// Number of crow-rpc I/O worker threads. Default: 2.
+    #[arg(long, default_value_t = 2)]
+    rpc_workers: u32,
 }
 
 #[tokio::main]
@@ -189,7 +193,7 @@ async fn main() {
         Arc::new(metrics.clone()),
         rpc_rt_handle,
     ));
-    let rpc_server = Arc::new(crow_rpc_ffi::RpcServer::new(None));
+    let rpc_server = Arc::new(crow_rpc_ffi::RpcServer::with_engines(None, 1, args.rpc_workers));
     rpc_server
         .listen(
             rpc_listen_addr.ip().to_string().as_str(),

@@ -47,6 +47,9 @@ pub struct KvStoreRegistry {
     port_pool: Mutex<Vec<u16>>,
     /// Metrics registry shared by all stores. `None` when metrics disabled.
     pub metrics_registry: Option<Arc<Mutex<MetricsRegistry>>>,
+    /// crow-rpc I/O worker count (from `--rpc-workers` CLI). Applied to
+    /// each `PxKvStore` at construction. Default: 2.
+    pub rpc_workers: u32,
 }
 
 impl Default for KvStoreRegistry {
@@ -72,6 +75,7 @@ impl KvStoreRegistry {
             config,
             port_pool: Mutex::new(Vec::new()),
             metrics_registry: None,
+            rpc_workers: 2,
         }
     }
 
@@ -79,6 +83,13 @@ impl KvStoreRegistry {
     #[must_use]
     pub fn with_metrics_registry(mut self, registry: Arc<Mutex<MetricsRegistry>>) -> Self {
         self.metrics_registry = Some(registry);
+        self
+    }
+
+    /// Builder-style setter for the crow-rpc worker count.
+    #[must_use]
+    pub fn with_rpc_workers(mut self, workers: u32) -> Self {
+        self.rpc_workers = workers;
         self
     }
 
