@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R123** — Bump this line in the same commit when adding a new item.
+**Next R number: R124** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -425,6 +425,13 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   `Accept` rejection on the LearnerStream bidi path. Both have empty
   bodies pending crow-rpc migration; the infrastructure now exists — write
   the test bodies and un-ignore. Low complexity; no dependencies.
+- **[R123](R123-console-cli-short-flags.md)** — CLI short flag aliases
+  for all subcommands — Area: console / cli — Only `bench rpc` and the
+  global `--config` (`-p`) have short aliases; all other subcommands
+  (`bench kv`, `diskdb`, `disk`, `server`, `paxos`, `node`) and global
+  args (`--ip`, `--port`, `--json`) are long-only. Add `short = '<char>'`
+  to every `#[arg]` across all subcommands, following the `bench rpc`
+  precedent. Low complexity; no dependencies.
 
 ---
 
