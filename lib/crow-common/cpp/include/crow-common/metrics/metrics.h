@@ -71,8 +71,10 @@ class MetricsRegistry
 
     // Start periodic flush thread. interval_secs in seconds.
     // max_file_mb and max_files control size-based rotation with gzip
-    // compression of rotated files.
-    void start(const std::string &log_path, double interval_secs, size_t max_file_mb = 30, size_t max_files = 5);
+    // compression of rotated files. When console is true, each flush
+    // is also written to stdout.
+    void start(const std::string &log_path, double interval_secs, size_t max_file_mb = 30, size_t max_files = 5,
+               bool console = false);
     void stop();
 
   private:
@@ -89,6 +91,7 @@ class MetricsRegistry
     double            interval_secs_  = 0.0;
     size_t            max_file_bytes_ = 30ULL * 1024ULL * 1024ULL;
     size_t            max_files_      = 5;
+    bool              console_        = false;
 
     void flush_to_file();
     void check_rotate();

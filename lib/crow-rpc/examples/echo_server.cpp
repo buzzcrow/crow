@@ -8,8 +8,12 @@
 // as key=value lines (parsed by the CLI bench runner).
 //
 // Usage: crow-rpc-echo-server --port <port> [--io-engines N] [--io-workers M]
+//        [--enable-nagle] [--log-dir <dir>]
 
 #include "crow-rpc/c_api.h"
+
+#include "crow-common/metrics/counter.h"
+#include "crow-common/metrics/metrics.h"
 
 #include <atomic>
 #include <csignal>
@@ -37,12 +41,59 @@ static uint32_t parse_u32(const char *s, const char *name)
     return static_cast<uint32_t>(v);
 }
 
+// Transport stats counters registered with MetricsRegistry for periodic flush.
+struct TransportMetricsBridge
+{
+    crow::common::metrics::Counter *read_calls;
+    crow::common::metrics::Counter *writev_calls;
+    crow::common::metrics::Counter *frames_sent;
+    crow::common::metrics::Counter *frames_parsed;
+
+    // Previous cumulative values for delta computation.
+    uint64_t prev_read_calls{0};
+    uint64_t prev_writev_calls{0};
+    uint64_t prev_frames_sent{0};
+    uint64_t prev_frames_parsed{0};
+
+    TransportMetricsBridge()
+    {
+        auto &reg = crow::common::metrics::MetricsRegistry::global();
+        read_calls    = reg.register_counter("rpc.transport.read_calls");
+        writev_calls  = reg.register_counter("rpc.transport.writev_calls");
+        frames_sent   = reg.register_counter("rpc.transport.frames_sent");
+        frames_parsed = reg.register_counter("rpc.transport.frames_parsed");
+    }
+
+    void sample(crow_rpc_server_t server)
+    {
+        crow_rpc_transport_stats_t stats;
+        std::memset(&stats, 0, sizeof(stats));
+        crow_rpc_server_transport_stats(server, &stats);
+
+        uint64_t cur_read_calls    = stats.read_calls;
+        uint64_t cur_writev_calls  = stats.writev_calls;
+        uint64_t cur_frames_sent   = stats.frames_sent;
+        uint64_t cur_frames_parsed = stats.frames_parsed;
+
+        read_calls->inc_by(cur_read_calls - prev_read_calls);
+        writev_calls->inc_by(cur_writev_calls - prev_writev_calls);
+        frames_sent->inc_by(cur_frames_sent - prev_frames_sent);
+        frames_parsed->inc_by(cur_frames_parsed - prev_frames_parsed);
+
+        prev_read_calls    = cur_read_calls;
+        prev_writev_calls  = cur_writev_calls;
+        prev_frames_sent   = cur_frames_sent;
+        prev_frames_parsed = cur_frames_parsed;
+    }
+};
+
 int main(int argc, char *argv[])
 {
     int      port         = 0;
     uint32_t io_engines   = 1;
     uint32_t io_workers   = 1;
     int      tcp_nodelay  = 1;
+    const char *log_dir   = nullptr;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -58,15 +109,24 @@ int main(int argc, char *argv[])
         else if (arg == "--enable-nagle") {
             tcp_nodelay = 0;
         }
+        else if (arg == "--log-dir" && i + 1 < argc) {
+            log_dir = argv[++i];
+        }
         else if (arg == "--help" || arg == "-h") {
             std::printf("usage: crow-rpc-echo-server --port <port> "
-                        "[--io-engines N] [--io-workers M] [--enable-nagle]\n");
+                        "[--io-engines N] [--io-workers M] [--enable-nagle] "
+                        "[--log-dir <dir>]\n");
             return 0;
         }
         else {
             std::fprintf(stderr, "error: unknown argument %s\n", argv[i]);
             return 1;
         }
+    }
+
+    // Init logging to log_dir if specified.
+    if (log_dir != nullptr) {
+        crow_rpc_init_logging(log_dir, "info", 30, 5, "echo-server");
     }
 
     std::signal(SIGTERM, on_signal);
@@ -97,14 +157,30 @@ int main(int argc, char *argv[])
 
     crow_rpc_server_start(server);
 
-    // Run until signaled.
+    // Start metrics flush: bridge transport stats to crow-common metrics
+    // and flush periodically to file + console.
+    TransportMetricsBridge bridge;
+    std::string metrics_log_path =
+        log_dir != nullptr ? std::string(log_dir) + "/metrics.log" : std::string("/tmp/echo-server-metrics.log");
+    crow_rpc_metrics_start(metrics_log_path.c_str(), 5.0, 30, 5, 1);
+
+    // Run until signaled. Sample transport stats every ~1s to feed
+    // deltas into the crow-common metrics counters.
+    int sample_tick = 0;
     while (g_running.load()) {
-        // Busy-wait with a short sleep to avoid spinning.
         struct timespec ts;
         ts.tv_sec  = 0;
         ts.tv_nsec = 10'000'000; // 10ms
         nanosleep(&ts, nullptr);
+        if (++sample_tick >= 100) { // ~1s
+            bridge.sample(server);
+            sample_tick = 0;
+        }
     }
+
+    // Final bridge sample + stop metrics (does one last flush).
+    bridge.sample(server);
+    crow_rpc_metrics_stop();
 
     // Print transport stats before stopping.
     crow_rpc_transport_stats_t stats;
@@ -131,5 +207,9 @@ int main(int argc, char *argv[])
 
     crow_rpc_server_stop(server);
     crow_rpc_server_destroy(server);
+
+    if (log_dir != nullptr) {
+        crow_rpc_shutdown_logging();
+    }
     return 0;
 }

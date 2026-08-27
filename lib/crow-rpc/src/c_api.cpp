@@ -4,6 +4,7 @@
 #include "crow-rpc/c_api.h"
 
 #include "crow-common/log.h"
+#include "crow-common/metrics/metrics.h"
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api_internal.h"
 #include "crow-rpc/client/client.h"
@@ -903,4 +904,17 @@ void crow_rpc_flush_logging()
 void crow_rpc_shutdown_logging()
 {
     crow::common::shutdown_logging();
+}
+
+void crow_rpc_metrics_start(const char *log_path, double interval_secs, size_t max_file_mb, size_t max_files,
+                            int console)
+{
+    crow::common::metrics::MetricsRegistry::global().start(
+        log_path != nullptr ? std::string(log_path) : std::string(), interval_secs,
+        max_file_mb == 0 ? 30 : max_file_mb, max_files == 0 ? 5 : max_files, console != 0);
+}
+
+void crow_rpc_metrics_stop(void)
+{
+    crow::common::metrics::MetricsRegistry::global().stop();
 }

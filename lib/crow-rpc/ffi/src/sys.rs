@@ -260,6 +260,14 @@ extern "C" {
     );
     pub fn crow_rpc_flush_logging();
     pub fn crow_rpc_shutdown_logging();
+    pub fn crow_rpc_metrics_start(
+        log_path: *const c_char,
+        interval_secs: f64,
+        max_file_mb: usize,
+        max_files: usize,
+        console: c_int,
+    );
+    pub fn crow_rpc_metrics_stop();
 
     // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
     pub fn crow_rpc_co_spawn(

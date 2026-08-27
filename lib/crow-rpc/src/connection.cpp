@@ -4,6 +4,7 @@
 #include "crow-rpc/connection.h"
 
 #include "crow-common/log.h"
+#include "crow-common/metrics/metrics.h"
 #include "crow-rpc/transport/socket_transport.h" // TransportStats
 
 #include <sys/uio.h>
@@ -174,7 +175,14 @@ retry:
                 static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
             for (int i = 0; i < n; i++) {
                 if (batch[i]->create_nano > 0) {
-                    stats->submit_to_writev.record(now - batch[i]->create_nano);
+                    uint64_t delta = now - batch[i]->create_nano;
+                    stats->submit_to_writev.record(delta);
+                    // Also observe in the global crow-common histogram for
+                    // periodic metrics flush (percentile distribution).
+                    static crow::common::metrics::LatencyHistogram *h =
+                        crow::common::metrics::MetricsRegistry::global().register_histogram(
+                            "rpc.transport.submit_to_writev");
+                    h->observe(delta);
                 }
             }
         }

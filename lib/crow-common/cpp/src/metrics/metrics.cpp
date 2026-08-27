@@ -251,12 +251,14 @@ size_t MetricsRegistry::max_name_len() const
     return max_len;
 }
 
-void MetricsRegistry::start(const std::string &log_path, double interval_secs, size_t max_file_mb, size_t max_files)
+void MetricsRegistry::start(const std::string &log_path, double interval_secs, size_t max_file_mb, size_t max_files,
+                             bool console)
 {
     log_path_       = log_path;
     interval_secs_  = interval_secs;
     max_file_bytes_ = max_file_mb * 1024 * 1024;
     max_files_      = max_files;
+    console_        = console;
     running_.store(true, std::memory_order_relaxed);
     flush_thread_ = std::thread([this]() {
         set_current_thread_name("ct-metrics");
@@ -286,14 +288,42 @@ void MetricsRegistry::flush_to_file()
     // Check if rotation is needed before writing.
     check_rotate();
 
-    FILE *fp = std::fopen(log_path_.c_str(), "a");
-    if (fp == nullptr) {
+    std::string ts = iso8601_now();
+
+    // Flush once to a memory buffer, then write to both file and
+    // stdout. This avoids double-flushing (which would reset the
+    // metric windows on the first flush, leaving nothing for the
+    // second).
+    char  *buf = nullptr;
+    size_t len  = 0;
+    FILE  *mem  = open_memstream(&buf, &len);
+    if (mem == nullptr) {
         return;
     }
-    std::string ts = iso8601_now();
-    flush_to(fp, interval_secs_, ts.c_str(), "metrics", 0);
-    std::fflush(fp);
-    std::fclose(fp);
+    flush_to(mem, interval_secs_, ts.c_str(), "metrics", 0);
+    std::fflush(mem);
+    std::fclose(mem);
+
+    if (len == 0) {
+        free(buf);
+        return;
+    }
+
+    // Write to file.
+    FILE *fp = std::fopen(log_path_.c_str(), "a");
+    if (fp != nullptr) {
+        std::fwrite(buf, 1, len, fp);
+        std::fflush(fp);
+        std::fclose(fp);
+    }
+
+    // Also write to stdout when console mode is enabled.
+    if (console_) {
+        std::fwrite(buf, 1, len, stdout);
+        std::fflush(stdout);
+    }
+
+    free(buf);
 }
 
 void MetricsRegistry::check_rotate()

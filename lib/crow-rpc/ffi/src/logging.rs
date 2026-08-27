@@ -42,3 +42,28 @@ pub fn flush_logging() {
 pub fn shutdown_logging() {
     unsafe { sys::crow_rpc_shutdown_logging() };
 }
+
+/// Start periodic metrics flush to `log_path` + optionally stdout.
+pub fn metrics_start(
+    log_path: &str,
+    interval_secs: f64,
+    max_file_mb: usize,
+    max_files: usize,
+    console: bool,
+) {
+    let path_c = CString::new(log_path).unwrap_or_default();
+    unsafe {
+        sys::crow_rpc_metrics_start(
+            path_c.as_ptr(),
+            interval_secs,
+            max_file_mb,
+            max_files,
+            if console { 1 } else { 0 },
+        );
+    }
+}
+
+/// Stop the metrics flush thread and do a final flush.
+pub fn metrics_stop() {
+    unsafe { sys::crow_rpc_metrics_stop() };
+}

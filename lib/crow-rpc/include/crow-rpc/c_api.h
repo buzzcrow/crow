@@ -287,6 +287,15 @@ void crow_rpc_init_logging(const char *log_dir, const char *level, size_t max_fi
 void crow_rpc_flush_logging(void);
 void crow_rpc_shutdown_logging(void);
 
+// ── Metrics (crow-common MetricsRegistry) ────────────────────────
+// Start periodic metrics flush to log_path + optionally stdout.
+// interval_secs: flush interval (e.g. 5.0).
+// max_file_mb / max_files: rotation params (0 => 30 / 5).
+// console: 1 = also flush to stdout, 0 = file only.
+void crow_rpc_metrics_start(const char *log_path, double interval_secs, size_t max_file_mb, size_t max_files,
+                            int console);
+void crow_rpc_metrics_stop(void);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

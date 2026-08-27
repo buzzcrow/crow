@@ -225,16 +225,16 @@ pub struct RpcArgs {
     #[arg(long)]
     pub run_id: Option<String>,
 
-    /// Show transport stats on console (default: stats go to
-    /// `bench-runs/<run>/` files only).
-    #[arg(long, short = 'v', default_value_t = false)]
-    pub verbose: bool,
-
     /// Connect to an external echo server on this port instead of
     /// auto-spawning one. Use with a manually-started
     /// `crow-rpc-echo-server --port <port>`.
     #[arg(long)]
     pub server_port: Option<i32>,
+
+    /// Log directory for the echo server and client logs. Defaults to
+    /// `bench-runs/<run>/`. All logs (server.log, metrics.log) go here.
+    #[arg(long)]
+    pub log_dir: Option<String>,
 }
 
 /// Arguments for `crow-cli bench`.

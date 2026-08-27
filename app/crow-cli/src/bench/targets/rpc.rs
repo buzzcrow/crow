@@ -125,8 +125,8 @@ pub(crate) struct RpcTarget {
     /// `request_id` collisions (the C API uses the flatbuffer's `id` field
     /// as the `request_id` for response correlation).
     request_id_counter: Arc<AtomicU64>,
-    /// Show transport stats on console (from --verbose).
-    verbose: bool,
+    /// Log directory for server and client logs.
+    log_dir: Option<String>,
 }
 
 impl RpcTarget {
@@ -141,7 +141,7 @@ impl RpcTarget {
             conns: Vec::new(),
             next_conn: AtomicUsize::new(0),
             request_id_counter: Arc::new(AtomicU64::new(1)),
-            verbose: false,
+            log_dir: None,
         }
     }
 }
@@ -154,7 +154,7 @@ impl BenchTarget for RpcTarget {
     }
 
     async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
-        self.verbose = cfg.verbose;
+        self.log_dir.clone_from(&cfg.log_dir);
         let pool = Arc::new(BufferPool::new(8192));
 
         if let Some(port) = cfg.server_port {
@@ -172,10 +172,8 @@ impl BenchTarget for RpcTarget {
                     "could not locate crow-rpc-echo-server binary; set $CROW_RPC_ECHO_SERVER_BIN".to_string(),
                 )
             })?;
-            let log_path = cfg.report_dir.as_ref().map_or_else(
-                || std::env::temp_dir().join(format!("crow-rpc-echo-server-{}.log", std::process::id())),
-                |d| d.join("server.log"),
-            );
+            let log_dir = cfg.log_dir.as_deref().unwrap_or(".");
+            let log_path = std::path::PathBuf::from(log_dir).join("server.log");
             if let Some(parent) = log_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -187,7 +185,9 @@ impl BenchTarget for RpcTarget {
                 .arg("--io-engines")
                 .arg(cfg.io_engines.to_string())
                 .arg("--io-workers")
-                .arg(cfg.io_workers.to_string());
+                .arg(cfg.io_workers.to_string())
+                .arg("--log-dir")
+                .arg(log_dir);
             if cfg.enable_nagle {
                 cmd.arg("--enable-nagle");
             }
@@ -271,6 +271,16 @@ impl BenchTarget for RpcTarget {
         self.pool = Some(pool);
         self.server = Some(server);
         self.conns = conns;
+
+        // Start client-side metrics flush to log-dir + console.
+        // The submit_to_writev histogram is already registered in the
+        // C++ hot path (connection.cpp). RPC client counters are
+        // registered in rpc_client_metrics.cpp.
+        if let Some(ref log_dir) = self.log_dir {
+            let metrics_path = std::path::PathBuf::from(log_dir).join("client-metrics.log");
+            crow_rpc_ffi::logging::metrics_start(metrics_path.to_str().unwrap_or(""), 5.0, 30, 5, true);
+        }
+
         Ok(())
     }
 
@@ -309,7 +319,10 @@ impl BenchTarget for RpcTarget {
 
     #[allow(clippy::cast_precision_loss, reason = "counters fit in f64 mantissa")]
     async fn cleanup(&mut self) {
-        // Sample client-side transport stats before stopping.
+        // Stop client-side metrics flush (does a final flush to console + file).
+        crow_rpc_ffi::logging::metrics_stop();
+
+        // Print client-side transport stats to console.
         if let Some(server) = &self.server {
             let s = server.transport_stats();
             let avg_us = |h: &CrowRpcLatencyStats| {
@@ -319,7 +332,7 @@ impl BenchTarget for RpcTarget {
                     0.0
                 }
             };
-            let client_line = format!(
+            eprintln!(
                 "client_transport_stats : read_calls={rc} writev_calls={wc} \
                  frames_sent={fs} frames_parsed={fp} \
                  read_bytes={rb} writev_bytes={wb} \
@@ -351,15 +364,6 @@ impl BenchTarget for RpcTarget {
                 rns = s.read_ns_sum,
                 fns = s.flush_ns_sum,
             );
-            // Write to file in the run directory.
-            if let Some(ref log_path) = self.server_log_path {
-                if let Some(stats_path) = log_path.parent() {
-                    let _ = std::fs::write(stats_path.join("client-stats.log"), &client_line);
-                }
-            }
-            if self.verbose {
-                eprintln!("{client_line}");
-            }
         }
         // Stop the local client-side transport.
         if let Some(server) = self.server.take() {
@@ -371,19 +375,12 @@ impl BenchTarget for RpcTarget {
             let _ = stop_pid_with_timeout(pid, Duration::from_secs(5));
             let _ = child.wait();
         }
-        // Read server-side stats from the log file.
+        // Print server-side stats from the log file.
         if let Some(ref log_path) = self.server_log_path {
             if let Ok(content) = std::fs::read_to_string(log_path) {
                 for line in content.lines() {
                     if let Some(rest) = line.strip_prefix("stats ") {
-                        let server_line = format!("server_transport_stats : stats {rest}");
-                        // Write to file in the run directory.
-                        if let Some(stats_path) = log_path.parent() {
-                            let _ = std::fs::write(stats_path.join("server-stats.log"), &server_line);
-                        }
-                        if self.verbose {
-                            eprintln!("{server_line}");
-                        }
+                        eprintln!("server_transport_stats : stats {rest}");
                         break;
                     }
                 }

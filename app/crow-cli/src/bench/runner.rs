@@ -171,11 +171,12 @@ pub(crate) struct BenchConfig {
     pub(crate) send_queue_capacity: u32,
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
     pub(crate) enable_nagle: bool,
-    /// Show transport stats on console (default: files only).
-    pub(crate) verbose: bool,
     /// Connect to external echo server on this port (RPC target only).
     /// When set, skip auto-spawning the echo server.
     pub(crate) server_port: Option<i32>,
+    /// Log directory for echo server and client logs (RPC target only).
+    /// Defaults to the bench run directory.
+    pub(crate) log_dir: Option<String>,
 }
 
 impl BenchConfig {
@@ -214,8 +215,8 @@ impl BenchConfig {
             rpc_worker_mode: RpcWorkerMode::Coroutine,
             send_queue_capacity: 1024,
             enable_nagle: false,
-            verbose: false,
             server_port: None,
+            log_dir: None,
         }
     }
 
