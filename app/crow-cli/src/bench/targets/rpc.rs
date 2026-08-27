@@ -157,72 +157,82 @@ impl BenchTarget for RpcTarget {
         self.verbose = cfg.verbose;
         let pool = Arc::new(BufferPool::new(8192));
 
-        // Spawn the external echo server process. It gets its own
-        // epoll fd — the client-side transport (below) gets a separate
-        // one, giving 2 independent epoll fds.
-        let binary = echo_server_bin().ok_or_else(|| {
-            Error::Config(
-                "could not locate crow-rpc-echo-server binary; set $CROW_RPC_ECHO_SERVER_BIN".to_string(),
-            )
-        })?;
-        let log_path = cfg.report_dir.as_ref().map_or_else(
-            || std::env::temp_dir().join(format!("crow-rpc-echo-server-{}.log", std::process::id())),
-            |d| d.join("server.log"),
-        );
-        if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let log_file = std::fs::File::create(&log_path)?;
-        let log_file_stderr = log_file.try_clone()?;
-        let mut cmd = Command::new(&binary);
-        cmd.arg("--port")
-            .arg("0")
-            .arg("--io-engines")
-            .arg(cfg.io_engines.to_string())
-            .arg("--io-workers")
-            .arg(cfg.io_workers.to_string());
-        if cfg.enable_nagle {
-            cmd.arg("--enable-nagle");
-        }
-        cmd.stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_file_stderr));
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Error::Config(format!("failed to spawn echo server {}: {e}", binary.display())))?;
+        if let Some(port) = cfg.server_port {
+            // External server mode: connect to a manually-started echo
+            // server. Skip spawning; no server.log to read stats from.
+            self.port = port;
+            self.server_child = None;
+            self.server_log_path = None;
+        } else {
+            // Auto-spawn the external echo server process. It gets its
+            // own epoll fd — the client-side transport (below) gets a
+            // separate one, giving 2 independent epoll fds.
+            let binary = echo_server_bin().ok_or_else(|| {
+                Error::Config(
+                    "could not locate crow-rpc-echo-server binary; set $CROW_RPC_ECHO_SERVER_BIN".to_string(),
+                )
+            })?;
+            let log_path = cfg.report_dir.as_ref().map_or_else(
+                || std::env::temp_dir().join(format!("crow-rpc-echo-server-{}.log", std::process::id())),
+                |d| d.join("server.log"),
+            );
+            if let Some(parent) = log_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let log_file = std::fs::File::create(&log_path)?;
+            let log_file_stderr = log_file.try_clone()?;
+            let mut cmd = Command::new(&binary);
+            cmd.arg("--port")
+                .arg("0")
+                .arg("--io-engines")
+                .arg(cfg.io_engines.to_string())
+                .arg("--io-workers")
+                .arg(cfg.io_workers.to_string());
+            if cfg.enable_nagle {
+                cmd.arg("--enable-nagle");
+            }
+            cmd.stdout(Stdio::from(log_file))
+                .stderr(Stdio::from(log_file_stderr));
+            let mut child = cmd.spawn().map_err(|e| {
+                Error::Config(format!("failed to spawn echo server {}: {e}", binary.display()))
+            })?;
 
-        // Wait for the server to print its listening port. Read stdout
-        // from the log file (the child's stdout is redirected there).
-        // Poll the file until we see "listening port=NNNN".
-        let port = {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            let mut found = None;
-            while std::time::Instant::now() < deadline {
-                if let Ok(content) = std::fs::read_to_string(&log_path) {
-                    for line in content.lines() {
-                        if let Some(rest) = line.strip_prefix("listening port=") {
-                            if let Ok(p) = rest.trim().parse::<i32>() {
-                                found = Some(p);
-                                break;
+            // Wait for the server to print its listening port. Read stdout
+            // from the log file (the child's stdout is redirected there).
+            // Poll the file until we see "listening port=NNNN".
+            let port = {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut found = None;
+                while std::time::Instant::now() < deadline {
+                    if let Ok(content) = std::fs::read_to_string(&log_path) {
+                        for line in content.lines() {
+                            if let Some(rest) = line.strip_prefix("listening port=") {
+                                if let Ok(p) = rest.trim().parse::<i32>() {
+                                    found = Some(p);
+                                    break;
+                                }
                             }
                         }
                     }
+                    if found.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                if found.is_some() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            found.ok_or_else(|| {
-                // Check if the child already exited.
-                match child.try_wait() {
-                    Ok(Some(status)) => Error::Config(format!("echo server exited before binding: {status}")),
-                    _ => Error::Config("echo server did not bind within 5s".to_string()),
-                }
-            })?
-        };
-        self.port = port;
-        self.server_child = Some(child);
-        self.server_log_path = Some(log_path);
+                found.ok_or_else(|| {
+                    // Check if the child already exited.
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            Error::Config(format!("echo server exited before binding: {status}"))
+                        }
+                        _ => Error::Config("echo server did not bind within 5s".to_string()),
+                    }
+                })?
+            };
+            self.port = port;
+            self.server_child = Some(child);
+            self.server_log_path = Some(log_path);
+        }
 
         // Create a local RpcServer (no listen) — used only for its
         // client-side transport (epoll fd + I/O workers). Connections

@@ -229,6 +229,12 @@ pub struct RpcArgs {
     /// `bench-runs/<run>/` files only).
     #[arg(long, short = 'v', default_value_t = false)]
     pub verbose: bool,
+
+    /// Connect to an external echo server on this port instead of
+    /// auto-spawning one. Use with a manually-started
+    /// `crow-rpc-echo-server --port <port>`.
+    #[arg(long)]
+    pub server_port: Option<i32>,
 }
 
 /// Arguments for `crow-cli bench`.

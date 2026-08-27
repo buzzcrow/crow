@@ -35,6 +35,7 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
     cfg.io_workers = args.io_workers;
     cfg.enable_nagle = args.enable_nagle;
     cfg.verbose = args.verbose;
+    cfg.server_port = args.server_port;
     cfg.rpc_worker_mode = match args.mode.as_str() {
         "tokio" => crate::bench::runner::RpcWorkerMode::Tokio,
         "coroutine" => crate::bench::runner::RpcWorkerMode::Coroutine,

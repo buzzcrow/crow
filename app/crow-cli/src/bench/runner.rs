@@ -173,6 +173,9 @@ pub(crate) struct BenchConfig {
     pub(crate) enable_nagle: bool,
     /// Show transport stats on console (default: files only).
     pub(crate) verbose: bool,
+    /// Connect to external echo server on this port (RPC target only).
+    /// When set, skip auto-spawning the echo server.
+    pub(crate) server_port: Option<i32>,
 }
 
 impl BenchConfig {
@@ -212,6 +215,7 @@ impl BenchConfig {
             send_queue_capacity: 1024,
             enable_nagle: false,
             verbose: false,
+            server_port: None,
         }
     }
 
