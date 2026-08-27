@@ -54,6 +54,11 @@ void shutdown_logging();
 // nothing is emitted before logging is configured.
 [[nodiscard]] bool logging_enabled();
 
+// True only after init_logging() has successfully created a logger.
+// Distinct from logging_enabled() (which defaults to true even before
+// init_logging is called, so spdlog's default stderr logger is used).
+[[nodiscard]] bool logger_initialized();
+
 // Set the current thread's name for CT_LOG output (stored thread_local and
 // also passed to pthread_setname_np for debugger/htop visibility). Should be
 // called at the start of each engine thread's body.

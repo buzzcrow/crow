@@ -287,6 +287,9 @@ impl BenchTarget for RpcTarget {
         // C++ hot path (connection.cpp). RPC client counters are
         // registered in rpc_client_metrics.cpp.
         if let Some(ref log_dir) = self.log_dir {
+            // Init C++ logging to file so connection close/error logs
+            // don't spam the console (default spdlog writes to stderr).
+            crow_rpc_ffi::logging::init_logging(log_dir, "info", 30, 5, "bench-client");
             let metrics_path = std::path::PathBuf::from(log_dir).join("client-metrics.log");
             #[allow(clippy::cast_precision_loss, reason = "interval fits in f64")]
             let interval = self.metrics_interval as f64;
@@ -377,9 +380,16 @@ impl BenchTarget for RpcTarget {
                 fns = s.flush_ns_sum,
             );
         }
-        // Stop the local client-side transport.
+        // Stop the local client-side transport. This closes all
+        // connections and may log close events — the C++ logger is
+        // still active and writes them to the log file.
         if let Some(server) = self.server.take() {
             server.stop();
+        }
+        // Now safe to shutdown C++ logging — all connection close
+        // logs have been queued to the async logger.
+        if self.log_dir.is_some() {
+            crow_rpc_ffi::logging::shutdown_logging();
         }
         // Stop the external echo server (SIGTERM, then read its stats).
         if let Some(mut child) = self.server_child.take() {

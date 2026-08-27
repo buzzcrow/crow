@@ -86,6 +86,12 @@ bool logging_enabled()
     return g_enabled.load(std::memory_order_relaxed);
 }
 
+bool logger_initialized()
+{
+    std::lock_guard<std::mutex> lk(g_log_mu);
+    return g_logger != nullptr;
+}
+
 void flush_logging()
 {
     std::lock_guard<std::mutex> lk(g_log_mu);

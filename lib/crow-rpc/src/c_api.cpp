@@ -885,7 +885,11 @@ void crow_rpc_init_logging(const char *log_dir, const char *level, size_t max_fi
     // first), add a second file sink so rpc messages go to a separate file
     // alongside the tree log. If no logger exists yet, create one — this
     // handles standalone crow-rpc usage without crow-tree.
-    if (crow::common::logging_enabled()) {
+    // NOTE: must check g_logger, not g_enabled — g_enabled defaults to true
+    // even when init_logging was never called, so the add_log_file branch
+    // would be a no-op (g_logger is null) and logs would go to spdlog's
+    // default stderr logger.
+    if (crow::common::logger_initialized()) {
         crow::common::add_log_file(log_dir == nullptr ? "" : std::string(log_dir), max_file_mb, max_files,
                                    file_prefix == nullptr ? "crow-rpc" : std::string(file_prefix));
     }
