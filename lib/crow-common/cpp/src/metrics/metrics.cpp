@@ -263,12 +263,16 @@ void MetricsRegistry::start(const std::string &log_path, double interval_secs, s
     running_.store(true, std::memory_order_relaxed);
     flush_thread_ = std::thread([this]() {
         set_current_thread_name("ct-metrics");
+        std::unique_lock<std::mutex> lk(flush_mutex_);
         while (running_.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(interval_secs_ * 1000)));
+            stop_cv_.wait_for(lk, std::chrono::milliseconds(static_cast<int>(interval_secs_ * 1000)),
+                              [this] { return !running_.load(std::memory_order_relaxed); });
             if (!running_.load(std::memory_order_relaxed)) {
                 break;
             }
+            lk.unlock();
             flush_to_file();
+            lk.lock();
         }
     });
 }
@@ -278,6 +282,10 @@ void MetricsRegistry::stop()
     if (!running_.exchange(false, std::memory_order_relaxed)) {
         return;
     }
+    {
+        std::lock_guard<std::mutex> lk(flush_mutex_);
+    }
+    stop_cv_.notify_all();
     if (flush_thread_.joinable()) {
         flush_thread_.join();
     }

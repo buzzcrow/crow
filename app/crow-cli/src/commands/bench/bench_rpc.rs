@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use crate::commands::bench::{next_run_id, run_folder_name};
 
-/// RPC bench: 2-process echo server (child) + client (CLI), measure
-/// raw transport throughput.
+/// RPC bench: 2-process echo server (external) + client (CLI), measure
+/// raw transport throughput. The echo server must be started manually
+/// before running — use `tools/bench-rpc-regression.sh` for the wrapper.
 pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> ExitCode {
     use crate::bench::target::rpc::RpcTarget;
     use crate::bench::target::BenchTarget;

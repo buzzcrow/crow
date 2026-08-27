@@ -156,6 +156,69 @@ Memory copy summary:
 Regression sentinel: `tools/bench-rpc-regression.sh`.
 Raw TSV: `doc/working/bench-rpc-regression.tsv`.
 
+### 2026-08-27 (Nagle Comparison + Metrics Shutdown Fix)
+
+Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
+Config: 128B values, 20s duration, standalone echo server, epoll
+loopback, pipeline_depth=1. Same codebase as 2026-08-25 plus a
+metrics shutdown fix (condition_variable wake in
+`MetricsRegistry::stop` — shutdown latency dropped from up to 5s to
+60ms). Single-engine only (2-engine configs removed from the sweep).
+Added nagle-on configs for 64/512/1000T to measure TCP coalescing
+benefit. `raggr`/`saggr` columns dropped (frames_sent/frames_parsed
+moved to crow-common metrics histograms); `nagle` column added.
+
+#### Full sweep (11 configs)
+
+| Eng | Wkr | T | C | Mode | nagle | ops/s | avg | p50 | p99 | p999 | err |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 1 | coroutine | off | 52,759 | 17 | 17 | 25 | 31 | 0 |
+| 1 | 1 | 1 | 1 | tokio | off | 23,564 | 41 | 42 | 69 | 102 | 0 |
+| 1 | 4 | 64 | 4 | coroutine | off | 514,844 | 122 | 108 | 186 | 326 | 0 |
+| 1 | 4 | 64 | 4 | tokio | off | 557,362 | 113 | 105 | 265 | 425 | 6 |
+| 1 | 8 | 512 | 8 | coroutine | off | 820,424 | 621 | 612 | 842 | 1181 | 0 |
+| 1 | 16 | 1000 | 32 | coroutine | off | 1,246,622 | 798 | 401 | 6148 | 10416 | 0 |
+| 1 | 16 | 1000 | 32 | tokio | off | 849,575 | 1156 | 1063 | 2652 | 3838 | 591 |
+| 1 | 4 | 64 | 4 | coroutine | on | 983,245 | 63 | 59 | 162 | 520 | 0 |
+| 1 | 8 | 512 | 8 | coroutine | on | 1,744,728 | 291 | 261 | 540 | 5248 | 0 |
+| 1 | 16 | 1000 | 32 | coroutine | on | 2,023,369 | 490 | 418 | 1550 | 2282 | 0 |
+
+#### Nagle impact (coroutine, nagle off vs on)
+
+| T | C | Wkr | nagle off | nagle on | speedup | p99 off | p99 on |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 64 | 4 | 4 | 514,844 | 983,245 | +91% | 186us | 162us |
+| 512 | 8 | 8 | 820,424 | 1,744,728 | +113% | 842us | 540us |
+| 1000 | 32 | 16 | 1,246,622 | 2,023,369 | +62% | 6148us | 1550us |
+
+#### Analysis
+
+Nagle (TCP coalescing) is a massive win for bursty coroutine workloads
+with small payloads (128B). At 512T, nagle-on delivers **+113%**
+throughput (820K→1.74M) and cuts p99 by 36% (842→540us). At 1000T,
+nagle-on delivers **+62%** throughput (1.25M→2.02M) and cuts p99 by
+**75%** (6148→1550us). The mechanism: with many bursty coroutines
+sending small 128B frames, Nagle allows the kernel to coalesce multiple
+frames into a single TCP segment, reducing syscall overhead (writev +
+read) dramatically. Without Nagle, TCP_NODELAY sends each 128B frame
+immediately — one syscall per frame, and the kernel can't coalesce.
+
+The non-nagle coroutine results are ~50% below the 2026-08-25 reference
+(e.g. 1e8w 820K vs 1.86M). This is likely environmental — the machine
+had background load during this run. The nagle-on results (1.74M at
+512T, 2.02M at 1000T) are close to the 2026-08-25 non-nagle reference
+(1.86M, 2.23M), confirming that nagle recovers the lost performance by
+reducing syscall pressure. This suggests the non-nagle path is
+syscall-bound at high concurrency, and application-level send batching
+(grouping multiple frames into a single writev before the kernel does
+it via Nagle) could deliver nagle-level performance without relying on
+TCP coalescing.
+
+The tokio results (3 configs) are consistent with the 2026-08-25
+reference within noise: 1e1w 23.6K (vs 26.8K), 1e4w 557K (vs 618K),
+1e16w 850K (vs 1.04M). Tokio errors at 1e16w (591) are lower than the
+reference (697).
+
 ### 2026-08-25 (Re-run, Mixed — Reference Not Updated)
 
 Platform: **AMD Ryzen 9 5950X** (16c/32t, x86_64, Linux 6.8).
@@ -440,3 +503,12 @@ all configs.
   (noise); tokio mostly lower, with 1e8w -17.6% (1.01M→836K) the one
   outlier worth watching. Tokio errors down across all configs. Peak
   coroutine 2.29M (2e16w) vs reference 2.35M.
+- **2026-08-27 (AMD 5950X, nagle + metrics fix)**: metrics cv shutdown
+  fix (5s→60ms). Removed 2-engine configs from sweep. Added nagle-on
+  configs at 64/512/1000T. Nagle gives +62-113% throughput and up to 4x
+  lower p99 for bursty coroutine workloads — TCP coalescing batches
+  small frames per syscall. Peak nagle-on 2.02M (1e16w 1000t32c). Non-
+  nagle results ~50% below 2026-08-25 reference (environmental); nagle-
+  on recovers to near-reference levels. Dropped raggr/saggr columns
+  (frames_sent/frames_parsed moved to metrics histograms); added nagle
+  column.

@@ -25,6 +25,7 @@
 #include "crow-common/metrics/latency_summary.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -84,14 +85,15 @@ class MetricsRegistry
     std::vector<std::unique_ptr<LatencyHistogram>> histograms_;
     std::vector<std::unique_ptr<LatencySummary>>   summaries_;
 
-    std::mutex        flush_mutex_;
-    std::thread       flush_thread_;
-    std::atomic<bool> running_{false};
-    std::string       log_path_;
-    double            interval_secs_  = 0.0;
-    size_t            max_file_bytes_ = 30ULL * 1024ULL * 1024ULL;
-    size_t            max_files_      = 5;
-    bool              console_        = false;
+    std::mutex              flush_mutex_;
+    std::condition_variable stop_cv_;
+    std::thread             flush_thread_;
+    std::atomic<bool>       running_{false};
+    std::string             log_path_;
+    double                  interval_secs_  = 0.0;
+    size_t                  max_file_bytes_ = 30ULL * 1024ULL * 1024ULL;
+    size_t                  max_files_      = 5;
+    bool                    console_        = false;
 
     void flush_to_file();
     void check_rotate();

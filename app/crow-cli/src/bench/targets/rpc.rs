@@ -4,16 +4,20 @@
 #![allow(unsafe_code)]
 // FFI dispatch callback + raw pointer handoff requires unsafe.
 
-//! RPC bench target: spawns a standalone `crow-rpc-echo-server` as a
-//! child process (separate epoll fd), then builds `RpcClient`-backed
-//! workers in the CLI process that connect to the external server and
-//! send ping requests with data payloads, verifying the echo response.
+//! RPC bench target: connects to an externally-started
+//! `crow-rpc-echo-server` (separate process, separate epoll fd), then
+//! builds `RpcClient`-backed workers in the CLI process that send ping
+//! requests with data payloads and verify the echo response.
 //!
 //! This measures raw RPC transport throughput (epoll + framing +
 //! request/response correlation) without any KV/storage layer in the
 //! path. The 2-process model gives 2 independent epoll fds (client +
-//! server), giving 2 independent epoll fds and eliminating the
-//! single-epoll-fd contention of the in-process model.
+//! server), eliminating the single-epoll-fd contention of the
+//! in-process model.
+//!
+//! The echo server must be started manually before the bench — see
+//! `tools/bench-rpc-regression.sh` for the wrapper that starts/stops
+//! it per config. Pass `--server-port` to point the client at it.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

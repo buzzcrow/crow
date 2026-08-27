@@ -223,8 +223,10 @@ pub struct RpcArgs {
     pub run_id: Option<String>,
 
     /// Echo server port. Defaults to 18080 (the echo server's default
-    /// port). Pass a different value to connect to a manually-started
-    /// server on another port.
+    /// port). The server must be started manually (e.g.
+    /// `crow-rpc-echo-server --port=18080`); no auto-spawn. Use
+    /// `tools/bench-rpc-regression.sh` for the wrapper that manages
+    /// the server lifecycle.
     #[arg(short = 'P', long, default_value_t = 18080)]
     pub server_port: i32,
 
