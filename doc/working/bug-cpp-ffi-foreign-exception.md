@@ -1,4 +1,9 @@
-# Bug: C++ foreign exception crossing FFI boundary during shutdown
+# Bug: C++ foreign exception crossing FFI boundary during shutdown (macOS only)
+
+> **Platform scope:** The foreign-exception crash has only ever been
+> observed on macOS. Linux never reproduced it — the Linux failure was
+> a separate stale-binary election issue, now resolved. All remaining
+> work below is macOS-only.
 
 ## Status
 
