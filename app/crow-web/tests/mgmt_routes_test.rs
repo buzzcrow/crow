@@ -115,6 +115,9 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
+    // Register the upstream's pid so `refresh_node_cache` (which skips
+    // nodes with no tracked runtime pid) refreshes after mutations.
+    state.set_runtime_pid(1, upstream.pid);
     tokio::spawn(async move {
         axum::serve(listener, router(state)).await.unwrap();
     });

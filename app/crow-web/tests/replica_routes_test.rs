@@ -148,6 +148,12 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
         .unwrap();
     }
     let state = AppState::with_config(cfg, None);
+    // Register each upstream's pid so `refresh_node_cache` (which
+    // skips nodes with no tracked runtime pid) refreshes after
+    // mutations.
+    for u in upstreams {
+        state.set_runtime_pid(u.node_id, u.pid);
+    }
 
     // Seed the monitor cache from each upstream's topology so the
     // initial GETs work before the first mutation triggers a refresh.

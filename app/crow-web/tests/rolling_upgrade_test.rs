@@ -219,6 +219,12 @@ async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
         .unwrap();
     }
     let state = AppState::with_config(cfg, None);
+    // Register each upstream's pid so `refresh_node_cache` (which
+    // skips nodes with no tracked runtime pid) refreshes after
+    // mutations.
+    for u in upstreams.values() {
+        state.set_runtime_pid(u.node_id, u.pid);
+    }
 
     for u in upstreams.values() {
         let client = ServerClient::new(u.mgmt_url.clone()).unwrap();

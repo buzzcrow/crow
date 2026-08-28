@@ -358,6 +358,16 @@ pub fn stop_pid_with_timeout(pid: u32, timeout: std::time::Duration) -> Result<b
         .arg("-KILL")
         .arg(pid.to_string())
         .status();
+    // Wait briefly for the kernel to process SIGKILL so the caller can
+    // safely reuse resources (ports, WAL files) without racing a
+    // not-yet-reaped process.
+    let kill_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < kill_deadline {
+        if !process_is_alive(pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     Ok(false)
 }
 
@@ -561,7 +571,7 @@ pub fn crow_kv_server_bin() -> Option<PathBuf> {
             let mut p = dir.to_path_buf();
             for _ in 0..3 {
                 let candidate = p.join("crow-kv-server");
-                if candidate.exists() {
+                if is_executable(&candidate) {
                     return Some(candidate);
                 }
                 if !p.pop() {
@@ -582,12 +592,23 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join(name);
-            if candidate.is_file() {
+            if is_executable(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+/// Check that a path is a non-empty executable. Skips 0-byte
+/// placeholders left by interrupted builds, which would cause
+/// `ENOEXEC` (os error 8) at spawn time.
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .is_ok_and(|m| m.len() > 0 && m.permissions().mode() & 0o111 != 0)
 }
 
 // ── DiskDB deploy (R77) ───────────────────────────────────────────

@@ -49,56 +49,47 @@ job, not the sum.
 
 ## Suite Timing
 
-Measured on 2026-08-28 on Linux in the sequential pixi test run after the
-RPC shutdown fix. The C++ test execution totals were 15.94 s for tree, 2.71 s
-for RPC, and 4.61 s for diskio. Rust suite timings include their subprocess
-startup and shutdown work. The console-server suite completed; the console UI
-suite completed after fixing the store-isolation scan race (test 24). Seven
-pre-existing failures remain in capacity/diskdb and store-group/reconfig specs,
-unrelated to the scan fix.
+Measured on 2026-08-28 on Linux (post-task-fb pull `81d56124` + KV
+client dead-connection fix) in a sequential pixi test run with all
+binaries pre-compiled. C++ ctest suites report ctest's "Total Test
+time"; `test-common-ct` and Rust suites report wall-clock time
+including subprocess startup/shutdown. All console Rust suites pass
+(0 failures); `test-console-ui` was re-run and dropped from 8
+pre-existing failures to 1 (the `task-fb` pull fixed 7).
 
 | Suite | Tests | macOS | Linux (08-28) |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 416 | 20.1 s | 15.94 s |
-| `test-common-ct` | 21 | — | 17.76 s |
+| `test-tree-ct` | 416 | 20.1 s | 15.78 s |
+| `test-common-ct` | 21 | — | 17.78 s |
 | `test-tree-ffi` | 30 | 13.5 s | 0.54 s |
-| `test-rpc-ct` | 57 | — | 2.71 s |
-| `test-rpc-ffi` | 13 | — | 1.13 s |
-| `test-diskio-ct` | 93 | — | 4.61 s |
-| `test-common` | 65 | 21.9 s | 9.71 s |
-| `test-protocol` | 121 | 12.2 s | 0.15 s |
-| `test-kv-core` | 556 | 43.2 s | 68.02 s |
-| `test-kv-client` | 49 | 23.4 s | 4.54 s |
-| `test-chunkdb-client` | 10 | 13.8 s | 5.63 s |
-| `test-kv-server` | 81 | 53.0 s | 39.57 s |
-| `test-diskdb` | 127 | 42.8 s | 25.43 s |
-| `test-diskdb-client` | 7 | 13.9 s | 19.39 s |
-| `test-chunkdb` | 76 | 27.8 s | 20.73 s |
-| `test-chunk-client` | 49 | — | 15.18 s |
-| `test-diskio-client` | 4 | — | 42.89 s |
-| `test-console-shared` | 62 | 39.2 s | 24.31 s |
-| `test-console-cli` | 17 | 69.4 s | 58.42 s |
-| `test-console-server` | 71 | 50.7 s | 25.02 s |
-| `test-console-ui` | 102 | 165.7 s | 492.0 s (42 passed, 8 pre-existing failures) |
+| `test-rpc-ct` | 57 | — | 2.59 s |
+| `test-rpc-ffi` | 13 | — | 0.68 s |
+| `test-diskio-ct` | 93 | — | 4.46 s |
+| `test-common` | 65 | 21.9 s | 9.78 s |
+| `test-protocol` | 121 | 12.2 s | 0.70 s |
+| `test-kv-core` | 558 | 43.2 s | 63.20 s |
+| `test-kv-client` | 49 | 23.4 s | 4.70 s |
+| `test-chunkdb-client` | 10 | 13.8 s | 2.00 s |
+| `test-kv-server` | 81 | 53.0 s | 43.52 s |
+| `test-diskdb` | 127 | 42.8 s | 25.76 s |
+| `test-diskdb-client` | 7 | 13.9 s | 16.81 s |
+| `test-chunkdb` | 76 | 27.8 s | 19.75 s |
+| `test-chunk-client` | 49 | — | 12.11 s |
+| `test-diskio-client` | 4 | — | 43.22 s |
+| `test-console-shared` | 64 | 39.2 s | 9.36 s |
+| `test-console-cli` | 17 | 69.4 s | 44.09 s |
+| `test-console-server` | 74 | 50.7 s | 42.72 s |
+| `test-console-ui` | 102 | 165.7 s | 327.13 s (49 passed, 1 failed) |
 
 Pre-existing `test-console-ui` failures (not caused by the reset/deployer
 work):
 
-- `21-kv-cluster-reconfig` — "stopping a non-leader keeps quorum,
-  stopping the leader triggers reelection"
-- `21-kv-cluster-reconfig` — "deleting non-leader nodes preserves
-  quorum down to majority"
-- `50-capacity-diskdb` — "disk-group and disk CRUD via the UI"
 - `50-capacity-diskdb` — "disk maintenance operations, set-status,
-  and health badges"
-- `50-capacity-diskdb` — "assign disk-group to diskdb via UI (owner +
-  bind); capacity non-zero when RPC reachable"
-- `50-capacity-diskdb` — "full deploy flow: deploy diskdb via UI,
-  restart, stop, delete via context menu"
-- `51-capacity-canvas` — "CapacityPanel shows cluster totals and
-  instance count"
-- `51-capacity-canvas` — "datacenter root in Capacity sidebar;
-  inspector shows cluster totals"
+  and health badges" — `waitForResponse` timeout on
+  `/api/diskdb/recalc` (10 s); the recalc RPC never returns when no
+  diskdb instance is reachable. The `task-fb` pull (`81d56124`) fixed
+  the other 7 previously-failing specs (reconfig, disk CRUD, deploy
+  flow, capacity canvas).
 
 ---
 

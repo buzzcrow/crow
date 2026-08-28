@@ -18,7 +18,9 @@ fn tempdir(tag: &str) -> PathBuf {
     let base = std::env::temp_dir().join("crow-deployer-tests");
     let _ = std::fs::create_dir_all(&base);
     let pid = std::process::id();
-    base.join(format!("{tag}-{pid}"))
+    let dir = base.join(format!("{tag}-{pid}"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 async fn spawn_web(cfg_path: PathBuf) -> String {
@@ -43,7 +45,7 @@ async fn deployer_start_stop_reset_cycle() {
         eprintln!("skipping: crow-kv-server binary not found");
         return;
     }
-    let cfg_path = tempdir("cycle");
+    let cfg_path = tempdir("cycle").join("console.toml");
     let base_url = spawn_web(cfg_path).await;
 
     let mut deployer = CrowClusterDeployer::new(&base_url).expect("deployer");
@@ -87,7 +89,7 @@ async fn deployer_repeated_cycles_no_state_leakage() {
         eprintln!("skipping: crow-kv-server binary not found");
         return;
     }
-    let cfg_path = tempdir("repeat");
+    let cfg_path = tempdir("repeat").join("console.toml");
     let base_url = spawn_web(cfg_path).await;
 
     let mut deployer = CrowClusterDeployer::new(&base_url).expect("deployer");
@@ -110,7 +112,7 @@ async fn deployer_repeated_cycles_no_state_leakage() {
 
 #[tokio::test]
 async fn deployer_reset_on_empty_is_fast() {
-    let cfg_path = tempdir("empty-reset");
+    let cfg_path = tempdir("empty-reset").join("console.toml");
     let base_url = spawn_web(cfg_path).await;
 
     let deployer = CrowClusterDeployer::new(&base_url).expect("deployer");

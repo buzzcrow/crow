@@ -118,6 +118,31 @@ impl KvRpcTransport {
         self.connections.clear();
     }
 
+    /// Remove all cached connections for `rpc_endpoint` so the next
+    /// `conn_for` re-establishes a fresh connection. Called when an
+    /// RPC fails with a retryable transport error (`SendQueueFull`,
+    /// `ConnectionClosed`, etc.) — the cached connection is dead and
+    /// must be replaced.
+    fn drop_endpoint(&self, rpc_endpoint: &str) {
+        let normalized = normalize_endpoint(rpc_endpoint);
+        if let Some(mut entry) = self.connections.get_mut(&normalized) {
+            entry.value_mut().clear();
+        }
+    }
+
+    /// Convert an `RpcError` to `Error`, dropping cached connections
+    /// for `endpoint` on retryable transport errors so the next call
+    /// reconnects. Preserves the endpoint in the error message.
+    fn map_rpc_err(&self, e: RpcError, endpoint: &str) -> Error {
+        if e.is_retryable() {
+            self.drop_endpoint(endpoint);
+        }
+        Error::Transport {
+            endpoint: endpoint.to_string(),
+            status: format!("rpc error: {e:?}"),
+        }
+    }
+
     /// Get or create a `Connection` for the given endpoint, round-
     /// robining across the pool. The crow-rpc server listens on the
     /// same port as the crow-rpc endpoint (no port derivation).
@@ -203,8 +228,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "put response missing control buffer".into(),
@@ -273,8 +298,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "get response missing control buffer".into(),
@@ -317,8 +342,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "delete response missing control buffer".into(),
@@ -376,8 +401,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "batch_write response missing control buffer".into(),
@@ -434,8 +459,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "scan response missing control buffer".into(),
@@ -482,8 +507,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "journal_scan response missing control buffer".into(),
@@ -520,8 +545,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "create_snapshot response missing control buffer".into(),
@@ -565,8 +590,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "list_snapshots response missing control buffer".into(),
@@ -630,8 +655,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "snapshot_scan response missing control buffer".into(),
@@ -688,8 +713,8 @@ impl KvRpcTransport {
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(rpc_error_to_client)?;
-        let resp = fut.await.map_err(rpc_error_to_client)?;
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
             status: "release_snapshot response missing control buffer".into(),
@@ -896,13 +921,6 @@ fn fb_ret_code_to_kv_error_code(code: FBKvClientRetCode) -> i32 {
         FBKvClientRetCode::Unavailable => KvErrorCode::KvErrorUnavailable as i32,
         FBKvClientRetCode::JournalScanGcGap => KvErrorCode::KvErrorJournalScanGcGap as i32,
         _ => KvErrorCode::KvErrorInternal as i32,
-    }
-}
-
-fn rpc_error_to_client(e: RpcError) -> Error {
-    Error::Transport {
-        endpoint: String::new(),
-        status: format!("rpc error: {e:?}"),
     }
 }
 

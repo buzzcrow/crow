@@ -190,6 +190,9 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
+    // Register the upstream's pid so `refresh_node_cache` (which skips
+    // nodes with no tracked runtime pid) refreshes after mutations.
+    state.set_runtime_pid(1, upstream.pid);
 
     let client = ServerClient::new(upstream.mgmt_url.clone()).unwrap();
     if let Ok(stores) = client.topology().await {
