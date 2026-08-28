@@ -8,6 +8,7 @@ import {
   createRack,
   createNode,
   freePort,
+  freePortRange,
   addDiskGroup as apiAddDiskGroup,
   removeDiskGroup as apiRemoveDiskGroup,
   addDisksBatch,
@@ -496,12 +497,16 @@ test.describe('capacity · diskdb', () => {
 
       // --- Compact Zones opens zone select dialog with range input ---
 
+      // Wait for DG-545 to appear — fetchNodeDiskGroups fetches all
+      // 15 disk groups + their disks (16 API calls) and is not polled,
+      // so the tree may not have them yet.
+      await expect(aside.getByText(/DG-545/, { exact: true })).toBeVisible({ timeout: 10_000 });
       const expandDg545 = aside.getByRole('treeitem').filter({ hasText: /DG-545/ }).locator('button[aria-label="Expand"]');
       if (await expandDg545.count() > 0) await expandDg545.click();
 
       // Right-click the disk → Compact Zones.
       const disk545Label = aside.getByText(disk545.slice(0, 12), { exact: false });
-      await expect(disk545Label).toBeVisible({ timeout: 5_000 });
+      await expect(disk545Label).toBeVisible({ timeout: 10_000 });
       await clickMenuItem(page, disk545Label.first(), /compact zones/i);
 
       const compactDialog = page.getByRole('dialog', { name: /compact zones/i });
@@ -1283,7 +1288,7 @@ test.describe('capacity · diskdb', () => {
     const diskId = randomDiskId();
     const storeId = 590;
     const groupId = 590;
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     // Deploy diskdb via API (the UI deploy flow is tested in the next
     // test; here we just need a running instance for ownership assignment).
@@ -1419,7 +1424,7 @@ test.describe('capacity · diskdb', () => {
   test('full deploy flow: deploy diskdb via UI, restart, stop, delete via context menu', async ({ page, baseURL }) => {
     test.setTimeout(90_000);
     const nodeId = DISKDB_NODE;
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     // Helper: fetch /api/servers and return {kv, ddb} entries for this node.
     async function fetchBothServices(api: import('@playwright/test').APIRequestContext) {

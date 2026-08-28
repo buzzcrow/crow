@@ -8,7 +8,9 @@ mod common;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvSetRequest};
+use crow_kv::rpc::{
+    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvErrorCode, KvGetRequest, KvSetRequest,
+};
 use crow_kv_client::KvRpcTransport;
 use serde_json::Value;
 
@@ -98,9 +100,17 @@ enum KvOp {
 }
 
 /// Execute a KV operation against the current leader, refreshing the leader
-/// and retrying when the RPC returns "not leader". This lets tests keep the
-/// aggressive `test` election profile while tolerating transient leader
-/// churn on the same physical host.
+/// and retrying on transient failures. This lets tests keep the aggressive
+/// `test` election profile while tolerating leader churn on the same physical
+/// host. Retries on:
+/// - transport errors (Timeout, `ConnectionClosed`, etc.) — the resolved
+///   leader may have stepped down to candidate (no KV response) or be
+///   briefly unreachable;
+/// - `NotLeader` / `Unavailable` response codes — the leader changed or
+///   quorum was not yet reached.
+///
+/// Deterministic errors (`Internal`, unknown codes) fail fast. A legitimate
+/// `not_found` (Get on a missing key) is returned immediately.
 async fn run_kv_op_with_retry(nodes: &[ServerNode], group_id: u64, op: &KvOp) -> crow_kv::rpc::KvResponse {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let transport = Arc::new(KvRpcTransport::new());
@@ -116,13 +126,25 @@ async fn run_kv_op_with_retry(nodes: &[ServerNode], group_id: u64, op: &KvOp) ->
             KvOp::BatchWrite(req) => client.batch_write(req.clone()).await,
         };
         match result {
-            Ok(resp) => return resp.into_inner(),
+            Ok(resp) => {
+                let resp = resp.into_inner();
+                if resp.ok || resp.not_found {
+                    return resp;
+                }
+                // ok=false without not_found: classify by error_code.
+                let code = KvErrorCode::try_from(resp.error_code).unwrap_or(KvErrorCode::KvErrorInternal);
+                if matches!(
+                    code,
+                    KvErrorCode::KvErrorNotLeader | KvErrorCode::KvErrorUnavailable
+                ) {
+                    last_err = resp.error.clone();
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                panic!("kv rpc failed (error_code={}): {}", resp.error_code, resp.error);
+            }
             Err(status) => {
                 last_err = status.message().to_string();
-                assert!(
-                    last_err.to_lowercase().contains("not leader"),
-                    "kv rpc failed: {last_err}"
-                );
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
@@ -482,11 +504,15 @@ async fn e2e_dynamic_group_management() {
         assert_eq!(detail["groups"].as_array().unwrap().len(), 1);
     }
 
-    let leader_idx = wait_for_leader(&nodes, group_id, std::time::Duration::from_secs(20)).await;
-    let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-    let kv = TestKvClient::connect(format!("http://{leader_addr}")).await;
-    let resp = kv
-        .put(KvSetRequest {
+    // The group-2 add/remove churn can delay group-1 heartbeats and cause
+    // a transient leader flap right after `wait_for_leader` resolves. Use
+    // the retry helper (re-resolves the leader, retries on Timeout /
+    // NotLeader / Unavailable) instead of a bare single put — matches the
+    // pattern used by every other KV-op test in this file.
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_id,
+        &KvOp::Put(KvSetRequest {
             version: 1,
             key: Bytes::from_static(b"after-remove"),
             value: Bytes::from_static(b"still-works"),
@@ -496,10 +522,9 @@ async fn e2e_dynamic_group_management() {
             request_id: 3001,
             request_create_ms: 30001,
             group_id,
-        })
-        .await
-        .unwrap()
-        .into_inner();
+        }),
+    )
+    .await;
     assert!(resp.ok);
 }
 

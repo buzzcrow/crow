@@ -8,6 +8,7 @@ import {
   createRack,
   createNode,
   freePort,
+  freePortRange,
   addDiskGroup as apiAddDiskGroup,
   removeDiskGroup as apiRemoveDiskGroup,
   addDisksBatch,
@@ -52,7 +53,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
   test('ScannerPanel renders with Run Scan button and empty state', async ({ page, baseURL }) => {
     test.setTimeout(30_000);
     const nodeId = CANVAS_NODE;
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     try {
       await deployDiskdb(baseURL!, nodeId, rpcPort);
@@ -87,7 +88,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
   test('CapacityPanel shows cluster totals and instance count', async ({ page, baseURL }) => {
     test.setTimeout(30_000);
     const nodeId = CANVAS_NODE;
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     try {
       await deployDiskdb(baseURL!, nodeId, rpcPort);
@@ -132,7 +133,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
     const nodeId = CANVAS_NODE;
     const dgId = 610;
     const diskId = randomDiskId();
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     try {
       await deployDiskdb(baseURL!, nodeId, rpcPort);
@@ -213,7 +214,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
     const nodeId = CANVAS_NODE;
     const dgId = 620;
     const diskId = randomDiskId();
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     try {
       await stepTime('dc: deployDiskdb', () => deployDiskdb(baseURL!, nodeId, rpcPort));

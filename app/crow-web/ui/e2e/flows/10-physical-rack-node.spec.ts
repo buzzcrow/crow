@@ -3,7 +3,7 @@
 // Baseline: 10s (2026-08-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, createNode, createRack, createStore, deployNodeServer, freePort, removeDiskdb, resetAll, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, createNode, createRack, createStore, deployNodeServer, freePort, freePortRange, removeDiskdb, resetAll, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 import { step } from '../fixtures/stepTimer';
 
 test.describe('physical · rack + node CRUD', () => {
@@ -112,7 +112,7 @@ test.describe('physical · rack + node CRUD', () => {
       const nodeId = 310;
       const restPort = freePort();
       const rpcPort = freePort();
-      const diskdbRpcPort = freePort();
+      const diskdbRpcPort = freePortRange(3);
       await step('rack-CRUD: createRack 31', () => createRack(baseURL!, { id: rackId, name: 'Rack Thirty-One' }));
 
       await step('rack-CRUD: add node+svc UI', async () => {

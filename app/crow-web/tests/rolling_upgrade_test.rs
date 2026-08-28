@@ -429,7 +429,13 @@ async fn mixed_version_3_node_cluster_kv_no_divergence() {
             .expect("terminate node");
         assert!(status.success());
 
-        let dead = Instant::now() + Duration::from_secs(3);
+        // Wait for graceful shutdown to complete. The server's per-layer
+        // shutdown timeout is 10s (ServerConfig::DEFAULT.shutdown_timeout_ms)
+        // and shutdown performs a real fsync of the WAL + engine snapshot,
+        // which can take several seconds under CI disk contention. The poll
+        // returns as soon as the process exits (normally ~200ms); the 15s
+        // cap is a safety net above the server's own 10s/layer budget.
+        let dead = Instant::now() + Duration::from_secs(15);
         while process_is_alive(pid) && Instant::now() < dead {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

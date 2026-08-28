@@ -25,6 +25,21 @@ export function freePort(): number {
   return nextPort++;
 }
 
+// Allocate `count` consecutive ports. Needed for diskdb, which derives
+// http_port = rpc_port + 1 and rpc_listen_port = rpc_port + 2 from the
+// single rpc_port passed to deployDiskdb. Without this, the monotonic
+// counter only advances by 1, and the next freePort() call returns a
+// port the diskdb is already bound to (port conflict).
+export function freePortRange(count: number): number {
+  if (count < 1) throw new Error('freePortRange: count must be >= 1');
+  if (nextPort + count > PORT_CEILING) {
+    throw new Error(`freePortRange: exhausted ${PORT_CEILING - PORT_BASE} ports; raise PORT_CEILING above the ephemeral range`);
+  }
+  const base = nextPort;
+  nextPort += count;
+  return base;
+}
+
 // ── Timing instrumentation ──────────────────────────────────────────
 
 export { step as stepTime } from './stepTimer';
@@ -656,7 +671,7 @@ export class CrowClusterDeployer {
     const instances: DiskdbInfo[] = [];
     if (!topo.deployDiskdb) return instances;
     for (const nodeId of nodes) {
-      const rpcPort = freePort();
+      const rpcPort = freePortRange(3);
       await deployDiskdb(this.baseURL, nodeId, rpcPort);
       instances.push({ nodeId, pid: 0, rpcPort });
     }
