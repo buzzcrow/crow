@@ -23,27 +23,28 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
 
     let stale_payload = encode_put_payload(b"stale", b"value");
     let followers = cluster.followers();
-    let follower = followers.first().expect("follower present");
-    // Step 10.7: unary `Accept` is retired. Seed the follower's slot 1
-    // by driving the local acceptor directly (the on_accept path the
-    // gRPC handler used to wrap). This keeps the test focused on the
-    // proposer's slot-retry behaviour rather than RPC plumbing.
-    let follower_group = follower.get_group(1).expect("group exists on follower");
-    let follower_replica = follower_group.local_replica();
-    let entry = PxLogEntry {
-        slot: 1,
-        ballot: PxBallot::new(10, 99),
-        term: 0,
-        payload: bytes::Bytes::from(stale_payload.clone()),
-    };
-    let reply = follower_replica.on_accept(&entry).await;
-    assert!(
-        matches!(reply, crow_kv::paxos::roles::PxAcceptReply::Accepted { .. }),
-        "preload accept should succeed: {reply:?}"
-    );
+    // Seed ALL followers' slot 1 so the leader cannot reach quorum
+    // without discovering the prior accepted value. With only one
+    // seeded follower in a 3-node cluster (quorum=2), the leader can
+    // reach quorum via the unseeded follower and overwrite slot 1.
+    for follower in &followers {
+        let follower_group = follower.get_group(1).expect("group exists on follower");
+        let follower_replica = follower_group.local_replica();
+        let entry = PxLogEntry {
+            slot: 1,
+            ballot: PxBallot::new(10, 99),
+            term: 0,
+            payload: bytes::Bytes::from(stale_payload.clone()),
+        };
+        let reply = follower_replica.on_accept(&entry).await;
+        assert!(
+            matches!(reply, crow_kv::paxos::roles::PxAcceptReply::Accepted { .. }),
+            "preload accept should succeed: {reply:?}"
+        );
+    }
 
     let leader = cluster.leader();
-    let mut kv = cluster.kv_client(leader).await;
+    let kv = cluster.kv_client(leader).await;
     let put_resp = kv
         .put(KvSetRequest {
             version: 1,

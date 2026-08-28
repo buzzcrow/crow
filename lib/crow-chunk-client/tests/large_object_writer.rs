@@ -16,7 +16,6 @@ use crow_chunk_client::{
 };
 use crow_common::ec::{decode, encode_parity_from_shards, EcScheme};
 use crow_protocol::common::ChunkId;
-use prost::Message;
 
 // ── ProtoLocation tests ──────────────────────────────────────────
 
@@ -32,8 +31,8 @@ fn location_proto_round_trip_single() {
         logical_offset: 0,
         logical_length: 50 * 1024 * 1024,
     };
-    let bytes = loc.encode_to_vec();
-    let back = ProtoLocation::decode(bytes.as_slice()).unwrap();
+    let bytes = bincode::serialize(&loc).unwrap();
+    let back: ProtoLocation = bincode::deserialize(&bytes).unwrap();
     assert_eq!(loc, back);
 }
 
@@ -52,11 +51,8 @@ fn location_proto_bytes_round_trip_3_entries() {
         })
         .collect();
 
-    let encoded: Vec<Vec<u8>> = locs.iter().map(ProtoLocation::encode_to_vec).collect();
-    let decoded: Vec<ProtoLocation> = encoded
-        .iter()
-        .map(|b| ProtoLocation::decode(b.as_slice()).unwrap())
-        .collect();
+    let encoded: Vec<Vec<u8>> = locs.iter().map(|l| bincode::serialize(l).unwrap()).collect();
+    let decoded: Vec<ProtoLocation> = encoded.iter().map(|b| bincode::deserialize(b).unwrap()).collect();
     assert_eq!(locs, decoded);
 }
 

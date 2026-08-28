@@ -12,13 +12,16 @@
 
 mod common;
 
-use bytes::Bytes;
-use crow_kv::rpc::kv_service_client::KvServiceClient;
-use crow_kv::rpc::{KvGetRequest, KvSetRequest};
-use serde_json::Value;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use crow_kv::rpc::{KvGetRequest, KvSetRequest};
+use crow_kv_client::KvRpcTransport;
+use serde_json::Value;
+
 use common::process::{start_test_server_with_ports, ServerHandle};
+use common::test_client::TestKvClient;
 
 const STORE_IDS: &[u64] = &[1, 2];
 const GROUP_ID: u64 = 10;
@@ -65,7 +68,7 @@ fn store_status(topo: &Value, store_id: u64) -> Value {
     store
 }
 
-/// The normalized gRPC endpoint for a store on a process.
+/// The normalized crow-rpc endpoint for a store on a process.
 async fn store_endpoint(handle: &ServerHandle, store_id: u64) -> String {
     let topo = topology(handle).await;
     store_status(&topo, store_id)["listen_addr"]
@@ -154,12 +157,11 @@ async fn kv_put(
     req_id: u64,
 ) -> bool {
     let deadline = Instant::now() + Duration::from_secs(15);
+    let transport = Arc::new(KvRpcTransport::new());
     while Instant::now() < deadline {
         let leader_idx = wait_for_store_leader(handles, store_id, group_id, Duration::from_secs(10)).await;
         let addr = store_endpoint(&handles[leader_idx], store_id).await;
-        let mut client = KvServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect");
+        let client = TestKvClient::with_transport(Arc::clone(&transport), format!("http://{addr}"));
         match client
             .put(KvSetRequest {
                 version: 1,
@@ -191,9 +193,7 @@ async fn kv_put(
 async fn kv_get(handles: &[ServerHandle], store_id: u64, group_id: u64, key: &[u8]) -> Option<Vec<u8>> {
     let leader_idx = wait_for_store_leader(handles, store_id, group_id, Duration::from_secs(10)).await;
     let addr = store_endpoint(&handles[leader_idx], store_id).await;
-    let mut client = KvServiceClient::connect(format!("http://{addr}"))
-        .await
-        .expect("connect");
+    let client = TestKvClient::connect(format!("http://{addr}")).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,

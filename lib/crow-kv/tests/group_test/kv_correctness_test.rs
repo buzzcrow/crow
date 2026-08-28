@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! KV operation correctness through group `propose` / gRPC KV API.
+//! KV operation correctness through group `propose` / crow-rpc KV API.
 //!
 //! Covers all op types and orderings: Put, overwrite, Delete,
 //! delete non-existent, batch with multiple puts, intra-batch
@@ -10,15 +10,11 @@
 //! replicas.
 
 use crate::common::cluster::{start_cluster, TestCluster};
+use crate::common::test_client::TestKvClient;
 use bytes::Bytes;
 use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetRequest};
 
-async fn put(
-    client: &mut crow_kv::rpc::kv_service_client::KvServiceClient<tonic::transport::Channel>,
-    key: &[u8],
-    val: &[u8],
-    req_id: u64,
-) {
+async fn put(client: &mut TestKvClient, key: &[u8], val: &[u8], req_id: u64) {
     let resp = client
         .put(KvSetRequest {
             version: 1,
@@ -37,11 +33,7 @@ async fn put(
     assert!(resp.ok, "put failed for key {key:?}");
 }
 
-async fn delete(
-    client: &mut crow_kv::rpc::kv_service_client::KvServiceClient<tonic::transport::Channel>,
-    key: &[u8],
-    req_id: u64,
-) {
+async fn delete(client: &mut TestKvClient, key: &[u8], req_id: u64) {
     let resp = client
         .delete(KvDeleteRequest {
             version: 1,
@@ -58,11 +50,7 @@ async fn delete(
     assert!(resp.ok, "delete failed for key {key:?}");
 }
 
-async fn batch_write(
-    client: &mut crow_kv::rpc::kv_service_client::KvServiceClient<tonic::transport::Channel>,
-    items: Vec<(&[u8], &[u8], bool)>,
-    req_id: u64,
-) {
+async fn batch_write(client: &mut TestKvClient, items: Vec<(&[u8], &[u8], bool)>, req_id: u64) {
     let resp = client
         .batch_write(KvBatchWriteRequest {
             version: 1,

@@ -17,7 +17,7 @@ use crow_chunkdb::lifecycle::LifecycleHandler;
 use crow_chunkdb::routing::{
     default_binding_table, BindingCache, BindingTable, BucketBinding, MigrationState,
 };
-use crow_chunkdb::service::ChunkdbService;
+use crow_chunkdb::service::ChunkdbRpcService;
 use crow_chunkdb::storage::ChunkStore;
 use crow_chunkdb::topology::TopologyCache;
 use crow_kv_client::{ClientConfig, CrowkvClient, ServiceRegistryClient};
@@ -94,10 +94,10 @@ async fn lifecycle_handler_full_wiring() {
 
 #[tokio::test]
 async fn service_construction() {
-    // Verify the gRPC service can be constructed with a real handler.
+    // Verify the crow-rpc service can be constructed with a real handler.
     let handler = Arc::new(build_handler());
-    let service = ChunkdbService::new(handler);
-    let _server = service.into_server();
+    let rt_handle = tokio::runtime::Handle::current();
+    let _service = ChunkdbRpcService::new(handler, rt_handle);
 }
 
 #[tokio::test]

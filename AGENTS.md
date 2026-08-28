@@ -11,7 +11,7 @@ Rust workspace + C++ storage engine (via FFI).
 - **`crow-kv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
 - **`crow-kv-client`** — client library (retry, topology cache, `NotLeaderHint`) + group-0 sysdata service classes (`HardwareClient`, `ServiceRegistryClient`, `KVClusterMetaClient`, `KVClusterAdmin`); `ffi` feature exposes a C ABI for C++ consumers (primarily `crow-diskio`).
 - **`crow-kv-server`** — binary: CLI, HTTP management API (internal — only called by `crow-kv-client`), store/group/replica wiring, keep-alive loop.
-- **`crow-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, gRPC service stubs; allocation logic is R72).
+- **`crow-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, crow-rpc service stubs; allocation logic is R72).
 - **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CROW.
 - **`lib/crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
 - **`lib/crow-rpc/ffi`** — Rust async facade over C++ crow-rpc C ABI (epoll/kqueue transport, flatbuffer framing, request/response correlation via oneshot channels).
@@ -43,8 +43,8 @@ Rust workspace + C++ storage engine (via FFI).
 
 ## Bench Targets
 
-- `crow-cli bench kv` — 3-node Paxos cluster, measures full KV path (consensus + WAL + storage). Use `--mode mem|file|block` to select storage engine.
-- `crow-cli bench rpc` — 2-process RPC echo server, measures raw transport throughput (epoll/kqueue + framing + correlation). No KV layer. Use `tools/bench-rpc-regression.sh` for the regression sentinel.
+- `crow-cli bench kv` — 3-node Paxos cluster, measures full KV path (consensus + WAL + storage). Use `--mode mem|file|block` to select storage engine. Spawns `crow-kv-server` as a subprocess (not a cargo dependency of `crow-cli`) — always build both: `pixi run -- cargo build --release -p crow-cli -p crow-kv-server`.
+- `crow-cli bench rpc` — 2-process RPC fb server, measures raw transport throughput (epoll/kqueue + framing + correlation). No KV layer. Use `tools/bench-rpc-regression.sh` for the regression sentinel.
 
 ## Dispatch — Read Before Acting
 

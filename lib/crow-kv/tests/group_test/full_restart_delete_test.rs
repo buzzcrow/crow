@@ -4,7 +4,7 @@
 //! Full-cluster restart durability for deletes.
 //!
 //! Reproduces the web-console `cluster_restart_recovery_test` failure at the
-//! `crow_kv` layer (no console / gRPC proxy): a 3-node WAL-backed group commits
+//! `crow_kv` layer (no console / crow-rpc proxy): a 3-node WAL-backed group commits
 //! puts and deletes, then EVERY node is killed and restarted from its own WAL
 //! dir. After restart the deleted keys must stay deleted (no resurrection) and
 //! the surviving keys must remain readable.
@@ -19,11 +19,12 @@ use crow_kv::cluster::group_config::GroupConfigStore;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::common::config::{PxElectionConfig, WalConfig};
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvDeleteRequest, KvGetRequest, KvSetRequest};
 use crow_kv::wal::replay::replay_group;
 use crow_kv::wal::{IoBackend, WalEngine};
-use tonic::transport::Channel;
+use crow_kv_client::KvRpcTransport;
+
+use crate::common::test_client::TestKvClient;
 
 const GROUP: u64 = 1;
 
@@ -35,6 +36,7 @@ struct WalNode {
 
 struct WalCluster {
     nodes: Vec<WalNode>,
+    kv_transport: Arc<KvRpcTransport>,
     _tmp: tempfile::TempDir,
     _net: tokio::sync::MutexGuard<'static, ()>,
 }
@@ -133,6 +135,7 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
 
     WalCluster {
         nodes,
+        kv_transport: Arc::new(KvRpcTransport::new()),
         _tmp: tmp,
         _net: net,
     }
@@ -149,13 +152,11 @@ impl WalCluster {
         })
     }
 
-    async fn kv_client(&self, node: &WalNode) -> KvServiceClient<Channel> {
-        KvServiceClient::connect(format!(
-            "http://{}",
-            node.store.listen_addr().expect("bound addr")
-        ))
-        .await
-        .expect("connect kv")
+    fn kv_client(&self, node: &WalNode) -> TestKvClient {
+        TestKvClient::with_transport(
+            Arc::clone(&self.kv_transport),
+            format!("http://{}", node.store.listen_addr().expect("bound addr")),
+        )
     }
 
     async fn wait_for_leader(&self, timeout: Duration) -> Option<u64> {
@@ -173,7 +174,7 @@ impl WalCluster {
     async fn read_local_everywhere(&self, key: &[u8]) -> Vec<(u64, Option<Vec<u8>>)> {
         let mut out = Vec::new();
         for node in &self.nodes {
-            let mut client = self.kv_client(node).await;
+            let client = self.kv_client(node);
             let resp = client
                 .get(KvGetRequest {
                     version: 1,
@@ -207,7 +208,6 @@ impl WalCluster {
         for node in self.nodes.drain(..) {
             node.store.shutdown(Duration::from_secs(2)).await;
         }
-
         // Pass 1: bind each store with NO remotes wired yet — exactly the
         // web-console restore window where `add_group` runs before
         // `add_remote_replicas`. With zero remotes the group is quorum=1 and
@@ -227,10 +227,28 @@ impl WalCluster {
                 wal_dir: wal_dir.clone(),
             });
         }
-        // Let each lone (quorum=1) replica self-promote and run repair before
-        // any remotes are wired — reproducing the restore-window race.
-        tokio::time::sleep(Duration::from_millis(800)).await;
-
+        // Wait until every lone (quorum=1) replica has self-promoted to
+        // leader before wiring remotes — reproducing the restore-window
+        // race. Poll instead of a fixed sleep so we proceed as soon as
+        // the election driver has promoted all nodes.
+        let promote_start = Instant::now();
+        loop {
+            let all_leaders = nodes.iter().all(|n| {
+                n.store
+                    .get_group(GROUP)
+                    .expect("group")
+                    .local_replica()
+                    .is_leader()
+            });
+            if all_leaders {
+                break;
+            }
+            assert!(
+                promote_start.elapsed() < Duration::from_secs(5),
+                "lone replicas did not all self-promote within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         // Pass 2: rewire peers to the actual bound endpoints.
         let endpoints: Vec<(u64, String)> = nodes
             .iter()
@@ -255,7 +273,7 @@ async fn put(cluster: &WalCluster, key: &str, value: &str, seq: u64) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if let Some(leader) = cluster.elected_leader() {
-            let mut client = cluster.kv_client(leader).await;
+            let client = cluster.kv_client(leader);
             let resp = client
                 .put(KvSetRequest {
                     version: 1,
@@ -285,7 +303,7 @@ async fn delete(cluster: &WalCluster, key: &str, seq: u64) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if let Some(leader) = cluster.elected_leader() {
-            let mut client = cluster.kv_client(leader).await;
+            let client = cluster.kv_client(leader);
             let resp = client
                 .delete(KvDeleteRequest {
                     version: 1,

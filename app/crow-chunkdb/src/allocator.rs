@@ -226,11 +226,9 @@ fn assemble_strip(
             sealed_ts_ms: 0,
             sealed_length: 0,
             strip_type: ProtoStripType::Mirror as i32,
-            strip: Some(crow_protocol::chunkdb::rpc::chunk_strip::Strip::MirrorStrip(
-                MirrorStrip {
-                    segments: segments.to_vec(),
-                },
-            )),
+            strip: Some(crow_protocol::chunkdb::rpc::Strip::MirrorStrip(MirrorStrip {
+                segments: segments.to_vec(),
+            })),
             usage_bitmap: Vec::new(),
         },
         StripAllocType::Ec { data_num, code_num } => ChunkStrip {
@@ -242,14 +240,12 @@ fn assemble_strip(
             sealed_ts_ms: 0,
             sealed_length: 0,
             strip_type: ProtoStripType::Ec as i32,
-            strip: Some(crow_protocol::chunkdb::rpc::chunk_strip::Strip::EcStrip(
-                EcStrip {
-                    data_num: u32::try_from(data_num).unwrap_or(u32::MAX),
-                    code_num: u32::try_from(code_num).unwrap_or(u32::MAX),
-                    ec_state: crow_protocol::chunkdb::rpc::EcState::NoParity as i32,
-                    segments: segments.to_vec(),
-                },
-            )),
+            strip: Some(crow_protocol::chunkdb::rpc::Strip::EcStrip(EcStrip {
+                data_num: u32::try_from(data_num).unwrap_or(u32::MAX),
+                code_num: u32::try_from(code_num).unwrap_or(u32::MAX),
+                ec_state: crow_protocol::chunkdb::rpc::EcState::NoParity as i32,
+                segments: segments.to_vec(),
+            })),
             usage_bitmap: Vec::new(),
         },
     }

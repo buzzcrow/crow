@@ -122,17 +122,29 @@ async fn registry_start_stop_lifecycle() {
         1, // 1 second interval
     );
     runner.start();
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    // Stop performs a final flush
-    runner.stop().await;
-
-    // Find the metrics log file (open_metrics_log names it <prefix>-metrics-*.log)
+    // Poll until at least 1 periodic flush block appears in the log
+    // (the runner flushes every 1s). Then stop() adds the final flush.
     let metrics_file = std::fs::read_dir(tmp.path())
         .unwrap()
         .flatten()
         .find(|e| e.file_name().to_string_lossy().contains("-metrics-"))
         .map(|e| e.path())
         .expect("metrics log file not found");
+    let poll_start = std::time::Instant::now();
+    loop {
+        let content = std::fs::read_to_string(&metrics_file).unwrap();
+        if content.matches("[metrics").count() >= 1 {
+            break;
+        }
+        assert!(
+            poll_start.elapsed() < std::time::Duration::from_secs(5),
+            "no periodic flush within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // Stop performs a final flush
+    runner.stop().await;
+
     let content = std::fs::read_to_string(&metrics_file).unwrap();
     // Should have at least 2 flush blocks (periodic + final)
     let count = content.matches("[metrics").count();
@@ -283,7 +295,26 @@ async fn cpp_metrics_block_appears_with_matching_window() {
         let _ = writeln!(w);
     });
     runner.start();
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // Poll until at least 1 periodic flush (with both [metrics and
+    // [cpp-metrics blocks) appears in the log. The runner flushes
+    // every 1s; polling avoids a fixed 1200ms sleep.
+    let poll_start = std::time::Instant::now();
+    loop {
+        let mut content = String::new();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|e| e == "log") {
+                content.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+            }
+        }
+        if content.contains("[metrics ") && content.contains("[cpp-metrics ") {
+            break;
+        }
+        assert!(
+            poll_start.elapsed() < std::time::Duration::from_secs(5),
+            "no flush with both blocks within 5s, last content:\n{content}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     runner.stop().await;
 
     // Read the log file and check for both blocks.

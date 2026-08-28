@@ -4,7 +4,7 @@
 //! Vote granting tests: `PreVote` and `RequestVote` decision logic.
 //!
 //! These tests exercise `handle_pre_vote` and `handle_request_vote` on a
-//! bare `PxLocalReplica` — no peers, no gRPC. The decision is a pure function
+//! bare `PxLocalReplica` — no peers, no crow-rpc. The decision is a pure function
 //! of `(current_term, voted_for, vote_lockout_until, candidate_log_up_to_date)`.
 
 use crow_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};

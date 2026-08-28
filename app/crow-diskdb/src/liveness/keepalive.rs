@@ -78,9 +78,9 @@ pub struct KeepAlive {
     /// `heartbeat.interval_secs` from this handle each tick; when
     /// `None`, falls back to the fixed `config.interval` snapshot.
     config_handle: Option<Arc<arc_swap::ArcSwap<crate::ddb_config::DdbConfig>>>,
-    /// gRPC endpoint to register with the service registry (R74
+    /// crow-rpc endpoint to register with the service registry (R74
     /// keepalive piggyback). When empty, passes `""` (test mode).
-    grpc_endpoint: String,
+    rpc_endpoint: String,
     /// Optional metrics handle for sync latency/success/failure
     /// observations (R74 §11).
     metrics: Option<DiskdbMetrics>,
@@ -126,7 +126,7 @@ impl KeepAlive {
             kv: None,
             cas_retry_metric: None,
             config_handle: None,
-            grpc_endpoint: String::new(),
+            rpc_endpoint: String::new(),
             metrics: None,
             sync_trigger: None,
             disk_miss_counts: RwLock::new(HashMap::new()),
@@ -163,13 +163,13 @@ impl KeepAlive {
         self
     }
 
-    /// Attach the gRPC endpoint to register with the service registry
+    /// Attach the crow-rpc endpoint to register with the service registry
     /// (R74 keepalive piggyback). When set, `heartbeat` passes this
     /// endpoint + per-disk-group usage summaries to
     /// `heartbeat_diskdb`.
     #[must_use]
-    pub fn with_grpc_endpoint(mut self, endpoint: String) -> Self {
-        self.grpc_endpoint = endpoint;
+    pub fn with_rpc_endpoint(mut self, endpoint: String) -> Self {
+        self.rpc_endpoint = endpoint;
         self
     }
 
@@ -310,7 +310,7 @@ impl KeepAlive {
             .collect();
         if let Err(e) = self
             .svc
-            .heartbeat_diskdb(instance_id, &self.grpc_endpoint, &owned_dg_ids, &group_usages)
+            .heartbeat_diskdb(instance_id, &self.rpc_endpoint, &owned_dg_ids, &group_usages)
             .await
         {
             warn!(error = %e, "sync: heartbeat failed");

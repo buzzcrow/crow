@@ -13,12 +13,20 @@
 //!
 //! - `9910`–`9919` — crow-kv-server HTTP management API (stride 1)
 //! - `9920`–`9929` — crow-web HTTP service (stride 1)
-//! - `9941`–`9960` — crow-diskdb gRPC + HTTP management (paired,
-//!   stride 2; instance `i` uses gRPC `9941 + 2i`, HTTP `9942 + 2i`)
-//! - `9971`–`9990` — crow-chunkdb gRPC + HTTP management (paired,
-//!   stride 2; instance `i` uses gRPC `9971 + 2i`, HTTP `9972 + 2i`)
-//! - `28001`–`28200` — crow-kv-server gRPC `PxKvStore` listener pool
+//! - `9931`–`9940` — crow-diskdb crow-rpc listener (R115 migration,
+//!   stride 1; instance `i` uses `9931 + i`)
+//! - `9941`–`9960` — crow-diskdb main listener + HTTP management (paired,
+//!   stride 2; instance `i` uses listener `9941 + 2i`, HTTP `9942 + 2i`)
+//! - `9971`–`9990` — crow-chunkdb main listener + HTTP management (paired,
+//!   stride 2; instance `i` uses listener `9971 + 2i`, HTTP `9972 + 2i`)
+//! - `28001`–`28200` — crow-kv-server main `PxKvStore` listener pool
 //!   (stride 1)
+//! - `28101`–`28300` — crow-kv-server crow-rpc consensus listener (R32
+//!   migration, stride 1; inter-KV-server only. R117 adds a separate
+//!   client-facing port)
+//! - `28201`–`28400` — crow-kv-server crow-rpc client-facing listener
+//!   (R117 migration, stride 1; client-to-server only. Separate from
+//!   the consensus port so the two surfaces evolve independently)
 //!
 //! Future service types (diskio, …) should pick a base
 //! outside these ranges and document it here.
@@ -26,20 +34,45 @@
 /// crow-kv-server HTTP management API — base port.
 pub const KV_SERVER_MGMT_BASE: u16 = 9910;
 
-/// crow-kv-server gRPC `PxKvStore` listener — base port (port pool).
-pub const KV_SERVER_GRPC_BASE: u16 = 28001;
+/// crow-kv-server main `PxKvStore` listener — base port (port pool).
+pub const KV_SERVER_LISTEN_BASE: u16 = 28001;
 
-/// crow-diskdb gRPC listener — base port.
-pub const DISKDB_GRPC_BASE: u16 = 9941;
+/// crow-kv-server crow-rpc consensus listener — base port (R32
+/// migration). Separate from the main listener so both servers run
+/// simultaneously during the mixed-rollout window. Inter-KV-server
+/// only (replica-to-replica Paxos). R117 adds a separate client-facing
+/// port. Stride 1 (one port per instance).
+pub const KV_RPC_BASE: u16 = 28101;
+
+/// crow-kv-server crow-rpc client-facing listener — base port (R117
+/// migration). Separate from the consensus port so the two surfaces
+/// evolve independently. Stride 1 (one port per instance). Derived
+/// from the main listener port via `KV_CLIENT_RPC_BASE - KV_SERVER_LISTEN_BASE
+/// = 200` (parallel to R32's `KV_RPC_BASE - KV_SERVER_LISTEN_BASE =
+/// 100`).
+pub const KV_CLIENT_RPC_BASE: u16 = 28201;
+
+/// crow-diskdb main listener — base port.
+pub const DISKDB_LISTEN_BASE: u16 = 9941;
 
 /// crow-diskdb HTTP management API — base port.
 pub const DISKDB_HTTP_BASE: u16 = 9942;
 
-/// crow-chunkdb gRPC listener — base port.
-pub const CHUNKDB_GRPC_BASE: u16 = 9971;
+/// crow-diskdb crow-rpc listener — base port (R115 migration). Separate
+/// from the main listener so both servers run simultaneously during the
+/// mixed-rollout window. Stride 1 (one port per instance).
+pub const DISKDB_RPC_BASE: u16 = 9931;
+
+/// crow-chunkdb main listener — base port.
+pub const CHUNKDB_LISTEN_BASE: u16 = 9971;
 
 /// crow-chunkdb HTTP management API — base port.
 pub const CHUNKDB_HTTP_BASE: u16 = 9972;
+
+/// crow-chunkdb crow-rpc listener — base port (R116 migration).
+/// Separate from the main listener so both servers run simultaneously
+/// during the mixed-rollout window. Stride 1 (one port per instance).
+pub const CHUNKDB_RPC_BASE: u16 = 9961;
 
 /// crow-web HTTP service — base port.
 pub const WEB_BASE: u16 = 9920;
@@ -54,16 +87,22 @@ pub const WEB_BASE: u16 = 9920;
 pub enum ServicePort {
     /// crow-kv-server HTTP management API.
     KvServerMgmt,
-    /// crow-kv-server gRPC — `PxKvStore` listener (port pool).
-    KvServerGrpc,
-    /// crow-diskdb gRPC listener.
-    DiskdbGrpc,
+    /// crow-kv-server main `PxKvStore` listener (port pool).
+    KvServerListen,
+    /// crow-kv-server crow-rpc consensus listener (R32 migration).
+    KvServerRpc,
+    /// crow-kv-server crow-rpc client-facing listener (R117 migration).
+    KvServerClientRpc,
+    /// crow-diskdb main listener.
+    DiskdbListen,
     /// crow-diskdb HTTP management API.
     DiskdbHttp,
-    /// crow-chunkdb gRPC listener.
-    ChunkdbGrpc,
+    /// crow-chunkdb main listener.
+    ChunkdbListen,
     /// crow-chunkdb HTTP management API.
     ChunkdbHttp,
+    /// crow-chunkdb crow-rpc listener (R116 migration).
+    ChunkdbRpc,
     /// crow-web HTTP service.
     Web,
 }
@@ -74,11 +113,14 @@ impl ServicePort {
     pub const fn base(self) -> u16 {
         match self {
             Self::KvServerMgmt => KV_SERVER_MGMT_BASE,
-            Self::KvServerGrpc => KV_SERVER_GRPC_BASE,
-            Self::DiskdbGrpc => DISKDB_GRPC_BASE,
+            Self::KvServerListen => KV_SERVER_LISTEN_BASE,
+            Self::KvServerRpc => KV_RPC_BASE,
+            Self::KvServerClientRpc => KV_CLIENT_RPC_BASE,
+            Self::DiskdbListen => DISKDB_LISTEN_BASE,
             Self::DiskdbHttp => DISKDB_HTTP_BASE,
-            Self::ChunkdbGrpc => CHUNKDB_GRPC_BASE,
+            Self::ChunkdbListen => CHUNKDB_LISTEN_BASE,
             Self::ChunkdbHttp => CHUNKDB_HTTP_BASE,
+            Self::ChunkdbRpc => CHUNKDB_RPC_BASE,
             Self::Web => WEB_BASE,
         }
     }
@@ -88,10 +130,15 @@ impl ServicePort {
     #[must_use]
     pub const fn stride(self) -> u16 {
         match self {
-            Self::KvServerMgmt | Self::KvServerGrpc | Self::Web => 1,
-            // diskdb and chunkdb use paired ports (gRPC + HTTP); each
+            Self::KvServerMgmt
+            | Self::KvServerListen
+            | Self::KvServerRpc
+            | Self::KvServerClientRpc
+            | Self::Web
+            | Self::ChunkdbRpc => 1,
+            // diskdb and chunkdb use paired ports (listener + HTTP); each
             // instance consumes two consecutive ports.
-            Self::DiskdbGrpc | Self::DiskdbHttp | Self::ChunkdbGrpc | Self::ChunkdbHttp => 2,
+            Self::DiskdbListen | Self::DiskdbHttp | Self::ChunkdbListen | Self::ChunkdbHttp => 2,
         }
     }
 

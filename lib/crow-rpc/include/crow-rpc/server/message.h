@@ -34,10 +34,14 @@ Buffer *build_ping_request(BufferPool *pool, uint64_t request_id, uint64_t rpc_c
 
 // Build a ping response control buffer. Returns a pool-allocated Buffer
 // with the serialized ConnectionPingResponse flatbuffer.
-Buffer *build_ping_response(BufferPool *pool, uint64_t request_id, uint64_t rpc_create_nano);
+// response_create_nano is the server's steady_clock::now() at response
+// build time (server clock domain — not used by client for latency).
+Buffer *build_ping_response(BufferPool *pool, uint64_t request_id, uint64_t rpc_create_nano,
+                            uint64_t response_create_nano);
 
 // Build an unknown-message response control buffer.
-Buffer *build_unknown_response(BufferPool *pool, uint64_t request_id, uint64_t rpc_create_nano);
+Buffer *build_unknown_response(BufferPool *pool, uint64_t request_id, uint64_t rpc_create_nano,
+                               uint64_t response_create_nano);
 
 // Build a generic response control buffer for a custom msg_type. The
 // caller provides the raw flatbuffer bytes (already serialized). This

@@ -11,7 +11,7 @@
 //! epoch agrees again, per §6.3's confirmed trade-off.
 //!
 //! Uses the real 3-node `common::cluster` harness (separate `PxKvStore`
-//! processes-in-process, real gRPC wire messages, no mocks) rather than
+//! processes-in-process, real crow-rpc wire messages, no mocks) rather than
 //! the console's HTTP mgmt layer: the epoch bump itself is what's under
 //! test here, not the HTTP fan-out mechanics already covered by
 //! `crow-kv-server`'s `add_remote_replicas` tests. Calling
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -42,7 +42,7 @@ async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64
 
 async fn put(cluster: &TestCluster, client_id: u64, seq: u64, key: &[u8], value: &[u8]) -> (bool, String) {
     let leader = cluster.elected_leader().expect("leader present");
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
     let resp = client
         .put(KvSetRequest {
             version: 1,
@@ -63,7 +63,7 @@ async fn put(cluster: &TestCluster, client_id: u64, seq: u64, key: &[u8], value:
 
 async fn get_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     let leader = cluster.elected_leader()?;
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
     let resp = client
         .get(KvGetRequest {
             version: 1,
@@ -84,7 +84,7 @@ async fn get_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn membership_epoch_mismatch_stalls_writes_until_fanout_completes() {
     let cluster = start_cluster_no_leader(&[1, 2, 3]).await;
 

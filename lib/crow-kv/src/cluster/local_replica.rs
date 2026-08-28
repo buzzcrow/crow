@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Role of a local replica in the leader-election state machine.
 ///
@@ -343,6 +343,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.on_accept(entry).await)
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn on_pre_vote(
         &self,
         req: VoteRequestPayload,
@@ -359,6 +360,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.handle_request_vote(req).await)
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn on_heartbeat(
         &self,
         req: HeartbeatRequestPayload,
@@ -367,6 +369,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.handle_heartbeat(req))
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn on_step_down(
         &self,
         req: &StepDownRequestPayload,
@@ -587,15 +590,17 @@ impl PxLocalReplica {
         self.election_state.lock().clone()
     }
 
-    /// Cascade shutdown: flush + persist engine state, then rely on
+    /// Cascade shutdown: flush WAL + engine state, then rely on
     /// `Drop` for acceptor/learner resource release (slot list reclaim,
     /// in-memory KV map drop).
     ///
     /// The maintenance loop is already cancelled by `PxGroup::shutdown`
     /// before this method is called, so there is no concurrent
-    /// flush/snapshot risk. `flush()` drains L0 memtable into L1 B+tree
-    /// (in-memory); `persist_snapshot()` writes dirty L1 pages + superblock
-    /// to the page store (disk). For `InMemKV` both are no-ops.
+    /// flush/snapshot risk. The WAL is durably flushed (real `fsync`)
+    /// regardless of `--no-fsync` — shutdown always persists. Then
+    /// `engine.flush()` drains L0 memtable into L1 B+tree (in-memory);
+    /// `persist_snapshot()` writes dirty L1 pages + superblock to the
+    /// page store (disk). For `InMemKV` both are no-ops.
     #[tracing::instrument(level = "debug", skip_all, fields(replica_l_id = self.id))]
     #[allow(clippy::unused_async)] // async kept for cascade uniformity
     pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
@@ -610,6 +615,19 @@ impl PxLocalReplica {
         // R63: stop the background apply loop before flushing the engine.
         self.stop_apply_loop();
 
+        // Durably flush the WAL (real fsync, regardless of --no-fsync).
+        // This ensures shutdown always persists data to disk.
+        if let Some(wal) = &self.wal {
+            if let Err(e) = wal.flush_all().await {
+                warn!(
+                    replica_l_id = self.id,
+                    error = %e,
+                    "WAL flush_all failed during shutdown"
+                );
+            } else {
+                debug!(replica_l_id = self.id, "WAL flush_all completed during shutdown");
+            }
+        }
         let engine = self.learner.engine();
         engine.flush();
         let snap_slot = engine.persist_snapshot();

@@ -199,7 +199,7 @@ impl MonitorCache {
             }
         }
         // No healthy node — return the first replica so the caller can
-        // attempt anyway; gRPC will surface `NodeUnreachable`.
+        // attempt anyway; crow-rpc will surface `NodeUnreachable`.
         view.replicas.first().map(|r| (r.replica_id, r.node_id))
     }
 }

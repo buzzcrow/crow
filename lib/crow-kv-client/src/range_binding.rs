@@ -36,7 +36,7 @@ pub struct ChunkdbRangeBinding {
     pub range_start: u16,
     pub range_end: u16,
     pub instance_id: u64,
-    pub grpc_endpoint: String,
+    pub rpc_endpoint: String,
     pub original_instance_id: u64,
     pub original_endpoint: String,
     pub status: RangeStatus,
@@ -56,7 +56,7 @@ impl ChunkdbRangeBinding {
             range_start: u16::try_from(v.range_start).unwrap_or(0),
             range_end: u16::try_from(v.range_end).unwrap_or(u16::MAX),
             instance_id: v.instance_id,
-            grpc_endpoint: v.grpc_endpoint.clone(),
+            rpc_endpoint: v.rpc_endpoint.clone(),
             original_instance_id: v.original_instance_id,
             original_endpoint: v.original_endpoint.clone(),
             status: RangeStatus::try_from(v.status).unwrap_or(RangeStatus::Stable),
@@ -226,7 +226,7 @@ impl RangeBindingClient {
                 primary: binding.clone(),
                 fallback: Some(ChunkdbRangeBinding {
                     instance_id: binding.original_instance_id,
-                    grpc_endpoint: binding.original_endpoint.clone(),
+                    rpc_endpoint: binding.original_endpoint.clone(),
                     ..binding.clone()
                 }),
             })
@@ -302,7 +302,7 @@ mod tests {
             range_start: start,
             range_end: end,
             instance_id: instance,
-            grpc_endpoint: endpoint.to_string(),
+            rpc_endpoint: endpoint.to_string(),
             original_instance_id: 0,
             original_endpoint: String::new(),
             status: RangeStatus::Stable,
@@ -323,10 +323,10 @@ mod tests {
         };
         let r = client.route_bucket(20_000).unwrap();
         assert_eq!(r.instance_id, 1);
-        assert_eq!(r.grpc_endpoint, "http://a:1");
+        assert_eq!(r.rpc_endpoint, "http://a:1");
         let r = client.route_bucket(40_000).unwrap();
         assert_eq!(r.instance_id, 2);
-        assert_eq!(r.grpc_endpoint, "http://b:1");
+        assert_eq!(r.rpc_endpoint, "http://b:1");
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod tests {
             range_start: start,
             range_end: end,
             instance_id: instance,
-            grpc_endpoint: endpoint.to_string(),
+            rpc_endpoint: endpoint.to_string(),
             original_instance_id: orig_instance,
             original_endpoint: orig_endpoint.to_string(),
             status: RangeStatus::InTransition,
@@ -447,7 +447,7 @@ mod tests {
         };
         let r = client.route_with_fallback(500).unwrap();
         assert_eq!(r.primary.instance_id, 2);
-        assert_eq!(r.primary.grpc_endpoint, "http://b:1");
+        assert_eq!(r.primary.rpc_endpoint, "http://b:1");
         assert!(r.fallback.is_some());
         assert_eq!(r.fallback.unwrap().instance_id, 1);
     }

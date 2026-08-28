@@ -14,7 +14,6 @@
 //! apply is parked; with the fence, the read blocks until the apply
 //! completes and then returns the value.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +35,7 @@ fn leader_group(group_id: u64, my_id: u64) -> PxGroup {
 /// then returns the written value (read-your-writes holds).
 #[tokio::test]
 async fn linearizable_read_waits_for_async_apply() {
-    let store = Arc::new(PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0))));
+    let store = Arc::new(PxKvStore::new(0, "127.0.0.1:0".parse().unwrap()));
     store.add_group(leader_group(1, 1));
 
     // Park the spawned R17 apply so the fence's slow path is exercised
@@ -109,7 +108,7 @@ async fn linearizable_read_waits_for_async_apply() {
 /// has already completed by the time the read lands).
 #[tokio::test]
 async fn linearizable_read_fast_path_when_apply_done() {
-    let store = Arc::new(PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0))));
+    let store = Arc::new(PxKvStore::new(0, "127.0.0.1:0".parse().unwrap()));
     store.add_group(leader_group(1, 1));
 
     let put = store.kv_put(1, b"fast-key", b"fast-val", 8, 1, 1, 1).await;

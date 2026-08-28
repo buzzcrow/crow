@@ -3,7 +3,7 @@
 
 //! Unit tests for the `paxos::error` classifier: error keyword mapping and
 //! retry-action derivation. Cluster-level error propagation (not-leader hint,
-//! preemption retry, gRPC boundary rejection) lives in the group layer at
+//! preemption retry, crow-rpc boundary rejection) lives in the group layer at
 //! `tests/group/paxos_error_test.rs`.
 
 use crow_kv::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};

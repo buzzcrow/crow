@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
 
-    // Open the per-session operation log file. Outbound HTTP/gRPC/SSH
+    // Open the per-session operation log file. Outbound HTTP/crow-rpc/SSH
     // calls append a JSON-Lines record carrying the correlation id and
     // a curl-reproducible summary. Best-effort: a filesystem failure
     // here drops logging but does not abort startup.

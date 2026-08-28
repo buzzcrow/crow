@@ -80,6 +80,9 @@ pub(crate) struct PendingWrite {
     pub ack: oneshot::Sender<io::Result<SlotLocation>>,
 }
 
+/// Acknowledgment sender for Seal/Flush commands.
+type WriterAck = oneshot::Sender<io::Result<()>>;
+
 /// Commands sent to the writer task.
 pub(crate) enum WriterCommand {
     /// A pending write from an append caller.
@@ -87,6 +90,10 @@ pub(crate) enum WriterCommand {
     /// Seal the active segment and open a new one. The oneshot is resolved
     /// after the seal is durable.
     Seal { ack: oneshot::Sender<io::Result<()>> },
+    /// Durably flush the active segment (real `fsync`/`sync_all`). Used
+    /// during shutdown to persist data even when `--no-fsync` is set.
+    /// Does NOT seal or rotate the segment.
+    Flush { ack: oneshot::Sender<io::Result<()>> },
 }
 
 /// Spawn the writer task for one pipeline. Returns the command sender.
@@ -241,6 +248,16 @@ async fn pipeline_writer_loop(
                     return;
                 }
             }
+            WriterCommand::Flush { ack } => {
+                // Drain any pending writes first, then do a real fsync
+                // on the active segment. This is the shutdown path —
+                // always durable, regardless of --no-fsync.
+                let result = segment.flush().await;
+                if result.is_err() {
+                    failed.store(true, Ordering::Release);
+                }
+                let _ = ack.send(result);
+            }
         }
     }
 }
@@ -273,7 +290,8 @@ async fn handle_write_command(
     batch.clear();
     batch.push(first);
     let mut batch_bytes_acc = batch[0].encoded.total_len();
-    let mut pending_seal_acks = drain_pending_commands(rx, batch, &mut batch_bytes_acc, batch_bytes);
+    let (mut pending_seal_acks, pending_flush_acks) =
+        drain_pending_commands(rx, batch, &mut batch_bytes_acc, batch_bytes);
 
     // Capture segment_id before potential rotation.
     let segment_id = segment.segment_id;
@@ -315,7 +333,7 @@ async fn handle_write_command(
 
             resolve_batch_acks(batch, offsets, pipeline_idx, segment_id);
 
-            process_pending_seal_acks(
+            if !process_pending_seal_acks(
                 segment,
                 &mut pending_seal_acks,
                 rx,
@@ -329,6 +347,20 @@ async fn handle_write_command(
                 failed,
             )
             .await
+            {
+                for ack in pending_flush_acks {
+                    let _ = ack.send(Err(io::Error::other("WAL disk failed")));
+                }
+                return false;
+            }
+            for ack in pending_flush_acks {
+                let result = segment.flush().await;
+                if result.is_err() {
+                    failed.store(true, Ordering::Release);
+                }
+                let _ = ack.send(result);
+            }
+            true
         }
         Err(e) => {
             failed.store(true, Ordering::Release);
@@ -408,15 +440,17 @@ async fn handle_seal_command(
 }
 
 /// Drain all commands already queued in the channel, accumulating writes into
-/// `batch` and collecting any seal acks. Returns the list of pending seal
-/// acks that must be processed after the batch is flushed.
+/// `batch` and collecting any seal/flush acks. Returns the pending seal and
+/// flush acks that must be processed after the batch is flushed. At most one
+/// of the two vectors is non-empty (the first Seal/Flush causes a break).
 fn drain_pending_commands(
     rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
     batch: &mut Vec<PendingWrite>,
     batch_bytes_acc: &mut usize,
     batch_bytes: usize,
-) -> Vec<oneshot::Sender<io::Result<()>>> {
-    let mut pending_seal_acks: Vec<oneshot::Sender<io::Result<()>>> = Vec::new();
+) -> (Vec<WriterAck>, Vec<WriterAck>) {
+    let mut pending_seal_acks: Vec<WriterAck> = Vec::new();
+    let mut pending_flush_acks: Vec<WriterAck> = Vec::new();
     loop {
         match rx.try_recv() {
             Ok(WriterCommand::Write(req)) => {
@@ -430,10 +464,14 @@ fn drain_pending_commands(
                 pending_seal_acks.push(ack);
                 break;
             }
+            Ok(WriterCommand::Flush { ack }) => {
+                pending_flush_acks.push(ack);
+                break;
+            }
             Err(_) => break,
         }
     }
-    pending_seal_acks
+    (pending_seal_acks, pending_flush_acks)
 }
 
 /// Insert index entries for every non-metadata record in the batch.
@@ -679,7 +717,7 @@ fn drain_and_fail_all(rx: &mut mpsc::UnboundedReceiver<WriterCommand>) {
             WriterCommand::Write(req) => {
                 let _ = req.ack.send(Err(io::Error::other("WAL disk failed")));
             }
-            WriterCommand::Seal { ack } => {
+            WriterCommand::Seal { ack } | WriterCommand::Flush { ack } => {
                 let _ = ack.send(Err(io::Error::other("WAL disk failed")));
             }
         }

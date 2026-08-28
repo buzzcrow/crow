@@ -54,6 +54,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     collect_cpp(&common_src.join("metrics"), &mut sources)?;
     sources.push(common_src.join("gzip.cpp"));
 
+    // ── spdlog logging (mirrors crow-tree-ffi/build.rs) ──
+    // When spdlog is available in the conda/pixi env, enable
+    // CROW_HAVE_SPDLOG and compile log.cpp + compressing_sink.cpp so
+    // the CR_LOG_* macros route to an async file logger (separate
+    // `crow-rpc-*.log` files alongside the Rust server's `log/` dir).
+    // Without spdlog, the macros are zero-cost no-ops.
+    let conda_prefix = std::env::var("CONDA_PREFIX").ok().map(PathBuf::from);
+    let have_spdlog = conda_prefix.as_ref().is_some_and(|prefix| {
+        prefix.join("include").join("spdlog").is_dir()
+            && (prefix.join("lib").join("libspdlog.dylib").is_file()
+                || prefix.join("lib").join("libspdlog.so").is_file()
+                || prefix.join("lib").join("libspdlog.a").is_file())
+    });
+    if have_spdlog {
+        sources.push(common_src.join("log.cpp"));
+        sources.push(common_src.join("compressing_sink.cpp"));
+    }
+
     // Exclude platform-specific engines that don't compile on this OS.
     let target = std::env::var("TARGET").unwrap_or_default();
     let is_linux = target.contains("linux");
@@ -93,6 +111,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .include(&include)
         .include(&common_include)
         .files(sources.iter().map(|p| p.as_path()).collect::<Vec<_>>());
+
+    // Enable spdlog in the C++ build (gates CR_LOG_* macros).
+    if have_spdlog {
+        build.define("CROW_HAVE_SPDLOG", "1");
+    }
 
     // Generated flatbuffer C++ headers. The .fbs schemas live in
     // crow-protocol (single home for all proto types); run flatc --cpp
@@ -176,8 +199,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // zlib for gzip_compress_file (used by metrics check_rotate).
+    // zlib for gzip_compress_file (used by metrics check_rotate and
+    // compressing_sink's gzip-rotated log files).
     println!("cargo:rustc-link-lib=z");
+
+    // Link spdlog + fmt for the C++ async file logger (CR_LOG_* macros).
+    // fmt is bundled with spdlog in conda-forge. The rpath embedding
+    // ensures the dynamic linker finds libspdlog at runtime (pixi/conda
+    // lib dir is not in the default dyld search path).
+    if have_spdlog {
+        if let Some(prefix) = &conda_prefix {
+            let lib_dir = prefix.join("lib");
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            println!("cargo:rustc-link-lib=dylib=spdlog");
+            println!("cargo:rustc-link-lib=dylib=fmt");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+        }
+    }
 
     // Rerun if any source or header changes.
     for src in &sources {

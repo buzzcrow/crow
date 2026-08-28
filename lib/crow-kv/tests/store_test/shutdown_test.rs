@@ -57,7 +57,7 @@ async fn shutdown_is_idempotent() {
 
 #[tokio::test]
 async fn shutdown_without_start_is_clean() {
-    // No gRPC task spawned; shutdown should still return cleanly without
+    // No crow-rpc task spawned; shutdown should still return cleanly without
     // touching `shutdown_server` work.
     let store = make_store();
     let report = store.shutdown(Duration::from_secs(1)).await;

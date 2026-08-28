@@ -11,19 +11,76 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R118** — Bump this line in the same commit when adding a new item.
+**Next R number: R125** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-- **[R114](R114-rpc-streaming-support.md)** — crow-rpc streaming RPC
-  support — Area: rpc — R104 shipped request-response + one-way only;
-  streaming was explicitly deferred (§1 Non-Goals). Adds server-
-  streaming (one request → N response frames) and bi-directional
-  streaming (N request ↔ N response frames on one persistent
-  connection) via a stream-open/stream-close handshake + `stream_id`
-  correlation. **Blocks R32** (LearnerStream, StreamSnapshot) and
-  **R117** (WatchNotify). The three KV streaming RPCs cannot migrate
-  to crow-rpc until this lands.
+- **[R124](R124-console-bench-lifecycle-split.md)** — split bench
+  lifecycle into deploy/prepare/run/clean/teardown verbs — Area:
+  console / cli / bench — `bench kv` is monolithic per invocation
+  (provision + pre-pop + run + teardown every call), so the
+  regression sentinels pay deploy + pre-pop overhead on every
+  sub-test (read 11×, scan 14×, write 7×), capping practical dataset
+  size. Split into discrete CLI verbs orchestrated by the script:
+  `bench deploy --name <deploy> --kind kv|rpc|chunk|storage`
+  (multi-kind from the start; rpc needs no console-web, kv/chunk/
+  storage start one), `bench prepare --target <deploy>` (default
+  `put` semantics, multi-round to grow data), `bench run --target
+  <deploy>` (reads all connection info from the deploy folder, no
+  port re-entry), `bench clean --target <deploy>` (per-service wipe
+  endpoint with a deliberately non-trivial name/flow so it can't be
+  triggered accidentally; wipes WAL + engine data, keeps group0
+  sysdata), `bench teardown --target <deploy>`. Each deploy writes
+  metadata + node workspaces + server logs + cli logs under a named
+  `runtime/<deploy-name>/` folder (generalizing `bench-runs/`),
+  co-locating bench and cluster artifacts. Rewrite the three
+  `tools/bench-kv-*-regression.sh` scripts to deploy once → prepare
+  once → run × N → teardown (read/scan), and deploy once → (clean →
+  run) × N → teardown (write). Decisions resolved: console-web
+  lifetime is kind-dependent; clean is per-service with a hard-to-
+  mistake flow; `bench run` is a standalone verb with `--target`;
+  prepare uses default put; handles live in named runtime folders.
+- **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
+  test port prober — Area: cluster / protocol / server —
+  `crow-protocol/src/ports.rs` already defines base ports + stride +
+  `ServicePort` for all services, but adoption is incomplete:
+  `crow-kv-server` has no CLI flag for the consensus (`KV_RPC_BASE`) or
+  client-facing (`KV_CLIENT_RPC_BASE`) RPC ports; `crow-diskdb` takes
+  listen addrs from TOML config (not CLI flags with `ports.rs` defaults);
+  and `KvServer::start` still supports port 0 (OS-assigned), contradicting
+  the project flow. Wire every server to accept explicit per-listener
+  port flags (defaults from `crow-protocol::ports`), reject port 0, and
+  add an in-process port-prober + flock-coordinated claim file (library
+  + `crow-port-alloc` CLI binary, no daemon) that is the single place
+  picking ports, so tests and cluster bootstrap run in parallel without
+  `Address already in use`. Console UI E2E shells out to the CLI binary
+  to replace its private `freePort()` counter. Open questions: claim-to-
+  bind TOCTOU mitigation, claim-file path/format, probe port range,
+  cross-host scope, paired-port override semantics.
+- **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
+  review & unification — Area: cluster / observability — CROW has
+  two logging stacks (Rust `tracing` in `crow-common/rust`, C++
+  `spdlog` in `crow-common/cpp`) and four servers + `crow-cli`, but
+  only `crow-kv-server` wires up file logging with rotation +
+  compression; `crow-diskdb`, `crow-chunkdb`, and `crow-web`
+  initialize console-only `tracing_subscriber::fmt().init()` and
+  lose every log line when daemonized. The `crow-rpc` C++ library
+  ships a `crow_rpc_init_logging` C API that no Rust caller ever
+  invokes (no FFI wrapper, no call site), so the consensus
+  transport layer is silent. Log directories diverge (`"log"`,
+  `~/.crow-kv/log`, temp paths), log formats differ between Rust
+  and C++, and no audit has been done of whether log lines are
+  meaningful and self-explaining. R119 does a two-prong audit
+  (code review of every logging call site + run each service's
+  e2e test and read the real log output), then unifies every
+  server on the shared rotating-file logging stack, wires the
+  crow-rpc C++ logging through an FFI bridge, adopts one log
+  directory + format convention, adds a "Logging" section to
+  `design-crow-kv-observability.md` (current design gap — the doc
+  covers metrics only), and fixes log lines that are opaque,
+  noisy, or missing context. Verification: each service's e2e
+  test asserts its log file exists, is non-empty, and contains
+  self-explaining key lines.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
@@ -95,9 +152,9 @@ complexity, and dependency. Before implementation, follow the
 
 Dependency order: R93 → R106, R107 → R110, R111, R112
 (R110/R112 reuse R110's negative list; R111 reuses R110's negative
-list + degraded-strip tracking). The RPC migration items (R114,
-R115, R116, R117) are in a separate area (see RPC Migration section
-below); R32 depends on R114 + R115.
+list + degraded-strip tracking). The RPC migration items (R115,
+R116, R117) are in a separate area (see RPC Migration section
+below); R32 depends on R115.
 
 - **[R93](R93-chunkdb-mirror-to-ec-conversion.md)** — Mirror-to-EC
   conversion — Area: chunkdb — Background conversion of mirror strips
@@ -198,6 +255,41 @@ below); R32 depends on R114 + R115.
 
 ### Medium Priority
 
+- **[R121](R121-tree-cpp-lock-review.md)** — C++ mutex/lock review
+  fixes — Area: tree / rpc / common — Full review of all mutex/lock
+  usage across the C++ codebase (37 files) found 3 critical hot-path
+  findings, 5 medium, 17 OK. Highest-impact: `BufferPool::pin` holds
+  the global mutex during synchronous disk I/O on a cache miss — every
+  cache hit blocks behind every miss, making the buffer pool mutex a
+  global serialization point. Also critical: `ConcurrentSkipList`
+  spinlock (no backoff/fairness) on the `apply_batch` → `MemTable::upsert`
+  write path, and `HandlerRegistry::get_handler` mutex on every RPC
+  frame dispatch (handlers registered once at startup, never change).
+  Medium: `MetricsRegistry::register_*` data race (unsynchronized
+  `push_back` vs. `flush_to` iteration), `thread_name_flag` mutex on
+  every log line, `ConnectionPool` mutex on every connection acquire,
+  `Crowtree::resident` cold-path load serialization, `slot_mutex_` set
+  insert on the apply path. R121 tracks the fixes; OK findings document
+  correct patterns and need no action.
+- **[R122](R122-kv-rust-lock-review.md)** — Rust mutex/lock review
+  fixes — Area: kv / client / diskdb / server — Full review of all
+  mutex/`RwLock`/`parking_lot`/`tokio::sync` lock usage across the Rust
+  crates (75 files) found 3 critical hot-path findings, 7 medium, ~30
+  OK. The codebase leans heavily on lock-free patterns (`DashMap`,
+  `Atomic*`, `arc_swap`, `OnceLock`, per-bit CAS), so findings are
+  fewer/milder than C++ (R121). Highest-impact:
+  `PxLearner::out_of_order` `Mutex<BTreeMap>` taken on every accepted
+  slot on a follower for the chosen-frontier advance — serializes
+  concurrent out-of-order applies. Also critical: `WalEngine::index`
+  `Mutex<SegmentIndex>` held during every flush batch insert (multi-
+  pipeline flush completions serialize; GC stalls flushes), and
+  `ClientMetrics::window_lat` `std::Mutex` on every client RPC
+  completion. Medium: `RangeBindingClient` `RwLock` read on every route
+  (should use `arc_swap`), `MetricsRunner` collector inside
+  `registry.lock()` (same root cause as R121 #4), `PxGroup` coalescer/
+  peer-watermark mutexes, `PxLocalReplica` gap-slots/election-state
+  locked reads. R122 tracks the fixes; OK findings document notably
+  good lock-free design.
 - **[R83](R83-chunkdb-complete-recovery-flow.md)** — chunkdb
   complete recovery flow (real data recovery + speed control) —
   Area: chunkdb / diskdb / diskio — diskdb's recovery is disk-layer
@@ -236,58 +328,34 @@ below); R32 depends on R114 + R115.
   R81 Part 2.
 - **[R32](R32-kv-custom-rust-rpc.md)** — KV consensus hot path →
   `crow-rpc` — Area: kv / RPC — Migrate the internal replica-to-replica
-  Paxos path from gRPC/tonic to the `crow-rpc` flatbuffer RPC library.
+  Paxos path from the legacy tonic/h2 stack to the `crow-rpc` flatbuffer RPC library.
   Recovers the ~17% h2-lock throughput loss at 2T:1C
   (measured in `kv-read-flow-analysis.md`). Protocol semantics
   preserved (same request/response shapes, `NotLeaderHint`, error
   codes); only the transport changes. Depends on R104 (finished) +
-  R114 (streaming — for LearnerStream + StreamSnapshot). Management
+  R114 (finished — bidirectional request-response for LearnerStream +
+  StreamSnapshot). Management
   API stays on Axum/HTTP. Open Question resolved: full `.fbs`
-  conversion (no prost bridge), consistent with R105/diskio.
+  conversion (no prost bridge — the rejected approach), consistent with R105/diskio.
 
-### RPC Migration (gRPC → crow-rpc)
+### RPC Migration (legacy → crow-rpc)
 
-Dependency order: R114 → R32, R117 (streaming); R115 (unary,
-proof-of-pattern) → R116 (unary). R115 lands first to validate the
+Dependency order: R115 → R116 (unary); R117 (streaming) depends on
+R114 (finished) + R32. R115 lands first to validate the
 migration pattern (schema, server, client, error mapping, mixed
 rollout) before the streaming services. All four items follow the
 zero-copy wrapper convention (`design-crow-rpc.md` §6): `FB`-prefixed
 flatbuffer types, wrapper classes in `crow-protocol`, no owned
-intermediate structs, no per-field copy.
+intermediate structs, no per-field copy. All four items (R115 diskdb,
+R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
 
-- **[R115](R115-diskdb-rpc-migration.md)** — DiskdbService → crow-rpc
-  — Area: diskdb / rpc — Migrate all 11 DiskdbService unary RPCs
-  (AllocateBlocks, FreeBlocks, CommitBlocks, QueryCapacityStats, etc.)
-  from tonic/gRPC to crow-rpc. No streaming needed (R114 not
-  required). Serves as the **proof-of-pattern** for the full `.fbs`
-  conversion approach — exercises every migration step (schema,
-  server, client, error mapping, `grpc_endpoint` rename, mixed
-  rollout, cutover) that R32/R116/R117 repeat. Full `.fbs` conversion
-  (no prost bridge), consistent with R105/diskio.
-- **[R116](R116-chunkdb-rpc-migration.md)** — ChunkdbService →
-  crow-rpc — Area: chunkdb / rpc — Migrate all 8 ChunkdbService unary
-  RPCs (AllocateChunk, AppendChunk, QueryChunk, SealChunk,
-  UpdateChunkStrip, etc.) from tonic/gRPC to crow-rpc. No streaming
-  needed. Preserves `NotLeaderHint` as a flatbuffer response field
-  (redirect `ret_code` + leader endpoint). Should land after R115
-  (pattern validation) and after the chunk-layer refactor stabilizes
-  `ChunkWriter`'s RPC call sites.
-- **[R117](R117-kv-client-rpc-migration.md)** — KvService (client-
-  facing) → crow-rpc — Area: kv / rpc — Migrate the client→server
-  path: 10 unary RPCs (Put, Get, Delete, BatchWrite, Scan, etc.) +
-  1 bi-directional stream (WatchNotify). R32 migrates the internal
-  Paxos path; R117 migrates the client-facing path — the surface
-  that `crow-kv-client` and FFI consumers (crow-diskio) call. FFI C
-  ABI preserved (only internal transport changes). Depends on R114
-  (WatchNotify streaming) + R32 (validates KV `NotLeaderHint`
-  flatbuffer model + `kv_rpc.fbs` schema sub-range).
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
   scan error spike by wrapping the maintenance loop's `flush` /
   `persist_snapshot` / `collect_garbage` in `spawn_blocking`, but
   verified it only on the scan path. The maintenance loop runs
   identically under write load, yet the write regression sentinel
-  (`bench-write-regression.sh`) only exercises 512 B values — there is
+  (`bench-kv-write-regression.sh`) only exercises 512 B values — there is
   no large-value write config. Add a `largeval_16k` write config
   (`--value-size 16384`, 100k keys, 10s mem mode) and verify 0 write
   errors across 3 consecutive runs on Linux. If errors appear, RCA into
@@ -367,13 +435,28 @@ intermediate structs, no per-field copy.
   `persist_snapshot` / `collect_garbage` in `spawn_blocking`, but
   verified it only on the scan path. The maintenance loop runs
   identically under write load, yet the write regression sentinel
-  (`bench-write-regression.sh`) only exercises 512 B values — there is
+  (`bench-kv-write-regression.sh`) only exercises 512 B values — there is
   no large-value write config. Add a `largeval_16k` write config
   (`--value-size 16384`, 100k keys, 10s mem mode) and verify 0 write
   errors across 3 consecutive runs on Linux. If errors appear, RCA into
   whether the R67 fix has a write-path gap and file a follow-up
   requirement. Low complexity; verifies R67's coverage extends to
   writes.
+- **[R120](R120-kv-ignored-test-migration.md)** — revive crow-rpc migrated
+  ignored tests — Area: kv / tests — Two `#[ignore]`d test stubs in
+  `group_test.rs` cover real contracts with no other coverage at the
+  `crow-kv` layer: the forwarded-flag loop guard on `Get`/`Scan` (a
+  follower must not re-forward an already-forwarded request) and malformed
+  `Accept` rejection on the LearnerStream bidi path. Both have empty
+  bodies pending crow-rpc migration; the infrastructure now exists — write
+  the test bodies and un-ignore. Low complexity; no dependencies.
+- **[R123](R123-console-cli-short-flags.md)** — CLI short flag aliases
+  for all subcommands — Area: console / cli — Only `bench rpc` and the
+  global `--config` (`-p`) have short aliases; all other subcommands
+  (`bench kv`, `diskdb`, `disk`, `server`, `paxos`, `node`) and global
+  args (`--ip`, `--port`, `--json`) are long-only. Add `short = '<char>'`
+  to every `#[arg]` across all subcommands, following the `bench rpc`
+  precedent. Low complexity; no dependencies.
 
 ---
 

@@ -4,6 +4,7 @@
 
 import { test, expect, consoleBaseURL } from '../fixtures/realBackend';
 import { createRack, createNode, deployNodeServer, stopNodeServer, freePort } from '../fixtures/consoleSetup';
+import { step } from '../fixtures/stepTimer';
 
 // One rack/node/server shared by every test in this file so the canvas
 // has content in Physical and Capacity views (IDs reused from the former
@@ -15,19 +16,19 @@ test.describe('canvas · fit + pan', () => {
     // Idempotent setup: tolerate "already exists" from a prior run
     // that was interrupted before afterAll could clean up.
     try {
-      await createRack(apiBase, { id: 480, name: 'Rack 480' });
+      await step('canvas: create rack', () => createRack(apiBase, { id: 480, name: 'Rack 480' }));
     } catch (err) {
       if (!String(err).includes('already exists')) throw err;
     }
     try {
-      await createNode(apiBase, { id: 480, rack_id: 480 });
+      await step('canvas: create node', () => createNode(apiBase, { id: 480, rack_id: 480 }));
     } catch (err) {
       if (!String(err).includes('already exists')) throw err;
     }
     // Stop any leftover server from a prior run, then deploy fresh.
-    await stopNodeServer(apiBase, 480);
+    await step('canvas: stop leftover server', () => stopNodeServer(apiBase, 480));
     try {
-      await deployNodeServer(apiBase, 480, freePort(), freePort());
+      await step('canvas: deploy server', () => deployNodeServer(apiBase, 480, freePort(), freePort()));
     } catch (err) {
       await stopNodeServer(apiBase, 480);
       throw err;
@@ -35,12 +36,12 @@ test.describe('canvas · fit + pan', () => {
   });
 
   test.afterAll(async () => {
-    await stopNodeServer(apiBase, 480);
+    await step('canvas: stop server', () => stopNodeServer(apiBase, 480));
   });
 
   test('Fit All is available in every view and autofit centers nodes on load', async ({ page }) => {
     // --- Fit All button visible/enabled in Physical view with content ---
-    await page.goto('/');
+    await step('canvas: goto', () => page.goto('/'));
     await page.getByRole('button', { name: 'Physical' }).click();
 
     const fitBtn = page.getByTestId('fit-all-btn');
@@ -61,7 +62,7 @@ test.describe('canvas · fit + pan', () => {
     await expect(page.getByText(/Capacity Overview|No diskdb instances registered/)).toBeVisible({ timeout: 5_000 });
 
     // --- autofit centers nodes on initial load ---
-    await page.goto('/');
+    await step('canvas: goto autofit', () => page.goto('/'));
     await page.getByRole('button', { name: 'Physical' }).click();
 
     // Wait for nodes and the auto-fit to settle. The canvas should
@@ -86,7 +87,7 @@ test.describe('canvas · fit + pan', () => {
   });
 
   test('clicking Fit All resets the viewport after panning', async ({ page }) => {
-    await page.goto('/');
+    await step('canvas: goto', () => page.goto('/'));
     await page.getByRole('button', { name: 'Physical' }).click();
 
     // Wait for nodes to render.
@@ -95,28 +96,31 @@ test.describe('canvas · fit + pan', () => {
     // Pan the canvas by dragging the background.
     const viewport = page.locator('.react-flow__viewport');
     const canvas = page.locator('.react-flow');
-    await canvas.hover({ position: { x: 200, y: 200 } });
-    await page.mouse.down();
-    await page.mouse.move(400, 400);
-    await page.mouse.up();
+    await step('canvas: pan', async () => {
+      await canvas.hover({ position: { x: 200, y: 200 } });
+      await page.mouse.down();
+      await page.mouse.move(400, 400);
+      await page.mouse.up();
+    });
 
     // After panning, the viewport transform should have changed.
     const transformAfterPan = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
 
     // Click Fit All to reset the view.
-    await page.getByTestId('fit-all-btn').click();
-
-    // Wait for the fit animation (250ms) to complete and verify the
-    // transform changed from the panned state.
-    await expect.poll(async () => {
-      return viewport.evaluate((el) => (el as HTMLElement).style.transform);
-    }, { timeout: 3_000, intervals: [100] }).not.toEqual(transformAfterPan);
+    await step('canvas: fit all', async () => {
+      await page.getByTestId('fit-all-btn').click();
+      // Wait for the fit animation (250ms) to complete and verify the
+      // transform changed from the panned state.
+      await expect.poll(async () => {
+        return viewport.evaluate((el) => (el as HTMLElement).style.transform);
+      }, { timeout: 3_000, intervals: [100] }).not.toEqual(transformAfterPan);
+    });
   });
 
   test('switching views always fits to window, not the stale viewport', async ({ page }) => {
     test.setTimeout(60_000);
     // --- Physical -> KV Cluster -> Physical ---
-    await page.goto('/');
+    await step('canvas: goto', () => page.goto('/'));
     await page.getByRole('button', { name: 'Physical' }).click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
 
@@ -129,10 +133,12 @@ test.describe('canvas · fit + pan', () => {
     expect(fittedTransform).toBeTruthy();
 
     // Pan the canvas away from the fitted position.
-    await canvas.hover({ position: { x: 200, y: 200 } });
-    await page.mouse.down();
-    await page.mouse.move(400, 400);
-    await page.mouse.up();
+    await step('canvas: pan', async () => {
+      await canvas.hover({ position: { x: 200, y: 200 } });
+      await page.mouse.down();
+      await page.mouse.move(400, 400);
+      await page.mouse.up();
+    });
 
     // Confirm the transform changed after panning.
     const pannedTransform = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
@@ -152,20 +158,22 @@ test.describe('canvas · fit + pan', () => {
     // After switching back, the viewport should be re-fitted, not the
     // stale panned position. Give the fit animation time to complete.
     await page.waitForTimeout(300);
-    await expect.poll(async () => {
+    await step('canvas: fit after KV switch', () => expect.poll(async () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
-    }, { timeout: 5_000, intervals: [100] }).not.toEqual(pannedTransform);
+    }, { timeout: 5_000, intervals: [100] }).not.toEqual(pannedTransform));
 
     // --- Physical -> Capacity -> Physical ---
-    await page.goto('/');
+    await step('canvas: goto', () => page.goto('/'));
     await page.getByRole('button', { name: 'Physical' }).click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
 
     // Pan in Physical view.
-    await canvas.hover({ position: { x: 200, y: 200 } });
-    await page.mouse.down();
-    await page.mouse.move(400, 400);
-    await page.mouse.up();
+    await step('canvas: pan', async () => {
+      await canvas.hover({ position: { x: 200, y: 200 } });
+      await page.mouse.down();
+      await page.mouse.move(400, 400);
+      await page.mouse.up();
+    });
     const physicalPanned = await viewport.evaluate((el) => (el as HTMLElement).style.transform);
 
     // Switch to Capacity — shows CapacityPanel (no canvas).
@@ -178,8 +186,8 @@ test.describe('canvas · fit + pan', () => {
     await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 5_000 });
     await page.waitForTimeout(300);
 
-    await expect.poll(async () => {
+    await step('canvas: fit after Capacity switch', () => expect.poll(async () => {
       return viewport.evaluate((el) => (el as HTMLElement).style.transform);
-    }, { timeout: 5_000, intervals: [100] }).not.toEqual(physicalPanned);
+    }, { timeout: 5_000, intervals: [100] }).not.toEqual(physicalPanned));
   });
 });

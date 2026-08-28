@@ -32,27 +32,30 @@ class EpollEngine : public SocketEngine
     }
 
     void add_listen_fd(int fd) override;
-    void add_connection(int fd, Connection *conn) override;
-    void remove_connection(int fd) override;
-    void arm_read(int fd, Connection *conn) override;
-    void arm_write(int fd, Connection *conn) override;
-    void disarm_write(int fd, Connection *conn) override;
+    void add_connection(int read_fd, int write_fd, Connection *conn) override;
+    void remove_connection(int read_fd, int write_fd) override;
+    void arm_read(int read_fd, Connection *conn) override;
+    void arm_write(int write_fd, Connection *conn) override;
+    void disarm_write(int write_fd, Connection *conn) override;
     void notify_worker() override;
+    void notify_stop() override;
     void set_timer(int timeout_ms) override;
     int  wait(EngineEvent *out_events, int max_events, int timeout_ms) override;
     void shutdown() override;
 
   private:
-    int  epoll_fd_  = -1;
-    int  notify_fd_ = -1;    // eventfd
-    int  timer_fd_  = -1;    // timerfd
-    bool oneshot_   = false; // multi-worker safety
+    int               epoll_fd_  = -1;
+    int               notify_fd_ = -1;    // eventfd
+    int               timer_fd_  = -1;    // timerfd
+    bool              oneshot_   = false; // multi-worker safety
+    std::atomic<bool> stop_notified_{false};
 
     // fd → Connection* map (only used for add/remove; wait() uses data.ptr).
     std::mutex                            conn_mu_;
     std::unordered_map<int, Connection *> connections_;
 
     void mod_fd(int fd, uint32_t events, Connection *conn);
+    void mod_fd_write(int fd, uint32_t events, Connection *conn);
 };
 
 } // namespace crow::rpc

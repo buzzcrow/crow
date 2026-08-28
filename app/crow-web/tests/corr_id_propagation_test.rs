@@ -126,7 +126,7 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
         id: "n1".into(),
         url: format!("http://{upstream_addr}"),
         node_id: Some(1),
-        grpc_url: None,
+        rpc_url: None,
         rest_port: None,
         rpc_port: None,
         auto_start: false,
@@ -134,6 +134,8 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);

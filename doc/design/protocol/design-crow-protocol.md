@@ -9,7 +9,7 @@ to store and scan rows in crow-kv, the wire types that cross crate
 boundaries (HTTP management API DTOs, group-0 sysdata entry types), and
 the identifier aliases (`RackId`, `NodeId`, `DiskId`, …) that give every
 crate one named, numeric definition of each ID. `crow-protocol` is the
-single home for these shapes: it already hosts the shared protobuf types
+single home for these shapes: it already hosts the shared flatbuffer types
 and carries no heavy dependencies, so any crate can depend on it without
 pulling in the KV engine.
 
@@ -33,16 +33,16 @@ that keeps one source of truth across crates.
 
 ## 1. Non-Goals
 
-- **No value encoding.** Values are free to use protobuf, bincode, or
+- **No value encoding.** Values are free to use flatbuffers, bincode, or
   whatever a component chooses; only keys are governed by the key
   encoding sub-design.
 - **No transport encoding.** RPC wire format is a separate concern;
-  keys do not travel over gRPC as serialized key messages. The RPC
+  keys do not travel over crow-rpc as serialized key messages. The RPC
   engine lives in its own design area,
   [`design-crow-rpc.md`](../rpc/design-crow-rpc.md).
-- **No protobuf service definitions.** `.proto` files and generated
+- **No flatbuffer service definitions.** `.fbs` files and generated
   code live in `crow-protocol` for shared access, but their design is
-  driven by each component's gRPC service doc, not here.
+  driven by each component's crow-rpc service doc, not here.
 - **No server-local types.** Types used only inside `crow-kv-server`
   stay in the server; they are not cross-component.
 - **No compression.** Keys are small and fixed-width; compression
@@ -60,7 +60,7 @@ that keeps one source of truth across crates.
 - **Keys are self-sorting, prefix-stable bytes.** crow-kv's
   `KVEngine` treats keys as raw `&[u8]` and scans by lexicographic
   byte order. The key encoding produces deterministic, self-sorting,
-  prefix-stable bytes — protobuf `*Key` messages are never used as KV
+  prefix-stable bytes — flatbuffer `*Key` messages are never used as KV
   key bytes.
 - **Two encodings, one key concept.** Each key struct is a single
   source of truth; `BinaryKey` maps it to bytes for data groups,
@@ -70,7 +70,7 @@ that keeps one source of truth across crates.
   IDs exist for documentation and API clarity, not type-safety
   enforcement; newtypes would add conversion friction at every
   boundary. Composite IDs (`DiskId` 128-bit, `ChunkId` 192-bit) are
-  proto structs.
+  flatbuffer structs.
 - **Re-export and alias, never redefine.** Consumers that have their
   own traditional names for wire types use `pub use` aliases, so one
   struct definition per wire shape is guaranteed.

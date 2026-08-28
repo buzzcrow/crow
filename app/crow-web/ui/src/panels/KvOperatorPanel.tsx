@@ -134,8 +134,15 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
 
   const targetLabel = groupId === ALL_GROUPS ? `${storeId}/all` : `${storeId}/${groupId}`;
 
+  // Guard against stale scan responses overwriting current state. When
+  // store/group changes, a new handleScan closure is created but the old
+  // one's await kvScan may still be in flight; without this guard the old
+  // response silently overwrites the table with wrong-store data.
+  const scanReqIdRef = useRef(0);
+
   const handleScan = useCallback(async () => {
     if (!storeId || !groupId) return;
+    const reqId = ++scanReqIdRef.current;
     setScanLoading(true);
     setErrorMsg(null);
     try {
@@ -145,6 +152,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
         let anyTruncated = false;
         for (const gid of groupIdsInStore) {
           const result = await kvScan(storeId, gid, scanPrefix);
+          if (reqId !== scanReqIdRef.current) return;
           allRows.push(...result.items.map((item) => ({ ...item, groupId: gid, selected: false })));
           if (result.items.length > 0) {
             cursors.set(gid, { lastKey: result.items[result.items.length - 1].key_utf8, truncated: result.truncated });
@@ -157,6 +165,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
         setScanDone(true);
       } else {
         const result = await kvScan(storeId, groupId, scanPrefix);
+        if (reqId !== scanReqIdRef.current) return;
         setScanRows(result.items.map((item) => ({ ...item, groupId, selected: false })));
         setScanTruncated(result.truncated);
         setScanDone(true);
@@ -169,12 +178,15 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
       log({ action: 'KV Scan', target: targetLabel, status: 'Success', message: `Found ${scanRows.length} keys` });
       success(`Scanned ${scanRows.length} keys`);
     } catch (err) {
+      if (reqId !== scanReqIdRef.current) return;
       const msg = err instanceof Error ? err.message : 'Scan failed';
       setErrorMsg(msg);
       log({ action: 'KV Scan', target: targetLabel, status: 'Failed', message: msg });
       error(msg);
     } finally {
-      setScanLoading(false);
+      if (reqId === scanReqIdRef.current) {
+        setScanLoading(false);
+      }
     }
   }, [storeId, groupId, scanPrefix, groupIdsInStore, targetLabel, log, success, error, scanRows.length]);
 

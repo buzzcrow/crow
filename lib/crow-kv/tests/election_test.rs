@@ -10,7 +10,7 @@
 //! management, and term fencing.
 //!
 //! These tests drive a single replica in isolation — no peers, no group,
-//! no gRPC. Multi-replica election convergence lives in the `group` binary;
+//! no crow-rpc. Multi-replica election convergence lives in the `group` binary;
 //! the replica-layer persistence / prepare-accept / dedup / snapshot tests
 //! live in the `replica` binary.
 

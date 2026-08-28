@@ -37,6 +37,12 @@ struct Buffer
     class BufferPool     *pool     = nullptr;
     std::atomic<int32_t> *ref      = nullptr; // shared refcount (pool-allocated or standalone)
 
+    // External free callback: when set, release() calls free_cb(free_ctx)
+    // instead of freeing `data` directly. Used for zero-copy buffers that
+    // wrap externally-owned memory (e.g. a Rust Vec allocation).
+    void (*free_cb)(void *) = nullptr;
+    void *free_ctx          = nullptr;
+
     // Copy src into data, set len. Called once per buffer.
     void write(const void *src, uint32_t n);
 
@@ -44,7 +50,7 @@ struct Buffer
     // allocation. Each consumer that needs to hold the buffer calls ref().
     Buffer *ref_clone();
 
-    // Decrement refcount. On ref == 0, recycle to pool.
+    // Decrement refcount. On ref == 0, recycle to pool or call free_cb.
     void release();
 };
 

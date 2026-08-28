@@ -85,6 +85,11 @@ enable_testing()
 include(GoogleTest)
 find_package(GTest REQUIRED)
 file(GLOB_RECURSE CROWCOMMON_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
+  list(REMOVE_ITEM CROWCOMMON_TEST_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/diskio_uring_test.cpp
+  )
+endif()
 add_executable(crowcommon_tests ${CROWCOMMON_TEST_SRC})
 target_include_directories(crowcommon_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(crowcommon_tests PRIVATE crowcommon GTest::gtest GTest::gtest_main)

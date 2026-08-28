@@ -95,7 +95,7 @@ pub struct BenchFixture {
     console_task: tokio::task::JoinHandle<()>,
     node_ids: Vec<u64>,
     node_pids: Vec<u32>,
-    node_grpc_urls: Vec<String>,
+    node_rpc_urls: Vec<String>,
     node_mgmt_urls: Vec<String>,
     leader_endpoint: String,
     workspace_dir: PathBuf,
@@ -121,6 +121,11 @@ impl BenchFixture {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
+        peer_pool_size: usize,
+        enable_nagle: bool,
+        quickack: bool,
+        event_write: bool,
+        send_queue_capacity: u32,
     ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
 
@@ -133,7 +138,7 @@ impl BenchFixture {
         });
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
-        let (ids, pids, grpc_urls, mgmt_urls) = match Self::provision_nodes(
+        let (ids, pids, rpc_urls, mgmt_urls) = match Self::provision_nodes(
             &client,
             mode,
             max_inflight,
@@ -141,6 +146,11 @@ impl BenchFixture {
             node_config,
             coalesce_max_keys,
             coalesce_drain_threshold,
+            peer_pool_size,
+            enable_nagle,
+            quickack,
+            event_write,
+            send_queue_capacity,
         )
         .await
         {
@@ -181,7 +191,7 @@ impl BenchFixture {
             console_task,
             node_ids: ids,
             node_pids: pids,
-            node_grpc_urls: grpc_urls,
+            node_rpc_urls: rpc_urls,
             node_mgmt_urls: mgmt_urls,
             leader_endpoint,
             workspace_dir,
@@ -201,10 +211,15 @@ impl BenchFixture {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
+        peer_pool_size: usize,
+        enable_nagle: bool,
+        quickack: bool,
+        event_write: bool,
+        send_queue_capacity: u32,
     ) -> Result<(Vec<u64>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
-        let mut grpc_urls = Vec::with_capacity(NODE_COUNT);
+        let mut rpc_urls = Vec::with_capacity(NODE_COUNT);
         let mut mgmt_urls = Vec::with_capacity(NODE_COUNT);
         for i in 0..NODE_COUNT {
             let rack_id = i as u64;
@@ -240,6 +255,11 @@ impl BenchFixture {
                 max_inflight: Some(max_inflight),
                 coalesce_max_keys,
                 coalesce_drain_threshold,
+                peer_pool_size: Some(peer_pool_size),
+                enable_nagle: Some(enable_nagle),
+                quickack: Some(quickack),
+                event_write: Some(event_write),
+                send_queue_capacity: Some(send_queue_capacity),
                 ..Default::default()
             };
             mode.apply_to(&mut body);
@@ -251,10 +271,10 @@ impl BenchFixture {
 
             ids.push(node_id);
             pids.push(deployed.pid);
-            grpc_urls.push(deployed.grpc_url);
+            rpc_urls.push(deployed.rpc_url);
             mgmt_urls.push(deployed.mgmt_url);
         }
-        Ok((ids, pids, grpc_urls, mgmt_urls))
+        Ok((ids, pids, rpc_urls, mgmt_urls))
     }
 
     /// Create the single store spanning all nodes, then a 3-replica
@@ -281,7 +301,7 @@ impl BenchFixture {
         Ok(())
     }
 
-    /// The elected leader's gRPC endpoint, ready to hand to
+    /// The elected leader's crow-rpc endpoint, ready to hand to
     /// `bench::runner::run_bench`.
     #[must_use]
     pub fn leader_endpoint(&self) -> &str {
@@ -309,13 +329,13 @@ impl BenchFixture {
         &self.workspace_dir
     }
 
-    /// Build a map from gRPC endpoint URL to node ID, for resolving
+    /// Build a map from crow-rpc endpoint URL to node ID, for resolving
     /// leader-change episode endpoints to node names in the report.
     #[must_use]
     pub fn endpoint_to_node_map(&self) -> std::collections::HashMap<String, String> {
         self.node_ids
             .iter()
-            .zip(self.node_grpc_urls.iter())
+            .zip(self.node_rpc_urls.iter())
             .map(|(nid, url)| (url.clone(), nid.to_string()))
             .collect()
     }
@@ -412,8 +432,8 @@ async fn wait_for_leader_endpoint(client: &ConsoleClient, timeout: Duration) -> 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Ok(info) = client.resolve_endpoint(STORE_ID, GROUP_ID).await {
-            if !info.grpc_url.is_empty() {
-                return Ok(info.grpc_url);
+            if !info.rpc_url.is_empty() {
+                return Ok(info.rpc_url);
             }
         }
         if tokio::time::Instant::now() >= deadline {
@@ -535,6 +555,11 @@ pub(crate) struct KvTarget {
     node_config: Option<String>,
     coalesce_max_keys: Option<usize>,
     coalesce_drain_threshold: Option<usize>,
+    peer_pool_size: usize,
+    enable_nagle: bool,
+    quickack: bool,
+    event_write: bool,
+    send_queue_capacity: u32,
     fixture: Option<BenchFixture>,
     /// The shared client used by all workers + progress/metrics tasks.
     client: Option<Arc<CrowkvClient>>,
@@ -550,6 +575,11 @@ impl KvTarget {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
+        peer_pool_size: usize,
+        enable_nagle: bool,
+        quickack: bool,
+        event_write: bool,
+        send_queue_capacity: u32,
     ) -> Self {
         Self {
             mode,
@@ -559,6 +589,11 @@ impl KvTarget {
             node_config,
             coalesce_max_keys,
             coalesce_drain_threshold,
+            peer_pool_size,
+            enable_nagle,
+            quickack,
+            event_write,
+            send_queue_capacity,
             fixture: None,
             client: None,
         }
@@ -581,6 +616,11 @@ impl BenchTarget for KvTarget {
             self.node_config.clone(),
             self.coalesce_max_keys,
             self.coalesce_drain_threshold,
+            self.peer_pool_size,
+            self.enable_nagle,
+            self.quickack,
+            self.event_write,
+            self.send_queue_capacity,
         )
         .await?;
 
@@ -597,6 +637,10 @@ impl BenchTarget for KvTarget {
         let mut client_config = ClientConfig::new(topology_seed.map(|s| vec![s]).unwrap_or_default());
         client_config.pool_size_per_endpoint = cfg.connections as usize;
         client_config.read_endpoint_policy = cfg.read_endpoint_policy;
+        client_config.enable_nagle = self.enable_nagle;
+        client_config.quickack = self.quickack;
+        client_config.event_write = self.event_write;
+        client_config.send_queue_capacity = self.send_queue_capacity;
         let client = CrowkvClient::new(client_config);
         client.seed_leader(cfg.store_id, cfg.group_id, fixture.leader_endpoint().to_string());
         self.client = Some(Arc::new(client));
@@ -604,6 +648,7 @@ impl BenchTarget for KvTarget {
         Ok(())
     }
 
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
     async fn build_client(&self) -> Result<KvBenchClient> {
         let client = self
             .client
@@ -693,6 +738,23 @@ impl BenchTarget for KvTarget {
         self.client
             .as_ref()
             .map_or_else(crow_kv_client::ClientMetricsSnapshot::default, |c| c.metrics())
+    }
+
+    fn client_transport_stats(&self) -> super::super::report::TransportStatsSnapshot {
+        self.client.as_ref().and_then(|c| c.transport_stats()).map_or(
+            super::super::report::TransportStatsSnapshot::default(),
+            |s| super::super::report::TransportStatsSnapshot {
+                submit_to_writev_count: s.submit_to_writev.count,
+                submit_to_writev_avg_us: s
+                    .submit_to_writev
+                    .sum_ns
+                    .checked_div(s.submit_to_writev.count)
+                    .unwrap_or(0)
+                    / 1000,
+                send_queue_rejects: s.send_queue_rejects,
+                ..Default::default()
+            },
+        )
     }
 
     fn node_ids(&self) -> Vec<u64> {

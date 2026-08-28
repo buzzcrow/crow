@@ -21,7 +21,7 @@ pub(crate) struct FileBackendFile {
 }
 
 impl FileBackendFile {
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn open(path: &Path, opts: &OpenOptions) -> io::Result<Self> {
         let std_opts = opts.to_std();
         let file = File::from_std(std_opts.open(path)?);
@@ -111,7 +111,7 @@ impl FileBackendFile {
 
     /// No-op — let the OS page cache flush naturally. Use [`Self::fsync`]
     /// for an explicit durable flush on close/shutdown.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn fdatasync(&self) -> io::Result<()> {
         Ok(())
     }

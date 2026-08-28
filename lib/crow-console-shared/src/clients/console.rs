@@ -108,6 +108,21 @@ pub struct DeployNodeServerBody {
     /// `--coalesce-drain-threshold` value for R45b drain heuristic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_drain_threshold: Option<usize>,
+    /// `--peer-pool-size` value for inter-server RPC connection pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_pool_size: Option<usize>,
+    /// `--enable-nagle` flag for RPC connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_nagle: Option<bool>,
+    /// `--quickack` flag for RPC connections (Linux only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quickack: Option<bool>,
+    /// `--event-write` flag for RPC transports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_write: Option<bool>,
+    /// `--send-queue-capacity` value for per-connection send queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_queue_capacity: Option<u32>,
     /// Optional `--config` JSON path passed to the spawned `crow-kv-server`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
@@ -124,13 +139,19 @@ pub struct PingResult {
 pub struct DeployResult {
     pub node_id: NodeId,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     pub pid: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StopResult {
     pub sent: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResetResult {
+    #[serde(default)]
+    pub stopped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,7 +218,7 @@ pub struct ServerSummary {
     pub node_id: Option<NodeId>,
     pub mgmt_url: String,
     #[serde(default)]
-    pub grpc_url: Option<String>,
+    pub rpc_url: Option<String>,
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
@@ -205,10 +226,10 @@ pub struct ServerSummary {
 }
 
 /// Response of `GET /api/stores/:s/groups/:g/endpoint` — the leader's
-/// gRPC URL, ready to hand to a direct gRPC client.
+/// crow-rpc URL, ready to hand to a direct crow-rpc client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EndpointInfo {
-    pub grpc_url: String,
+    pub rpc_url: String,
 }
 
 impl ConsoleClient {
@@ -521,7 +542,7 @@ impl ConsoleClient {
     }
 
     /// `GET /api/stores/:s/groups/:g/endpoint`. Resolve the leader's
-    /// gRPC URL for a direct gRPC client (the bench engine).
+    /// crow-rpc URL for a direct crow-rpc client (the bench engine).
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
@@ -575,6 +596,70 @@ impl ConsoleClient {
     pub async fn remove_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
         self.delete_no_response(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
             .await
+    }
+
+    // ── Disk-group owner / bind ────────────────────────────────────
+
+    /// `PUT /api/disk-groups/:rack/:node/:dg/owner`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn set_disk_group_owner(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        instance_id: u64,
+        lease_expiry_ms: u64,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body {
+            instance_id: u64,
+            lease_expiry_ms: u64,
+        }
+        self.put_json_no_response(
+            &format!("/api/disk-groups/{rack_id}/{node_id}/{dg_id}/owner"),
+            &Body {
+                instance_id,
+                lease_expiry_ms,
+            },
+        )
+        .await
+    }
+
+    /// `PUT /api/disk-groups/:rack/:node/:dg/bind`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn set_disk_group_bind(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        store_id: u64,
+        group_id: u64,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body {
+            store_id: u64,
+            group_id: u64,
+        }
+        self.put_json_no_response(
+            &format!("/api/disk-groups/{rack_id}/{node_id}/{dg_id}/bind"),
+            &Body { store_id, group_id },
+        )
+        .await
+    }
+
+    // ── Cluster reset ──────────────────────────────────────────────
+
+    /// `POST /internal/reset` — full cluster reset (stops all servers,
+    /// removes all racks/nodes/stores/groups, clears workspaces).
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn reset_all(&self) -> Result<ResetResult> {
+        self.post_json("/internal/reset", &serde_json::json!({})).await
     }
 
     // ── KV data plane ──────────────────────────────────────────────

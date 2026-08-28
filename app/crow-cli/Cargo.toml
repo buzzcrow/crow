@@ -26,7 +26,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sy
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
-rand = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
 tracing = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "1"

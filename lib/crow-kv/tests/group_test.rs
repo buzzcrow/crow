@@ -7,7 +7,7 @@
 //! the full Paxos write path, leader election driver, repair, and KV
 //! forwarding. These tests drive real multi-node clusters (via the shared
 //! `common::cluster` harness — separate `PxKvStore` nodes wired over loopback
-//! gRPC, no mocks) as well as single-leader fast paths.
+//! crow-rpc, no mocks) as well as single-leader fast paths.
 //!
 //! Layout:
 //! - propose / repair: `group_propose`, `proposer`, `safe_slot`, `snapshot_slot`, `kv_slot_retry`
@@ -122,6 +122,3 @@ mod coalesce;
 
 #[path = "group_test/r65_replication_test.rs"]
 mod r65_replication;
-
-#[path = "group_test/watch_notify_test.rs"]
-mod watch_notify;

@@ -67,13 +67,13 @@ pub struct Node {
 
 /// Console's view of one deployed `crow-kv-server` process.
 ///
-/// `mgmt_url` / `grpc_url` are the *intended* endpoints (persisted);
+/// `mgmt_url` / `rpc_url` are the *intended* endpoints (persisted);
 /// `pid` / `state` / `health` / `last_seen_ms` are live cache filled by
 /// the monitor task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerProcess {
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(default)]
@@ -119,9 +119,9 @@ pub enum NodeHealth {
 pub struct NodeStore {
     pub node_id: NodeId,
     pub store_id: StoreId,
-    /// gRPC listen address (`host:port`) of this `PxKvStore`. Each store
+    /// crow-rpc listen address (`host:port`) of this `PxKvStore`. Each store
     /// binds its own port, so the bootstrap rpc port reported in
-    /// `ServerEntry::grpc_url` is only correct for the bootstrap store
+    /// `ServerEntry::rpc_url` is only correct for the bootstrap store
     /// (id 1). Operator-created stores get a random port and must wire
     /// Paxos remotes to *this* address. `None` until the next monitor
     /// poll fills it in.

@@ -121,7 +121,11 @@ void BlockingEngine::worker_loop()
             }
             break;
         case IoOp::Fsync:
+#ifdef __linux__
             res = ::fdatasync(fd);
+#else
+            res = ::fsync(fd);
+#endif
             if (res < 0) {
                 res = -errno;
             }

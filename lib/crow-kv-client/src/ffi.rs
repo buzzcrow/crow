@@ -258,18 +258,18 @@ pub unsafe extern "C" fn crow_svc_client_destroy(client: crow_svc_client_t) {
 pub unsafe extern "C" fn crow_svc_heartbeat_diskio(
     client: crow_svc_client_t,
     instance_id: u64,
-    grpc_endpoint: *const c_char,
+    rpc_endpoint: *const c_char,
     owned_dg_ids_json: *const c_char,
     group_usages_json: *const c_char,
     callback: crow_kv_on_complete,
     user_data: *mut c_void,
 ) {
-    if client.is_null() || grpc_endpoint.is_null() {
+    if client.is_null() || rpc_endpoint.is_null() {
         callback(-1, ptr::null(), user_data);
         return;
     }
     let svc = (*(client as *const ServiceRegistryClient)).clone();
-    let endpoint = if let Ok(s) = CStr::from_ptr(grpc_endpoint).to_str() {
+    let endpoint = if let Ok(s) = CStr::from_ptr(rpc_endpoint).to_str() {
         s.to_string()
     } else {
         callback(-1, ptr::null(), user_data);

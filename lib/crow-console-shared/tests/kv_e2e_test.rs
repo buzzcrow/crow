@@ -3,7 +3,7 @@
 
 //! C6 end-to-end: spawn `crow-kv-server`, create a store/group through the
 //! management API, then via `crow-kv-client`'s `CrowkvClient` exercise
-//! put → get → delete → get-not-found → scan. (C6's own gRPC `KvClient`
+//! put → get → delete → get-not-found → scan. (C6's own crow-rpc `KvClient`
 //! wrapper is gone -- see -- so this
 //! now exercises the real client library `crow-web`/`crow-cli` use.)
 
@@ -45,7 +45,7 @@ async fn spawn_server() -> Option<(u32, String)> {
     Some((deployed.pid, deployed.mgmt_url))
 }
 
-async fn store_grpc_endpoint(mgmt_url: &str, store_id: u64) -> String {
+async fn store_rpc_endpoint(mgmt_url: &str, store_id: u64) -> String {
     let mgmt = ServerClient::new(mgmt_url.to_string()).unwrap();
     let detail = mgmt.get_store(store_id).await.expect("get_store");
     let listen = detail.listen_addr.expect("listen_addr");
@@ -83,7 +83,7 @@ async fn put_get_delete_cycle() {
         .await
         .expect("wait_for_leader");
 
-    let endpoint = store_grpc_endpoint(&mgmt_url, store_id).await;
+    let endpoint = store_rpc_endpoint(&mgmt_url, store_id).await;
     // `CrowkvClient` normally discovers leaders via `/topology`; here we
     // already know the endpoint (just resolved it above), so seed it
     // directly rather than standing up topology discovery for a

@@ -4,7 +4,9 @@
 //! R65 replication tests: async catch-up, `ChosenNotice` ballot verification,
 //! out-of-order apply, `FetchGap` follower-driven catch-up, heartbeat strip.
 
-use crate::common::cluster::{start_cluster, start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{
+    start_cluster, start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster,
+};
 use bytes::Bytes;
 use crow_kv::rpc::{KvDeleteRequest, KvSetRequest};
 use std::time::{Duration, Instant};
@@ -58,7 +60,7 @@ async fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Optio
 async fn follower_does_not_apply_on_accept() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     let resp = client
         .put(KvSetRequest {
@@ -96,7 +98,7 @@ async fn follower_does_not_apply_on_accept() {
 async fn follower_applies_on_chosen_notice() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     for i in 0..5u32 {
         let key = format!("r65-2-key{i}");
@@ -135,7 +137,7 @@ async fn follower_applies_on_chosen_notice() {
 async fn out_of_order_apply_converges() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     for i in 0..10u32 {
         let resp = client
@@ -174,7 +176,7 @@ async fn out_of_order_apply_converges() {
 async fn delete_converges_across_nodes() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     let resp = client
         .put(KvSetRequest {
@@ -222,7 +224,7 @@ async fn delete_converges_across_nodes() {
 async fn heartbeat_not_delayed_by_lagging_follower() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     for i in 0..50u32 {
         let resp = client
@@ -273,7 +275,7 @@ async fn leader_change_continues_serving() {
     }
 
     let leader = cluster.elected_leader().expect("leader elected");
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     for i in 0..5u32 {
         let resp = client
@@ -312,7 +314,7 @@ async fn leader_change_continues_serving() {
 async fn large_value_converges() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     let large: Vec<u8> = (0..1024 * 1024u32)
         .map(|i| u8::try_from(i % 256).unwrap())
@@ -347,7 +349,7 @@ async fn batch_writes_converge() {
     use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest};
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     let resp = client
         .batch_write(KvBatchWriteRequest {

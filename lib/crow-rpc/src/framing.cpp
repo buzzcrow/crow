@@ -6,7 +6,6 @@
 #include "crow-rpc/buffer.h"
 
 #include <cassert>
-#include <chrono>
 #include <cstdlib>
 #include <new>
 
@@ -26,12 +25,14 @@ void serialize_header(uint8_t *buf, const Header &h)
     buf[3]  = static_cast<uint8_t>(h.msg_type >> 8);
     buf[4]  = static_cast<uint8_t>(h.msg_size & 0xFF);
     buf[5]  = static_cast<uint8_t>(h.msg_size >> 8);
-    buf[6]  = static_cast<uint8_t>(h.data_size & 0xFF);
-    buf[7]  = static_cast<uint8_t>(h.data_size >> 8);
-    buf[8]  = static_cast<uint8_t>(h.data_size >> 16);
-    buf[9]  = static_cast<uint8_t>(h.data_size >> 24);
-    buf[10] = h.msg_offset;
-    buf[11] = h.flags;
+    buf[6]  = static_cast<uint8_t>(h.msg_size >> 16);
+    buf[7]  = static_cast<uint8_t>(h.msg_size >> 24);
+    buf[8]  = static_cast<uint8_t>(h.data_size & 0xFF);
+    buf[9]  = static_cast<uint8_t>(h.data_size >> 8);
+    buf[10] = static_cast<uint8_t>(h.data_size >> 16);
+    buf[11] = static_cast<uint8_t>(h.data_size >> 24);
+    buf[12] = h.msg_offset;
+    buf[13] = h.flags;
 }
 
 Header parse_header(const uint8_t *buf)
@@ -39,11 +40,12 @@ Header parse_header(const uint8_t *buf)
     Header h;
     h.magic      = static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8);
     h.msg_type   = static_cast<uint16_t>(buf[2]) | (static_cast<uint16_t>(buf[3]) << 8);
-    h.msg_size   = static_cast<uint16_t>(buf[4]) | (static_cast<uint16_t>(buf[5]) << 8);
-    h.data_size  = static_cast<uint32_t>(buf[6]) | (static_cast<uint32_t>(buf[7]) << 8) |
-                   (static_cast<uint32_t>(buf[8]) << 16) | (static_cast<uint32_t>(buf[9]) << 24);
-    h.msg_offset = buf[10];
-    h.flags      = buf[11];
+    h.msg_size   = static_cast<uint32_t>(buf[4]) | (static_cast<uint32_t>(buf[5]) << 8) |
+                   (static_cast<uint32_t>(buf[6]) << 16) | (static_cast<uint32_t>(buf[7]) << 24);
+    h.data_size  = static_cast<uint32_t>(buf[8]) | (static_cast<uint32_t>(buf[9]) << 8) |
+                   (static_cast<uint32_t>(buf[10]) << 16) | (static_cast<uint32_t>(buf[11]) << 24);
+    h.msg_offset = buf[12];
+    h.flags      = buf[13];
     return h;
 }
 
@@ -89,11 +91,11 @@ FramingError FrameParser::validate_header() const
 Frame *FrameParser::yield_frame()
 {
     assert(frame_ != nullptr);
-    frame_->header          = header_;
-    frame_->request_id      = parsed_request_id_;
-    frame_->rpc_create_nano = parsed_rpc_create_nano_;
-    frame_->data_buf        = data_buf_;
-    frame_->parsed_nano     = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    frame_->header               = header_;
+    frame_->request_id           = parsed_request_id_;
+    frame_->rpc_create_nano      = parsed_rpc_create_nano_;
+    frame_->response_create_nano = parsed_response_create_nano_;
+    frame_->data_buf             = data_buf_;
 
     // Copy control bytes into the Frame for service-specific handlers.
     // Common handlers (ping, unknown) ignore this field.
@@ -111,10 +113,11 @@ Frame *FrameParser::yield_frame()
     state_         = ParseState::ReadingHeader;
     header_offset_ = 0;
     control_buf_.clear();
-    control_offset_         = 0;
-    data_offset_            = 0;
-    parsed_request_id_      = 0;
-    parsed_rpc_create_nano_ = 0;
+    control_offset_              = 0;
+    data_offset_                 = 0;
+    parsed_request_id_           = 0;
+    parsed_rpc_create_nano_      = 0;
+    parsed_response_create_nano_ = 0;
 
     return out;
 }
@@ -155,8 +158,9 @@ Frame *FrameParser::advance(uint32_t bytes_read)
         }
         if (header_.msg_size == 0) {
             // No control message.
-            parsed_request_id_      = 0;
-            parsed_rpc_create_nano_ = 0;
+            parsed_request_id_           = 0;
+            parsed_rpc_create_nano_      = 0;
+            parsed_response_create_nano_ = 0;
             if (header_.data_size == 0) {
                 // Control-only, data-less frame (e.g. one-way ping).
                 frame_ = new Frame;
@@ -188,7 +192,7 @@ Frame *FrameParser::advance(uint32_t bytes_read)
         }
         // Control complete — extract fields.
         extract_control_fields(control_buf_.data(), static_cast<uint32_t>(control_buf_.size()), parsed_request_id_,
-                               parsed_rpc_create_nano_);
+                               parsed_rpc_create_nano_, parsed_response_create_nano_);
         if (header_.data_size == 0) {
             // Control-only frame.
             frame_ = new Frame;

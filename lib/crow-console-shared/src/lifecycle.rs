@@ -53,9 +53,27 @@ pub struct DeployRequest {
     /// `--coalesce-drain-threshold` value. `None` leaves the spawned
     /// server's own default in effect.
     pub coalesce_drain_threshold: Option<usize>,
+    /// `--peer-pool-size` value. `None` leaves the spawned server's
+    /// own default in effect.
+    pub peer_pool_size: Option<usize>,
+    /// `--enable-nagle` flag. `None` leaves the spawned server's own
+    /// default in effect.
+    pub enable_nagle: Option<bool>,
+    /// `--quickack` flag. `None` leaves the spawned server's own
+    /// default in effect.
+    pub quickack: Option<bool>,
+    /// `--event-write` flag. `None` leaves the spawned server's own
+    /// default in effect.
+    pub event_write: Option<bool>,
+    /// `--send-queue-capacity` value. `None` leaves the spawned
+    /// server's own default in effect.
+    pub send_queue_capacity: Option<u32>,
     /// Optional `--config` TOML path for `crow-kv-server` (first-boot
     /// tunable overrides only; ignored in restore mode).
     pub config: Option<PathBuf>,
+    /// `--rpc-workers` value for the spawned `crow-kv-server`. `None`
+    /// leaves the server's default (2) in effect.
+    pub rpc_workers: Option<u32>,
 }
 
 /// Result of a successful deploy. Persist these fields onto the
@@ -64,7 +82,7 @@ pub struct DeployRequest {
 pub struct DeployedServer {
     pub server_id: String,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     pub pid: u32,
 }
 
@@ -137,6 +155,24 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     if let Some(threshold) = req.coalesce_drain_threshold {
         cmd.arg("--coalesce-drain-threshold").arg(threshold.to_string());
     }
+    if let Some(workers) = req.rpc_workers {
+        cmd.arg("--rpc-workers").arg(workers.to_string());
+    }
+    if let Some(pool_size) = req.peer_pool_size {
+        cmd.arg("--peer-pool-size").arg(pool_size.to_string());
+    }
+    if let Some(true) = req.enable_nagle {
+        cmd.arg("--enable-nagle");
+    }
+    if let Some(true) = req.quickack {
+        cmd.arg("--quickack");
+    }
+    if let Some(true) = req.event_write {
+        cmd.arg("--event-write");
+    }
+    if let Some(cap) = req.send_queue_capacity {
+        cmd.arg("--send-queue-capacity").arg(cap.to_string());
+    }
 }
 
 /// Resolve the `--config` path for a deploy. When `req.config` is set,
@@ -183,7 +219,7 @@ async fn deploy_local_in_workspace(
     let config_path = resolve_config_path(req);
 
     let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
-    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+    let rpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--management-addr")
@@ -270,7 +306,7 @@ async fn deploy_local_in_workspace(
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
         mgmt_url,
-        grpc_url,
+        rpc_url,
         pid,
     })
 }
@@ -315,13 +351,23 @@ pub fn stop_pid_with_timeout(pid: u32, timeout: std::time::Duration) -> Result<b
         if !process_is_alive(pid) {
             return Ok(true);
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     // Process didn't exit within timeout — force kill.
     let _ = std::process::Command::new("kill")
         .arg("-KILL")
         .arg(pid.to_string())
         .status();
+    // Wait briefly for the kernel to process SIGKILL so the caller can
+    // safely reuse resources (ports, WAL files) without racing a
+    // not-yet-reaped process.
+    let kill_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < kill_deadline {
+        if !process_is_alive(pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     Ok(false)
 }
 
@@ -330,18 +376,34 @@ pub fn stop_pid_with_timeout(pid: u32, timeout: std::time::Duration) -> Result<b
 /// and 'Z' for zombies.
 #[must_use]
 pub fn process_is_alive(pid: u32) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .arg("-o")
-        .arg("stat=")
-        .output()
-    else {
-        return false;
-    };
-    let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // Empty = process doesn't exist; 'Z' = zombie (effectively dead).
-    !stat.is_empty() && !stat.starts_with('Z')
+    // Fast path: read /proc/{pid}/stat (Linux) — no subprocess spawn.
+    // Falls back to `ps` on non-Linux platforms (macOS, etc.).
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // Field 3 (state) is after the comm field in parentheses.
+            // The state char: 'R'=running, 'S'=sleeping, 'Z'=zombie, etc.
+            // Zombie means the process has exited but not been reaped.
+            let state = stat.rsplit(')').next().unwrap_or("").trim_start();
+            let state_char = state.chars().next().unwrap_or('Z');
+            return state_char != 'Z';
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(output) = std::process::Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("stat=")
+            .output()
+        else {
+            return false;
+        };
+        let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
 }
 
 /// Render the shell command that brings up `crow-kv-server` on the remote
@@ -509,7 +571,7 @@ pub fn crow_kv_server_bin() -> Option<PathBuf> {
             let mut p = dir.to_path_buf();
             for _ in 0..3 {
                 let candidate = p.join("crow-kv-server");
-                if candidate.exists() {
+                if is_executable(&candidate) {
                     return Some(candidate);
                 }
                 if !p.pop() {
@@ -530,7 +592,7 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join(name);
-            if candidate.is_file() {
+            if is_executable(&candidate) {
                 return Some(candidate);
             }
         }
@@ -538,12 +600,23 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
     None
 }
 
+/// Check that a path is a non-empty executable. Skips 0-byte
+/// placeholders left by interrupted builds, which would cause
+/// `ENOEXEC` (os error 8) at spawn time.
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .is_ok_and(|m| m.len() > 0 && m.permissions().mode() & 0o111 != 0)
+}
+
 // ── DiskDB deploy (R77) ───────────────────────────────────────────
 
 /// Inputs for a diskdb deploy (R77). The binary and config file are
 /// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
 /// and `<workspace>/conf/crow_diskdb_config.toml`); the deploy only
-/// needs the gRPC port to override `--listen-addr`. The HTTP port is
+/// needs the crow-rpc port to override `--listen-addr`. The HTTP port is
 /// read from the config file for readiness checking.
 #[derive(Debug, Clone, Default)]
 pub struct DiskdbDeployRequest {
@@ -618,10 +691,12 @@ fn resolve_diskdb_config_path(
     // Minimal valid config — only [server] is required; all other
     // sections default via `#[serde(default)]` on `DdbConfig` fields
     // (values match `DdbConfig::default()`).
+    let rpc_listen_port = rpc_port.saturating_add(2);
     let config = format!(
         "[server]\n\
          listen_addr = \"0.0.0.0:{rpc_port}\"\n\
          http_listen_addr = \"0.0.0.0:{http_port}\"\n\
+         rpc_listen_addr = \"0.0.0.0:{rpc_listen_port}\"\n\
          kv_server_mgmt_seeds = [{seeds}]\n",
     );
     std::fs::write(&path, config).map_err(Error::Io)?;
@@ -663,7 +738,7 @@ fn http_listen_addr_from_config(config_path: &std::path::Path) -> Option<String>
 /// Spawn `crow-diskdb` locally. The binary and config file are
 /// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
 /// and `<workspace>/conf/crow_diskdb_config.toml`). The deploy only
-/// overrides `--listen-addr` with the gRPC port; the HTTP port comes
+/// overrides `--listen-addr` with the crow-rpc port; the HTTP port comes
 /// from the config file.
 ///
 /// # Errors
@@ -695,7 +770,7 @@ pub async fn deploy_diskdb_local(
     };
 
     let config_path = resolve_diskdb_config_path(workspace_dir, req.rpc_port, &req.kv_server_mgmt_seeds)?;
-    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+    let rpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     // Read the HTTP listen address from the config file for readiness
     // checking. If absent, the diskdb binary uses its default HTTP
@@ -757,7 +832,7 @@ pub async fn deploy_diskdb_local(
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
         mgmt_url,
-        grpc_url,
+        rpc_url,
         pid,
     })
 }

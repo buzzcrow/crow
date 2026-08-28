@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "common_msg_generated.h"
+#include "crow-common/request_id.h"
 #include "crow-rpc/buffer.h"
 #include "crow-rpc/c_api.h"
 #include "crow-rpc/client/client.h"
@@ -74,6 +75,8 @@ TEST(LoadTest, MultiThreadEcho)
     constexpr uint32_t DATA_SIZE     = 512;
     constexpr uint16_t ECHO_MSG_TYPE = 100;
 
+    crow::common::RequestIdGen id_gen;
+
     RpcServer server;
     ASSERT_TRUE(server.listen("127.0.0.1", 0));
     int port = server.listen_port();
@@ -84,7 +87,7 @@ TEST(LoadTest, MultiThreadEcho)
         uint64_t req_id = request->request_id;
 
         BufferPool *pool      = conn->pool();
-        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
+        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0, 0);
 
         Buffer *resp_data = nullptr;
         if (request->data_buf != nullptr && request->data_buf->len > 0) {
@@ -139,7 +142,7 @@ TEST(LoadTest, MultiThreadEcho)
                 pr->payload[i] = static_cast<uint8_t>((i + r * 7 + tid * 13) % 256);
             }
 
-            uint64_t    req_id = caller->next_request_id();
+            uint64_t    req_id = id_gen.next();
             BufferPool *pool   = transport.pool();
             Buffer     *ctrl   = build_ping_request(pool, req_id, 0);
             Buffer     *data   = pool->alloc(DATA_SIZE);
@@ -212,6 +215,8 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
     constexpr uint32_t DATA_SIZE     = 512;
     constexpr uint16_t ECHO_MSG_TYPE = 100;
 
+    crow::common::RequestIdGen id_gen;
+
     // Server with 1 engine × 2 workers → EPOLLONESHOT mode.
     RpcServer server(nullptr, 1, 2);
     ASSERT_TRUE(server.listen("127.0.0.1", 0));
@@ -222,7 +227,7 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
         uint64_t req_id = request->request_id;
 
         BufferPool *pool      = conn->pool();
-        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
+        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0, 0);
 
         Buffer *resp_data = nullptr;
         if (request->data_buf != nullptr && request->data_buf->len > 0) {
@@ -273,7 +278,7 @@ TEST(LoadTest, MultiWorkerOneshotEcho)
                 pr->payload[i] = static_cast<uint8_t>((i + r * 7 + tid * 13) % 256);
             }
 
-            uint64_t    req_id = caller->next_request_id();
+            uint64_t    req_id = id_gen.next();
             BufferPool *pool   = transport.pool();
             Buffer     *ctrl   = build_ping_request(pool, req_id, 0);
             Buffer     *data   = pool->alloc(DATA_SIZE);
@@ -344,6 +349,8 @@ TEST(LoadTest, SharedTransportOneshotEcho)
     constexpr uint32_t DATA_SIZE     = 512;
     constexpr uint16_t ECHO_MSG_TYPE = 100;
 
+    crow::common::RequestIdGen id_gen;
+
     RpcServer server(nullptr, 1, 2);
     ASSERT_TRUE(server.listen("127.0.0.1", 0));
     int port = server.listen_port();
@@ -352,7 +359,7 @@ TEST(LoadTest, SharedTransportOneshotEcho)
     server.register_handler(ECHO_MSG_TYPE, [](Frame *request, Connection *conn) -> OutFrame * {
         uint64_t    req_id    = request->request_id;
         BufferPool *pool      = conn->pool();
-        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0);
+        Buffer     *resp_ctrl = build_ping_response(pool, req_id, 0, 0);
         Buffer     *resp_data = nullptr;
         if (request->data_buf != nullptr && request->data_buf->len > 0) {
             resp_data = pool->alloc(request->data_buf->len);
@@ -399,7 +406,7 @@ TEST(LoadTest, SharedTransportOneshotEcho)
             for (uint32_t i = 0; i < DATA_SIZE; i++) {
                 pr->payload[i] = static_cast<uint8_t>((i + r * 7 + tid * 13) % 256);
             }
-            uint64_t req_id = caller->next_request_id();
+            uint64_t req_id = id_gen.next();
             Buffer  *ctrl   = build_ping_request(pool, req_id, 0);
             Buffer  *data   = pool->alloc(DATA_SIZE);
             if (ctrl == nullptr || data == nullptr) {

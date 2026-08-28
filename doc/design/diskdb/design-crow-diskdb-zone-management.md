@@ -124,7 +124,7 @@ zone's busy (or free) keys returns blocks in `unit_offset` order
 without deserialization. Exact byte layouts and prefix constructors
 (e.g. `BusyBlockKey::prefix_for_zone(disk_id, zone_index)`) are in
 `doc/design/protocol/design-crow-protocol-key.md`; value field details
-are in `diskdb_type.proto`.
+are in `diskdb_type.fbs`.
 
 ### Value schemas
 
@@ -729,7 +729,7 @@ and returns the reconstructed `Node`.
 
 - **Startup**: after the blocking `sync_once` fetches owned
   disk-groups, `RecoveryEngine::recover_node` runs for each one. The
-  gRPC server does not accept RPCs until recovery completes.
+  rpc server does not accept RPCs until recovery completes.
 - **Ownership transfer**: when `SyncLoop` detects a disk-group newly
   assigned to this instance, it checks whether `ZoneValue` snapshots
   already exist. If they do, the new owner runs

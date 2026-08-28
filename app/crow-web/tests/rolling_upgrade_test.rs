@@ -34,7 +34,7 @@ struct Upstream {
     node_id: u64,
     pid: u32,
     mgmt_url: String,
-    grpc_url: String,
+    rpc_url: String,
     rest_port: u16,
     rpc_port: u16,
     binary: PathBuf,
@@ -174,7 +174,7 @@ async fn spawn_upstream(node_id: u64, workspace: &std::path::Path, binary: &Path
         node_id,
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
         rest_port: req.rest_port,
         rpc_port: req.rpc_port,
         binary: binary.to_path_buf(),
@@ -205,7 +205,7 @@ async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
             id: u.node_id.to_string(),
             url: u.mgmt_url.clone(),
             node_id: Some(u.node_id),
-            grpc_url: Some(u.grpc_url.clone()),
+            rpc_url: Some(u.rpc_url.clone()),
             rest_port: None,
             rpc_port: None,
             auto_start: true,
@@ -213,10 +213,18 @@ async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
             election_profile: None,
             pid: Some(u.pid),
             service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
         })
         .unwrap();
     }
     let state = AppState::with_config(cfg, None);
+    // Register each upstream's pid so `refresh_node_cache` (which
+    // skips nodes with no tracked runtime pid) refreshes after
+    // mutations.
+    for u in upstreams.values() {
+        state.set_runtime_pid(u.node_id, u.pid);
+    }
 
     for u in upstreams.values() {
         let client = ServerClient::new(u.mgmt_url.clone()).unwrap();
@@ -421,7 +429,13 @@ async fn mixed_version_3_node_cluster_kv_no_divergence() {
             .expect("terminate node");
         assert!(status.success());
 
-        let dead = Instant::now() + Duration::from_secs(3);
+        // Wait for graceful shutdown to complete. The server's per-layer
+        // shutdown timeout is 10s (ServerConfig::DEFAULT.shutdown_timeout_ms)
+        // and shutdown performs a real fsync of the WAL + engine snapshot,
+        // which can take several seconds under CI disk contention. The poll
+        // returns as soon as the process exits (normally ~200ms); the 15s
+        // cap is a safety net above the server's own 10s/layer budget.
+        let dead = Instant::now() + Duration::from_secs(15);
         while process_is_alive(pid) && Instant::now() < dead {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

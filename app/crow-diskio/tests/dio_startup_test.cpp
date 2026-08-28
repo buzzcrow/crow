@@ -14,6 +14,7 @@
 #include <flatbuffers/flatbuffers.h>
 #include <gtest/gtest.h>
 #include <msg_type_generated.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 

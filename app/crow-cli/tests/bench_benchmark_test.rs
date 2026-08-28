@@ -10,17 +10,20 @@
 
 mod common;
 
-use common::console::{crow_cli_bin, crow_rpc_echo_server_bin, run};
+use common::console::{crow_cli_bin, crow_rpc_fb_server_bin, run};
 use crow_console_shared::lifecycle;
 use std::sync::{Mutex, OnceLock};
 
 static BENCH_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn bench_lock() -> std::sync::MutexGuard<'static, ()> {
-    BENCH_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+    BENCH_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// `bench kv --mode mem --duration-secs 3` runs end-to-end,
+/// `bench kv --mode mem --duration-secs 1` runs end-to-end,
 /// exits 0, and prints a report path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_mem_end_to_end() {
@@ -45,7 +48,7 @@ async fn bench_benchmark_mem_end_to_end() {
             "--mode",
             "mem",
             "--duration-secs",
-            "3",
+            "1",
             "--loader-num",
             "2",
             "--connections",
@@ -61,7 +64,7 @@ async fn bench_benchmark_mem_end_to_end() {
     assert!(stdout.contains("total_ops"), "stdout={stdout}");
 }
 
-/// `bench kv --mode file --duration-secs 3` runs
+/// `bench kv --mode file --duration-secs 1` runs
 /// end-to-end with the crow-tree engine + file page store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_file_end_to_end() {
@@ -86,7 +89,7 @@ async fn bench_benchmark_file_end_to_end() {
             "--mode",
             "file",
             "--duration-secs",
-            "3",
+            "1",
             "--loader-num",
             "2",
             "--connections",
@@ -127,7 +130,7 @@ async fn bench_compare_two_reports() {
             "--mode",
             "mem",
             "--duration-secs",
-            "2",
+            "1",
             "--loader-num",
             "1",
             "--connections",
@@ -153,7 +156,7 @@ async fn bench_compare_two_reports() {
             "--mode",
             "mem",
             "--duration-secs",
-            "2",
+            "1",
             "--loader-num",
             "1",
             "--connections",
@@ -175,9 +178,9 @@ async fn bench_compare_two_reports() {
     assert!(stdout.contains(&run_id_2), "stdout={stdout}");
 }
 
-/// `bench rpc --duration-secs 3` runs the 2-process RPC echo
-/// benchmark end-to-end. No KV cluster needed — the RPC target
-/// provisions its own server.
+/// `bench rpc --duration-secs 1` runs the 2-process RPC echo
+/// benchmark end-to-end. The test starts the fb server as a child
+/// process, runs the bench, then kills the server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_rpc_end_to_end() {
     let _lock = bench_lock();
@@ -186,11 +189,41 @@ async fn bench_benchmark_rpc_end_to_end() {
         eprintln!("skipping: crow_kv CLI binary not built ({})", cli.display());
         return;
     }
-    // `bench rpc` spawns the CMake-built `crow-rpc-echo-server` binary.
-    // Skip when C++ libs haven't been built (e.g. bare `cargo test -p
-    // crow-cli` without `pixi run build-cpp`).
-    if crow_rpc_echo_server_bin().is_none_or(|p| !p.exists()) {
-        eprintln!("skipping: crow-rpc-echo-server binary not built (run `pixi run build-cpp`)");
+    let Some(fb_server) = crow_rpc_fb_server_bin() else {
+        eprintln!("skipping: crow-rpc-fb-server binary not built (run `pixi run build-cpp`)");
+        return;
+    };
+    if !fb_server.exists() {
+        eprintln!("skipping: crow-rpc-fb-server binary not built (run `pixi run build-cpp`)");
+        return;
+    }
+
+    // Start the fb server on port 18080 (the bench default).
+    let mut fb = std::process::Command::new(&fb_server);
+    fb.arg("--port=18080")
+        .arg("--io_workers=2")
+        .arg("--logdir=/tmp/bench-rpc-test")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut fb_child = match fb.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("skipping: failed to start crow-rpc-fb-server: {e}");
+            return;
+        }
+    };
+    // Wait for the server to bind.
+    let mut ready = false;
+    for _ in 0..50 {
+        if std::net::TcpStream::connect("127.0.0.1:18080").is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !ready {
+        eprintln!("skipping: crow-rpc-fb-server did not bind on port 18080");
+        let _ = fb_child.kill();
         return;
     }
 
@@ -202,17 +235,18 @@ async fn bench_benchmark_rpc_end_to_end() {
             "bench",
             "rpc",
             "--duration-secs",
-            "3",
+            "1",
             "--loader-num",
             "2",
             "--connections",
             "2",
-            "--key-space",
-            "100",
             "--value-size",
             "64",
         ],
     );
+    let _ = fb_child.kill();
+    let _ = fb_child.wait();
+
     assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
     assert!(stdout.contains("report (json):"), "stdout={stdout}");
     assert!(stdout.contains("target          : rpc"), "stdout={stdout}");

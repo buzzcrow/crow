@@ -159,6 +159,10 @@ pub(crate) struct BenchReport {
     /// field existed still deserialize.
     #[serde(default)]
     pub(crate) client_metrics: ClientMetricsSnapshot,
+    /// Client-side crow-rpc transport stats (end-of-run cumulative
+    /// snapshot from the bench process's `CrowkvClient`).
+    #[serde(default)]
+    pub(crate) client_transport_stats: TransportStatsSnapshot,
 }
 
 impl BenchReport {
@@ -242,6 +246,75 @@ pub(crate) struct ServerMetrics {
     pub(crate) wal_rmw_count: u64,
     /// System resource usage (see `crow_kv::metrics::system`).
     pub(crate) system: SystemMetrics,
+    /// Server-side crow-rpc transport stats (aggregated across nodes):
+    /// syscall counts + frame aggregation, summed across the run.
+    #[serde(default)]
+    pub(crate) rpc: TransportStatsSnapshot,
+    /// Inter-replica consensus RPC latency (leader → followers):
+    /// `accept_quorum_rpc` avg (us), per-replica `rpc.l@2`/`@3` avg (us),
+    /// follower `engine_apply` avg (us). Last-window snapshot from the
+    /// leader's metrics log.
+    #[serde(default)]
+    pub(crate) replica: ReplicaMetrics,
+    /// Total proposals that hit the inflight window slow path (window
+    /// was full, had to queue). From `*.write.inflight_enqueued.c`
+    /// counter, summed across the run. Zero means the window was never
+    /// full — increasing `max_inflight` won't help.
+    #[serde(default)]
+    pub(crate) inflight_enqueued: u64,
+    /// Avg wait time (us) for queued proposals (window-full events).
+    /// From `*.write.inflight_wait.l` summary, max avg across windows.
+    #[serde(default)]
+    pub(crate) inflight_wait_avg_us: u64,
+}
+
+/// Inter-replica consensus RPC metrics from the leader's perspective.
+/// Captured from the metrics-log flush windows (steady state). Latency
+/// values are avg microseconds; tps values are round-trips per second.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct ReplicaMetrics {
+    /// Leader → follower 2 RPC avg latency (us).
+    #[serde(default)]
+    pub(crate) r2: u64,
+    /// Leader → follower 2 RPC tps — round-trips per second.
+    #[serde(default)]
+    pub(crate) r2_tps: u64,
+    /// Leader → follower 3 RPC avg latency (us).
+    #[serde(default)]
+    pub(crate) r3: u64,
+    /// Leader → follower 3 RPC tps — round-trips per second.
+    #[serde(default)]
+    pub(crate) r3_tps: u64,
+}
+
+/// crow-rpc transport stats: submit→writev queue-wait latency.
+/// Used for both server-side (summed from metrics-log window deltas)
+/// and client-side (end-of-run cumulative snapshot) reporting.
+/// Legacy fields (`read_calls`, etc.) kept for deserialization of
+/// historical reports — always zero in new reports.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct TransportStatsSnapshot {
+    #[serde(default)]
+    pub read_calls: u64,
+    #[serde(default)]
+    pub writev_calls: u64,
+    #[serde(default)]
+    pub frames_sent: u64,
+    #[serde(default)]
+    pub frames_parsed: u64,
+    #[serde(default)]
+    pub read_bytes: u64,
+    #[serde(default)]
+    pub writev_bytes: u64,
+    /// Cumulative count of submit→writev latency samples.
+    #[serde(default)]
+    pub submit_to_writev_count: u64,
+    /// Cumulative average submit→writev queue wait (microseconds).
+    #[serde(default)]
+    pub submit_to_writev_avg_us: u64,
+    /// Total `enqueue_send` rejections (queue full or connection closed).
+    #[serde(default)]
+    pub send_queue_rejects: u64,
 }
 
 /// Per-op outcome flags recorded into `OpStats`. Grouped as a struct

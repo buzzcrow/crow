@@ -67,7 +67,7 @@ impl NotifyHandler {
         // (the subscriptions themselves stay alive — only their
         // `notify_rx` is moved into the merge tasks). The merge-task
         // join handles are tracked so they can be aborted on stop
-        // (otherwise they linger until the gRPC streams close).
+        // (otherwise they linger until the crow-rpc streams close).
         let (merge_tx, mut merge_rx) = mpsc::channel::<()>(64);
         let mut merge_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         for mut sub in subscriptions {

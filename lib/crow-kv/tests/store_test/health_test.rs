@@ -24,7 +24,7 @@ fn make_store_single_replica() -> Arc<PxKvStore> {
 
 #[tokio::test]
 async fn health_unhealthy_before_start() {
-    // gRPC server has not been started — listen handle absent → Unhealthy.
+    // crow-rpc server has not been started — listen handle absent → Unhealthy.
     let store = make_store_single_replica();
     let s = store.status();
     assert_eq!(s.status, StatusLevel::Unhealthy, "{s:?}");

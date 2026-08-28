@@ -3,19 +3,19 @@
 
 //! Standalone client library for `CrowKV`.
 //!
-//! Wraps `crow_kv`'s generated `KvService` gRPC client with:
+//! Wraps `crow_kv`'s generated `KvService` crow-rpc client with:
 //! - **Topology cache** (`(store_id, group_id) -> leader_endpoint`) sourced
-//!   from `crow-kv-server`'s HTTP management API `/topology` (no gRPC
+//!   from `crow-kv-server`'s HTTP management API `/topology` (no crow-rpc
 //!   `DescribeCluster`).
 //! - **Retry policy** on `NotLeaderHint` / timeout / other errors, reusing
 //!   the same `(client_id, seq)` across retries of one logical write so the
 //!   server's dedup cache can do its job.
 //! - **`ReadMode` routing**, including client-side `MinSlot` slot
 //!   tracking (a bounded per-group high-watermark, not per-key).
-//! - A per-endpoint `tonic::Channel` pool.
+//! - A per-endpoint connection pool (crow-rpc).
 //!
 //! `crow-console` is expected to depend on this crate rather than rolling
-//! its own gRPC client.
+//! its own crow-rpc client.
 
 mod binding_framework;
 mod chunkdb_binding_strategy;
@@ -26,8 +26,8 @@ mod config;
 mod error;
 mod hardware;
 mod kv_cluster;
+mod kv_rpc_transport;
 mod metrics;
-mod pool;
 mod range_binding;
 mod service_registry;
 mod space_usage;
@@ -54,6 +54,7 @@ pub use hardware::{
     NodeCapacityEntry, RackCapacityEntry,
 };
 pub use kv_cluster::{KVClusterAdmin, KVClusterMetaClient};
+pub use kv_rpc_transport::KvRpcTransport;
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 pub use range_binding::{ChunkdbRangeBinding, RangeBindingClient, RangeRouteError, RouteWithFallback};
 pub use service_registry::ServiceRegistryClient;

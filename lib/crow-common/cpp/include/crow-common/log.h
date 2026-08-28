@@ -35,6 +35,12 @@ namespace crow::common
 void init_logging(const std::string &log_dir, const std::string &level = "info", size_t max_file_mb = 30,
                   size_t max_files = 5, const std::string &file_prefix = "crow-tree");
 
+// Add an additional file sink to the existing logger created by
+// init_logging. Messages go to both the original file and this new file.
+// No-op (never throws) if logging was never initialized. Used by
+// crow-rpc to get its own log file alongside the crow-tree log file.
+void add_log_file(const std::string &log_dir, size_t max_file_mb, size_t max_files, const std::string &file_prefix);
+
 // Flush buffered messages to the sink without stopping the logger.
 // Safe to call when uninitialized or already shut down (no-op).
 void flush_logging();
@@ -47,6 +53,11 @@ void shutdown_logging();
 // Cheap (a single relaxed atomic load); used to gate the CR_LOG_* macros so
 // nothing is emitted before logging is configured.
 [[nodiscard]] bool logging_enabled();
+
+// True only after init_logging() has successfully created a logger.
+// Distinct from logging_enabled() (which defaults to true even before
+// init_logging is called, so spdlog's default stderr logger is used).
+[[nodiscard]] bool logger_initialized();
 
 // Set the current thread's name for CT_LOG output (stored thread_local and
 // also passed to pthread_setname_np for debugger/htop visibility). Should be

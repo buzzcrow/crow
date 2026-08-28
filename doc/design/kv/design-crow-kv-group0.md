@@ -21,7 +21,7 @@ Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §3.3
   - [2.5 ID types defined in `crow-protocol`](#25-id-types-defined-in-crow-protocol)
   - [2.6 Two monitoring models: push (services) and pull (infrastructure)](#26-two-monitoring-models-push-services-and-pull-infrastructure)
   - [2.7 kv-server keep-alive to group 0 (revised)](#27-kv-server-keep-alive-to-group-0-revised)
-  - [2.8 Hardware admin via kv-client (no admin gRPC service)](#28-hardware-admin-via-kv-client-no-admin-grpc-service)
+  - [2.8 Hardware admin via kv-client (no admin crow-rpc service)](#28-hardware-admin-via-kv-client-no-admin-crow-rpc-service)
 - [3. Group-0 Sysdata Schema](#3-group-0-sysdata-schema)
   - [3.1 Key layout (text-path encoding)](#31-key-layout-text-path-encoding)
   - [3.2 Text magic namespaces](#32-text-magic-namespaces)
@@ -157,9 +157,9 @@ handle, not a numeric cluster ID).
 - **`InstanceId`** — `u64`. Service instance identifier (diskdb
   instance, kv-server instance).
 - **`DiskId`** — 128-bit: two `u64` (`high`, `low`). Already defined
-  as a proto message in `common_type.proto`. Globally unique.
+  as a flatbuffer message in `common_type.fbs`. Globally unique.
 - **`ChunkId`** — 192-bit: three `u64` (`high`, `mid`, `low`).
-  Already defined as a proto message in `common_type.proto`.
+  Already defined as a flatbuffer message in `common_type.fbs`.
 
 The simple integer IDs (`RackId`, `NodeId`, `DiskGroupId`, `StoreId`,
 `GroupId`, `ReplicaId`, `InstanceId`) are type aliases (`pub type
@@ -167,7 +167,7 @@ RackId = u64;`) in `crow-protocol`, not newtypes. They exist for
 documentation and API clarity (function signatures read
 `rack_id: RackId` rather than `rack_id: u64`), not for type-safety
 enforcement. The composite IDs (`DiskId`, `ChunkId`) are already
-proto structs.
+flatbuffer structs.
 
 ### 2.6 Two monitoring models: push (services) and pull (infrastructure)
 
@@ -239,14 +239,14 @@ group). This is no more circular than a kv-server instance writing
 user data to a group it hosts. It's a normal client write that goes
 through the Paxos consensus path.
 
-### 2.8 Hardware admin via kv-client (no admin gRPC service)
+### 2.8 Hardware admin via kv-client (no admin crow-rpc service)
 
 Hardware admin operations (add/remove rack/node/disk-group/disk,
 set `*_status`) are writes to group-0 sysdata. They are performed
 through `HardwareClient` in `crow-kv-client`, invoked by the console
-(`crow-web` / `crow-cli`). There is **no `DiskdbAdminService` gRPC
-surface**: the previous `diskdb_sys_service.proto` /
-`diskdb_sys_op.proto` admin RPCs (`AddRack`, `SetDiskStatus`,
+(`crow-web` / `crow-cli`). There is **no `DiskdbAdminService` crow-rpc
+surface**: the previous `diskdb_sys_service.fbs` /
+`diskdb_sys_op.fbs` admin RPCs (`AddRack`, `SetDiskStatus`,
 `FetchHardware`, `Keepalive`) are removed. `FetchHardware` is
 replaced by `HardwareClient` prefix scans, `Keepalive` by
 `ServiceRegistryClient.heartbeat`, and the add/remove/status ops by
@@ -301,11 +301,11 @@ All group-0 values are JSON-encoded (`serde_json::to_vec` /
 single home for cross-component data structures) and are used by
 `crow-kv-client` directly, with no per-crate redefinition:
 
-- **Existing proto `*Value` types** (`RackValue`, `NodeValue`,
+- **Existing flatbuffer `*Value` types** (`RackValue`, `NodeValue`,
   `DiskGroupValue`, `DiskValue`, `HwStatus`, `DiskId`) — used directly.
   `crow-protocol`'s `build.rs` already derives
   `serde::Serialize`/`Deserialize` on them.
-- **New group-0 sysdata value types** added as proto messages in
+- **New group-0 sysdata value types** added as flatbuffer messages in
   `crow-protocol` (parallel to the hardware values): `StoreValue`,
   `GroupValue`, `ReplicaValue`, `InstanceValue` (service-registry
   value, generic across services), `OwnerMapValue`
@@ -337,15 +337,15 @@ single home for cross-component data structures) and are used by
 ### 3.5 `DiskGroupId` widening: u32 → u64
 
 Key structs (`DiskGroupKey`, `DiskKey`, `OwnerMapKey`,
-`BindMapKey`) use `u32` for `disk_group_id`. The proto type
+`BindMapKey`) use `u32` for `disk_group_id`. The flatbuffer type
 `NodeValue` also uses `u32` for `disk_group_ids` (`repeated uint32`)
 and `last_used_dg_id` (`uint32`). (`DiskGroupValue` has no
 `disk_group_id` field; the id is in the key.) This requirement
 widens `DiskGroupId` to `u64` for consistency with all other integer
 IDs and to remove the artificial 4-billion limit. The `NodeValue`
-proto fields change from `uint32` to `uint64`; the key struct fields
+flatbuffer fields change from `uint32` to `uint64`; the key struct fields
 change from `u32` to `u64`. The `disk_group_id` fields in
-`diskdb_op.proto` (`AllocateBlocksRequest`, `QueryCapacityStatsRequest`,
+`diskdb_op.fbs` (`AllocateBlocksRequest`, `QueryCapacityStatsRequest`,
 `GetDiskGroupInfoRequest`, `GetDiskInfoRequest`) and the Info response
 types (`NodeInfo`, `DiskInfo`, `DiskGroupInfo`) widen from `uint32` to
 `uint64` as well. This is a breaking schema change, acceptable because
@@ -379,7 +379,7 @@ later). It takes a `service` name that selects the path namespace
 - `read_all_instances(service) -> Result<Vec<(u64, InstanceValue)>>` (prefix scan)
 
 `InstanceValue` is the generic service-registry value
-(`{ instance_id, grpc_endpoint, last_heartbeat_ms, extra: ServiceExtra }`).
+(`{ instance_id, rpc_endpoint, last_heartbeat_ms, extra: ServiceExtra }`).
 `ServiceExtra` is a per-service enum (diskdb carries `owned_dg_ids:
 Vec<u64>`; kv-server carries `hosted_stores`, `hosted_groups`,
 `health`). Diskdb convenience wrappers
@@ -446,7 +446,7 @@ old `/topology/...` records are replaced by `/hw/...` and
 
 ### 5.4 Leader readiness before writing
 
-`HardwareClient` and `KVClusterMetaClient` write via gRPC to the
+`HardwareClient` and `KVClusterMetaClient` write via crow-rpc to the
 group-0 leader. `http_cluster_init` can only write sysdata after a
 group-0 leader is elected and reachable. For single-node init this
 is immediate (self-elect). For multi-node, the init flow must wait

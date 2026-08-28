@@ -64,7 +64,7 @@ See `pixi.toml` for the full list of tasks.
 | Crate | What it is |
 | --- | --- |
 | `crow-kv` | Core library: Multi-Paxos consensus, WAL, storage engine, RPC |
-| `crow-kv-server` | Server binary: gRPC + HTTP management API |
+| `crow-kv-server` | Server binary: crow-rpc + HTTP management API |
 | `crow-kv-client` | Client library: topology cache, retry, idempotency |
 | `crow-tree` | C++ storage engine (B+tree, delta chains, io_uring, buffer pool) |
 | `crow-console` | Operations console: web UI (Axum + React) and CLI |

@@ -5,7 +5,7 @@
 
 This is the root design document for the diskdb component area. It
 defines **what diskdb is**, **why key choices were made**, and **how the
-component is structured**. Field-level details live in the proto files
+component is structured**. Field-level details live in the schema files
 and Rust source; this doc covers decisions and architecture only.
 
 ---
@@ -20,9 +20,9 @@ and Rust source; this doc covers decisions and architecture only.
   - [3.3 No CAS needed; exclusive ownership](#33-no-cas-needed-exclusive-ownership)
   - [3.4 Records are the source of truth; bitmap is derived](#34-records-are-the-source-of-truth-bitmap-is-derived)
   - [3.5 Zone is a logical concept; sizes may vary](#35-zone-is-a-logical-concept-sizes-may-vary)
-  - [3.6 Common protocol crate; gRPC now, custom RPC later](#36-common-protocol-crate-grpc-now-custom-rpc-later)
+  - [3.6 Common protocol crate; crow-rpc transport](#36-common-protocol-crate-crow-rpc-transport)
   - [3.7 Reuse crow-common metrics](#37-reuse-crow-common-metrics)
-  - [3.8 Proto types used directly; no Rust type duplication](#38-proto-types-used-directly-no-rust-type-duplication)
+  - [3.8 Schema types used directly; no Rust type duplication](#38-schema-types-used-directly-no-rust-type-duplication)
   - [3.9 Unit-based sizes; disk-id key routing](#39-unit-based-sizes-disk-id-key-routing)
 - [4. Architecture Overview](#4-architecture-overview)
 - [5. Group-0 Sysdata Schema](#5-group-0-sysdata-schema)
@@ -175,13 +175,12 @@ may be smaller; the word-alignment rule (each zone's `unit_capacity` is
 a multiple of 64) ensures no bitmap masking or padding. Details in
 [`design-crow-diskdb-zone-management.md`](design-crow-diskdb-zone-management.md) §2.
 
-### 3.6 Common protocol crate; gRPC now, custom RPC later
+### 3.6 Common protocol crate; crow-rpc transport
 
-A new `lib/crow-protocol` crate holds protobuf definitions for all CROW
-components. diskdb uses it first; crow-kv's existing protos stay where
-they are (unchanged). Later, when CROW adds its own RPC transport, the
-protobuf messages are reused and only the transport changes (custom RPC
-+ flatbuffer is a future direction).
+A new `lib/crow-protocol` crate holds flatbuffers definitions for all CROW
+components. diskdb uses it first; crow-kv's existing schemas stay where
+they are (unchanged). The flatbuffers messages are reused across the
+crow-rpc transport.
 
 ### 3.7 Reuse crow-common metrics
 
@@ -189,20 +188,20 @@ diskdb reuses `crow-common`'s metrics module (no parallel metrics
 system). Per-disk atomic counters stay as hot-path counters that flush
 into the crow-common registry at reporting intervals.
 
-### 3.8 Proto types used directly; no Rust type duplication
+### 3.8 Schema types used directly; no Rust type duplication
 
-Proto types (`DiskId`, `ChunkId`, `Segment`, `HwStatus`, `DiskType`,
+Schema types (`DiskId`, `ChunkId`, `Segment`, `HwStatus`, `DiskType`,
 `ZoneAllocationState`, value types) are defined in `crow_protocol`
 and used directly in Rust, with no field duplication. Extension traits add
 domain methods. Internal types (metas, bitmap, CRC logic) are Rust
-structs not exposed via gRPC.
+structs not exposed via rpc.
 
-**Keys are not protobuf.** KV keys use the cross-component binary
+**Keys are not flatbuffers.** KV keys use the cross-component binary
 encoding defined in `doc/design/protocol/design-crow-protocol-key.md` (flat
 per-kind Rust structs, two-byte `magic | type_tag` header, big-endian
-fixed-width fields). Protobuf-serialized `*Key` messages are never
+fixed-width fields). Flatbuffers-serialized `*Key` messages are never
 used as KV key bytes. The tag bytes break prefix scans. RPC
-responses/requests use `**Info` proto messages that flatten key and
+responses/requests use `**Info` schema messages that flatten key and
 value fields into one message; see §5 and zone-management §6.
 
 ### 3.9 Unit-based sizes; disk-id key routing
@@ -255,14 +254,14 @@ routing (§3.2); it is not stored in record keys or `Segment`.
 
 ### Protocol
 
-Proto definitions are split across multiple files in
-`lib/crow-protocol/src/proto/` (`error_code`, `common_type`,
+Schema definitions are split across multiple files in
+`lib/crow-protocol/src/fbs/` (`error_code`, `common_type`,
 `diskdb_type`, `diskdb_op`, `diskdb_sys_op`, `diskdb_service`,
 `diskdb_sys_service`, `chunkdb_type`, `chunkdb_op`, `chunkdb_service`,
-`diskio_op`, `diskio_service`). See the proto files for field-level
+`diskio_op`, `diskio_service`). See the schema files for field-level
 detail.
 
-Three gRPC services (diskdb now; chunkdb and diskio are future
+Three rpc services (diskdb now; chunkdb and diskio are future
 components with protocol surfaces reserved):
 - **`DiskdbService`** (served by the diskdb server): `AllocateBlocks`
   (carries `disk_group_id`, not `node_id`; carries `exclude_disks` for
@@ -272,12 +271,12 @@ components with protocol surfaces reserved):
   `MarkBlockCorrupt` (per-block state transitions, zone-management §6). The service ships
   with allocate/free returning `Unimplemented`; the rest are later
   requirements.
-- **Hardware admin** (no gRPC surface): rack/node/disk-group/disk
+- **Hardware admin** (no rpc surface): rack/node/disk-group/disk
   add/remove and `set_*_status` are writes to group-0 sysdata
   performed through `HardwareClient` in `crow-kv-client`, invoked by
   the console (`crow-web` / `crow-cli`). The previous
-  `DiskdbAdminService` proto (`diskdb_sys_service.proto` /
-  `diskdb_sys_op.proto`) is removed — `FetchHardware` is replaced by
+  `DiskdbAdminService` schema (`diskdb_sys_service.fbs` /
+  `diskdb_sys_op.fbs`) is removed — `FetchHardware` is replaced by
   `HardwareClient` prefix scans, `Keepalive` by
   `ServiceRegistryClient.heartbeat`, and the add/remove/status ops by
   `HardwareClient` methods. The diskdb server reads hardware state
@@ -293,8 +292,8 @@ Key protocol decisions: integer IDs throughout (no string UUIDs);
 `DiskId` is globally unique (no `node_id`/`disk_group_id` in `Segment`
 or record keys. `disk_group_id` is in the `AllocateBlocks` request for
 routing only); `Segment.owner_chunk` (192-bit `ChunkId`) replaces the
-former `tag`; all sizes are unit-based; errors are returned via gRPC
-status codes with `ErrorInfo` details (`error_code.proto`), not
+former `tag`; all sizes are unit-based; errors are returned via rpc
+status codes with `ErrorInfo` details (`error_code.fbs`), not
 `bool ok + string error` in response bodies.
 
 ## 5. Group-0 Sysdata Schema
@@ -334,11 +333,11 @@ structs live in `lib/crow-protocol/src/key/` and implement both
 `doc/design/kv/design-crow-kv-group0.md` §3.
 
 diskdb's own data groups (zone records) keep the `BinaryKey` encoding:
-`ZoneKey`, `BusyBlockKey`, `FreeBlockKey` (binary + prost, unchanged).
+`ZoneKey`, `BusyBlockKey`, `FreeBlockKey` (binary + flatbuffers, unchanged).
 
-Value types live in `crow-protocol` (proto `*Value` types used
+Value types live in `crow-protocol` (flatbuffers `*Value` types used
 directly; new sysdata values `OwnerMapValue`, `BindMapValue`,
-`InstanceValue` added as proto messages; Entry return types
+`InstanceValue` added as schema messages; Entry return types
 `DiskGroupEntry`/`DiskdbOwnerEntry`/`KVGroupBindEntry` are plain serde
 structs). See `design-crow-kv-group0.md` §3.3.
 
@@ -470,12 +469,12 @@ the group-0 leader and subscribes to the prefixes it cares about
 (`/hw/dg_owner/`, `/hw/dg_bind/`, `/hw/disk/`); the leader pushes
 hw-status-change and ownership-change notifications over that stream.
 No separate notify-endpoint registration is needed for notify delivery.
-The `grpc_endpoint` arg of `heartbeat_diskdb` is the diskdb gRPC
+The `rpc_endpoint` arg of `heartbeat_diskdb` is the diskdb rpc
 service address for service-registry discovery (so clients can route
 `allocate_blocks`), already populated from `config.server.listen_addr`.
 This replaces polling for status changes as the primary
 change-detection mechanism; polling stays as a safety net with an
-increased interval. The detailed design (proto, registry, apply-path
+increased interval. The detailed design (schema, registry, apply-path
 trigger, client, diskdb handler, configuration) lives in
 [`design-crow-kv-watch-notify.md`](../kv/design-crow-kv-watch-notify.md).
 
@@ -483,7 +482,7 @@ trigger, client, diskdb handler, configuration) lives in
 
 diskdb's third major component. Detailed design (usage accessors,
 `QueryCapacityStats` handler, per-disk counters, keepalive piggyback,
-recalc verifier, reporting loop, proto, kv-client aggregation, and the
+recalc verifier, reporting loop, schema, kv-client aggregation, and the
 full `crow-diskdb-client` library) lives in
 [`design-crow-diskdb-space-metrics.md`](design-crow-diskdb-space-metrics.md).
 This section carries the architecture and the metric categories.
@@ -667,13 +666,13 @@ visibility.
   `BackgroundTask` and runs on `BgRunner` with a `TimerFn` trigger
   reading `scanner.scan_interval_secs` from the shared config handle.
   `ScanState` holds the last `ScanSummary` (shared between the task
-  and the gRPC service handlers) + an `AtomicBool` scan-requested
+  and the rpc service handlers) + an `AtomicBool` scan-requested
   flag (set by `TriggerScan`, consumed at the start of the next
   `run_cycle`) + an `AtomicBool` in-progress flag (prevents overlap).
 - **Admin RPCs** — `TriggerScan` sets the scan-requested flag and
   returns the current summary + `scan_in_progress` flag;
   `GetScanStatus` returns the last summary + `has_run` flag. The
-  `ScanSummary` proto message carries all scan counts (ghost_busy,
+  `ScanSummary` schema message carries all scan counts (ghost_busy,
   ghost_free, uncompacted_lag, corrupt_snapshots, corrupt_records,
   owner_mismatches, leak_status) + timing.
 - **Scanner metrics** — `scanner_runs_total` (counter),
@@ -689,20 +688,20 @@ visibility.
 ## 11. Crate Layout
 
 ```
-lib/crow-protocol         (common protobuf for all CROW components; diskdb first)
-app/crow-diskdb           (server: lib + binary — types, allocator, records, sync, gRPC + HTTP, CLI)
-lib/crow-diskdb-client    (client library for callers: allocate/free/query; gRPC now, custom RPC later)
+lib/crow-protocol         (common flatbuffers for all CROW components; diskdb first)
+app/crow-diskdb           (server: lib + binary — types, allocator, records, sync, rpc + HTTP, CLI)
+lib/crow-diskdb-client    (client library for callers: allocate/free/query; crow-rpc transport)
 ```
 
-- **`lib/crow-protocol`** — protobuf definitions for diskdb gRPC services
-  (allocate/free/query) + extension traits for proto types
+- **`lib/crow-protocol`** — flatbuffers definitions for diskdb rpc services
+  (allocate/free/query) + extension traits for schema types
   (`diskdb_type_util.rs`: `DiskIdExt`, `HwStatusExt`,
   `ZoneAllocationStateExt`, `ZoneValueExt`, `effective_status`).
-  crow-kv's existing protos stay in `crow-kv` (unchanged). Later, when
-  CROW adds its own RPC transport, the protobuf messages are reused.
+  crow-kv's existing schemas stay in `crow-kv` (unchanged). The
+  flatbuffers messages are reused across the crow-rpc transport.
 - **`app/crow-diskdb`** — server crate (package name `crow-diskdb`).
   Combined library + binary: contains all diskdb logic (types, zone
-  allocator, record persistence, scanner, ownership/sync, gRPC +
+  allocator, record persistence, scanner, ownership/sync, rpc +
   HTTP handlers, CLI, config). The library target enables integration
   tests without spawning a separate process; the binary target
   (`crow-diskdb`) is the server executable. Proto types and their
@@ -711,7 +710,7 @@ lib/crow-diskdb-client    (client library for callers: allocate/free/query; gRPC
   are Rust structs.
 - **`lib/crow-diskdb-client`** — client library for easy access to the server
   (allocate/free/query), mirroring `crow-kv-client`'s retry +
-  topology-cache pattern. gRPC now; custom RPC + flatbuffer later.
+  topology-cache pattern. crow-rpc transport; flatbuffers framing.
 
 ### Dependencies
 
@@ -723,7 +722,7 @@ crow-kv-client (sole durable store — group 0 + data groups)
 crow-diskdb (server) ──depends──> crow-kv-client, crow-common, protocol
 crow-diskdb-client  ──depends──> protocol, crow-kv-client (for group-0 discovery)
 
-protocol ──> (no internal deps beyond prost/tonic)
+protocol ──> (no internal deps beyond flatbuffers/crow-rpc)
 ```
 
 ## 12. Concurrency Model
@@ -802,7 +801,7 @@ The diskdb implementation is organized by functional scope. Each area
 below covers a coherent slice of the component; together they make up
 the full diskdb server.
 
-- **Protocol + core types** — protobuf services, core types, record key
+- **Protocol + core types** — flatbuffers services, core types, record key
   layout, config validation, bitmap utilities, CRC integrity.
 - **Group-0 sysdata schema + sync** — disk status management, group-0
   read/write, ownership/binding maps, heartbeat, disk-add initialization
@@ -846,7 +845,7 @@ the diskdb component area.
 
 `DiskdbClient` wraps allocate/free/query/recalc/compact and also the
 scanner RPCs (`TriggerScan`, `GetScanStatus`) and
-`RebuildZoneBitmap`. The proto + server handlers exist; the client
+`RebuildZoneBitmap`. The schema + server handlers exist; the client
 wrappers make them reachable from the REST proxy and CLI.
 
 ```rust

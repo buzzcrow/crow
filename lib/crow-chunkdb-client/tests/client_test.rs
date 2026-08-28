@@ -1,11 +1,10 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `ChunkdbClient` unit tests — error mapping, retry config.
+//! `ChunkdbClient` unit tests — retry config, error transience.
 
 use crow_chunkdb_client::{ChunkdbClientError, RetryConfig};
 use std::time::Duration;
-use tonic::Status;
 
 #[test]
 fn retry_config_default() {
@@ -67,45 +66,7 @@ fn is_not_transient_aborted() {
 }
 
 #[test]
-fn from_status_unavailable() {
-    let status = Status::unavailable("server down");
-    let err = crow_chunkdb_client::from_status(&status);
-    assert!(matches!(err, ChunkdbClientError::Unavailable(_)));
+fn is_transient_not_my_range() {
+    let err = ChunkdbClientError::NotMyRange("test".into());
     assert!(err.is_transient());
-}
-
-#[test]
-fn from_status_not_found() {
-    let status = Status::not_found("chunk not found");
-    let err = crow_chunkdb_client::from_status(&status);
-    assert!(matches!(err, ChunkdbClientError::NotFound(_)));
-    assert!(!err.is_transient());
-}
-
-#[test]
-fn from_status_already_exists() {
-    let status = Status::already_exists("chunk exists");
-    let err = crow_chunkdb_client::from_status(&status);
-    assert!(matches!(err, ChunkdbClientError::AlreadyExists(_)));
-}
-
-#[test]
-fn from_status_failed_precondition() {
-    let status = Status::failed_precondition("invalid state");
-    let err = crow_chunkdb_client::from_status(&status);
-    assert!(matches!(err, ChunkdbClientError::FailedPrecondition(_)));
-}
-
-#[test]
-fn from_status_aborted() {
-    let status = Status::aborted("conflict");
-    let err = crow_chunkdb_client::from_status(&status);
-    assert!(matches!(err, ChunkdbClientError::Aborted(_)));
-}
-
-#[test]
-fn from_status_internal() {
-    let status = Status::internal("boom");
-    let err = crow_chunkdb_client::from_status(&status);
-    assert!(matches!(err, ChunkdbClientError::Internal(_)));
 }

@@ -5,7 +5,7 @@
 
 use crate::cluster::group::{ProposeResult, PxGroup};
 use crate::cluster::group_election::{LeaderElection, ReadBarrierOutcome};
-use crate::cluster::kv_server::GrpcTaskState;
+use crate::cluster::kv_server::{RpcServerState, RpcTaskState};
 use crate::cluster::status::{GroupStatus, StatusLevel, StoreStatus};
 use crate::common::config::ServerConfig;
 use crate::common::report::OperationReport;
@@ -23,8 +23,14 @@ use tracing::{debug, info};
 pub struct PxKvStore {
     pub store_id: u64,
     pub(crate) groups: DashMap<u64, Arc<PxGroup>>,
-    pub(crate) server_state: Mutex<GrpcTaskState>,
+    pub(crate) server_state: Mutex<RpcTaskState>,
     pub(crate) listen_addr: SocketAddr,
+    /// crow-rpc server state (R32 migration). Holds the `RpcServer`
+    /// handle + the shared `PxRpcTransport` for outbound RPCs.
+    pub(crate) rpc_server_state: Mutex<RpcServerState>,
+    /// Client-facing crow-rpc server state (R117 migration). Holds the
+    /// `RpcServer` handle for the client-facing KV service.
+    pub(crate) client_rpc_server_state: Mutex<RpcServerState>,
     /// Set the first time `shutdown()` is invoked. Subsequent calls are no-ops.
     shutdown_started: AtomicBool,
     /// Metrics registry for KV service instrumentation. `None` when
@@ -34,6 +40,29 @@ pub struct PxKvStore {
     /// Defaults to `ServerConfig::DEFAULT.scan_byte_budget`; overridden via
     /// `set_scan_byte_budget` from the loaded `CrowKVConfig` before `start()`.
     pub(crate) scan_byte_budget: usize,
+    /// Number of crow-rpc I/O worker threads for the server's `RpcServer`.
+    /// Set from `--rpc-workers` CLI before `start()`. Default: 2.
+    pub rpc_workers: u32,
+    /// Number of crow-rpc connections per peer endpoint for inter-server
+    /// consensus RPCs. Defaults to `ServerConfig::DEFAULT.peer_pool_size`;
+    /// overridden via `set_peer_pool_size` before `start()`.
+    pub(crate) peer_pool_size: usize,
+    /// Enable Nagle on RPC connections. Defaults to
+    /// `ServerConfig::DEFAULT.enable_nagle`; overridden via
+    /// `set_enable_nagle` before `start()`.
+    pub(crate) enable_nagle: bool,
+    /// Enable `TCP_QUICKACK` on RPC connections (Linux only). Defaults to
+    /// `ServerConfig::DEFAULT.quickack`; overridden via `set_quickack`
+    /// before `start()`.
+    pub(crate) quickack: bool,
+    /// Event-write mode for RPC transports. Defaults to
+    /// `ServerConfig::DEFAULT.event_write`; overridden via
+    /// `set_event_write` before `start()`.
+    pub(crate) event_write: bool,
+    /// Per-connection send queue capacity. Defaults to
+    /// `ServerConfig::DEFAULT.send_queue_capacity`; overridden via
+    /// `set_send_queue_capacity` before `start()`.
+    pub(crate) send_queue_capacity: u32,
     /// Test-only delay injected into `kv_get` before `resolve_read_point`.
     /// Set via `set_get_delay_for_tests` under the `test-util` feature;
     /// `None` in production.
@@ -47,11 +76,19 @@ impl PxKvStore {
         Self {
             store_id,
             groups: DashMap::new(),
-            server_state: Mutex::new(GrpcTaskState::default()),
+            server_state: Mutex::new(RpcTaskState::default()),
+            rpc_server_state: Mutex::new(RpcServerState::default()),
+            client_rpc_server_state: Mutex::new(RpcServerState::default()),
             listen_addr,
             shutdown_started: AtomicBool::new(false),
             metrics_registry: None,
             scan_byte_budget: ServerConfig::DEFAULT.scan_byte_budget,
+            rpc_workers: 2,
+            peer_pool_size: ServerConfig::DEFAULT.peer_pool_size,
+            enable_nagle: ServerConfig::DEFAULT.enable_nagle,
+            quickack: ServerConfig::DEFAULT.quickack,
+            event_write: ServerConfig::DEFAULT.event_write,
+            send_queue_capacity: ServerConfig::DEFAULT.send_queue_capacity,
             #[cfg(feature = "test-util")]
             get_delay: Mutex::new(None),
         }
@@ -67,6 +104,36 @@ impl PxKvStore {
     /// `CrowKVConfig.server.scan_byte_budget`. Called before `start()`.
     pub fn set_scan_byte_budget(&mut self, budget: usize) {
         self.scan_byte_budget = budget;
+    }
+
+    /// Override the peer connection pool size from the loaded
+    /// `CrowKVConfig.server.peer_pool_size`. Called before `start()`.
+    pub fn set_peer_pool_size(&mut self, size: usize) {
+        self.peer_pool_size = size;
+    }
+
+    /// Override the Nagle setting from the loaded
+    /// `CrowKVConfig.server.enable_nagle`. Called before `start()`.
+    pub fn set_enable_nagle(&mut self, enabled: bool) {
+        self.enable_nagle = enabled;
+    }
+
+    /// Override `TCP_QUICKACK` from the loaded
+    /// `CrowKVConfig.server.quickack`. Called before `start()`.
+    pub fn set_quickack(&mut self, enabled: bool) {
+        self.quickack = enabled;
+    }
+
+    /// Override the event-write mode from the loaded
+    /// `CrowKVConfig.server.event_write`. Called before `start()`.
+    pub fn set_event_write(&mut self, enabled: bool) {
+        self.event_write = enabled;
+    }
+
+    /// Override the send queue capacity from the loaded
+    /// `CrowKVConfig.server.send_queue_capacity`. Called before `start()`.
+    pub fn set_send_queue_capacity(&mut self, capacity: u32) {
+        self.send_queue_capacity = capacity;
     }
 
     /// Reap expired snapshot handles from a group's registry. Called
@@ -101,7 +168,7 @@ impl PxKvStore {
         *self.get_delay.lock() = Some(delay);
     }
 
-    /// Cascade shutdown: stop gRPC server (with timeout), then shut down each
+    /// Cascade shutdown: stop crow-rpc server (with timeout), then shut down each
     /// group, cascading into every replica layer.
     ///
     /// The shutdown contract across layers (`PxKvStore` → `PxGroup` →
@@ -153,7 +220,7 @@ impl PxKvStore {
 
         let mut report = OperationReport::new();
 
-        // 1. Stop gRPC server first so no new requests reach the groups.
+        // 1. Stop crow-rpc server first so no new requests reach the groups.
         if let Err(msg) = self.shutdown_server(per_layer_timeout).await {
             report.push_error(msg);
         }
@@ -198,12 +265,12 @@ impl PxKvStore {
             status = StatusLevel::Unhealthy;
             messages.push(format!("store {} has been shut down", self.store_id));
         } else {
-            // gRPC server liveness — listen_addr is set by start() and cleared by
+            // crow-rpc server liveness — listen_addr is set by start() and cleared by
             // shutdown_server() taking the JoinHandle.
             let server_running = self.server_state.lock().handle.is_some();
             if !server_running {
                 status = StatusLevel::Unhealthy;
-                messages.push(format!("store {}: gRPC server not running", self.store_id));
+                messages.push(format!("store {}: crow-rpc server not running", self.store_id));
             }
         }
 
@@ -280,6 +347,15 @@ impl PxKvStore {
         if let Some(ref registry) = self.metrics_registry {
             arc.set_metrics_registry(registry, self.store_id);
         }
+        // Wire the shared crow-rpc transport into remote replicas when
+        // the server has already started the consensus RPC server.
+        if let Some(transport) = self.rpc_transport() {
+            for remote in &arc.remote_replicas {
+                if let Some(real) = remote.as_real() {
+                    real.set_rpc_transport(transport.clone());
+                }
+            }
+        }
         // Spawn the per-group election driver (no-op when
         // `election_driver_disabled`). Driver holds a `Weak<PxGroup>` so
         // dropping the store's `Arc` does not leak the task. Skip when no
@@ -325,7 +401,7 @@ impl PxKvStore {
     ///
     /// * the group exists locally,
     /// * the local replica is **not** the current leader, and
-    /// * the leader's gRPC endpoint is known (one of the group's
+    /// * the leader's crow-rpc endpoint is known (one of the group's
     ///   `remote_replicas` carries it).
     ///
     /// Returns `None` when local is the leader, the group is missing,

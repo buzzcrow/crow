@@ -3,12 +3,15 @@
 
 #include "crow-rpc/server/server.h"
 
+#include "crow-rpc/client/client.h" // RpcClient, RpcError (for request_client_ + fail_all)
+#include "crow-rpc/rpc_metrics.h"
 #include "crow-rpc/server/handler.h"
 #include "msg_type_generated.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -16,14 +19,10 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <thread>
 
 namespace crow::rpc
 {
-
-static inline uint64_t now_nano()
-{
-    return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-}
 
 RpcServer::RpcServer(BufferPool *pool, uint32_t io_engines, uint32_t io_workers)
     : pool_(pool),
@@ -129,6 +128,18 @@ void RpcServer::stop()
 
 void RpcServer::acceptor_loop(std::promise<void> ready)
 {
+    // Client-only server (no listen): sleep-loop on running_ so the
+    // acceptor thread doesn't busy-spin. On macOS, poll() with fd=-1
+    // returns immediately (POLLNVAL), causing 100% CPU; on Linux it
+    // times out, but either way there is nothing to accept.
+    if (listen_fd_ < 0) {
+        ready.set_value();
+        while (running_.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return;
+    }
+
     // Make the listen socket non-blocking and use poll() with a short
     // timeout. On Linux, close(listen_fd) from another thread does NOT
     // unblock a thread blocked in accept() (unlike macOS). The poll()
@@ -165,43 +176,78 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-        auto conn = transport_->create_connection(fd, "client");
+        int nodelay = transport_->tcp_nodelay() ? 1 : 0;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+#if defined(__linux__)
+        // TCP_QUICKACK breaks the Nagle + delayed-ACK deadlock (40ms
+        // stalls per round). Controlled by set_quickack() — independent
+        // of Nagle. QUICKACK is not sticky — re-armed after each read.
+        if (transport_->quickack()) {
+            int quickack = 1;
+            ::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+        }
+#endif
+
+        auto conn      = transport_->create_connection(fd, "client");
+        conn->quickack = transport_->quickack();
         conn->set_on_frame([this](Frame *frame, Connection *c) { dispatch(frame, c); });
+        // Fail pending server-initiated requests when the connection closes.
+        // Per-connection scoping: only fail requests sent on this connection.
+        conn->set_on_close([this](Connection *c) {
+            if (request_client_ != nullptr) {
+                request_client_->fail_all(c, RpcError::ConnectionClosed);
+            }
+        });
     }
 }
 
 void RpcServer::dispatch(Frame *frame, Connection *conn)
 {
-    auto    &stats         = transport_->stats();
-    uint64_t dispatch_nano = 0;
-    if (frame->parsed_nano > 0) {
-        dispatch_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-        stats.read_to_dispatch.record(dispatch_nano - frame->parsed_nano);
-    }
+    uint16_t msg_type          = frame->header.msg_type;
+    bool     is_one_way        = (frame->header.flags & FLAG_ONE_WAY) != 0;
+    uint64_t frame_parsed_nano = now_nanos();
 
-    uint16_t msg_type   = frame->header.msg_type;
-    bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
-
+    // Try request dispatch first — if a handler is registered for
+    // this msg_type, dispatch as a request. This ensures request
+    // frames are not intercepted by on_response (which matches by
+    // request_id and can't distinguish a request from its ack).
     HandlerFn handler = handlers_.get_handler(msg_type);
-    if (!handler) {
-        // Unknown msg_type — send UnknownMessage response (if not one-way).
-        if (!is_one_way) {
-            handler = handle_unknown;
+    if (handler) {
+        if (msg_type == static_cast<uint16_t>(proto::FBMsgType_EConnectionPingRequest)) {
+            cnt_response_ping().inc();
         }
-        else {
-            delete frame;
-            return;
+        OutFrame *response = handler(frame, conn);
+        if (response != nullptr) {
+            // Inline path: handler returned response immediately (sync).
+            hist_response_inline().observe(now_nanos() - frame_parsed_nano);
+            transport_->submit_inline(conn, response);
         }
+        // Async path: handler returned nullptr, will call submit_response
+        // later. The dispatched latency is not tracked — it would require
+        // per-request context to span the trampoline return → submit_response
+        // call. The inline histogram covers the sync path.
+        return;
     }
 
-    OutFrame *response = handler(frame, conn);
-    if (response != nullptr) {
-        // Record handler latency (dispatch entry → response enqueue).
-        if (dispatch_nano > 0) {
-            stats.dispatch_to_enq.record(now_nano() - dispatch_nano);
+    // No handler for this msg_type — try response routing (ack to
+    // a server-sent request). on_response consumes the frame if the
+    // request_id is in the request client's pending map.
+    if (request_client_ != nullptr && request_client_->on_response(frame->request_id, frame)) {
+        return; // ack routed, frame consumed
+    }
+
+    // Unknown msg_type and not an ack — send UnknownMessage (if not
+    // one-way) or drop.
+    if (!is_one_way) {
+        handler            = handle_unknown;
+        OutFrame *response = handler(frame, conn);
+        if (response != nullptr) {
+            hist_response_inline().observe(now_nanos() - frame_parsed_nano);
+            transport_->submit_inline(conn, response);
         }
-        // Submit the response via inline path (direct enqueue + write).
-        transport_->submit_inline(conn, response);
+    }
+    else {
+        delete frame;
     }
 }
 

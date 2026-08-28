@@ -9,7 +9,7 @@
 //! - `ReplicaClient`: Client-side senders (remote replicas)
 //!
 //! Both handler/client traits are **transport-neutral**: errors flow through
-//! [`PxReplicaError`], an in-process enum. The gRPC adapter
+//! [`PxReplicaError`], an in-process enum. The crow-rpc adapter
 //! (`rpc::px_service`) maps both directions across the network boundary.
 //!
 //! Key work: error taxonomy ([`PxReplicaError`]), election handler methods
@@ -22,9 +22,9 @@ use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
 
 /// Transport-neutral replica error.
 ///
-/// All [`ReplicaHandler`] and [`ReplicaClient`] methods return this. The gRPC
-/// adapter (`crate::rpc::px_service`) maps to/from `tonic::Status` at the
-/// network boundary so `crow_kv` library code never names `tonic::Status`
+/// All [`ReplicaHandler`] and [`ReplicaClient`] methods return this. The crow-rpc
+/// adapter (`crate::rpc::px_rpc_service`) maps to/from `PxReplicaError` at the
+/// network boundary so `crow_kv` library code never names `PxReplicaError`
 /// outside of `rpc/`.
 #[derive(Debug, thiserror::Error)]
 pub enum PxReplicaError {
@@ -103,6 +103,18 @@ pub struct StepDownReply {
     pub current_leader_id: PxNodeId,
 }
 
+/// `FetchGap` reply (R65). Carries the chosen value at the chosen ballot
+/// so the follower can overwrite any stale lower-ballot value and apply.
+#[derive(Clone, Debug)]
+pub struct FetchGapReply {
+    pub group_id: u64,
+    pub slot: u64,
+    pub term: u64,
+    pub ballot_round: u64,
+    pub leader_id: u64,
+    pub payload: bytes::Bytes,
+}
+
 /// Common trait for replica metadata.
 ///
 /// This trait defines the minimal metadata interface that all replicas must implement.
@@ -121,8 +133,8 @@ pub trait Replica {
 
 /// Server-side handler trait for local replicas.
 ///
-/// All errors are transport-neutral ([`PxReplicaError`]); the gRPC adapter
-/// translates to `tonic::Status` only at the network boundary.
+/// All errors are transport-neutral ([`PxReplicaError`]); the crow-rpc adapter
+/// translates to `PxReplicaError` only at the network boundary.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaHandler: Replica {
     /// Phase-1 `Prepare` handler.
@@ -174,8 +186,8 @@ pub trait ReplicaHandler: Replica {
 
 /// Client-side sender trait for remote replicas.
 ///
-/// All errors are transport-neutral ([`PxReplicaError`]); transport-level gRPC
-/// failures fold into [`PxReplicaError::Internal`] inside the gRPC client
+/// All errors are transport-neutral ([`PxReplicaError`]); transport-level crow-rpc
+/// failures fold into [`PxReplicaError::Internal`] inside the crow-rpc client
 /// adapter.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaClient: Replica {

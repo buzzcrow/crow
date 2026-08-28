@@ -34,30 +34,43 @@ MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)
 
 Counter *MetricsRegistry::register_counter(const std::string &name)
 {
-    auto     h   = std::make_unique<Counter>(name);
-    Counter *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<Counter>(name);
+    Counter         *raw = h.get();
     counters_.push_back(std::move(h));
     return raw;
 }
 
 Gauge *MetricsRegistry::register_gauge(const std::string &name)
 {
-    auto   h   = std::make_unique<Gauge>(name);
-    Gauge *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<Gauge>(name);
+    Gauge           *raw = h.get();
     gauges_.push_back(std::move(h));
+    return raw;
+}
+
+CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name, CallbackGauge::Callback cb)
+{
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<CallbackGauge>(name, std::move(cb));
+    CallbackGauge   *raw = h.get();
+    callback_gauges_.push_back(std::move(h));
     return raw;
 }
 
 Bandwidth *MetricsRegistry::register_bandwidth(const std::string &name)
 {
-    auto       h   = std::make_unique<Bandwidth>(name);
-    Bandwidth *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<Bandwidth>(name);
+    Bandwidth       *raw = h.get();
     bandwidths_.push_back(std::move(h));
     return raw;
 }
 
 LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 {
+    std::scoped_lock  lock(flush_mutex_);
     auto              h   = std::make_unique<LatencyHistogram>(name);
     LatencyHistogram *raw = h.get();
     histograms_.push_back(std::move(h));
@@ -66,8 +79,9 @@ LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 
 LatencySummary *MetricsRegistry::register_summary(const std::string &name)
 {
-    auto            h   = std::make_unique<LatencySummary>(name);
-    LatencySummary *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<LatencySummary>(name);
+    LatencySummary  *raw = h.get();
     summaries_.push_back(std::move(h));
     return raw;
 }
@@ -98,7 +112,7 @@ template <typename T> static std::vector<size_t> sorted_indices(const std::vecto
 void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timestamp, const char *section_label,
                                size_t width, size_t count_w, size_t tps_w)
 {
-    std::lock_guard<std::mutex> lock(flush_mutex_);
+    std::scoped_lock lock(flush_mutex_);
 
     // Global max name length across all sections (or override from caller).
     size_t name_w = width;
@@ -199,31 +213,42 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  avg_size(KB)  rate(KB/s)  total(KB)\n", static_cast<int>(name_w),
-                         "");
+            std::fprintf(fp, "%-*s  count  tps(/s)  avg_size(KB)  max(KB)  rate(KB/s)  total(KB)\n",
+                         static_cast<int>(name_w), "");
             for (const auto &[i, snap] : active) {
                 uint64_t avg_size = snap.count > 0 ? snap.sum / snap.count : 0;
                 double   rate_d   = static_cast<double>(snap.sum) / window_secs;
                 auto     rate     = static_cast<uint64_t>(rate_d);
                 double   tps_d    = static_cast<double>(snap.count) / window_secs;
                 auto     tps      = static_cast<uint64_t>(tps_d);
-                std::fprintf(fp, "%-*s  %*llu  %*llu  %12llu  %10llu  %9llu\n", static_cast<int>(name_w),
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %12llu  %7llu  %10llu  %9llu\n", static_cast<int>(name_w),
                              bandwidths_[i]->name().c_str(), static_cast<int>(cw),
                              static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
                              static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg_size / 1024),
+                             static_cast<unsigned long long>(snap.max_bytes / 1024),
                              static_cast<unsigned long long>(rate / 1024),
                              static_cast<unsigned long long>(snap.total_bytes / 1024));
             }
         }
     }
 
-    // Gauges (always printed, even if 0)
-    if (!gauges_.empty()) {
+    // Gauges (always printed, even if 0). Regular gauges and callback
+    // gauges are merged into one sorted list for a unified output section.
+    if (!gauges_.empty() || !callback_gauges_.empty()) {
+        // Collect (name, value) pairs from both gauge types, then sort.
+        std::vector<std::pair<std::string, uint64_t>> all_gauges;
+        all_gauges.reserve(gauges_.size() + callback_gauges_.size());
+        for (const auto &g : gauges_) {
+            all_gauges.emplace_back(g->name(), g->get());
+        }
+        for (const auto &g : callback_gauges_) {
+            all_gauges.emplace_back(g->name(), g->get());
+        }
+        std::sort(all_gauges.begin(), all_gauges.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
         std::fprintf(fp, "%-*s  value\n", static_cast<int>(name_w), "");
-        auto idx = sorted_indices(gauges_);
-        for (size_t i : idx) {
-            std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(name_w), gauges_[i]->name().c_str(),
-                         static_cast<unsigned long long>(gauges_[i]->get()));
+        for (const auto &[name, value] : all_gauges) {
+            std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(name_w), name.c_str(),
+                         static_cast<unsigned long long>(value));
         }
     }
 
@@ -248,24 +273,33 @@ size_t MetricsRegistry::max_name_len() const
     for (const auto &e : gauges_) {
         max_len = std::max(max_len, e->name().size());
     }
+    for (const auto &e : callback_gauges_) {
+        max_len = std::max(max_len, e->name().size());
+    }
     return max_len;
 }
 
-void MetricsRegistry::start(const std::string &log_path, double interval_secs, size_t max_file_mb, size_t max_files)
+void MetricsRegistry::start(const std::string &log_path, double interval_secs, size_t max_file_mb, size_t max_files,
+                            bool console)
 {
     log_path_       = log_path;
     interval_secs_  = interval_secs;
     max_file_bytes_ = max_file_mb * 1024 * 1024;
     max_files_      = max_files;
+    console_        = console;
     running_.store(true, std::memory_order_relaxed);
     flush_thread_ = std::thread([this]() {
         set_current_thread_name("ct-metrics");
+        std::unique_lock<std::mutex> lk(flush_mutex_);
         while (running_.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(interval_secs_ * 1000)));
+            stop_cv_.wait_for(lk, std::chrono::milliseconds(static_cast<int>(interval_secs_ * 1000)),
+                              [this] { return !running_.load(std::memory_order_relaxed); });
             if (!running_.load(std::memory_order_relaxed)) {
                 break;
             }
+            lk.unlock();
             flush_to_file();
+            lk.lock();
         }
     });
 }
@@ -275,6 +309,10 @@ void MetricsRegistry::stop()
     if (!running_.exchange(false, std::memory_order_relaxed)) {
         return;
     }
+    {
+        std::scoped_lock lk(flush_mutex_);
+    }
+    stop_cv_.notify_all();
     if (flush_thread_.joinable()) {
         flush_thread_.join();
     }
@@ -286,14 +324,42 @@ void MetricsRegistry::flush_to_file()
     // Check if rotation is needed before writing.
     check_rotate();
 
-    FILE *fp = std::fopen(log_path_.c_str(), "a");
-    if (fp == nullptr) {
+    std::string ts = iso8601_now();
+
+    // Flush once to a memory buffer, then write to both file and
+    // stdout. This avoids double-flushing (which would reset the
+    // metric windows on the first flush, leaving nothing for the
+    // second).
+    char  *buf = nullptr;
+    size_t len = 0;
+    FILE  *mem = open_memstream(&buf, &len);
+    if (mem == nullptr) {
         return;
     }
-    std::string ts = iso8601_now();
-    flush_to(fp, interval_secs_, ts.c_str(), "metrics", 0);
-    std::fflush(fp);
-    std::fclose(fp);
+    flush_to(mem, interval_secs_, ts.c_str(), "metrics", 0);
+    std::fflush(mem);
+    std::fclose(mem);
+
+    if (len == 0) {
+        free(buf);
+        return;
+    }
+
+    // Write to file.
+    FILE *fp = std::fopen(log_path_.c_str(), "a");
+    if (fp != nullptr) {
+        std::fwrite(buf, 1, len, fp);
+        std::fflush(fp);
+        std::fclose(fp);
+    }
+
+    // Also write to stdout when console mode is enabled.
+    if (console_) {
+        std::fwrite(buf, 1, len, stdout);
+        std::fflush(stdout);
+    }
+
+    free(buf);
 }
 
 void MetricsRegistry::check_rotate()

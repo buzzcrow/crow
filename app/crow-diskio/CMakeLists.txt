@@ -30,7 +30,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 else()
   set(CARGO_PROFILE debug)
 endif()
-set(CROW_KV_CLIENT_FFI_LIB ${CROW_ROOT_DIR}/target/${CARGO_PROFILE}/libcrow_kv_client.so)
+if(APPLE)
+  set(CROW_KV_CLIENT_FFI_LIB ${CROW_ROOT_DIR}/target/${CARGO_PROFILE}/libcrow_kv_client.dylib)
+else()
+  set(CROW_KV_CLIENT_FFI_LIB ${CROW_ROOT_DIR}/target/${CARGO_PROFILE}/libcrow_kv_client.so)
+endif()
 add_custom_command(
   OUTPUT ${CROW_KV_CLIENT_FFI_LIB}
   COMMAND pixi run cargo build -p crow-kv-client --features ffi

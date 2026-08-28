@@ -237,7 +237,7 @@ void Group0Sync::heartbeat()
     std::string dg_ids_json = "[" + std::to_string(cfg_.dg_id) + "]";
 
     SyncCallbackCtx ctx;
-    crow_svc_heartbeat_diskio(svc_client_, cfg_.instance_id, cfg_.grpc_endpoint.c_str(), dg_ids_json.c_str(), "[]",
+    crow_svc_heartbeat_diskio(svc_client_, cfg_.instance_id, cfg_.rpc_endpoint.c_str(), dg_ids_json.c_str(), "[]",
                               on_ffi_complete, &ctx);
     if (!wait_for_ctx(ctx)) {
         std::fprintf(stderr, "warning: group-0 heartbeat timed out\n");

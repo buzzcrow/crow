@@ -8,6 +8,7 @@ import {
   createRack,
   createNode,
   freePort,
+  freePortRange,
   addDiskGroup as apiAddDiskGroup,
   removeDiskGroup as apiRemoveDiskGroup,
   addDisksBatch,
@@ -24,6 +25,57 @@ import {
 
 const DISKDB_RACK = 501;
 const DISKDB_NODE = 501;
+
+// Right-click a tree item, then click a context menu item. Retries up to
+// 5 times with 470 ms between attempts — the sidebar tree re-renders
+// every 5 s (useCapacityTree poll), and a right-click during re-render
+// lands on a stale element so the contextmenu event never fires. After
+// each right-click, polls every 100 ms for the menu to appear; if it
+// doesn't appear within 2 s, presses Escape and retries.
+// Uses dispatchEvent('click') for the menu item — regular click()
+// dispatches mousedown which closes the menu via the outside-click
+// handler before the click event fires.
+async function clickMenuItem(
+  page: import('@playwright/test').Page,
+  treeItem: import('@playwright/test').Locator,
+  menuItemName: string | RegExp,
+) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) await page.waitForTimeout(470);
+    await treeItem.click({ button: 'right', timeout: 5_000 }).catch(() => {});
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const item = page.getByRole('menuitem', { name: menuItemName });
+      if (await item.isVisible().catch(() => false)) {
+        await item.dispatchEvent('click');
+        return;
+      }
+      await page.waitForTimeout(100);
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+  throw new Error(`clickMenuItem: '${menuItemName}' not found after 5 attempts`);
+}
+
+// Right-click a tree item and verify the context menu opens. Retries up
+// to 5 times with 470 ms between attempts. Returns when any menuitem is
+// visible. Caller inspects menu items and presses Escape when done.
+async function openContextMenu(
+  page: import('@playwright/test').Page,
+  treeItem: import('@playwright/test').Locator,
+) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) await page.waitForTimeout(470);
+    await treeItem.click({ button: 'right', timeout: 5_000 }).catch(() => {});
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      if (await page.getByRole('menuitem').first().isVisible().catch(() => false)) return;
+      await page.waitForTimeout(100);
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+  throw new Error('openContextMenu: menu did not appear after 5 attempts');
+}
 
 /**
  * All Capacity / DiskDB flows share ONE rack + node (and, for the final
@@ -89,7 +141,7 @@ test.describe('capacity · diskdb', () => {
     // to the Physical view and must NOT appear here.
 
     // Right-click the node.
-    await aside.getByText(`N-${DISKDB_NODE}`, { exact: true }).click({ button: 'right' });
+    await openContextMenu(page, aside.getByText(`N-${DISKDB_NODE}`, { exact: true }));
 
     await expect(page.getByRole('menuitem', { name: /add disk group/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toBeVisible();
@@ -102,6 +154,8 @@ test.describe('capacity · diskdb', () => {
 
     // --- rack context menu: Capacity view has no rack operations ---
     // The rack label is "R-501 (Rack 501)" so match by text fragment.
+    // No retry needed — the rack has no menu items in Capacity view, so
+    // openContextMenu (which polls for menuitem visibility) would hang.
     await aside.getByText(`R-${DISKDB_RACK}`, { exact: false }).first().click({ button: 'right' });
     // No Add Node, no Delete Rack in Capacity view.
     await expect(page.getByRole('menuitem', { name: /add node/i })).toHaveCount(0);
@@ -111,14 +165,13 @@ test.describe('capacity · diskdb', () => {
     // --- Deploy DiskDB dialog only has RPC port (no REST/binary/listen/http/config) ---
 
     // Right-click node → Deploy DiskDB.
-    await aside.getByText(`N-${DISKDB_NODE}`, { exact: true }).click({ button: 'right' });
-    await page.getByRole('menuitem', { name: /deploy diskdb/i }).click();
+    await clickMenuItem(page, aside.getByText(`N-${DISKDB_NODE}`, { exact: true }), /deploy diskdb/i);
 
     const dialog = page.getByRole('dialog', { name: /deploy diskdb/i });
     await expect(dialog).toBeVisible();
 
     // Should have RPC Port field.
-    await expect(dialog.getByLabel('RPC Port (gRPC)')).toBeVisible();
+    await expect(dialog.getByLabel('RPC Port (crow-rpc)')).toBeVisible();
 
     // Should NOT have REST Port, Binary Path, Listen Address, HTTP Address, Config Path.
     await expect(dialog.getByLabel('REST Port')).toHaveCount(0);
@@ -163,8 +216,7 @@ test.describe('capacity · diskdb', () => {
       // --- Add Disk Group dialog creates a disk-group via UI ---
 
       // Right-click node → Add Disk Group.
-      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /add disk group/i }).click();
+      await clickMenuItem(page, aside.getByText(`N-${nodeId}`, { exact: true }), /add disk group/i);
 
       const dgDialog = page.getByRole('dialog', { name: /add disk group/i });
       await expect(dgDialog).toBeVisible();
@@ -202,8 +254,7 @@ test.describe('capacity · diskdb', () => {
       // suggest an ID that does NOT reuse the just-created DG-520 or
       // any other existing DG. The suggestion must be the minimal
       // unused id (not a duplicate).
-      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /add disk group/i }).click();
+      await clickMenuItem(page, aside.getByText(`N-${nodeId}`, { exact: true }), /add disk group/i);
       const dgDialog2 = page.getByRole('dialog', { name: /add disk group/i });
       await expect(dgDialog2).toBeVisible();
       const suggestedId2 = await dgDialog2.getByLabel('Disk Group ID (auto-assigned)').inputValue();
@@ -238,7 +289,7 @@ test.describe('capacity · diskdb', () => {
 
       // Right-click the disk-group.
       await expect(aside.getByText(/DG-530/, { exact: true })).toBeVisible({ timeout: 5_000 });
-      await aside.getByText(/DG-530/, { exact: true }).click({ button: 'right' });
+      await openContextMenu(page, aside.getByText(/DG-530/, { exact: true }));
 
       await expect(page.getByRole('menuitem', { name: /add disk/i })).toBeVisible();
       // DG status is now behind a "Change Status" submenu (not flat
@@ -255,8 +306,7 @@ test.describe('capacity · diskdb', () => {
       await expect(aside.getByText(/DG-540/, { exact: true })).toBeVisible({ timeout: 5_000 });
 
       // Right-click disk-group → Add Disk.
-      await aside.getByText(/DG-540/, { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /add disk/i }).click();
+      await clickMenuItem(page, aside.getByText(/DG-540/, { exact: true }), /add disk/i);
 
       const diskDialog = page.getByRole('dialog', { name: /add disks/i });
       await expect(diskDialog).toBeVisible();
@@ -311,7 +361,7 @@ test.describe('capacity · diskdb', () => {
       // Right-click the disk.
       const disk560Label = aside.getByText(disk560.slice(0, 12), { exact: false });
       await expect(disk560Label).toBeVisible({ timeout: 5_000 });
-      await disk560Label.first().click({ button: 'right' });
+      await openContextMenu(page, disk560Label.first());
 
       await expect(page.getByRole('menuitem', { name: /compact zones/i })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /rebuild bitmap/i })).toBeVisible();
@@ -328,8 +378,7 @@ test.describe('capacity · diskdb', () => {
       await expect(aside.getByText(/DG-570/, { exact: true })).toBeVisible({ timeout: 5_000 });
 
       // Right-click disk-group → Delete Disk Group.
-      await aside.getByText(/DG-570/, { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /delete disk group/i }).click();
+      await clickMenuItem(page, aside.getByText(/DG-570/, { exact: true }), /delete disk group/i);
 
       // Confirm delete dialog.
       const deleteDialog = page.getByRole('dialog', { name: /delete disk group/i });
@@ -448,14 +497,17 @@ test.describe('capacity · diskdb', () => {
 
       // --- Compact Zones opens zone select dialog with range input ---
 
+      // Wait for DG-545 to appear — fetchNodeDiskGroups fetches all
+      // 15 disk groups + their disks (16 API calls) and is not polled,
+      // so the tree may not have them yet.
+      await expect(aside.getByText(/DG-545/, { exact: true })).toBeVisible({ timeout: 10_000 });
       const expandDg545 = aside.getByRole('treeitem').filter({ hasText: /DG-545/ }).locator('button[aria-label="Expand"]');
       if (await expandDg545.count() > 0) await expandDg545.click();
 
       // Right-click the disk → Compact Zones.
       const disk545Label = aside.getByText(disk545.slice(0, 12), { exact: false });
-      await expect(disk545Label).toBeVisible({ timeout: 5_000 });
-      await disk545Label.first().click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /compact zones/i }).click();
+      await expect(disk545Label).toBeVisible({ timeout: 10_000 });
+      await clickMenuItem(page, disk545Label.first(), /compact zones/i);
 
       const compactDialog = page.getByRole('dialog', { name: /compact zones/i });
       await expect(compactDialog).toBeVisible();
@@ -475,8 +527,7 @@ test.describe('capacity · diskdb', () => {
       // Right-click the disk → Rebuild Bitmap.
       const disk546Label = aside.getByText(disk546.slice(0, 12), { exact: false });
       await expect(disk546Label).toBeVisible({ timeout: 5_000 });
-      await disk546Label.first().click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /rebuild bitmap/i }).click();
+      await clickMenuItem(page, disk546Label.first(), /rebuild bitmap/i);
 
       const rebuildDialog = page.getByRole('dialog', { name: /rebuild bitmap/i });
       await expect(rebuildDialog).toBeVisible();
@@ -493,8 +544,7 @@ test.describe('capacity · diskdb', () => {
       // Right-click the disk → Compact Zones.
       const disk547Label = aside.getByText(disk547.slice(0, 12), { exact: false });
       await expect(disk547Label).toBeVisible({ timeout: 5_000 });
-      await disk547Label.first().click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /compact zones/i }).click();
+      await clickMenuItem(page, disk547Label.first(), /compact zones/i);
 
       const validateDialog = page.getByRole('dialog', { name: /compact zones/i });
       await expect(validateDialog).toBeVisible();
@@ -537,9 +587,7 @@ test.describe('capacity · diskdb', () => {
       // Right-click disk-group → Change Status → Offline. The real API
       // writes to group-0 via HardwareClient and returns 204.
       await expect(aside.getByText(/DG-548/, { exact: true })).toBeVisible({ timeout: 5_000 });
-      await aside.getByText(/DG-548/, { exact: true }).click({ button: 'right' });
-      // Open the "Change Status" submenu.
-      await page.getByRole('menuitem', { name: /change status/i }).click();
+      await clickMenuItem(page, aside.getByText(/DG-548/, { exact: true }), /change status/i);
       const dgStatusResponse = page.waitForResponse(
         (r: any) => r.request().method() === 'PUT' && r.url().includes(`/api/disk-groups/${rackId}/${nodeId}/${dg548}/status`),
         { timeout: 10_000 },
@@ -556,8 +604,6 @@ test.describe('capacity · diskdb', () => {
       // Right-click disk → Change Status → Offline.
       const disk549Label = aside.getByText(disk549.slice(0, 12), { exact: false });
       await expect(disk549Label).toBeVisible({ timeout: 5_000 });
-      await disk549Label.first().click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /change status/i }).click();
       // The UI sends the dashed disk_id format (from the tree node's
       // rawId, which comes from the API). The waitForResponse filter
       // must use the dashed format to match.
@@ -566,6 +612,7 @@ test.describe('capacity · diskdb', () => {
         (r: any) => r.request().method() === 'PUT' && r.url().includes(`/api/disks/${encodeURIComponent(disk549Dashed)}/status`),
         { timeout: 10_000 },
       );
+      await clickMenuItem(page, disk549Label.first(), /change status/i);
       await page.getByRole('menuitem', { name: /^Offline$/ }).click();
       const diskResp = await diskStatusResponse;
       // Accept 204 (success) or 404 (pre-existing backend issue:
@@ -587,15 +634,14 @@ test.describe('capacity · diskdb', () => {
       // Right-click disk → Recalc Usage.
       const disk551Label = aside.getByText(disk551.slice(0, 12), { exact: false });
       await expect(disk551Label).toBeVisible({ timeout: 5_000 });
-      await disk551Label.first().click({ button: 'right' });
+      await page.route('**/api/diskdb/recalc', (route) => {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [] }) });
+      });
       const recalcResponse = page.waitForResponse(
         (r: any) => r.request().method() === 'POST' && r.url().includes('/api/diskdb/recalc'),
         { timeout: 10_000 },
       );
-      await page.route('**/api/diskdb/recalc', (route) => {
-        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [] }) });
-      });
-      await page.getByRole('menuitem', { name: /recalc usage/i }).click();
+      await clickMenuItem(page, disk551Label.first(), /recalc usage/i);
       const recalcResp = await recalcResponse;
       expect(recalcResp.ok(), await recalcResp.text()).toBeTruthy();
 
@@ -607,11 +653,6 @@ test.describe('capacity · diskdb', () => {
       // Right-click disk → Trigger Consistency Scan.
       const disk552Label = aside.getByText(disk552.slice(0, 12), { exact: false });
       await expect(disk552Label).toBeVisible({ timeout: 5_000 });
-      await disk552Label.first().click({ button: 'right' });
-      const scanResponse = page.waitForResponse(
-        (r: any) => r.request().method() === 'POST' && r.url().includes('/api/diskdb/scan'),
-        { timeout: 10_000 },
-      );
       await page.route('**/api/diskdb/scan', (route) => {
         route.fulfill({
           status: 200,
@@ -619,7 +660,11 @@ test.describe('capacity · diskdb', () => {
           body: JSON.stringify({ summary: null, has_run: false, scan_in_progress: true }),
         });
       });
-      await page.getByRole('menuitem', { name: /trigger consistency scan/i }).click();
+      const scanResponse = page.waitForResponse(
+        (r: any) => r.request().method() === 'POST' && r.url().includes('/api/diskdb/scan'),
+        { timeout: 10_000 },
+      );
+      await clickMenuItem(page, disk552Label.first(), /trigger consistency scan/i);
       const scanResp = await scanResponse;
       expect(scanResp.ok(), await scanResp.text()).toBeTruthy();
 
@@ -907,7 +952,7 @@ test.describe('capacity · diskdb', () => {
             {
               instance_id: `diskdb-${nodeId}`,
               node_id: nodeId,
-              grpc_endpoint: `http://127.0.0.1:30099`,
+              rpc_endpoint: `http://127.0.0.1:30099`,
               owned_dg_ids: [dg580, dg581],
               status: 'up',
             },
@@ -1182,7 +1227,7 @@ test.describe('capacity · diskdb', () => {
             {
               instance_id: `diskdb-bitmap`,
               node_id: nodeId,
-              grpc_endpoint: `http://127.0.0.1:30099`,
+              rpc_endpoint: `http://127.0.0.1:30099`,
               owned_dg_ids: [dgId],
               status: 'up',
             },
@@ -1235,7 +1280,7 @@ test.describe('capacity · diskdb', () => {
     }
   });
 
-  test('assign disk-group to diskdb via UI (owner + bind); capacity non-zero when gRPC reachable', async ({ page, baseURL }) => {
+  test('assign disk-group to diskdb via UI (owner + bind); capacity non-zero when crow-rpc reachable', async ({ page, baseURL }) => {
     test.setTimeout(60_000);
     const rackId = DISKDB_RACK;
     const nodeId = DISKDB_NODE;
@@ -1243,7 +1288,7 @@ test.describe('capacity · diskdb', () => {
     const diskId = randomDiskId();
     const storeId = 590;
     const groupId = 590;
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     // Deploy diskdb via API (the UI deploy flow is tested in the next
     // test; here we just need a running instance for ownership assignment).
@@ -1254,13 +1299,25 @@ test.describe('capacity · diskdb', () => {
     {
       const api = await apiContext(baseURL!);
       try {
-        const r = await api.get('/api/diskdb/instances');
-        expect(r.ok()).toBeTruthy();
-        const instances = await r.json();
-        const ddb = instances.find((i: { grpc_endpoint: string }) =>
-          i.grpc_endpoint.includes(String(rpcPort)));
+        // The diskdb registers with rpc_listen_addr = rpc_port + 2
+        // (see resolve_diskdb_config_path in lifecycle.rs). Poll until
+        // the instance appears in the service registry — the diskdb
+        // process registers asynchronously after startup.
+        const rpcListenPort = rpcPort + 2;
+        let ddb: { instance_id: number } | undefined;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const r = await api.get('/api/diskdb/instances');
+          if (r.ok()) {
+            const instances = await r.json();
+            ddb = (instances as { rpc_endpoint: string; instance_id: number }[]).find(
+              (i) => i.rpc_endpoint.includes(String(rpcListenPort)),
+            );
+            if (ddb) break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
         expect(ddb, 'diskdb instance should be registered').toBeTruthy();
-        instanceId = ddb.instance_id;
+        instanceId = ddb!.instance_id;
       } finally {
         await api.dispose();
       }
@@ -1287,9 +1344,7 @@ test.describe('capacity · diskdb', () => {
       await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 5_000 });
 
       // --- Right-click DG → "Assign to DiskDB" context menu item ---
-      await aside.getByText(/DG-590/, { exact: true }).click({ button: 'right' });
-      await expect(page.getByRole('menuitem', { name: /assign to diskdb/i })).toBeVisible();
-      await page.getByRole('menuitem', { name: /assign to diskdb/i }).click();
+      await clickMenuItem(page, aside.getByText(/DG-590/, { exact: true }), /assign to diskdb/i);
 
       const assignDialog = page.getByRole('dialog', { name: /assign disk group/i });
       await expect(assignDialog).toBeVisible();
@@ -1323,9 +1378,9 @@ test.describe('capacity · diskdb', () => {
       // --- Verify capacity becomes non-zero via API ---
       // The diskdb keepalive syncs every 10s, so poll until the DG
       // appears in the usage response with capacity > 0. If the
-      // diskdb's gRPC endpoint is not reachable (transport error —
+      // diskdb's crow-rpc endpoint is not reachable (transport error —
       // common in the test environment where the diskdb process may
-      // not fully bind its gRPC port), the usage API returns an empty
+      // not fully bind its crow-rpc port), the usage API returns an empty
       // disk_groups list; in that case, verify the assign flow
       // succeeded (owner + bind written to group-0) but skip the
       // capacity-non-zero assertion.
@@ -1340,10 +1395,10 @@ test.describe('capacity · diskdb', () => {
             const dg = usage.disk_groups.find((g: { disk_group_id: number }) =>
               g.disk_group_id === dgId);
             return dg?.capacity_bytes ?? 0;
-          }, { timeout: 30_000, intervals: [2_000] }).toBeGreaterThan(0);
+          }, { timeout: 12_000, intervals: [500] }).toBeGreaterThan(0);
           usageReachable = true;
         } catch {
-          console.warn(`DG-${dgId} never reported usage — diskdb gRPC not reachable, skipping capacity-non-zero assertion`);
+          console.warn(`DG-${dgId} never reported usage — diskdb crow-rpc not reachable, skipping capacity-non-zero assertion`);
         }
 
         if (usageReachable) {
@@ -1369,7 +1424,7 @@ test.describe('capacity · diskdb', () => {
   test('full deploy flow: deploy diskdb via UI, restart, stop, delete via context menu', async ({ page, baseURL }) => {
     test.setTimeout(90_000);
     const nodeId = DISKDB_NODE;
-    const rpcPort = freePort();
+    const rpcPort = freePortRange(3);
 
     // Helper: fetch /api/servers and return {kv, ddb} entries for this node.
     async function fetchBothServices(api: import('@playwright/test').APIRequestContext) {
@@ -1406,12 +1461,11 @@ test.describe('capacity · diskdb', () => {
 
       // --- deploy diskdb via node context menu (UI Deploy button) ---
 
-      await aside.getByText(`N-${nodeId}`, { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /deploy diskdb/i }).click();
+      await clickMenuItem(page, aside.getByText(`N-${nodeId}`, { exact: true }), /deploy diskdb/i);
 
       const dialog = page.getByRole('dialog', { name: /deploy diskdb/i });
       await expect(dialog).toBeVisible();
-      await dialog.getByLabel('RPC Port (gRPC)').fill(String(rpcPort));
+      await dialog.getByLabel('RPC Port (crow-rpc)').fill(String(rpcPort));
       await dialog.getByRole('button', { name: /deploy/i }).click();
       await expect(dialog).toHaveCount(0, { timeout: 5_000 });
 
@@ -1447,16 +1501,15 @@ test.describe('capacity · diskdb', () => {
       await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
 
       // Right-click DDB item → Restart/Stop/Delete DiskDB visible.
-      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
+      await openContextMenu(page, aside.getByText(`DDB-${nodeId}`, { exact: true }));
       await expect(page.getByRole('menuitem', { name: /restart diskdb/i })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /stop diskdb/i })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toHaveCount(0);
       await page.keyboard.press('Escape');
 
       // --- restart DDB via Physical view DDB context menu ---
-      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
       const restartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
-      await page.getByRole('menuitem', { name: /restart diskdb/i }).click();
+      await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /restart diskdb/i);
       await restartResponse;
 
       // Verify DDB restarted + KV unaffected.
@@ -1480,9 +1533,8 @@ test.describe('capacity · diskdb', () => {
       }
 
       // --- stop DDB via Physical view DDB context menu ---
-      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
       const stopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/stop'));
-      await page.getByRole('menuitem', { name: /stop diskdb/i }).click();
+      await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /stop diskdb/i);
       await stopResponse;
 
       // After stop: DDB entry preserved (stop ≠ delete), DDB PID gone.
@@ -1535,9 +1587,8 @@ test.describe('capacity · diskdb', () => {
       const expandNodeForRestart = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForRestart.count() > 0) await expandNodeForRestart.first().click();
       await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
-      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
       const restartResponse2 = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
-      await page.getByRole('menuitem', { name: /restart diskdb/i }).click();
+      await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /restart diskdb/i);
       await restartResponse2;
 
       {
@@ -1567,9 +1618,8 @@ test.describe('capacity · diskdb', () => {
       await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
 
       // Right-click KV → Stop Crow Storage.
-      await aside.getByText(`KV-${nodeId}`, { exact: true }).click({ button: 'right' });
       const kvStopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/server/stop'));
-      await page.getByRole('menuitem', { name: /stop crow storage/i }).click();
+      await clickMenuItem(page, aside.getByText(`KV-${nodeId}`, { exact: true }), /stop crow storage/i);
       await kvStopResponse;
 
       // KV PID should be gone; DDB entry + PID must be unaffected.
@@ -1608,9 +1658,8 @@ test.describe('capacity · diskdb', () => {
       await expect(ddbItemAfterKvStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
 
       // --- restart KV, verify DDB unaffected ---
-      await aside.getByText(`KV-${nodeId}`, { exact: true }).click({ button: 'right' });
       const kvRestartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/server/restart'));
-      await page.getByRole('menuitem', { name: /restart crow storage/i }).click();
+      await clickMenuItem(page, aside.getByText(`KV-${nodeId}`, { exact: true }), /restart crow storage/i);
       await kvRestartResponse;
 
       {
@@ -1638,8 +1687,7 @@ test.describe('capacity · diskdb', () => {
 
       // --- delete DiskDB via Physical-view context menu (confirm dialog) ---
       await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
-      await aside.getByText(`DDB-${nodeId}`, { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /delete diskdb/i }).click();
+      await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /delete diskdb/i);
 
       const deleteDialog = page.getByRole('dialog', { name: /delete diskdb/i });
       await expect(deleteDialog).toBeVisible();

@@ -455,7 +455,7 @@ and the Server context menu works for both types.
 Deployment mechanism: SSH or local fork, same as KV. No Docker. The
 `crow-diskdb` binary is spawned via `ssh::deploy_via_ssh` or
 `lifecycle::deploy_local_in_dir`, on the paired ports from
-`ports.rs` (`DISKDB_GRPC_BASE` + `DISKDB_HTTP_BASE`).
+`ports.rs` (`DISKDB_RPC_BASE` + `DISKDB_HTTP_BASE`).
 
 New handlers mirroring the KV handlers:
 
@@ -482,7 +482,7 @@ pub async fn http_stop_node_diskdb(
 
 - `http_deploy_node_diskdb` — checks no existing diskdb on the node
   (409 if present), resolves the node, builds a `DeployRequest` with
-  `rpc_port`/`http_port` from `ServicePort::DiskdbGrpc`/`DiskdbHttp`
+  `rpc_port`/`http_port` from `ServicePort::DiskdbRpc`/`DiskdbHttp`
   defaults (or body overrides), spawns via SSH or local fork, persists
   a `ServerEntry` with `service_type: Diskdb`, records the pid.
   Route: `POST /api/nodes/:id/diskdb/deploy`.
@@ -514,7 +514,7 @@ Edge cases:
 `crow-web` proxies diskdb runtime RPCs (`QueryCapacityStats` drill-down,
 scan, recalc, compact, rebuild) via REST endpoints under
 `/api/diskdb/`. The CLI and web UI route through `crow-web` (no direct
-gRPC from the browser or CLI). `AppState` owns a `DiskdbClient` built
+crow-rpc from the browser or CLI). `AppState` owns a `DiskdbClient` built
 from the same `ServiceRegistryClient` the console already uses:
 
 ```rust
@@ -527,7 +527,7 @@ The `DiskdbClient` is lazily initialized on first diskdb REST request
 Handlers:
 
 - `GET /api/diskdb/instances` — reads `read_all_diskdb_instances`
-  from the service registry directly (no gRPC fan-out). Returns
+  from the service registry directly (no crow-rpc fan-out). Returns
   instance id, endpoint, `last_heartbeat_ms`, `owned_dg_ids`, and the
   keepalive `group_usages` summaries.
 - `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` —
@@ -561,7 +561,7 @@ Edge cases:
 - Cluster overview with a dead instance → merged response excludes
   it; the `/instances` endpoint still lists it (with stale heartbeat)
   so the UI can show the degraded card.
-- Zone drill-down → bitmap is omitted at disk level (proto contract);
+- Zone drill-down → bitmap is omitted at disk level (flatbuffer contract);
   the UI issues the zone-level query separately.
 - Scan already running → `trigger_scan` returns `scan_in_progress:
   true`; handler passes it through (no error).
@@ -709,7 +709,7 @@ impl ConsoleClient {
 }
 ```
 
-Serde model types (mirrors of the proto responses):
+Serde model types (mirrors of the flatbuffer responses):
 `DiskdbInstanceInfo`, `DiskGroupUsageSummary`, `DiskGroupUsage`,
 `DiskUsage`, `ZoneUsage`, `ScanSummary`, `RecalcResult`,
 `CompactionResult`, `RebuildResult`, `UsageResponse`.
@@ -732,4 +732,4 @@ crow diskdb rebuild <disk_id> [--zone <zi>]
 ```
 
 All route through `ConsoleClient` → `crow-web` → `DiskdbClient` →
-gRPC; no direct talk to `crow-diskdb`.
+crow-rpc; no direct talk to `crow-diskdb`.

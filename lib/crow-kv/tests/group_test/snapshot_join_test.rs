@@ -4,7 +4,7 @@
 //! New-member snapshot join (`PxGroup::join_via_snapshot`):
 //! a fresh, still-empty replica pulls
 //! a snapshot from an existing cluster's leader over the real
-//! `SnapshotService` gRPC, instead of replaying full Paxos history from
+//! `SnapshotService` crow-rpc, instead of replaying full Paxos history from
 //! slot 1.
 
 use crate::common::cluster::start_cluster;
@@ -18,7 +18,7 @@ use crow_kv::rpc::KvSetRequest;
 async fn fresh_replica_joins_via_snapshot_and_matches_leader_state() {
     let cluster = start_cluster(&[0, 1], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     for (i, (k, v)) in [
         (&b"a"[..], &b"1"[..]),

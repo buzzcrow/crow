@@ -17,11 +17,11 @@ interface ServerPortSource {
   rpc_port?: number | null;
   process?: {
     mgmt_url: string;
-    grpc_url: string;
+    rpc_url: string;
   };
   server?: {
     mgmt_url: string;
-    grpc_url: string;
+    rpc_url: string;
   };
 }
 
@@ -144,12 +144,12 @@ export function deployPortDefaultsForNode(
       server.rest_port ??
       (server.process?.mgmt_url ? extractPort(server.process.mgmt_url) : null) ??
       (server.server?.mgmt_url ? extractPort(server.server.mgmt_url) : null);
-    const grpc =
+    const rpc =
       server.rpc_port ??
-      (server.process?.grpc_url ? extractPort(server.process.grpc_url) : null) ??
-      (server.server?.grpc_url ? extractPort(server.server.grpc_url) : null);
+      (server.process?.rpc_url ? extractPort(server.process.rpc_url) : null) ??
+      (server.server?.rpc_url ? extractPort(server.server.rpc_url) : null);
     if (mgmt) usedRestPorts.push(mgmt);
-    if (grpc) usedRpcPorts.push(grpc);
+    if (rpc) usedRpcPorts.push(rpc);
   }
 
   const defaultRestPort = nextAvailablePort(usedRestPorts, preferredPortStart(restStart, nodeId));
@@ -162,13 +162,13 @@ export function deployPortDefaultsForNode(
 }
 
 interface DiskdbPortSource {
-  grpc_endpoint?: string | null;
+  rpc_endpoint?: string | null;
 }
 
 /**
- * Pick a dynamic diskdb gRPC port for a node: offset the base by the
+ * Pick a dynamic diskdb crow-rpc port for a node: offset the base by the
  * node-id suffix, then increment past ports already assigned to other
- * diskdb instances (extracted from their `grpc_endpoint`) and any
+ * diskdb instances (extracted from their `rpc_endpoint`) and any
  * extra remembered ports. Mirrors `deployPortDefaultsForNode` so diskdb
  * deploy gets the same collision-avoidance as kv-server deploy.
  */
@@ -180,7 +180,7 @@ export function diskdbPortDefaultsForNode(
 ): string {
   const usedRpcPorts: number[] = [...extraUsedRpcPorts];
   for (const inst of instances) {
-    const port = extractPort(inst.grpc_endpoint);
+    const port = extractPort(inst.rpc_endpoint);
     if (port) usedRpcPorts.push(port);
   }
   return nextAvailablePort(usedRpcPorts, preferredPortStart(rpcStart, nodeId));

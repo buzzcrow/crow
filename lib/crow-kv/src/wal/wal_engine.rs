@@ -342,6 +342,29 @@ impl WalEngine {
         Ok(())
     }
 
+    /// Durably flush all active segments (real `fsync`/`sync_all`). Used
+    /// during shutdown to persist WAL data even when `--no-fsync` is set.
+    /// Does NOT seal or rotate segments — just forces a durable flush.
+    ///
+    /// # Errors
+    /// Returns IO error if flushing any segment fails.
+    pub async fn flush_all(&self) -> io::Result<()> {
+        let mut acks = Vec::with_capacity(self.pipelines.len());
+        for pipeline in &self.pipelines {
+            let (tx, rx) = oneshot::channel();
+            pipeline
+                .writer_tx
+                .send(WriterCommand::Flush { ack: tx })
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer stopped"))?;
+            acks.push(rx);
+        }
+        for rx in acks {
+            rx.await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer dropped ack"))??;
+        }
+        Ok(())
+    }
+
     /// Access the segment index (for GC, replay, lookup).
     pub fn index(&self) -> &parking_lot::Mutex<SegmentIndex> {
         &self.index

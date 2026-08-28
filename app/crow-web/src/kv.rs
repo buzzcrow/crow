@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::cluster::{GroupHealth, NodeId};
-use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode, ScanOutcome};
+use crow_kv_client::{GetOutcome, ReadMode, ScanOutcome};
 use hex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -81,7 +81,7 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, (axum::http::StatusCode, Json<ErrorBod
     hex::decode(s.trim()).map_err(|e| err_400(format!("invalid hex: {e}")))
 }
 
-/// Resolve the gRPC endpoint for a group's leader via the monitor cache.
+/// Resolve the crow-rpc endpoint for a group's leader via the monitor cache.
 /// Falls back to any healthy replica if no leader hint is available.
 ///
 /// Before returning, the monitor cache is refreshed for every node hosting
@@ -93,7 +93,7 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, (axum::http::StatusCode, Json<ErrorBod
 ///
 /// # Errors
 /// Returns `404` if the group is unknown, or `502` if the leader's
-/// node has no gRPC URL configured.
+/// node has no crow-rpc URL configured.
 pub async fn resolve_kv_endpoint(
     state: &AppState,
     sid: u64,
@@ -134,12 +134,12 @@ async fn kv_endpoint_for_node(
     sid: u64,
     node_id: NodeId,
 ) -> Result<String, (StatusCode, Json<ErrorBody>)> {
-    // Each `PxKvStore` listens on its own gRPC port (ephemeral when created
+    // Each `PxKvStore` listens on its own crow-rpc port (ephemeral when created
     // via the management API with `port: None`), reported as the store's
     // `listen_addr`. KV requests must target that per-store endpoint — the
-    // node's configured `grpc_url` is a different listener and does not host
-    // this store's groups. Combine the node host (from `grpc_url`) with the
-    // store's listen port; fall back to `grpc_url` if the cache has no
+    // node's configured `rpc_url` is a different listener and does not host
+    // this store's groups. Combine the node host (from `rpc_url`) with the
+    // store's listen port; fall back to `rpc_url` if the cache has no
     // `listen_addr` yet.
     let store_port = {
         let snap = state.monitor_cache.snapshot().await;
@@ -151,39 +151,43 @@ async fn kv_endpoint_for_node(
     };
 
     let cfg = state.config.read().unwrap();
-    let grpc_url = cfg
+    let rpc_url = cfg
         .server_for_node(node_id)
-        .and_then(|s| s.grpc_url.clone())
-        .ok_or_else(|| err_502(format!("leader node {node_id} has no gRPC endpoint configured")))?;
+        .and_then(|s| s.rpc_url.clone())
+        .ok_or_else(|| {
+            err_502(format!(
+                "leader node {node_id} has no crow-rpc endpoint configured"
+            ))
+        })?;
 
     match store_port {
-        Some(port) => Ok(format!("http://{}:{port}", host_of(&grpc_url))),
-        None => Ok(grpc_url),
+        Some(port) => Ok(format!("http://{}:{port}", host_of(&rpc_url))),
+        None => Ok(rpc_url),
     }
 }
 
 #[derive(Debug, Serialize)]
 pub struct EndpointResponse {
-    /// gRPC URL of the group's current leader (`http://host:port`),
+    /// crow-rpc URL of the group's current leader (`http://host:port`),
     /// ready to hand to `KvClient::connect`.
-    grpc_url: String,
+    rpc_url: String,
 }
 
-/// `GET /api/stores/:sid/groups/:gid/endpoint`. Resolve the gRPC
+/// `GET /api/stores/:sid/groups/:gid/endpoint`. Resolve the crow-rpc
 /// endpoint of the group's leader via the monitor cache, so a direct
-/// gRPC client (the CLI bench engine) can dial it without touching any
+/// crow-rpc client (the CLI bench engine) can dial it without touching any
 /// registry. Same resolution as the KV data plane uses internally.
 ///
 /// # Errors
 /// `404` if the group is unknown / has no replicas; `502` if the
-/// leader's node has no gRPC endpoint configured.
+/// leader's node has no crow-rpc endpoint configured.
 pub async fn http_kv_endpoint(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<Json<EndpointResponse>, (StatusCode, Json<ErrorBody>)> {
     refresh_group_nodes(&state, sid, gid).await;
-    let grpc_url = resolve_kv_endpoint(&state, sid, gid).await?;
-    Ok(Json(EndpointResponse { grpc_url }))
+    let rpc_url = resolve_kv_endpoint(&state, sid, gid).await?;
+    Ok(Json(EndpointResponse { rpc_url }))
 }
 
 /// Extract the port from a `host:port` (or `scheme://host:port`) string.
@@ -193,8 +197,8 @@ fn port_of(addr: &str) -> Option<u16> {
 
 /// Extract the host from a `scheme://host:port` or `host:port` string,
 /// defaulting to `127.0.0.1` when it cannot be parsed.
-fn host_of(grpc_url: &str) -> String {
-    let without_scheme = grpc_url.split_once("://").map_or(grpc_url, |(_, rest)| rest);
+fn host_of(rpc_url: &str) -> String {
+    let without_scheme = rpc_url.split_once("://").map_or(rpc_url, |(_, rest)| rest);
     let host = without_scheme.split(':').next().unwrap_or("").trim();
     if host.is_empty() || host == "0.0.0.0" {
         "127.0.0.1".to_string()
@@ -259,6 +263,12 @@ async fn mgmt_seeds_for_group(
     let mut seen = HashSet::new();
     let mut seeds = Vec::new();
     for node_id in &node_ids {
+        // Skip stopped servers — no runtime pid means the server process
+        // is not running. Including its URL as a seed only wastes time
+        // (connection-refused) during topology refresh.
+        if state.runtime_pid(*node_id).is_none() {
+            continue;
+        }
         if let Some(server) = cfg.server_for_node(*node_id) {
             if seen.insert(server.url.clone()) {
                 seeds.push(server.url.clone());
@@ -289,7 +299,7 @@ fn map_kv_client_err(e: crow_kv_client::Error) -> (StatusCode, Json<ErrorBody>) 
 /// Get a value from the KV store.
 ///
 /// # Errors
-/// Returns an error if the key decoding, endpoint resolution, or gRPC call fails.
+/// Returns an error if the key decoding, endpoint resolution, or crow-rpc call fails.
 pub async fn http_kv_get(
     State(state): State<AppState>,
     Query(q): Query<KvGetQuery>,
@@ -297,7 +307,8 @@ pub async fn http_kv_get(
 ) -> Result<Json<KvGetResponse>, (StatusCode, Json<ErrorBody>)> {
     let key = decode_key(q.key, q.key_hex)?;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -362,7 +373,7 @@ pub struct KvScanResponseView {
 /// Scan keys in the KV store.
 ///
 /// # Errors
-/// Returns an error if the endpoint resolution or gRPC call fails.
+/// Returns an error if the endpoint resolution or crow-rpc call fails.
 pub async fn http_kv_scan(
     State(state): State<AppState>,
     Query(q): Query<KvScanQuery>,
@@ -380,7 +391,11 @@ pub async fn http_kv_scan(
     };
     let limit = q.limit;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
+    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
+        client.seed_leader(sid, gid, endpoint);
+    }
     let ScanOutcome { items, truncated, .. } = client
         .scan(
             sid,
@@ -411,7 +426,7 @@ pub async fn http_kv_scan(
 /// Put a value into the KV store.
 ///
 /// # Errors
-/// Returns an error if the key/value decoding, endpoint resolution, or gRPC call fails.
+/// Returns an error if the key/value decoding, endpoint resolution, or crow-rpc call fails.
 pub async fn http_kv_put(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
@@ -428,7 +443,8 @@ pub async fn http_kv_put(
     let client_id = body.client_id;
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -445,7 +461,7 @@ pub async fn http_kv_put(
 /// Delete a value from the KV store.
 ///
 /// # Errors
-/// Returns an error if the key decoding, endpoint resolution, or gRPC call fails.
+/// Returns an error if the key decoding, endpoint resolution, or crow-rpc call fails.
 pub async fn http_kv_delete(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
@@ -455,7 +471,8 @@ pub async fn http_kv_delete(
     let client_id = body.client_id;
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }

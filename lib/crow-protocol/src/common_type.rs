@@ -2,14 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Common type aliases that complement the proto types in
-//! `common_type.proto`.
+//! `common_type.fbs`.
 //!
 //! All identifier types are defined here (once) and used consistently
 //! across all crates (console config, kv-client, kv-server, diskdb,
 //! chunkdb). The simple integer IDs are type aliases (`pub type X =
 //! u64;`) for documentation and API clarity, not newtypes. The
 //! composite IDs (`DiskId`, `ChunkId`) are proto structs in
-//! `common_type.proto`.
+//! `common_type.fbs`.
 
 /// Rack identifier (integer, assigned by the cluster).
 pub type RackId = u64;

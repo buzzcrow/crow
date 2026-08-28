@@ -74,7 +74,7 @@ const mockServers: CrowKVServerView[] = [
     host: '127.0.0.1',
     process: {
       mgmt_url: 'http://127.0.0.1:19910',
-      grpc_url: 'http://127.0.0.1:19920',
+      rpc_url: 'http://127.0.0.1:19920',
       state: ProcState.Running,
       health: NodeHealth.Up,
       last_seen_ms: Date.now(),
@@ -237,7 +237,7 @@ describe('Add Node dialog', () => {
 
 describe('Deploy Server dialog', () => {
   it('POSTs DeployNodeServerBody to /api/nodes/:id/server/deploy', async () => {
-    installFetchMock({ node_id: 1, pid: 1234, mgmt_url: 'x', grpc_url: 'y' });
+    installFetchMock({ node_id: 1, pid: 1234, mgmt_url: 'x', rpc_url: 'y' });
     render(<DeployServerDialog isOpen onClose={() => {}} nodeId={1} />, { wrapper });
 
     fireEvent.change(screen.getByLabelText('REST Port'), { target: { value: '19911' } });
@@ -254,7 +254,7 @@ describe('Deploy Server dialog', () => {
   });
 
   it('submits immediately with provided default ports', async () => {
-    installFetchMock({ node_id: 1, pid: 1234, mgmt_url: 'x', grpc_url: 'y' });
+    installFetchMock({ node_id: 1, pid: 1234, mgmt_url: 'x', rpc_url: 'y' });
     render(
       <DeployServerDialog
         isOpen
@@ -277,11 +277,11 @@ describe('Deploy Server dialog', () => {
       [
         {
           id: 1,
-          server: { mgmt_url: 'http://127.0.0.1:19910', grpc_url: 'http://127.0.0.1:19920' },
+          server: { mgmt_url: 'http://127.0.0.1:19910', rpc_url: 'http://127.0.0.1:19920' },
         },
         {
           id: 2,
-          server: { mgmt_url: 'http://127.0.0.1:19910', grpc_url: 'http://127.0.0.1:19920' },
+          server: { mgmt_url: 'http://127.0.0.1:19910', rpc_url: 'http://127.0.0.1:19920' },
         },
       ],
       1,
@@ -295,7 +295,7 @@ describe('Deploy Server dialog', () => {
       [
         {
           id: 2,
-          server: { mgmt_url: 'http://127.0.0.1:19910', grpc_url: 'http://127.0.0.1:19920' },
+          server: { mgmt_url: 'http://127.0.0.1:19910', rpc_url: 'http://127.0.0.1:19920' },
         },
       ],
       1,
@@ -327,7 +327,7 @@ describe('diskdbPortDefaultsForNode', () => {
   });
 
   it('increments past ports already assigned to other diskdb instances', () => {
-    const instances = [{ grpc_endpoint: 'http://127.0.0.1:29921' }];
+    const instances = [{ rpc_endpoint: 'http://127.0.0.1:29921' }];
     expect(diskdbPortDefaultsForNode(instances, 1)).toBe('29922');
   });
 
@@ -426,7 +426,7 @@ describe('Add Store dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
-          grpc_url: 'http://127.0.0.1:29920',
+          rpc_url: 'http://127.0.0.1:29920',
           state: ProcState.Stopped,
           health: NodeHealth.Down,
           last_seen_ms: Date.now(),
@@ -455,7 +455,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
-          grpc_url: 'http://127.0.0.1:29920',
+          rpc_url: 'http://127.0.0.1:29920',
           state: ProcState.Running,
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
@@ -518,7 +518,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
-          grpc_url: 'http://127.0.0.1:29920',
+          rpc_url: 'http://127.0.0.1:29920',
           state: ProcState.Running,
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
@@ -552,7 +552,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:19910',
-          grpc_url: 'http://127.0.0.1:19920',
+          rpc_url: 'http://127.0.0.1:19920',
           state: ProcState.Running,
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
@@ -567,7 +567,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
-          grpc_url: 'http://127.0.0.1:29920',
+          rpc_url: 'http://127.0.0.1:29920',
           state: ProcState.Running,
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
@@ -582,7 +582,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:39910',
-          grpc_url: 'http://127.0.0.1:39920',
+          rpc_url: 'http://127.0.0.1:39920',
           state: ProcState.Running,
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
@@ -597,7 +597,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:49910',
-          grpc_url: 'http://127.0.0.1:49920',
+          rpc_url: 'http://127.0.0.1:49920',
           state: ProcState.Running,
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
@@ -635,7 +635,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
-          grpc_url: 'http://127.0.0.1:29920',
+          rpc_url: 'http://127.0.0.1:29920',
           state: ProcState.Running,
           health: NodeHealth.Up,
           last_seen_ms: Date.now(),
@@ -674,7 +674,7 @@ describe('Add Group dialog', () => {
         host: '127.0.0.1',
         process: {
           mgmt_url: 'http://127.0.0.1:29910',
-          grpc_url: 'http://127.0.0.1:29920',
+          rpc_url: 'http://127.0.0.1:29920',
           state: ProcState.Stopped,
           health: NodeHealth.Down,
           last_seen_ms: Date.now(),

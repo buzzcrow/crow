@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crow_console_shared::config::{ConsoleConfig, NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crow_console_shared::lifecycle::{crow_diskdb_bin, stop_pid_with_timeout};
-use crow_console_shared::test_ports::unique_test_port;
+use crow_console_shared::test_ports::unique_test_port_range;
 use crow_web::mgmt::startup_topology_check;
 use crow_web::AppState;
 
@@ -50,7 +50,9 @@ async fn diskdb_auto_starts_on_console_restart() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let node_id: u64 = 7777;
-    let rpc_port = unique_test_port();
+    // The diskdb needs 3 consecutive ports: rpc_port, http_port
+    // (rpc_port+1), rpc_listen_port (rpc_port+2).
+    let rpc_port = unique_test_port_range(3);
 
     let mut cfg = ConsoleConfig::default();
     cfg.add_rack(RackEntry {
@@ -69,12 +71,12 @@ async fn diskdb_auto_starts_on_console_restart() {
     })
     .unwrap();
 
-    let grpc_url = format!("http://127.0.0.1:{rpc_port}");
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}");
     cfg.add_server(ServerEntry {
         id: format!("diskdb-{node_id}"),
         url: format!("http://127.0.0.1:{}", rpc_port + 1),
         node_id: Some(node_id),
-        grpc_url: Some(grpc_url),
+        rpc_url: Some(rpc_url),
         rest_port: None,
         rpc_port: Some(rpc_port),
         auto_start: true,
@@ -82,6 +84,8 @@ async fn diskdb_auto_starts_on_console_restart() {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Diskdb,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
 

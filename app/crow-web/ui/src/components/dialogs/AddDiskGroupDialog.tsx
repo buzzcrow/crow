@@ -26,12 +26,14 @@ export function AddDiskGroupDialog({
   const [dgId, setDgId] = useState('');
   const [name, setName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const userEditedIdRef = useRef(false);
   const wasOpenRef = useRef(false);
   const { success, error } = useToast();
 
   // Fetch fresh DG list when the dialog opens, then compute the next
   // available ID. This avoids reusing an existing active DG id even if
-  // the polled nodeDiskGroups state is stale.
+  // the polled nodeDiskGroups state is stale. Uses a ref to track user
+  // edits so the async fetch doesn't clobber a user-typed value.
   useEffect(() => {
     if (!isOpen || wasOpenRef.current) {
       wasOpenRef.current = isOpen;
@@ -39,13 +41,15 @@ export function AddDiskGroupDialog({
     }
     wasOpenRef.current = isOpen;
     setName('');
+    userEditedIdRef.current = false;
+    setDgId('');
     listNodeDiskGroups(nodeId)
       .then((dgs) => {
         const ids = dgs.map((dg) => dg.id);
-        setDgId(minUnusedId([...existingDgIds, ...ids], 1));
+        if (!userEditedIdRef.current) setDgId(minUnusedId([...existingDgIds, ...ids], 1));
       })
       .catch(() => {
-        setDgId(minUnusedId(existingDgIds, 1));
+        if (!userEditedIdRef.current) setDgId(minUnusedId(existingDgIds, 1));
       });
   }, [isOpen, nodeId, existingDgIds]);
 
@@ -53,7 +57,7 @@ export function AddDiskGroupDialog({
 
   // Fallback: if the fetch hasn't completed yet, use the polled default.
   useEffect(() => {
-    if (isOpen && !dgId) {
+    if (isOpen && !dgId && !userEditedIdRef.current) {
       setDgId(defaultDgId);
     }
   }, [isOpen, dgId, defaultDgId]);
@@ -96,7 +100,7 @@ export function AddDiskGroupDialog({
           label="Disk Group ID (auto-assigned)"
           inputMode="numeric"
           value={dgId}
-          onChange={(e) => setDgId(e.target.value)}
+          onChange={(e) => { setDgId(e.target.value); userEditedIdRef.current = true; }}
           autoFocus
         />
         <Input

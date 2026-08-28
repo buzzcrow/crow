@@ -26,7 +26,7 @@ impl ChunkState {
             Ok(ProtoChunkState::Active) => Self::Active,
             Ok(ProtoChunkState::Sealed) => Self::Sealed,
             Ok(ProtoChunkState::Deleted) => Self::Deleted,
-            Err(_) => Self::Init,
+            Err(()) => Self::Init,
         }
     }
 

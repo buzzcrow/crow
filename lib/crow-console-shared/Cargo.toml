@@ -28,7 +28,7 @@ crow-protocol = { path = "../crow-protocol" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
 axum = "0.7"
-# KV data-plane gRPC client for `tests/kv_e2e_test.rs` (C6's own gRPC
+# KV data-plane crow-rpc client for `tests/kv_e2e_test.rs` (C6's own crow-rpc
 # `KvClient` wrapper is gone; that test now exercises the real
 # `crow-kv-client` crate end-to-end instead).
 crow-kv-client = { path = "../crow-kv-client" }

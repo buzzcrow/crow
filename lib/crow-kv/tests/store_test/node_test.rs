@@ -7,7 +7,6 @@ use crow_kv::cluster::kv_store::KvStore;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 use crow_kv::paxos::roles::{PxBallot, PxLogEntry};
 use crow_kv::rpc::KvBatchItem;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 fn sample_group(my_id: u64, leader_id: u64, leader_endpoint: &str) -> PxGroup {
@@ -30,7 +29,7 @@ fn sample_group(my_id: u64, leader_id: u64, leader_endpoint: &str) -> PxGroup {
 
 #[tokio::test]
 async fn kv_ops_apply_locally_for_single_leader() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     let group = sample_group(1, 1, "127.0.0.1:0");
     store.add_group(group);
 
@@ -88,7 +87,7 @@ async fn kv_ops_apply_locally_for_single_leader() {
 
 #[tokio::test]
 async fn follower_redirects_with_leader_hint() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     let remote_replicas = vec![
         PxRemoteReplica::new(42, "127.0.0.1:4444".to_string()),
         PxRemoteReplica::new(7, "127.0.0.1:7777".to_string()),
@@ -147,7 +146,7 @@ async fn role_can_be_changed_for_tests() {
 
 #[tokio::test]
 async fn read_modes_serve_value_with_slots_on_single_leader() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(sample_group(1, 1, "127.0.0.1:0"));
 
     // Commit one write so the leader has an applied frontier at slot 1.
@@ -194,7 +193,7 @@ async fn read_modes_serve_value_with_slots_on_single_leader() {
 
 #[tokio::test]
 async fn kv_get_returns_per_key_revision() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(sample_group(1, 1, "127.0.0.1:0"));
 
     let put = store.kv_put(1, b"rk", b"v1", 11, 1, 1, 1).await;
@@ -224,7 +223,7 @@ async fn kv_get_returns_per_key_revision() {
 
 #[tokio::test]
 async fn kv_get_missing_key_returns_revision_zero() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(sample_group(1, 1, "127.0.0.1:0"));
 
     let get = store.kv_get(1, b"missing", 0, 0, 1, 1).await;
@@ -234,7 +233,7 @@ async fn kv_get_missing_key_returns_revision_zero() {
 
 #[tokio::test]
 async fn kv_get_after_delete_returns_revision_zero() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(sample_group(1, 1, "127.0.0.1:0"));
 
     let put = store.kv_put(1, b"dk", b"v1", 11, 1, 1, 1).await;
@@ -250,7 +249,7 @@ async fn kv_get_after_delete_returns_revision_zero() {
 
 #[tokio::test]
 async fn dedup_suppresses_retried_client_seq() {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.add_group(sample_group(1, 1, "127.0.0.1:0"));
 
     // First write commits at some slot.

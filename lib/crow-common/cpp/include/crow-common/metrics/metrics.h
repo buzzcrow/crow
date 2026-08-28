@@ -19,12 +19,14 @@
 #pragma once
 
 #include "crow-common/metrics/bandwidth.h"
+#include "crow-common/metrics/callback_gauge.h"
 #include "crow-common/metrics/counter.h"
 #include "crow-common/metrics/gauge.h"
 #include "crow-common/metrics/latency_histogram.h"
 #include "crow-common/metrics/latency_summary.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -54,6 +56,7 @@ class MetricsRegistry
 
     Counter          *register_counter(const std::string &name);
     Gauge            *register_gauge(const std::string &name);
+    CallbackGauge    *register_callback_gauge(const std::string &name, CallbackGauge::Callback cb);
     Bandwidth        *register_bandwidth(const std::string &name);
     LatencyHistogram *register_histogram(const std::string &name);
     LatencySummary   *register_summary(const std::string &name);
@@ -71,24 +74,29 @@ class MetricsRegistry
 
     // Start periodic flush thread. interval_secs in seconds.
     // max_file_mb and max_files control size-based rotation with gzip
-    // compression of rotated files.
-    void start(const std::string &log_path, double interval_secs, size_t max_file_mb = 30, size_t max_files = 5);
+    // compression of rotated files. When console is true, each flush
+    // is also written to stdout.
+    void start(const std::string &log_path, double interval_secs, size_t max_file_mb = 30, size_t max_files = 5,
+               bool console = false);
     void stop();
 
   private:
     std::vector<std::unique_ptr<Counter>>          counters_;
     std::vector<std::unique_ptr<Gauge>>            gauges_;
+    std::vector<std::unique_ptr<CallbackGauge>>    callback_gauges_;
     std::vector<std::unique_ptr<Bandwidth>>        bandwidths_;
     std::vector<std::unique_ptr<LatencyHistogram>> histograms_;
     std::vector<std::unique_ptr<LatencySummary>>   summaries_;
 
-    std::mutex        flush_mutex_;
-    std::thread       flush_thread_;
-    std::atomic<bool> running_{false};
-    std::string       log_path_;
-    double            interval_secs_  = 0.0;
-    size_t            max_file_bytes_ = 30ULL * 1024ULL * 1024ULL;
-    size_t            max_files_      = 5;
+    std::mutex              flush_mutex_;
+    std::condition_variable stop_cv_;
+    std::thread             flush_thread_;
+    std::atomic<bool>       running_{false};
+    std::string             log_path_;
+    double                  interval_secs_  = 0.0;
+    size_t                  max_file_bytes_ = 30ULL * 1024ULL * 1024ULL;
+    size_t                  max_files_      = 5;
+    bool                    console_        = false;
 
     void flush_to_file();
     void check_rotate();

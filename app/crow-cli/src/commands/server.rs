@@ -90,7 +90,7 @@ async fn server_list(cli: &Cli) -> ExitCode {
             }
             println!(
                 "{:<12}  {:<26}  {:<26}  {:<8}  HEALTH",
-                "NODE", "MGMT", "GRPC", "PID"
+                "NODE", "MGMT", "RPC", "PID"
             );
             for s in &servers {
                 let health = match s.health {
@@ -102,7 +102,7 @@ async fn server_list(cli: &Cli) -> ExitCode {
                     "{:<12}  {:<26}  {:<26}  {:<8}  {health}",
                     s.node_id.map_or_else(|| "-".to_string(), |n| n.to_string()),
                     s.mgmt_url,
-                    s.grpc_url.as_deref().unwrap_or("-"),
+                    s.rpc_url.as_deref().unwrap_or("-"),
                     s.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
                 );
             }
@@ -138,8 +138,8 @@ async fn server_deploy(
                 return print_json(&r);
             }
             println!(
-                "deployed server on node {} -> {} (pid {}, grpc {})",
-                r.node_id, r.mgmt_url, r.pid, r.grpc_url
+                "deployed server on node {} -> {} (pid {}, rpc {})",
+                r.node_id, r.mgmt_url, r.pid, r.rpc_url
             );
             ExitCode::SUCCESS
         }
@@ -161,8 +161,8 @@ async fn server_restart(cli: &Cli, node_id: NodeId) -> ExitCode {
                 return print_json(&r);
             }
             println!(
-                "restarted crow-kv-server on node {} -> {} (pid {}, grpc {})",
-                r.node_id, r.mgmt_url, r.pid, r.grpc_url
+                "restarted crow-kv-server on node {} -> {} (pid {}, rpc {})",
+                r.node_id, r.mgmt_url, r.pid, r.rpc_url
             );
             ExitCode::SUCCESS
         }

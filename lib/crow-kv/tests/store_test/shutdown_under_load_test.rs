@@ -15,7 +15,7 @@ use crow_kv::cluster::kv_store::KvStore;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::common::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader_relaxed as start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -41,7 +41,7 @@ async fn graceful_shutdown_under_load() {
         .expect("leader elected");
 
     let leader = cluster.elected_leader().expect("leader present");
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     // Write initial data to group 1.
     for i in 0u64..10 {
@@ -98,7 +98,7 @@ async fn graceful_shutdown_under_load() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        let mut client = cluster.kv_client(leader_node).await;
+        let client = cluster.kv_client(leader_node).await;
         let mut all_ok = true;
         let mut idx = verified;
         while idx < 10 {

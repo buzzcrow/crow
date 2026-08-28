@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WAL with multi-disk segments, batched durable flush, replay, and GC
 - crow-tree storage engine: B+tree with delta chains, io_uring async I/O, epoch-safe lock-free reads, buffer pool
 - `KVEngine` trait with in-memory and crow-tree backends
-- gRPC services: Paxos (Prepare/Promise/Accept/Accepted), KV, Snapshot
+- crow-rpc services: Paxos (Prepare/Promise/Accept/Accepted), KV, Snapshot
 - Leader election with term/ballot fencing and leader lease
 - Reconfiguration: member add/remove, leader transfer, membership epoch fence
 - `crow-kv-server` binary with HTTP management API

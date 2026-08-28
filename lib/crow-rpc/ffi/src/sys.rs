@@ -35,7 +35,7 @@ pub struct crow_rpc_server_s {
 }
 
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct CrowRpcLatencyStats {
     pub count: u64,
     pub sum_ns: u64,
@@ -44,24 +44,18 @@ pub struct CrowRpcLatencyStats {
 }
 
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct CrowRpcTransportStats {
-    pub read_calls: u64,
-    pub writev_calls: u64,
     pub submit_to_writev: CrowRpcLatencyStats,
-    pub read_to_dispatch: CrowRpcLatencyStats,
-    pub dispatch_to_enq: CrowRpcLatencyStats,
+    pub send_queue_rejects: u64,
 }
 
 #[repr(C)]
 #[derive(Default, Debug)]
 pub struct CrowRpcClientCounters {
-    pub submit_ok: u64,
     pub submit_fail: u64,
-    pub resp_matched: u64,
     pub resp_missed: u64,
     pub reaped: u64,
-    pub slab_fallback: u64,
 }
 
 pub type crow_rpc_status = i32;
@@ -81,6 +75,22 @@ pub type crow_rpc_on_complete = Option<
         control: crow_rpc_buffer_t,
         data: crow_rpc_buffer_t,
         status: crow_rpc_status,
+        user_data: *mut c_void,
+    ),
+>;
+
+// ── Custom server handler dispatch (R115: Rust server handlers) ──
+pub type crow_rpc_handler_fn = Option<
+    unsafe extern "C" fn(
+        request_id: u64,
+        rpc_create_nano: u64,
+        msg_type: u16,
+        control: *const u8,
+        control_len: u32,
+        data: *const u8,
+        data_len: u32,
+        conn_handle: *mut c_void,
+        frame_handle: *mut c_void,
         user_data: *mut c_void,
     ),
 >;
@@ -114,6 +124,12 @@ extern "C" {
     pub fn crow_rpc_buffer_ref(buf: crow_rpc_buffer_t) -> crow_rpc_buffer_t;
     pub fn crow_rpc_buffer_release(buf: crow_rpc_buffer_t);
     pub fn crow_rpc_buffer_create(data: *const u8, len: u32) -> crow_rpc_buffer_t;
+    pub fn crow_rpc_buffer_create_external(
+        data: *const u8,
+        len: u32,
+        free_cb: Option<extern "C" fn(ctx: *mut std::ffi::c_void)>,
+        free_ctx: *mut std::ffi::c_void,
+    ) -> crow_rpc_buffer_t;
 
     pub fn crow_rpc_pool_create(max_buffers: u32) -> crow_rpc_pool_t;
     pub fn crow_rpc_pool_destroy(pool: crow_rpc_pool_t);
@@ -135,6 +151,9 @@ extern "C" {
     pub fn crow_rpc_server_stop(server: crow_rpc_server_t);
     pub fn crow_rpc_server_port(server: crow_rpc_server_t) -> c_int;
     pub fn crow_rpc_server_set_send_queue_capacity(server: crow_rpc_server_t, capacity: u32);
+    pub fn crow_rpc_server_set_tcp_nodelay(server: crow_rpc_server_t, enabled: c_int);
+    pub fn crow_rpc_server_set_quickack(server: crow_rpc_server_t, enabled: c_int);
+    pub fn crow_rpc_server_set_event_write(server: crow_rpc_server_t, enabled: c_int);
 
     pub fn crow_rpc_server_transport_stats(server: crow_rpc_server_t, out: *mut CrowRpcTransportStats);
 
@@ -162,9 +181,30 @@ extern "C" {
         user_data: *mut c_void,
     ) -> crow_rpc_status;
 
+    pub fn crow_rpc_client_send_conn(
+        client: crow_rpc_client_t,
+        server: crow_rpc_server_t,
+        conn_handle: *mut c_void,
+        request_id: u64,
+        control: crow_rpc_buffer_t,
+        data: crow_rpc_buffer_t,
+        msg_type: u16,
+        on_complete: crow_rpc_on_complete,
+        user_data: *mut c_void,
+    ) -> crow_rpc_status;
+
     pub fn crow_rpc_connect(server: crow_rpc_server_t, addr: *const c_char, port: c_int) -> crow_rpc_conn_t;
 
     pub fn crow_rpc_server_register_echo_handler(server: crow_rpc_server_t, msg_type: u16);
+
+    pub fn crow_rpc_frame_release(frame_handle: *mut c_void);
+
+    pub fn crow_rpc_server_register_handler(
+        server: crow_rpc_server_t,
+        msg_type: u16,
+        callback: crow_rpc_handler_fn,
+        user_data: *mut c_void,
+    );
 
     pub fn crow_rpc_server_submit_response(
         server: crow_rpc_server_t,
@@ -176,6 +216,48 @@ extern "C" {
         msg_type: u16,
         request_id: u64,
     ) -> crow_rpc_status;
+
+    pub fn crow_rpc_server_submit_response_buffer(
+        server: crow_rpc_server_t,
+        conn_handle: *mut c_void,
+        control: crow_rpc_buffer_t,
+        data: crow_rpc_buffer_t,
+        msg_type: u16,
+        request_id: u64,
+    ) -> crow_rpc_status;
+
+    // ── Client-side request handler dispatch (R114) ───────────────
+    pub fn crow_rpc_client_register_handler(
+        client: crow_rpc_client_t,
+        msg_type: u16,
+        callback: crow_rpc_handler_fn,
+        user_data: *mut c_void,
+    );
+
+    pub fn crow_rpc_client_set_transport(client: crow_rpc_client_t, server: crow_rpc_server_t);
+
+    // ── Server-side request-response correlation (R114) ───────────
+    pub fn crow_rpc_server_set_request_client(server: crow_rpc_server_t, client: crow_rpc_client_t);
+
+    // ── Logging (mirrors crow-tree ct_*_logging) ─────────────────
+    pub fn crow_rpc_init_logging(
+        log_dir: *const c_char,
+        level: *const c_char,
+        max_file_mb: usize,
+        max_files: usize,
+        file_prefix: *const c_char,
+    );
+    pub fn crow_rpc_flush_logging();
+    pub fn crow_rpc_shutdown_logging();
+    pub fn crow_rpc_metrics_start(
+        log_path: *const c_char,
+        interval_secs: f64,
+        max_file_mb: usize,
+        max_files: usize,
+        console: c_int,
+    );
+    pub fn crow_rpc_metrics_stop();
+    pub fn crow_rpc_server_register_conn_count_gauge(server: crow_rpc_server_t, name: *const c_char);
 
     // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
     pub fn crow_rpc_co_spawn(

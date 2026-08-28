@@ -28,7 +28,7 @@ use crate::worker::EcWorker;
 use crate::{IoError, Result};
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskId;
-use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
+use crow_protocol::chunkdb::rpc::Strip as StripOneof;
 use crow_protocol::chunkdb::rpc::{Chunk, EcStrip};
 use crow_protocol::diskdb::rpc::Segment;
 
@@ -182,7 +182,7 @@ impl EcStripWriter {
     /// caller (`ChunkWriter`) collects the handles and joins them at
     /// `seal()` time — strip N+1's data writes overlap with strip N's
     /// parity writes + fsyncs.
-    #[allow(clippy::unused_async)] // signature matches MirrorStripWriter for enum dispatch
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // signature matches MirrorStripWriter for enum dispatch
     pub async fn finish(&mut self) -> Result<StripResult> {
         if self.finished {
             return Err(IoError::Finished);

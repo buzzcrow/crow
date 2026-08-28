@@ -132,6 +132,13 @@ pub(crate) trait BenchTarget: Send {
         ClientMetricsSnapshot::default()
     }
 
+    /// Client-side crow-rpc transport stats (end-of-run cumulative
+    /// snapshot). KV samples from `CrowkvClient`; RPC and others
+    /// return default (empty).
+    fn client_transport_stats(&self) -> super::report::TransportStatsSnapshot {
+        super::report::TransportStatsSnapshot::default()
+    }
+
     /// Node IDs for the markdown report (KV: 3-node cluster; RPC: empty).
     fn node_ids(&self) -> Vec<u64> {
         Vec::new()

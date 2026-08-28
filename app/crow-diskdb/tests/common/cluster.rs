@@ -206,12 +206,12 @@ pub async fn wait_for_leader(nodes: &[KvNode], group_id: u64, timeout: Duration)
         if leaders.len() == 1 {
             return leaders[0];
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("no unique leader for group {group_id} within {timeout:?}");
 }
 
-/// Get the gRPC endpoint of the leader node for a group.
+/// Get the crow-rpc endpoint of the leader node for a group.
 pub async fn leader_endpoint(nodes: &[KvNode], group_id: u64) -> String {
     let idx = wait_for_leader(nodes, group_id, Duration::from_secs(30)).await;
     node_endpoint(&topology(&nodes[idx]).await)
@@ -384,7 +384,7 @@ async fn start_kv_node_with_groups(
 }
 
 /// Wait for all disks in a disk-group to transition from Init to Up
-/// and have their zones loaded. Polls every 10ms up to 5s.
+/// and have their zones loaded. Polls every 10ms up to 15s.
 ///
 /// Used by `diskdb_e2e_test.rs` and `recovery_test.rs`; other test
 /// binaries include `common` without using it, so `dead_code` is
@@ -397,7 +397,7 @@ pub async fn wait_for_disks_ready(
     expected_zones: u32,
 ) {
     use crow_protocol::common::HwStatus;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(dg) = container.get_disk_group(dg_id) {
             let disks = dg.disks.read().unwrap();

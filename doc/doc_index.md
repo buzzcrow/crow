@@ -38,7 +38,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/kv/kv-read-flow-analysis.md` | KV point-read flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-scan-flow-analysis.md` | KV scan flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. |
-| `doc/design/rpc/rpc-echo-flow-analysis.md` | RPC echo transport flow trace, benchmarks, bottleneck analysis. |
+| `doc/design/rpc/rpc-flow-analysis.md` | RPC transport flow trace, benchmarks, and performance history. |
 
 ## Project Files (repo root)
 
@@ -56,7 +56,8 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | --- | --- |
 | `doc/design/kv/design-crow-kv-leader-election.md` | Election protocol, leader lease, ReadIndex, step-down. |
 | `doc/design/kv/design-crow-kv-slot.md` | Parallel slot pipelining, gap repair, follower catch-up, `SlotList`, proposal coalescing. |
-| `doc/design/kv/design-crow-kv-rpc.md` | Wire protocol, LearnerStream, PxService, Paxos error model. |
+| `doc/design/kv/design-crow-kv-rpc.md` | Wire protocol, crow-rpc consensus transport, PxRpcService, PxRpcTransport, flatbuffer schema, Paxos error model. |
+| `doc/design/kv/design-crow-kv-rpc-client.md` | Client-facing KV RPC: crow-rpc transport, KvRpcService, KvRpcTransport, WatchNotify server-push, mixed-rollout. |
 | `doc/design/kv/design-crow-kv-reconfiguration.md` | Member add/remove, leader transfer, `membership_epoch` fence. |
 | `doc/design/kv/design-crow-kv-group0.md` | Group-0 sysdata schema, service registry, cluster topology records. |
 | `doc/design/kv/design-crow-kv-sysdata-lifecycle.md` | Sysdata lifecycle: ID reuse safety, cascading cleanup, client cache eviction, disk move, cluster reset. |
@@ -75,6 +76,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/protocol/design-crow-protocol-types.md` | Wire types, `u64` ID aliases, re-export pattern, `utoipa` schema derives. |
 | `doc/design/chunkdb/design-crow-chunkdb.md` | chunkdb root: architecture, chunk lifecycle, per-chunk lifecycle lock + payload cache, strip types (mirror/EC), disk-group placement, EC integration, crate layout, concurrency. |
 | `doc/design/chunkdb/design-crow-chunkdb-range-binding.md` | chunkdb instance sharding: non-contiguous sub-range binding schema, `BindingStrategy` trait + `ChunkdbRangeStrategy` (incremental assignment preserving `InTransition`), `RangeBindingClient` (route + transition fallback + `refresh_and_route` on `NotMyRange`), `RangeGuard` enforcement, leader-gated `BindingMonitor` in crow-kv-server (write-on-change), `NotMyRange` reject-and-retry, migration flow (chunkdb routing-change + diskdb data-copy ref to R102), precise `free_blocks` routing. |
+| `doc/design/chunkdb/design-crow-chunkdb-rpc.md` | chunkdb RPC: crow-rpc flatbuffer transport for ChunkdbService (8 unary RPCs), `CHUNKDB_RPC_BASE = 9961` port allocation, `chunkdb.fbs` schema (enums + nested types + `FBStripBody` union), zero-copy `Ref` wrappers, `ChunkdbRpcService` server handler, `ChunkdbRpcTransport` client transport, `ChunkdbClient::with_rpc_transport` selection, `rpc_listen_addr` config, error model (`LifecycleError` → `FBChunkdbRetCode` → `ChunkdbClientError`). |
 | `doc/design/chunkio/design-crow-chunkio.md` | chunk IO data path root: `crow-chunk-client` crate write pipeline — block-granularity EC flow (fetch → main write → parity hand-off), backpressure + per-writer memory budget + `WriterPool`, shard-based partial EC encode, chunk rotation + `Location`, whole-strip retry + `Drop` abort, key design choices (always-store push contract, bounded preallocation, two trait seams). |
 | `doc/design/diskdb/design-crow-diskdb.md` | diskdb root: architecture, group-0 sysdata, disk status management, space metrics, background scanner, crate layout, concurrency. |
 | `doc/design/diskdb/design-crow-diskdb-zone-management.md` | Zone management: record model, allocation algorithm, persist-only free, compaction-on-rotation, preparatory thread, crash recovery, zone-level concurrency, invariants. |
@@ -83,6 +85,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/rpc/design-crow-rpc.md` | RPC root: architecture, Non-Goals, key design decisions (native buffer, 12-byte header, transport interface, pull-based parser, per-connection writer, folly CHM, worker timer, C ABI + oneshot FFI, flatbuffers), wire format diagram, control plane (pool + reconnect, `RpcClient` correlation, `ScheduledExecutor`, `RpcServer` + handler offload, backpressure Reject/Await), flatbuffer schema home + build matrix, sub-design map. |
 | `doc/design/rpc/design-crow-rpc-tcp.md` | TCP transport: `SocketTransport` shared base, worker loop, scatter-gather `writev` send, zero-copy receive, `EpollEngine` (Linux, level-triggered), `KqueueEngine` (macOS, `EV_CLEAR` write), multi-engine scaling (N engines × M workers). |
 | `doc/design/rpc/design-crow-rpc-rdma.md` | RDMA transport: `RdmaTransport`, CQ poll loop, `librdmacm` connection setup, pre-registered buffer pools. |
+| `doc/design/rpc/design-crow-rpc-diskdb-migration.md` | diskdb crow-rpc migration: server-side Rust handler dispatch (`DiskdbRpcService`), client-side `DiskdbRpcTransport`, error model parity, mixed-rollout mechanism, `conn_handle` lifetime safety (live-connection registry in `SocketTransport`). |
 
 ## How AI Should Use This Index
 

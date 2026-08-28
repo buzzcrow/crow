@@ -29,10 +29,11 @@ crow-protocol = { path = "../../lib/crow-protocol" }
 crow-kv-client = { path = "../../lib/crow-kv-client" }
 crow-diskdb-client = { path = "../../lib/crow-diskdb-client" }
 crow-common = { path = "../../lib/crow-common/rust" }
+crow-rpc-ffi = { path = "../../lib/crow-rpc/ffi" }
+flatbuffers = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "net", "sync"] }
-tonic = { workspace = true }
-prost = { workspace = true }
 bytes = "1"
+bincode = "1"
 clap = { version = "4", features = ["derive"] }
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }

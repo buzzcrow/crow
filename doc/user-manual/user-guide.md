@@ -430,7 +430,7 @@ waits for a new leader, then removes the replica.
 ### 3.4 Replace a failed node
 
 1. Provision the new machine with the same node ID, management port,
-   and gRPC port.
+   and RPC port.
 2. Deploy the server via the service. The server auto-loads its
    store/group configuration from `conf/node-config.json` on startup.
    No `--stores`/`--groups` CLI args needed for normal restart:

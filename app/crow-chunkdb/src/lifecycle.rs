@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Chunk lifecycle management — state machine + gRPC handlers.
+//! Chunk lifecycle management — state machine + crow-rpc handlers.
 //!
 //! Design §9: `Init → Active → Sealed → Deleted` state machine.
 //! Transitions are validated; invalid transitions return
@@ -36,7 +36,7 @@ pub use state::{ChunkState, StateTransitionError};
 /// Default lock wait time for `LockPolicy::default()`.
 const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(10);
 
-/// Lifecycle error — maps to gRPC status codes in the service layer.
+/// Lifecycle error — maps to crow-rpc status codes in the service layer.
 #[derive(Debug, thiserror::Error)]
 pub enum LifecycleError {
     #[error("invalid state transition: {0}")]
@@ -825,7 +825,7 @@ impl LifecycleHandler {
 
 /// Extract all segments from a strip (mirror or EC).
 fn extract_segments(strip: &ChunkStrip) -> Vec<crow_protocol::diskdb::rpc::Segment> {
-    use crow_protocol::chunkdb::rpc::chunk_strip::Strip;
+    use crow_protocol::chunkdb::rpc::Strip;
     match &strip.strip {
         Some(Strip::MirrorStrip(m)) => m.segments.clone(),
         Some(Strip::EcStrip(ec)) => ec.segments.clone(),

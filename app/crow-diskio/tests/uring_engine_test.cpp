@@ -5,13 +5,14 @@
 // cancel_fd, O_DIRECT alignment check.
 #include "engine/uring/uring_engine.h"
 
+#include <gtest/gtest.h>
+
 #ifdef CROW_HAVE_LIBURING
 
 #    include "disk/disk.h"
 #    include "disk/types.h"
 
 #    include <fcntl.h>
-#    include <gtest/gtest.h>
 #    include <unistd.h>
 
 #    include <atomic>

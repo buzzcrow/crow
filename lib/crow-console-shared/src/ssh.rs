@@ -355,7 +355,7 @@ pub async fn deploy_via_ssh(
 
     // Poll /health up to 10s, like the local-fork path.
     let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
-    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+    let rpc_url = format!("http://{}:{}", node.host, req.rpc_port);
     let client = ServerClient::new(mgmt_url.clone())?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -363,7 +363,7 @@ pub async fn deploy_via_ssh(
             return Ok(crate::lifecycle::DeployedServer {
                 server_id: req.server_id.clone(),
                 mgmt_url,
-                grpc_url,
+                rpc_url,
                 pid,
             });
         }

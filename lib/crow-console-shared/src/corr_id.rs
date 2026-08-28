@@ -5,7 +5,7 @@
 //!
 //! Every console request (CLI invocation, web handler call) runs inside
 //! a `tokio` task-local that carries an opaque 16-hex-char correlation
-//! id. Outbound HTTP/gRPC clients attach this id as the
+//! id. Outbound HTTP/crow-rpc clients attach this id as the
 //! `x-crow-kv-corr-id` header so a single user action shows up linked
 //! across console + every upstream `crow-kv-server` it touched.
 //!

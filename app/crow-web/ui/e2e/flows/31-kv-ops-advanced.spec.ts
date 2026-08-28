@@ -4,6 +4,7 @@
 
 import { test, expect, consoleBaseURL } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, freePort, resetAll, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { step } from '../fixtures/stepTimer';
 
 // One rack/node/server shared by every test in this file (IDs reused from
 // the former 26-kv-demo spec so they stay unique):
@@ -14,7 +15,7 @@ import { addGroup, createStore, deployNodeServer, freePort, resetAll, seedRackAn
 const apiBase = consoleBaseURL();
 
 async function openKvPanel(page: any, storeId: string, groupId?: string) {
-  await page.goto('/');
+  await step('kv: goto', () => page.goto('/'));
   await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
   await page.getByLabel('Store').selectOption(storeId);
   if (groupId !== undefined) {
@@ -23,50 +24,62 @@ async function openKvPanel(page: any, storeId: string, groupId?: string) {
 }
 
 async function putKey(page: any, key: string, value: string) {
-  await page.getByLabel('Put key').fill(key);
-  await page.getByLabel('Put value').fill(value);
-  const responsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
-  await page.getByRole('button', { name: /^Put$/ }).click();
-  const response = await responsePromise;
-  expect(response.ok(), await response.text()).toBeTruthy();
+  await step('kv: put', async () => {
+    await page.getByLabel('Put key').fill(key);
+    await page.getByLabel('Put value').fill(value);
+    const responsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
+    await page.getByRole('button', { name: /^Put$/ }).click();
+    const response = await responsePromise;
+    expect(response.ok(), await response.text()).toBeTruthy();
+  });
 }
 
 async function scanAndRefresh(page: any) {
-  const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
-  await page.getByRole('button', { name: /^Scan$/ }).click();
-  await scanResponse;
-  await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
+  await step('kv: scan', async () => {
+    const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+    await page.getByRole('button', { name: /^Scan$/ }).click();
+    await scanResponse;
+    await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
+  });
 }
 
 async function scanAllDemoKeys(baseURL: string, storeId: number, groupId: number): Promise<string[]> {
-  const keys: string[] = [];
-  let startAfter = '';
-  for (;;) {
-    const url = `/api/stores/${storeId}/groups/${groupId}/kv/scan?prefix=demo_&limit=500${startAfter ? `&start_after=${encodeURIComponent(startAfter)}` : ''}`;
-    const resp = await fetch(`${baseURL}${url}`);
-    const body = await resp.json();
-    keys.push(...body.items.map((i: any) => i.key_utf8));
-    if (!body.truncated || body.items.length === 0) break;
-    startAfter = body.items[body.items.length - 1].key_utf8;
-  }
-  return keys;
+  return step('kv: scan demo keys', async () => {
+    const keys: string[] = [];
+    let startAfter = '';
+    for (;;) {
+      const url = `/api/stores/${storeId}/groups/${groupId}/kv/scan?prefix=demo_&limit=500${startAfter ? `&start_after=${encodeURIComponent(startAfter)}` : ''}`;
+      const resp = await fetch(`${baseURL}${url}`);
+      const body = await resp.json();
+      keys.push(...body.items.map((i: any) => i.key_utf8));
+      if (!body.truncated || body.items.length === 0) break;
+      startAfter = body.items[body.items.length - 1].key_utf8;
+    }
+    return keys;
+  });
 }
 
 test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
   test.beforeAll(async () => {
     // The demo/advanced flows assume a backend with no leftover topology.
-    await resetAll(apiBase);
+    await step('kv: resetAll', () => resetAll(apiBase));
     try {
-      await seedRackAndNode(apiBase, 262, 262);
-      await deployNodeServer(apiBase, 262, freePort(), freePort());
-      await createStore(apiBase, 261, [262]);
-      await addGroup(apiBase, 261, 2610, 26100, [262]);
-      await addGroup(apiBase, 261, 2611, 26110, [262]);
-      await waitForLeader(apiBase, 261, 2610);
-      await waitForLeader(apiBase, 261, 2611);
-      await createStore(apiBase, 262, [262]);
-      await addGroup(apiBase, 262, 2620, 26200, [262]);
-      await waitForLeader(apiBase, 262, 2620);
+      await step('kv: seed rack/node', () => seedRackAndNode(apiBase, 262, 262));
+      await step('kv: deploy server', () => deployNodeServer(apiBase, 262, freePort(), freePort()));
+      await step('kv: create store 261 + groups', async () => {
+        await createStore(apiBase, 261, [262]);
+        await addGroup(apiBase, 261, 2610, 26100, [262]);
+        await addGroup(apiBase, 261, 2611, 26110, [262]);
+      });
+      await step('kv: wait for leaders 261', () => Promise.all([
+        waitForLeader(apiBase, 261, 2610),
+        waitForLeader(apiBase, 261, 2611),
+      ]));
+      await step('kv: create store 262 + group', async () => {
+        await createStore(apiBase, 262, [262]);
+        await addGroup(apiBase, 262, 2620, 26200, [262]);
+      });
+      await step('kv: wait for leader 262', () => waitForLeader(apiBase, 262, 2620));
     } catch (err) {
       await stopNodeServer(apiBase, 262);
       throw err;
@@ -74,7 +87,7 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
   });
 
   test.afterAll(async () => {
-    await stopNodeServer(apiBase, 262);
+    await step('kv: stop server', () => stopNodeServer(apiBase, 262));
   });
 
   test('prefix/selected/inline delete + copy, load more, all-groups mode, auto-scan toggle', async ({ page }) => {
@@ -91,18 +104,20 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     await expect(page.getByTestId('kv-scan-table').getByText('adv-a-1')).toBeVisible({ timeout: 3_000 });
 
     // Delete Prefix: delete all keys starting with "adv-a-"
-    await page.getByLabel('Delete key').fill('adv-a-');
-    await page.getByRole('button', { name: /delete prefix/i }).click();
-    // Confirm dialog appears
-    const dialog = page.getByRole('dialog');
-    await expect(dialog).toBeVisible({ timeout: 3_000 });
-    const deletePrefixResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
-    await dialog.getByRole('button', { name: 'Delete' }).click();
-    await deletePrefixResponse;
-    // Wait for the component's automatic re-scan (setTimeout 100ms) to
-    // complete before triggering a manual scan, so the two /kv/scan
-    // responses don't race and overwrite each other.
-    await page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+    await step('kv: delete prefix', async () => {
+      await page.getByLabel('Delete key').fill('adv-a-');
+      await page.getByRole('button', { name: /delete prefix/i }).click();
+      // Confirm dialog appears
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible({ timeout: 3_000 });
+      const deletePrefixResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
+      await dialog.getByRole('button', { name: 'Delete' }).click();
+      await deletePrefixResponse;
+      // Wait for the component's automatic re-scan (setTimeout 100ms) to
+      // complete before triggering a manual scan, so the two /kv/scan
+      // responses don't race and overwrite each other.
+      await page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+    });
 
     // Scan again — adv-a-* keys should be gone
     await scanAndRefresh(page);
@@ -111,15 +126,17 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     await expect(page.getByTestId('kv-scan-table').getByText('adv-a-2')).toHaveCount(0);
 
     // Delete Selected: check the checkbox for adv-b-1, then delete
-    const row = page.getByTestId('kv-scan-table').locator('tr').filter({ hasText: 'adv-b-1' });
-    await row.locator('input[type="checkbox"]').check();
-    await expect(page.getByRole('button', { name: /delete selected/i })).toBeEnabled({ timeout: 3_000 });
-    await page.getByRole('button', { name: /delete selected/i }).click();
-    const confirmDialog = page.getByRole('dialog');
-    await expect(confirmDialog).toBeVisible({ timeout: 3_000 });
-    const deleteSelectedResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
-    await confirmDialog.getByRole('button', { name: 'Delete' }).click();
-    await deleteSelectedResponse;
+    await step('kv: delete selected', async () => {
+      const row = page.getByTestId('kv-scan-table').locator('tr').filter({ hasText: 'adv-b-1' });
+      await row.locator('input[type="checkbox"]').check();
+      await expect(page.getByRole('button', { name: /delete selected/i })).toBeEnabled({ timeout: 3_000 });
+      await page.getByRole('button', { name: /delete selected/i }).click();
+      const confirmDialog = page.getByRole('dialog');
+      await expect(confirmDialog).toBeVisible({ timeout: 3_000 });
+      const deleteSelectedResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
+      await confirmDialog.getByRole('button', { name: 'Delete' }).click();
+      await deleteSelectedResponse;
+    });
 
     // Scan — adv-b-1 should be gone
     await scanAndRefresh(page);
@@ -129,44 +146,52 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     await putKey(page, 'adv-inline', 'val-inline');
     await scanAndRefresh(page);
     await expect(page.getByTestId('kv-scan-table').getByText('adv-inline')).toBeVisible({ timeout: 3_000 });
-    await page.getByTestId('inline-delete-adv-inline').click();
-    const inlineDialog = page.getByRole('dialog');
-    await expect(inlineDialog).toBeVisible({ timeout: 3_000 });
-    const inlineDeleteResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
-    await inlineDialog.getByRole('button', { name: 'Delete' }).click();
-    await inlineDeleteResponse;
+    await step('kv: inline delete', async () => {
+      await page.getByTestId('inline-delete-adv-inline').click();
+      const inlineDialog = page.getByRole('dialog');
+      await expect(inlineDialog).toBeVisible({ timeout: 3_000 });
+      const inlineDeleteResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
+      await inlineDialog.getByRole('button', { name: 'Delete' }).click();
+      await inlineDeleteResponse;
+    });
 
     // Copy: put a key, get it, verify copy button exists
     await putKey(page, 'adv-copy', 'copy-val');
-    await page.getByLabel('Get key').fill('adv-copy');
-    const getResponse = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
-    await page.getByRole('button', { name: /^Get$/ }).click();
-    await getResponse;
-    await expect(page.getByTestId('kv-get-result')).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByTestId('kv-copy-value')).toBeVisible();
+    await step('kv: get copy', async () => {
+      await page.getByLabel('Get key').fill('adv-copy');
+      const getResponse = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
+      await page.getByRole('button', { name: /^Get$/ }).click();
+      await getResponse;
+      await expect(page.getByTestId('kv-get-result')).toBeVisible({ timeout: 3_000 });
+      await expect(page.getByTestId('kv-copy-value')).toBeVisible();
+    });
 
     // --- >100 keys: truncated indicator + Load More (former 29-kv-load-more) ---
     // Bulk-insert 120 keys via API (much faster than UI one-by-one)
-    for (let i = 0; i < 120; i++) {
-      const key = `load-key-${String(i).padStart(3, '0')}`;
-      const resp = await fetch(`${apiBase}/api/stores/262/groups/2620/kv/put`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, value: `val-${i}` }),
-      });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`KV put failed for key ${key}: ${resp.status} ${text}`);
+    await step('kv: bulk insert 120 keys', async () => {
+      for (let i = 0; i < 120; i++) {
+        const key = `load-key-${String(i).padStart(3, '0')}`;
+        const resp = await fetch(`${apiBase}/api/stores/262/groups/2620/kv/put`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, value: `val-${i}` }),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(`KV put failed for key ${key}: ${resp.status} ${text}`);
+        }
       }
-    }
+    });
 
     await openKvPanel(page, '262', '2620');
 
     // Scan
-    const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
-    await page.getByRole('button', { name: /scan/i }).click();
-    await scanResponse;
-    await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
+    await step('kv: scan load-more', async () => {
+      const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+      await page.getByRole('button', { name: /scan/i }).click();
+      await scanResponse;
+      await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
+    });
 
     // Verify truncated indicator
     await expect(page.getByText(/truncated/i)).toBeVisible({ timeout: 3_000 });
@@ -179,9 +204,11 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     expect(initialRowCount).toBe(100);
 
     // Click Load More
-    const loadMoreResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
-    await page.getByRole('button', { name: /load more/i }).click();
-    await loadMoreResponse;
+    await step('kv: load more', async () => {
+      const loadMoreResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+      await page.getByRole('button', { name: /load more/i }).click();
+      await loadMoreResponse;
+    });
 
     // Verify additional rows appear
     await expect(page.getByTestId('kv-scan-table').locator('tbody tr')).toHaveCount(120, { timeout: 3_000 });
@@ -203,12 +230,14 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     await expect(page.getByRole('button', { name: /^Get$/ })).toBeDisabled();
 
     // Scan should aggregate keys from both groups
-    const allGroupsScanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
-    await page.getByRole('button', { name: /scan/i }).click();
-    await allGroupsScanResponse;
-    await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByTestId('kv-scan-table').getByText('all-groups-key-0')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId('kv-scan-table').getByText('all-groups-key-1')).toBeVisible({ timeout: 10_000 });
+    await step('kv: all-groups scan', async () => {
+      const allGroupsScanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+      await page.getByRole('button', { name: /scan/i }).click();
+      await allGroupsScanResponse;
+      await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
+      await expect(page.getByTestId('kv-scan-table').getByText('all-groups-key-0')).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByTestId('kv-scan-table').getByText('all-groups-key-1')).toBeVisible({ timeout: 10_000 });
+    });
 
     // Group column should be visible in All Groups mode
     await expect(page.getByTestId('kv-scan-table').locator('th').filter({ hasText: 'Group' })).toBeVisible();
@@ -218,10 +247,12 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
 
     // Put an initial key and scan
     await putKey(page, 'auto-key-1', 'val-1');
-    const scanResp = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
-    await page.getByRole('button', { name: /scan/i }).click();
-    await scanResp;
-    await expect(page.getByTestId('kv-scan-table').getByText('auto-key-1')).toBeVisible({ timeout: 3_000 });
+    await step('kv: auto-scan initial', async () => {
+      const scanResp = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+      await page.getByRole('button', { name: /scan/i }).click();
+      await scanResp;
+      await expect(page.getByTestId('kv-scan-table').getByText('auto-key-1')).toBeVisible({ timeout: 3_000 });
+    });
 
     // Turn auto-scan off
     await page.getByLabel('auto-scan').uncheck();
@@ -245,9 +276,11 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
 
     // Inject 5 demo keys (default is 20, we use a smaller count for speed)
     await page.getByLabel('Demo key count').fill('5');
-    const injectResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
-    await page.getByRole('button', { name: /Inject/ }).click();
-    await injectResponsePromise;
+    await step('kv: inject 5', async () => {
+      const injectResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
+      await page.getByRole('button', { name: /Inject/ }).click();
+      await injectResponsePromise;
+    });
 
     // Wait for scan to auto-trigger and show demo keys
     await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/).first()).toBeVisible({ timeout: 3_000 });
@@ -256,15 +289,17 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     expect(keys.every((k) => k.startsWith('demo_key_'))).toBe(true);
 
     // Delete all demo keys — wait for all delete responses to settle
-    await page.getByRole('button', { name: /Delete all demo/ }).click();
-    const dialog = page.getByRole('dialog');
-    await expect(dialog).toBeVisible();
-    await dialog.getByRole('button', { name: 'Delete' }).click();
-    // Poll until no demo keys remain (delete-all sends multiple requests)
-    await expect.poll(async () => {
-      const remaining = await scanAllDemoKeys(apiBase, 261, 2610);
-      return remaining.length;
-    }, { timeout: 5_000, intervals: [100] }).toBe(0);
+    await step('kv: delete-all demo', async () => {
+      await page.getByRole('button', { name: /Delete all demo/ }).click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole('button', { name: 'Delete' }).click();
+      // Poll until no demo keys remain (delete-all sends multiple requests)
+      await expect.poll(async () => {
+        const remaining = await scanAllDemoKeys(apiBase, 261, 2610);
+        return remaining.length;
+      }, { timeout: 5_000, intervals: [100] }).toBe(0);
+    });
 
     // Verify scan table no longer shows demo keys
     await page.getByRole('button', { name: /scan/i }).click();
@@ -275,9 +310,11 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
 
     // Inject 20 demo keys in All Groups mode — should randomly distribute
     await page.getByLabel('Demo key count').fill('20');
-    const allGroupsInjectPromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
-    await page.getByRole('button', { name: /Inject/ }).click();
-    await allGroupsInjectPromise;
+    await step('kv: inject 20 all-groups', async () => {
+      const allGroupsInjectPromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
+      await page.getByRole('button', { name: /Inject/ }).click();
+      await allGroupsInjectPromise;
+    });
 
     // Wait for scan to show demo keys
     await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/).first()).toBeVisible({ timeout: 3_000 });
@@ -292,16 +329,18 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     expect(keys1.length).toBeGreaterThan(0);
 
     // Delete all demo keys in All Groups mode — poll until clean
-    await page.getByRole('button', { name: /Delete all demo/ }).click();
-    const allGroupsDialog = page.getByRole('dialog');
-    await expect(allGroupsDialog).toBeVisible();
-    await allGroupsDialog.getByRole('button', { name: 'Delete' }).click();
-    // Poll until no demo keys remain in either group
-    await expect.poll(async () => {
-      const r0 = await scanAllDemoKeys(apiBase, 261, 2610);
-      const r1 = await scanAllDemoKeys(apiBase, 261, 2611);
-      return r0.length + r1.length;
-    }, { timeout: 5_000, intervals: [100] }).toBe(0);
+    await step('kv: delete-all all-groups', async () => {
+      await page.getByRole('button', { name: /Delete all demo/ }).click();
+      const allGroupsDialog = page.getByRole('dialog');
+      await expect(allGroupsDialog).toBeVisible();
+      await allGroupsDialog.getByRole('button', { name: 'Delete' }).click();
+      // Poll until no demo keys remain in either group
+      await expect.poll(async () => {
+        const r0 = await scanAllDemoKeys(apiBase, 261, 2610);
+        const r1 = await scanAllDemoKeys(apiBase, 261, 2611);
+        return r0.length + r1.length;
+      }, { timeout: 5_000, intervals: [100] }).toBe(0);
+    });
 
     // --- inject into a specific second group only targets that group (former 26-kv-demo #3) ---
     // Select the second group specifically
@@ -309,9 +348,11 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
 
     // Inject 10 demo keys into group 2611 only
     await page.getByLabel('Demo key count').fill('10');
-    const secondGroupInjectPromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
-    await page.getByRole('button', { name: /Inject/ }).click();
-    await secondGroupInjectPromise;
+    await step('kv: inject 10 group 2611', async () => {
+      const secondGroupInjectPromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
+      await page.getByRole('button', { name: /Inject/ }).click();
+      await secondGroupInjectPromise;
+    });
 
     await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/).first()).toBeVisible({ timeout: 3_000 });
 
@@ -322,13 +363,15 @@ test.describe('kv ops · advanced deletes, load-more, all-groups, demo', () => {
     expect(secondKeys1.length).toBe(10);
 
     // Delete all demo keys (still in group 2611 context) — poll until clean
-    await page.getByRole('button', { name: /Delete all demo/ }).click();
-    const secondGroupDialog = page.getByRole('dialog');
-    await expect(secondGroupDialog).toBeVisible();
-    await secondGroupDialog.getByRole('button', { name: 'Delete' }).click();
-    await expect.poll(async () => {
-      const remaining = await scanAllDemoKeys(apiBase, 261, 2611);
-      return remaining.length;
-    }, { timeout: 5_000, intervals: [100] }).toBe(0);
+    await step('kv: delete-all group 2611', async () => {
+      await page.getByRole('button', { name: /Delete all demo/ }).click();
+      const secondGroupDialog = page.getByRole('dialog');
+      await expect(secondGroupDialog).toBeVisible();
+      await secondGroupDialog.getByRole('button', { name: 'Delete' }).click();
+      await expect.poll(async () => {
+        const remaining = await scanAllDemoKeys(apiBase, 261, 2611);
+        return remaining.length;
+      }, { timeout: 5_000, intervals: [100] }).toBe(0);
+    });
   });
 });

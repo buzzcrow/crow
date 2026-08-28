@@ -15,6 +15,7 @@ table ConnectionPingRequest {
 table ConnectionPingResponse {
     id:uint64;
     rpc_create_nano:uint64;
+    response_create_nano:uint64;
     ret:FBRetCode;
 }
 
@@ -23,4 +24,5 @@ table ConnectionPingResponse {
 table UnknownMessage {
     id:uint64;
     rpc_create_nano:uint64;
+    response_create_nano:uint64;
 }

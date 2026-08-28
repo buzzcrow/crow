@@ -32,6 +32,7 @@ pub enum BenchSub {
 
 /// Arguments for `crow-cli bench kv`.
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct KvArgs {
     /// Storage mode: `mem` (crow-tree + mem-block), `file` (crow-tree +
     /// file page store), or `block` (crow-tree + block page store).
@@ -141,6 +142,31 @@ pub struct KvArgs {
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
 
+    /// Inter-server RPC connection pool size (--peer-pool-size on each
+    /// spawned server). Default 2. Raise to 4 for high-concurrency.
+    #[arg(long, default_value_t = 2)]
+    pub peer_pool_size: usize,
+
+    /// Enable Nagle on RPC connections (--enable-nagle on each spawned
+    /// server). Default false.
+    #[arg(long, default_value_t = false)]
+    pub enable_nagle: bool,
+
+    /// Enable `TCP_QUICKACK` on RPC connections (--quickack on each spawned
+    /// server, Linux only). Breaks Nagle + delayed-ACK deadlock. Default false.
+    #[arg(long, default_value_t = false)]
+    pub quickack: bool,
+
+    /// Event-write mode (--event-write on each spawned server).
+    /// Coalesces frames via I/O worker. Default false.
+    #[arg(long, default_value_t = false)]
+    pub event_write: bool,
+
+    /// Per-connection send queue capacity (--send-queue-capacity on
+    /// each spawned server). Default 4096.
+    #[arg(long, default_value_t = 4096)]
+    pub send_queue_capacity: u32,
+
     /// Scan limit (max entries per scan op) for `--workload list`.
     /// Default 1 (the historical stub behavior). Set higher for
     /// bounded-limit / full-keyspace scan benches.
@@ -175,11 +201,11 @@ pub struct KvArgs {
 #[derive(Args, Debug)]
 pub struct RpcArgs {
     /// Test duration in seconds.
-    #[arg(long, default_value_t = 20)]
+    #[arg(short = 'd', long, default_value_t = 20)]
     pub duration_secs: u64,
 
     /// Number of C++ coroutines (load generators).
-    #[arg(long, default_value_t = 8)]
+    #[arg(short = 'L', long, default_value_t = 128)]
     pub loader_num: u32,
 
     /// Worker execution model: `coroutine` (C++ coroutines on I/O
@@ -190,8 +216,8 @@ pub struct RpcArgs {
     #[arg(long, default_value = "coroutine")]
     pub mode: String,
 
-    /// Number of TCP connections to the echo server.
-    #[arg(long, default_value_t = 4)]
+    /// Number of TCP connections to the fb server.
+    #[arg(short = 'c', long, default_value_t = 4)]
     pub connections: u32,
 
     /// Number of independent epoll/kqueue instances. Each engine owns
@@ -199,7 +225,7 @@ pub struct RpcArgs {
     /// partitioned). 1 = single-engine (default). More than 1
     /// parallelizes event processing across independent kernel event
     /// queues with no ONESHOT re-arm overhead.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 'e', long, default_value_t = 1)]
     pub io_engines: u32,
 
     /// Total number of C++ I/O worker threads (across all engines).
@@ -207,19 +233,42 @@ pub struct RpcArgs {
     /// path, no ONESHOT re-arm). More than 1 per engine enables
     /// `EV_ONESHOT`/`EPOLLONESHOT` within that engine for multi-worker
     /// safety. Must be divisible by `io_engines`.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 't', long, default_value_t = 2)]
     pub io_workers: u32,
 
-    #[arg(long, default_value_t = 1_000_000)]
-    pub key_space: u64,
+    /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
+    #[arg(short = 'n', long, default_value_t = false)]
+    pub enable_nagle: bool,
 
-    #[arg(long, default_value_t = 512)]
+    /// Enable `TCP_QUICKACK` (Linux only). Breaks Nagle + delayed-ACK deadlock.
+    #[arg(long, default_value_t = false)]
+    pub quickack: bool,
+
+    #[arg(short = 's', long, default_value_t = 128)]
     pub value_size: usize,
 
     /// Optional explicit run id; defaults to an auto-incremented
     /// sequence number.
     #[arg(long)]
     pub run_id: Option<String>,
+
+    /// FB server port. Defaults to 18080 (the fb server's default
+    /// port). The server must be started manually (e.g.
+    /// `crow-rpc-fb-server --port=18080`); no auto-spawn. Use
+    /// `tools/bench-rpc-regression.sh` for the wrapper that manages
+    /// the server lifecycle.
+    #[arg(short = 'P', long, default_value_t = 18080)]
+    pub server_port: i32,
+
+    /// Log directory for the fb server and client logs. Defaults to
+    /// `bench-runs/<run>/`. All logs (server.log, metrics.log) go here.
+    #[arg(long)]
+    pub log_dir: Option<String>,
+
+    /// Metrics flush interval in seconds (counters + latency histogram).
+    /// Default 5.
+    #[arg(short = 'm', long, default_value_t = 5)]
+    pub metrics_interval: u64,
 }
 
 /// Arguments for `crow-cli bench`.

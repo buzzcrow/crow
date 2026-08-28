@@ -20,9 +20,9 @@ design context is `design-crow-diskdb.md` §8 and `design-crow-kv-rpc.md`
 
 ## Table of Contents
 
-- [1. WatchNotify gRPC Bidi Stream](#1-watchnotify-grpc-bidi-stream)
+- [1. WatchNotify crow-rpc Bidi Stream](#1-watchnotify-crow-rpc-bidi-stream)
   - [1.1 Why](#11-why)
-  - [1.2 Proto](#12-proto)
+  - [1.2 Schema](#12-schema)
   - [1.3 Server-side handler](#13-server-side-handler)
 - [2. Watch Registry + Apply-Path Trigger](#2-watch-registry--apply-path-trigger)
   - [2.1 Why](#21-why)
@@ -52,7 +52,7 @@ design context is `design-crow-diskdb.md` §8 and `design-crow-kv-rpc.md`
 
 ---
 
-## 1. WatchNotify gRPC Bidi Stream
+## 1. WatchNotify crow-rpc Bidi Stream
 
 ### 1.1 Why
 
@@ -61,17 +61,17 @@ change-detection mechanism available to external components is polling
 (prefix scans of group 0). A push mechanism requires a long-lived
 stream from the group-0 leader to each watcher, fired when a watched
 prefix is written. The `LearnerStream` bidi pattern is the existing
-precedent for a long-lived gRPC bidi stream multiplexing frames between
+precedent for a long-lived crow-rpc bidi stream multiplexing frames between
 a leader and a peer. `WatchNotify` follows the same shape but serves
 client-to-leader watch subscriptions rather than replica-to-leader
 consensus traffic.
 
-### 1.2 Proto
+### 1.2 Schema
 
-`lib/crow-kv/src/rpc/proto/kv.proto` carries the watch/notify messages
+`lib/crow-kv/src/rpc/fbs/kv_client.fbs` carries the watch/notify messages
 and one bidi RPC on `KvService`:
 
-```protobuf
+```fbs
 // Client-to-leader watch subscription. The client opens a WatchNotify
 // bidi stream to a node, sends WatchSubscribe frames for each
 // (group_id, prefix) it wants to watch, and receives WatchNotify frames
@@ -124,7 +124,7 @@ message WatchNotifyResponse {
 
 Add to the `KvService` service:
 
-```protobuf
+```fbs
   rpc WatchNotify(stream WatchNotifyRequest) returns (stream WatchNotifyResponse);
 ```
 
@@ -135,7 +135,7 @@ Add to the `KvService` service:
   `/hw/disk/1/100/5/abcd`) because `HardwareClient` puts keys via
   `key.to_path().as_bytes()` and scans via `prefix.as_bytes()`. For
   data groups the keys are binary-encoded (`BinaryKey::to_bytes()`). The
-  proto is encoding-agnostic; the subscriber and the engine agree on the
+  schema is encoding-agnostic; the subscriber and the engine agree on the
   encoding because they both use the same key types. No `Bytes` mapping
   needed — group-0 keys are text paths < 128 bytes; `Vec<u8>` is fine.
 - **Fat notify (keys + values)** — `values[i]` is the latest value for
@@ -180,7 +180,7 @@ c. On inbound stream end (client disconnect or error), remove all
    watchers registered by this stream from their group registries
    (`registry.remove_all(&watcher_ids)`).
 d. The outbound stream is `ReceiverStream::new(rx)` boxed, returned to
-   tonic.
+   the crow-rpc server.
 
 - **Leader check** — uses `local_replica.is_leader()`, the same atomic
   role check the propose path uses for its leadership gate. A
@@ -493,7 +493,7 @@ a. `subscribe` resolves the group leader endpoint via `CrowkvClient`'s
    topology cache (`kv.topology.leader(store_id, group_id)`, falling
    back to `kv.topology.refresh()` on cache miss — same mechanism as
    `Put`/`Get` via `resolve_leader`).
-b. Gets a gRPC channel from the shared `ConnectionPool`
+b. Gets a crow-rpc connection from the shared `ConnectionPool`
    (`kv.pool.get(&endpoint)`) — reuses the existing connection pool,
    no separate channel management.
 c. Opens a `KvServiceClient::new(channel).watch_notify(...)` bidi
@@ -514,10 +514,10 @@ f. `WatchSubscription::drop` sends `WatchUnsubscribe` (if the stream
   client can resolve the leader endpoint.
 - **One stream per subscription** — simpler than multiplexing multiple
   prefixes over one stream (each subscription is independent; a diskdb
-  instance typically watches 3 prefixes). The proto already supports
+  instance typically watches 3 prefixes). The schema already supports
   multiple `WatchSubscribe` frames on one stream, so a future
   optimization can multiplex subscriptions over a shared stream with
-  no proto change.
+  no schema change.
 - **Reconnect backoff** — capped exponential (50 ms → 2 s), matching
   `LearnerStream`'s reconnect policy (`design-crow-kv-rpc.md` §6).
 - **Proactive topology refresh on reconnect** — the reader loop calls
@@ -593,9 +593,9 @@ c. In `trigger()` (the `BackgroundTask` impl): if `sync_trigger` is
 d. Method `pub fn trigger_now(&self)` — calls
    `self.sync_trigger.notify_one()` if set. Called by the notify
    handler on each `WatchNotify` frame.
-e. **`grpc_endpoint` already populated** — `main.rs` calls
-   `.with_grpc_endpoint(config.load().server.listen_addr.clone())`,
-   and `keepalive.rs` passes `self.grpc_endpoint` to `heartbeat_diskdb`
+e. **`rpc_endpoint` already populated** — `main.rs` calls
+   `.with_rpc_endpoint(config.load().server.listen_addr.clone())`,
+   and `keepalive.rs` passes `self.rpc_endpoint` to `heartbeat_diskdb`
    on every tick. The endpoint registration (item 1 of the original
    scope) is already done; no change needed here.
 
@@ -772,7 +772,7 @@ pub watch_notify_enabled: bool,
 ```
 lib/crow-kv/src/
   rpc/
-    proto/kv.proto              # WatchNotify messages + RPC
+    fbs/kv_client.fbs            # WatchNotify messages + RPC
     kv_service.rs               # watch_notify handler
   cluster/
     watch_registry.rs           # WatchRegistry, Watcher, PrefixTrie
@@ -816,7 +816,7 @@ lib/crow-diskdb-client/src/
    same stop signal as the bg runner.
 3. On shutdown: the stop signal aborts the notify handler (its `run`
    loop exits on `stop.notified()`); the bg runner stops keepalive +
-   compaction; gRPC + HTTP servers drain.
+   compaction; crow-rpc + HTTP servers drain.
 
 ## 10. Test Design
 
@@ -899,7 +899,7 @@ lib/crow-diskdb-client/src/
 
 **Client endpoint cache proactive refresh**:
 - `DiskdbClient` with `watch_notify_enabled=true`, subscribed to
-  `/srv/diskdb/`; change a diskdb instance's `grpc_endpoint` in group
+  `/srv/diskdb/`; change a diskdb instance's `rpc_endpoint` in group
   0 → client's `endpoint_cache` entry for the affected `disk_group_id`
   refreshes without a failed `allocate_blocks` attempt; next call
   routes to the new endpoint.

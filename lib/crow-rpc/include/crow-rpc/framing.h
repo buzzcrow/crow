@@ -13,9 +13,9 @@
 namespace crow::rpc
 {
 
-// ── Wire format (12-byte header) ──────────────────────────────────
+// ── Wire format (14-byte header) ──────────────────────────────────
 //
-// [magic:2][msg_type:2][msg_size:2][data_size:4][msg_offset:1][flags:1]
+// [magic:2][msg_type:2][msg_size:4][data_size:4][msg_offset:1][flags:1]
 //
 // Little-endian, field-by-field (not memcpy of the struct — avoids
 // compiler-layout dependence). See design-crow-rpc.md §3 for
@@ -23,7 +23,7 @@ namespace crow::rpc
 // reference's 20-byte header.
 
 constexpr uint16_t MAGIC       = 0xCA70;
-constexpr uint8_t  HEADER_SIZE = 12;
+constexpr uint8_t  HEADER_SIZE = 14;
 
 // flags bit definitions
 constexpr uint8_t FLAG_ONE_WAY = 0x01;
@@ -32,7 +32,7 @@ struct Header
 {
     uint16_t magic      = MAGIC;
     uint16_t msg_type   = 0;
-    uint16_t msg_size   = 0;           // control message length
+    uint32_t msg_size   = 0;           // control message length
     uint32_t data_size  = 0;           // data payload length
     uint8_t  msg_offset = HEADER_SIZE; // offset to control message
     uint8_t  flags      = 0;
@@ -47,10 +47,10 @@ struct Header
 struct Frame
 {
     Header   header;
-    uint64_t request_id      = 0;       // extracted from control during parse
-    uint64_t rpc_create_nano = 0;       // extracted from control during parse
-    Buffer  *data_buf        = nullptr; // pool-allocated; nullptr if control-only
-    uint64_t parsed_nano     = 0;       // steady_clock ns when parser yielded this frame
+    uint64_t request_id           = 0;       // extracted from control during parse
+    uint64_t rpc_create_nano      = 0;       // extracted from control during parse
+    uint64_t response_create_nano = 0;       // extracted from control during parse (responses only)
+    Buffer  *data_buf             = nullptr; // pool-allocated; nullptr if control-only
 
     // Raw control message bytes (flatbuffer). Populated for all frames with
     // msg_size > 0. Common handlers (ping, unknown) use only request_id +
@@ -79,11 +79,12 @@ void serialize_header(uint8_t *buf, const Header &h);
 // Parse a 12-byte buffer into a header (little-endian, field-by-field).
 Header parse_header(const uint8_t *buf);
 
-// Extract request_id + rpc_create_nano from a flatbuffer control
-// message. All common messages (ConnectionPingRequest/Response,
-// UnknownMessage) share the same layout for these two fields.
+// Extract request_id + rpc_create_nano + response_create_nano from a
+// flatbuffer control message. All common messages
+// (ConnectionPingRequest/Response, UnknownMessage) share the same
+// layout for these fields. response_create_nano is 0 for requests.
 void extract_control_fields(const uint8_t *control, uint32_t len, uint64_t &out_request_id,
-                            uint64_t &out_rpc_create_nano);
+                            uint64_t &out_rpc_create_nano, uint64_t &out_response_create_nano);
 
 // ── FrameParser — pull-based zero-copy state machine ──────────────
 //
@@ -204,8 +205,9 @@ class FrameParser
     BufferPool *pool_ = nullptr;
 
     // Extracted during parse (stored in Frame on yield).
-    uint64_t parsed_request_id_      = 0;
-    uint64_t parsed_rpc_create_nano_ = 0;
+    uint64_t parsed_request_id_           = 0;
+    uint64_t parsed_rpc_create_nano_      = 0;
+    uint64_t parsed_response_create_nano_ = 0;
 
     // The completed frame (returned by advance, owned by the caller).
     Frame *frame_ = nullptr;

@@ -35,7 +35,7 @@ detail is in the sub-designs.
   `common_type`). Diskio, consensus, and other services define their
   own schemas in their own crates.
 - **No value serialization policy.** The data payload is raw bytes;
-  the caller chooses how to serialize values (protobuf, bincode, raw).
+  the caller chooses how to serialize values (flatbuffers, bincode, raw).
 - **No TLS.** CROW runs on a trusted internal cluster network.
 - **No client-side retry or topology.** Retry, topology cache, and
   `NotLeaderHint` handling live in `crow-kv-client`, not here.
@@ -154,10 +154,31 @@ task runs on the C++ worker thread, not on a tokio thread.
 
 `RpcClient` tracks pending requests in a per-connection
 `folly::ConcurrentHashMap<request_id, CompletionCallback>`. `call`
-allocates a monotonic `request_id`, inserts the callback, submits the
-frame; `on_response` looks up the id, invokes the callback, removes the
-entry. `call_one_way` skips the pending map. `fail_all` (on connection
-close) invokes every pending callback with `ConnectionClosed`.
+allocates a monotonic `request_id` (via `RequestIdGen` in
+`crow-common`), inserts the callback, submits the frame; `on_response`
+looks up the id, invokes the callback, removes the entry.
+`on_response` returns `bool` — `true` if the id was found (frame
+consumed), `false` if not (caller owns the frame and dispatches it as
+a request). `call_one_way` skips the pending map. `fail_all` (on
+connection close) invokes every pending callback with
+`ConnectionClosed`.
+
+`RequestIdGen` (in `crow-common`) is a per-client monotonic
+`request_id` generator — a single definition shared by C++
+(`crow::common::RequestIdGen`) and Rust (`crow_common::RequestIdGen`).
+Per-client (not global) because `request_id` only needs uniqueness
+within one client's pending map.
+
+**Bidirectional request-response**: either side can send requests and
+receive responses. The client's `attach()` sets a combined `on_frame`
+callback: `on_response` first (route responses to pending callbacks);
+if no match, `dispatch_request` (dispatch to a registered handler by
+`msg_type`). The server's `dispatch()` uses handler-first order: if a
+handler is registered for the `msg_type`, dispatch as a request; if
+not, try `on_response` on the `request_client_` (route ack responses
+to server-sent requests). The handler-first order on the server side
+ensures request frames are not intercepted by `on_response` (which
+matches by `request_id` and can't distinguish a request from its ack).
 
 Per-request timeout is enforced by the worker timer: `call` schedules a
 timer task for `request_timeout`; on expiry, if still pending, the
@@ -176,11 +197,21 @@ share one timer (timerfd / `EVFILT_TIMER` / CQ-event timer).
 ### 4.4 Server Side
 
 `RpcServer` listens (TCP socket or RDMA CM id), registers handlers per
-`msg_type`, and spawns acceptor + worker threads. The worker looks up
-`handlers_[msg_type]`, invokes the handler with the `Frame*` and
-`Connection*`, and submits the response frame if the handler returns
-one. Ping is registered automatically (`EConnectionPingRequest` →
-`ConnectionPingResponse`).
+`msg_type`, and spawns acceptor + worker threads. The worker's
+`dispatch()` uses handler-first order: if a handler is registered for
+the `msg_type`, invoke it with the `Frame*` and `Connection*` and
+submit the response frame if the handler returns one. If no handler
+matches, try `request_client_->on_response()` (route ack responses to
+server-sent requests). If neither matches, send `UnknownMessage` (or
+drop if one-way). Ping is registered automatically
+(`EConnectionPingRequest` → `ConnectionPingResponse`).
+
+`set_request_client(RpcClient*)` wires an `RpcClient` into the server
+for server-initiated request-response (e.g. WatchNotify: server sends
+a notify request, awaits ack). The server sends requests via
+`request_client_->send()`; ack responses are routed by the server's
+`dispatch()` to the `request_client_`'s pending map. Connection close
+fires `request_client_->fail_all(ConnectionClosed)`.
 
 Handlers run on the worker thread. Fast handlers (ping, diskio write
 submit) return inline; slow handlers (diskio read waiting on io_uring)
@@ -232,7 +263,7 @@ optional RDMA deps.
 
 ## 6. Flatbuffer Wrapper Convention
 
-**Rule for all services migrating to crow-rpc (R32, R115, R116, R117).**
+**Rule for all services on crow-rpc (R32, R115, R116, R117).**
 The flatbuffer control message is a buffer; field access is a direct
 memory-offset read through the flatbuffers runtime — no deserialization
 into an owned struct, no per-field copy. This rule governs both the C++
@@ -275,9 +306,27 @@ server side and the Rust client side.
   a reference to it. Accessor calls are pure pointer-offset reads — no
   heap allocation, no `Vec`, no `String` construction unless the
   caller explicitly converts a field to an owned type. The data
-  payload (raw bytes after the control message) is the one exception:
-  it may be copied into an owned `Vec<u8>` when the caller needs owned
-  bytes, because it is not a flatbuffer.
+  payload (raw bytes after the control message) is not a flatbuffer;
+  whether it is copied depends on what the receiver does with it (see
+  the next bullet).
+- **Data payload: zero-copy when the receiver consumes by reference.**
+  The data buffer is a ref-counted pool buffer on the same ref-count
+  path as the control buffer. The receiver may copy it into an owned
+  `Vec<u8>` when it genuinely needs owned bytes — e.g. retaining the
+  data beyond the handler's lifetime, or handing it to an API that
+  takes ownership. But streaming-data handlers consume the data with
+  `pwrite(fd, &buf, len)` and `engine.apply(slot, &batch)`, both of
+  which take `&[u8]` for the duration of the call and need no owned
+  bytes. These handlers hold the frame's data buffer by reference,
+  pass `&[u8]` to `pwrite`/`apply`, and drop the reference after the
+  async write completes — no copy to owned `Vec`. The pool buffer
+  recycles when the last reference drops. This is the receive-side
+  companion to the "no owned intermediate" rule above: the control
+  buffer is zero-copy via flatbuffer accessors; the data buffer is
+  zero-copy via ref-counted pool reference. Applies to LearnerStream
+  (log entries) and StreamSnapshot (snapshot chunks); the handler
+  implementation is R32's scope, the protocol design (per-batch
+  `call()`) enables it.
 - **Write path: build, finish, attach.** The sender builds the
   flatbuffer with `FlatBufferBuilder` (Rust) or
   `flatbuffers::FlatBufferBuilder` (C++), calls `finish`, and attaches
@@ -332,6 +381,21 @@ if (!req.valid()) { send_error_response(...); return nullptr; }
 DiskId did = req.disk_id();
 ```
 
+### 6.3 Anti-patterns
+
+- **Deserializing into an owned struct.** Reading `FBDiskWriteRequest`
+  into a `DiskWriteRequest` Rust struct with `String` + `Vec` fields,
+  then passing that struct to the handler, copies every field on every
+  call.
+- **Accessor calls that allocate on the hot path.**
+  `fb.disk_id().to_string()` or `fb.strips().to_vec()` inside a
+  request handler heap-allocates per call. Use the flatbuffer reference
+  directly; convert to owned only at the boundary where the caller
+  truly needs owned data.
+- **Per-service wrapper duplicates.** Defining one wrapper in
+  `crow-diskdb` and another in `crow-chunkdb` for the same flatbuffer
+  type. Define once in `crow-protocol`, share everywhere.
+
 ## 7. Sub-Design Document Map
 
 - [`design-crow-rpc-tcp.md`](design-crow-rpc-tcp.md) — socket transport:
@@ -341,3 +405,7 @@ DiskId did = req.disk_id();
 - [`design-crow-rpc-rdma.md`](design-crow-rpc-rdma.md) — RDMA transport:
   `RdmaTransport`, CQ poll loop, `librdmacm` connection setup,
   pre-registered buffer pools.
+- [`design-crow-rpc-diskdb-migration.md`](design-crow-rpc-diskdb-migration.md)
+  — diskdb service on crow-rpc: server-side Rust handler dispatch,
+  client-side `DiskdbRpcTransport`, error model parity, `conn_handle`
+  lifetime safety.

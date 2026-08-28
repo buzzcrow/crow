@@ -281,10 +281,10 @@ pub struct ServerEntry {
     /// for plain "registered external server" entries from C2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<NodeId>,
-    /// gRPC base URL, e.g. `http://127.0.0.1:28001`. Populated for
+    /// crow-rpc base URL, e.g. `http://127.0.0.1:28001`. Populated for
     /// console-deployed instances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grpc_url: Option<String>,
+    pub rpc_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rest_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,6 +301,15 @@ pub struct ServerEntry {
     /// backward compatibility with pre-R77 persisted configs.
     #[serde(default, skip_serializing_if = "is_default_service_type")]
     pub service_type: ServiceType,
+    /// `--rpc-workers` value passed to the spawned `crow-kv-server`.
+    /// `None` means the server's default (2) is used. Persisted so
+    /// restart reuses the same value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_workers: Option<u32>,
+    /// `--no-fsync` flag passed to the spawned `crow-kv-server`.
+    /// Persisted so restart reuses the same value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_fsync: bool,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -397,7 +406,7 @@ struct PersistedServerEntry {
     node_id: Option<NodeId>,
     url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    grpc_url: Option<String>,
+    rpc_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rest_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -410,6 +419,10 @@ struct PersistedServerEntry {
     election_profile: Option<String>,
     #[serde(default, skip_serializing_if = "is_default_service_type")]
     service_type: ServiceType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rpc_workers: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    no_fsync: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,7 +448,7 @@ impl ServerEntry {
             id: id.into(),
             url: url.into(),
             node_id: None,
-            grpc_url: None,
+            rpc_url: None,
             rest_port: None,
             rpc_port: None,
             auto_start: false,
@@ -443,6 +456,8 @@ impl ServerEntry {
             election_profile: None,
             pid: None,
             service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
         }
     }
 }
@@ -925,13 +940,15 @@ impl ConsoleConfig {
                     PersistedServerEntry {
                         node_id: entry.node_id,
                         url: entry.url.clone(),
-                        grpc_url: entry.grpc_url.clone(),
+                        rpc_url: entry.rpc_url.clone(),
                         rest_port: entry.rest_port,
                         rpc_port: entry.rpc_port,
                         auto_start: entry.auto_start,
                         binary: entry.binary.clone(),
                         election_profile: entry.election_profile.clone(),
                         service_type: entry.service_type,
+                        rpc_workers: entry.rpc_workers,
+                        no_fsync: entry.no_fsync,
                     },
                 )
             })
@@ -1038,7 +1055,7 @@ impl ConsoleConfig {
                 id,
                 url: entry.url,
                 node_id: entry.node_id,
-                grpc_url: entry.grpc_url,
+                rpc_url: entry.rpc_url,
                 rest_port: entry.rest_port,
                 rpc_port: entry.rpc_port,
                 auto_start: entry.auto_start,
@@ -1046,6 +1063,8 @@ impl ConsoleConfig {
                 election_profile: entry.election_profile,
                 pid: None,
                 service_type: entry.service_type,
+                rpc_workers: entry.rpc_workers,
+                no_fsync: entry.no_fsync,
             })
             .collect();
         servers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1130,7 +1149,7 @@ mod tests {
         let mut cfg = ConsoleConfig::default();
         let mut a = ServerEntry::new("a", "http://127.0.0.1:9910");
         a.node_id = Some(1);
-        a.grpc_url = Some("http://127.0.0.1:9921".into());
+        a.rpc_url = Some("http://127.0.0.1:9921".into());
         a.rest_port = Some(9910);
         a.rpc_port = Some(9921);
         a.auto_start = true;

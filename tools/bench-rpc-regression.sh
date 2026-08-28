@@ -2,7 +2,11 @@
 # CrowRPC echo regression benchmark.
 # Usage: bash tools/bench-rpc-regression.sh
 #
-# After a run, update doc/design/rpc/rpc-echo-flow-analysis.md: add a
+# Starts a standalone crow-rpc-fb-server (built via `pixi run build-cpp`),
+# then runs crow-cli bench rpc against it for each config. The server is
+# restarted per config so its io_engines/io_workers match the client.
+#
+# After a run, update doc/design/rpc/rpc-flow-analysis.md: add a
 # dated subsection under "Current Data" with the results table and
 # scaling analysis, plus a "History" entry. Always record the CPU model.
 #
@@ -22,92 +26,205 @@
 #   1  16  1,000   32    722,644 1,372  1,009   5,484  14,384     7.2    9.3    0
 #   2  16  1,000   16    900,252 1,099    851   4,012   9,056     6.3   13.0    0
 #
-# AMD (2026-08-21): Ryzen 9 5950X, 16c/32t, Linux 6.8, 128B, 20s,
-# standalone server over epoll loopback. Slab completion pool with
-# two-phase PENDING (CLAIMED→READY) + read-before-CAS in on_response.
-# Coroutine mode uses send_queue=256 (same-thread submit+drain); tokio
-# mode uses send_queue=1024 (burst-submit needs larger queue).
-#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   raggr  saggr  err
-#   1   1      1    1      53,644    17     17     24      29     1.0    1.0    0
-#   1   4     64    4    964,072    65     61    145     613     6.0    6.0    0
-#   1   8    512    8   1,749,146   290    271    422   2,568    10.1   10.7    0
-#   2   8    512    8   1,803,255   281    247    357     415     7.9    8.2    0
-#   1  16  1,000   32   2,217,250   447    340  1,707   2,572     9.4    9.8    0
-#   2  16  1,000   16   2,348,192   422    363  1,399   5,584     9.2   10.3    0
+# AMD (2026-08-27): Ryzen 9 5950X, 16c/32t, Linux 6.8, 128B, 20s,
+# standalone server over epoll loopback. Same build as 2026-08-25 plus
+# metrics cv shutdown fix (condition_variable wake in
+# MetricsRegistry::stop — 5s→60ms shutdown). Single-engine only (2-engine
+# configs removed). Nagle on = TCP coalescing (multiple small frames per
+# writev/read syscall). Nagle gives +62-113% throughput and 4x lower p99
+# at high concurrency — bursty coroutine workloads are syscall-bound.
+# raggr/saggr columns dropped (frames_sent/frames_parsed moved to
+# crow-common metrics histograms); nagle column added.
+# Coroutine (nagle off):
+#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   nagle  err
+#   1   1      1    1      52,759    17     17     25      31     0      0
+#   1   4     64    4    514,844   122    108    186     326     0      0
+#   1   8    512    8    820,424   621    612    842   1,181     0      0
+#   1  16  1,000   32  1,246,622   798    401  6,148  10,416     0      0
+# Coroutine (nagle on):
+#   1   4     64    4    983,245    63     59    162     520     1      0
+#   1   8    512    8  1,744,728   291    261    540   5,248     1      0
+#   1  16  1,000   32  2,023,369   490    418  1,550   2,282     1      0
+# Tokio (nagle off):
+#   1   1      1    1      23,564    41     42     69     102     0      0
+#   1   4     64    4    557,362   113    105    265     425     0      6
+#   1  16  1,000   32    849,575 1,156  1,063  2,652   3,838     0    591
+#
+# AMD (2026-08-28): same hw/build as 2026-08-27. TCP_QUICKACK decoupled
+# from Nagle into a separate --quickack flag. QUICKACK adds a setsockopt
+# per read + more ACK packets — hurts the RPC echo workload (continuous
+# request stream, Nagle never stalls). Only the 1000T/32C config tested.
+#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   nagle  qa  err
+#   1  16  1,000   32  1,209,549   823    413  7,280  12,720     0    0    0
+#   1  16  1,000   32  1,949,603   508    363  2,142   3,250     1    0    0
+#   1  16  1,000   32  1,731,709   573    471  1,893   2,764     1    1    0
+#   1  16  1,000   32  1,206,111   825    420  5,844   9,600     0    1    0
+# Conclusion: nagle on, quickack off is optimal for RPC echo (-11% vs
+# nagle+quickack). QUICKACK is for Paxos (KV bench), not raw RPC echo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RESULTS_FILE="doc/working/bench-rpc-regression.tsv"
 DURATION=20
-KEYSPACE=1000
 VALUE_SIZE=128
+SERVER_BIN="lib/crow-rpc/build/crow-rpc-fb-server"
+SERVER_LOG_DIR="/tmp/crow-rpc-bench-server"
+SERVER_PORT=18080
+SERVER_PID=""
+
+# Start fb server with matching io_engines/io_workers/nagle.
+# Sets SERVER_PID and waits for "listening port=" on stdout.
+start_server() {
+    local io_engines="$1" io_workers="$2" nagle="$3"
+    rm -rf "$SERVER_LOG_DIR"
+    mkdir -p "$SERVER_LOG_DIR"
+    local nagle_arg=""
+    if [ "$nagle" = "1" ]; then
+        nagle_arg="--enable_nagle"
+    fi
+    local cmd="pixi run -- $SERVER_BIN --port=$SERVER_PORT --io_engines=$io_engines --io_workers=$io_workers --logdir=$SERVER_LOG_DIR --metrics_interval=2 $nagle_arg"
+    echo "    [server] $cmd"
+    $cmd > "$SERVER_LOG_DIR/stdout.log" 2>&1 &
+    SERVER_PID=$!
+    # Wait for "listening port=" in stdout (up to 5s).
+    local deadline=$((SECONDS + 5))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if grep -q 'listening port=' "$SERVER_LOG_DIR/stdout.log" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "    [server] ERROR: server exited early"
+            cat "$SERVER_LOG_DIR/stdout.log"
+            return 1
+        fi
+        sleep 0.1
+    done
+    echo "    [server] ERROR: server did not bind within 5s"
+    cat "$SERVER_LOG_DIR/stdout.log"
+    return 1
+}
+
+# Stop fb server (SIGTERM, wait up to 5s).
+stop_server() {
+    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill -TERM "$SERVER_PID" 2>/dev/null
+        local wait_deadline=$((SECONDS + 5))
+        while [ "$SECONDS" -lt "$wait_deadline" ]; do
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        kill -KILL "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    SERVER_PID=""
+}
+
+# Parse server metrics.log for cumulative totals. The `total` column is
+# cumulative since start, so we take the max across all blocks for each
+# metric (the last block containing that metric has the grand total).
+# The final shutdown block may only have connection-close events, so we
+# can't just take the last block — we scan all blocks.
+# Extracts: writev_total, read_total, submit_to_writev_count.
+# NOTE: frames_sent/frames_parsed are no longer emitted as raw counters
+# (moved to crow-common metrics histograms), so raggr/saggr cannot be
+# computed. These columns are dropped from the output.
+parse_server_totals() {
+    local metrics_log="$SERVER_LOG_DIR/metrics.log"
+    if [ ! -f "$metrics_log" ]; then
+        echo "0 0 0"
+        return
+    fi
+    local writev_total read_total sw_count
+    writev_total=$(awk '/^rpc\.transport\.writev /{if ($NF+0 > max) max=$NF+0} END{print max+0}' "$metrics_log")
+    read_total=$(awk '/^rpc\.transport\.read_handle /{if ($NF+0 > max) max=$NF+0} END{print max+0}' "$metrics_log")
+    sw_count=$(awk '/^rpc\.transport\.submit_to_writev /{if ($NF+0 > max) max=$NF+0} END{print max+0}' "$metrics_log")
+    echo "${writev_total:-0} ${read_total:-0} ${sw_count:-0}"
+}
 
 run_bench() {
-    local loaders="$1" conn="$2" label="$3" io_engines="${4:-1}" wkr="${5:-1}" mode="${6:-coroutine}"
-    echo ">>> $label (io_engines=$io_engines, io_workers=$wkr, mode=$mode) ..."
+    local loaders="$1" conn="$2" label="$3" io_engines="${4:-1}" wkr="${5:-1}" mode="${6:-coroutine}" nagle="${7:-0}"
+    echo ">>> $label (io_engines=$io_engines, io_workers=$wkr, mode=$mode, nagle=$nagle) ..."
+
+    # Start fb server with matching config.
+    if ! start_server "$io_engines" "$wkr" "$nagle"; then
+        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t0\t$nagle\t1" >> "$RESULTS_FILE"
+        return
+    fi
+
+    # Build and print the full client command.
+    local nagle_flag=""
+    if [ "$nagle" = "1" ]; then
+        nagle_flag="--enable-nagle"
+    fi
+    local client_cmd="pixi run -- ./target/release/crow-cli bench rpc \
+        --duration-secs $DURATION \
+        --loader-num $loaders --connections $conn \
+        --value-size $VALUE_SIZE \
+        --io-engines $io_engines --io-workers $wkr \
+        --mode $mode \
+        --server-port $SERVER_PORT \
+        $nagle_flag \
+        --json"
+    echo "    [client] $client_cmd"
+
     local output
-    output=$(pixi run -- ./target/release/crow-cli bench rpc \
-        --duration-secs "$DURATION" \
-        --loader-num "$loaders" --connections "$conn" \
-        --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
-        --io-engines "$io_engines" --io-workers "$wkr" \
-        --mode "$mode" \
-        --json 2>&1)
+    output=$(eval "$client_cmd" 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
+        echo -e "$label\t$wkr\t0\t0\t0\t0\t0\t0\t$nagle\t1" >> "$RESULTS_FILE"
+        stop_server
         return
     fi
-    local ops_s avg_us p50_us p99_us p999_us errors raggr saggr
+    local ops_s avg_us p50_us p99_us p999_us errors
     ops_s=$(echo "$json" | jq -r '.total_ops * 1000 / .duration_ms' | awk '{printf "%.0f", $1}')
     avg_us=$(echo "$json" | jq -r '.by_op.write.latency_us.avg_us')
     p50_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p50_us')
     p99_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p99_us')
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
-    # recv/send aggregation from server transport stats:
-    #   raggr = submit_to_writev_count / read_calls  (frames per read)
-    #   saggr = submit_to_writev_count / writev_calls (frames per writev)
-    local srv_line rc wc swc
-    srv_line=$(echo "$output" | grep 'server_transport_stats' || true)
-    rc=$(echo "$srv_line" | sed -n 's/.*read_calls=\([0-9][0-9]*\).*/\1/p')
-    wc=$(echo "$srv_line" | sed -n 's/.*writev_calls=\([0-9][0-9]*\).*/\1/p')
-    swc=$(echo "$srv_line" | sed -n 's/.*submit_to_writev_count=\([0-9][0-9]*\).*/\1/p')
-    rc=${rc:-0}; wc=${wc:-0}; swc=${swc:-0}
-    if [ "$rc" -gt 0 ] && [ "$wc" -gt 0 ]; then
-        raggr=$(awk "BEGIN { printf \"%.1f\", $swc / $rc }")
-        saggr=$(awk "BEGIN { printf \"%.1f\", $swc / $wc }")
-    else
-        raggr=0; saggr=0
-    fi
-    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us raggr=$raggr saggr=$saggr err=$errors"
-    echo -e "$label\t$wkr\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$raggr\t$saggr\t$errors" >> "$RESULTS_FILE"
+
+    # Stop server (triggers final stats flush to stdout + metrics.log).
+    stop_server
+
+    # Parse server-side totals from metrics.log (last block = cumulative).
+    local srv_totals writev_total read_total sw_count
+    srv_totals=$(parse_server_totals)
+    writev_total=$(echo "$srv_totals" | awk '{print $1}')
+    read_total=$(echo "$srv_totals" | awk '{print $2}')
+    sw_count=$(echo "$srv_totals" | awk '{print $3}')
+
+    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors | srv: writev=$writev_total read=$read_total sw=$sw_count"
+    echo -e "$label\t$wkr\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$nagle\t$errors" >> "$RESULTS_FILE"
 }
 
-echo -e "label\twkr\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\traggr\tsaggr\terrors" > "$RESULTS_FILE"
+# Cleanup on exit — kill server if still running.
+trap 'stop_server' EXIT
 
-echo "=== rpc echo regression (128B, 20s, 12 configs) ==="
+echo -e "label\twkr\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\tnagle\terrors" > "$RESULTS_FILE"
 
-# Standard regression sweep — scale workers with connections.
-# Wkr = total I/O workers (Eng × per-engine); per-engine = Wkr / Eng.
-# Each config runs in both modes: coroutine (default) and tokio (call()).
-run_bench 1   1  "rpc_1e1w_1l_1c"      1 1
+echo "=== rpc echo regression (128B, 20s, 11 configs) ==="
+
+# Standard regression sweep — single-engine, scale workers with load.
+# Coroutine: all 4 configs. Tokio: only 1/64/1000 loaders (skip 512).
+run_bench 1   1  "rpc_1e1w_1l_1c"        1 1
 run_bench 1   1  "rpc_1e1w_1l_1c_tokio"  1 1 tokio
-run_bench 64  4  "rpc_1e4w_64l_4c"     1 4
+run_bench 64  4  "rpc_1e4w_64l_4c"       1 4
 run_bench 64  4  "rpc_1e4w_64l_4c_tokio" 1 4 tokio
-run_bench 512 8  "rpc_1e8w_512l_8c"    1 8
-run_bench 512 8  "rpc_1e8w_512l_8c_tokio" 1 8 tokio
-run_bench 512 8  "rpc_2e8w_512l_8c"    2 8
-run_bench 512 8  "rpc_2e8w_512l_8c_tokio" 2 8 tokio
+run_bench 512 8  "rpc_1e8w_512l_8c"      1 8
 
-# High-concurrency configs: 1000T (multi-worker scaling).
-# 1e16w 32c = peak single-engine (16 workers on one epoll fd).
-# 2e16w 16c = 2 engines × 8 workers/engine, reduced connections.
-run_bench 1000 32 "rpc_1e16w_1000l_32c"  1 16
-run_bench 1000 32 "rpc_1e16w_1000l_32c_tokio" 1 16 tokio
-run_bench 1000 16 "rpc_2e16w_1000l_16c"  2 16
-run_bench 1000 16 "rpc_2e16w_1000l_16c_tokio" 2 16 tokio
+# High-concurrency: 1000T, single-engine 16 workers.
+run_bench 1000 32 "rpc_1e16w_1000l_32c"        1 16
+run_bench 1000 32 "rpc_1e16w_1000l_32c_tokio"  1 16 tokio
+
+# Nagle-enabled (coroutine) — TCP coalescing batches multiple small
+# frames per writev/read syscall. Run at 64/512/1000T to measure the
+# nagle benefit across load levels.
+run_bench 64   4  "rpc_1e4w_64l_4c_nagle"     1 4  coroutine 1
+run_bench 512  8  "rpc_1e8w_512l_8c_nagle"    1 8  coroutine 1
+run_bench 1000 32 "rpc_1e16w_1000l_32c_nagle" 1 16 coroutine 1
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

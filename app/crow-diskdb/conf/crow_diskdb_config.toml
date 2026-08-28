@@ -6,6 +6,7 @@
 [server]
 listen_addr = "0.0.0.0:9941"
 http_listen_addr = "0.0.0.0:9942"
+rpc_listen_addr = "0.0.0.0:9931"
 kv_server_mgmt_seeds = ["http://127.0.0.1:9910"]
 
 [storage]

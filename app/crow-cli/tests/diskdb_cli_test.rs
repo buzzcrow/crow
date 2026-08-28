@@ -14,7 +14,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::console::{crow_cli_bin, run, spawn_console_empty};
+use common::console::{crow_cli_bin, pick_free_port_range, run, spawn_console_empty};
 use crow_console_shared::lifecycle::crow_diskdb_bin;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -162,7 +162,11 @@ async fn diskdb_cli_deploy_restart_stop_delete_lifecycle() {
     assert_eq!(code, 0, "disk add stderr={stderr}");
 
     // diskdb deploy → should succeed (local-fork).
-    let (_rest_port, rpc_port) = common::console::pick_two_distinct_free_ports();
+    // The diskdb needs 3 consecutive ports: rpc_port, http_port
+    // (rpc_port+1), and rpc_listen_port (rpc_port+2). Pick a range
+    // where all three are free to avoid port conflicts with leftover
+    // processes from previous test runs.
+    let rpc_port = pick_free_port_range(3);
     let rpc_port = rpc_port.to_string();
     let (code, stdout, stderr) = run(
         &cli,
@@ -191,7 +195,7 @@ async fn diskdb_cli_deploy_restart_stop_delete_lifecycle() {
     );
 
     // --- Second deploy → delete (without stop) ---
-    let (_rest_port2, rpc_port2) = common::console::pick_two_distinct_free_ports();
+    let rpc_port2 = pick_free_port_range(3);
     let rpc_port2 = rpc_port2.to_string();
     let (code, _, stderr) = run(
         &cli,

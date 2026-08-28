@@ -52,11 +52,11 @@ async fn disk_io_e2e_group0_sync() {
         if let Ok(Some(instance)) = svc.read_instance("diskio", INSTANCE_ID).await {
             eprintln!(
                 "  service registry: found diskio instance {} at {}",
-                instance.instance_id, instance.grpc_endpoint
+                instance.instance_id, instance.rpc_endpoint
             );
             assert!(
-                !instance.grpc_endpoint.is_empty(),
-                "heartbeat should register a non-empty grpc_endpoint"
+                !instance.rpc_endpoint.is_empty(),
+                "heartbeat should register a non-empty rpc_endpoint"
             );
             heartbeat_ok = true;
             break;

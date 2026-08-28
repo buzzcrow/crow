@@ -116,18 +116,25 @@ pub(super) async fn add_store(
         "creating PxKvStore via management API"
     );
     let mut store = PxKvStore::new(req.store_id, addr);
+    store.rpc_workers = state.rpc_workers;
     if let Some(ref mr) = state.metrics_registry {
         store.set_metrics_registry(Arc::clone(mr));
     }
     store.set_scan_byte_budget(state.config.server.scan_byte_budget);
+    store.set_peer_pool_size(state.config.server.peer_pool_size);
+    store.set_enable_nagle(state.config.server.enable_nagle);
+    store.set_quickack(state.config.server.quickack);
+    store.set_event_write(state.config.server.event_write);
+    store.set_send_queue_capacity(state.config.server.send_queue_capacity);
     let store = Arc::new(store);
 
     if let Err(e) = store.start().await {
         return Err(err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to start store gRPC server: {e}"),
+            format!("failed to start store server: {e}"),
         ));
     }
+    store.wire_rpc_transport();
 
     info!(
         store_id = req.store_id,

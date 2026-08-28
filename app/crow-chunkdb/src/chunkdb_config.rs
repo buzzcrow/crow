@@ -3,8 +3,10 @@
 
 //! Configuration for the chunkdb server.
 
+use std::net::SocketAddr;
+
 use crow_common::config::BaseConfig;
-use crow_protocol::{CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, KV_SERVER_MGMT_BASE};
+use crow_protocol::{CHUNKDB_HTTP_BASE, CHUNKDB_LISTEN_BASE, CHUNKDB_RPC_BASE, KV_SERVER_MGMT_BASE};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for a chunkdb instance.
@@ -22,6 +24,24 @@ impl BaseConfig for ChunkdbConfig {
     fn validate(&self) -> Result<(), String> {
         if self.server.kv_server_mgmt_seeds.is_empty() {
             return Err("server.kv_server_mgmt_seeds must not be empty".into());
+        }
+        if self.server.listen_addr.parse::<SocketAddr>().is_err() {
+            return Err(format!(
+                "server.listen_addr {:?} is not a valid SocketAddr",
+                self.server.listen_addr,
+            ));
+        }
+        if self.server.http_listen_addr.parse::<SocketAddr>().is_err() {
+            return Err(format!(
+                "server.http_listen_addr {:?} is not a valid SocketAddr",
+                self.server.http_listen_addr,
+            ));
+        }
+        if self.server.rpc_listen_addr.parse::<SocketAddr>().is_err() {
+            return Err(format!(
+                "server.rpc_listen_addr {:?} is not a valid SocketAddr",
+                self.server.rpc_listen_addr,
+            ));
         }
         if self.topology.refresh_interval_secs == 0 {
             return Err("topology.refresh_interval_secs must be > 0".into());
@@ -49,11 +69,15 @@ impl Default for RangeGuardConfig {
     }
 }
 
-/// gRPC + HTTP listen addresses.
+/// main listener + HTTP + crow-rpc listen addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub listen_addr: String,
     pub http_listen_addr: String,
+    /// crow-rpc listen address (R116 migration — runs alongside the main
+    /// listener during the mixed-rollout window).
+    #[serde(default = "default_rpc_listen_addr")]
+    pub rpc_listen_addr: String,
     pub instance_id: Option<String>,
     pub kv_server_mgmt_seeds: Vec<String>,
     /// Service-registry keep-alive interval in seconds. 0 disables
@@ -67,11 +91,16 @@ fn default_keepalive_interval_secs() -> u32 {
     10
 }
 
+fn default_rpc_listen_addr() -> String {
+    format!("0.0.0.0:{CHUNKDB_RPC_BASE}")
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            listen_addr: format!("0.0.0.0:{CHUNKDB_GRPC_BASE}"),
+            listen_addr: format!("0.0.0.0:{CHUNKDB_LISTEN_BASE}"),
             http_listen_addr: format!("0.0.0.0:{CHUNKDB_HTTP_BASE}"),
+            rpc_listen_addr: default_rpc_listen_addr(),
             instance_id: None,
             kv_server_mgmt_seeds: vec![format!("http://127.0.0.1:{KV_SERVER_MGMT_BASE}")],
             keepalive_interval_secs: default_keepalive_interval_secs(),

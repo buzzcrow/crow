@@ -12,7 +12,6 @@
 //! pending-barrier batch. Releasing the gate then lets the single
 //! round complete and resolve every waiter at once.
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,7 +28,7 @@ fn leader_group(group_id: u64, my_id: u64) -> PxGroup {
 
 fn store_with_registry() -> (Arc<PxKvStore>, Arc<Mutex<MetricsRegistry>>) {
     let registry = Arc::new(Mutex::new(MetricsRegistry::new()));
-    let mut store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let mut store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     store.set_metrics_registry(Arc::clone(&registry));
     (Arc::new(store), registry)
 }

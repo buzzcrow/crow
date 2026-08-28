@@ -86,6 +86,12 @@ bool logging_enabled()
     return g_enabled.load(std::memory_order_relaxed);
 }
 
+bool logger_initialized()
+{
+    std::lock_guard<std::mutex> lk(g_log_mu);
+    return g_logger != nullptr;
+}
+
 void flush_logging()
 {
     std::lock_guard<std::mutex> lk(g_log_mu);
@@ -173,6 +179,37 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
     }
 }
 
+void add_log_file(const std::string &log_dir, size_t max_file_mb, size_t max_files, const std::string &file_prefix)
+{
+    std::lock_guard<std::mutex> lk(g_log_mu);
+    if (!g_logger) {
+        return; // never initialized — no-op
+    }
+    try {
+        if (log_dir.empty()) {
+            return;
+        }
+        const auto now    = std::chrono::system_clock::now();
+        const auto t_time = std::chrono::system_clock::to_time_t(now);
+        std::tm    tm_buf{};
+        gmtime_r(&t_time, &tm_buf);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+        std::array<char, 128> ts{};
+        std::snprintf(ts.data(), ts.size(), "%04d%02d%02d-%02d%02d%02d.%03lld", tm_buf.tm_year + 1900,
+                      tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
+                      static_cast<long long>(ms));
+        const std::string prefix = file_prefix.empty() ? "crow-cpp" : file_prefix;
+        const std::string path   = log_dir + "/" + prefix + "-" + ts.data() + "-" + std::to_string(::getpid()) + ".log";
+        auto              sink = std::make_shared<compressing_file_sink_mt>(path, max_file_mb * 1024 * 1024, max_files);
+        // spdlog::logger::sinks() returns a non-const vector ref; push_back
+        // is safe under g_log_mu (never on the logging hot path).
+        g_logger->sinks().push_back(sink);
+    }
+    catch (const std::exception &) {
+        // Never take down the engine on a logging failure.
+    }
+}
+
 } // namespace crow::common
 
 #else // !CROW_HAVE_SPDLOG — no-op build
@@ -195,6 +232,11 @@ void shutdown_logging()
 
 void init_logging(const std::string & /*log_dir*/, const std::string & /*level*/, size_t /*max_file_mb*/,
                   size_t /*max_files*/, const std::string & /*file_prefix*/)
+{
+}
+
+void add_log_file(const std::string & /*log_dir*/, size_t /*max_file_mb*/, size_t /*max_files*/,
+                  const std::string & /*file_prefix*/)
 {
 }
 

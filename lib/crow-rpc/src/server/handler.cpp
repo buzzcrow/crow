@@ -6,6 +6,7 @@
 #include "crow-rpc/server/message.h"
 #include "msg_type_generated.h"
 
+#include <chrono>
 #include <cstring>
 
 namespace crow::rpc
@@ -18,7 +19,8 @@ OutFrame *handle_ping(Frame *request, Connection *conn)
     uint64_t create_nano = request->rpc_create_nano;
 
     BufferPool *pool      = conn->pool();
-    Buffer     *resp_ctrl = build_ping_response(pool, req_id, create_nano);
+    uint64_t    resp_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    Buffer     *resp_ctrl = build_ping_response(pool, req_id, create_nano, resp_nano);
 
     delete request;
 
@@ -33,7 +35,8 @@ OutFrame *handle_unknown(Frame *request, Connection *conn)
     uint64_t create_nano = request->rpc_create_nano;
 
     BufferPool *pool      = conn->pool();
-    Buffer     *resp_ctrl = build_unknown_response(pool, req_id, create_nano);
+    uint64_t    resp_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    Buffer     *resp_ctrl = build_unknown_response(pool, req_id, create_nano, resp_nano);
 
     auto msg_type = static_cast<uint16_t>(proto::FBMsgType_EUnknownResponse);
     delete request;

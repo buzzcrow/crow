@@ -4,7 +4,7 @@
 //! Scanner background task + shared state. Implements `BackgroundTask`
 //! so it runs on the shared `BgRunner` with the same stop signal as
 //! compaction + keepalive. The `ScanState` is shared between the task
-//! and the gRPC service handlers (`TriggerScan` / `GetScanStatus`).
+//! and the crow-rpc service handlers (`TriggerScan` / `GetScanStatus`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -151,7 +151,7 @@ impl ScannerTask {
         Self { state, config }
     }
 
-    /// Access the shared `ScanState` (for wiring into the gRPC
+    /// Access the shared `ScanState` (for wiring into the crow-rpc
     /// service handlers).
     #[must_use]
     pub fn state(&self) -> ScanState {

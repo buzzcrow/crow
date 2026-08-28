@@ -209,7 +209,7 @@ async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<Cr
         Err(c) => return Err(c),
     };
     let endpoint = match client.resolve_endpoint(store_id, group_id).await {
-        Ok(info) => info.grpc_url,
+        Ok(info) => info.rpc_url,
         Err(e) => {
             eprintln!("error: resolve endpoint for store {store_id} group {group_id}: {e}");
             return Err(ExitCode::from(2));

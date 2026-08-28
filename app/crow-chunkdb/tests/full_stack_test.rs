@@ -5,7 +5,7 @@
 //!
 //! Verifies the allocate → append → seal → query → delete lifecycle
 //! against a real 3-node crow-kv-server cluster with diskdb running
-//! in-process as a gRPC server.
+//! in-process as a crow-rpc server.
 
 mod common;
 
@@ -35,7 +35,7 @@ async fn chunkdb_full_stack_allocate_seal_delete() {
 
     // 3. Start diskdb in-process.
     let diskdb = DiskdbServer::start(&cluster).await;
-    eprintln!("diskdb started: {}", diskdb.grpc_endpoint);
+    eprintln!("diskdb started: {}", diskdb.rpc_endpoint);
 
     // 4. Wire chunkdb handler.
     let harness = ChunkdbHarness::start(&cluster).await;

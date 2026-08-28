@@ -196,14 +196,12 @@ fn chunk_key(id: &ChunkId) -> Vec<u8> {
     key
 }
 
-/// Encode a `Chunk` proto to bytes.
+/// Encode a `Chunk` to bytes (bincode).
 fn encode_chunk(chunk: &Chunk) -> Vec<u8> {
-    use prost::Message;
-    chunk.encode_to_vec()
+    bincode::serialize(chunk).expect("Chunk serialization")
 }
 
-/// Decode a `Chunk` proto from bytes.
+/// Decode a `Chunk` from bytes (bincode).
 fn decode_chunk(data: &[u8]) -> Result<Chunk> {
-    use prost::Message;
-    Chunk::decode(data).map_err(|e| StoreError::Serde(e.to_string()))
+    bincode::deserialize(data).map_err(|e| StoreError::Serde(e.to_string()))
 }

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Topology cache: `(store_id, group_id) -> leader_endpoint`, sourced from
-//! `crow-kv-server`'s HTTP management API (`GET /topology`). There is no gRPC
+//! `crow-kv-server`'s HTTP management API (`GET /topology`). There is no crow-rpc
 //! `DescribeCluster` RPC — this is the only discovery mechanism.
 
 use std::collections::HashSet;
@@ -169,7 +169,7 @@ impl TopologyCache {
         }
 
         for store in body.stores {
-            // `listen_addr` is the local replica's gRPC endpoint; it is
+            // `listen_addr` is the local replica's crow-rpc endpoint; it is
             // `None` only for a server that hasn't bound its listener yet,
             // in which case this store contributes no endpoints.
             let local_endpoint = store.listen_addr.clone();

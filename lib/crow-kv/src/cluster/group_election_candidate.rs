@@ -113,11 +113,16 @@ impl PxGroup {
             });
         }
 
-        while let Some(joined) = joinset.join_next().await {
-            if cancel.is_cancelled() {
-                joinset.abort_all();
-                return PreVoteOutcome::Lost;
-            }
+        loop {
+            let joined = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    joinset.abort_all();
+                    return PreVoteOutcome::Lost;
+                }
+                joined = joinset.join_next() => joined,
+            };
+            let Some(joined) = joined else { break };
             let Ok((peer_id, reply)) = joined else { continue };
             match reply {
                 Ok(vote) => {
@@ -214,11 +219,16 @@ impl PxGroup {
             });
         }
 
-        while let Some(joined) = joinset.join_next().await {
-            if cancel.is_cancelled() {
-                joinset.abort_all();
-                return;
-            }
+        loop {
+            let joined = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    joinset.abort_all();
+                    return;
+                }
+                joined = joinset.join_next() => joined,
+            };
+            let Some(joined) = joined else { break };
             let (peer_id, reply) = match joined {
                 Ok(pair) => pair,
                 Err(join_err) => {

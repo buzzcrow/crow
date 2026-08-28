@@ -173,7 +173,7 @@ single-field overrides without rebuilding the whole struct. The
    │   │Group-2 F│             │Group-2 L│             │Group-2 F│  │
    │   └─────────┘             └─────────┘             └─────────┘  │
    └─────────▲──────────────────────────────────────────────────────┘
-             │  HTTP /topology (mgmt API) + per-group writes/reads (gRPC)
+             │  HTTP /topology (mgmt API) + per-group writes/reads (crow-rpc)
         ┌────┴────┐
         │ Client  │  sends KV RPC with explicit group_id
         └─────────┘
@@ -186,9 +186,9 @@ single-field overrides without rebuilding the whole struct. The
   proxies for peers on other nodes.
 - **Group sizes** can differ per group (3, 5, 7…). No cluster-wide
   `num_groups` or `hash(key) -> group_id` concept.
-- **All inter-node communication** is protobuf over gRPC with
+- **All inter-node communication** is flatbuffers over crow-rpc with
   append-only field numbers for rolling-upgrade compatibility.
-  Topology discovery is HTTP, not gRPC.
+  Topology discovery is HTTP, not crow-rpc.
 
 ## 5. Data Model
 
@@ -269,7 +269,7 @@ Full design: `design-crow-kv-wal.md`, `design-crow-kv-state-machine.md`,
   lists, persisted to config file, `membership_epoch` fence
   (exact-match on Prepare/Accept). New members join as non-voting,
   catch up via snapshot, then become voting.
-- **Rolling upgrade** — protobuf with append-only field numbers;
+- **Rolling upgrade** — flatbuffers with append-only field numbers;
   on-disk formats carry version headers; one major version step
   compatibility.
 - **Backup** — in-cluster recovery via snapshot install + WAL replay.
@@ -293,7 +293,7 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
 - **Discovery** — client polls a seed server's HTTP `/topology` endpoint
   to build `(store_id, group_id) → leader_endpoint` cache plus a
   `(store_id, group_id) → replica_endpoints` list (local + remotes). No
-  gRPC `DescribeCluster`. Re-polls only on cache miss / `NotLeader`.
+  crow-rpc `DescribeCluster`. Re-polls only on cache miss / `NotLeader`.
 - **Read-endpoint policy** — `ClientConfig::read_endpoint_policy`
   selects how `MinSlot` reads pick a target replica:
   - `Leader` (default) — every read targets the leader; backward
@@ -328,7 +328,7 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
 - **Scan pagination** — the unary `Scan` RPC uses S3-style pagination
   (`start_after` + `truncated` + `limit`). The server applies a
   per-page byte budget (`ServerConfig::scan_byte_budget`, default 3.5
-  MiB, leaving ~0.5 MiB for proto framing under tonic's 4 MiB default)
+  MiB, leaving ~0.5 MiB for flatbuffer framing under the 4 MiB default)
   to each response so every page is provably bounded regardless of
   value sizes: the C++ engine's merge loop accumulates key+value bytes
   and stops with `truncated = true` when the budget is exceeded,
@@ -367,7 +367,7 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
 | **Repair** | Background task: detects and resolves slot gaps via classic Paxos. |
 | **Snapshot** | Per-group snapshots; serves install to lagging peers. |
 | **Storage Engine** | Pluggable `KVEngine` trait: `InMemKV`, `CrowTreeEngine`. |
-| **RPC** | gRPC layer: `PxReplicaService`, `KvStoreService`, `PxSnapshotService`. |
+| **RPC** | crow-rpc layer: `PxReplicaService`, `KvStoreService`, `PxSnapshotService`. |
 
 Single-leader hot path: **Proposer → WAL → Replicator → Learner → ack.**
 
@@ -422,7 +422,7 @@ The async disk I/O substrate (`AsyncFile`: io_uring on Linux ≥ 5.11,
   Design: `../console/design-crow-console.md`, `../console/design-crow-console-ui.md`.
 - **`crowbench`** — benchmark tool, fulfilled by `crow-console` CLI
   `bench` subcommand.
-- **RPC** — protobuf over gRPC (tonic + prost). Design: `design-crow-kv-rpc.md`.
+- **RPC** — flatbuffers over crow-rpc. Design: `design-crow-kv-rpc.md`.
 
 ## 15. Performance Targets
 

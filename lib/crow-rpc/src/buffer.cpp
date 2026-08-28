@@ -31,8 +31,18 @@ Buffer *Buffer::ref_clone()
 void Buffer::release()
 {
     if (ref->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        // Last reference — recycle to pool or free standalone.
-        if (pool != nullptr) {
+        // Last reference — recycle to pool, call external free, or free
+        // standalone.
+        if (free_cb != nullptr) {
+            // External buffer (created via crow_rpc_buffer_create_external):
+            // the data is owned by an external allocator (e.g. a Rust Vec).
+            // free_cb drops the external owner; data itself is NOT freed
+            // here (the external owner's destructor handles that).
+            free_cb(free_ctx);
+            delete ref;
+            delete this;
+        }
+        else if (pool != nullptr) {
             pool->recycle(this);
         }
         else {

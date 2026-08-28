@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! KV gRPC integration tests covering Put/Delete/BatchWrite flows.
+//! KV crow-rpc integration tests covering Put/Delete/BatchWrite flows.
 
 use crate::common::cluster::{start_cluster, TestCluster};
 use bytes::Bytes;
@@ -11,7 +11,7 @@ use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetReque
 async fn kv_mutations_apply_to_all_learners() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = cluster.kv_client(leader).await;
+    let client = cluster.kv_client(leader).await;
 
     // Put k1=v1
     let resp = client

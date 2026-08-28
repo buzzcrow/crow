@@ -132,12 +132,12 @@ async fn diskdb_instances(cli: &Cli) -> ExitCode {
             }
             println!(
                 "{:<12}  {:<30}  {:<16}  DG_IDS",
-                "INSTANCE_ID", "GRPC_ENDPOINT", "LAST_HEARTBEAT_MS"
+                "INSTANCE_ID", "RPC_ENDPOINT", "LAST_HEARTBEAT_MS"
             );
             for i in &instances {
                 println!(
                     "{:<12}  {:<30}  {:<16}  {:?}",
-                    i.instance_id, i.grpc_endpoint, i.last_heartbeat_ms, i.owned_dg_ids
+                    i.instance_id, i.rpc_endpoint, i.last_heartbeat_ms, i.owned_dg_ids
                 );
             }
             ExitCode::SUCCESS
@@ -353,8 +353,8 @@ async fn diskdb_deploy(cli: &Cli, node: u64, rpc_port: u16) -> ExitCode {
                 return print_json(&resp);
             }
             println!(
-                "deployed diskdb on node {}: pid={}, mgmt={}, grpc={}",
-                resp.node_id, resp.pid, resp.mgmt_url, resp.grpc_url
+                "deployed diskdb on node {}: pid={}, mgmt={}, rpc={}",
+                resp.node_id, resp.pid, resp.mgmt_url, resp.rpc_url
             );
             ExitCode::SUCCESS
         }

@@ -46,7 +46,7 @@ Reverse scans have different cache behavior than forward scans:
 backward leaf traversal touches pages in reverse allocation order,
 which may have worse prefetch/sequential-read characteristics. Needs
 its own scan perf baseline — add reverse-scan configs to
-`tools/bench-scan-regression.sh`.
+`tools/bench-kv-scan-regression.sh`.
 
 ## Dependencies
 

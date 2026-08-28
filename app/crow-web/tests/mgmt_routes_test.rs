@@ -23,7 +23,7 @@ fn pick_free_port() -> u16 {
 struct Upstream {
     pid: u32,
     mgmt_url: String,
-    grpc_url: String,
+    rpc_url: String,
     workspace: PathBuf,
 }
 
@@ -74,7 +74,7 @@ async fn spawn_upstream() -> Option<Upstream> {
     Some(Upstream {
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
         workspace,
     })
 }
@@ -102,7 +102,7 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         id: "n1".to_string(),
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
-        grpc_url: Some(upstream.grpc_url.clone()),
+        rpc_url: Some(upstream.rpc_url.clone()),
         rest_port: None,
         rpc_port: None,
         auto_start: true,
@@ -110,9 +110,14 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
+    // Register the upstream's pid so `refresh_node_cache` (which skips
+    // nodes with no tracked runtime pid) refreshes after mutations.
+    state.set_runtime_pid(1, upstream.pid);
     tokio::spawn(async move {
         axum::serve(listener, router(state)).await.unwrap();
     });

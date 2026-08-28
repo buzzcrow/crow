@@ -37,7 +37,7 @@ function toServerView(node: { id: number; rack_id: number; host: string; server?
     host: node.host,
     process: node.server,
     rest_port: extractPort(node.server.mgmt_url),
-    rpc_port: extractPort(node.server.grpc_url),
+    rpc_port: extractPort(node.server.rpc_url),
   };
 }
 

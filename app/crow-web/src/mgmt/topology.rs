@@ -4,7 +4,7 @@
 //! Topology restore: startup three-way fallback + per-node restore.
 
 use crate::mgmt::{
-    build_server_client, grpc_endpoint_for_node, mgmt_url_for_node, port_of, refresh_node_cache,
+    build_server_client, mgmt_url_for_node, port_of, refresh_node_cache, rpc_endpoint_for_node,
     rpc_is_conflict, rpc_is_not_found,
 };
 use crate::state::AppState;
@@ -291,7 +291,7 @@ async fn ensure_diskdb_running(
     }
     let rpc_port = server
         .rpc_port
-        .or_else(|| server.grpc_url.as_deref().and_then(port_of))
+        .or_else(|| server.rpc_url.as_deref().and_then(port_of))
         .ok_or_else(|| format!("diskdb entry {} missing persisted rpc_port", server.id))?;
     // Look up the kv-server management URL(s) on this node so the
     // diskdb can discover group-0 after restart.
@@ -315,7 +315,7 @@ async fn ensure_diskdb_running(
         .await
         .map_err(|e| e.to_string())?;
     state.set_diskdb_runtime_pid(node.id, deployed.pid);
-    // Update the persisted entry with the fresh mgmt_url/grpc_url in
+    // Update the persisted entry with the fresh mgmt_url/rpc_url in
     // case the HTTP listen address changed (e.g. port rotation).
     {
         let mut cfg = state.config.write().unwrap();
@@ -325,7 +325,7 @@ async fn ensure_diskdb_running(
             .find(|s| s.node_id == Some(node.id) && s.service_type == ServiceType::Diskdb)
         {
             entry.url.clone_from(&deployed.mgmt_url);
-            entry.grpc_url = Some(deployed.grpc_url.clone());
+            entry.rpc_url = Some(deployed.rpc_url.clone());
         }
     }
     state.persist().map_err(|e| e.to_string())?;
@@ -429,7 +429,7 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
             if peer.replica_id == replica.replica_id {
                 continue;
             }
-            let Some(current_endpoint) = grpc_endpoint_for_node(state, peer.node_id, group.store_id).await
+            let Some(current_endpoint) = rpc_endpoint_for_node(state, peer.node_id, group.store_id).await
             else {
                 // Peer's store is not up yet; skip rather than overwriting
                 // the correct persisted-config endpoint with a stale one.

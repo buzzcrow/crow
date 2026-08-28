@@ -103,7 +103,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   }, [apiPrefix]);
 
   const [lastUsedRackId, setLastUsedRackId] = useState<number>(0);
-  const [rememberedDeployPorts, setRememberedDeployPorts] = useState<{ mgmt: number[]; grpc: number[]; diskdbRpc: number[] }>({ mgmt: [], grpc: [], diskdbRpc: [] });
+  const [rememberedDeployPorts, setRememberedDeployPorts] = useState<{ mgmt: number[]; rpc: number[]; diskdbRpc: number[] }>({ mgmt: [], rpc: [], diskdbRpc: [] });
   const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
   const [refreshing, setRefreshing] = useState(false);
   const [centerPanel, setCenterPanel] = useState<CenterPanelMode>('topology');
@@ -713,7 +713,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       19910,
       19920,
       rememberedDeployPorts.mgmt,
-      rememberedDeployPorts.grpc,
+      rememberedDeployPorts.rpc,
     );
   }, [dialog.deployServer?.nodeId, rememberedDeployPorts, servers]);
 
@@ -727,7 +727,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           19910,
           19920,
           rememberedDeployPorts.mgmt,
-          rememberedDeployPorts.grpc,
+          rememberedDeployPorts.rpc,
         ),
         defaultDiskdbRpcPort: diskdbPortDefaultsForNode(
           diskdbInstances,
@@ -1004,7 +1004,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           onSuccess={async ({ restPort, rpcPort }) => {
             setRememberedDeployPorts((prev) => ({
               mgmt: prev.mgmt.includes(restPort) ? prev.mgmt : [...prev.mgmt, restPort],
-              grpc: prev.grpc.includes(rpcPort) ? prev.grpc : [...prev.grpc, rpcPort],
+              rpc: prev.rpc.includes(rpcPort) ? prev.rpc : [...prev.rpc, rpcPort],
               diskdbRpc: prev.diskdbRpc,
             }));
             await handleRefresh();
@@ -1079,7 +1079,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         onSuccess={async () => {
           setRememberedDeployPorts((prev) => ({
             mgmt: prev.mgmt,
-            grpc: prev.grpc,
+            rpc: prev.rpc,
             diskdbRpc: prev.diskdbRpc.includes(Number(deployDiskdbDefaults))
               ? prev.diskdbRpc
               : [...prev.diskdbRpc, Number(deployDiskdbDefaults)],

@@ -3,6 +3,7 @@
 
 //! `DiskioClient`: async disk I/O via RPC.
 
+use crow_common::RequestIdGen;
 use crow_protocol::diskio_fb::{
     FBDiskFsyncRequest, FBDiskFsyncRequestArgs, FBDiskFsyncResponse, FBDiskReadRequest,
     FBDiskReadRequestArgs, FBDiskReadResponse, FBDiskWriteRequest, FBDiskWriteRequestArgs,
@@ -11,7 +12,6 @@ use crow_protocol::diskio_fb::{
 use crow_protocol::fb::FBMsgType;
 use crow_rpc_ffi::{Buffer, CallFuture, Connection, RpcClient, RpcError, RpcServer};
 use flatbuffers::FlatBufferBuilder;
-use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 /// 128-bit disk identifier (high + low 64-bit halves).
@@ -83,13 +83,13 @@ pub type DiskioResult<T> = std::result::Result<T, DiskioError>;
 /// `DiskioClient` sends disk write/read/fsync requests via crow-rpc.
 pub struct DiskioClient {
     rpc: RpcClient,
-    next_req_id: AtomicU64,
+    req_id_gen: RequestIdGen,
 }
 
 impl std::fmt::Debug for DiskioClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiskioClient")
-            .field("next_req_id", &self.next_req_id.load(Ordering::Relaxed))
+            .field("req_id_gen", &"RequestIdGen")
             .finish_non_exhaustive()
     }
 }
@@ -100,9 +100,10 @@ impl DiskioClient {
     pub fn new() -> Self {
         let rpc = RpcClient::new();
         rpc.set_completion_pool_size(1024);
+        rpc.start_reaper(5_000_000_000, 500_000_000);
         Self {
             rpc,
-            next_req_id: AtomicU64::new(1),
+            req_id_gen: RequestIdGen::new(),
         }
     }
 
@@ -112,7 +113,7 @@ impl DiskioClient {
     }
 
     fn next_id(&self) -> u64 {
-        self.next_req_id.fetch_add(1, Ordering::Relaxed)
+        self.req_id_gen.next().as_u64()
     }
 
     /// Send a disk write request. `data` is the payload to write.

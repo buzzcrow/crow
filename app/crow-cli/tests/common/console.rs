@@ -40,6 +40,13 @@ pub fn pick_two_distinct_free_ports() -> (u16, u16) {
     (first, second)
 }
 
+/// Pick a base port where `port`, `port+1`, ..., `port+count-1` are all
+/// free. Delegates to `crow_console_shared::test_ports`.
+#[must_use]
+pub fn pick_free_port_range(count: u16) -> u16 {
+    crow_console_shared::test_ports::unique_test_port_range(count)
+}
+
 /// Locate the compiled `crow-cli` binary next to the test runner.
 /// Cargo exposes its path via `CARGO_BIN_EXE_crow-cli`; the fallback
 /// walks up to the `debug`/`release` dir for `cargo test` invocations
@@ -57,17 +64,17 @@ pub fn crow_cli_bin() -> PathBuf {
     p
 }
 
-/// Locate the CMake-built `crow-rpc-echo-server` binary. Mirrors the
-/// search order in `bench/targets/rpc.rs::echo_server_bin`:
+/// Locate the CMake-built `crow-rpc-fb-server` binary. Mirrors the
+/// search order in `bench/targets/rpc.rs::fb_server_bin`:
 ///
-/// 1. `$CROW_RPC_ECHO_SERVER_BIN`
-/// 2. `lib/crow-rpc/build/crow-rpc-echo-server` relative to the
+/// 1. `$CROW_RPC_FB_SERVER_BIN`
+/// 2. `lib/crow-rpc/build/crow-rpc-fb-server` relative to the
 ///    workspace root (pixi `build-cpp` output)
 ///
 /// Returns `None` when not found (e.g. C++ libs not built).
 #[must_use]
-pub fn crow_rpc_echo_server_bin() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("CROW_RPC_ECHO_SERVER_BIN") {
+pub fn crow_rpc_fb_server_bin() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CROW_RPC_FB_SERVER_BIN") {
         return Some(PathBuf::from(p));
     }
     let cli = crow_cli_bin();
@@ -77,7 +84,7 @@ pub fn crow_rpc_echo_server_bin() -> Option<PathBuf> {
             .join("lib")
             .join("crow-rpc")
             .join("build")
-            .join("crow-rpc-echo-server");
+            .join("crow-rpc-fb-server");
         if candidate.exists() {
             return Some(candidate);
         }
@@ -92,7 +99,7 @@ pub fn crow_rpc_echo_server_bin() -> Option<PathBuf> {
 pub struct Upstream {
     pub pid: u32,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     workspace: std::path::PathBuf,
 }
 
@@ -154,7 +161,7 @@ pub async fn spawn_upstream() -> Option<Upstream> {
     Some(Upstream {
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
         workspace,
     })
 }
@@ -177,7 +184,7 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
         id: "1".to_string(),
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
-        grpc_url: Some(upstream.grpc_url.clone()),
+        rpc_url: Some(upstream.rpc_url.clone()),
         rest_port: None,
         rpc_port: None,
         auto_start: true,
@@ -185,9 +192,14 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
+    // Register the upstream's pid so `refresh_node_cache` (which skips
+    // nodes with no tracked runtime pid) refreshes after mutations.
+    state.set_runtime_pid(1, upstream.pid);
 
     let client = ServerClient::new(upstream.mgmt_url.clone()).unwrap();
     if let Ok(stores) = client.topology().await {

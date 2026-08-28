@@ -35,11 +35,12 @@ use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::kv_server::KvServer;
 use crow_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::common::config::{PxElectionConfig, WalConfig};
-use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use crow_kv::wal::replay::replay_group;
 use crow_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
-use tonic::transport::Channel;
+use crow_kv_client::KvRpcTransport;
+
+use crate::common::test_client::TestKvClient;
 
 const GROUP: u64 = 1;
 
@@ -51,6 +52,7 @@ struct WalNode {
 
 struct WalCluster {
     nodes: Vec<WalNode>,
+    kv_transport: Arc<KvRpcTransport>,
     _tmp: tempfile::TempDir,
     _net: tokio::sync::MutexGuard<'static, ()>,
 }
@@ -153,6 +155,7 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
 
     WalCluster {
         nodes,
+        kv_transport: Arc::new(KvRpcTransport::new()),
         _tmp: tmp,
         _net: net,
     }
@@ -169,13 +172,11 @@ impl WalCluster {
         })
     }
 
-    async fn kv_client(&self, node: &WalNode) -> KvServiceClient<Channel> {
-        KvServiceClient::connect(format!(
-            "http://{}",
-            node.store.listen_addr().expect("bound addr")
-        ))
-        .await
-        .expect("connect kv")
+    fn kv_client(&self, node: &WalNode) -> TestKvClient {
+        TestKvClient::with_transport(
+            Arc::clone(&self.kv_transport),
+            format!("http://{}", node.store.listen_addr().expect("bound addr")),
+        )
     }
 
     async fn wait_for_leader(&self, timeout: Duration) -> Option<u64> {
@@ -191,7 +192,7 @@ impl WalCluster {
 
     async fn read_via_leader(&self, key: &[u8]) -> Option<Vec<u8>> {
         let leader = self.elected_leader()?;
-        let mut client = self.kv_client(leader).await;
+        let client = self.kv_client(leader);
         let resp = client
             .get(KvGetRequest {
                 version: 1,
@@ -263,7 +264,7 @@ async fn commit_one_write(cluster: &WalCluster, key: &[u8], value: &[u8], seq: u
             "write should commit before timeout"
         );
         if let Some(leader) = cluster.elected_leader() {
-            let mut client = cluster.kv_client(leader).await;
+            let client = cluster.kv_client(leader);
             let resp = client
                 .put(KvSetRequest {
                     version: 1,

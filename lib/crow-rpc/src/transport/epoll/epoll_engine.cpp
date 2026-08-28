@@ -66,14 +66,31 @@ void EpollEngine::set_oneshot(bool on)
     oneshot_ = on;
 }
 
+// Bit 0 of data.ptr marks write fds (buzz-cpp pattern). Connection*
+// is at least 2-byte aligned, so bit 0 is always 0 for read fds.
+static constexpr uintptr_t WRITE_FD_MASK = 1;
+
 // epoll_ctl is kernel-serialized (thread-safe), so no userspace lock
 // is needed. Redundant MODs are ~1µs each — cheaper than a mutex.
+// For read fds: data.ptr = conn (no mask bit).
+// For write fds: data.ptr = conn | WRITE_FD_MASK (bit 0 set).
 void EpollEngine::mod_fd(int fd, uint32_t events, Connection *conn)
 {
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     ev.events   = events | (oneshot_ ? static_cast<uint32_t>(EPOLLONESHOT) : 0u);
     ev.data.ptr = conn; // udata = Connection* for zero-lock dispatch
+    ::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
+}
+
+// MOD for write fds — preserves the WRITE_FD_MASK bit in data.ptr so
+// wait() can distinguish write events from read events.
+void EpollEngine::mod_fd_write(int fd, uint32_t events, Connection *conn)
+{
+    struct epoll_event ev;
+    std::memset(&ev, 0, sizeof(ev));
+    ev.events   = events | (oneshot_ ? static_cast<uint32_t>(EPOLLONESHOT) : 0u);
+    ev.data.ptr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(conn) | WRITE_FD_MASK);
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
 }
 
@@ -86,54 +103,74 @@ void EpollEngine::add_listen_fd(int fd)
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
 }
 
-void EpollEngine::add_connection(int fd, Connection *conn)
+void EpollEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 {
     {
         std::lock_guard<std::mutex> lock(conn_mu_);
-        connections_[fd] = conn;
+        connections_[read_fd] = conn;
     }
+    // Register read fd with EPOLLIN (armed immediately for reading).
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     ev.events   = EPOLLIN | (oneshot_ ? static_cast<uint32_t>(EPOLLONESHOT) : 0u);
     ev.data.ptr = conn; // udata = Connection* for zero-lock dispatch
-    ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
+    ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, read_fd, &ev);
+
+    // Register write fd with no events (armed on-demand via arm_write).
+    // Bit 0 of data.ptr marks this as a write fd so wait() can distinguish
+    // read events from write events on the same underlying socket.
+    if (write_fd >= 0 && write_fd != read_fd) {
+        std::memset(&ev, 0, sizeof(ev));
+        ev.events   = 0; // no events until arm_write
+        ev.data.ptr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(conn) | WRITE_FD_MASK);
+        ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, write_fd, &ev);
+    }
 }
 
-void EpollEngine::remove_connection(int fd)
+void EpollEngine::remove_connection(int read_fd, int write_fd)
 {
     {
         std::lock_guard<std::mutex> lock(conn_mu_);
-        connections_.erase(fd);
+        connections_.erase(read_fd);
     }
-    ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+    ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, read_fd, nullptr);
+    if (write_fd >= 0 && write_fd != read_fd) {
+        ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, write_fd, nullptr);
+    }
 }
 
-void EpollEngine::arm_read(int fd, Connection *conn)
+void EpollEngine::arm_read(int read_fd, Connection *conn)
 {
-    // Always MOD — epoll_ctl is kernel-serialized (thread-safe), so no
-    // userspace mask tracking is needed. Redundant MODs when EPOLLIN is
-    // already armed are ~1µs each, cheaper than a mutex lock/unlock.
-    mod_fd(fd, EPOLLIN, conn);
+    // MOD read fd with EPOLLIN only — does not touch the write fd.
+    mod_fd(read_fd, EPOLLIN, conn);
 }
 
-void EpollEngine::arm_write(int fd, Connection *conn)
+void EpollEngine::arm_write(int write_fd, Connection *conn)
 {
-    // MOD with EPOLLIN|EPOLLOUT to arm both. In ONESHOT mode the kernel
-    // disarmed everything; in level-triggered mode this may be a redundant
-    // MOD if EPOLLOUT is already armed — acceptable (epoll_ctl is cheap).
-    mod_fd(fd, EPOLLIN | EPOLLOUT, conn);
+    // MOD write fd with EPOLLOUT only — does not re-arm read.
+    // Uses mod_fd_write to preserve the WRITE_FD_MASK bit in data.ptr
+    // so wait() can distinguish write events from read events.
+    mod_fd_write(write_fd, EPOLLOUT, conn);
 }
 
-void EpollEngine::disarm_write(int fd, Connection *conn)
+void EpollEngine::disarm_write(int write_fd, Connection *conn)
 {
-    // MOD with EPOLLIN only — removes EPOLLOUT from the registration.
-    // In ONESHOT mode this also re-arms read (kernel disarmed both).
-    mod_fd(fd, EPOLLIN, conn);
+    // MOD write fd with 0 events — disarms write without touching read.
+    mod_fd_write(write_fd, 0, conn);
 }
 
 void EpollEngine::notify_worker()
 {
     if (notify_fd_ >= 0) {
+        uint64_t val = 1;
+        ::write(notify_fd_, &val, sizeof(val));
+    }
+}
+
+void EpollEngine::notify_stop()
+{
+    if (notify_fd_ >= 0) {
+        stop_notified_.store(true, std::memory_order_release);
         uint64_t val = 1;
         ::write(notify_fd_, &val, sizeof(val));
     }
@@ -177,8 +214,10 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
         int fd = ev.data.fd;
 
         if (fd == notify_fd_) {
-            uint64_t val;
-            ::read(notify_fd_, &val, sizeof(val));
+            if (!stop_notified_.load(std::memory_order_acquire)) {
+                uint64_t val;
+                ::read(notify_fd_, &val, sizeof(val));
+            }
             out_events[out++] = {SocketEvent::Notify, -1, nullptr};
             continue;
         }
@@ -189,23 +228,31 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
             continue;
         }
 
-        // Connection fd: data.ptr holds Connection* (set in add_connection).
-        // The listen socket has data.ptr = nullptr (set via data.fd).
-        auto *conn = reinterpret_cast<Connection *>(ev.data.ptr);
+        // Connection fd: data.ptr holds Connection* (read fd) or
+        // Connection* | WRITE_FD_MASK (write fd). The listen socket
+        // has data.ptr = nullptr (set via data.fd).
+        auto  raw_ptr     = reinterpret_cast<uintptr_t>(ev.data.ptr);
+        bool  is_write_fd = (raw_ptr & WRITE_FD_MASK) != 0;
+        auto *conn        = reinterpret_cast<Connection *>(raw_ptr & ~WRITE_FD_MASK);
 
         // Recover fd for connection events: data.ptr was set, not data.fd.
-        // We need the fd for read/write syscalls. Store it in the event.
-        // For listen socket: fd is valid (data.fd was set).
-        // For connection: fd is garbage (data.ptr was set). Recover from
-        // the connection's transport_handle.
+        // For read events: use the read fd (transport_handle).
+        // For write events: use the write fd (conn->write_fd).
         if (conn != nullptr) {
-            fd = static_cast<int>(conn->transport_handle);
+            fd = is_write_fd ? conn->write_fd : static_cast<int>(conn->transport_handle);
         }
 
         if (ev.events & (EPOLLERR | EPOLLHUP)) {
             out_events[out++] = {SocketEvent::Error, fd, conn};
         }
+        else if (is_write_fd) {
+            // Write fd event — only EPOLLOUT is armed on this fd.
+            if (ev.events & EPOLLOUT && conn != nullptr) {
+                out_events[out++] = {SocketEvent::Writable, fd, conn};
+            }
+        }
         else {
+            // Read fd event — EPOLLIN for connection or listen socket.
             if (ev.events & EPOLLIN) {
                 if (conn != nullptr) {
                     out_events[out++] = {SocketEvent::Readable, fd, conn};
@@ -213,9 +260,6 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
                 else {
                     out_events[out++] = {SocketEvent::Accept, fd, nullptr};
                 }
-            }
-            if (ev.events & EPOLLOUT && conn != nullptr) {
-                out_events[out++] = {SocketEvent::Writable, fd, conn};
             }
         }
     }

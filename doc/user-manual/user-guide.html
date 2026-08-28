@@ -627,7 +627,7 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <p>waits for a new leader, then removes the replica.</p>
 <h3 id="34-replace-a-failed-node">3.4 Replace a failed node</h3>
 <li>Provision the new machine with the same node ID, management port,</li>
-<p>   and gRPC port.</p>
+<p>   and RPC port.</p>
 <li>Deploy the server via the service. The server auto-loads its</li>
 <p>   store/group configuration from <code>conf/node-config.json</code> on startup.</p>
 <p>   No <code>--stores</code>/<code>--groups</code> CLI args needed for normal restart:</p>

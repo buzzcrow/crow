@@ -78,7 +78,7 @@ struct NodeSpec {
 ///
 /// Same two-phase bind-then-rewire technique as
 /// `e2e_retry_test.rs::start_two_node_cluster`: phase 1 starts each
-/// server with placeholder remote endpoints to bind real gRPC
+/// server with placeholder remote endpoints to bind real crow-rpc
 /// addresses; phase 2 rewires every node's remotes to the bound
 /// endpoints. Returns `(leader=A, follower=B, lagging=C)`.
 async fn start_three_node_cluster() -> (Arc<PxKvStore>, Arc<PxKvStore>, Arc<PxKvStore>) {

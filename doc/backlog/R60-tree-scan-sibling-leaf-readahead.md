@@ -86,7 +86,7 @@ bench config is a prerequisite for validation).
   no-readahead baseline. The win is zero on mem-mode (leaves resident).
 - Readahead memory is bounded (per-scan in-flight cap, default window
   = 1); a full-keyspace cold scan does not grow unbounded RSS.
-- No regression on `tools/bench-scan-regression.sh` (mem-mode configs
+- No regression on `tools/bench-kv-scan-regression.sh` (mem-mode configs
   unchanged — readahead is a no-op when leaves are resident).
 
 **Note**: the gap lives in

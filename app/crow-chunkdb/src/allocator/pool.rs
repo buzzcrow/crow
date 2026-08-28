@@ -1,43 +1,36 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Diskdb client pool — caches gRPC connections to diskdb instances.
+//! Diskdb client pool — caches crow-rpc transports to diskdb instances.
 //!
 //! Routes `AllocateBlocks` / `FreeBlocks` to the correct diskdb
 //! instance per disk-group, using `ServiceRegistryClient` for endpoint
 //! discovery.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use dashmap::DashMap;
-use tonic::transport::Channel;
 use tracing::warn;
 
+use crow_diskdb_client::DiskdbRpcTransport;
 use crow_kv_client::ServiceRegistryClient;
 use crow_protocol::common::{ChunkId, DiskId};
 use crow_protocol::diskdb::rpc::{
     AllocateBlocksRequest, AllocateResponse, CommitBlocksRequest, FreeBlocksRequest, FreeResponse, Segment,
 };
 
-/// Pinned boxed future for a `free_blocks` RPC call.
-type FreeFut = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = std::result::Result<tonic::Response<FreeResponse>, tonic::Status>>
-            + Send,
-    >,
->;
-
-/// Pool of diskdb gRPC clients, keyed by disk-group ID.
+/// Pool of diskdb crow-rpc transports, keyed by disk-group ID.
 pub struct DiskdbClientPool {
     svc: ServiceRegistryClient,
-    /// `disk_group_id -> grpc_endpoint` cache.
+    /// `disk_group_id -> rpc_endpoint` cache.
     endpoints: DashMap<u64, String>,
-    /// `grpc_endpoint -> Channel` pool.
-    channels: DashMap<String, Channel>,
     /// `disk_id -> disk_group_id` reverse lookup cache (GAP-4).
     /// Populated from the topology cache's `DiskGroupEntry` list.
     /// Used for precise `free_blocks` routing.
     disk_id_to_dg: DashMap<DiskId, u64>,
+    /// Shared crow-rpc transport.
+    transport: Arc<DiskdbRpcTransport>,
 }
 
 impl DiskdbClientPool {
@@ -46,8 +39,8 @@ impl DiskdbClientPool {
         Self {
             svc,
             endpoints: DashMap::new(),
-            channels: DashMap::new(),
             disk_id_to_dg: DashMap::new(),
+            transport: Arc::new(DiskdbRpcTransport::new()),
         }
     }
 
@@ -67,39 +60,25 @@ impl DiskdbClientPool {
         self.disk_id_to_dg.get(disk_id).map(|r| *r)
     }
 
-    /// Get or create a channel for the diskdb instance owning
+    /// Resolve the endpoint for the diskdb instance owning
     /// `disk_group_id`.
-    async fn channel_for_dg(&self, dg_id: u64) -> Result<Channel, String> {
+    async fn endpoint_for_dg(&self, dg_id: u64) -> Result<String, String> {
         // Check endpoint cache.
         if let Some(endpoint) = self.endpoints.get(&dg_id) {
-            return self.get_or_create_channel(endpoint.value());
+            return Ok(endpoint.value().clone());
         }
 
         // Cache miss — refresh from service registry and retry.
         self.refresh_endpoints().await?;
         if let Some(endpoint) = self.endpoints.get(&dg_id) {
-            return self.get_or_create_channel(endpoint.value());
+            return Ok(endpoint.value().clone());
         }
         Err(format!("no endpoint cached for disk_group {dg_id}"))
     }
 
-    fn get_or_create_channel(&self, endpoint: &str) -> Result<Channel, String> {
-        let normalized = crow_diskdb_client::normalize_endpoint(endpoint);
-        if let Some(ch) = self.channels.get(&normalized) {
-            return Ok(ch.clone());
-        }
-        let ch = Channel::from_shared(normalized.clone())
-            .map_err(|e| format!("invalid endpoint {normalized}: {e}"))?
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_lazy();
-        self.channels.insert(normalized, ch.clone());
-        Ok(ch)
-    }
-
     /// Warm the endpoint cache by reading all diskdb instances from the
     /// service registry. Maps each instance's `owned_dg_ids` to its
-    /// gRPC endpoint so `channel_for_dg` can route by disk-group ID.
+    /// RPC endpoint so `endpoint_for_dg` can route by disk-group ID.
     ///
     /// # Errors
     /// Returns a String error if the service registry read fails.
@@ -113,12 +92,17 @@ impl DiskdbClientPool {
             if let Some(ref extra) = value.extra {
                 if let Some(ref diskdb) = extra.diskdb {
                     for dg_id in &diskdb.owned_dg_ids {
-                        self.endpoints.insert(*dg_id, value.grpc_endpoint.clone());
+                        self.endpoints.insert(*dg_id, value.rpc_endpoint.clone());
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// All cached endpoints (for broadcast operations).
+    fn all_endpoints(&self) -> Vec<String> {
+        self.endpoints.iter().map(|r| r.value().clone()).collect()
     }
 
     /// Allocate blocks on the diskdb instance owning `disk_group_id`.
@@ -133,8 +117,7 @@ impl DiskdbClientPool {
         unit_count: u32,
         owner_chunk: &ChunkId,
     ) -> Result<AllocateResponse, String> {
-        let channel = self.channel_for_dg(dg_id).await?;
-        let mut client = crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(channel);
+        let endpoint = self.endpoint_for_dg(dg_id).await?;
         let req = AllocateBlocksRequest {
             disk_group_id: dg_id,
             unit_count,
@@ -142,15 +125,14 @@ impl DiskdbClientPool {
             exclude_disk_ids: vec![],
             owner_chunk: Some(*owner_chunk),
         };
-        client
-            .allocate_blocks(req)
+        self.transport
+            .allocate_blocks(&endpoint, &req)
             .await
-            .map(tonic::Response::into_inner)
             .map_err(|e| format!("allocate_blocks RPC: {e}"))
     }
 
     /// Commit blocks (mark as permanent) on the diskdb instances that
-    /// own them. Broadcasts to all known channels — the owning instance
+    /// own them. Broadcasts to all known endpoints — the owning instance
     /// accepts the commit, others reject.
     ///
     /// # Errors
@@ -160,20 +142,22 @@ impl DiskdbClientPool {
             return Ok(());
         }
 
-        let mut futures = Vec::new();
-        for endpoint in &self.channels {
-            let channel = endpoint.value().clone();
-            let segs = segments.clone();
-            futures.push(async move {
-                let mut client =
-                    crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(channel);
-                let req = CommitBlocksRequest { segments: segs };
-                client.commit_blocks(req).await
-            });
+        let endpoints = self.all_endpoints();
+        if endpoints.is_empty() {
+            return Err("no endpoints available for commit_blocks".into());
         }
 
-        if futures.is_empty() {
-            return Err("no channels available for commit_blocks".into());
+        let mut futures = Vec::new();
+        for endpoint in endpoints {
+            let segs = segments.clone();
+            let transport = Arc::clone(&self.transport);
+            futures.push(async move {
+                let req = CommitBlocksRequest { segments: segs };
+                transport
+                    .commit_blocks(&endpoint, &req)
+                    .await
+                    .map_err(|e| format!("commit_blocks RPC: {e}"))
+            });
         }
 
         let results = futures::future::join_all(futures).await;
@@ -197,6 +181,10 @@ impl DiskdbClientPool {
     /// # Errors
     /// Returns a String error if any free RPC fails.
     pub async fn free_blocks(&self, segments: Vec<Segment>) -> Result<(), String> {
+        type FreeFut = std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<FreeResponse, String>> + Send>,
+        >;
+
         if segments.is_empty() {
             return Ok(());
         }
@@ -218,15 +206,15 @@ impl DiskdbClientPool {
 
         // Precise routing: one free RPC per disk-group.
         for (dg_id, segs) in grouped {
-            match self.channel_for_dg(dg_id).await {
-                Ok(channel) => {
+            match self.endpoint_for_dg(dg_id).await {
+                Ok(endpoint) => {
+                    let transport = Arc::clone(&self.transport);
                     futures.push(Box::pin(async move {
-                        let mut client =
-                            crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(
-                                channel,
-                            );
                         let req = FreeBlocksRequest { segments: segs };
-                        client.free_blocks(req).await
+                        transport
+                            .free_blocks(&endpoint, &req)
+                            .await
+                            .map_err(|e| format!("free_blocks RPC: {e}"))
                     }));
                 }
                 Err(e) => {
@@ -240,20 +228,21 @@ impl DiskdbClientPool {
 
         // Broadcast fallback for ungrouped segments (reverse lookup miss).
         if !ungrouped.is_empty() {
-            for endpoint in &self.channels {
-                let channel = endpoint.value().clone();
+            for endpoint in self.all_endpoints() {
                 let segs = ungrouped.clone();
+                let transport = Arc::clone(&self.transport);
                 futures.push(Box::pin(async move {
-                    let mut client =
-                        crow_protocol::diskdb::rpc::diskdb_service_client::DiskdbServiceClient::new(channel);
                     let req = FreeBlocksRequest { segments: segs };
-                    client.free_blocks(req).await
+                    transport
+                        .free_blocks(&endpoint, &req)
+                        .await
+                        .map_err(|e| format!("free_blocks RPC: {e}"))
                 }));
             }
         }
 
         if futures.is_empty() {
-            return Err("no channels available for free_blocks".into());
+            return Err("no endpoints available for free_blocks".into());
         }
 
         let results = futures::future::join_all(futures).await;

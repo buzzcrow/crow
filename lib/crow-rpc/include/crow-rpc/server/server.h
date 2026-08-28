@@ -17,6 +17,9 @@
 namespace crow::rpc
 {
 
+// Forward declaration — used for server-initiated request-response.
+class RpcClient;
+
 // RpcServer accepts connections, parses frames, and dispatches to
 // registered handlers by msg_type. Common handlers (ping) are registered
 // automatically. The server owns the transport and the acceptor thread.
@@ -39,6 +42,15 @@ class RpcServer
 
     // Register a handler for a msg_type.
     void register_handler(uint16_t msg_type, HandlerFn handler);
+
+    // Wire an RpcClient into the server for server-initiated request-
+    // response (e.g. WatchNotify). The server's dispatch tries the
+    // request client's on_response first (to route ack responses);
+    // if no match, dispatches as a request (existing behavior).
+    void set_request_client(RpcClient *client)
+    {
+        request_client_ = client;
+    }
 
     // Start the server: spawns worker threads + acceptor thread.
     // Blocks until the acceptor is ready to accept connections.
@@ -64,6 +76,7 @@ class RpcServer
     bool                             owns_pool_;
     std::unique_ptr<SocketTransport> transport_;
     HandlerRegistry                  handlers_;
+    RpcClient                       *request_client_{nullptr}; // server-initiated request-response
 
     int               listen_fd_   = -1;
     int               listen_port_ = 0;

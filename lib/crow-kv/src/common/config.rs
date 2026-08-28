@@ -77,8 +77,9 @@ pub struct PaxosConfig {
     /// in `coalesce_drain_after_round` when the in-flight slot-task
     /// count (`occupied`) is at or above this value. Lets the
     /// `max_keys` overflow path handle high load (full batches) while
-    /// the drain maintains concurrency at low-moderate load. Default
-    /// `1` (set via CLI when coalescing is enabled). `0` = always
+    /// the drain maintains concurrency at low-moderate load. Library
+    /// default `1`; the `crow-kv-server` CLI derives `max_inflight / 4`
+    /// when `--coalesce-drain-threshold` is omitted. `0` = always
     /// drain (disables the heuristic).
     pub coalesce_drain_threshold: usize,
 }
@@ -113,19 +114,45 @@ pub struct ServerConfig {
     /// bounded regardless of value sizes. The engine always returns at
     /// least one entry even if it alone exceeds the budget (so the
     /// client makes progress). Default 3.5 MiB leaves ~0.5 MiB for
-    /// proto framing under tonic's 4 MiB default
+    /// proto framing under the default 4 MiB limit
     /// `max_decoding_message_size`; tune down for low-latency
     /// interactive scans or up for bulk-export workloads (stay below
     /// the RPC frame ceiling). Post-R32 (custom Rust RPC) the ceiling
     /// may change — only this default's constraint value needs
     /// revisiting, not the knob itself.
     pub scan_byte_budget: usize,
+    /// static: number of crow-rpc connections per peer endpoint for
+    /// inter-server consensus RPCs (Prepare/Accept/Heartbeat etc).
+    /// Round-robined to distribute send-queue pressure. Default 2;
+    /// raise to 4 for high-concurrency benchmarks.
+    pub peer_pool_size: usize,
+    /// static: enable Nagle's algorithm (disable `TCP_NODELAY`) on RPC
+    /// connections. Default false (Nagle off). Nagle degrades Paxos
+    /// latency — leave off unless coalescing tiny frames on a WAN.
+    pub enable_nagle: bool,
+    /// static: enable `TCP_QUICKACK` on RPC connections (Linux only).
+    /// Default false. Set true to break the Nagle + delayed-ACK deadlock
+    /// when Nagle is enabled. Adds a setsockopt per read.
+    pub quickack: bool,
+    /// static: event-write mode — `submit()` enqueues to the I/O worker
+    /// instead of calling `writev()` directly. Coalesces multiple frames
+    /// into one writev at the cost of ~20-40us epoll wake latency.
+    /// Default false. Enable for high-concurrency write workloads.
+    pub event_write: bool,
+    /// static: per-connection send queue capacity (backpressure bound).
+    /// Default 4096. Raise if `enqueue_send` failures appear under load.
+    pub send_queue_capacity: u32,
 }
 
 impl ServerConfig {
     pub const DEFAULT: Self = Self {
         shutdown_timeout_ms: 10_000,
         scan_byte_budget: 3 * 1024 * 1024 + 512 * 1024, // 3.5 MiB
+        peer_pool_size: 2,
+        enable_nagle: false,
+        quickack: false,
+        event_write: false,
+        send_queue_capacity: 4096,
     };
 }
 

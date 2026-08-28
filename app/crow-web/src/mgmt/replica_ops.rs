@@ -6,7 +6,7 @@
 use crate::error::{err_500, err_502, ErrorBody};
 use crate::expand::Recursive;
 use crate::mgmt::{
-    build_server_client, grpc_endpoint_for_node, mgmt_url_for_node, refresh_node_cache, wait_for_new_leader,
+    build_server_client, mgmt_url_for_node, refresh_node_cache, rpc_endpoint_for_node, wait_for_new_leader,
 };
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -211,9 +211,9 @@ pub(crate) async fn http_add_replica(
     refresh_node_cache(&state, *target_node).await;
 
     // Step 2: Register the new replica as a remote on every existing peer.
-    let Some(new_endpoint) = grpc_endpoint_for_node(&state, *target_node, sid).await else {
+    let Some(new_endpoint) = rpc_endpoint_for_node(&state, *target_node, sid).await else {
         return Err(err_502(format!(
-            "could not determine gRPC endpoint for new replica on node {target_node}"
+            "could not determine crow-rpc endpoint for new replica on node {target_node}"
         )));
     };
     let new_remote = RemoteReplicaInfo {
@@ -254,7 +254,7 @@ pub(crate) async fn http_add_replica(
     // Step 3: Register every existing peer as a remote on the new replica.
     let mut existing_remotes: Vec<RemoteReplicaInfo> = Vec::with_capacity(view.replicas.len());
     for r in &view.replicas {
-        if let Some(ep) = grpc_endpoint_for_node(&state, r.node_id, sid).await {
+        if let Some(ep) = rpc_endpoint_for_node(&state, r.node_id, sid).await {
             existing_remotes.push(RemoteReplicaInfo {
                 replica_id: r.replica_id,
                 endpoint: ep,

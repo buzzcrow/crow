@@ -206,13 +206,24 @@ async fn create_group(
     replica_id: u64,
     nodes: &[u64],
 ) {
-    let (status, body) = json_post(
-        client,
-        &format!("{base}/api/stores/{store_id}/groups"),
-        json!({ "group_id": group_id, "replica_id": replica_id, "nodes": nodes }),
-    )
-    .await;
-    assert_eq!(status.as_u16(), 201, "create group {store_id}/{group_id}: {body}");
+    // Retry with backoff — the kv-server on the target node may be
+    // momentarily unreachable right after concurrent deploy.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = json_post(
+            client,
+            &format!("{base}/api/stores/{store_id}/groups"),
+            json!({ "group_id": group_id, "replica_id": replica_id, "nodes": nodes }),
+        )
+        .await;
+        if status.as_u16() == 201 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            assert_eq!(status.as_u16(), 201, "create group {store_id}/{group_id}: {body}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str, value: &str) {
@@ -231,8 +242,6 @@ async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u
             assert_eq!(status.as_u16(), 200, "kv put {store_id}/{group_id} {key}: {body}");
             assert_eq!(body["ok"], true);
         }
-        // Leader likely changed mid-operation; wait for a stable leader and retry.
-        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(3)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -257,7 +266,6 @@ async fn kv_delete(client: &reqwest::Client, base: &str, store_id: u64, group_id
             );
             assert_eq!(body["ok"], true);
         }
-        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(3)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -533,7 +541,6 @@ async fn setup_cluster(tag: &str, rack_nodes: &[(u64, u64)], bin: &Path, electio
     let addr = spawn_web_with_path(cfg_path).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
-
     let mut racks: BTreeSet<u64> = BTreeSet::new();
     for (_, rack_id) in rack_nodes {
         racks.insert(*rack_id);

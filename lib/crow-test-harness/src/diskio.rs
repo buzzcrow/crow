@@ -274,7 +274,7 @@ impl DiskioProcess {
                 let log = self.log_content();
                 panic!("diskio did not discover disks within 15s. Log:\n{log}");
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }

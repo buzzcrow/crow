@@ -4,7 +4,7 @@
 //! Startup lifecycle state — lock-free phase tracking for the diskdb
 //! server.
 //!
-//! The service starts gRPC immediately (phase `Syncing`/`Loading`)
+//! The service starts crow-rpc immediately (phase `Syncing`/`Loading`)
 //! so health checks work during zone loading. RPCs that mutate state
 //! are gated on phase `Up`; read-only RPCs are allowed earlier.
 

@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use crate::commands::bench::{next_run_id, run_folder_name};
 
-/// RPC bench: 2-process echo server (child) + client (CLI), measure
-/// raw transport throughput.
+/// RPC bench: 2-process fb server (external) + client (CLI), measure
+/// raw transport throughput. The fb server must be started manually
+/// before running — use `tools/bench-rpc-regression.sh` for the wrapper.
 pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> ExitCode {
     use crate::bench::target::rpc::RpcTarget;
     use crate::bench::target::BenchTarget;
@@ -18,7 +19,7 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
     let folder_name = run_folder_name(&run_id, "rpc", now);
     let run_dir = crate::bench::BenchReport::default_dir().join(&folder_name);
 
-    println!("provisioning 2-process RPC echo server...");
+    println!("provisioning 2-process RPC fb server...");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut target = RpcTarget::new();
@@ -29,10 +30,18 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
     cfg.connections = args.connections;
     cfg.loader_num = args.loader_num;
     cfg.duration = Duration::from_secs(args.duration_secs);
-    cfg.key_space = args.key_space;
+    cfg.key_space = 1; // RPC echo has no keys; set to 1 for OpGen.
     cfg.value_size = args.value_size;
     cfg.io_engines = args.io_engines;
     cfg.io_workers = args.io_workers;
+    cfg.enable_nagle = args.enable_nagle;
+    cfg.quickack = args.quickack;
+    cfg.server_port = Some(args.server_port);
+    cfg.log_dir = args
+        .log_dir
+        .clone()
+        .or_else(|| Some(run_dir.to_string_lossy().to_string()));
+    cfg.metrics_interval = args.metrics_interval;
     cfg.rpc_worker_mode = match args.mode.as_str() {
         "tokio" => crate::bench::runner::RpcWorkerMode::Tokio,
         "coroutine" => crate::bench::runner::RpcWorkerMode::Coroutine,

@@ -31,7 +31,7 @@ allocate/free, `RecoveryEngine` (`recover_zone_inner`,
 - [6. crow-common metrics integration](#6-crow-common-metrics-integration)
 - [7. Reporting loop](#7-reporting-loop)
 - [8. Keepalive usage piggyback](#8-keepalive-usage-piggyback)
-- [9. Proto extension](#9-proto-extension)
+- [9. Schema extension](#9-schema-extension)
 - [10. kv-client space-usage aggregation](#10-kv-client-space-usage-aggregation)
 - [11. diskdb-client — full client library](#11-diskdb-client--full-client-library)
 - [12. E2E test migration](#12-e2e-test-migration)
@@ -284,13 +284,13 @@ lifecycle phase (like `GetDiskGroupInfo`); it does **not** check
 
 `disk_id == 0` sentinel: `DiskId` is a message (`{high, low}`); 0 means
 `Some(DiskId{high:0,low:0})` is treated as "not set" only when the field
-is `None`. The proto field is `optional crow.common.DiskId disk_id` so
+is `None`. The schema field is `disk_id: DiskId` so
 "not set" = `None`; a real disk with all-zero id is pathological and
 rejected at disk-add time. `zone_index == 0` is ambiguous (zone 0 is
 valid), so the disk-level shape is selected by `disk_id` being set
 **and** `zone_index` being absent. Use proto3 `optional` on `zone_index`
 (field presence) so "not set" is distinguishable from 0. (proto3 scalar
-presence requires `optional` keyword; prost generates `Option<u32>`.)
+presence requires `optional` keyword; flatbuffers generates `Option<u32>`.)
 
 Edge cases:
 - `disk_group_id == 0` + zero owned groups → empty `disk_groups`, `Ok`.
@@ -516,7 +516,7 @@ let group_usages: Vec<DiskGroupUsageSummary> = container
 
 Pass `&owned_dg_ids` + `&group_usages` to `svc.heartbeat_diskdb(instance_id,
 endpoint, &owned_dg_ids, &group_usages)` instead of `&[]`. The endpoint
-string is the diskdb gRPC listen address (from config; passed as the
+string is the diskdb rpc listen address (from config; passed as the
 real `server.listen_addr` so group 0 records a reachable endpoint for
 the diskdb-client cache). The summary is recomputed each tick (not
 cached).
@@ -529,47 +529,47 @@ Edge cases:
 - Group 0 stores **only disk-group-level** usage; per-disk/per-zone
   live usage is never written to group 0.
 
-## 9. Proto extension
+## 9. Schema extension
 
-`lib/crow-protocol/src/proto/diskdb_type.proto`:
+`lib/crow-protocol/src/fbs/diskdb_type.fbs`:
 
-```proto
-message ZoneUsage {
-  uint32 zone_index        = 1;
-  uint64 capacity_bytes    = 2;
-  uint64 busy_bytes        = 3;
-  uint64 free_bytes        = 4;
-  uint32 busy_block_count  = 5;
-  uint32 free_block_count  = 6;
-  ZoneAllocationState alloc_state = 7;
+```fbs
+table ZoneUsage {
+  zone_index: uint32;
+  capacity_bytes: uint64;
+  busy_bytes: uint64;
+  free_bytes: uint64;
+  busy_block_count: uint32;
+  free_block_count: uint32;
+  alloc_state: ZoneAllocationState;
   // Populated only for a specific-zone query; omitted at disk level.
-  optional bytes usage_bitmap = 8;
+  usage_bitmap: [ubyte];
 }
 ```
 
 `DiskInfo` gains `busy_units`, `free_units`, `capacity_bytes`,
 `busy_bytes`, `free_bytes`, `active_zone_count`, and
-`repeated ZoneUsage zone_usages`. `DiskGroupInfo` gains
+`[ZoneUsage] zone_usages`. `DiskGroupInfo` gains
 `capacity_bytes`, `busy_bytes`, `free_bytes`,
 `allocatable_disk_count`.
 
-`diskdb_op.proto`:
+`diskdb_op.fbs`:
 - `QueryCapacityStatsRequest`: add
-  `optional crow.common.DiskId disk_id = 2` and
-  `optional uint32 zone_index = 3`.
-- Add `RecalcDiskUsageRequest { optional uint64 disk_group_id = 1; }` /
-  `RecalcDiskUsageResponse { repeated DiskGroupRecalcResult results = 1; }`
-  + `DiskGroupRecalcResult { uint64 disk_group_id = 1; bool drift_detected = 2;
-  repeated ZoneRecalcResult zones = 3; }` + `ZoneRecalcResult { ... }`
+  `disk_id: DiskId` and
+  `zone_index: uint32`.
+- Add `RecalcDiskUsageRequest { disk_group_id: uint64; }` /
+  `RecalcDiskUsageResponse { results: [DiskGroupRecalcResult]; }`
+  + `DiskGroupRecalcResult { disk_group_id: uint64; drift_detected: bool;
+  zones: [ZoneRecalcResult]; }` + `ZoneRecalcResult { ... }`
   (mirror `RecalcResult`).
 
-`diskdb_service.proto`: add
-`rpc RecalcDiskUsage(RecalcDiskUsageRequest) returns (RecalcDiskUsageResponse);`
+`diskdb_service.fbs`: add
+`rpc RecalcDiskUsage(RecalcDiskUsageRequest) -> (RecalcDiskUsageResponse);`
 
 Edge cases:
-- proto3 `optional` on scalars → prost generates `Option<u32>` so
+- flatbuffers scalar presence → flatc generates `Option<u32>` so
   `zone_index` absence is distinguishable from 0.
-- `usage_bitmap` is `optional bytes` → `Option<Vec<u8>>`; omitted at
+- `usage_bitmap` is `[ubyte]` → `Option<Vec<u8>>`; omitted at
   disk level.
 
 ## 10. kv-client space-usage aggregation
@@ -629,17 +629,17 @@ Edge cases:
 
 ## 11. diskdb-client — full client library
 
-`crow-diskdb-client` is the primary client surface for all diskdb gRPC
+`crow-diskdb-client` is the primary client surface for all diskdb rpc
 operations (allocate/free/query with retry + endpoint caching),
 mirroring `crow-kv-client`'s pattern. Without it, callers must use raw
-gRPC stubs and do endpoint discovery manually.
+rpc stubs and do endpoint discovery manually.
 
 `DiskdbClient` in `lib/crow-diskdb-client/src/client.rs`:
 
 ```rust
 pub struct DiskdbClient {
     svc: ServiceRegistryClient,        // endpoint discovery from group 0
-    cache: DashMap<DiskGroupId, String>, // dg_id -> grpc_endpoint
+    cache: DashMap<DiskGroupId, String>, // dg_id -> rpc_endpoint
     retry: RetryConfig,
 }
 
@@ -664,11 +664,11 @@ impl DiskdbClient {
 
 - **Endpoint discovery + cache**: `refresh_endpoints` calls
   `svc.read_all_diskdb_instances()`, reads each
-  `InstanceValue.grpc_endpoint` + `DiskdbExtra.owned_dg_ids`, populates
+  `InstanceValue.rpc_endpoint` + `DiskdbExtra.owned_dg_ids`, populates
   `cache: dg_id -> endpoint`. Called on startup (eager), on cache miss
   (lazy `refresh_for`), and on `Unavailable`/`ResourceExhausted`
   (refresh + retry). `DashMap` for concurrent reads.
-- **Channel pool**: a `DashMap<String, tonic::transport::Channel>` per
+- **Channel pool**: a `DashMap<String, crow_rpc::Channel>` per
   endpoint; lazily created on first use. Channels are reused across
   calls.
 - **`allocate_blocks`**: look up endpoint for `req.disk_group_id`
@@ -691,7 +691,7 @@ impl DiskdbClient {
   `query_disk(dg_id, disk_id)` → `disk_id=Some, zone_index=None`;
   `query_zone(dg_id, disk_id, zi)` → all set.
 - **`recalc_disk_usage`**: wraps the admin RPC.
-- **Error model**: `DiskdbClientError` with `Rpc(tonic::Status)` /
+- **Error model**: `DiskdbClientError` with `Rpc(crow_rpc::Status)` /
   `NoSpace` / `NotFound` / `InvalidArgument` mappings. `RetryConfig`
   mirrors `crow-kv-client` (max retries, backoff).
 
@@ -709,8 +709,8 @@ Edge cases:
 
 ## 12. E2E test migration
 
-New gRPC-level e2e tests in `lib/crow-diskdb-client/tests/` using
-`DiskdbClient` against an in-process diskdb gRPC server + `KvCluster`
+New rpc-level e2e tests in `lib/crow-diskdb-client/tests/` using
+`DiskdbClient` against an in-process diskdb rpc server + `KvCluster`
 (mirroring `crow-kv-client/tests/` pattern):
 - `allocate_free_e2e.rs` — allocate → verify busy record → free →
   verify free.
@@ -766,10 +766,10 @@ app/crow-diskdb/src/
   liveness/keepalive.rs      # usage piggyback + endpoint + sync metrics
   ddb_config.rs        # + ReportingConfig
   main.rs              # wire ReportingTask + RecalcEngine + DiskdbMetrics
-lib/crow-protocol/src/proto/
-  diskdb_type.proto    # ZoneUsage, extend DiskInfo/DiskGroupInfo
-  diskdb_op.proto      # extend QueryCapacityStatsRequest, RecalcDiskUsage*
-  diskdb_service.proto # RecalcDiskUsage RPC
+lib/crow-protocol/src/fbs/
+  diskdb_type.fbs    # ZoneUsage, extend DiskInfo/DiskGroupInfo
+  diskdb_op.fbs      # extend QueryCapacityStatsRequest, RecalcDiskUsage*
+  diskdb_service.fbs # RecalcDiskUsage RPC
 lib/crow-kv-client/src/
   space_usage.rs       # SpaceUsageClient + ClusterUsage/RackUsage/NodeUsage
   lib.rs               # re-export

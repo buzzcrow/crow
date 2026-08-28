@@ -12,7 +12,7 @@ use bytes::Bytes;
 use crow_chunk_client::{DiskWriter, EcStripWriter, Result};
 use crow_common::ec::EcScheme;
 use crow_diskio_client::DiskId;
-use crow_protocol::chunkdb::rpc::chunk_strip::Strip as StripOneof;
+use crow_protocol::chunkdb::rpc::Strip as StripOneof;
 use crow_protocol::chunkdb::rpc::{Chunk, ChunkStrip, ChunkType, EcStrip, StripType};
 use crow_protocol::common::{ChunkId, DiskId as ProtoDiskId};
 use crow_protocol::diskdb::rpc::Segment;

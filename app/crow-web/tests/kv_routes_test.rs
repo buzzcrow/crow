@@ -24,7 +24,7 @@ fn pick_free_port() -> u16 {
 struct Upstream {
     pid: u32,
     mgmt_url: String,
-    grpc_url: String,
+    rpc_url: String,
 }
 
 impl Drop for Upstream {
@@ -59,7 +59,7 @@ async fn spawn_upstream() -> Option<Upstream> {
     Some(Upstream {
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
     })
 }
 
@@ -86,7 +86,7 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         id: "n1".to_string(),
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
-        grpc_url: Some(upstream.grpc_url.clone()),
+        rpc_url: Some(upstream.rpc_url.clone()),
         rest_port: None,
         rpc_port: None,
         auto_start: true,
@@ -94,9 +94,14 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
+    // Register the upstream's pid so `refresh_node_cache` (which skips
+    // nodes with no tracked runtime pid) refreshes after mutations.
+    state.set_runtime_pid(1, upstream.pid);
 
     // Seed the monitor cache so leader resolution works.
     let client = ServerClient::new(upstream.mgmt_url.clone()).unwrap();
@@ -231,12 +236,12 @@ async fn kv_get_returns_502_when_leader_unreachable() {
         ssh_key: None,
         ssh_password: None,
     });
-    // The node has a configured grpc_url, but the port is dead.
+    // The node has a configured rpc_url, but the port is dead.
     cfg.add_server(ServerEntry {
         id: "n1".to_string(),
         url: format!("http://127.0.0.1:{dead_port}"),
         node_id: Some(1),
-        grpc_url: Some(format!("http://127.0.0.1:{dead_port}")),
+        rpc_url: Some(format!("http://127.0.0.1:{dead_port}")),
         rest_port: None,
         rpc_port: None,
         auto_start: true,
@@ -244,12 +249,14 @@ async fn kv_get_returns_502_when_leader_unreachable() {
         election_profile: None,
         pid: None,
         service_type: ServiceType::Kv,
+        rpc_workers: None,
+        no_fsync: false,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
 
     // Seed a fake group on n1 with a leader hint, so resolve_kv_endpoint
-    // returns Ok(grpc_url) and the handler proceeds to connect.
+    // returns Ok(rpc_url) and the handler proceeds to connect.
     let mut stores = BTreeMap::new();
     stores.insert(
         7,
@@ -294,7 +301,7 @@ async fn kv_get_returns_502_when_leader_unreachable() {
     assert_eq!(
         resp.status(),
         502,
-        "expected 502 when leader gRPC port is dead, got {}",
+        "expected 502 when leader crow-rpc port is dead, got {}",
         resp.status()
     );
 }

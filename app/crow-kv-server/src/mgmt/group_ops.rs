@@ -27,7 +27,7 @@ use crate::operation_registry::{Operation, OperationKind, OperationStatus, Opera
 #[derive(ToSchema, Deserialize)]
 pub(super) struct JoinGroupRequest {
     replica_id: u64,
-    /// gRPC endpoint (`host:port`) of an existing, already-caught-up member
+    /// crow-rpc endpoint (`host:port`) of an existing, already-caught-up member
     /// of this group to pull the snapshot from. Must run the **same**
     /// crow-tree backend as this store -- `KVEngine::snapshot_import`
     /// is only ever meaningful fed a stream from the same engine kind's

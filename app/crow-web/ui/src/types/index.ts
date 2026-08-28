@@ -31,7 +31,7 @@ export enum NodeHealth {
 
 export interface ServerProcess {
   mgmt_url: string;
-  grpc_url: string;
+  rpc_url: string;
   pid?: number;
   state: ProcState;
   health: NodeHealth;
@@ -287,7 +287,7 @@ export interface DiskEntry {
 
 export interface DiskdbInstanceInfo {
   instance_id: number;
-  grpc_endpoint: string;
+  rpc_endpoint: string;
   last_heartbeat_ms: number;
   owned_dg_ids: number[];
   group_usages: DiskGroupUsageSummary[];
@@ -414,7 +414,7 @@ export interface RebuildResultResponse {
 export interface DiskdbDeployResult {
   node_id: number;
   mgmt_url: string;
-  grpc_url: string;
+  rpc_url: string;
   pid: number;
 }
 

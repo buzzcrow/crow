@@ -13,10 +13,9 @@ use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::kv_store::KvStore;
 use crow_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::rpc::KvBatchItem;
-use std::net::SocketAddr;
 
 fn leader_store() -> PxKvStore {
-    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());
     let local = PxLocalReplica::new(10, PxLocalReplicaRole::Leader);
     let group = PxGroup::new(1, local);
     store.add_group(group);

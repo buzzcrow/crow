@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crow_chunkdb_client::{ChunkdbClient, RetryConfig};
+use crow_chunkdb_client::{ChunkdbClient, ChunkdbRpcTransport, RetryConfig};
 
 use crate::hardware::INSTANCE_ID;
 
@@ -52,11 +52,34 @@ pub fn find_free_port() -> i32 {
         .into()
 }
 
+/// Find a pair of free ports `(listen_port, rpc_port)` such that
+/// `rpc_port = listen_port - offset`. The chunkdb client derives the
+/// crow-rpc port from the crow-rpc port using a fixed offset
+/// (`CHUNKDB_RPC_BASE - CHUNKDB_LISTEN_BASE`), so the harness must pick a
+/// pair satisfying that constraint — otherwise the subprocess falls
+/// back to the hardcoded default `0.0.0.0:9961` and collides across
+/// tests. Tries up to 100 random ports.
+fn find_port_pair_with_offset(offset: i32) -> (i32, i32) {
+    for _ in 0..100 {
+        let listen_port = find_free_port();
+        let rpc_port = listen_port - offset;
+        if rpc_port > 1024 && is_port_free(rpc_port) {
+            return (listen_port, rpc_port);
+        }
+    }
+    panic!("could not find a free port pair with offset {offset}");
+}
+
+fn is_port_free(port: i32) -> bool {
+    let addr = format!("127.0.0.1:{port}");
+    std::net::TcpListener::bind(addr.as_str()).is_ok()
+}
+
 // ── chunkdb subprocess ───────────────────────────────────────────
 
 pub struct ChunkdbProcess {
     pub child: std::process::Child,
-    pub grpc_port: i32,
+    pub listen_port: i32,
     pub http_port: i32,
     pub config_file: tempfile::NamedTempFile,
     pub log_path: std::path::PathBuf,
@@ -74,12 +97,21 @@ impl ChunkdbProcess {
             panic!("crow-chunkdb binary not found; set CROW_CHUNKDB_BIN or build app/crow-chunkdb")
         });
 
-        let grpc_port = find_free_port();
+        // The client derives rpc_port from listen_port using a fixed
+        // offset (CHUNKDB_LISTEN_BASE - CHUNKDB_RPC_BASE = 10). Pick a
+        // port pair that satisfies this constraint so the subprocess
+        // binds the crow-rpc listener on the port the client will
+        // connect to (instead of the hardcoded default 0.0.0.0:9961,
+        // which collides across tests).
+        let rpc_port_offset =
+            i32::from(crow_protocol::CHUNKDB_LISTEN_BASE) - i32::from(crow_protocol::CHUNKDB_RPC_BASE);
+        let (listen_port, rpc_port) = find_port_pair_with_offset(rpc_port_offset);
         let http_port = find_free_port();
 
         let config_content = format!(
             r#"[server]
-listen_addr = "127.0.0.1:{grpc_port}"
+listen_addr = "127.0.0.1:{listen_port}"
+rpc_listen_addr = "127.0.0.1:{rpc_port}"
 http_listen_addr = "127.0.0.1:{http_port}"
 instance_id = "{INSTANCE_ID}"
 kv_server_mgmt_seeds = [{seeds}]
@@ -120,7 +152,7 @@ lock_hold_warn_threshold_ms = 1000
 
         Self {
             child,
-            grpc_port,
+            listen_port,
             http_port,
             config_file,
             log_path,
@@ -143,7 +175,7 @@ lock_hold_warn_threshold_ms = 1000
                 let log = self.log_content();
                 panic!("crow-chunkdb did not become ready within 30s. Log:\n{log}");
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -163,11 +195,13 @@ pub fn check_binaries() -> bool {
 
 /// Build a `ChunkdbClient` with standard retry config.
 pub fn make_client(svc: crow_kv_client::ServiceRegistryClient) -> Arc<ChunkdbClient> {
+    let transport = Arc::new(ChunkdbRpcTransport::new());
     Arc::new(ChunkdbClient::with_retry_config(
         svc,
         RetryConfig {
             max_retries: 5,
             initial_backoff: Duration::from_millis(100),
         },
+        transport,
     ))
 }

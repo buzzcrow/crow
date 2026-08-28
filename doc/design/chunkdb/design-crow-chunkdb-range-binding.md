@@ -30,7 +30,7 @@ and diskdb's table strategy (R102) share one monitor loop.
 ## Table of Contents
 
 - [1. Instance Binding Schema](#1-instance-binding-schema)
-  - [1.1 Proto types](#11-proto-types)
+  - [1.1 Flatbuffer types](#11-flatbuffer-types)
   - [1.2 Key types](#12-key-types)
   - [1.3 Sub-range space](#13-sub-range-space)
   - [1.4 Edge cases](#14-edge-cases)
@@ -66,52 +66,52 @@ Both coexist: the KV group binding decides where chunk metadata is
 persisted; the instance binding decides which chunkdb instance
 processes the request.
 
-### 1.1 Proto types
+### 1.1 Flatbuffer types
 
-`sysdata_type.proto` defines `ChunkdbRangeBindingValue` +
+`sysdata_type.fbs` defines `ChunkdbRangeBindingValue` +
 `ChunkdbRangeMigrationValue` + the `RangeStatus` enum. The binding
 value carries the sub-range index, the derived bucket bounds, the
 current + original owner, and the transition status.
 
-```proto
-message ChunkdbRangeBindingValue {
-  uint32 sub_range_index = 1;  // sub-range index (0..N-1, N = sub_range_count)
-  uint32 range_start     = 2;  // derived from sub_range_index (cached for routing)
-  uint32 range_end       = 3;  // derived from sub_range_index
-  uint64 instance_id     = 4;  // current owner
-  string grpc_endpoint   = 5;
-  uint64 original_instance_id = 6;  // original owner (for migration fallback)
-  string original_endpoint     = 7;
-  RangeStatus status     = 8;  // STABLE or IN_TRANSITION
-  uint64 last_change_time_ms = 9;  // last ownership change timestamp
+```fbs
+table ChunkdbRangeBindingValue {
+  sub_range_index: uint;  // sub-range index (0..N-1, N = sub_range_count)
+  range_start: uint;      // derived from sub_range_index (cached for routing)
+  range_end: uint;        // derived from sub_range_index
+  instance_id: ulong;     // current owner
+  rpc_endpoint: string;
+  original_instance_id: ulong;  // original owner (for migration fallback)
+  original_endpoint: string;
+  status: RangeStatus;    // STABLE or IN_TRANSITION
+  last_change_time_ms: ulong;   // last ownership change timestamp
 }
 
-enum RangeStatus {
-  RANGE_STATUS_STABLE        = 0;
-  RANGE_STATUS_IN_TRANSITION = 1;
+enum RangeStatus : ubyte {
+  RANGE_STATUS_STABLE        = 0,
+  RANGE_STATUS_IN_TRANSITION = 1,
 }
 ```
 
-`chunkdb_type.proto` defines `NotMyRangeHint`, the detail message
-carried in gRPC status when a chunkdb instance receives a request for
-a chunk outside its owned range. The server does not track other
+`chunkdb_type.fbs` defines `NotMyRangeHint`, the detail message
+carried in the RPC response when a chunkdb instance receives a request
+for a chunk outside its owned range. The server does not track other
 instances' bindings, so the hint carries only the rejected bucket (in
 `range_start`/`range_end` as a diagnostic); `instance_id`,
-`grpc_endpoint`, and `sub_range_index` are empty. The client refreshes
+`rpc_endpoint`, and `sub_range_index` are empty. The client refreshes
 its binding cache from group-0 and re-routes via
 `RangeBindingClient::refresh_and_route`.
 
-```proto
-message NotMyRangeHint {
-  uint32 range_start   = 1;  // rejected bucket (diagnostic)
-  uint32 range_end     = 2;  // rejected bucket (diagnostic)
-  uint64 instance_id   = 3;  // unused — server does not know the owner
-  string grpc_endpoint = 4;  // unused — server does not know the owner
-  uint32 sub_range_index = 5;  // unused
+```fbs
+table NotMyRangeHint {
+  range_start: uint;    // rejected bucket (diagnostic)
+  range_end: uint;      // rejected bucket (diagnostic)
+  instance_id: ulong;   // unused — server does not know the owner
+  rpc_endpoint: string; // unused — server does not know the owner
+  sub_range_index: uint; // unused
 }
 ```
 
-`error_code.proto` reserves `ERROR_CODE_NOT_MY_RANGE = 30` for
+`error_code.fbs` reserves `ERROR_CODE_NOT_MY_RANGE = 30` for
 structured error reporting.
 
 `build.rs` adds `#[derive(serde::Serialize, serde::Deserialize)]` to
@@ -181,7 +181,7 @@ pub struct ChunkdbRangeBinding {
     pub range_start: u16,
     pub range_end: u16,
     pub instance_id: u64,
-    pub grpc_endpoint: String,
+    pub rpc_endpoint: String,
     pub original_instance_id: u64,
     pub original_endpoint: String,
     pub status: RangeStatus,
@@ -250,7 +250,7 @@ pub enum RangeRouteError {
 ```
 
 The chunkdb client's `with_retry` loop (in `crow-chunkdb-client`) is
-extended: on `NotMyRange` gRPC status, the client calls
+extended: on `NotMyRange` RPC response, the client calls
 `RangeBindingClient::refresh_and_route(chunk_id)` to refresh the
 binding cache from group-0 and re-route in one call, then retries.
 This follows the `NotLeaderHint` pattern in
@@ -314,7 +314,7 @@ If the guard is `None` (single-instance mode, no binding table), the
 check is skipped. `QueryChunk` and `ListChunks` are read-only and
 bypass the guard (a stale read is acceptable).
 
-On `NotMyRange`, the service layer returns gRPC `FAILED_PRECONDITION`
+On `NotMyRange`, the service layer returns RPC `FAILED_PRECONDITION`
 with a `NotMyRangeHint` detail carrying only the rejected bucket (the
 server does not track other instances' bindings, so it cannot fill the
 owning instance endpoint). The client refreshes its binding cache from
@@ -351,8 +351,8 @@ method passes its chunk ID to `with_retry`. Read-only RPCs without a
 chunk ID (`list_chunks`) pass `None` and use "any instance".
 
 `ChunkdbClientError` gains a `NotMyRange(String)` variant, treated as
-transient by `is_transient()`. `from_status` decodes the
-`NotMyRangeHint` detail from the gRPC status when the code is
+transient by `is_transient()`. `from_response` decodes the
+`NotMyRangeHint` detail from the RPC response when the code is
 `FAILED_PRECONDITION`.
 
 ## 5. Dynamic Binding Monitor
@@ -412,7 +412,7 @@ impl BindingStrategy for ChunkdbRangeStrategy {
 - Divide `N` sub-ranges as evenly as possible: instance `i` gets
   sub-ranges `[i * N / M, (i+1) * N / M)` where `M = instances.len()`.
 - Each sub-range entry is written with `instance_id`,
-  `grpc_endpoint`, `status = STABLE`, `original_instance_id = 0`,
+  `rpc_endpoint`, `status = STABLE`, `original_instance_id = 0`,
   `last_change_time_ms = now`.
 
 `write_bindings` PUTs each binding (idempotent overwrite, no
@@ -621,8 +621,8 @@ correctness; the owning instance accepts the free, others reject).
 - `RangeGuard`: `app/crow-chunkdb/src/range_guard.rs`.
 - Monitor wiring: `app/crow-kv-server/src/binding_monitor_wiring.rs`.
 - chunkdb keep-alive: `app/crow-chunkdb/src/main.rs` (`spawn_chunkdb_keepalive`).
-- `NotMyRangeHint`: `lib/crow-protocol/src/proto/chunkdb_type.proto`.
-- `ChunkdbRangeBindingValue` + `RangeStatus`: `lib/crow-protocol/src/proto/sysdata_type.proto`.
+- `NotMyRangeHint`: `lib/crow-protocol/src/fbs/chunkdb_type.fbs`.
+- `ChunkdbRangeBindingValue` + `RangeStatus`: `lib/crow-protocol/src/fbs/sysdata_type.fbs`.
 - Follow-ups: R102 (diskdb dynamic binding migration — reuses
   `BindingStrategy`), R103 (chunkdb range migration — transition
   states + dual-serve cutover).

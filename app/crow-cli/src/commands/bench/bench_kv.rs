@@ -88,6 +88,11 @@ pub(crate) async fn bench_benchmark_kv(args: super::KvArgs, json: bool) -> ExitC
         args.node_config.clone(),
         args.coalesce_max_keys,
         args.coalesce_drain_threshold,
+        args.peer_pool_size,
+        args.enable_nagle,
+        args.quickack,
+        args.event_write,
+        args.send_queue_capacity,
     );
 
     let mut cfg = BenchConfig::defaults(String::new(), kind);
@@ -146,6 +151,7 @@ pub(crate) async fn bench_benchmark_kv(args: super::KvArgs, json: bool) -> ExitC
 
     let (server_metrics, _) = target.collect_artifacts();
     report.server_metrics = server_metrics;
+    report.client_transport_stats = target.client_transport_stats();
 
     let artifacts_dir = run_dir.join("artifacts");
     let node_ids = target.node_ids();

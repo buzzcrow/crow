@@ -26,7 +26,7 @@ static std::vector<uint8_t> build_frame(uint16_t msg_type, const uint8_t *ctrl, 
 {
     Header h;
     h.msg_type  = msg_type;
-    h.msg_size  = static_cast<uint16_t>(ctrl_len);
+    h.msg_size  = ctrl_len;
     h.data_size = data_len;
     h.flags     = flags;
 
@@ -150,11 +150,11 @@ TEST(FramingTest, PartialHeader)
     std::memcpy(t1.ptr, bytes.data(), 6);
     EXPECT_EQ(parser.advance(6), nullptr);
 
-    // Feed remaining 6 bytes
+    // Feed remaining header bytes
     auto t2 = parser.next_read_target();
     ASSERT_EQ(t2.len, HEADER_SIZE - 6u);
-    std::memcpy(t2.ptr, bytes.data() + 6, 6);
-    EXPECT_EQ(parser.advance(6), nullptr); // header done, need control
+    std::memcpy(t2.ptr, bytes.data() + 6, HEADER_SIZE - 6);
+    EXPECT_EQ(parser.advance(HEADER_SIZE - 6), nullptr); // header done, need control
 
     // Feed control
     auto t3 = parser.next_read_target();

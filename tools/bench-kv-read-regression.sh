@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# --- CrowKV read regression benchmark ---
+# Usage: bash tools/bench-kv-read-regression.sh
+#
+# Regression sentinel for point-read (get) throughput and latency. Covers
+# the core read code paths with a minimal config set, plus a multi-thread
+# read-mode split measurement and a correctness verification pass.
+#
+# Configurations (all --workload read, mem mode, 3-node cluster):
+#   Single-thread (1T:1C) — isolate per-read engine cost:
+#     - lin_1t:        linearizable (lease barrier + engine get)
+#     - minslot_1t:    minslot (no barrier, local serve)
+#   Multi-thread — max throughput + read-mode split:
+#     - lin_6t:        linearizable mid-concurrency
+#     - minslot_6t:    minslot (reads distributed across replicas)
+#     - lin_16t:       linearizable high concurrency
+#     - minslot_16t:   minslot high concurrency
+#     - lin_32t:       linearizable saturation
+#     - minslot_32t:   minslot saturation
+#   HTTP/2 connection lock sentinel:
+#     - minslot_6t_2to1: 6T:3C (2:1 ratio, h2 lock contention)
+#   Correctness verification (--verify-bytes 8):
+#     - lin_16t_verify:   linearizable correctness
+#     - minslot_16t_verify: minslot correctness
+#
+# 11 runs × 20s ≈ 220s + pre-pop overhead.
+#
+# Reference platform: see doc/design/kv/kv-read-flow-analysis.md. After
+# a run, update the "Latest Benchmark Results" section there with the
+# results and CPU model — absolute read throughput is platform-dependent.
+#
+# Prerequisites:
+#   - pixi installed, project dependencies resolved
+#   - jq installed
+#   - release binary built (pixi run -- cargo build --release -p crow-cli)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+RESULTS_FILE="doc/working/bench-read-regression.tsv"
+DURATION=20
+KEYSPACE=100000
+
+run_bench() {
+    local label="$1" read_mode="$2" min_slot="$3" threads="$4" connections="$5" verify_bytes="${6:-0}"
+    local read_endpoint
+    if [ "$read_mode" = "minslot" ]; then
+        read_endpoint="any-replica"
+    else
+        read_endpoint="leader"
+    fi
+    local display="$label (${threads}T:${connections}C)"
+    if [ "$verify_bytes" -gt 0 ]; then
+        display="$display verify"
+    fi
+    echo ">>> $display ..."
+    local output
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
+        --mode mem --workload read --duration-secs "$DURATION" \
+        --loader-num "$threads" --connections "$connections" \
+        --read-mode "$read_mode" --min-slot "$min_slot" \
+        --read-endpoint-policy "$read_endpoint" \
+        --pre-populate "$KEYSPACE" --key-space "$KEYSPACE" \
+        --value-size 64 --verify-bytes "$verify_bytes" --json 2>&1)
+    local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
+    if [ -z "$json" ]; then
+        echo "    ERROR: no JSON output"; echo "$output" | tail -5
+        echo -e "$label\t$read_mode\t${threads}T${connections}C\t$verify_bytes\t0\t0\t0\t0\t0\t0\t1\t1" >> "$RESULTS_FILE"
+        return
+    fi
+    local ops_s avg_us p50_us p99_us p999_us errors corr_err
+    ops_s=$(echo "$json" | jq -r '.total_ops * 1000 / .duration_ms' | awk '{printf "%.0f", $1}')
+    avg_us=$(echo "$json" | jq -r '.by_op.read.latency_us.avg_us')
+    p50_us=$(echo "$json" | jq -r '.by_op.read.latency_us.p50_us')
+    p99_us=$(echo "$json" | jq -r '.by_op.read.latency_us.p99_us')
+    p999_us=$(echo "$json" | jq -r '.by_op.read.latency_us.p999_us')
+    errors=$(echo "$json" | jq -r '.total_errors')
+    corr_err=$(echo "$json" | jq -r '.correctness_errors')
+    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors corr=$corr_err"
+    echo -e "$label\t$read_mode\t${threads}T${connections}C\t$verify_bytes\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors\t$corr_err" >> "$RESULTS_FILE"
+}
+
+# --- regression sentinel configs ---
+#
+# Regression policy: only update the reference table below when a new
+# run is strictly better (higher ops/s, lower latency, fewer errors).
+# If a run is worse, do NOT update — investigate and fix the regression
+# first, otherwise silent performance regressions slip in.
+#
+# Reference results (2026-08-19, Apple M5 Pro, 18c, arm64, macOS 26.5):
+#   10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values.
+#
+#   label              mode        T:C   ops/s    avg_us  p99_us  err  notes
+#   lin_1t             linearizable 1:1   21112    46      67      0    per-read cost
+#   minslot_1t         minslot      1:1   21691    45      66      0    same as lin (lease ~0)
+#   lin_6t             linearizable 6:6   70668    84      163     0    mid-concurrency
+#   minslot_6t         minslot      6:6   77622    76      142     0    +9.8% vs lin (distributed)
+#   lin_16t            linearizable 16:16 106399   148     251     0    high concurrency
+#   minslot_16t        minslot      16:16 107455   147     235     0    +1.0% vs lin (converging)
+#   lin_32t            linearizable 32:32 119473   265     418     0    saturation
+#   minslot_32t        minslot      32:32 113270   280     432     0    -5.2% vs lin (saturated)
+#   minslot_6t_2to1    minslot      6:3   74752    79      151     0    h2 lock, -3.7% vs 6:6
+#   lin_16t_verify     linearizable 16:16 105613   150     252     0    corr=0
+#   minslot_16t_verify minslot      16:16 106662   148     237     0    corr=0
+#
+# Analysis: doc/design/kv/kv-read-flow-analysis.md § Latest Benchmark Results.
+#
+# Latest measured results (2026-08-28, Linux x86_64, AMD Ryzen 9 5950X,
+# 16 cores / 32 threads; 20s mem mode, 3-node cluster, 100k keys, 64B values;
+# script wall time: 9m29.941s):
+#   label              mode          T:C     ops/s   avg_us  p50_us  p99_us  p999_us  err  corr
+#   lin_1t             linearizable  1:1      13495       73      76     107      151    0    0
+#   minslot_1t         minslot       1:1      11746       84      85     125      161    0    0
+#   lin_6t             linearizable  6:6      77338       76      74     127      152    0    0
+#   minslot_6t         minslot       6:6      95949       61      59     105      131    0    0
+#   lin_16t            linearizable 16:16    232893       67      65     116      147    0    0
+#   minslot_16t        minslot      16:16    236501       66      64     109      150    0    0
+#   lin_32t            linearizable 32:32    271184      116     112     221      273    0    0
+#   minslot_32t        minslot      32:32    265130      119     116     206      276    0    0
+#   minslot_6t_2to1    minslot       6:3      89795       66      64     113      143    0    0
+#   lin_16t_verify     linearizable 16:16    233716       67      65     114      141    0    0
+#   minslot_16t_verify minslot      16:16    233090       67      65     111      147    0    0
+
+echo -e "label\tread_mode\tT:C\tverify\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tcorrectness_errors" > "$RESULTS_FILE"
+
+echo "=== Single-thread (1T:1C) — per-read engine cost ==="
+run_bench "lin_1t"        linearizable auto 1 1
+run_bench "minslot_1t"    minslot      zero 1 1
+
+echo "=== Multi-thread — max throughput + read-mode split ==="
+run_bench "lin_6t"        linearizable auto 6 6
+run_bench "minslot_6t"    minslot      zero 6 6
+run_bench "lin_16t"       linearizable auto 16 16
+run_bench "minslot_16t"   minslot      zero 16 16
+run_bench "lin_32t"       linearizable auto 32 32
+run_bench "minslot_32t"   minslot      zero 32 32
+
+echo "=== HTTP/2 connection lock sentinel (2T:1C should drop) ==="
+run_bench "minslot_6t_2to1" minslot    zero 6 3
+
+echo "=== Correctness verification ==="
+run_bench "lin_16t_verify"     linearizable auto 16 16 8
+run_bench "minslot_16t_verify" minslot      zero 16 16 8
+
+echo "=== DONE ==="
+echo "Results in $RESULTS_FILE"
+column -t -s$'\t' "$RESULTS_FILE"

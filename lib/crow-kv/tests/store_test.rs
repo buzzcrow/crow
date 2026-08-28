@@ -3,12 +3,12 @@
 
 //! Store-layer tests (`PxKvStore`).
 //!
-//! A store hosts multiple groups behind one node identity and the shared gRPC
+//! A store hosts multiple groups behind one node identity and the shared crow-rpc
 //! server. These tests cover request routing to the right group, dynamic
 //! add/remove of groups, single-node KV/read modes, the topology `status`
 //! snapshot, the `health` report, and graceful `shutdown` cascade.
 //!
-//! These exercise the `crow_kv` library `PxKvStore` directly (the embedded gRPC
+//! These exercise the `crow_kv` library `PxKvStore` directly (the embedded crow-rpc
 //! server, no HTTP). Tests that boot the `crow-kv-server` binary / HTTP
 //! management API live under `crow-kv-server/tests`.
 

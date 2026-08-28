@@ -64,9 +64,11 @@ pub(crate) async fn run_fetchgap_driver(
             );
             continue;
         }
-        // Clone the learner stream Arc so the spawned task can send
-        // FetchGap without holding a reference to the group.
-        let stream = remote.learner_stream().clone();
+        // Clone the crow-rpc transport + endpoint so the spawned task
+        // can call `transport.send_fetch_gap()` directly.
+        let rpc_transport = remote.rpc_transport().cloned();
+        let rpc_endpoint = remote.endpoint_str().to_string();
+        let rpc_timeout = Duration::from_millis(group.config.election.learner_stream_rpc_timeout_ms);
         let replica = group.local_replica();
         let term = replica.current_term_snapshot();
         let gaps = replica.drain_gaps_for_fetchgap();
@@ -90,7 +92,9 @@ pub(crate) async fn run_fetchgap_driver(
             .map(|h| h.fetchgap_failed.clone());
         // Spawn a task per gap to send FetchGap concurrently.
         for slot in gaps {
-            let stream_clone = stream.clone();
+            let rpc_transport_clone = rpc_transport.clone();
+            let rpc_endpoint_clone = rpc_endpoint.clone();
+            let rpc_timeout_clone = rpc_timeout;
             let fetchgap_inflight_clone = fetchgap_inflight.clone();
             let gap_slots_clone = gap_slots.clone();
             let learner_clone = learner.clone();
@@ -99,14 +103,26 @@ pub(crate) async fn run_fetchgap_driver(
             let fetchgap_received_clone = fetchgap_received.clone();
             let fetchgap_failed_clone = fetchgap_failed.clone();
             tokio::spawn(async move {
-                let req = crate::rpc::FetchGapRequest {
-                    version: 1,
-                    group_id,
-                    slot,
-                    term,
-                    leader_id,
+                let Some(ref transport) = rpc_transport_clone else {
+                    fetchgap_inflight_clone.fetch_sub(1, Ordering::AcqRel);
+                    if let Some(c) = &fetchgap_failed_clone {
+                        c.inc();
+                    }
+                    return;
                 };
-                let result = stream_clone.send_fetch_gap(req).await;
+                let result = tokio::time::timeout(
+                    rpc_timeout_clone,
+                    transport.send_fetch_gap(&rpc_endpoint_clone, group_id, slot, term, leader_id),
+                )
+                .await
+                .map_err(|_| {
+                    crate::cluster::replica::PxReplicaError::Internal(format!(
+                        "fetch_gap rpc timeout after {} ms at peer {}",
+                        rpc_timeout_clone.as_millis(),
+                        rpc_endpoint_clone
+                    ))
+                })
+                .and_then(|r| r);
                 fetchgap_inflight_clone.fetch_sub(1, Ordering::AcqRel);
                 match result {
                     Ok(resp) => {
@@ -126,7 +142,7 @@ pub(crate) async fn run_fetchgap_driver(
                             slot: resp.slot,
                             ballot: crate::paxos::roles::PxBallot::new(resp.ballot_round, resp.leader_id),
                             term: resp.term,
-                            payload: bytes::Bytes::from(resp.payload),
+                            payload: resp.payload,
                         };
                         acceptor_clone.accept(&entry).await;
                         learner_clone.update_chosen_frontier(resp.slot, resp.term);

@@ -7,7 +7,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::time::Duration;
-use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
 use crate::cluster::group::{PxGroup, RemoteReplicaKind};
@@ -455,7 +454,7 @@ impl PxGroup {
 
     /// Cascade shutdown through this group's replicas.
     ///
-    /// Iterates real remote replicas and closes their gRPC channels, then
+    /// Iterates real remote replicas and closes their crow-rpc channels, then
     /// shuts down the local replica (which in turn cascades through
     /// `acceptor` / `learner` / `slot_list` / `kv_store`). Continues on errors;
     /// aggregated `critical:` messages are returned.
@@ -521,14 +520,13 @@ impl PxGroup {
             let _ = handle.await;
         }
 
-        // 1. Close remote gRPC channels first so no in-flight RPCs spin.
+        // 1. Close remote crow-rpc channels first so no in-flight RPCs spin.
         for remote in &self.remote_replicas {
             if let RemoteReplicaKind::Real(remote) = remote {
                 let sub = remote.shutdown(per_layer_timeout).await;
                 report.merge(sub);
             }
         }
-
         // 2. Shutdown local replica.
         let sub = self.local_replica.shutdown(per_layer_timeout).await;
         report.merge(sub);
@@ -564,62 +562,41 @@ impl PxGroup {
     /// Returns an error string on any transport, decode, or engine-import
     /// failure.
     pub async fn join_via_snapshot(&self, peer_endpoint: &str) -> Result<u64, String> {
-        use crate::rpc::snapshot_service_client::SnapshotServiceClient;
-        use crate::rpc::{snapshot_stream_item, SnapshotRequest};
+        use crate::rpc::PxRpcTransport;
 
-        let mut client = SnapshotServiceClient::connect(format!("http://{peer_endpoint}"))
+        let transport = PxRpcTransport::new();
+        let resp = transport
+            .send_snapshot(peer_endpoint, self.group_id)
             .await
-            .map_err(|e| format!("snapshot join: connect to {peer_endpoint} failed: {e}"))?;
-
-        let mut stream = client
-            .stream_snapshot(SnapshotRequest {
-                group_id: self.group_id,
-            })
-            .await
-            .map_err(|e| format!("snapshot join: StreamSnapshot rpc failed: {e}"))?
-            .into_inner();
-
-        let mut header: Option<(u64, u64)> = None;
-        let mut bytes = Vec::new();
-        while let Some(item) = stream.next().await {
-            let item = item.map_err(|e| format!("snapshot join: stream error: {e}"))?;
-            match item.payload {
-                Some(snapshot_stream_item::Payload::Header(h)) => {
-                    header = Some((h.term_at_slot, h.membership_epoch));
-                }
-                Some(snapshot_stream_item::Payload::Data(chunk)) => {
-                    bytes.extend_from_slice(&chunk);
-                }
-                None => {}
-            }
-        }
-        let (term_at_slot, membership_epoch) =
-            header.ok_or_else(|| "snapshot join: stream ended without a header".to_string())?;
+            .map_err(|e| format!("snapshot join: rpc to {peer_endpoint} failed: {e}"))?;
 
         let at_slot = self
             .local_replica
             .learner
             .engine()
-            .snapshot_import(&bytes)
+            .snapshot_import(&resp.data)
             .map_err(|e| format!("snapshot join: engine import failed: {e}"))?;
+
+        if at_slot != resp.at_slot {
+            return Err(format!(
+                "snapshot join: at_slot mismatch (server reported {}, import returned {})",
+                resp.at_slot, at_slot
+            ));
+        }
 
         info!(
             group_id = self.group_id,
             peer_endpoint,
             at_slot,
-            term_at_slot,
-            membership_epoch,
-            stream_bytes = bytes.len(),
+            term_at_slot = resp.term_at_slot,
+            membership_epoch = resp.membership_epoch,
+            stream_bytes = resp.data.len(),
             "snapshot join: imported snapshot, seeding learner frontier"
         );
         self.local_replica
             .learner
-            .seed_resume_frontier(at_slot, term_at_slot);
-        // Seed the epoch fence from the exporting peer's current value --
-        // without this, a fresh join always starts at epoch 0 and could
-        // never receive a Prepare/Accept (even as a non-voting catch-up
-        // learner) from a group that has ever had a membership change.
-        self.set_membership_epoch(membership_epoch);
+            .seed_resume_frontier(at_slot, resp.term_at_slot);
+        self.set_membership_epoch(resp.membership_epoch);
         Ok(at_slot)
     }
 

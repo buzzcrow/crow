@@ -103,6 +103,7 @@ fn minimal_server_only_config_uses_section_defaults() {
     let toml = "[server]\n\
          listen_addr = \"0.0.0.0:50051\"\n\
          http_listen_addr = \"0.0.0.0:50052\"\n\
+         rpc_listen_addr = \"0.0.0.0:9931\"\n\
          kv_server_mgmt_seeds = [\"http://127.0.0.1:9910\"]\n";
     let config: DdbConfig = toml::from_str(toml).expect("minimal config parses");
     config.validate().expect("minimal config validates");

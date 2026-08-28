@@ -3,7 +3,7 @@
 
 //! Bench runner: connection pool + worker tasks + stats aggregation.
 //!
-//! Key work: build N gRPC channels (the connection pool), spawn M
+//! Key work: build N crow-rpc channels (the connection pool), spawn M
 //! tokio tasks (the workers) that each clone a channel, drive a loop
 //! issuing ops until `duration` elapses, collect per-op-kind histograms
 //! and counters, and emit a `BenchReport`.
@@ -68,7 +68,7 @@ pub(crate) struct BenchConfig {
     pub(crate) workload: WorkloadKind,
     /// Storage mode label: `mem`, `file`, or `block`.
     pub(crate) mode: String,
-    /// Number of independent gRPC channels (1..=64). Default 4.
+    /// Number of independent crow-rpc channels (1..=64). Default 4.
     pub(crate) connections: u32,
     /// Number of load generators (worker threads or coroutines).
     /// Default 8.
@@ -169,6 +169,19 @@ pub(crate) struct BenchConfig {
     pub(crate) rpc_worker_mode: RpcWorkerMode,
     /// Per-connection send queue capacity (RPC target only). Default 1024.
     pub(crate) send_queue_capacity: u32,
+    /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
+    pub(crate) enable_nagle: bool,
+    /// Enable `TCP_QUICKACK` (Linux only). Breaks Nagle + delayed-ACK deadlock.
+    pub(crate) quickack: bool,
+    /// Connect to external fb server on this port (RPC target only).
+    /// The server must be started manually (e.g. via
+    /// `tools/bench-rpc-regression.sh`). No auto-spawn.
+    pub(crate) server_port: Option<i32>,
+    /// Log directory for fb server and client logs (RPC target only).
+    /// Defaults to the bench run directory.
+    pub(crate) log_dir: Option<String>,
+    /// Metrics flush interval in seconds (RPC target only). Default 5.
+    pub(crate) metrics_interval: u64,
 }
 
 impl BenchConfig {
@@ -206,6 +219,11 @@ impl BenchConfig {
             io_workers: 1,
             rpc_worker_mode: RpcWorkerMode::Coroutine,
             send_queue_capacity: 1024,
+            enable_nagle: false,
+            quickack: false,
+            server_port: None,
+            log_dir: None,
+            metrics_interval: 5,
         }
     }
 
@@ -400,6 +418,7 @@ pub(crate) async fn run_bench<T: BenchTarget>(
         by_op: per_op_map(by_kind),
         server_metrics: super::report::ServerMetrics::default(),
         client_metrics,
+        client_transport_stats: super::report::TransportStatsSnapshot::default(),
     };
 
     let dir = cfg.report_dir.clone().unwrap_or_else(BenchReport::default_dir);

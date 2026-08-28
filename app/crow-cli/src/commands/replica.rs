@@ -18,7 +18,7 @@ pub enum ReplicaVerb {
         store_id: u64,
         #[arg(long)]
         group_id: u64,
-        /// Target node id. The console looks up the node's gRPC URL
+        /// Target node id. The console looks up the node's crow-rpc URL
         /// from its config; the operator never sees `host:port`.
         #[arg(long)]
         node: u64,

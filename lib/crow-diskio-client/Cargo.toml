@@ -12,6 +12,7 @@ autobenches = false
 workspace = true
 
 [dependencies]
+crow-common = { path = "../crow-common/rust" }
 crow-protocol = { path = "../crow-protocol" }
 crow-rpc-ffi = { path = "../crow-rpc/ffi" }
 flatbuffers = { workspace = true }

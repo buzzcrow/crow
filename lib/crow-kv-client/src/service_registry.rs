@@ -69,12 +69,12 @@ impl ServiceRegistryClient {
         &self,
         service: &str,
         instance_id: InstanceId,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         extra: &ServiceExtra,
     ) -> Result<()> {
         let value = InstanceValue {
             instance_id,
-            grpc_endpoint: grpc_endpoint.to_string(),
+            rpc_endpoint: rpc_endpoint.to_string(),
             last_heartbeat_ms: now_ms(),
             extra: Some(extra.clone()),
         };
@@ -83,18 +83,18 @@ impl ServiceRegistryClient {
 
     /// Heartbeat an existing instance (updates `last_heartbeat_ms`
     /// and any changed fields in `extra`). Read-modify-write to
-    /// preserve `grpc_endpoint` if the caller only wants to update
+    /// preserve `rpc_endpoint` if the caller only wants to update
     /// the heartbeat timestamp + extra.
     pub async fn heartbeat(
         &self,
         service: &str,
         instance_id: InstanceId,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         extra: &ServiceExtra,
     ) -> Result<()> {
         // Heartbeat is a full overwrite (same as register) — the
         // caller supplies the current endpoint + extra each time.
-        self.register(service, instance_id, grpc_endpoint, extra).await
+        self.register(service, instance_id, rpc_endpoint, extra).await
     }
 
     /// Unregister a service instance (clean shutdown).
@@ -231,7 +231,7 @@ impl ServiceRegistryClient {
     pub async fn register_diskdb(
         &self,
         instance_id: InstanceId,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         owned_dg_ids: &[u64],
         group_usages: &[DiskGroupUsageSummary],
     ) -> Result<()> {
@@ -242,7 +242,7 @@ impl ServiceRegistryClient {
             }),
             kv_server: None,
         };
-        self.register("diskdb", instance_id, grpc_endpoint, &extra).await
+        self.register("diskdb", instance_id, rpc_endpoint, &extra).await
     }
 
     /// Heartbeat a diskdb instance with updated `owned_dg_ids` and
@@ -250,11 +250,11 @@ impl ServiceRegistryClient {
     pub async fn heartbeat_diskdb(
         &self,
         instance_id: InstanceId,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         owned_dg_ids: &[u64],
         group_usages: &[DiskGroupUsageSummary],
     ) -> Result<()> {
-        self.register_diskdb(instance_id, grpc_endpoint, owned_dg_ids, group_usages)
+        self.register_diskdb(instance_id, rpc_endpoint, owned_dg_ids, group_usages)
             .await
     }
 
@@ -273,7 +273,7 @@ impl ServiceRegistryClient {
     pub async fn heartbeat_diskio(
         &self,
         instance_id: InstanceId,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         owned_dg_ids: &[u64],
         group_usages: &[DiskGroupUsageSummary],
     ) -> Result<()> {
@@ -284,7 +284,7 @@ impl ServiceRegistryClient {
             }),
             kv_server: None,
         };
-        self.register("diskio", instance_id, grpc_endpoint, &extra).await
+        self.register("diskio", instance_id, rpc_endpoint, &extra).await
     }
 }
 
@@ -296,7 +296,7 @@ impl ServiceRegistryClient {
     pub async fn register_kv_server(
         &self,
         instance_id: InstanceId,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         hosted_stores: &[u64],
         hosted_groups: &[crow_protocol::common::HostedGroup],
         health: &str,
@@ -311,7 +311,7 @@ impl ServiceRegistryClient {
                 data_root: data_root.to_string(),
             }),
         };
-        self.register("kv-server", instance_id, grpc_endpoint, &extra)
+        self.register("kv-server", instance_id, rpc_endpoint, &extra)
             .await
     }
 
@@ -319,7 +319,7 @@ impl ServiceRegistryClient {
     pub async fn heartbeat_kv_server(
         &self,
         instance_id: InstanceId,
-        grpc_endpoint: &str,
+        rpc_endpoint: &str,
         hosted_stores: &[u64],
         hosted_groups: &[crow_protocol::common::HostedGroup],
         health: &str,
@@ -327,7 +327,7 @@ impl ServiceRegistryClient {
     ) -> Result<()> {
         self.register_kv_server(
             instance_id,
-            grpc_endpoint,
+            rpc_endpoint,
             hosted_stores,
             hosted_groups,
             health,
@@ -346,20 +346,20 @@ impl ServiceRegistryClient {
 
 impl ServiceRegistryClient {
     /// Register a chunkdb instance. chunkdb is stateless (design §3.6),
-    /// so the only extra field is the gRPC endpoint; the binding
+    /// so the only extra field is the crow-rpc endpoint; the binding
     /// monitor (`BindingMonitor` with `ChunkdbRangeStrategy`) reads
     /// these entries to compute the range binding table.
-    pub async fn register_chunkdb(&self, instance_id: InstanceId, grpc_endpoint: &str) -> Result<()> {
+    pub async fn register_chunkdb(&self, instance_id: InstanceId, rpc_endpoint: &str) -> Result<()> {
         let extra = ServiceExtra {
             diskdb: None,
             kv_server: None,
         };
-        self.register("chunkdb", instance_id, grpc_endpoint, &extra).await
+        self.register("chunkdb", instance_id, rpc_endpoint, &extra).await
     }
 
     /// Heartbeat a chunkdb instance (same as register — full overwrite).
-    pub async fn heartbeat_chunkdb(&self, instance_id: InstanceId, grpc_endpoint: &str) -> Result<()> {
-        self.register_chunkdb(instance_id, grpc_endpoint).await
+    pub async fn heartbeat_chunkdb(&self, instance_id: InstanceId, rpc_endpoint: &str) -> Result<()> {
+        self.register_chunkdb(instance_id, rpc_endpoint).await
     }
 
     /// Read all live chunkdb instances.

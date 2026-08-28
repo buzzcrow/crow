@@ -5,7 +5,7 @@
 //!
 //! Starts a real 3-node `crow-kv-server` cluster (store 0, groups 0
 //! and 1), seeds hardware metadata, starts diskdb in-process as a
-//! gRPC server, registers it in the service registry, and wires the
+//! crow-rpc server, registers it in the service registry, and wires the
 //! chunkdb lifecycle handler. Tests call the handler directly.
 
 use std::io as std_io;
@@ -30,7 +30,7 @@ use crow_diskdb::metrics::RecalcEngine;
 use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::ZoneLoader;
 use crow_diskdb::scanner::ScanState;
-use crow_diskdb::service::DiskdbService;
+use crow_diskdb::service::DiskdbRpcService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
 use crow_protocol::common::{DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -487,24 +487,24 @@ pub fn seeded_dg_ids() -> Vec<u64> {
     (0..3u64).map(|i| 1000 + i).collect()
 }
 
-// ── diskdb gRPC server (in-process) ─────────────────────────────
+// ── diskdb crow-rpc server (in-process) ─────────────────────────────
 
 #[allow(dead_code)]
 pub struct DiskdbServer {
     pub container: Arc<DdbDiskGroupContainer>,
-    pub grpc_endpoint: String,
-    _serve_handle: tokio::task::JoinHandle<()>,
+    pub rpc_endpoint: String,
+    _serve_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DiskdbServer {
     /// Start diskdb in-process: run one keepalive tick to populate
-    /// state, wait for zones, then start the gRPC server on a free
+    /// state, wait for zones, then start the crow-rpc server on a free
     /// port and register in the service registry.
     pub async fn start(cluster: &KvCluster) -> Self {
         let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
         let svc = cluster.make_service_registry_client();
         let hw = cluster.make_hardware_client();
-        // Keepalive takes an owned DdbKvClient; the gRPC service takes Arc.
+        // Keepalive takes an owned DdbKvClient; the RPC service takes Arc.
         let dg_kv_owned = DdbKvClient::from_shared(cluster.make_crowkv_client());
 
         let keepalive_cfg = KeepAliveConfig {
@@ -535,7 +535,8 @@ impl DiskdbServer {
 
         let mut registry = MetricsRegistry::new();
         let metrics = Arc::new(DiskdbMetrics::register(&mut registry));
-        let grpc_service = DiskdbService::new(
+        let rt_handle = tokio::runtime::Handle::current();
+        let rpc_service = Arc::new(DiskdbRpcService::new(
             Arc::clone(&container),
             cluster.make_ddb_kv_client(),
             StorageDefaults::default(),
@@ -546,25 +547,26 @@ impl DiskdbServer {
             )),
             ScanState::new(),
             metrics,
-        )
-        .into_server();
+            rt_handle,
+        ));
+        let rpc_server = Arc::new(crow_rpc_ffi::RpcServer::new(None));
+        rpc_server
+            .listen(
+                listen_addr.ip().to_string().as_str(),
+                i32::from(listen_addr.port()),
+            )
+            .expect("rpc server listen");
+        rpc_service.register_handlers(&rpc_server);
+        rpc_server.start();
 
         container.set_lifecycle_phase(StartupPhase::Up);
 
-        let serve_handle = tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(grpc_service)
-                .serve(listen_addr)
-                .await
-                .expect("diskdb gRPC server");
-        });
-
-        let grpc_endpoint = format!("http://127.0.0.1:{port}");
+        let rpc_endpoint = format!("http://127.0.0.1:{port}");
 
         // Register in service registry.
         let svc = cluster.make_service_registry_client();
         let dg_ids = seeded_dg_ids();
-        svc.register_diskdb(INSTANCE_ID, &grpc_endpoint, &dg_ids, &[])
+        svc.register_diskdb(INSTANCE_ID, &rpc_endpoint, &dg_ids, &[])
             .await
             .expect("register diskdb");
 
@@ -573,8 +575,8 @@ impl DiskdbServer {
 
         Self {
             container,
-            grpc_endpoint,
-            _serve_handle: serve_handle,
+            rpc_endpoint,
+            _serve_handle: None,
         }
     }
 }

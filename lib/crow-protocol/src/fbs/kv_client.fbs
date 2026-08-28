@@ -1,0 +1,334 @@
+include "common_type.fbs";
+
+namespace crow.kv_client.proto;
+
+// KV client-facing service flatbuffer control messages (R117: legacy →
+// crow-rpc migration). Mirrors crow_kv.rpc.KvService (kv.proto).
+//
+// Conventions (design-crow-rpc.md §6, todo_fb.md "Rules to Follow"):
+// - Every request/response table carries `id` (request_id, matched by
+//   the RPC framework) + `rpc_create_nano` (creation timestamp in ns)
+//   as its first two fields, same as kv_consensus.fbs / diskdb.fbs.
+// - Every response carries `ret_code` (FBKvClientRetCode) + optional
+//   `error_msg`. On Success the data fields are populated; on error
+//   the data fields are empty and `error_msg` describes the failure.
+// - `NotLeaderHint` is NOT a separate message — it is a string field
+//   (`not_leader_hint`) on the response tables. The client reads it
+//   to detect a non-leader replica and redirects via its topology
+//   cache. No Paxos term/epoch reasoning (unlike kv_consensus.fbs).
+// - Unary requests carry `forwarded: bool` (default false) — the
+//   server-side leader-forward loop-guard that replaces the
+//   `x-crow-kv-forwarded` legacy metadata header (crow-rpc has no
+//   metadata). Set to true when the server re-issues a Linearizable
+//   read to the leader; the leader serves it locally without
+//   re-forwarding.
+// - WatchNotify is a persistent-connection server-push model (NOT a
+//   bidi Stream): the client sends `FBWatchSubscribe`/
+//   `FBWatchUnsubscribe` as fire-and-forget `send()` frames; the
+//   server pushes `FBWatchNotify`/`FBWatchNotifyError` as
+//   fire-and-forget `send()` frames on the same connection.
+
+// ── Return codes (mirrors kv.proto KvErrorCode) ─────────────────
+enum FBKvClientRetCode : int16 {
+    Success = 0,
+    NotFound = 1,
+    NotLeader = 2,
+    Unavailable = 3,
+    Internal = 4,
+    InvalidArgument = 5,
+    // JournalScan asked for slots already GC'd below the WAL trim
+    // point. The caller falls back to a full-scan rebuild.
+    JournalScanGcGap = 6,
+}
+
+// ── Read mode (mirrors kv.proto ReadMode) ───────────────────────
+enum FBReadMode : int16 {
+    Linearizable = 0,
+    MinSlot = 1,
+}
+
+// ── Wrapper for a byte vector (flatbuffers rejects [[ubyte]]) ────
+// Used by FBWatchNotify to carry multiple keys/values per push.
+table FBBytes {
+    data:[ubyte];
+}
+
+// ── Put / Get / Delete / BatchWrite ─────────────────────────────
+// All four return FBKvResponse (matching kv.proto's unified
+// KvResponse). The response msg_type is EKvResponse (1101) for all.
+
+table FBKvSetRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    key:[ubyte];
+    value:[ubyte];
+    seq:uint64;
+    ttl_ms:uint64;
+    client_id:uint64;
+    request_id:uint64;
+    request_create_ms:uint64;
+    group_id:uint64;
+    forwarded:bool;
+}
+
+table FBKvGetRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    key:[ubyte];
+    request_id:uint64;
+    request_create_ms:uint64;
+    group_id:uint64;
+    read_mode:FBReadMode;
+    min_slot:uint64;
+    forwarded:bool;
+}
+
+table FBKvDeleteRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    key:[ubyte];
+    seq:uint64;
+    client_id:uint64;
+    request_id:uint64;
+    request_create_ms:uint64;
+    group_id:uint64;
+    forwarded:bool;
+}
+
+table FBKvBatchItem {
+    key:[ubyte];
+    value:[ubyte];
+    is_delete:bool;
+}
+
+table FBKvBatchWriteRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    items:[FBKvBatchItem];
+    seq:uint64;
+    client_id:uint64;
+    request_id:uint64;
+    request_create_ms:uint64;
+    group_id:uint64;
+    forwarded:bool;
+}
+
+// Unified mutation + get response (mirrors kv.proto KvResponse).
+table FBKvResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvClientRetCode;
+    error_msg:string;
+    version:uint32;
+    ok:bool;
+    revision:uint64;
+    not_found:bool;
+    not_leader_hint:string;
+    request_id:uint64;
+    request_create_ms:uint64;
+    value:[ubyte];
+    read_slot:uint64;
+    safe_slot:uint64;
+}
+
+// ── Scan ────────────────────────────────────────────────────────
+
+table FBKvScanRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    prefix:[ubyte];
+    limit:uint32;
+    request_id:uint64;
+    request_create_ms:uint64;
+    group_id:uint64;
+    read_mode:FBReadMode;
+    start_after:[ubyte];
+    end_key:[ubyte];
+    min_slot:uint64;
+    keys_only:bool;
+    count_only:bool;
+    deadline_ms:uint64;
+    forwarded:bool;
+}
+
+table FBKvScanItem {
+    key:[ubyte];
+    value:[ubyte];
+}
+
+table FBKvScanResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvClientRetCode;
+    error_msg:string;
+    version:uint32;
+    ok:bool;
+    truncated:bool;
+    items:[FBKvScanItem];
+    request_id:uint64;
+    request_create_ms:uint64;
+    read_slot:uint64;
+    not_leader_hint:string;
+    count:uint64;
+    timed_out:bool;
+}
+
+// ── JournalScan ─────────────────────────────────────────────────
+
+table FBKvJournalScanRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    min_slot:uint64;
+    max_slot:uint64;
+    key_prefix:[ubyte];
+    limit:uint32;
+    request_id:uint64;
+    request_create_ms:uint64;
+    read_mode:FBReadMode;
+    forwarded:bool;
+}
+
+table FBKvJournalOp {
+    key:[ubyte];
+    value:[ubyte];
+    is_delete:bool;
+    slot:uint64;
+}
+
+table FBKvJournalScanResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvClientRetCode;
+    error_msg:string;
+    version:uint32;
+    ok:bool;
+    ops:[FBKvJournalOp];
+    truncated:bool;
+    last_op_slot:uint64;
+    read_slot:uint64;
+    not_leader_hint:string;
+    request_id:uint64;
+    request_create_ms:uint64;
+}
+
+// ── Snapshot versioning API (R59) ───────────────────────────────
+
+table FBCreateSnapshotRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    group_id:uint64;
+    read_mode:FBReadMode;
+    min_slot:uint64;
+    forwarded:bool;
+}
+
+table FBCreateSnapshotResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvClientRetCode;
+    error_msg:string;
+    ok:bool;
+    snapshot_handle:uint64;
+    at_slot:uint64;
+    not_leader_hint:string;
+}
+
+table FBListSnapshotsRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    group_id:uint64;
+}
+
+table FBSnapshotInfo {
+    snapshot_handle:uint64;
+    at_slot:uint64;
+    lease_remaining_ms:uint64;
+}
+
+table FBListSnapshotsResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvClientRetCode;
+    error_msg:string;
+    ok:bool;
+    snapshots:[FBSnapshotInfo];
+}
+
+table FBSnapshotScanRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    snapshot_handle:uint64;
+    prefix:[ubyte];
+    start_after:[ubyte];
+    limit:uint32;
+    group_id:uint64;
+}
+
+table FBSnapshotScanResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvClientRetCode;
+    error_msg:string;
+    ok:bool;
+    truncated:bool;
+    items:[FBKvScanItem];
+}
+
+table FBReleaseSnapshotRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    snapshot_handle:uint64;
+    group_id:uint64;
+}
+
+table FBReleaseSnapshotResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBKvClientRetCode;
+    error_msg:string;
+    ok:bool;
+}
+
+// ── Watch/Notify (persistent-connection server-push) ────────────
+// Client→server frames (fire-and-forget `send()`, no response):
+table FBWatchSubscribe {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    group_id:uint64;
+    prefix:[ubyte];
+}
+
+table FBWatchUnsubscribe {
+    id:uint64;
+    rpc_create_nano:uint64;
+    group_id:uint64;
+    prefix:[ubyte];
+}
+
+// Server→client push frames (fire-and-forget `send()` on the
+// watcher's connection, no response):
+table FBWatchNotify {
+    id:uint64;
+    rpc_create_nano:uint64;
+    group_id:uint64;
+    prefix:[ubyte];
+    keys:[FBBytes];
+    slot:uint64;
+    values:[FBBytes];
+}
+
+table FBWatchNotifyError {
+    id:uint64;
+    rpc_create_nano:uint64;
+    group_id:uint64;
+    not_leader_hint:string;
+    error:string;
+}

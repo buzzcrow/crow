@@ -20,7 +20,7 @@ use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::recovery::compaction::{CompactionEngine, PreparatoryThread};
 use crow_diskdb::recovery::ZoneLoader;
 use crow_diskdb::scanner::{ScanState, ScannerTask};
-use crow_diskdb::service::DiskdbService;
+use crow_diskdb::service::DiskdbRpcService;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient};
 use tracing::info;
 
@@ -32,13 +32,17 @@ struct Cli {
     #[arg(long)]
     config: String,
 
-    /// gRPC listen address (overrides config).
+    /// crow-rpc listen address (overrides config).
     #[arg(long)]
     listen_addr: Option<String>,
 
     /// HTTP management listen address (overrides config).
     #[arg(long)]
     http_addr: Option<String>,
+
+    /// Number of crow-rpc I/O worker threads. Default: 2.
+    #[arg(long, default_value_t = 2)]
+    rpc_workers: u32,
 }
 
 #[tokio::main]
@@ -135,7 +139,7 @@ async fn main() {
         .with_ddb_kv_client(dg_kv_sync)
         .with_cas_retry_metric(Arc::clone(&metrics.allocate_retry_cas_bit))
         .with_config_handle(Arc::clone(&config))
-        .with_grpc_endpoint(config.load().server.listen_addr.clone())
+        .with_rpc_endpoint(config.load().server.rpc_listen_addr.clone())
         .with_metrics(metrics.clone());
     let keepalive = if let Some(ref trigger) = sync_trigger {
         keepalive.with_sync_trigger(Arc::clone(trigger))
@@ -152,7 +156,7 @@ async fn main() {
         "initial keep-alive tick complete"
     );
 
-    // Build the gRPC service + start serving immediately (before
+    // Build the crow-rpc service + start serving immediately (before
     // zone loading). Mutating RPCs are gated on lifecycle phase = Up,
     // so allocate/free/rebuild return `unavailable` during loading.
     // Read-only RPCs (GetDiskGroupInfo, GetDiskInfo) are allowed.
@@ -168,7 +172,18 @@ async fn main() {
         .listen_addr
         .parse()
         .expect("valid listen_addr");
-    let grpc_service = DiskdbService::new(
+    info!(%listen_addr, "RPC server listening (zone load pending)");
+
+    // Build the crow-rpc server. The RpcServer listens on the RPC
+    // port and dispatches to DiskdbRpcService handlers.
+    let rpc_listen_addr: SocketAddr = config
+        .load()
+        .server
+        .rpc_listen_addr
+        .parse()
+        .expect("valid rpc_listen_addr");
+    let rpc_rt_handle = tokio::runtime::Handle::current();
+    let rpc_service = Arc::new(DiskdbRpcService::new(
         container.clone(),
         Arc::clone(&dg_kv),
         config.load().storage.clone(),
@@ -176,9 +191,18 @@ async fn main() {
         Arc::clone(&recalc_engine),
         scan_state.clone(),
         Arc::new(metrics.clone()),
-    )
-    .into_server();
-    info!(%listen_addr, "gRPC server listening (zone load pending)");
+        rpc_rt_handle,
+    ));
+    let rpc_server = Arc::new(crow_rpc_ffi::RpcServer::with_engines(None, 1, args.rpc_workers));
+    rpc_server
+        .listen(
+            rpc_listen_addr.ip().to_string().as_str(),
+            i32::from(rpc_listen_addr.port()),
+        )
+        .expect("rpc server listen");
+    rpc_service.register_handlers(&rpc_server);
+    rpc_server.start();
+    info!(%rpc_listen_addr, "crow-rpc server listening (R115 migration)");
 
     // Phase = Loading. Spawn zone loading as a background task — the
     // main task does not block on it. Each disk-group's zones are
@@ -275,20 +299,13 @@ async fn main() {
             .expect("HTTP health server error");
     });
 
-    // Serve gRPC until shutdown signal.
-    let grpc_result = tonic::transport::Server::builder()
-        .add_service(grpc_service)
-        .serve_with_shutdown(listen_addr, async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("received shutdown signal");
-            stop.notify_waiters();
-            http_stop.notify_waiters();
-        })
-        .await;
-
-    if let Err(e) = grpc_result {
-        tracing::error!("gRPC server error: {e}");
-    }
+    // Wait for shutdown signal.
+    let rpc_server_stop = Arc::clone(&rpc_server);
+    let _ = tokio::signal::ctrl_c().await;
+    info!("received shutdown signal");
+    rpc_server_stop.stop();
+    stop.notify_waiters();
+    http_stop.notify_waiters();
     for h in bg_handles {
         let _ = h.await;
     }
