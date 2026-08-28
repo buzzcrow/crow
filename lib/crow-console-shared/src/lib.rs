@@ -14,6 +14,7 @@
 
 pub mod clients;
 pub mod cluster;
+pub mod cluster_deployer;
 pub mod config;
 pub mod corr_id;
 pub mod diskdb;

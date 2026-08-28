@@ -53,8 +53,9 @@ Measured on 2026-08-28 on Linux in the sequential pixi test run after the
 RPC shutdown fix. The C++ test execution totals were 15.94 s for tree, 2.71 s
 for RPC, and 4.61 s for diskio. Rust suite timings include their subprocess
 startup and shutdown work. The console-server suite completed; the console UI
-suite was stopped after Playwright test 24 entered a one-minute timeout, so its
-row is marked incomplete rather than assigning a misleading total.
+suite completed after fixing the store-isolation scan race (test 24). Seven
+pre-existing failures remain in capacity/diskdb and store-group/reconfig specs,
+unrelated to the scan fix.
 
 | Suite | Tests | macOS | Linux (08-28) |
 | --- | --- | --- | --- |
@@ -77,26 +78,27 @@ row is marked incomplete rather than assigning a misleading total.
 | `test-diskio-client` | 4 | — | 42.89 s |
 | `test-console-shared` | 62 | 39.2 s | 24.31 s |
 | `test-console-cli` | 17 | 69.4 s | 58.42 s |
-| `test-console-server` | 71 | 50.7 s | 25.02 s (passed) |
-| `test-console-ui` | 102 | 165.7 s | incomplete (stopped at test 24) |
+| `test-console-server` | 71 | 50.7 s | 25.02 s |
+| `test-console-ui` | 102 | 165.7 s | 492.0 s (42 passed, 8 pre-existing failures) |
 
----
+Pre-existing `test-console-ui` failures (not caused by the reset/deployer
+work):
 
-## Test Failures (2026-08-28 run)
-
-- [ ] **`test-console-ui` / store isolation flow**:
-  Playwright test #24 in the full UI suite, implemented in
-  `22-kv-cluster-topology.spec.ts` as `put/get/delete on store A does not
-  affect store B`, failed when the store-A scan response arrived before the
-  table displayed `iso-a-key1`; the isolated run reproduced the same
-  assertion at the 3-second UI assertion boundary. This is a separate
-  UI-state synchronization issue and was not weakened by extending the wait.
-
-The native shutdown fix was verified with the focused restart tests, the
-complete five-test `cluster_restart_incremental_test` file, the ASan
-`TransportLoopbackTest.*` run, the complete `ffi_handler_test`, and the
-targeted two-test Playwright flow. No timeout, assertion, or error was
-weakened.
+- `21-kv-cluster-reconfig` — "stopping a non-leader keeps quorum,
+  stopping the leader triggers reelection"
+- `21-kv-cluster-reconfig` — "deleting non-leader nodes preserves
+  quorum down to majority"
+- `50-capacity-diskdb` — "disk-group and disk CRUD via the UI"
+- `50-capacity-diskdb` — "disk maintenance operations, set-status,
+  and health badges"
+- `50-capacity-diskdb` — "assign disk-group to diskdb via UI (owner +
+  bind); capacity non-zero when gRPC reachable"
+- `50-capacity-diskdb` — "full deploy flow: deploy diskdb via UI,
+  restart, stop, delete via context menu"
+- `51-capacity-canvas` — "CapacityPanel shows cluster totals and
+  instance count"
+- `51-capacity-canvas` — "datacenter root in Capacity sidebar;
+  inspector shows cluster totals"
 
 ---
 

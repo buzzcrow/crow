@@ -210,9 +210,14 @@ fn remap_zero_host(addr: &str) -> String {
         .map_or_else(|| addr.to_string(), |port| format!("127.0.0.1:{port}"))
 }
 
-/// Build a [`HardwareClient`] pinned to group 0 by finding any node in the
-/// monitor cache that hosts store 0's gRPC listener. Returns `None` when
-/// no group-0 endpoint is known (e.g. cluster not yet initialized).
+/// Build a [`HardwareClient`] pinned to group 0 by finding nodes in the
+/// monitor cache that host store 0's gRPC listener. All group-0 hosting
+/// nodes' mgmt API URLs are passed as topology-discovery seeds so that
+/// when the current leader is down (e.g. a test stopped it), the client
+/// can contact another seed's `/topology` endpoint to discover the new
+/// leader instead of failing with "no seeds configured".
+/// Returns `None` when no group-0 endpoint is known (e.g. cluster not
+/// yet initialized).
 pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crow_kv_client::HardwareClient> {
     let snap = state.monitor_cache.snapshot().await;
     if snap.is_empty() {
@@ -220,15 +225,25 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crow_kv_cl
         // not a warning-worthy condition. Callers fall back to config.
         return None;
     }
+    // Collect all group-0 hosting nodes: their gRPC endpoints (for
+    // seed_leader) and mgmt API URLs (for topology discovery seeds).
+    let mut grpc_eps: Vec<String> = Vec::new();
+    let mut mgmt_seeds: Vec<String> = Vec::new();
     for node_id in snap.keys() {
         if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
-            let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
-            kv.seed_leader(0, 0, ep);
-            return Some(crow_kv_client::HardwareClient::new(kv));
+            grpc_eps.push(ep);
+            if let Ok(url) = mgmt_url_for_node(state, *node_id) {
+                mgmt_seeds.push(url);
+            }
         }
     }
-    warn!("build_hardware_client: nodes exist but no group-0 endpoint found in monitor cache");
-    None
+    if grpc_eps.is_empty() {
+        warn!("build_hardware_client: nodes exist but no group-0 endpoint found in monitor cache");
+        return None;
+    }
+    let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(mgmt_seeds));
+    kv.seed_leader(0, 0, grpc_eps[0].clone());
+    Some(crow_kv_client::HardwareClient::new(kv))
 }
 
 /// Cheap check: is group-0 (store 0) known to the monitor cache?

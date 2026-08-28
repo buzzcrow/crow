@@ -160,16 +160,24 @@ pub(crate) async fn http_cluster_init(
 
     // Phase 5: write hardware hierarchy + KV-cluster topology into
     // group 0 via HardwareClient + KVClusterMetaClient. Build a
-    // CrowkvClient seeded with the group-0 gRPC endpoint.
+    // CrowkvClient seeded with all group-0 mgmt URLs as topology
+    // discovery seeds, plus the first gRPC endpoint as the initial
+    // leader hint.
     let cfg_snapshot = state.config.read().unwrap().clone();
+    let mgmt_seeds: Vec<String> = succeeded
+        .iter()
+        .filter_map(|(nid, _)| mgmt_url_for_node(&state, *nid).ok())
+        .collect();
     let mut topology_written = false;
     for (nid, _) in &succeeded {
         let Some(grpc_ep) = rpc_endpoint_for_node(&state, *nid, 0).await else {
             continue;
         };
-        let kv_client = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+        let kv_client =
+            crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(mgmt_seeds.clone()));
         kv_client.seed_leader(0, 0, grpc_ep.clone());
-        let kv_client2 = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+        let kv_client2 =
+            crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(mgmt_seeds.clone()));
         kv_client2.seed_leader(0, 0, grpc_ep.clone());
         let hw = crow_kv_client::HardwareClient::new(kv_client);
         let meta = crow_kv_client::KVClusterMetaClient::new(kv_client2);

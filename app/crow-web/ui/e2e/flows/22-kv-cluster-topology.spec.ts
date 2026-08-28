@@ -250,7 +250,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       await page.getByLabel('Group').selectOption('3800');
 
       // Scan and verify store A keys appear
-      const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+      const scanResponse = page.waitForResponse((r: any) => r.url().includes('/stores/380/groups/3800/kv/scan'));
       await page.getByRole('button', { name: /^Scan$/ }).click();
       await scanResponse;
       await expect(page.getByTestId('kv-scan-table').getByText('iso-a-key1')).toBeVisible({ timeout: 3_000 });
@@ -259,7 +259,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       // Switch to store B, scan, see only B keys
       await page.getByLabel('Store').selectOption('381');
       await page.getByLabel('Group').selectOption('3810');
-      const scanResponse2 = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+      const scanResponse2 = page.waitForResponse((r: any) => r.url().includes('/stores/381/groups/3810/kv/scan'));
       await page.getByRole('button', { name: /^Scan$/ }).click();
       await scanResponse2;
       await expect(page.getByTestId('kv-scan-table').getByText('iso-b-key1')).toBeVisible({ timeout: 3_000 });

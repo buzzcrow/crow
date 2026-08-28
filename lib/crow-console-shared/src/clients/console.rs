@@ -145,6 +145,12 @@ pub struct StopResult {
     pub sent: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResetResult {
+    #[serde(default)]
+    pub stopped: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AddReplicaBody {
     pub node_id: NodeId,
@@ -587,6 +593,70 @@ impl ConsoleClient {
     pub async fn remove_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
         self.delete_no_response(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
             .await
+    }
+
+    // ── Disk-group owner / bind ────────────────────────────────────
+
+    /// `PUT /api/disk-groups/:rack/:node/:dg/owner`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn set_disk_group_owner(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        instance_id: u64,
+        lease_expiry_ms: u64,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body {
+            instance_id: u64,
+            lease_expiry_ms: u64,
+        }
+        self.put_json_no_response(
+            &format!("/api/disk-groups/{rack_id}/{node_id}/{dg_id}/owner"),
+            &Body {
+                instance_id,
+                lease_expiry_ms,
+            },
+        )
+        .await
+    }
+
+    /// `PUT /api/disk-groups/:rack/:node/:dg/bind`.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn set_disk_group_bind(
+        &self,
+        rack_id: RackId,
+        node_id: NodeId,
+        dg_id: DiskGroupId,
+        store_id: u64,
+        group_id: u64,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body {
+            store_id: u64,
+            group_id: u64,
+        }
+        self.put_json_no_response(
+            &format!("/api/disk-groups/{rack_id}/{node_id}/{dg_id}/bind"),
+            &Body { store_id, group_id },
+        )
+        .await
+    }
+
+    // ── Cluster reset ──────────────────────────────────────────────
+
+    /// `POST /internal/reset` — full cluster reset (stops all servers,
+    /// removes all racks/nodes/stores/groups, clears workspaces).
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn reset_all(&self) -> Result<ResetResult> {
+        self.post_json("/internal/reset", &serde_json::json!({})).await
     }
 
     // ── KV data plane ──────────────────────────────────────────────

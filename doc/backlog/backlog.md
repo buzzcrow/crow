@@ -11,10 +11,35 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R124** — Bump this line in the same commit when adding a new item.
+**Next R number: R125** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
+- **[R124](R124-console-bench-lifecycle-split.md)** — split bench
+  lifecycle into deploy/prepare/run/clean/teardown verbs — Area:
+  console / cli / bench — `bench kv` is monolithic per invocation
+  (provision + pre-pop + run + teardown every call), so the
+  regression sentinels pay deploy + pre-pop overhead on every
+  sub-test (read 11×, scan 14×, write 7×), capping practical dataset
+  size. Split into discrete CLI verbs orchestrated by the script:
+  `bench deploy --name <deploy> --kind kv|rpc|chunk|storage`
+  (multi-kind from the start; rpc needs no console-web, kv/chunk/
+  storage start one), `bench prepare --target <deploy>` (default
+  `put` semantics, multi-round to grow data), `bench run --target
+  <deploy>` (reads all connection info from the deploy folder, no
+  port re-entry), `bench clean --target <deploy>` (per-service wipe
+  endpoint with a deliberately non-trivial name/flow so it can't be
+  triggered accidentally; wipes WAL + engine data, keeps group0
+  sysdata), `bench teardown --target <deploy>`. Each deploy writes
+  metadata + node workspaces + server logs + cli logs under a named
+  `runtime/<deploy-name>/` folder (generalizing `bench-runs/`),
+  co-locating bench and cluster artifacts. Rewrite the three
+  `tools/bench-kv-*-regression.sh` scripts to deploy once → prepare
+  once → run × N → teardown (read/scan), and deploy once → (clean →
+  run) × N → teardown (write). Decisions resolved: console-web
+  lifetime is kind-dependent; clean is per-service with a hard-to-
+  mistake flow; `bench run` is a standalone verb with `--target`;
+  prepare uses default put; handles live in named runtime folders.
 - **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
   test port prober — Area: cluster / protocol / server —
   `crow-protocol/src/ports.rs` already defines base ports + stride +

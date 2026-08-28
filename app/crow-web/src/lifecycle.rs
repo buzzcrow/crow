@@ -1179,11 +1179,79 @@ pub async fn http_node_openapi_proxy(
 pub async fn http_internal_reset(
     State(state): State<AppState>,
 ) -> Result<Json<ResetResult>, (StatusCode, Json<ErrorBody>)> {
-    use crow_console_shared::lifecycle;
+    // Graceful shutdown in dependency order:
+    //   1-4. shutdown_kv_data — remove user groups → user stores →
+    //        clean group-0 sysdata → remove group-0/store-0.
+    //   5.   stop_all_services — SIGTERM all KV + DDB processes.
+    //   6-8. config cleanup — remove nodes, racks, caches, workspaces.
+    let mut stopped = shutdown_kv_data(&state).await;
+    stopped.extend(stop_all_services(&state).await);
 
-    // 0. Capture rack IDs and store IDs, then clean group-0 sysdata
-    //    before stopping servers (R81: cluster reset must remove
-    //    hardware hierarchy and KV-cluster topology from group 0).
+    // 6. Remove all nodes from config + drop monitor cache entries.
+    let node_ids: Vec<NodeId> = {
+        let cfg = state.config.read().unwrap();
+        cfg.nodes.iter().map(|n| n.id).collect()
+    };
+    for nid in &node_ids {
+        {
+            let mut cfg = state.config.write().unwrap();
+            let _ = cfg.remove_server_for_node(*nid);
+            let pos = cfg
+                .servers
+                .iter()
+                .position(|s| s.node_id == Some(*nid) && s.service_type == ServiceType::Diskdb);
+            if let Some(p) = pos {
+                cfg.servers.remove(p);
+            }
+            cfg.purge_node_topology(*nid);
+            let _ = cfg.remove_node(*nid);
+        }
+        state.monitor_cache.drop_node(nid).await;
+    }
+
+    // 7. Remove all racks from config.
+    let rack_ids: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.racks.iter().map(|r| r.id.to_string()).collect()
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        for rid in &rack_ids {
+            let _ = cfg.remove_rack(rid.parse().unwrap());
+        }
+        // Clear disk-groups and disks from config — the rack/node
+        // cascade above removed them from group-0 sysdata, but the
+        // config file still carries the stale entries from before
+        // the reset. Without this, a restart reloads stale DGs/disks.
+        cfg.disk_groups.clear();
+        cfg.disks.clear();
+    }
+
+    // 8. Clear caches and workspace directories.
+    state.openapi_cache.lock().unwrap().clear();
+    state
+        .clear_workspaces()
+        .map_err(|e| err_500(format!("clear workspaces: {e}")))?;
+    state.persist().map_err(map_persist_err)?;
+
+    Ok(Json(ResetResult { stopped }))
+}
+
+/// Steps 1-4: gracefully shut down all KV data in dependency order.
+/// - Step 1: remove user groups (non-zero) via mgmt API RPC to each node.
+/// - Step 2: remove user stores (non-zero) via mgmt API RPC to each node.
+/// - Step 3: clean group-0 sysdata (rack cascade, store records, diskdb
+///   unregister) via group-0 RPC — group-0 still alive.
+/// - Step 4: remove group-0/store-0 via mgmt API RPC — last KV data
+///   gracefully shut down (flushes WAL, closes engine).
+///
+/// Skips all RPC steps when no KV servers are running
+/// (`kv_pid_snapshot().is_empty()`). This is the key optimization for
+/// E2E tests: the test's `finally` block already stopped the servers,
+/// so `resetAll` skips doomed RPC retries (10-20s of backoff) and goes
+/// straight to config cleanup.
+#[allow(clippy::too_many_lines)]
+async fn shutdown_kv_data(state: &AppState) -> Vec<String> {
     let rack_ids: Vec<RackId> = {
         let cfg = state.config.read().unwrap();
         cfg.racks.iter().map(|r| r.id).collect()
@@ -1195,25 +1263,73 @@ pub async fn http_internal_reset(
         ids.dedup();
         ids
     };
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
+    let any_kv_running = !state.kv_pid_snapshot().is_empty();
+    if !any_kv_running {
+        tracing::info!("reset: no KV servers running, skipping data shutdown RPC steps");
+        return Vec::new();
+    }
+
+    // Step 1: remove user groups (non-zero) from each hosting node.
+    let user_stores: Vec<u64> = stores.iter().copied().filter(|&sid| sid != 0).collect();
+    for sid in &user_stores {
+        if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
+            let group_ids: Vec<u64> = view.groups.iter().map(|g| g.group_id).collect();
+            for gid in group_ids {
+                if let Some(gv) = state.monitor_cache.resolve_group(*sid, gid).await {
+                    let node_ids: Vec<NodeId> = gv.replicas.iter().map(|r| r.node_id).collect();
+                    for nid in &node_ids {
+                        if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
+                            if let Ok(client) = crate::mgmt::build_server_client(url) {
+                                let _ = client.remove_group(*sid, gid).await;
+                            }
+                        }
+                    }
+                    for nid in &node_ids {
+                        crate::mgmt::refresh_node_cache(state, *nid).await;
+                    }
+                }
+                {
+                    let mut cfg = state.config.write().unwrap();
+                    cfg.remove_group_record(*sid, gid);
+                }
+            }
+        }
+    }
+
+    // Step 2: remove user stores (non-zero) from each hosting node.
+    for sid in &user_stores {
+        if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
+            for nid in &view.nodes {
+                if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
+                    if let Ok(client) = crate::mgmt::build_server_client(url) {
+                        let _ = client.remove_store(*sid).await;
+                    }
+                }
+            }
+            for nid in &view.nodes {
+                crate::mgmt::refresh_node_cache(state, *nid).await;
+            }
+        }
+        {
+            let mut cfg = state.config.write().unwrap();
+            cfg.remove_store_record(*sid);
+        }
+    }
+
+    // Step 3: clean group-0 sysdata — rack cascade, store records,
+    // diskdb unregister. Group-0 is still alive at this point.
+    if let Some(hw) = crate::mgmt::build_hardware_client(state).await {
         for rid in &rack_ids {
             if let Err(e) = hw.remove_rack_cascade(*rid).await {
                 tracing::warn!(rack_id = rid, error = %e, "reset: remove_rack_cascade failed");
             }
         }
-        // Also clean KV-cluster topology records (stores, groups)
-        // from group 0 — the existing reset removes them from config
-        // but not from sysdata.
         let meta = crow_kv_client::KVClusterMetaClient::from_shared(hw.shared_kv());
         for sid in &stores {
             if let Err(e) = meta.remove_store(*sid).await {
                 tracing::warn!(store_id = sid, error = %e, "reset: remove_store from sysdata failed");
             }
         }
-        // Unregister all diskdb instances from the service registry
-        // so stale endpoints don't cause continuous gRPC errors after
-        // reset. The TTL-based expiry would eventually drop them, but
-        // explicit unregister is immediate and avoids the 15s window.
         let svc = crow_kv_client::ServiceRegistryClient::from_shared(hw.shared_kv());
         match svc.read_all_diskdb_instances().await {
             Ok(instances) => {
@@ -1236,59 +1352,49 @@ pub async fn http_internal_reset(
         tracing::warn!("reset: no group-0 endpoint, skipping sysdata cleanup");
     }
 
-    let mut stopped: Vec<String> = Vec::new();
-
-    // 1. For each store: list & remove all groups, then remove the store.
-    for sid in &stores {
-        // List groups for this store.
-        if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
-            let group_ids: Vec<u64> = view.groups.iter().map(|g| g.group_id).collect();
-            for gid in group_ids {
-                // Remove group: RPC to each node + config cleanup.
-                if let Some(gv) = state.monitor_cache.resolve_group(*sid, gid).await {
-                    let node_ids: Vec<NodeId> = gv.replicas.iter().map(|r| r.node_id).collect();
-                    for nid in &node_ids {
-                        if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, *nid) {
-                            if let Ok(client) = crate::mgmt::build_server_client(url) {
-                                let _ = client.remove_group(*sid, gid).await;
-                            }
-                        }
-                    }
-                    for nid in &node_ids {
-                        crate::mgmt::refresh_node_cache(&state, *nid).await;
-                    }
-                }
-                {
-                    let mut cfg = state.config.write().unwrap();
-                    cfg.remove_group_record(*sid, gid);
-                }
-            }
-        }
-
-        // Remove the store from each node.
-        if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
+    // Step 4: remove group-0/store-0 via mgmt API — last KV data,
+    // triggers graceful PxGroup/PxKvStore shutdown (flush WAL, close
+    // engine) on each node that hosts store 0.
+    if stores.contains(&0) {
+        if let Some(view) = state.monitor_cache.resolve_store(0).await {
             for nid in &view.nodes {
-                if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, *nid) {
+                if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
                     if let Ok(client) = crate::mgmt::build_server_client(url) {
-                        let _ = client.remove_store(*sid).await;
+                        let _ = client.remove_group(0, 0).await;
                     }
                 }
             }
             for nid in &view.nodes {
-                crate::mgmt::refresh_node_cache(&state, *nid).await;
+                if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
+                    if let Ok(client) = crate::mgmt::build_server_client(url) {
+                        let _ = client.remove_store(0).await;
+                    }
+                }
+            }
+            for nid in &view.nodes {
+                crate::mgmt::refresh_node_cache(state, *nid).await;
             }
         }
         {
             let mut cfg = state.config.write().unwrap();
-            cfg.remove_store_record(*sid);
+            cfg.remove_store_record(0);
         }
     }
 
-    // 2. List all nodes, stop their servers, then remove them.
+    Vec::new()
+}
+
+/// Step 5: graceful stop all KV server + DDB processes (SIGTERM →
+/// graceful shutdown). Clears runtime PIDs. Returns the list of node
+/// IDs whose KV server process was stopped.
+async fn stop_all_services(state: &AppState) -> Vec<String> {
+    use crow_console_shared::lifecycle;
+
     let node_ids: Vec<NodeId> = {
         let cfg = state.config.read().unwrap();
         cfg.nodes.iter().map(|n| n.id).collect()
     };
+    let mut stopped: Vec<String> = Vec::new();
 
     for nid in &node_ids {
         // Stop the KV server process if a PID is tracked.
@@ -1318,52 +1424,9 @@ pub async fn http_internal_reset(
             let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await;
             state.clear_diskdb_runtime_pid(nid);
         }
-
-        // Remove all server entries + purge topology from config.
-        {
-            let mut cfg = state.config.write().unwrap();
-            let _ = cfg.remove_server_for_node(*nid);
-            // Also remove any DDB entry for this node.
-            let pos = cfg
-                .servers
-                .iter()
-                .position(|s| s.node_id == Some(*nid) && s.service_type == ServiceType::Diskdb);
-            if let Some(p) = pos {
-                cfg.servers.remove(p);
-            }
-            cfg.purge_node_topology(*nid);
-            let _ = cfg.remove_node(*nid);
-        }
-
-        state.monitor_cache.drop_node(nid).await;
     }
 
-    // 3. Remove all racks.
-    let rack_ids: Vec<String> = {
-        let cfg = state.config.read().unwrap();
-        cfg.racks.iter().map(|r| r.id.to_string()).collect()
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        for rid in &rack_ids {
-            let _ = cfg.remove_rack(rid.parse().unwrap());
-        }
-        // Clear disk-groups and disks from config — the rack/node
-        // cascade above removed them from group-0 sysdata, but the
-        // config file still carries the stale entries from before
-        // the reset. Without this, a restart reloads stale DGs/disks.
-        cfg.disk_groups.clear();
-        cfg.disks.clear();
-    }
-
-    // 4. Clear caches and workspace directories.
-    state.openapi_cache.lock().unwrap().clear();
-    state
-        .clear_workspaces()
-        .map_err(|e| err_500(format!("clear workspaces: {e}")))?;
-    state.persist().map_err(map_persist_err)?;
-
-    Ok(Json(ResetResult { stopped }))
+    stopped
 }
 
 #[derive(Serialize)]
