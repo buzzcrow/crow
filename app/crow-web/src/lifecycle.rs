@@ -1276,14 +1276,21 @@ async fn shutdown_kv_data(state: &AppState) -> Vec<String> {
             for gid in group_ids {
                 if let Some(gv) = state.monitor_cache.resolve_group(*sid, gid).await {
                     let node_ids: Vec<NodeId> = gv.replicas.iter().map(|r| r.node_id).collect();
-                    for nid in &node_ids {
+                    // Only contact running servers — skip stopped ones
+                    // (no runtime pid) to avoid connection-refused delays.
+                    let live: Vec<NodeId> = node_ids
+                        .iter()
+                        .copied()
+                        .filter(|n| state.runtime_pid(*n).is_some())
+                        .collect();
+                    for nid in &live {
                         if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
                             if let Ok(client) = crate::mgmt::build_server_client(url) {
                                 let _ = client.remove_group(*sid, gid).await;
                             }
                         }
                     }
-                    for nid in &node_ids {
+                    for nid in &live {
                         crate::mgmt::refresh_node_cache(state, *nid).await;
                     }
                 }
@@ -1298,14 +1305,20 @@ async fn shutdown_kv_data(state: &AppState) -> Vec<String> {
     // Step 2: remove user stores (non-zero) from each hosting node.
     for sid in &user_stores {
         if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
-            for nid in &view.nodes {
+            let live: Vec<NodeId> = view
+                .nodes
+                .iter()
+                .copied()
+                .filter(|n| state.runtime_pid(*n).is_some())
+                .collect();
+            for nid in &live {
                 if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
                     if let Ok(client) = crate::mgmt::build_server_client(url) {
                         let _ = client.remove_store(*sid).await;
                     }
                 }
             }
-            for nid in &view.nodes {
+            for nid in &live {
                 crate::mgmt::refresh_node_cache(state, *nid).await;
             }
         }
@@ -1356,21 +1369,27 @@ async fn shutdown_kv_data(state: &AppState) -> Vec<String> {
     // engine) on each node that hosts store 0.
     if stores.contains(&0) {
         if let Some(view) = state.monitor_cache.resolve_store(0).await {
-            for nid in &view.nodes {
+            let live: Vec<NodeId> = view
+                .nodes
+                .iter()
+                .copied()
+                .filter(|n| state.runtime_pid(*n).is_some())
+                .collect();
+            for nid in &live {
                 if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
                     if let Ok(client) = crate::mgmt::build_server_client(url) {
                         let _ = client.remove_group(0, 0).await;
                     }
                 }
             }
-            for nid in &view.nodes {
+            for nid in &live {
                 if let Ok(url) = crate::mgmt::mgmt_url_for_node(state, *nid) {
                     if let Ok(client) = crate::mgmt::build_server_client(url) {
                         let _ = client.remove_store(0).await;
                     }
                 }
             }
-            for nid in &view.nodes {
+            for nid in &live {
                 crate::mgmt::refresh_node_cache(state, *nid).await;
             }
         }

@@ -351,7 +351,7 @@ pub fn stop_pid_with_timeout(pid: u32, timeout: std::time::Duration) -> Result<b
         if !process_is_alive(pid) {
             return Ok(true);
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     // Process didn't exit within timeout — force kill.
     let _ = std::process::Command::new("kill")
@@ -366,18 +366,34 @@ pub fn stop_pid_with_timeout(pid: u32, timeout: std::time::Duration) -> Result<b
 /// and 'Z' for zombies.
 #[must_use]
 pub fn process_is_alive(pid: u32) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .arg("-o")
-        .arg("stat=")
-        .output()
-    else {
-        return false;
-    };
-    let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // Empty = process doesn't exist; 'Z' = zombie (effectively dead).
-    !stat.is_empty() && !stat.starts_with('Z')
+    // Fast path: read /proc/{pid}/stat (Linux) — no subprocess spawn.
+    // Falls back to `ps` on non-Linux platforms (macOS, etc.).
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // Field 3 (state) is after the comm field in parentheses.
+            // The state char: 'R'=running, 'S'=sleeping, 'Z'=zombie, etc.
+            // Zombie means the process has exited but not been reaped.
+            let state = stat.rsplit(')').next().unwrap_or("").trim_start();
+            let state_char = state.chars().next().unwrap_or('Z');
+            return state_char != 'Z';
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(output) = std::process::Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("stat=")
+            .output()
+        else {
+            return false;
+        };
+        let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
 }
 
 /// Render the shell command that brings up `crow-kv-server` on the remote

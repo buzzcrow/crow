@@ -65,8 +65,10 @@ test.describe('shell · embedding + swagger', () => {
       expect(decodeURIComponent((await frameB.getAttribute('src')) ?? '')).toContain('/nodes/222/openapi.json');
       await expect(page.locator('header').getByText('Crow Storage Console')).toBeVisible();
     } finally {
-      await stopNodeServer(baseURL!, 221);
-      await stopNodeServer(baseURL!, 222);
+      await Promise.all([
+        stopNodeServer(baseURL!, 221),
+        stopNodeServer(baseURL!, 222),
+      ]);
     }
   });
 

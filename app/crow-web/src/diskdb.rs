@@ -38,6 +38,12 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
         return None;
     }
     for node_id in snap.keys() {
+        // Skip stopped servers — no runtime pid means the process is
+        // not running. Contacting it only wastes time on
+        // connection-refused.
+        if state.runtime_pid(*node_id).is_none() {
+            continue;
+        }
         if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
             let kv = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
             kv.seed_leader(0, 0, ep);

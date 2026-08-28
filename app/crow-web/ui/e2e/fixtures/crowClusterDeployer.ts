@@ -787,7 +787,5 @@ export async function setupCluster(baseURL: string, topo: TopologyDescriptor): P
  * Stop all deployed servers from a setupCluster call.
  */
 export async function teardownCluster(baseURL: string, result: SetupResult) {
-  for (const nodeId of result.nodes) {
-    await stopNodeServer(baseURL, nodeId);
-  }
+  await Promise.all(result.nodes.map((nodeId) => stopNodeServer(baseURL, nodeId)));
 }

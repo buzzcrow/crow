@@ -96,6 +96,10 @@ pub(crate) async fn cluster_initialized(state: &AppState) -> bool {
         return true; // No servers deployed yet; allow first-run flows.
     }
     for nid in &node_ids {
+        // Skip stopped servers — no runtime pid means not running.
+        if state.runtime_pid(*nid).is_none() {
+            continue;
+        }
         let Ok(url) = mgmt_url_for_node(state, *nid) else {
             continue;
         };
@@ -115,6 +119,13 @@ pub(crate) async fn cluster_initialized(state: &AppState) -> bool {
 }
 
 pub(crate) async fn refresh_node_cache(state: &AppState, node_id: NodeId) {
+    // Skip servers with no tracked runtime pid — they are stopped, and
+    // contacting them only wastes time (connection-refused) and spams
+    // logs. The stop handler already called mark_down, so the monitor
+    // cache reflects the correct Down state.
+    if state.runtime_pid(node_id).is_none() {
+        return;
+    }
     let url = {
         let cfg = state.config.read().unwrap();
         cfg.server_for_node(node_id).map(|s| s.url.clone())
@@ -227,9 +238,15 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crow_kv_cl
     }
     // Collect all group-0 hosting nodes: their crow-rpc endpoints (for
     // seed_leader) and mgmt API URLs (for topology discovery seeds).
+    // Skip stopped servers (no runtime pid) — including their URLs as
+    // seeds only wastes time on connection-refused during topology
+    // refresh.
     let mut rpc_eps: Vec<String> = Vec::new();
     let mut mgmt_seeds: Vec<String> = Vec::new();
     for node_id in snap.keys() {
+        if state.runtime_pid(*node_id).is_none() {
+            continue;
+        }
         if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
             rpc_eps.push(ep);
             if let Ok(url) = mgmt_url_for_node(state, *node_id) {

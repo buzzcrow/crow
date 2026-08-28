@@ -110,9 +110,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       { rack: 193, node: 193, restPort: freePort(), rpcPort: freePort() },
     ];
 
-    for (const r of racks) {
-      await seedRackAndNode(baseURL!, r.rack, r.node);
-    }
+    await Promise.all(racks.map((r) => seedRackAndNode(baseURL!, r.rack, r.node)));
     await Promise.all(
       racks.map((r) => deployNodeServer(baseURL!, r.node, r.restPort, r.rpcPort)),
     );
@@ -190,9 +188,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       expect(getBody.value_utf8).toBe('e2e-19-value');
     } finally {
       await api.dispose();
-      for (const r of racks) {
-        await stopNodeServer(baseURL!, r.node);
-      }
+      await Promise.all(racks.map((r) => stopNodeServer(baseURL!, r.node)));
     }
   });
 
@@ -201,12 +197,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
     await resetAll(baseURL!);
 
     // Store A: nodes n38a,b,c. Store B: nodes n38d,e,f. Separate node sets.
-    await seedRackAndNode(baseURL!, 381, 381);
-    await seedRackAndNode(baseURL!, 382, 382);
-    await seedRackAndNode(baseURL!, 383, 383);
-    await seedRackAndNode(baseURL!, 384, 384);
-    await seedRackAndNode(baseURL!, 385, 385);
-    await seedRackAndNode(baseURL!, 386, 386);
+    await Promise.all([381, 382, 383, 384, 385, 386].map((n) => seedRackAndNode(baseURL!, n, n)));
     await Promise.all([
       deployNodeServer(baseURL!, 381, freePort(), freePort()),
       deployNodeServer(baseURL!, 382, freePort(), freePort()),
@@ -265,12 +256,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       await expect(page.getByTestId('kv-scan-table').getByText('iso-b-key1')).toBeVisible({ timeout: 3_000 });
       await expect(page.getByTestId('kv-scan-table').getByText('iso-a-key1')).toHaveCount(0);
     } finally {
-      await stopNodeServer(baseURL!, 381);
-      await stopNodeServer(baseURL!, 382);
-      await stopNodeServer(baseURL!, 383);
-      await stopNodeServer(baseURL!, 384);
-      await stopNodeServer(baseURL!, 385);
-      await stopNodeServer(baseURL!, 386);
+      await Promise.all([381, 382, 383, 384, 385, 386].map((n) => stopNodeServer(baseURL!, n)));
     }
   });
 
@@ -279,9 +265,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
     await resetAll(baseURL!);
 
     // 5 nodes total. Group A on n39a,b,c. Group B on n39c,d,e (overlap on n39c).
-    for (const r of [391, 392, 393, 394, 395]) {
-      await seedRackAndNode(baseURL!, r, r);
-    }
+    await Promise.all([391, 392, 393, 394, 395].map((r) => seedRackAndNode(baseURL!, r, r)));
     await Promise.all([
       deployNodeServer(baseURL!, 391, freePort(), freePort()),
       deployNodeServer(baseURL!, 392, freePort(), freePort()),
@@ -364,9 +348,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       await getBAfterDelete;
       await expect(page.getByTestId('kv-get-result')).toHaveText('val-b', { timeout: 3_000 });
     } finally {
-      for (const n of [391, 392, 393, 394, 395]) {
-        await stopNodeServer(baseURL!, n);
-      }
+      await Promise.all([391, 392, 393, 394, 395].map((n) => stopNodeServer(baseURL!, n)));
     }
   });
 
@@ -375,9 +357,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
     await resetAll(baseURL!);
 
     // 5 nodes, 1 store, 3 groups on different 3-node subsets.
-    for (const r of [401, 402, 403, 404, 405]) {
-      await seedRackAndNode(baseURL!, r, r);
-    }
+    await Promise.all([401, 402, 403, 404, 405].map((r) => seedRackAndNode(baseURL!, r, r)));
     await Promise.all([
       deployNodeServer(baseURL!, 401, freePort(), freePort()),
       deployNodeServer(baseURL!, 402, freePort(), freePort()),
@@ -427,9 +407,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       expect(scan2).not.toContain('mg40-key0');
       expect(scan2).not.toContain('mg40-key1');
     } finally {
-      for (const n of [401, 402, 403, 404, 405]) {
-        await stopNodeServer(baseURL!, n);
-      }
+      await Promise.all([401, 402, 403, 404, 405].map((n) => stopNodeServer(baseURL!, n)));
     }
   });
 

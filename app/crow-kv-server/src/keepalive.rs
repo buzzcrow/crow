@@ -72,8 +72,13 @@ impl KeepAliveLoop {
                     }
                     _ = &mut stop_rx => {
                         info!(instance_id, "keep-alive: shutting down; unregistering");
+                        // Best-effort unregister: if group-0 is unreachable
+                        // (e.g. this server hosts group-0 and is shutting down
+                        // its own RPC stack), the registry entry expires via
+                        // heartbeat TTL anyway. Keep the timeout short so
+                        // shutdown isn't blocked by a dead RPC endpoint.
                         match tokio::time::timeout(
-                            tokio::time::Duration::from_secs(1),
+                            tokio::time::Duration::from_millis(100),
                             svc.unregister("kv-server", instance_id),
                         )
                         .await

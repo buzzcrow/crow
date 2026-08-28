@@ -76,8 +76,10 @@ test.describe('kv cluster · store + group CRUD', () => {
 
     // --- add a replica to an existing group (store 177, group 1770) ---
     // Setup: two racks/nodes with deployed servers.
-    await seedRackAndNode(baseURL!, 171, 171);
-    await seedRackAndNode(baseURL!, 172, 172);
+    await Promise.all([
+      seedRackAndNode(baseURL!, 171, 171),
+      seedRackAndNode(baseURL!, 172, 172),
+    ]);
     await Promise.all([
       deployNodeServer(baseURL!, 171, freePort(), freePort()),
       deployNodeServer(baseURL!, 172, freePort(), freePort()),
@@ -118,8 +120,10 @@ test.describe('kv cluster · store + group CRUD', () => {
       );
     } finally {
       await addReplicaApi.dispose();
-      await stopNodeServer(baseURL!, 171);
-      await stopNodeServer(baseURL!, 172);
+      await Promise.all([
+        stopNodeServer(baseURL!, 171),
+        stopNodeServer(baseURL!, 172),
+      ]);
     }
   });
 

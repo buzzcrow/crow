@@ -163,9 +163,7 @@ test.describe('kv cluster · reconfiguration', () => {
     // --- stopping a non-leader node preserves quorum and KV ops (store 420) ---
     await resetAll(baseURL!);
 
-    for (const r of [421, 422, 423]) {
-      await seedRackAndNode(baseURL!, r, r);
-    }
+    await Promise.all([421, 422, 423].map((r) => seedRackAndNode(baseURL!, r, r)));
     await Promise.all([
       deployNodeServer(baseURL!, 421, freePort(), freePort()),
       deployNodeServer(baseURL!, 422, freePort(), freePort()),
@@ -201,17 +199,17 @@ test.describe('kv cluster · reconfiguration', () => {
       await restartServerViaMenu(page, stopNode);
       await waitForReachableReplicas(baseURL!, 420, 4200, 3);
     } finally {
-      await stopNodeServer(baseURL!, 421);
-      await stopNodeServer(baseURL!, 422);
-      await stopNodeServer(baseURL!, 423);
+      await Promise.all([
+        stopNodeServer(baseURL!, 421),
+        stopNodeServer(baseURL!, 422),
+        stopNodeServer(baseURL!, 423),
+      ]);
     }
 
     // --- stopping the leader triggers reelection and KV ops continue (store 430) ---
     await resetAll(baseURL!);
 
-    for (const r of [431, 432, 433]) {
-      await seedRackAndNode(baseURL!, r, r);
-    }
+    await Promise.all([431, 432, 433].map((r) => seedRackAndNode(baseURL!, r, r)));
     await Promise.all([
       deployNodeServer(baseURL!, 431, freePort(), freePort()),
       deployNodeServer(baseURL!, 432, freePort(), freePort()),
@@ -245,18 +243,18 @@ test.describe('kv cluster · reconfiguration', () => {
       await restartServerViaMenu(page, leaderNode!);
       await waitForReachableReplicas(baseURL!, 430, 4300, 3);
     } finally {
-      await stopNodeServer(baseURL!, 431);
-      await stopNodeServer(baseURL!, 432);
-      await stopNodeServer(baseURL!, 433);
+      await Promise.all([
+        stopNodeServer(baseURL!, 431),
+        stopNodeServer(baseURL!, 432),
+        stopNodeServer(baseURL!, 433),
+      ]);
     }
   });
 
   test('deleting non-leader nodes preserves quorum down to majority', async ({ page, baseURL }) => {
     await resetAll(baseURL!);
 
-    for (const r of [441, 442, 443, 444, 445]) {
-      await seedRackAndNode(baseURL!, r, r);
-    }
+    await Promise.all([441, 442, 443, 444, 445].map((r) => seedRackAndNode(baseURL!, r, r)));
     await Promise.all([
       deployNodeServer(baseURL!, 441, freePort(), freePort()),
       deployNodeServer(baseURL!, 442, freePort(), freePort()),
@@ -295,18 +293,14 @@ test.describe('kv cluster · reconfiguration', () => {
       expect(await getKeyUi(page, 'del44-key3')).toBe('val44c');
       expect(await getKeyUi(page, 'del44-key')).toBe('val44');
     } finally {
-      for (const n of [441, 442, 443, 444, 445]) {
-        await stopNodeServer(baseURL!, n);
-      }
+      await Promise.all([441, 442, 443, 444, 445].map((n) => stopNodeServer(baseURL!, n)));
     }
   });
 
   test('4th replica catches up and group still accepts writes', async ({ page, baseURL }) => {
     await resetAll(baseURL!);
 
-    for (const r of [451, 452, 453, 454]) {
-      await seedRackAndNode(baseURL!, r, r);
-    }
+    await Promise.all([451, 452, 453, 454].map((r) => seedRackAndNode(baseURL!, r, r)));
     await Promise.all([
       deployNodeServer(baseURL!, 451, freePort(), freePort()),
       deployNodeServer(baseURL!, 452, freePort(), freePort()),
@@ -352,18 +346,14 @@ test.describe('kv cluster · reconfiguration', () => {
       expect(await getKeyUi(page, 'add45-key1')).toBe('val1');
       expect(await getKeyUi(page, 'add45-key2')).toBe('val2');
     } finally {
-      for (const n of [451, 452, 453, 454]) {
-        await stopNodeServer(baseURL!, n);
-      }
+      await Promise.all([451, 452, 453, 454].map((n) => stopNodeServer(baseURL!, n)));
     }
   });
 
   test('stopping shared node degrades both stores, restart recovers', async ({ page, baseURL }) => {
     await resetAll(baseURL!);
 
-    for (const r of [461, 462, 463, 464, 465]) {
-      await seedRackAndNode(baseURL!, r, r);
-    }
+    await Promise.all([461, 462, 463, 464, 465].map((r) => seedRackAndNode(baseURL!, r, r)));
     await Promise.all([
       deployNodeServer(baseURL!, 461, freePort(), freePort()),
       deployNodeServer(baseURL!, 462, freePort(), freePort()),
@@ -420,9 +410,7 @@ test.describe('kv cluster · reconfiguration', () => {
       await openKvPanel(page, 461, 4610);
       expect(await getKeyUi(page, 'ms46-b-key')).toBe('val-b');
     } finally {
-      for (const n of [461, 462, 463, 464, 465]) {
-        await stopNodeServer(baseURL!, n);
-      }
+      await Promise.all([461, 462, 463, 464, 465].map((n) => stopNodeServer(baseURL!, n)));
     }
   });
 });

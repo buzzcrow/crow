@@ -263,6 +263,12 @@ async fn mgmt_seeds_for_group(
     let mut seen = HashSet::new();
     let mut seeds = Vec::new();
     for node_id in &node_ids {
+        // Skip stopped servers — no runtime pid means the server process
+        // is not running. Including its URL as a seed only wastes time
+        // (connection-refused) during topology refresh.
+        if state.runtime_pid(*node_id).is_none() {
+            continue;
+        }
         if let Some(server) = cfg.server_for_node(*node_id) {
             if seen.insert(server.url.clone()) {
                 seeds.push(server.url.clone());

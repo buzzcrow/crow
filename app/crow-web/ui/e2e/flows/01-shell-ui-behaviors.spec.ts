@@ -155,12 +155,16 @@ test.describe('shell · UI behaviors', () => {
     }
 
     // --- tree chevron vs text click behavior ---
-    await createRack(baseURL!, { id: 211, name: 'Rack Twenty One A' });
-    await createRack(baseURL!, { id: 212, name: 'Rack Twenty One B' });
-    await createRack(baseURL!, { id: 213, name: 'Rack Twenty One C' });
-    await createNode(baseURL!, { id: 211, rack_id: 211 });
-    await createNode(baseURL!, { id: 212, rack_id: 212 });
-    await createNode(baseURL!, { id: 213, rack_id: 213 });
+    await Promise.all([
+      createRack(baseURL!, { id: 211, name: 'Rack Twenty One A' }),
+      createRack(baseURL!, { id: 212, name: 'Rack Twenty One B' }),
+      createRack(baseURL!, { id: 213, name: 'Rack Twenty One C' }),
+    ]);
+    await Promise.all([
+      createNode(baseURL!, { id: 211, rack_id: 211 }),
+      createNode(baseURL!, { id: 212, rack_id: 212 }),
+      createNode(baseURL!, { id: 213, rack_id: 213 }),
+    ]);
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();

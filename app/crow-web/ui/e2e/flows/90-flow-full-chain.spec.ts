@@ -280,8 +280,10 @@ test.describe('flow · full chain', () => {
       );
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 181);
-      await stopNodeServer(baseURL!, 182);
+      await Promise.all([
+        stopNodeServer(baseURL!, 181),
+        stopNodeServer(baseURL!, 182),
+      ]);
     }
   });
 });

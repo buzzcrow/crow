@@ -124,8 +124,10 @@ test.describe('physical · node inspect & cross-jump', () => {
       await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible();
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 261);
-      await stopNodeServer(baseURL!, 262);
+      await Promise.all([
+        stopNodeServer(baseURL!, 261),
+        stopNodeServer(baseURL!, 262),
+      ]);
     }
   });
 
