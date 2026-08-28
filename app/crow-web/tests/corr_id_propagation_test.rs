@@ -126,7 +126,7 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
         id: "n1".into(),
         url: format!("http://{upstream_addr}"),
         node_id: Some(1),
-        grpc_url: None,
+        rpc_url: None,
         rest_port: None,
         rpc_port: None,
         auto_start: false,

@@ -5,7 +5,7 @@
 
 use crate::cluster::group::{ProposeResult, PxGroup};
 use crate::cluster::group_election::{LeaderElection, ReadBarrierOutcome};
-use crate::cluster::kv_server::{GrpcTaskState, RpcServerState};
+use crate::cluster::kv_server::{RpcServerState, RpcTaskState};
 use crate::cluster::status::{GroupStatus, StatusLevel, StoreStatus};
 use crate::common::config::ServerConfig;
 use crate::common::report::OperationReport;
@@ -23,7 +23,7 @@ use tracing::{debug, info};
 pub struct PxKvStore {
     pub store_id: u64,
     pub(crate) groups: DashMap<u64, Arc<PxGroup>>,
-    pub(crate) server_state: Mutex<GrpcTaskState>,
+    pub(crate) server_state: Mutex<RpcTaskState>,
     pub(crate) listen_addr: SocketAddr,
     /// crow-rpc server state (R32 migration). Holds the `RpcServer`
     /// handle + the shared `PxRpcTransport` for outbound RPCs.
@@ -76,7 +76,7 @@ impl PxKvStore {
         Self {
             store_id,
             groups: DashMap::new(),
-            server_state: Mutex::new(GrpcTaskState::default()),
+            server_state: Mutex::new(RpcTaskState::default()),
             rpc_server_state: Mutex::new(RpcServerState::default()),
             client_rpc_server_state: Mutex::new(RpcServerState::default()),
             listen_addr,
@@ -168,7 +168,7 @@ impl PxKvStore {
         *self.get_delay.lock() = Some(delay);
     }
 
-    /// Cascade shutdown: stop gRPC server (with timeout), then shut down each
+    /// Cascade shutdown: stop crow-rpc server (with timeout), then shut down each
     /// group, cascading into every replica layer.
     ///
     /// The shutdown contract across layers (`PxKvStore` → `PxGroup` →
@@ -220,7 +220,7 @@ impl PxKvStore {
 
         let mut report = OperationReport::new();
 
-        // 1. Stop gRPC server first so no new requests reach the groups.
+        // 1. Stop crow-rpc server first so no new requests reach the groups.
         if let Err(msg) = self.shutdown_server(per_layer_timeout).await {
             report.push_error(msg);
         }
@@ -265,12 +265,12 @@ impl PxKvStore {
             status = StatusLevel::Unhealthy;
             messages.push(format!("store {} has been shut down", self.store_id));
         } else {
-            // gRPC server liveness — listen_addr is set by start() and cleared by
+            // crow-rpc server liveness — listen_addr is set by start() and cleared by
             // shutdown_server() taking the JoinHandle.
             let server_running = self.server_state.lock().handle.is_some();
             if !server_running {
                 status = StatusLevel::Unhealthy;
-                messages.push(format!("store {}: gRPC server not running", self.store_id));
+                messages.push(format!("store {}: crow-rpc server not running", self.store_id));
             }
         }
 
@@ -401,7 +401,7 @@ impl PxKvStore {
     ///
     /// * the group exists locally,
     /// * the local replica is **not** the current leader, and
-    /// * the leader's gRPC endpoint is known (one of the group's
+    /// * the leader's crow-rpc endpoint is known (one of the group's
     ///   `remote_replicas` carries it).
     ///
     /// Returns `None` when local is the leader, the group is missing,

@@ -13,7 +13,7 @@
 //! Hand-written Rust types replacing the prost-generated `crow.common`
 //! types. API-compatible with the former proto-generated structs — same
 //! field names, types, and derives. No `prost::Message` trait (removed
-//! with the gRPC/protobuf cutover).
+//! with the protobuf cutover).
 
 use serde::{Deserialize, Serialize};
 

@@ -163,7 +163,7 @@ async fn inspect_node(cli: &Cli, client: &ConsoleClient, node: NodeId) -> ExitCo
         Ok(entry) => render(cli, &entry, || {
             println!("node {node}");
             println!("  mgmt_url: {}", entry.url);
-            println!("  grpc_url: {}", entry.grpc_url.as_deref().unwrap_or("-"));
+            println!("  rpc_url: {}", entry.rpc_url.as_deref().unwrap_or("-"));
             println!(
                 "  pid:      {}",
                 entry.pid.map_or_else(|| "-".to_string(), |p| p.to_string())

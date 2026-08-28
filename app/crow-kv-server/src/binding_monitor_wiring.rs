@@ -45,7 +45,7 @@ impl Drop for BindingMonitorHandle {
 
 /// Spawn the chunkdb range binding monitor on this group-0 replica.
 ///
-/// `group0_endpoint` is the gRPC endpoint of this server's group-0
+/// `group0_endpoint` is the crow-rpc endpoint of this server's group-0
 /// listener (used by the monitor's `CrowkvClient` to read/write the
 /// binding table + scan the service registry). `interval_secs` is the
 /// tick interval; `0` is rejected by the caller (do not call this

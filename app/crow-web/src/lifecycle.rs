@@ -27,7 +27,7 @@ fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerP
     };
     ServerProcess {
         mgmt_url: entry.url.clone(),
-        grpc_url: entry.grpc_url.clone().unwrap_or_default(),
+        rpc_url: entry.rpc_url.clone().unwrap_or_default(),
         pid: None,
         state,
         health,
@@ -536,7 +536,7 @@ pub struct ServerSummary {
     pub node_id: Option<u64>,
     pub mgmt_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub grpc_url: Option<String>,
+    pub rpc_url: Option<String>,
     /// Live pid if the console currently tracks the process.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
@@ -586,7 +586,7 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
             ServerSummary {
                 node_id: s.node_id,
                 mgmt_url: s.url.clone(),
-                grpc_url: s.grpc_url.clone(),
+                rpc_url: s.rpc_url.clone(),
                 pid,
                 health,
                 service_type: match s.service_type {
@@ -656,7 +656,7 @@ pub struct DeployNodeServerBody {
 pub struct DeployResult {
     node_id: NodeId,
     mgmt_url: String,
-    grpc_url: String,
+    rpc_url: String,
     pid: u32,
 }
 
@@ -768,7 +768,7 @@ pub async fn http_deploy_node_server(
         id: node_id.to_string(),
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
-        grpc_url: Some(deployed.grpc_url.clone()),
+        rpc_url: Some(deployed.rpc_url.clone()),
         rest_port: Some(body.rest_port),
         rpc_port: Some(body.rpc_port),
         auto_start: true,
@@ -794,7 +794,7 @@ pub async fn http_deploy_node_server(
         Json(DeployResult {
             node_id,
             mgmt_url: deployed.mgmt_url,
-            grpc_url: deployed.grpc_url,
+            rpc_url: deployed.rpc_url,
             pid: deployed.pid,
         }),
     ))
@@ -851,15 +851,10 @@ pub async fn http_restart_node_server(
     let rest_port = crate::mgmt::port_of(&entry.url)
         .ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
     let rpc_port = entry
-        .grpc_url
+        .rpc_url
         .as_deref()
         .and_then(crate::mgmt::port_of)
-        .ok_or_else(|| {
-            err_500(format!(
-                "server entry has malformed grpc_url: {:?}",
-                entry.grpc_url
-            ))
-        })?;
+        .ok_or_else(|| err_500(format!("server entry has malformed rpc_url: {:?}", entry.rpc_url)))?;
 
     if let Some(pid) = state.runtime_pid(node_id) {
         let _sent = match &node {
@@ -904,7 +899,7 @@ pub async fn http_restart_node_server(
         id: node_id.to_string(),
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
-        grpc_url: Some(deployed.grpc_url.clone()),
+        rpc_url: Some(deployed.rpc_url.clone()),
         rest_port: entry.rest_port,
         rpc_port: entry.rpc_port,
         auto_start: entry.auto_start,
@@ -952,7 +947,7 @@ pub async fn http_restart_node_server(
     Ok(Json(DeployResult {
         node_id,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
         pid: deployed.pid,
     }))
 }

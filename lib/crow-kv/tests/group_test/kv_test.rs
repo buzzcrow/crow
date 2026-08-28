@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! KV gRPC integration tests covering Put/Delete/BatchWrite flows.
+//! KV crow-rpc integration tests covering Put/Delete/BatchWrite flows.
 
 use crate::common::cluster::{start_cluster, TestCluster};
 use bytes::Bytes;

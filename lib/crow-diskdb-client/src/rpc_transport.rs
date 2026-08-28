@@ -7,7 +7,7 @@
 //!
 //! Builds flatbuffer requests, sends via `RpcClient::call`, awaits
 //! `CallFuture`, and parses flatbuffer responses into the existing
-//! proto response types. Runs alongside the gRPC transport during the
+//! proto response types. Replaced the legacy transport during the
 //! mixed-rollout window; the client selects the transport based on
 //! whether `with_rpc_transport` was called.
 

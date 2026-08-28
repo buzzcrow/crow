@@ -5,7 +5,7 @@
 //! step-down mid-request with auto-retry, returns the same result."
 //!
 //! Standing up a live election (kill leader, wait for re-vote) inside a
-//! deterministic e2e test is flaky by nature (real timers, real gRPC).
+//! deterministic e2e test is flaky by nature (real timers, real crow-rpc).
 //! What actually matters for C2 is that [`crow_kv_client::CrowkvClient`]
 //! correctly follows a live `NotLeaderHint` end-to-end against a real
 //! `KvService` and completes the write at the real leader — that is
@@ -17,7 +17,7 @@
 //! Two-node group (mirrors `crow_kv/tests/testkit/cluster.rs::start_cluster_inner`,
 //! which is not a public dependency of this crate): node 1 pinned `Leader`,
 //! node 2 pinned `Follower` with `believed_leader` set to node 1, both with
-//! real bound gRPC endpoints wired into each other's `remote_replicas` so
+//! real bound crow-rpc endpoints wired into each other's `remote_replicas` so
 //! `PxGroup::leader_endpoint` can produce a real `not_leader_hint`.
 
 use std::sync::Arc;

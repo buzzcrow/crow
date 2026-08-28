@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! KV edge-case keys through group gRPC KV API.
+//! KV edge-case keys through group crow-rpc KV API.
 //!
 //! Covers: empty key, large key (1KB), special-bytes key (null,
 //! high-UTF8, whitespace), large value (100KB), small value (1 byte),

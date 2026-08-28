@@ -6,7 +6,7 @@
 //! Runs the same allocate / free / commit / query / compact / scan flows
 //! as `diskdb_full_flow_test`, but with `with_rpc_transport` enabled so
 //! all RPCs go through the crow-rpc flatbuffer transport instead of
-//! tonic gRPC.
+//! the legacy tonic transport.
 
 use std::sync::Arc;
 
@@ -46,8 +46,8 @@ async fn diskdb_rpc_transport_e2e() {
     let diskdb = DiskdbProcess::start(&cluster.mgmt_endpoints, false);
     diskdb.wait_for_ready().await;
     eprintln!(
-        "crow-diskdb started: grpc=127.0.0.1:{}, rpc=127.0.0.1:{}, http=127.0.0.1:{}",
-        diskdb.grpc_port, diskdb.rpc_port, diskdb.http_port
+        "crow-diskdb started: listen=127.0.0.1:{}, rpc=127.0.0.1:{}, http=127.0.0.1:{}",
+        diskdb.listen_port, diskdb.rpc_port, diskdb.http_port
     );
 
     // 4. Build the DiskdbClient with crow-rpc transport enabled.

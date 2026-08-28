@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long)]
     config: String,
 
-    /// gRPC listen address (overrides config).
+    /// crow-rpc listen address (overrides config).
     #[arg(long)]
     listen_addr: Option<String>,
 
@@ -156,7 +156,7 @@ async fn main() {
         "initial keep-alive tick complete"
     );
 
-    // Build the gRPC service + start serving immediately (before
+    // Build the crow-rpc service + start serving immediately (before
     // zone loading). Mutating RPCs are gated on lifecycle phase = Up,
     // so allocate/free/rebuild return `unavailable` during loading.
     // Read-only RPCs (GetDiskGroupInfo, GetDiskInfo) are allowed.

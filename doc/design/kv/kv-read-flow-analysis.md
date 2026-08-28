@@ -118,10 +118,10 @@ fast path.
 
 ### TCP transport migration
 
-The internal Paxos path moved from the HTTP/2/gRPC connection-lock transport
+The internal Paxos path moved from the HTTP/2/legacy connection-lock transport
 to flatbuffer-over-TCP crow-rpc with concurrent frame handling.
 
-Perf: compared with the previous Linux gRPC baseline, throughput improved
+Perf: compared with the previous Linux legacy baseline, throughput improved
 104–132% from 1T to 16T and 88–91% at 32T; p99 latency fell 34–61%. The 32T
 Linearizable result went from 144,262 to 271,184 ops/s.
 
@@ -137,7 +137,7 @@ Perf: 290x latency reduction (41ms → 138us).
 
 Replaced the Linux reference with the current crow-rpc run and retained the
 macOS baseline. The current peak is 271,184 Linearizable ops/s at 32T:32C,
-with zero errors. The previous Linux baseline used the legacy gRPC path;
+with zero errors. The previous Linux baseline used the legacy legacy path;
 positive throughput deltas and negative p99 deltas are improvements.
 
 | Config | Old ops/s | New ops/s | Δ ops/s | Old p99 us | New p99 us | Δ p99 |

@@ -69,12 +69,12 @@ async fn diskdb_auto_starts_on_console_restart() {
     })
     .unwrap();
 
-    let grpc_url = format!("http://127.0.0.1:{rpc_port}");
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}");
     cfg.add_server(ServerEntry {
         id: format!("diskdb-{node_id}"),
         url: format!("http://127.0.0.1:{}", rpc_port + 1),
         node_id: Some(node_id),
-        grpc_url: Some(grpc_url),
+        rpc_url: Some(rpc_url),
         rest_port: None,
         rpc_port: Some(rpc_port),
         auto_start: true,

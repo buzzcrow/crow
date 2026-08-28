@@ -42,8 +42,8 @@ async fn diskdb_client_e2e_full_flow() {
     let diskdb = DiskdbProcess::start(&cluster.mgmt_endpoints, false);
     diskdb.wait_for_ready().await;
     eprintln!(
-        "crow-diskdb started: grpc=127.0.0.1:{}, http=127.0.0.1:{}",
-        diskdb.grpc_port, diskdb.http_port
+        "crow-diskdb started: listen=127.0.0.1:{}, http=127.0.0.1:{}",
+        diskdb.listen_port, diskdb.http_port
     );
 
     // 4. Build the DiskdbClient and refresh endpoints.

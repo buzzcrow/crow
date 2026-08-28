@@ -67,7 +67,7 @@ the project has log *infrastructure* but no reviewed log *content*.
   - `crow-web` (`app/crow-web/src/main.rs` lines 32-37) —
     `tracing_subscriber::fmt().with_env_filter(...).init()`:
     console only. Also opens an `ops_log` (JSON-Lines operation
-    log for HTTP/gRPC/SSH calls) at
+    log for HTTP/RPC/SSH calls) at
     `~/.crow-kv/log/console-web-{secs}-{pid}.log`
     (`crow-console-shared/src/ops_log.rs`) — no rotation, no
     compression, no size cap.

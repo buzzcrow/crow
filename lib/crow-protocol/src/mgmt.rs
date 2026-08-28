@@ -101,7 +101,7 @@ pub struct GroupSummary {
 
 /// One element of `POST /stores/{sid}/groups/{gid}/remotes` body and
 /// the `GET` response. `endpoint` is the `host:port` of the remote
-/// replica's gRPC service.
+/// replica's crow-rpc service.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct RemoteReplicaInfo {

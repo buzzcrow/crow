@@ -139,7 +139,7 @@ pub struct PingResult {
 pub struct DeployResult {
     pub node_id: NodeId,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     pub pid: u32,
 }
 
@@ -218,7 +218,7 @@ pub struct ServerSummary {
     pub node_id: Option<NodeId>,
     pub mgmt_url: String,
     #[serde(default)]
-    pub grpc_url: Option<String>,
+    pub rpc_url: Option<String>,
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
@@ -226,10 +226,10 @@ pub struct ServerSummary {
 }
 
 /// Response of `GET /api/stores/:s/groups/:g/endpoint` — the leader's
-/// gRPC URL, ready to hand to a direct gRPC client.
+/// crow-rpc URL, ready to hand to a direct crow-rpc client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EndpointInfo {
-    pub grpc_url: String,
+    pub rpc_url: String,
 }
 
 impl ConsoleClient {
@@ -542,7 +542,7 @@ impl ConsoleClient {
     }
 
     /// `GET /api/stores/:s/groups/:g/endpoint`. Resolve the leader's
-    /// gRPC URL for a direct gRPC client (the bench engine).
+    /// crow-rpc URL for a direct crow-rpc client (the bench engine).
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.

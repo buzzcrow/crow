@@ -92,7 +92,7 @@ work):
 - `50-capacity-diskdb` — "disk maintenance operations, set-status,
   and health badges"
 - `50-capacity-diskdb` — "assign disk-group to diskdb via UI (owner +
-  bind); capacity non-zero when gRPC reachable"
+  bind); capacity non-zero when RPC reachable"
 - `50-capacity-diskdb` — "full deploy flow: deploy diskdb via UI,
   restart, stop, delete via context menu"
 - `51-capacity-canvas` — "CapacityPanel shows cluster totals and

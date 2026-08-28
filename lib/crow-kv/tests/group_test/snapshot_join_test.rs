@@ -4,7 +4,7 @@
 //! New-member snapshot join (`PxGroup::join_via_snapshot`):
 //! a fresh, still-empty replica pulls
 //! a snapshot from an existing cluster's leader over the real
-//! `SnapshotService` gRPC, instead of replaying full Paxos history from
+//! `SnapshotService` crow-rpc, instead of replaying full Paxos history from
 //! slot 1.
 
 use crate::common::cluster::start_cluster;

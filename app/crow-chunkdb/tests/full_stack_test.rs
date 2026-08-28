@@ -5,7 +5,7 @@
 //!
 //! Verifies the allocate → append → seal → query → delete lifecycle
 //! against a real 3-node crow-kv-server cluster with diskdb running
-//! in-process as a gRPC server.
+//! in-process as a crow-rpc server.
 
 mod common;
 

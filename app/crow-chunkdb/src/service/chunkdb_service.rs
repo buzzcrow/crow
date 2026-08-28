@@ -3,7 +3,7 @@
 
 //! chunkdb service — delegates to lifecycle handlers.
 //!
-//! The gRPC (tonic) server trait impl has been removed. The crow-rpc
+//! The legacy tonic server trait impl has been removed. The crow-rpc
 //! dispatch lives in `chunkdb_rpc_service.rs`.
 
 use crate::lifecycle::LifecycleHandler;

@@ -518,7 +518,7 @@ async fn create_and_start_stores(
 async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
     info!(
         store_count = registry.stores.len(),
-        "initiating graceful shutdown of gRPC stores"
+        "initiating graceful shutdown of crow-rpc stores"
     );
 
     // Flush C++ logs before store shutdown so any in-flight engine messages

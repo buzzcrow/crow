@@ -159,7 +159,7 @@ pub struct RebuildResultResponse {
 pub struct DiskdbDeployResult {
     pub node_id: u64,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     pub pid: u32,
 }
 

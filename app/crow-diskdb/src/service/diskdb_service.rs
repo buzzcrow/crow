@@ -3,7 +3,7 @@
 
 //! diskdb service utility functions and constants.
 //!
-//! The gRPC (tonic) server trait impl has been removed. The crow-rpc
+//! The legacy tonic server trait impl has been removed. The crow-rpc
 //! dispatch lives in `diskdb_rpc_service.rs`. This module retains
 //! shared constants and helpers used by the crow-rpc handlers.
 

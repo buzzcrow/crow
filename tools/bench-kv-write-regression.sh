@@ -111,8 +111,8 @@ run_bench() {
 #   512  16   4    64   26.7/64   233,601   87,458    1930   5564   0    2.8   2.6   3250  4,926    240   4,926    0     0
 #   1000 16   4    64   28.3/64   208,114   73,545    4340   12856  0    3     3.1   996   4,265    1052  4,264    0     0
 #
-# Zero-copy crow-rpc + event-write beats gRPC at every thread count.
-# Peak ~234K at 512T (was ~124K with gRPC, ~191K without event-write).
+# Zero-copy crow-rpc + event-write beats legacy at every thread count.
+# Peak ~234K at 512T (was ~124K with legacy, ~191K without event-write).
 # 1000T now uses co=64 (was co=32) — 1000 threads fill 64-key batches
 # as well as 512T. Coalesce fill: 48% at co=16 (256T), 42% at co=64
 # (512T/1000T) — batches not full, bottleneck is accept-round latency.
@@ -120,7 +120,7 @@ run_bench() {
 # Inter-replica: r2≈r3 (symmetric). Zero errors across all configs.
 # See doc/design/kv/kv-write-flow-analysis.md for full analysis.
 #
-# macOS M5 Pro (2026-08-19, gRPC transport, pre-zero-copy):
+# macOS M5 Pro (2026-08-19, legacy transport, pre-zero-copy):
 #   coalesce=32, max_inflight=128, same workload.
 #
 #   T    C    ops/s     WAL      p50    p99    p999   err
@@ -132,7 +132,7 @@ run_bench() {
 #   128  32   78,155    86,840   1,590  2,654  3,794  0
 #   256  32   87,448    86,619   2,870  4,704  7,004  0
 #
-# macOS peak ~87K at 256T (gRPC). M5 Pro faster at 1T (10K vs 3.7K, 2.7x)
+# macOS peak ~87K at 256T (legacy). M5 Pro faster at 1T (10K vs 3.7K, 2.7x)
 # due to lower per-op overhead, but saturates earlier (non-SMT 18-core vs
 # 32-thread SMT AMD). Zero-copy comparison on M5 Pro pending.
 

@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
 
-    /// Port pool for gRPC `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
+    /// Port pool for crow-rpc `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
     #[arg(long)]
     pub ports: Option<String>,
 

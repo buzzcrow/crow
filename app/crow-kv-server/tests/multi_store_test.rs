@@ -68,7 +68,7 @@ fn store_status(topo: &Value, store_id: u64) -> Value {
     store
 }
 
-/// The normalized gRPC endpoint for a store on a process.
+/// The normalized crow-rpc endpoint for a store on a process.
 async fn store_endpoint(handle: &ServerHandle, store_id: u64) -> String {
     let topo = topology(handle).await;
     store_status(&topo, store_id)["listen_addr"]

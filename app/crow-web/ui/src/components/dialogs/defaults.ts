@@ -17,11 +17,11 @@ interface ServerPortSource {
   rpc_port?: number | null;
   process?: {
     mgmt_url: string;
-    grpc_url: string;
+    rpc_url: string;
   };
   server?: {
     mgmt_url: string;
-    grpc_url: string;
+    rpc_url: string;
   };
 }
 
@@ -144,12 +144,12 @@ export function deployPortDefaultsForNode(
       server.rest_port ??
       (server.process?.mgmt_url ? extractPort(server.process.mgmt_url) : null) ??
       (server.server?.mgmt_url ? extractPort(server.server.mgmt_url) : null);
-    const grpc =
+    const rpc =
       server.rpc_port ??
-      (server.process?.grpc_url ? extractPort(server.process.grpc_url) : null) ??
-      (server.server?.grpc_url ? extractPort(server.server.grpc_url) : null);
+      (server.process?.rpc_url ? extractPort(server.process.rpc_url) : null) ??
+      (server.server?.rpc_url ? extractPort(server.server.rpc_url) : null);
     if (mgmt) usedRestPorts.push(mgmt);
-    if (grpc) usedRpcPorts.push(grpc);
+    if (rpc) usedRpcPorts.push(rpc);
   }
 
   const defaultRestPort = nextAvailablePort(usedRestPorts, preferredPortStart(restStart, nodeId));
@@ -166,7 +166,7 @@ interface DiskdbPortSource {
 }
 
 /**
- * Pick a dynamic diskdb gRPC port for a node: offset the base by the
+ * Pick a dynamic diskdb crow-rpc port for a node: offset the base by the
  * node-id suffix, then increment past ports already assigned to other
  * diskdb instances (extracted from their `rpc_endpoint`) and any
  * extra remembered ports. Mirrors `deployPortDefaultsForNode` so diskdb

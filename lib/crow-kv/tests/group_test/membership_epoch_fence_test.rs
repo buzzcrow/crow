@@ -11,7 +11,7 @@
 //! epoch agrees again, per §6.3's confirmed trade-off.
 //!
 //! Uses the real 3-node `common::cluster` harness (separate `PxKvStore`
-//! processes-in-process, real gRPC wire messages, no mocks) rather than
+//! processes-in-process, real crow-rpc wire messages, no mocks) rather than
 //! the console's HTTP mgmt layer: the epoch bump itself is what's under
 //! test here, not the HTTP fan-out mechanics already covered by
 //! `crow-kv-server`'s `add_remote_replicas` tests. Calling

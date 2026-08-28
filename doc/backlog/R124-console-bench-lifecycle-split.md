@@ -138,7 +138,7 @@ verb, and multi-kind deploy dispatch with `--web` opt-in console-web.
    `bench-runs/` pattern) with one subfolder per deploy:
    `runtime/<deploy-name>/` (e.g. `runtime/kv-bench-2026-08-28/`).
    Each subfolder holds: a serializable `ClusterHandle` (deploy name,
-   kind, console URL, node ids, pids, gRPC + mgmt endpoints, node
+   kind, console URL, node ids, pids, RPC + mgmt endpoints, node
    workspaces, tunables used), per-node workspaces (`N-<id>/`, where
    servers write `log/`), and CLI bench-run logs. `bench deploy`
    takes `--name <deploy-name>` and writes the handle +

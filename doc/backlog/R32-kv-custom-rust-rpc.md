@@ -5,12 +5,12 @@
 
 **Problem**
 
-gRPC (tonic + h2) serializes concurrent writers on a connection-level
+legacy (tonic + h2) serializes concurrent writers on a connection-level
 userspace lock. HTTP/2's stream/HPACK/flow-control architecture
 inherently requires a connection-level lock for correctness — the
 shared HPACK table, frame output buffer, and flow-control windows are
 mutable state that demands serialization. When N threads submit to one
-gRPC connection, they funnel through a single-threaded userspace
+legacy connection, they funnel through a single-threaded userspace
 critical section before any of them reach `write()`. The kernel's TCP
 coalescing never sees concurrent writers; h2 hands it one merged buffer
 from one thread.
@@ -25,16 +25,16 @@ concurrent writers without a lock. The R104 RPC library
 (`doc/backlog/R104-protocol-flatbuffer-rpc.md`) provides the
 replacement transport: flatbuffer-over-TCP with a per-connection
 lock-free writer queue. R32 is the migration of the KV consensus hot
-path from gRPC to R104.
+path from legacy to R104.
 
 **Current behavior + impact**: All internal KV RPC (replica-to-replica
-Paxos, LearnerStream, PxService) uses tonic/gRPC. The h2 connection
+Paxos, LearnerStream, PxService) uses tonic/legacy. The h2 connection
 lock costs ~17% at 2T:1C and forces the production deployment to run
 1T:1C to avoid the loss. The management API (Axum HTTP) and
 client-facing surface are separate and unaffected.
 
 **Design pointers**: KV RPC sub-design
-`doc/design/kv/design-crow-kv-rpc.md` covers the current gRPC wire
+`doc/design/kv/design-crow-kv-rpc.md` covers the current legacy wire
 protocol (PxService, LearnerStream, error model). R32 swaps the
 transport layer; the protocol semantics (request/response shapes,
 error codes, `NotLeaderHint`) are preserved. The h2-lock analysis
@@ -43,7 +43,7 @@ lives in `doc/design/kv/kv-read-flow-analysis.md` ≈L546-622.
 **Use scenarios**:
 
 - **Paxos accept under concurrency**: 4 followers each submit accepts
-  to a leader over 2 connections (2T:1C). With gRPC, the two threads on
+  to a leader over 2 connections (2T:1C). With legacy, the two threads on
   each connection funnel through the h2 lock. With R104, each accept is
   a framed message pushed to the per-connection MPSC queue — no
   userspace lock. Expected: throughput recovers the ~17% loss; higher
@@ -61,7 +61,7 @@ lives in `doc/design/kv/kv-read-flow-analysis.md` ≈L546-622.
   client's retry logic is unchanged. Expected: no contract change.
 
 - **Mixed workload**: Heartbeats and accepts share a connection. Under
-  gRPC, heartbeats can be starved behind write backpressure (E5
+  legacy, heartbeats can be starved behind write backpressure (E5
   reserves queue admission, not wire priority — tracked separately as
   R53). Under R104, the lock-free queue does not starve heartbeats
   behind accepts in the same way (both are cheap queue pushes).
@@ -70,14 +70,14 @@ lives in `doc/design/kv/kv-read-flow-analysis.md` ≈L546-622.
 
 **Solution**
 
-Migrate the KV consensus internal RPC from tonic/gRPC to the R104
+Migrate the KV consensus internal RPC from tonic/legacy to the R104
 `crow-rpc` library. The protocol semantics (request/response shapes,
 error codes, `NotLeaderHint`, LearnerStream) are preserved — only the
 transport changes. The existing `pxos.proto` is converted to a `.fbs`
 flatbuffer schema (full conversion — no prost bridge, consistent with
 R105/diskio and R115/diskdb; see Resolved Questions).
 
-**One-line summary**: Replace gRPC on the KV internal replica-to-
+**One-line summary**: Replace legacy on the KV internal replica-to-
 replica path with the R104 flatbuffer RPC library, preserving protocol
 semantics and recovering the h2-lock throughput loss.
 
@@ -110,7 +110,7 @@ semantics and recovering the h2-lock throughput loss.
    alongside the existing Axum HTTP management server (which stays on
    HTTP) on a new consensus port (`KV_RPC_BASE` — inter-KV-server
    only; R117 later adds a separate client-facing port for outside
-   services). The gRPC server remains temporarily for the
+   services). The legacy server remains temporarily for the
    client-facing surface until R117 migrates it. Wiring lands in
    `startup.rs` (where the existing tonic services are bound today).
 
@@ -143,17 +143,17 @@ semantics and recovering the h2-lock throughput loss.
    `SendQueueFull`/`ConnectionError` are retryable;
    `RegistrationFailed`/`AllDown`/`InvalidArg` are not. The client
    retry logic must treat R104 errors the same as the equivalent
-   gRPC status codes. `NotLeaderHint` is a protocol-level error
+   legacy status codes. `NotLeaderHint` is a protocol-level error
    (carried in the response body as response fields, not a transport
    error) — unchanged.
 
 5. **Benchmark + regression** (`tools/bench-kv-rpc.sh`, new) — a
    benchmark script that runs the 2T:1C read bench (`crow-cli bench
-   kv`) against both the gRPC path (baseline) and the R104 path.
+   kv`) against both the legacy path (baseline) and the R104 path.
    Verifies the ~17% loss is recovered. Also runs 1T:1C to verify no
    regression at the uncontended point. Added to the regression
    sentinel suite alongside `bench-kv-read-regression.sh` and
-   `bench-kv-write-regression.sh`. Prerequisite: capture the gRPC
+   `bench-kv-write-regression.sh`. Prerequisite: capture the legacy
    baseline before starting the migration (todo_fb.md §6 — the
    baseline goes in `doc/design/rpc/rpc-migration-baselines.md`, new,
    or extends `rpc-flow-analysis.md`). Note:
@@ -197,7 +197,7 @@ semantics and recovering the h2-lock throughput loss.
 **Flow diagram**:
 
 ```
-                          Before (gRPC)                          After (R104)
+                          Before (legacy)                          After (R104)
                           ─────────────                          ────────────
 
 Follower A ─┐                       Follower A ─┐
@@ -223,13 +223,13 @@ Follower D ─┘                       Follower D ─┘                    │
   topology-cache refresh handles this; no change.
 - LearnerStream mid-stream connection drop → R104 fails the in-flight
   request; the learner reconnects and resumes from the last applied
-  slot. Same semantics as gRPC stream reconnect.
-- Mixed gRPC + R104 during rollout → both servers run simultaneously
+  slot. Same semantics as legacy stream reconnect.
+- Mixed legacy + R104 during rollout → both servers run simultaneously
   during migration; clients switch via a config flag. After all
-  clients are migrated, the gRPC server is removed.
+  clients are migrated, the legacy server is removed.
 - Backpressure under burst → R104 `BackpressureError` maps to
   `Unavailable`; the client retries on a different connection or
-  backs off. Same behavior as gRPC `UNAVAILABLE`.
+  backs off. Same behavior as legacy `UNAVAILABLE`.
 
 **Dependencies**
 
@@ -255,7 +255,7 @@ Follower D ─┘                       Follower D ─┘                    │
 
 **Transport parity**:
 - A Paxos accept request over R104 produces the same consensus state
-  change as over gRPC (same proposal accepted, same log entry
+  change as over legacy (same proposal accepted, same log entry
   persisted). Integration test (run a 3-node cluster, submit accepts
   via R104, verify log consistency).
 - `NotLeaderHint` response over R104 is parsed correctly by the
@@ -267,21 +267,21 @@ Follower D ─┘                       Follower D ─┘                    │
 - 2T:1C read throughput over R104 is within 5% of the 1T:1C baseline
   (i.e., the h2-lock loss is recovered). Benchmark test
   (`tools/bench-kv-rpc.sh`, Linux only).
-- 1T:1C read throughput over R104 is within 5% of the gRPC 1T:1C
+- 1T:1C read throughput over R104 is within 5% of the legacy 1T:1C
   baseline (no regression at the uncontended point). Benchmark test.
 
 **Error model**:
 - R104 `ConnectionError` → client retries on next connection (same as
-  gRPC `UNAVAILABLE`). Integration test (kill a replica mid-call).
+  legacy `UNAVAILABLE`). Integration test (kill a replica mid-call).
 - R104 `TimeoutError` → client returns `Timeout` to caller (same as
-  gRPC deadline exceeded). Integration test.
+  legacy deadline exceeded). Integration test.
 - R104 `BackpressureError` → client retries with backoff (same as
-  gRPC `UNAVAILABLE` under load). Integration test.
+  legacy `UNAVAILABLE` under load). Integration test.
 
 **Mixed rollout**:
-- A cluster running both gRPC and R104 servers: a gRPC client can
-  still connect to the gRPC server, an R104 client can connect to the
-  R104 server. Integration test (3-node cluster, 1 node on gRPC, 2 on
+- A cluster running both legacy and R104 servers: a legacy client can
+  still connect to the legacy server, an R104 client can connect to the
+  R104 server. Integration test (3-node cluster, 1 node on legacy, 2 on
   R104, verify consensus works).
 
 **Test commands**: `pixi run cargo test -p crow-kv --test rpc_migration`
@@ -337,7 +337,7 @@ Follower D ─┘                       Follower D ─┘                    │
 - **`LearnerStream` modeling — R114 bidi vs. persistent-connection
   request-response** — persistent-connection request-response. The
   proto declares `LearnerStream` as bidi (`stream` request, `stream`
-  response), and semantically it is true bidi in the gRPC sense (both
+  response), and semantically it is true bidi in the legacy sense (both
   halves carry independently-framed messages). But the actual usage
   is request→response over a long-lived connection: the leader is the
   client (`PxLearnerStream` in `lib/crow-kv/src/cluster/

@@ -8,7 +8,7 @@
 //! thin clap argument-parsing layer over the same `shared` core the Web
 //! UI uses, and the service resolves upstream `crow-kv-server` nodes from
 //! its config and monitor cache. There is no direct `crow-kv-server` /
-//! registry path; even `bench` resolves its gRPC target via the service.
+//! registry path; even `bench` resolves its crow-rpc target via the service.
 
 mod bench;
 mod commands;

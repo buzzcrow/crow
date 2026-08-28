@@ -21,7 +21,7 @@ fn pick_free_port() -> u16 {
 struct Upstream {
     pid: u32,
     mgmt_url: String,
-    grpc_url: String,
+    rpc_url: String,
 }
 
 async fn spawn_upstream() -> Option<Upstream> {
@@ -50,7 +50,7 @@ async fn spawn_upstream() -> Option<Upstream> {
     Some(Upstream {
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
     })
 }
 
@@ -77,7 +77,7 @@ async fn spawn_web_with_node(upstream: &Upstream) -> SocketAddr {
         id: "n1".to_string(),
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
-        grpc_url: Some(upstream.grpc_url.clone()),
+        rpc_url: Some(upstream.rpc_url.clone()),
         rest_port: None,
         rpc_port: None,
         auto_start: true,
@@ -267,7 +267,7 @@ async fn openapi_proxy_cache_is_per_node() {
         id: "n1".to_string(),
         url: format!("http://{n1}"),
         node_id: Some(1),
-        grpc_url: None,
+        rpc_url: None,
         rest_port: None,
         rpc_port: None,
         auto_start: false,
@@ -283,7 +283,7 @@ async fn openapi_proxy_cache_is_per_node() {
         id: "n2".to_string(),
         url: format!("http://{n2}"),
         node_id: Some(2),
-        grpc_url: None,
+        rpc_url: None,
         rest_port: None,
         rpc_port: None,
         auto_start: false,

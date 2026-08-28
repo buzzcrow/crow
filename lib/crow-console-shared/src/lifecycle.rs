@@ -82,7 +82,7 @@ pub struct DeployRequest {
 pub struct DeployedServer {
     pub server_id: String,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     pub pid: u32,
 }
 
@@ -219,7 +219,7 @@ async fn deploy_local_in_workspace(
     let config_path = resolve_config_path(req);
 
     let mgmt_url = format!("http://{}:{}", node.host, req.rest_port);
-    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+    let rpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--management-addr")
@@ -306,7 +306,7 @@ async fn deploy_local_in_workspace(
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
         mgmt_url,
-        grpc_url,
+        rpc_url,
         pid,
     })
 }
@@ -579,7 +579,7 @@ fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
 /// Inputs for a diskdb deploy (R77). The binary and config file are
 /// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
 /// and `<workspace>/conf/crow_diskdb_config.toml`); the deploy only
-/// needs the gRPC port to override `--listen-addr`. The HTTP port is
+/// needs the crow-rpc port to override `--listen-addr`. The HTTP port is
 /// read from the config file for readiness checking.
 #[derive(Debug, Clone, Default)]
 pub struct DiskdbDeployRequest {
@@ -701,7 +701,7 @@ fn http_listen_addr_from_config(config_path: &std::path::Path) -> Option<String>
 /// Spawn `crow-diskdb` locally. The binary and config file are
 /// pre-copied to the node workspace (`<workspace>/bin/crow-diskdb`
 /// and `<workspace>/conf/crow_diskdb_config.toml`). The deploy only
-/// overrides `--listen-addr` with the gRPC port; the HTTP port comes
+/// overrides `--listen-addr` with the crow-rpc port; the HTTP port comes
 /// from the config file.
 ///
 /// # Errors
@@ -733,7 +733,7 @@ pub async fn deploy_diskdb_local(
     };
 
     let config_path = resolve_diskdb_config_path(workspace_dir, req.rpc_port, &req.kv_server_mgmt_seeds)?;
-    let grpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+    let rpc_url = format!("http://{}:{}", node.host, req.rpc_port);
 
     // Read the HTTP listen address from the config file for readiness
     // checking. If absent, the diskdb binary uses its default HTTP
@@ -795,7 +795,7 @@ pub async fn deploy_diskdb_local(
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
         mgmt_url,
-        grpc_url,
+        rpc_url,
         pid,
     })
 }

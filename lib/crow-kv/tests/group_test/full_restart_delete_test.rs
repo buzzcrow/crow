@@ -4,7 +4,7 @@
 //! Full-cluster restart durability for deletes.
 //!
 //! Reproduces the web-console `cluster_restart_recovery_test` failure at the
-//! `crow_kv` layer (no console / gRPC proxy): a 3-node WAL-backed group commits
+//! `crow_kv` layer (no console / crow-rpc proxy): a 3-node WAL-backed group commits
 //! puts and deletes, then EVERY node is killed and restarted from its own WAL
 //! dir. After restart the deleted keys must stay deleted (no resurrection) and
 //! the surviving keys must remain readable.

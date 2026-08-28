@@ -95,7 +95,7 @@ pub struct BenchFixture {
     console_task: tokio::task::JoinHandle<()>,
     node_ids: Vec<u64>,
     node_pids: Vec<u32>,
-    node_grpc_urls: Vec<String>,
+    node_rpc_urls: Vec<String>,
     node_mgmt_urls: Vec<String>,
     leader_endpoint: String,
     workspace_dir: PathBuf,
@@ -138,7 +138,7 @@ impl BenchFixture {
         });
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
-        let (ids, pids, grpc_urls, mgmt_urls) = match Self::provision_nodes(
+        let (ids, pids, rpc_urls, mgmt_urls) = match Self::provision_nodes(
             &client,
             mode,
             max_inflight,
@@ -191,7 +191,7 @@ impl BenchFixture {
             console_task,
             node_ids: ids,
             node_pids: pids,
-            node_grpc_urls: grpc_urls,
+            node_rpc_urls: rpc_urls,
             node_mgmt_urls: mgmt_urls,
             leader_endpoint,
             workspace_dir,
@@ -219,7 +219,7 @@ impl BenchFixture {
     ) -> Result<(Vec<u64>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
-        let mut grpc_urls = Vec::with_capacity(NODE_COUNT);
+        let mut rpc_urls = Vec::with_capacity(NODE_COUNT);
         let mut mgmt_urls = Vec::with_capacity(NODE_COUNT);
         for i in 0..NODE_COUNT {
             let rack_id = i as u64;
@@ -271,10 +271,10 @@ impl BenchFixture {
 
             ids.push(node_id);
             pids.push(deployed.pid);
-            grpc_urls.push(deployed.grpc_url);
+            rpc_urls.push(deployed.rpc_url);
             mgmt_urls.push(deployed.mgmt_url);
         }
-        Ok((ids, pids, grpc_urls, mgmt_urls))
+        Ok((ids, pids, rpc_urls, mgmt_urls))
     }
 
     /// Create the single store spanning all nodes, then a 3-replica
@@ -301,7 +301,7 @@ impl BenchFixture {
         Ok(())
     }
 
-    /// The elected leader's gRPC endpoint, ready to hand to
+    /// The elected leader's crow-rpc endpoint, ready to hand to
     /// `bench::runner::run_bench`.
     #[must_use]
     pub fn leader_endpoint(&self) -> &str {
@@ -329,13 +329,13 @@ impl BenchFixture {
         &self.workspace_dir
     }
 
-    /// Build a map from gRPC endpoint URL to node ID, for resolving
+    /// Build a map from crow-rpc endpoint URL to node ID, for resolving
     /// leader-change episode endpoints to node names in the report.
     #[must_use]
     pub fn endpoint_to_node_map(&self) -> std::collections::HashMap<String, String> {
         self.node_ids
             .iter()
-            .zip(self.node_grpc_urls.iter())
+            .zip(self.node_rpc_urls.iter())
             .map(|(nid, url)| (url.clone(), nid.to_string()))
             .collect()
     }
@@ -432,8 +432,8 @@ async fn wait_for_leader_endpoint(client: &ConsoleClient, timeout: Duration) -> 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Ok(info) = client.resolve_endpoint(STORE_ID, GROUP_ID).await {
-            if !info.grpc_url.is_empty() {
-                return Ok(info.grpc_url);
+            if !info.rpc_url.is_empty() {
+                return Ok(info.rpc_url);
             }
         }
         if tokio::time::Instant::now() >= deadline {

@@ -30,7 +30,7 @@ struct Cli {
     #[arg(long)]
     config: String,
 
-    /// gRPC listen address (overrides config).
+    /// crow-rpc listen address (overrides config).
     #[arg(long)]
     listen_addr: Option<String>,
 

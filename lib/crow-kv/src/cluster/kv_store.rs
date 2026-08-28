@@ -1,11 +1,11 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! [`KvStore`] trait — the gRPC-facing surface of a single
+//! [`KvStore`] trait — the crow-rpc-facing surface of a single
 //! `PxKvStore` instance. Methods mirror the wire protocol (`KvGet`,
 //! `KvPut`, `KvDelete`, `KvBatchWrite`, `KvScan`) and return the
 //! corresponding response message. The trait is implemented by
-//! [`crate::cluster::px_kv_store::PxKvStore`]; it exists so the gRPC
+//! [`crate::cluster::px_kv_store::PxKvStore`]; it exists so the crow-rpc
 //! handler layer in `crate::rpc` can depend on the trait rather than the
 //! concrete store, easing mocking and future store implementations.
 

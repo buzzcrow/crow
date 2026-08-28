@@ -27,7 +27,7 @@ const CANVAS_NODE = 510;
  * Capacity canvas + scanner/recalc E2E (R77 Phase 6.3-6.4).
  * Deploys a diskdb instance and verifies the CapacityPanel renders
  * the ScannerPanel, RecalcPanel, and per-disk UI elements. The
- * diskdb's gRPC endpoint may not be fully reachable in the test
+ * diskdb's crow-rpc endpoint may not be fully reachable in the test
  * environment, so we test the UI components that render from the
  * service registry data and verify the action buttons trigger calls.
  */
@@ -153,14 +153,14 @@ test.describe('capacity · canvas + scanner/recalc', () => {
 
       // Wait for the DG to appear in the sidebar. The keepalive loop
       // writes owned_dg_ids to the service registry; this may take a
-      // few seconds. If the DG never appears, the diskdb's gRPC
+      // few seconds. If the DG never appears, the diskdb's crow-rpc
       // endpoint isn't reachable — skip the canvas assertions.
       let dgVisible = false;
       try {
         await expect(aside.getByText(/DG-610/, { exact: true })).toBeVisible({ timeout: 15_000 });
         dgVisible = true;
       } catch {
-        console.warn(`DG-${dgId} did not appear in sidebar — diskdb gRPC not reachable, skipping canvas assertions`);
+        console.warn(`DG-${dgId} did not appear in sidebar — diskdb crow-rpc not reachable, skipping canvas assertions`);
       }
 
       if (dgVisible) {
@@ -240,7 +240,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
 
       // Capacity totals (Total Capacity / Used / Free) are shown in the
       // Capacity view. Wait for the DG to report usage so the totals are
-      // non-zero; if the diskdb gRPC is unreachable, still verify the
+      // non-zero; if the diskdb crow-rpc is unreachable, still verify the
       // labels render (totals would be 0 B).
       await expect(inspector.getByText('Total Capacity')).toBeVisible({ timeout: 3_000 });
       await expect(inspector.getByText('Used', { exact: true })).toBeVisible({ timeout: 3_000 });
@@ -260,7 +260,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
           }, { timeout: 15_000, intervals: [200] }).toBe(true);
           usageOk = true;
         } catch {
-          console.warn(`DG-${dgId} never reported usage — diskdb gRPC not reachable, skipping totals match`);
+          console.warn(`DG-${dgId} never reported usage — diskdb crow-rpc not reachable, skipping totals match`);
         }
 
         if (usageOk) {

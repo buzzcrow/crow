@@ -2,7 +2,7 @@ include "common_type.fbs";
 
 namespace crow.diskdb.proto;
 
-// diskdb service flatbuffer control messages (R115: gRPC → crow-rpc
+// diskdb service flatbuffer control messages (R115: legacy → crow-rpc
 // migration). Mirrors diskdb_op.proto + diskdb_type.proto + the
 // diskdb-relevant subset of common_type.proto / error_code.proto.
 //

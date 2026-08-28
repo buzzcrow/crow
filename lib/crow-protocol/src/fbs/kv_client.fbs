@@ -2,7 +2,7 @@ include "common_type.fbs";
 
 namespace crow.kv_client.proto;
 
-// KV client-facing service flatbuffer control messages (R117: gRPC →
+// KV client-facing service flatbuffer control messages (R117: legacy →
 // crow-rpc migration). Mirrors crow_kv.rpc.KvService (kv.proto).
 //
 // Conventions (design-crow-rpc.md §6, todo_fb.md "Rules to Follow"):
@@ -18,7 +18,7 @@ namespace crow.kv_client.proto;
 //   cache. No Paxos term/epoch reasoning (unlike kv_consensus.fbs).
 // - Unary requests carry `forwarded: bool` (default false) — the
 //   server-side leader-forward loop-guard that replaces the
-//   `x-crow-kv-forwarded` gRPC metadata header (crow-rpc has no
+//   `x-crow-kv-forwarded` legacy metadata header (crow-rpc has no
 //   metadata). Set to true when the server re-issues a Linearizable
 //   read to the leader; the leader serves it locally without
 //   re-forwarding.

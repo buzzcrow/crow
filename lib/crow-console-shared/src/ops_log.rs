@@ -5,19 +5,19 @@
 //!
 //! Each console session opens one append-only JSON-Lines file under
 //! `~/.crow-kv/log/`. Every outbound action issued by `shared::clients`
-//! (HTTP, gRPC, SSH) appends one record carrying:
+//! (HTTP, crow-rpc, SSH) appends one record carrying:
 //!
 //! - `ts_unix_ms`  — wall-clock time of the request.
 //! - `corr_id`     — current `corr_id` task-local (see `crate::corr_id`).
-//! - `kind`        — `"http"` / `"grpc"` / `"ssh"`.
+//! - `kind`        — `"http"` / `"rpc"` / `"ssh"`.
 //! - `target`      — target URL or `host:port`.
 //! - `op`          — `"GET /api/..."`, `"PxKvStore.Put"`, etc.
-//! - `status`      — HTTP status, gRPC code, exit status.
+//! - `status`      — HTTP status, crow-rpc code, exit status.
 //! - `duration_ms` — wall-clock cost of the call.
 //! - `body`        — optional short JSON summary (no secrets).
 //!
 //! Reproducibility intent: an operator can paste the recorded URL +
-//! body into curl/grpcurl/ssh and replay any failed step.
+//! body into curl/rpcurl/ssh and replay any failed step.
 //!
 //! Key work: lazy global init (`init`/`init_default`), thread-safe
 //! append (one `std::sync::Mutex` around the file handle), default
@@ -150,21 +150,15 @@ pub fn append_http(
     }
 }
 
-/// Append one gRPC-call record. `service_method` is the standard
+/// Append one crow-rpc-call record. `service_method` is the standard
 /// `package.Service/Method` form.
 #[allow(dead_code)]
-pub(crate) fn append_grpc(
-    corr_id: &str,
-    target: &str,
-    service_method: &str,
-    status: &str,
-    duration_ms: u128,
-) {
+pub(crate) fn append_rpc(corr_id: &str, target: &str, service_method: &str, status: &str, duration_ms: u128) {
     if let Some(log) = OPS_LOG.get() {
         log.append(&json!({
             "ts_unix_ms": now_ms(),
             "corr_id": corr_id,
-            "kind": "grpc",
+            "kind": "rpc",
             "op": service_method,
             "target": target,
             "status": status,

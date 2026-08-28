@@ -207,7 +207,7 @@ impl WalCluster {
     async fn kill(&mut self, id: u64) -> PathBuf {
         let idx = self.nodes.iter().position(|n| n.id == id).expect("node present");
         let node = self.nodes.remove(idx);
-        // Full cascade shutdown: stops the gRPC server *and* cancels the
+        // Full cascade shutdown: stops the crow-rpc server *and* cancels the
         // election driver / heartbeat loop. A bare `stop` would leave the
         // driver heartbeating forever, starving the survivors' election
         // deadline so they could never re-elect.

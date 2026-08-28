@@ -3,7 +3,7 @@
 
 //! C6 end-to-end: spawn `crow-kv-server`, create a store/group through the
 //! management API, then via `crow-kv-client`'s `CrowkvClient` exercise
-//! put → get → delete → get-not-found → scan. (C6's own gRPC `KvClient`
+//! put → get → delete → get-not-found → scan. (C6's own crow-rpc `KvClient`
 //! wrapper is gone -- see -- so this
 //! now exercises the real client library `crow-web`/`crow-cli` use.)
 

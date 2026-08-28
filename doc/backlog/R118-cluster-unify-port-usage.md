@@ -17,11 +17,11 @@ collide on the famous ports or on whatever a test harness hardcodes.
 
 - `lib/crow-protocol/src/ports.rs` already defines base ports + stride
   rules + a `ServicePort` enum for all current services (kv-server
-  mgmt/grpc/consensus-rpc/client-rpc, diskdb grpc/http/rpc, chunkdb
-  grpc/http/rpc, web). But adoption is incomplete and inconsistent:
+  mgmt/listen/consensus-rpc/client-rpc, diskdb listen/http/rpc, chunkdb
+  listen/http/rpc, web). But adoption is incomplete and inconsistent:
   - `crow-kv-server` CLI (`app/crow-kv-server/src/cli.rs`) exposes
     `--management-port` (default `KV_SERVER_MGMT_BASE`) and `--ports`
-    (gRPC pool, optional free-form list) but has **no CLI flag** for the
+    (listen pool, optional free-form list) but has **no CLI flag** for the
     consensus RPC port (`KV_RPC_BASE`) or the client-facing RPC port
     (`KV_CLIENT_RPC_BASE`). Those listeners fall back to constants the
     operator cannot override per-start.
@@ -96,12 +96,12 @@ collide on the famous ports or on whatever a test harness hardcodes.
 
 - **Operator single-instance start** — operator runs
   `crow-kv-server --root /node1` with no port flags → server listens on
-  `KV_SERVER_MGMT_BASE` (mgmt), `KV_SERVER_GRPC_BASE` (gRPC pool first
+  `KV_SERVER_MGMT_BASE` (mgmt), `KV_SERVER_LISTEN_BASE` (listen pool first
   port), `KV_RPC_BASE` (consensus), `KV_CLIENT_RPC_BASE` (client RPC).
   Same for `crow-diskdb` and `crow-chunkdb` with their famous defaults.
   No port 0 anywhere.
 - **Operator explicit override** — operator runs
-  `crow-kv-server --root /node1 --management-port 9915 --grpc-port 28005
+  `crow-kv-server --root /node1 --management-port 9915 --listen-port 28005
   --consensus-rpc-port 28105 --client-rpc-port 28205` → server listens
   on exactly those ports; defaults ignored for the flags passed.
   Passing `0` is rejected at CLI parse with a clear error.
@@ -118,7 +118,7 @@ collide on the famous ports or on whatever a test harness hardcodes.
   test does not observe a bind failure.
 - **Cluster bootstrap with dispatcher** — a cluster bootstrap tool asks
   the dispatcher for N kv-server instance indices (and their derived
-  mgmt/grpc/consensus/client-rpc ports) plus M diskdb instance indices,
+  mgmt/listen/consensus/client-rpc ports) plus M diskdb instance indices,
   then starts each server with the explicit `--*-port` flags derived
   from the dispatcher. Peers learn each other's listen addresses from
   the assigned indices, not from runtime discovery of OS-assigned ports.
@@ -159,19 +159,19 @@ Numbered work items:
 2. **`crow-kv-server` CLI unification** — `app/crow-kv-server/src/cli.rs`
    + `lib/crow-kv/src/cluster/kv_server.rs`. Add `--consensus-rpc-port`
    (default `KV_RPC_BASE`) and `--client-rpc-port` (default
-   `KV_CLIENT_RPC_BASE`); keep `--management-port` and `--ports` (gRPC
+   `KV_CLIENT_RPC_BASE`); keep `--management-port` and `--ports` (listen
    pool). All port flags reject `0`. Remove the port-0 / OS-assigned
    branch in `KvServer::start` (~lines 68-71) — bind exactly the
    requested port; bind failure is a hard error with a clear message.
 3. **`crow-diskdb` CLI unification** — `app/crow-diskdb/src/main.rs` +
-   diskdb config. Add CLI flags `--grpc-port` (default
-   `DISKDB_GRPC_BASE`), `--http-port` (default `DISKDB_HTTP_BASE`),
+   diskdb config. Add CLI flags `--listen-port` (default
+   `DISKDB_LISTEN_BASE`), `--http-port` (default `DISKDB_HTTP_BASE`),
    `--rpc-port` (default `DISKDB_RPC_BASE`) that override config; keep
    config as the fallback when the flag is absent. Reject `0`. The
-   paired-port invariant (http = grpc + 1 per instance) is enforced or
+   paired-port invariant (http = listen + 1 per instance) is enforced or
    documented as overridden when flags are passed individually.
 4. **`crow-chunkdb` CLI unification** — chunkdb server entry + config.
-   Same shape as diskdb: `--grpc-port` / `--http-port` / `--rpc-port`
+   Same shape as diskdb: `--listen-port` / `--http-port` / `--rpc-port`
    with `CHUNKDB_*_BASE` defaults, reject `0`. Blocked on the chunkdb
    server component landing (see Dependencies).
 5. **`crow-web` / `crow-cli` port flags** — `app/crow-web/src/main.rs`,
@@ -255,7 +255,7 @@ Edge cases at a glance:
 - All instances of a service exhausted (instance index beyond the
   documented range) → dispatcher returns a clear "no free index" error
   instead of silently wrapping into another service's range.
-- Operator passes inconsistent paired ports (diskdb http ≠ grpc + 1) →
+- Operator passes inconsistent paired ports (diskdb http ≠ listen + 1) →
   either rejected or accepted with documented override semantics
   (decided in design).
 - A server started with explicit ports outside its service's documented
@@ -282,7 +282,7 @@ Edge cases at a glance:
 **CLI unification (kv-server)**:
 
 - `crow-kv-server --root /tmp/n1` (no port flags) → mgmt listens on
-  `KV_SERVER_MGMT_BASE`, gRPC pool first port on `KV_SERVER_GRPC_BASE`,
+  `KV_SERVER_MGMT_BASE`, listen pool first port on `KV_SERVER_LISTEN_BASE`,
   consensus on `KV_RPC_BASE`, client RPC on `KV_CLIENT_RPC_BASE`.
   E2E test.
 - `crow-kv-server --root /tmp/n1 --management-port 0` → CLI parse error
@@ -296,18 +296,18 @@ Edge cases at a glance:
 
 **CLI unification (diskdb / chunkdb / web)**:
 
-- `crow-diskdb` with no port flags → gRPC on `DISKDB_GRPC_BASE`, HTTP on
+- `crow-diskdb` with no port flags → listen on `DISKDB_LISTEN_BASE`, HTTP on
   `DISKDB_HTTP_BASE`, crow-rpc on `DISKDB_RPC_BASE`. E2E test.
-- `crow-diskdb --grpc-port 0` → CLI parse error. Unit test.
-- `crow-diskdb --grpc-port 9943 --http-port 9944` → listens on those
-  ports; paired invariant http = grpc + 1 holds. E2E test.
+- `crow-diskdb --listen-port 0` → CLI parse error. Unit test.
+- `crow-diskdb --listen-port 9943 --http-port 9944` → listens on those
+  ports; paired invariant http = listen + 1 holds. E2E test.
 - `crow-chunkdb` equivalent of the above (skipped if server not landed
   — stated reason). E2E test / skip.
 - `crow-web --port 0` → CLI parse error. Unit test.
 
 **Port dispatcher**:
 
-- Two concurrent `Dispatcher::allocate(KvServerGrpc, 3)` calls on one
+- Two concurrent `Dispatcher::allocate(KvServerListen, 3)` calls on one
   host → return disjoint instance-index sets; no port collision when
   expanded via `ServicePort::port`. Integration test.
 - `Dispatcher::allocate` for a service until the documented range is
@@ -413,9 +413,9 @@ changes (none expected), plus `pixi run cargo fmt --all -- --check` and
    whether R118 covers cluster bootstrap or only test parallelism. If
    only test parallelism, cross-host is out of scope and this question
    is deferred to a future requirement.
-5. **Paired-port override semantics** (diskdb/chunkdb http = grpc + 1)
-   — when an operator passes `--grpc-port` but not `--http-port`, does
-   http follow grpc + 1 (preserve pairing) or stay at its own default
+5. **Paired-port override semantics** (diskdb/chunkdb http = listen + 1)
+   — when an operator passes `--listen-port` but not `--http-port`, does
+   http follow listen + 1 (preserve pairing) or stay at its own default
    (break pairing)? Preserve-pairing is intuitive but surprising if the
    operator expected the default; stay-at-default is explicit but can
    produce a confusingly split pair. Needs a human decision on the

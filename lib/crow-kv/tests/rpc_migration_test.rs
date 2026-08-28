@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! R32 integration tests: exercise the KV consensus hot path over
-//! crow-rpc (flatbuffer transport) instead of gRPC.
+//! crow-rpc (flatbuffer transport) instead of the legacy transport.
 
 mod common;
 

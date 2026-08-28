@@ -91,7 +91,7 @@ export function DeployDiskdbDialog({
           </select>
         </div>
         <Input
-          label="RPC Port (gRPC)"
+          label="RPC Port (crow-rpc)"
           inputMode="numeric"
           value={rpcPort}
           onChange={(e) => setRpcPort(e.target.value)}

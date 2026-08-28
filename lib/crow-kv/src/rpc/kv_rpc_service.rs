@@ -12,7 +12,7 @@
 
 //! crow-rpc handler set for the KV client-facing service (R117
 //! migration). Each handler dispatches by `msg_type` to the existing
-//! `KvStore` trait methods — the same logic bodies as the former gRPC
+//! `KvStore` trait methods — the same logic bodies as the former transport
 //! `KvStoreService` in `kv_service.rs`. The response is a flatbuffer
 //! frame built per `design-crow-rpc.md` §6 (build → finish → attach)
 //! and submitted via `RpcServer::submit_response`.
@@ -25,7 +25,7 @@
 //!
 //! `Get`/`Scan`/`JournalScan` preserve the transparent leader-forward
 //! step (linearizable reads only). The loop-guard `forwarded: bool`
-//! field on the request flatbuffer replaces the former gRPC
+//! field on the request flatbuffer replaces the former transport's
 //! `x-crow-kv-forwarded` metadata header. The forwarder
 //! (`KvClientRpcForwarder`) lives in `crow-kv` itself (not
 //! `crow-kv-client`) to avoid a crate cycle.
@@ -99,7 +99,7 @@ impl KvClientRpcForwarder {
     }
 
     /// Get or create a `Connection` for the given endpoint. The
-    /// crow-rpc server listens on the same port as the gRPC endpoint
+    /// crow-rpc server listens on the same port as the crow-rpc endpoint
     /// (no port derivation).
     fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection, RpcError> {
         let normalized = normalize_endpoint(rpc_endpoint);

@@ -80,10 +80,10 @@ separate concerns:
 
 - **Name by subject, not by kind or transport** — a file/module name
   says *what thing* it holds, not *what category* it is. Bad
-  (kind/transport): `grpc.rs`, `persistence.rs`, `sync.rs`, `status.rs`.
+  (kind/transport): `rpc.rs`, `persistence.rs`, `sync.rs`, `status.rs`.
   Good (subject): `service/diskdb_service.rs`, `data_group_client.rs`,
   `keepalive.rs`, `state_machine.rs`. The file-naming rule above (subject
-  not kind) extends to transport/layer names (`grpc`, `rpc`,
+  not kind) extends to transport/layer names (`rpc`,
   `persistence`, `sync`) and generic verbs (`status`).
 - **Name by the domain concept, not a borrowed/legacy term** — use the
   term the domain actually uses. If the unit is a *disk-group*, the

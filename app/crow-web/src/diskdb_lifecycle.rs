@@ -97,7 +97,7 @@ pub async fn http_deploy_diskdb(
         id: format!("diskdb-{node_id}"),
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
-        grpc_url: Some(deployed.grpc_url.clone()),
+        rpc_url: Some(deployed.rpc_url.clone()),
         rest_port: None,
         rpc_port: Some(body.rpc_port),
         auto_start: true,
@@ -137,7 +137,7 @@ pub async fn http_deploy_diskdb(
         Json(DiskdbDeployResult {
             node_id,
             mgmt_url: deployed.mgmt_url,
-            grpc_url: deployed.grpc_url,
+            rpc_url: deployed.rpc_url,
             pid: deployed.pid,
         }),
     ))
@@ -189,13 +189,8 @@ pub async fn http_restart_diskdb(
 
     let rpc_port = entry
         .rpc_port
-        .or_else(|| entry.grpc_url.as_deref().and_then(crate::mgmt::port_of))
-        .ok_or_else(|| {
-            err_500(format!(
-                "diskdb entry has malformed grpc_url: {:?}",
-                entry.grpc_url
-            ))
-        })?;
+        .or_else(|| entry.rpc_url.as_deref().and_then(crate::mgmt::port_of))
+        .ok_or_else(|| err_500(format!("diskdb entry has malformed rpc_url: {:?}", entry.rpc_url)))?;
 
     // Stop existing process.
     if let Some(pid) = state.diskdb_runtime_pid(node_id) {
@@ -232,7 +227,7 @@ pub async fn http_restart_diskdb(
         id: entry.id.clone(),
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
-        grpc_url: Some(deployed.grpc_url.clone()),
+        rpc_url: Some(deployed.rpc_url.clone()),
         rest_port: None,
         rpc_port: Some(rpc_port),
         auto_start: entry.auto_start,
@@ -279,7 +274,7 @@ pub async fn http_restart_diskdb(
     Ok(Json(DiskdbDeployResult {
         node_id,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
         pid: deployed.pid,
     }))
 }
@@ -398,6 +393,6 @@ pub async fn http_delete_diskdb(
 pub struct DiskdbDeployResult {
     pub node_id: u64,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     pub pid: u32,
 }

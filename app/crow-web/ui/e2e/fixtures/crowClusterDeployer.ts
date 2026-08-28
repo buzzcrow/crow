@@ -77,7 +77,7 @@ export interface NodeInfo {
   rackId: number;
   pid: number;
   mgmtUrl: string;
-  grpcUrl: string;
+  rpcUrl: string;
   restPort: number;
   rpcPort: number;
 }
@@ -619,7 +619,7 @@ export class CrowClusterDeployer {
             rackId: topo.rackBase + (nodeId - topo.nodeBase),
             pid: v.pid ?? 0,
             mgmtUrl: v.url ?? '',
-            grpcUrl: v.grpc_url ?? '',
+            rpcUrl: v.rpc_url ?? '',
             restPort,
             rpcPort,
           } as NodeInfo;
@@ -721,7 +721,7 @@ export class CrowClusterDeployer {
           const epResp = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}/endpoint`);
           if (epResp.ok()) {
             const ep = await epResp.json();
-            if (ep.grpc_url) group.leaderEndpoint = ep.grpc_url;
+            if (ep.rpc_url) group.leaderEndpoint = ep.rpc_url;
           }
         } finally {
           await api.dispose();

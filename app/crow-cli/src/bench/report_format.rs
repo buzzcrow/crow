@@ -76,7 +76,7 @@ impl BenchReport {
         let _ = writeln!(out, "- **workload:** {:?}", self.workload);
         let _ = writeln!(out, "- **target:** {}", self.target);
         let _ = writeln!(out, "- **storage_mode:** {}", self.mode);
-        let _ = writeln!(out, "- **connections:** {} (gRPC channels)", self.connections);
+        let _ = writeln!(out, "- **connections:** {} (crow-rpc channels)", self.connections);
         let _ = writeln!(
             out,
             "- **loaders:** {} (worker tasks, closed-loop)",

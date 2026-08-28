@@ -118,7 +118,7 @@ test.describe('capacity · diskdb', () => {
     await expect(dialog).toBeVisible();
 
     // Should have RPC Port field.
-    await expect(dialog.getByLabel('RPC Port (gRPC)')).toBeVisible();
+    await expect(dialog.getByLabel('RPC Port (crow-rpc)')).toBeVisible();
 
     // Should NOT have REST Port, Binary Path, Listen Address, HTTP Address, Config Path.
     await expect(dialog.getByLabel('REST Port')).toHaveCount(0);
@@ -1235,7 +1235,7 @@ test.describe('capacity · diskdb', () => {
     }
   });
 
-  test('assign disk-group to diskdb via UI (owner + bind); capacity non-zero when gRPC reachable', async ({ page, baseURL }) => {
+  test('assign disk-group to diskdb via UI (owner + bind); capacity non-zero when crow-rpc reachable', async ({ page, baseURL }) => {
     test.setTimeout(60_000);
     const rackId = DISKDB_RACK;
     const nodeId = DISKDB_NODE;
@@ -1323,9 +1323,9 @@ test.describe('capacity · diskdb', () => {
       // --- Verify capacity becomes non-zero via API ---
       // The diskdb keepalive syncs every 10s, so poll until the DG
       // appears in the usage response with capacity > 0. If the
-      // diskdb's gRPC endpoint is not reachable (transport error —
+      // diskdb's crow-rpc endpoint is not reachable (transport error —
       // common in the test environment where the diskdb process may
-      // not fully bind its gRPC port), the usage API returns an empty
+      // not fully bind its crow-rpc port), the usage API returns an empty
       // disk_groups list; in that case, verify the assign flow
       // succeeded (owner + bind written to group-0) but skip the
       // capacity-non-zero assertion.
@@ -1343,7 +1343,7 @@ test.describe('capacity · diskdb', () => {
           }, { timeout: 30_000, intervals: [2_000] }).toBeGreaterThan(0);
           usageReachable = true;
         } catch {
-          console.warn(`DG-${dgId} never reported usage — diskdb gRPC not reachable, skipping capacity-non-zero assertion`);
+          console.warn(`DG-${dgId} never reported usage — diskdb crow-rpc not reachable, skipping capacity-non-zero assertion`);
         }
 
         if (usageReachable) {
@@ -1411,7 +1411,7 @@ test.describe('capacity · diskdb', () => {
 
       const dialog = page.getByRole('dialog', { name: /deploy diskdb/i });
       await expect(dialog).toBeVisible();
-      await dialog.getByLabel('RPC Port (gRPC)').fill(String(rpcPort));
+      await dialog.getByLabel('RPC Port (crow-rpc)').fill(String(rpcPort));
       await dialog.getByRole('button', { name: /deploy/i }).click();
       await expect(dialog).toHaveCount(0, { timeout: 5_000 });
 

@@ -12,7 +12,7 @@
 //! (`KvResponse`, `KvScanResponse`, `KvJournalScanResponse`) so the
 //! retry/topology/`NotLeaderHint` logic in `client.rs` is unchanged.
 //!
-//! The only transport path (the former gRPC `ConnectionPool` was removed).
+//! The only transport path (the former transport `ConnectionPool` was removed).
 //! window; `CrowkvClient` selects the transport via
 //! `with_rpc_transport`.
 
@@ -120,7 +120,7 @@ impl KvRpcTransport {
 
     /// Get or create a `Connection` for the given endpoint, round-
     /// robining across the pool. The crow-rpc server listens on the
-    /// same port as the gRPC endpoint (no port derivation).
+    /// same port as the crow-rpc endpoint (no port derivation).
     fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection> {
         let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(entry) = self.connections.get(&normalized) {
@@ -708,7 +708,7 @@ impl KvRpcTransport {
         })
     }
 
-    /// Get or create a `Connection` for the given gRPC endpoint
+    /// Get or create a `Connection` for the given crow-rpc endpoint
     /// (public — used by `WatchNotifyClient` for the persistent
     /// connection). Always returns the first connection in the pool
     /// (index 0) so the watch subscription stays on one connection.

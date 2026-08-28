@@ -78,7 +78,7 @@ pub struct NodeInfo {
     pub rack_id: RackId,
     pub pid: u32,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     pub rest_port: u16,
     pub rpc_port: u16,
 }
@@ -377,7 +377,7 @@ impl CrowClusterDeployer {
                 rack_id: topo.rack_base + (node_id - topo.node_base),
                 pid: deployed.pid,
                 mgmt_url: deployed.mgmt_url,
-                grpc_url: deployed.grpc_url,
+                rpc_url: deployed.rpc_url,
                 rest_port,
                 rpc_port,
             });
@@ -516,8 +516,8 @@ impl CrowClusterDeployer {
                         .map(|r| r.node_id);
                 }
                 if let Ok(ep) = self.client.resolve_endpoint(store.store_id, group.group_id).await {
-                    if !ep.grpc_url.is_empty() {
-                        group.leader_endpoint = Some(ep.grpc_url);
+                    if !ep.rpc_url.is_empty() {
+                        group.leader_endpoint = Some(ep.rpc_url);
                     }
                 }
             }

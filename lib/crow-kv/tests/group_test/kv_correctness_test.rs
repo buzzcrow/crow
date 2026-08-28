@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! KV operation correctness through group `propose` / gRPC KV API.
+//! KV operation correctness through group `propose` / crow-rpc KV API.
 //!
 //! Covers all op types and orderings: Put, overwrite, Delete,
 //! delete non-existent, batch with multiple puts, intra-batch

@@ -4,7 +4,7 @@
 //! `LearnerStream` behaviour tests.
 //!
 //! The per-peer bidi `PxLearnerStream` multiplexes `Accept`, `Heartbeat`,
-//! and `ChosenNotification` frames over a single long-running gRPC stream.
+//! and `ChosenNotification` frames over a single long-running crow-rpc stream.
 //! All group-layer tests exercise the `LearnerStream` implicitly (every
 //! `Accept` and `Heartbeat` goes through it). These tests verify
 //! additional properties:

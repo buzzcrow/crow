@@ -3,8 +3,8 @@
 
 //! REST proxy for diskdb runtime RPCs under `/api/diskdb/` plus
 //! `PUT /api/disks/:disk_id/status`. The console web layer routes
-//! CLI and web UI requests through here → `DiskdbClient` → gRPC →
-//! `crow-diskdb`. No direct gRPC from the browser or CLI.
+//! CLI and web UI requests through here → `DiskdbClient` → crow-rpc →
+//! `crow-diskdb`. No direct crow-rpc from the browser or CLI.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -246,7 +246,7 @@ impl From<(InstanceId, InstanceValue)> for DiskdbInstanceInfo {
 // ── handlers ─────────────────────────────────────────────────────
 
 /// `GET /api/diskdb/instances` — all diskdb instances from the
-/// service registry (no gRPC fan-out).
+/// service registry (no crow-rpc fan-out).
 ///
 /// # Errors
 /// Returns `502` if the service registry read fails.
@@ -271,7 +271,7 @@ pub async fn http_list_diskdb_instances(
 /// all registered instances and merges for cluster-wide totals.
 ///
 /// # Errors
-/// Returns `502` on gRPC or registry errors, `400` on invalid params.
+/// Returns `502` on crow-rpc or registry errors, `400` on invalid params.
 pub async fn http_diskdb_usage(
     State(state): State<AppState>,
     Query(q): Query<UsageQuery>,
@@ -381,7 +381,7 @@ fn parse_disk_id(s: &str) -> Option<crow_protocol::common::DiskId> {
 /// `GET /api/diskdb/scan-status?dg=<id>` — `GetScanStatus`.
 ///
 /// # Errors
-/// Returns `502` on gRPC errors.
+/// Returns `502` on crow-rpc errors.
 pub async fn http_diskdb_scan_status(
     State(state): State<AppState>,
     Query(q): Query<DgQuery>,
@@ -397,7 +397,7 @@ pub async fn http_diskdb_scan_status(
 /// `POST /api/diskdb/scan` — `TriggerScan`.
 ///
 /// # Errors
-/// Returns `502` on gRPC errors.
+/// Returns `502` on crow-rpc errors.
 pub async fn http_diskdb_scan(
     State(state): State<AppState>,
     body: Json<DgBody>,
@@ -413,7 +413,7 @@ pub async fn http_diskdb_scan(
 /// `POST /api/diskdb/recalc` — `RecalcDiskUsage`.
 ///
 /// # Errors
-/// Returns `502` on gRPC errors.
+/// Returns `502` on crow-rpc errors.
 pub async fn http_diskdb_recalc(
     State(state): State<AppState>,
     body: Json<DgBody>,
@@ -432,7 +432,7 @@ pub async fn http_diskdb_recalc(
 /// `POST /api/diskdb/compact` — `CompactZone`.
 ///
 /// # Errors
-/// Returns `400` if `disk_id` is missing, `502` on gRPC errors.
+/// Returns `400` if `disk_id` is missing, `502` on crow-rpc errors.
 pub async fn http_diskdb_compact(
     State(state): State<AppState>,
     Json(body): Json<CompactBody>,
@@ -453,11 +453,11 @@ pub async fn http_diskdb_compact(
 /// `POST /api/diskdb/rebuild` — `RebuildZoneBitmap`.
 ///
 /// Accepts `zone_indices` (array) for multiple zones or empty/absent
-/// for all zones. Calls gRPC rebuild once per zone (or once with
+/// for all zones. Calls crow-rpc rebuild once per zone (or once with
 /// `u32::MAX` for all).
 ///
 /// # Errors
-/// Returns `400` if `disk_id` is missing, `502` on gRPC errors.
+/// Returns `400` if `disk_id` is missing, `502` on crow-rpc errors.
 pub async fn http_diskdb_rebuild(
     State(state): State<AppState>,
     Json(body): Json<RebuildBody>,

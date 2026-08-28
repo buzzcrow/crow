@@ -454,7 +454,7 @@ impl PxGroup {
 
     /// Cascade shutdown through this group's replicas.
     ///
-    /// Iterates real remote replicas and closes their gRPC channels, then
+    /// Iterates real remote replicas and closes their crow-rpc channels, then
     /// shuts down the local replica (which in turn cascades through
     /// `acceptor` / `learner` / `slot_list` / `kv_store`). Continues on errors;
     /// aggregated `critical:` messages are returned.
@@ -520,7 +520,7 @@ impl PxGroup {
             let _ = handle.await;
         }
 
-        // 1. Close remote gRPC channels first so no in-flight RPCs spin.
+        // 1. Close remote crow-rpc channels first so no in-flight RPCs spin.
         for remote in &self.remote_replicas {
             if let RemoteReplicaKind::Real(remote) = remote {
                 let sub = remote.shutdown(per_layer_timeout).await;

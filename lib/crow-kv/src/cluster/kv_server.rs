@@ -10,7 +10,7 @@
 //! crow-rpc servers (`start_rpc_server` for consensus,
 //! `start_client_rpc_server` for client-facing) handle the actual
 //! request serving. Server state (join handle, shutdown sender, bound
-//! address) lives on [`GrpcTaskState`] inside the store so
+//! address) lives on [`RpcTaskState`] inside the store so
 //! [`PxKvStore::shutdown_server`] can drive a timed graceful stop from
 //! the cascade shutdown path.
 
@@ -38,7 +38,7 @@ pub trait KvServer {
 }
 
 #[derive(Default)]
-pub(crate) struct GrpcTaskState {
+pub(crate) struct RpcTaskState {
     pub(crate) handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) listen_addr: Option<SocketAddr>,
@@ -82,7 +82,7 @@ impl KvServer for Arc<PxKvStore> {
             }
         };
 
-        // Start a single crow-rpc server on the gRPC port. Both
+        // Start a single crow-rpc server on the listen port. Both
         // consensus (PxRpcService) and client (KvRpcService) handlers
         // are registered on the same server — their handler names
         // don't conflict. Worker count set from `--rpc-workers` CLI
@@ -245,7 +245,7 @@ impl PxKvStore {
     /// Start the crow-rpc consensus server.
     ///
     /// This is now a no-op — `start()` starts a single crow-rpc server
-    /// that hosts both consensus and client handlers on the gRPC port.
+    /// that hosts both consensus and client handlers on the listen port.
     /// Kept for backward compatibility with callers that call it
     /// explicitly (e.g. `rpc_migration_test`).
     #[allow(clippy::missing_errors_doc)]
@@ -306,7 +306,7 @@ impl PxKvStore {
     /// Start the client-facing crow-rpc server.
     ///
     /// This is now a no-op — `start()` starts a single crow-rpc server
-    /// that hosts both consensus and client handlers on the gRPC port.
+    /// that hosts both consensus and client handlers on the listen port.
     /// Kept for backward compatibility.
     ///
     /// # Errors
@@ -315,7 +315,7 @@ impl PxKvStore {
     /// Start the client-facing crow-rpc server.
     ///
     /// This is now a no-op — `start()` starts a single crow-rpc server
-    /// that hosts both consensus and client handlers on the gRPC port.
+    /// that hosts both consensus and client handlers on the listen port.
     /// Kept for backward compatibility.
     pub fn start_client_rpc_server(self: &Arc<Self>, _rt: Handle) -> Result<(), String> {
         Ok(())

@@ -43,7 +43,7 @@ struct Upstream {
     node_id: u64,
     pid: u32,
     mgmt_url: String,
-    grpc_url: String,
+    rpc_url: String,
 }
 
 struct ProcessGuard {
@@ -106,7 +106,7 @@ async fn spawn_upstream(node_id: u64, workspace: &std::path::Path) -> Option<Ups
         node_id,
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
     })
 }
 
@@ -134,7 +134,7 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
             id: u.node_id.to_string(),
             url: u.mgmt_url.clone(),
             node_id: Some(u.node_id),
-            grpc_url: Some(u.grpc_url.clone()),
+            rpc_url: Some(u.rpc_url.clone()),
             rest_port: None,
             rpc_port: None,
             auto_start: true,

@@ -4,7 +4,7 @@
 //! HTTP health/readiness endpoint.
 //!
 //! Exposes the current `StartupPhase` (+ degraded flag) so operators
-//! and orchestrators can poll readiness during zone loading. The gRPC
+//! and orchestrators can poll readiness during zone loading. The crow-rpc
 //! service starts before zone loading completes; this endpoint is the
 //! observable signal that loading is done.
 

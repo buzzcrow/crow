@@ -35,7 +35,7 @@ pub struct AppState {
     /// spawning 6+ threads per request. Shared by all `CrowkvClient`
     /// instances created in `kv.rs`.
     pub kv_rpc_transport: Arc<tokio::sync::RwLock<Option<Arc<crow_kv_client::KvRpcTransport>>>>,
-    /// Rate-limiter for repeated gRPC failure warnings: maps
+    /// Rate-limiter for repeated crow-rpc failure warnings: maps
     /// `endpoint` → last-warned timestamp. Prevents flooding the
     /// console with identical "instance query failed" warnings every
     /// poll cycle when a diskdb instance is unreachable.

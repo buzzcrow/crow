@@ -84,7 +84,7 @@ async fn deploy_local_and_observe_topology() {
         id: deployed.server_id.clone(),
         url: deployed.mgmt_url.clone(),
         node_id: Some(1),
-        grpc_url: Some(deployed.grpc_url.clone()),
+        rpc_url: Some(deployed.rpc_url.clone()),
         rest_port: Some(rest_port),
         rpc_port: Some(rpc_port),
         auto_start: true,

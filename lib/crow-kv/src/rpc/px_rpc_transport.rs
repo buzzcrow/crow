@@ -7,7 +7,7 @@
 //! crow-rpc client transport for the KV consensus service (R32
 //! migration). Builds flatbuffer requests, sends via `RpcClient::call`,
 //! awaits `CallFuture`, and parses flatbuffer responses via the
-//! zero-copy `Ref` wrappers. Runs alongside the gRPC transport during
+//! zero-copy `Ref` wrappers. Replaced the legacy transport during
 //! the mixed-rollout window; `PxRemoteReplica` selects the transport
 //! based on whether `with_rpc_transport` was called.
 
@@ -107,7 +107,7 @@ impl PxRpcTransport {
 
     /// Get or create a `Connection` for the given endpoint, round-
     /// robining across the pool. The crow-rpc server listens on the
-    /// same port as the gRPC endpoint (no port derivation).
+    /// same port as the crow-rpc endpoint (no port derivation).
     fn conn_for(&self, rpc_endpoint: &str) -> Result<Connection, PxReplicaError> {
         let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(entry) = self.connections.get(&normalized) {

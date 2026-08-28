@@ -78,7 +78,7 @@ pub struct KeepAlive {
     /// `heartbeat.interval_secs` from this handle each tick; when
     /// `None`, falls back to the fixed `config.interval` snapshot.
     config_handle: Option<Arc<arc_swap::ArcSwap<crate::ddb_config::DdbConfig>>>,
-    /// gRPC endpoint to register with the service registry (R74
+    /// crow-rpc endpoint to register with the service registry (R74
     /// keepalive piggyback). When empty, passes `""` (test mode).
     rpc_endpoint: String,
     /// Optional metrics handle for sync latency/success/failure
@@ -163,7 +163,7 @@ impl KeepAlive {
         self
     }
 
-    /// Attach the gRPC endpoint to register with the service registry
+    /// Attach the crow-rpc endpoint to register with the service registry
     /// (R74 keepalive piggyback). When set, `heartbeat` passes this
     /// endpoint + per-disk-group usage summaries to
     /// `heartbeat_diskdb`.

@@ -209,7 +209,7 @@ pub fn router(state: AppState) -> axum::Router {
             "/api/stores/:sid/groups/:gid/replicas/:rid",
             get(mgmt::http_get_replica).delete(mgmt::http_remove_replica),
         )
-        // Leader gRPC endpoint resolver (CLI bench dials gRPC directly).
+        // Leader crow-rpc endpoint resolver (CLI bench dials crow-rpc directly).
         .route("/api/stores/:sid/groups/:gid/endpoint", get(kv::http_kv_endpoint))
         // KV data plane: leader resolved via the monitor cache; NotLeader triggers one retry (A8).
         .route("/api/stores/:sid/groups/:gid/kv/get", get(kv::http_kv_get))

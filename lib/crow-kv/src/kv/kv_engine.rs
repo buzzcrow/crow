@@ -35,7 +35,7 @@ pub trait KVEngine: Send + Sync {
     fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>>;
 
     /// Like [`Self::get`] but returns [`Bytes`] instead of `Vec<u8>`, so
-    /// the gRPC response path can avoid an extra allocation. The default
+    /// the crow-rpc response path can avoid an extra allocation. The default
     /// implementation delegates to [`Self::get`] and converts the
     /// `Vec<u8>` into `Bytes` (zero-copy move). [`super::CrowTreeEngine`]
     /// overrides this to use a pinned-value FFI path that eliminates the

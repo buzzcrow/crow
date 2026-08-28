@@ -9,7 +9,7 @@
 //! - `ReplicaClient`: Client-side senders (remote replicas)
 //!
 //! Both handler/client traits are **transport-neutral**: errors flow through
-//! [`PxReplicaError`], an in-process enum. The gRPC adapter
+//! [`PxReplicaError`], an in-process enum. The crow-rpc adapter
 //! (`rpc::px_service`) maps both directions across the network boundary.
 //!
 //! Key work: error taxonomy ([`PxReplicaError`]), election handler methods
@@ -22,7 +22,7 @@ use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
 
 /// Transport-neutral replica error.
 ///
-/// All [`ReplicaHandler`] and [`ReplicaClient`] methods return this. The gRPC
+/// All [`ReplicaHandler`] and [`ReplicaClient`] methods return this. The crow-rpc
 /// adapter (`crate::rpc::px_rpc_service`) maps to/from `PxReplicaError` at the
 /// network boundary so `crow_kv` library code never names `PxReplicaError`
 /// outside of `rpc/`.
@@ -133,7 +133,7 @@ pub trait Replica {
 
 /// Server-side handler trait for local replicas.
 ///
-/// All errors are transport-neutral ([`PxReplicaError`]); the gRPC adapter
+/// All errors are transport-neutral ([`PxReplicaError`]); the crow-rpc adapter
 /// translates to `PxReplicaError` only at the network boundary.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaHandler: Replica {
@@ -186,8 +186,8 @@ pub trait ReplicaHandler: Replica {
 
 /// Client-side sender trait for remote replicas.
 ///
-/// All errors are transport-neutral ([`PxReplicaError`]); transport-level gRPC
-/// failures fold into [`PxReplicaError::Internal`] inside the gRPC client
+/// All errors are transport-neutral ([`PxReplicaError`]); transport-level crow-rpc
+/// failures fold into [`PxReplicaError::Internal`] inside the crow-rpc client
 /// adapter.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaClient: Replica {

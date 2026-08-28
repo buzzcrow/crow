@@ -3,9 +3,9 @@
 
 //! Standalone client library for `CrowKV`.
 //!
-//! Wraps `crow_kv`'s generated `KvService` gRPC client with:
+//! Wraps `crow_kv`'s generated `KvService` crow-rpc client with:
 //! - **Topology cache** (`(store_id, group_id) -> leader_endpoint`) sourced
-//!   from `crow-kv-server`'s HTTP management API `/topology` (no gRPC
+//!   from `crow-kv-server`'s HTTP management API `/topology` (no crow-rpc
 //!   `DescribeCluster`).
 //! - **Retry policy** on `NotLeaderHint` / timeout / other errors, reusing
 //!   the same `(client_id, seq)` across retries of one logical write so the
@@ -15,7 +15,7 @@
 //! - A per-endpoint connection pool (crow-rpc).
 //!
 //! `crow-console` is expected to depend on this crate rather than rolling
-//! its own gRPC client.
+//! its own crow-rpc client.
 
 mod binding_framework;
 mod chunkdb_binding_strategy;

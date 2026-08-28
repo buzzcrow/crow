@@ -1203,7 +1203,7 @@ export async function moveDisk(
 export interface ServerSummary {
   node_id?: number;
   mgmt_url: string;
-  grpc_url?: string;
+  rpc_url?: string;
   pid?: number;
   health: string;
   service_type: string;

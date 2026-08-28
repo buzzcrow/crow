@@ -346,7 +346,7 @@ impl ServiceRegistryClient {
 
 impl ServiceRegistryClient {
     /// Register a chunkdb instance. chunkdb is stateless (design §3.6),
-    /// so the only extra field is the gRPC endpoint; the binding
+    /// so the only extra field is the crow-rpc endpoint; the binding
     /// monitor (`BindingMonitor` with `ChunkdbRangeStrategy`) reads
     /// these entries to compute the range binding table.
     pub async fn register_chunkdb(&self, instance_id: InstanceId, rpc_endpoint: &str) -> Result<()> {

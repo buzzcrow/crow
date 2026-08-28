@@ -5,7 +5,7 @@
 //!
 //! Starts a real 3-node `crow-kv-server` cluster (store 0, groups 0
 //! and 1), seeds hardware metadata, starts diskdb in-process as a
-//! gRPC server, registers it in the service registry, and wires the
+//! crow-rpc server, registers it in the service registry, and wires the
 //! chunkdb lifecycle handler. Tests call the handler directly.
 
 use std::io as std_io;
@@ -487,7 +487,7 @@ pub fn seeded_dg_ids() -> Vec<u64> {
     (0..3u64).map(|i| 1000 + i).collect()
 }
 
-// ── diskdb gRPC server (in-process) ─────────────────────────────
+// ── diskdb crow-rpc server (in-process) ─────────────────────────────
 
 #[allow(dead_code)]
 pub struct DiskdbServer {

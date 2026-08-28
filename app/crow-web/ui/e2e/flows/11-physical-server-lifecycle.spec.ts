@@ -120,7 +120,7 @@ test.describe('physical · server lifecycle', () => {
         expect.objectContaining({
           node_id: 4,
           url: `http://127.0.0.1:${restPort}`,
-          grpc_url: `http://127.0.0.1:${rpcPort}`,
+          rpc_url: `http://127.0.0.1:${rpcPort}`,
           pid: expect.any(Number),
         }),
       );

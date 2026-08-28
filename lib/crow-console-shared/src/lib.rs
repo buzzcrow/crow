@@ -4,7 +4,7 @@
 //! Shared core for the `Crow Storage` Console (web + CLI).
 //!
 //! Key work: data models for racks/nodes/servers/stores/groups/replicas,
-//! HTTP and gRPC clients to `crow-kv-server`, registry persistence,
+//! HTTP and crow-rpc clients to `crow-kv-server`, registry persistence,
 //! topology aggregation, error model, structured operation log.
 //!
 //! C0 status: skeleton only. Real modules land in C1+.

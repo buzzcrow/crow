@@ -46,7 +46,7 @@ existing crow-rpc flatbuffer and LearnerStream APIs.
    Requires extending `TestKvClient::get` (or adding a `get_forwarded`
    variant) to pass the `forwarded` flag through `KvRpcTransport::send_get`.
 
-2. **`malformed_accept_request_is_rejected_by_grpc_boundary`** —
+2. **`malformed_accept_request_is_rejected_by_rpc_boundary`** —
    `lib/crow-kv/tests/group_test/paxos_error_test.rs`. Construct a raw
    crow-rpc frame with an invalid `Accept` payload (e.g. slot = 0 or
    ballot with `round = 0, leader_id = 0`) and send it over a

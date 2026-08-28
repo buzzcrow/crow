@@ -92,7 +92,7 @@ pub fn crow_rpc_fb_server_bin() -> Option<PathBuf> {
 pub struct Upstream {
     pub pid: u32,
     pub mgmt_url: String,
-    pub grpc_url: String,
+    pub rpc_url: String,
     workspace: std::path::PathBuf,
 }
 
@@ -154,7 +154,7 @@ pub async fn spawn_upstream() -> Option<Upstream> {
     Some(Upstream {
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
+        rpc_url: deployed.rpc_url,
         workspace,
     })
 }
@@ -177,7 +177,7 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
         id: "1".to_string(),
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
-        grpc_url: Some(upstream.grpc_url.clone()),
+        rpc_url: Some(upstream.rpc_url.clone()),
         rest_port: None,
         rpc_port: None,
         auto_start: true,

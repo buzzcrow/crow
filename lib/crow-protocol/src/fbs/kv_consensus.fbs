@@ -2,7 +2,7 @@ include "common_type.fbs";
 
 namespace crow.kv_consensus.proto;
 
-// KV consensus service flatbuffer control messages (R32: gRPC →
+// KV consensus service flatbuffer control messages (R32: legacy →
 // crow-rpc migration). Mirrors pxos.proto (PxService + SnapshotService).
 //
 // Conventions (design-crow-rpc.md §6, todo_fb.md "Rules to Follow"):

@@ -84,7 +84,7 @@ pub enum BatchOp {
 #[derive(Debug, Default)]
 struct EndpointStats {
     /// In-flight read count for this endpoint. Incremented before the
-    /// gRPC send, decremented when the response arrives (via
+    /// crow-rpc send, decremented when the response arrives (via
     /// [`InFlightGuard`] drop). Used by `LeastConnections` selection.
     in_flight: AtomicI64,
     /// EWMA of get RTT in microseconds, updated on each `Ok` response.
@@ -131,7 +131,7 @@ impl EndpointStats {
 }
 
 /// RAII guard that decrements the endpoint's in-flight count on drop.
-/// Created before the gRPC send; dropped at the end of the retry-loop
+/// Created before the crow-rpc send; dropped at the end of the retry-loop
 /// iteration (covers all exit paths: success, error, redirect, `?`).
 /// Holds an `Arc<EndpointStats>` so it can live across `.await` points
 /// (a `DashMap` entry guard is not `Send`).

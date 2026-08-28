@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crow_common::config::BaseConfig;
-use crow_protocol::{DISKDB_GRPC_BASE, DISKDB_HTTP_BASE, DISKDB_RPC_BASE, KV_SERVER_MGMT_BASE};
+use crow_protocol::{DISKDB_HTTP_BASE, DISKDB_LISTEN_BASE, DISKDB_RPC_BASE, KV_SERVER_MGMT_BASE};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for a diskdb instance.
@@ -36,15 +36,15 @@ impl BaseConfig for DdbConfig {
     }
 }
 
-/// gRPC + HTTP + crow-rpc listen addresses.
+/// main listener + HTTP + crow-rpc listen addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// static: gRPC listen address.
+    /// static: main listen address.
     pub listen_addr: String,
     /// static: HTTP management listen address.
     pub http_listen_addr: String,
     /// static: crow-rpc listen address (R115 migration — runs alongside
-    /// gRPC during the mixed-rollout window).
+    /// the main listener during the mixed-rollout window).
     pub rpc_listen_addr: String,
     /// static: unique instance ID (auto-generated UUID if absent).
     pub instance_id: Option<String>,
@@ -60,7 +60,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            listen_addr: format!("0.0.0.0:{DISKDB_GRPC_BASE}"),
+            listen_addr: format!("0.0.0.0:{DISKDB_LISTEN_BASE}"),
             http_listen_addr: format!("0.0.0.0:{DISKDB_HTTP_BASE}"),
             rpc_listen_addr: format!("0.0.0.0:{DISKDB_RPC_BASE}"),
             instance_id: None,

@@ -328,7 +328,7 @@ below); R32 depends on R115.
   R81 Part 2.
 - **[R32](R32-kv-custom-rust-rpc.md)** — KV consensus hot path →
   `crow-rpc` — Area: kv / RPC — Migrate the internal replica-to-replica
-  Paxos path from the legacy gRPC/tonic stack to the `crow-rpc` flatbuffer RPC library.
+  Paxos path from the legacy tonic/h2 stack to the `crow-rpc` flatbuffer RPC library.
   Recovers the ~17% h2-lock throughput loss at 2T:1C
   (measured in `kv-read-flow-analysis.md`). Protocol semantics
   preserved (same request/response shapes, `NotLeaderHint`, error
@@ -338,7 +338,7 @@ below); R32 depends on R115.
   API stays on Axum/HTTP. Open Question resolved: full `.fbs`
   conversion (no prost bridge — the rejected approach), consistent with R105/diskio.
 
-### RPC Migration (legacy gRPC → crow-rpc)
+### RPC Migration (legacy → crow-rpc)
 
 Dependency order: R115 → R116 (unary); R117 (streaming) depends on
 R114 (finished) + R32. R115 lands first to validate the

@@ -11,7 +11,7 @@
 //! `crow-protocol` (`kv_consensus::rpc` for Paxos messages,
 //! `kv_client::rpc` for KV client messages) and re-exported here so
 //! existing `use crate::rpc::*` imports continue to work. The transport
-//! is crow-rpc (flatbuffer over TCP); the former gRPC server and
+//! is crow-rpc (flatbuffer over TCP); the former transport server and
 //! client modules have been removed.
 
 pub use crow_protocol::kv_client::rpc::*;

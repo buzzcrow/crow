@@ -208,7 +208,7 @@ async fn wait_for_leader(nodes: &[KvNode], group_id: u64, timeout: Duration) -> 
     panic!("no unique leader for group {group_id} within {timeout:?}");
 }
 
-/// Get the gRPC endpoint of the leader node for a group.
+/// Get the crow-rpc endpoint of the leader node for a group.
 async fn leader_endpoint(nodes: &[KvNode], group_id: u64) -> String {
     let idx = wait_for_leader(nodes, group_id, Duration::from_secs(30)).await;
     node_endpoint(&topology(&nodes[idx]).await)

@@ -199,7 +199,7 @@ consecutive zero-error runs.
 Replaced the Linux reference with the current crow-rpc run and retained the
 macOS baseline. The latest run has zero errors in all 14 configurations;
 large and mixed-value scans remain engine-limited. The previous Linux
-baseline used the legacy gRPC path; positive throughput deltas and negative
+baseline used the legacy legacy path; positive throughput deltas and negative
 p99 deltas are improvements.
 
 | Config | Old scans/s | New scans/s | Δ scans/s | Old p99 us | New p99 us | Δ p99 |

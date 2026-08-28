@@ -213,7 +213,7 @@ pub(crate) async fn http_add_replica(
     // Step 2: Register the new replica as a remote on every existing peer.
     let Some(new_endpoint) = rpc_endpoint_for_node(&state, *target_node, sid).await else {
         return Err(err_502(format!(
-            "could not determine gRPC endpoint for new replica on node {target_node}"
+            "could not determine crow-rpc endpoint for new replica on node {target_node}"
         )));
     };
     let new_remote = RemoteReplicaInfo {

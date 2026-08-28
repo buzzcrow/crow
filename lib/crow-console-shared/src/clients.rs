@@ -8,7 +8,7 @@
 //! - `console`: high-level two-tree API on a `crow-web`. Used by
 //!   the CLI, which never talks to a `crow-kv-server` directly.
 //!
-//! KV data-plane gRPC access used to live here too (`grpc::KvClient`,
+//! KV data-plane access used to live here too (`rpc::KvClient`,
 //! C6). It's gone: `crow-web`'s KV handlers and `crow-cli`'s `kv`
 //! commands and bench runner all depend on the standalone `crow-kv-client`
 //! crate instead for topology

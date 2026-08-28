@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use crow_common::config::BaseConfig;
-use crow_protocol::{CHUNKDB_GRPC_BASE, CHUNKDB_HTTP_BASE, CHUNKDB_RPC_BASE, KV_SERVER_MGMT_BASE};
+use crow_protocol::{CHUNKDB_HTTP_BASE, CHUNKDB_LISTEN_BASE, CHUNKDB_RPC_BASE, KV_SERVER_MGMT_BASE};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for a chunkdb instance.
@@ -69,13 +69,13 @@ impl Default for RangeGuardConfig {
     }
 }
 
-/// gRPC + HTTP + crow-rpc listen addresses.
+/// main listener + HTTP + crow-rpc listen addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub listen_addr: String,
     pub http_listen_addr: String,
-    /// crow-rpc listen address (R116 migration — runs alongside gRPC
-    /// during the mixed-rollout window).
+    /// crow-rpc listen address (R116 migration — runs alongside the main
+    /// listener during the mixed-rollout window).
     #[serde(default = "default_rpc_listen_addr")]
     pub rpc_listen_addr: String,
     pub instance_id: Option<String>,
@@ -98,7 +98,7 @@ fn default_rpc_listen_addr() -> String {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            listen_addr: format!("0.0.0.0:{CHUNKDB_GRPC_BASE}"),
+            listen_addr: format!("0.0.0.0:{CHUNKDB_LISTEN_BASE}"),
             http_listen_addr: format!("0.0.0.0:{CHUNKDB_HTTP_BASE}"),
             rpc_listen_addr: default_rpc_listen_addr(),
             instance_id: None,

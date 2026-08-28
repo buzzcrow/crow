@@ -4,7 +4,7 @@
 //! R74 §7 — `QueryCapacityStats` three shapes (disk-group, disk,
 //! zone) + `GetDiskGroupInfo`/`GetDiskInfo` usage fields. Tests the
 //! service handler logic via the `build_disk_info` helper + model
-//! accessors directly (no gRPC server needed).
+//! accessors directly (no crow-rpc server needed).
 
 use std::sync::Arc;
 

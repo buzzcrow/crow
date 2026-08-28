@@ -3,7 +3,7 @@ include "diskdb.fbs";
 
 namespace crow.chunkdb.proto;
 
-// chunkdb service flatbuffer control messages (R116: gRPC → crow-rpc
+// chunkdb service flatbuffer control messages (R116: legacy → crow-rpc
 // migration). Mirrors chunkdb_service.proto + chunkdb_op.proto +
 // chunkdb_type.proto.
 //
@@ -22,7 +22,7 @@ namespace crow.chunkdb.proto;
 //   response table. The server does not know the owning instance; the
 //   client refreshes its binding cache from group-0 and re-routes.
 
-// ── Return codes (mirrors LifecycleError + gRPC status mapping) ──
+// ── Return codes (mirrors LifecycleError + RPC status mapping) ──
 enum FBChunkdbRetCode : int16 {
     Success = 0,
     InvalidArgument = 1,

@@ -3,7 +3,7 @@
 
 //! Bench runner: connection pool + worker tasks + stats aggregation.
 //!
-//! Key work: build N gRPC channels (the connection pool), spawn M
+//! Key work: build N crow-rpc channels (the connection pool), spawn M
 //! tokio tasks (the workers) that each clone a channel, drive a loop
 //! issuing ops until `duration` elapses, collect per-op-kind histograms
 //! and counters, and emit a `BenchReport`.
@@ -68,7 +68,7 @@ pub(crate) struct BenchConfig {
     pub(crate) workload: WorkloadKind,
     /// Storage mode label: `mem`, `file`, or `block`.
     pub(crate) mode: String,
-    /// Number of independent gRPC channels (1..=64). Default 4.
+    /// Number of independent crow-rpc channels (1..=64). Default 4.
     pub(crate) connections: u32,
     /// Number of load generators (worker threads or coroutines).
     /// Default 8.

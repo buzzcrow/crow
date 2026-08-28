@@ -102,7 +102,7 @@ pub(crate) async fn http_cluster_init(
         }
     }
 
-    // Phase 2: refresh caches so we can resolve gRPC endpoints.
+    // Phase 2: refresh caches so we can resolve crow-rpc endpoints.
     for (nid, _) in &succeeded {
         refresh_node_cache(&state, *nid).await;
     }
@@ -161,7 +161,7 @@ pub(crate) async fn http_cluster_init(
     // Phase 5: write hardware hierarchy + KV-cluster topology into
     // group 0 via HardwareClient + KVClusterMetaClient. Build a
     // CrowkvClient seeded with all group-0 mgmt URLs as topology
-    // discovery seeds, plus the first gRPC endpoint as the initial
+    // discovery seeds, plus the first crow-rpc endpoint as the initial
     // leader hint.
     let cfg_snapshot = state.config.read().unwrap().clone();
     let mgmt_seeds: Vec<String> = succeeded
@@ -170,15 +170,15 @@ pub(crate) async fn http_cluster_init(
         .collect();
     let mut topology_written = false;
     for (nid, _) in &succeeded {
-        let Some(grpc_ep) = rpc_endpoint_for_node(&state, *nid, 0).await else {
+        let Some(rpc_ep) = rpc_endpoint_for_node(&state, *nid, 0).await else {
             continue;
         };
         let kv_client =
             crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(mgmt_seeds.clone()));
-        kv_client.seed_leader(0, 0, grpc_ep.clone());
+        kv_client.seed_leader(0, 0, rpc_ep.clone());
         let kv_client2 =
             crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(mgmt_seeds.clone()));
-        kv_client2.seed_leader(0, 0, grpc_ep.clone());
+        kv_client2.seed_leader(0, 0, rpc_ep.clone());
         let hw = crow_kv_client::HardwareClient::new(kv_client);
         let meta = crow_kv_client::KVClusterMetaClient::new(kv_client2);
 
@@ -223,7 +223,7 @@ pub(crate) async fn http_cluster_init(
             }
             for replica in &group.replicas {
                 let server = cfg_snapshot.server_for_node(replica.node_id);
-                let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
+                let endpoint = server.and_then(|s| s.rpc_url.clone()).unwrap_or_default();
                 let value = crow_protocol::common::ReplicaValue {
                     store_id: group.store_id,
                     group_id: group.group_id,

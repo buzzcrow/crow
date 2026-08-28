@@ -31,7 +31,7 @@ export enum NodeHealth {
 
 export interface ServerProcess {
   mgmt_url: string;
-  grpc_url: string;
+  rpc_url: string;
   pid?: number;
   state: ProcState;
   health: NodeHealth;
@@ -414,7 +414,7 @@ export interface RebuildResultResponse {
 export interface DiskdbDeployResult {
   node_id: number;
   mgmt_url: string;
-  grpc_url: string;
+  rpc_url: string;
   pid: number;
 }
 

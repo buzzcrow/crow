@@ -167,7 +167,7 @@ impl<'a> PhysicalBuilder<'a> {
         };
         ServerProcess {
             mgmt_url: entry.url.clone(),
-            grpc_url: entry.grpc_url.clone().unwrap_or_default(),
+            rpc_url: entry.rpc_url.clone().unwrap_or_default(),
             pid: if has_pid { Some(0) } else { None },
             state,
             health,
