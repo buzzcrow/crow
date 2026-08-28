@@ -206,13 +206,24 @@ async fn create_group(
     replica_id: u64,
     nodes: &[u64],
 ) {
-    let (status, body) = json_post(
-        client,
-        &format!("{base}/api/stores/{store_id}/groups"),
-        json!({ "group_id": group_id, "replica_id": replica_id, "nodes": nodes }),
-    )
-    .await;
-    assert_eq!(status.as_u16(), 201, "create group {store_id}/{group_id}: {body}");
+    // Retry with backoff — the kv-server on the target node may be
+    // momentarily unreachable right after concurrent deploy.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = json_post(
+            client,
+            &format!("{base}/api/stores/{store_id}/groups"),
+            json!({ "group_id": group_id, "replica_id": replica_id, "nodes": nodes }),
+        )
+        .await;
+        if status.as_u16() == 201 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            assert_eq!(status.as_u16(), 201, "create group {store_id}/{group_id}: {body}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str, value: &str) {

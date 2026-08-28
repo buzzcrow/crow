@@ -40,6 +40,13 @@ pub fn pick_two_distinct_free_ports() -> (u16, u16) {
     (first, second)
 }
 
+/// Pick a base port where `port`, `port+1`, ..., `port+count-1` are all
+/// free. Delegates to `crow_console_shared::test_ports`.
+#[must_use]
+pub fn pick_free_port_range(count: u16) -> u16 {
+    crow_console_shared::test_ports::unique_test_port_range(count)
+}
+
 /// Locate the compiled `crow-cli` binary next to the test runner.
 /// Cargo exposes its path via `CARGO_BIN_EXE_crow-cli`; the fallback
 /// walks up to the `debug`/`release` dir for `cargo test` invocations

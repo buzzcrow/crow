@@ -39,7 +39,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   workers: 1,
-  reporter: [['list']],
+  reporter: [['list'], ['./slowReporter.ts']],
   use: {
     baseURL,
     trace: 'retain-on-failure',

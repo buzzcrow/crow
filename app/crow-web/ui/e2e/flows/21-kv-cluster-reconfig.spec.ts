@@ -351,7 +351,7 @@ test.describe('kv cluster · reconfiguration', () => {
       // Add the 4th replica via the KV-Cluster Add Replica dialog.
       await openKvCluster(page);
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-      await expect(aside.getByText('G-4500')).toBeVisible({ timeout: 5_000 });
+      await expect(aside.getByText('G-4500')).toBeVisible({ timeout: 10_000 });
       await aside.getByText('G-4500').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add replica/i }).click();
       await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();

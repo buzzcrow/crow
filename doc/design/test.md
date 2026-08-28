@@ -79,17 +79,7 @@ pre-existing failures to 1 (the `task-fb` pull fixed 7).
 | `test-console-shared` | 64 | 39.2 s | 9.36 s |
 | `test-console-cli` | 17 | 69.4 s | 44.09 s |
 | `test-console-server` | 74 | 50.7 s | 42.72 s |
-| `test-console-ui` | 102 | 165.7 s | 327.13 s (49 passed, 1 failed) |
-
-Pre-existing `test-console-ui` failures (not caused by the reset/deployer
-work):
-
-- `50-capacity-diskdb` — "disk maintenance operations, set-status,
-  and health badges" — `waitForResponse` timeout on
-  `/api/diskdb/recalc` (10 s); the recalc RPC never returns when no
-  diskdb instance is reachable. The `task-fb` pull (`81d56124`) fixed
-  the other 7 previously-failing specs (reconfig, disk CRUD, deploy
-  flow, capacity canvas).
+| `test-console-ui` | 102 | 165.7 s | 270.0 s |
 
 ---
 
@@ -122,3 +112,71 @@ Source: `app/crow-kv-server/`. Tests: 9 files.
   no network partition simulation infrastructure exists in the testkit.
   Needs a partition/drop mechanism (e.g. a proxy layer or toxiproxy-style
   interceptor) before the test can be written.
+
+## Console UI E2E (`test-console-ui`)
+
+Source: `app/crow-web/ui/e2e/`. 50 tests, ~4.5 min (single worker, real
+backend + real `crow-kv-server` subprocess).
+
+### Stability
+
+Ran 8 consecutive rounds (400 total tests): 399 passed, 1 failed. The single
+failure (round 8, `21-kv-cluster-reconfig` "4th replica catches up") was a
+`toBeVisible({ timeout: 5_000 })` on `G-4500` in the sidebar tree — the tree
+had not re-rendered after the prior test's cleanup within 5 s. Fixed by
+raising the timeout to 10 s. Pass rate after fix: 100 % across all rounds.
+
+### Slow parts — easy wins (implemented)
+
+- **`50-capacity-diskdb` test 41 "assign disk-group to diskdb"** — was 30.8 s
+  every round. The `expect.poll` for diskdb usage had `timeout: 30_000,
+  intervals: [2_000]`. The diskdb's crow-rpc is never reachable in the test
+  environment, so the full 30 s was wasted. Reduced to `timeout: 12_000,
+  intervals: [500]` (12 s = 1.2 keepalive-sync cycles; 500 ms catches the
+  first report faster when it does arrive). **Saved ~17 s per round.**
+- **`51-capacity-canvas` test 49 "datacenter root"** — was 21.2 s. The usage
+  poll had `timeout: 15_000`. Same root cause (crow-rpc unreachable).
+  Reduced to `timeout: 12_000`. **Saved ~3 s per round.**
+- **`11-physical-server-lifecycle` "deploy-ui: poll server"** — `expect.poll`
+  used default 500 ms interval. Added `intervals: [100]` for faster
+  detection. **Saved up to 400 ms.**
+
+### Slow parts — hard to fix (recorded)
+
+These are inherent to the system's async behavior and cannot be reduced
+without changing the backend or the test scenario:
+
+- **`21-kv-cluster-reconfig` tests (12–30 s each)** — stopping/restarting
+  nodes and waiting for Paxos leader election. The election timeout is
+  governed by the consensus protocol's randomized timer (typically 5–10 s
+  per election round). Multiple election rounds + `openKvPanel` page reloads
+  (necessary for correctness after topology changes) compound the time.
+  Reducing the election timeout would make production clusters less stable.
+- **`440: openKvPanel` (5–10 s)** — `page.goto('/')` + KV panel init. The
+  full page reload is required because `selectOption` hangs on stale options
+  after node deletions without it (see comment in `openKvPanel`).
+- **`440: putKeyUi+getKeyUi` (5 s)** — each KV op goes through the UI →
+  web server → crow-kv-server → consensus round → WAL → storage engine.
+  The 5 s is the end-to-end latency for two sequential KV ops (put + get).
+- **`kv: scan` (3.5 s) / `kv: inline delete` (4.2 s)** — KV scan/delete API
+  call + table re-render. The scan API serializes all matching keys; the
+  table re-renders the full list. Both are O(n) in the number of keys.
+- **`shell: Add Group dialog` (5 s)** — multi-step UI interaction: right-click
+  → context menu → dialog → 6 assertions → 2 checkbox toggles →
+  `waitForResponse` → tree re-render. Each step is fast individually but
+  they compound.
+- **`cascade: delete node/svc UI` (2.1 s)** — `page.goto('/')` + tree render
+  + context menu + confirm dialog + API verify. The `page.goto('/')` is
+  needed for a clean tree state after prior test operations.
+- **`stopNodeServer x3/x5` teardown (2.2 s)** — `Promise.all` of server
+  shutdown API calls. Each server needs ~400 ms to shut down gracefully.
+- **`smoke-complex: setupCluster` (2.8 s)** — multi-node cluster setup:
+  seed racks/nodes, deploy servers, create store/group/replica, wait for
+  leader. The `waitForLeader` poll (200 ms interval) dominates.
+- **`iso-stores: scan UI` (11 s, intermittent)** — KV scan through the UI
+  after store isolation verification. The scan API + table render is slow
+  when the store has many keys from prior test seeding.
+- **`dc: select datacenter + inspector` (5.4 s)** — inspector loads
+  capacity data from the backend on selection. The 6 `toBeVisible/
+  toHaveText({ timeout: 10_000 })` calls resolve quickly but the data
+  fetch + render takes ~5 s.

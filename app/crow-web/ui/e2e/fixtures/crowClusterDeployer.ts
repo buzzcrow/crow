@@ -27,6 +27,8 @@ export function freePort(): number {
 
 // ── Timing instrumentation ──────────────────────────────────────────
 
+export { step as stepTime } from './stepTimer';
+
 const SLOW_THRESHOLD_MS = 2000;
 const VERY_SLOW_THRESHOLD_MS = 5000;
 
@@ -36,23 +38,8 @@ function logPhaseTime(phase: string, startMs: number): number {
     console.error(`[DEPLOYER] phase '${phase}' took ${elapsed}ms (very slow, expected <${VERY_SLOW_THRESHOLD_MS}ms)`);
   } else if (elapsed >= SLOW_THRESHOLD_MS) {
     console.warn(`[DEPLOYER] phase '${phase}' took ${elapsed}ms (slow, expected <${SLOW_THRESHOLD_MS}ms)`);
-  } else {
-    console.log(`[DEPLOYER] phase '${phase}' took ${elapsed}ms`);
   }
   return elapsed;
-}
-
-/** Test-level step timer. Wraps an async step and logs its duration.
- * Use in E2E tests to measure individual test steps. */
-export async function stepTime<T>(label: string, fn: () => Promise<T>): Promise<T> {
-  const start = Date.now();
-  try {
-    return await fn();
-  } finally {
-    const elapsed = Date.now() - start;
-    const tag = elapsed >= VERY_SLOW_THRESHOLD_MS ? 'VERY_SLOW' : elapsed >= SLOW_THRESHOLD_MS ? 'SLOW' : 'OK';
-    console.log(`[STEP] ${label}: ${elapsed}ms (${tag})`);
-  }
 }
 
 // ── Types ────────────────────────────────────────────────────────────

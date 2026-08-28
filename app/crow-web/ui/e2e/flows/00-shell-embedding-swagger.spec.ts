@@ -13,6 +13,7 @@ import {
   seedRackAndNode,
   stopNodeServer,
 } from '../fixtures/consoleSetup';
+import { step } from '../fixtures/stepTimer';
 
 /**
  * Shell-level surfaces that need no shared cluster: backend-unreachable
@@ -24,9 +25,9 @@ import {
  */
 test.describe('shell · embedding + swagger', () => {
   test('shows an alert when backend API requests fail', async ({ page }) => {
-    await page.route('**/api/**', route => route.abort('failed'));
+    await step('shell: route abort', () => page.route('**/api/**', route => route.abort('failed')));
 
-    await page.goto('/');
+    await step('shell: goto', () => page.goto('/'));
 
     // Scope to the banner alert — a toast (also role=alert) may appear
     // concurrently with "Failed to load server list:" text.
@@ -34,16 +35,18 @@ test.describe('shell · embedding + swagger', () => {
   });
 
   test('swagger panel renders inline and re-targets the node selection', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 22, name: 'Rack TwentyTwo' });
-    await createNode(baseURL!, { id: 221, rack_id: 22 });
-    await createNode(baseURL!, { id: 222, rack_id: 22 });
-    await Promise.all([
+    await step('shell: create rack/node', () => Promise.all([
+      createRack(baseURL!, { id: 22, name: 'Rack TwentyTwo' }),
+      createNode(baseURL!, { id: 221, rack_id: 22 }),
+      createNode(baseURL!, { id: 222, rack_id: 22 }),
+    ]));
+    await step('shell: deploy servers', () => Promise.all([
       deployNodeServer(baseURL!, 221, freePort(), freePort()),
       deployNodeServer(baseURL!, 222, freePort(), freePort()),
-    ]);
+    ]));
 
     try {
-      await page.goto('/');
+      await step('shell: goto', () => page.goto('/'));
       await page.getByRole('button', { name: 'Physical' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
@@ -65,26 +68,26 @@ test.describe('shell · embedding + swagger', () => {
       expect(decodeURIComponent((await frameB.getAttribute('src')) ?? '')).toContain('/nodes/222/openapi.json');
       await expect(page.locator('header').getByText('Crow Storage Console')).toBeVisible();
     } finally {
-      await Promise.all([
+      await step('shell: stop servers', () => Promise.all([
         stopNodeServer(baseURL!, 221),
         stopNodeServer(baseURL!, 222),
-      ]);
+      ]));
     }
   });
 
   test('embedding honors apiPrefix, readonly, and module opt-out', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 23, 23);
-    await deployNodeServer(baseURL!, 23, freePort(), freePort());
-    await createStore(baseURL!, 233, [23]);
-    await addGroup(baseURL!, 233, 2330, 23300, [23]);
+    await step('shell: seed rack/node', () => seedRackAndNode(baseURL!, 23, 23));
+    await step('shell: deploy server', () => deployNodeServer(baseURL!, 23, freePort(), freePort()));
+    await step('shell: create store', () => createStore(baseURL!, 233, [23]));
+    await step('shell: add group', () => addGroup(baseURL!, 233, 2330, 23300, [23]));
 
     // Reverse-proxy emulation: the SPA issues /proxy/api/* which we rewrite
     // back onto the real /api/* surface served by crow-web.
-    await page.route('**/proxy/api/**', (route) => {
+    await step('shell: route proxy', () => page.route('**/proxy/api/**', (route) => {
       const u = new URL(route.request().url());
       u.pathname = u.pathname.replace('/proxy/api', '/api');
       route.continue({ url: u.toString() });
-    });
+    }));
 
     const seen: string[] = [];
     page.on('request', (req) => seen.push(req.url()));
@@ -92,10 +95,10 @@ test.describe('shell · embedding + swagger', () => {
     try {
       const apiPrefix = encodeURIComponent('/proxy/api');
       const proxyRequest = page.waitForRequest('**/proxy/api/**', { timeout: 3_000 });
-      await page.goto(`/?view=Logical&readonly=1&disableModules=${encodeURIComponent('kv,swagger')}&apiPrefix=${apiPrefix}`);
+      await step('shell: goto embed', () => page.goto(`/?view=Logical&readonly=1&disableModules=${encodeURIComponent('kv,swagger')}&apiPrefix=${apiPrefix}`));
 
       // apiPrefix: the SPA re-roots every data-plane call under /proxy/api.
-      await proxyRequest;
+      await step('shell: wait proxy request', () => proxyRequest);
       expect(seen.some((u) => u.includes('/proxy/api/'))).toBeTruthy();
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
@@ -117,7 +120,7 @@ test.describe('shell · embedding + swagger', () => {
       await expect(inspector.getByRole('tab', { name: 'Details' })).toBeVisible({ timeout: 3_000 });
       await expect(inspector.getByRole('tab', { name: 'KV' })).toHaveCount(0);
     } finally {
-      await stopNodeServer(baseURL!, 23);
+      await step('shell: stop server', () => stopNodeServer(baseURL!, 23));
     }
   });
 });

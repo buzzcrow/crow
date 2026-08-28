@@ -265,7 +265,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
               if (!r.ok()) return false;
               const body = await r.json();
               return Array.isArray(body.disk_groups) && body.disk_groups.some((g: any) => g.disk_group_id === dgId);
-            }, { timeout: 15_000, intervals: [200] }).toBe(true);
+            }, { timeout: 12_000, intervals: [200] }).toBe(true);
             usageOk = true;
           } catch {
             console.warn(`DG-${dgId} never reported usage — diskdb crow-rpc not reachable, skipping totals match`);

@@ -227,7 +227,13 @@ async fn single_voter_with_prevote_enabled_becomes_leader() {
     let handle = spawn(Arc::downgrade(&group), cfg, cancel.clone());
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(cfg.election_max_ms + 10)).await;
-    for _ in 0..16 {
+    // The PreVote path has more async steps than the direct-vote path
+    // (PreVote round + real election round). Poll with yields until the
+    // role transitions to Leader, up to a generous limit.
+    for _ in 0..100 {
+        if group.local_replica().role() == PxLocalReplicaRole::Leader {
+            break;
+        }
         tokio::task::yield_now().await;
     }
 
