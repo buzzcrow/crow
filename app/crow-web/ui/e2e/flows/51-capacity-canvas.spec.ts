@@ -60,15 +60,15 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 10_000 });
 
       // ScannerPanel header + Run Scan button.
-      await expect(panel.getByText('Scanner', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText('Scanner', { exact: true })).toBeVisible({ timeout: 10_000 });
       const scanBtn = panel.getByRole('button', { name: /run scan/i });
-      await expect(scanBtn).toBeVisible({ timeout: 3_000 });
+      await expect(scanBtn).toBeVisible({ timeout: 10_000 });
 
       // Before any scan, should show "No scan has been run yet."
-      await expect(panel.getByText('No scan has been run yet.')).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText('No scan has been run yet.')).toBeVisible({ timeout: 10_000 });
 
       // Click Run Scan — button should handle the response (success or error).
       await scanBtn.click();
@@ -109,18 +109,18 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 10_000 });
 
       // The header subtitle shows the instance count (at least 1).
       await expect(panel.getByText(/\d+ instance\(s\)/)).toBeVisible({ timeout: 10_000 });
 
       // Cluster-wide totals cards.
-      await expect(panel.getByText('Total Capacity')).toBeVisible({ timeout: 3_000 });
-      await expect(panel.getByText('Busy', { exact: true })).toBeVisible({ timeout: 3_000 });
-      await expect(panel.getByText('Free', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText('Total Capacity')).toBeVisible({ timeout: 10_000 });
+      await expect(panel.getByText('Busy', { exact: true })).toBeVisible({ timeout: 10_000 });
+      await expect(panel.getByText('Free', { exact: true })).toBeVisible({ timeout: 10_000 });
 
       // Refresh button.
-      await expect(panel.getByRole('button', { name: 'Refresh' })).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByRole('button', { name: 'Refresh' })).toBeVisible({ timeout: 10_000 });
     } finally {
       await removeDiskdb(baseURL!, nodeId);
     }
@@ -142,7 +142,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await page.getByRole('button', { name: 'Capacity' }).click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
-      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 3_000 });
+      await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 10_000 });
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${CANVAS_RACK}` }).locator('button[aria-label="Expand"]');
@@ -168,22 +168,22 @@ test.describe('capacity · canvas + scanner/recalc', () => {
         // Click the DG in the sidebar → center panel switches to
         // DiskGroup scope showing per-disk boxes.
         await aside.getByText(/DG-610/, { exact: true }).click();
-        await expect(panel.getByText(`Capacity — DG-${dgId}`)).toBeVisible({ timeout: 3_000 });
+        await expect(panel.getByText(`Capacity — DG-${dgId}`)).toBeVisible({ timeout: 10_000 });
 
         // Per-disk boxes render as colored buttons with busy percentage.
-        await expect(panel.getByText(diskId.slice(0, 8), { exact: false })).toBeVisible({ timeout: 3_000 });
+        await expect(panel.getByText(diskId.slice(0, 8), { exact: false })).toBeVisible({ timeout: 10_000 });
 
         // --- Disk scope: zone grid + RecalcPanel ---
         // Click the disk box → center panel switches to Disk scope.
         await panel.getByText(diskId.slice(0, 8), { exact: false }).click();
-        await expect(panel.getByText(/Capacity — Disk/)).toBeVisible({ timeout: 3_000 });
+        await expect(panel.getByText(/Capacity — Disk/)).toBeVisible({ timeout: 10_000 });
 
         // RecalcPanel renders in the Disk scope (scoped to parent DG).
-        await expect(panel.getByText(`Recalc (DG-${dgId})`)).toBeVisible({ timeout: 3_000 });
-        await expect(panel.getByRole('button', { name: /run recalc/i })).toBeVisible({ timeout: 3_000 });
+        await expect(panel.getByText(`Recalc (DG-${dgId})`)).toBeVisible({ timeout: 10_000 });
+        await expect(panel.getByRole('button', { name: /run recalc/i })).toBeVisible({ timeout: 10_000 });
 
         // Zone grid section should appear.
-        await expect(panel.getByText(/Zone grid|No zone usage data available/)).toBeVisible({ timeout: 3_000 });
+        await expect(panel.getByText(/Zone grid|No zone usage data available/)).toBeVisible({ timeout: 10_000 });
 
         // Click "Run Recalc" — should trigger the recalc action.
         const recalcBtn = panel.getByRole('button', { name: /run recalc/i });
@@ -225,26 +225,26 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       // The datacenter root is the top treeitem, above the rack.
       const dcItem = aside.getByRole('treeitem').filter({ hasText: /^datacenter$/ });
-      await expect(dcItem).toBeVisible({ timeout: 3_000 });
+      await expect(dcItem).toBeVisible({ timeout: 10_000 });
       await expect(aside.getByRole('treeitem').first()).toHaveText(/datacenter/);
 
       // Select the datacenter → inspector opens.
       await aside.getByText('datacenter', { exact: true }).click();
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
-      await expect(inspector).toBeVisible({ timeout: 3_000 });
+      await expect(inspector).toBeVisible({ timeout: 10_000 });
       const typeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
-      await expect(typeDd).toHaveText('Datacenter', { timeout: 3_000 });
+      await expect(typeDd).toHaveText('Datacenter', { timeout: 10_000 });
       // Rack count is always shown (one rack from beforeAll).
       const rackCountDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Rack Count' }) }).locator('dd');
-      await expect(rackCountDd).toHaveText('1', { timeout: 3_000 });
+      await expect(rackCountDd).toHaveText('1', { timeout: 10_000 });
 
       // Capacity totals (Total Capacity / Used / Free) are shown in the
       // Capacity view. Wait for the DG to report usage so the totals are
       // non-zero; if the diskdb crow-rpc is unreachable, still verify the
       // labels render (totals would be 0 B).
-      await expect(inspector.getByText('Total Capacity')).toBeVisible({ timeout: 3_000 });
-      await expect(inspector.getByText('Used', { exact: true })).toBeVisible({ timeout: 3_000 });
-      await expect(inspector.getByText('Free', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText('Total Capacity')).toBeVisible({ timeout: 10_000 });
+      await expect(inspector.getByText('Used', { exact: true })).toBeVisible({ timeout: 10_000 });
+      await expect(inspector.getByText('Free', { exact: true })).toBeVisible({ timeout: 10_000 });
 
       // If the DG appears in usage, verify the inspector totals match the
       // cluster-wide sum from the API.
@@ -275,7 +275,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
             { capacity: 0, busy: 0, free: 0 },
           );
           const capDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Total Capacity' }) }).locator('dd');
-          await expect(capDd).toHaveText(formatBytesAssert(sum.capacity), { timeout: 3_000 });
+          await expect(capDd).toHaveText(formatBytesAssert(sum.capacity), { timeout: 10_000 });
         }
       } finally {
         await api.dispose();

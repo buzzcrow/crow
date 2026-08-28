@@ -24,48 +24,32 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
 
 ### Flatbuffer (crow-rpc handlers)
 
-The flatbuffer control message IS the buffer — field access is a memory-offset read through the runtime accessor, no deserialize step. Full spec: `doc/design/rpc/design-crow-rpc.md` §6.
+The flatbuffer control message IS the buffer — field access is a memory-offset read, no deserialize step. Full spec: `doc/design/rpc/design-crow-rpc.md` §6.
 
-- **No owned intermediate struct.** Don't deserialize `FB*Request` into a Rust struct / C++ class with `String` + `Vec` fields then pass that to the handler. That copies every field per call. Read through the flatbuffer root pointer in place.
-- **No allocating accessor on the hot path.** `fb.field().to_string()` / `.to_vec()` inside a handler heap-allocates per call. Use the flatbuffer reference directly; convert to owned only at a boundary that truly needs owned data.
-- **Wrappers live in `crow-protocol`.** One shared definition per flatbuffer type, not a per-service duplicate. Wrapper holds a buffer reference and reads through the root pointer on every accessor — no field copy.
-- **Data payload: zero-copy when consumed by reference.** Streaming handlers (`pwrite(fd, &buf, len)`, `engine.apply(slot, &batch)`) take `&[u8]` and drop the buffer after the async write — no copy to owned `Vec`. Copy to owned only when the handler retains the data past the frame's lifetime.
-- **Write path: build, finish, attach, drop.** Build with `FlatBufferBuilder`, `finish`, attach the bytes to the frame's control buffer, drop the builder. No retained builder state.
+- **No owned intermediate struct.** Read through the flatbuffer root pointer in place; don't deserialize into a Rust struct with `String` + `Vec` fields.
+- **No allocating accessor on the hot path.** `fb.field().to_string()` / `.to_vec()` heap-allocates per call. Use the flatbuffer reference directly.
+- **Wrappers live in `crow-protocol`.** One shared definition per flatbuffer type.
+- **Data payload: zero-copy when consumed by reference.** Copy to owned only when the handler retains data past the frame's lifetime.
+- **Write path: build, finish, attach, drop.** No retained builder state.
 
 ## Checklist
 
-1. **Health & Info exposure** — when adding internal state, consider if it should be exposed via `HealthStatus` variants or info struct fields. Default to exposing useful internal state.
-2. **Comments** — `//!` for module purpose, `///` for items, inline for non-obvious logic. No doc references in code. TODO/FIXME tracked in `doc/todo_code.md`.
-3. **Clone** — review every `#[derive(Clone)]` and `.clone()`. In hot paths, justify with a comment if non-trivial overhead is accepted.
+1. **Health & Info exposure** — expose useful internal state via `HealthStatus` variants or info struct fields by default.
+2. **Comments** — `//!` for module, `///` for items, inline for non-obvious logic. No doc references. TODO/FIXME in `doc/todo_code.md`.
+3. **Clone** — justify every `.clone()` in hot paths with a comment if non-trivial.
 4. **Arc** — drop inner `Arc` when parent is already `Arc`. Return `&T` instead of `Arc<T>` when parent keeps it alive. Inner `Arc` only if it outlives parent (e.g. moved into `tokio::spawn`).
-5. **Mutex** — `std::sync::Mutex` for short non-async sections; `tokio::sync::Mutex` only across `.await`; remove if all state is atomic.
+5. **Mutex** — `std::sync::Mutex` for short non-async; `tokio::sync::Mutex` only across `.await`; remove if all state is atomic.
 6. **Enum vs `dyn Trait`** — prefer enum dispatch. `dyn` only for open-ended / cross-crate.
-7. **Dead code** — remove unused types/imports/fields/methods/deps. Collapse always-same-value enum variants to unit.
+7. **Dead code** — remove unused types/imports/fields/methods/deps. Collapse always-same-value enum variants.
 8. **Duplication** — move shared helpers to `common/` or `rpc/`.
-9. **Errors** — no `panic!` in non-test code. Replace `OnceCell::get_or_init + unwrap` with `get_or_try_init`. crow-rpc client init must propagate.
+9. **Errors** — no `panic!` in non-test code. Replace `OnceCell::get_or_init + unwrap` with `get_or_try_init`.
 10. **Naming** — `Px` prefix for Paxos types. `&self` when interior mutability suffices.
-11. **Visibility** — minimise `pub`; use `pub(crate)` / `pub(super)`. Test-only access via `#[cfg(feature = "test-util")]` gates + `_for_tests` setters, not `pub`. Review every changed `pub` item — narrowest visibility that works (private < `pub(super)` < `pub(crate)` < `pub`).
+11. **Visibility** — minimise `pub`; use `pub(crate)` / `pub(super)`. Test-only via `#[cfg(feature = "test-util")]` gates.
 12. **Debug** — all public structs implement `Debug`. Manual: identity fields + `finish_non_exhaustive()`.
-13. **Tests** — integration tests only, under each crate's `tests/<topic>_test.rs`. No inline `#[cfg(test)] mod tests`. Shared helpers in `tests/common/` (2018 style, not `testkit/`).
-14. **Module & file layout** — changed file passes size caps (≤300 healthy / 301–600 ok / 601–1000 smell / >1000 must split) and naming rules (`snake_case`, subject not kind, banned `types.rs`/`impl.rs`/`core.rs`/`misc.rs`/`mod.rs`-with-logic); `foo.rs` is a pure index; split considered for grown files.
-15. **File cohesion** — passes the stranger check: one responsibility, grouped by shared state/imports, handlers by resource not verb.
-16. **Function length** — new/changed functions pass length caps (≤40 healthy / ≤80 orchestrator / ≤150 justified / >150 split). Extract by responsibility.
-
-## Steps
-
-// turbo
-```bash
-grep -rn '#\[derive(.*Clone' src/
-grep -rn 'Arc<' src/
-grep -rn '\.unwrap()' src/
-grep -rn 'fn .*(&self' src/
-grep -rn '#\[cfg\(test\)\]' src/
-grep -rn 'mod\.rs' src/ tests/
-grep -rn 'tests/testkit' .
-grep -rn '\bpub ' src/ | grep -v 'pub(crate)\|pub(super)\|pub use\|pub mod\|pub fn.*for_tests'
-```
-
-Pre-commit gate (AGENTS.md Hard Constraints) must have already passed — fmt, clippy, clang-format, relevant tests.
+13. **Tests** — integration tests only, under `tests/<topic>_test.rs`. No inline `#[cfg(test)] mod tests`. Helpers in `tests/common/`.
+14. **Module & file layout** — changed file passes size caps and naming rules; `foo.rs` is a pure index.
+15. **File cohesion** — passes the stranger check: one responsibility, handlers by resource not verb.
+16. **Function length** — new/changed functions pass length caps (≤40 healthy / ≤80 orchestrator / ≤150 justified / >150 split).
 
 ## Clippy Exceptions
 
@@ -77,11 +61,10 @@ Pre-commit gate (AGENTS.md Hard Constraints) must have already passed — fmt, c
 - Removing `Clone` without updating call sites.
 - Removing `Arc` from a field shared across spawned tasks.
 - Changing getter return type (`Arc<T>` → `&T`) without updating callers/tests.
-- Removing a dep used only by generated code (check `OUT_DIR`).
-- `&T` across `.await` is unsafe once moved into spawned task — must be `Arc<T>` then.
+- `&T` across `.await` is unsafe once moved into spawned task — must be `Arc<T>`.
 - Inline `#[cfg(test)] mod tests` instead of `tests/<topic>_test.rs`.
-- Adding a headline type or impl logic to `foo.rs` — it must stay a pure index (docs + `pub mod` + `pub use`).
-- Adding code to a >1000-line file — must extract a submodule first.
-- New file named `types.rs` / `utils.rs` / `impl.rs` / `core.rs` / `mod.rs`-with-logic — rename by subject (see /coding skill).
-- `pub` on a test-only item — gate behind `#[cfg(feature = "test-util")]` instead.
-- New file under `tests/testkit/` — use `tests/common/` (2018 style).
+- Adding headline type or impl logic to `foo.rs` — it must stay a pure index.
+- Adding code to a >1000-line file — extract a submodule first.
+- New file named `types.rs` / `utils.rs` / `impl.rs` / `core.rs` — rename by subject.
+- `pub` on a test-only item — gate behind `#[cfg(feature = "test-util")]`.
+- New file under `tests/testkit/` — use `tests/common/`.

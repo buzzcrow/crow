@@ -34,22 +34,25 @@ MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)
 
 Counter *MetricsRegistry::register_counter(const std::string &name)
 {
-    auto     h   = std::make_unique<Counter>(name);
-    Counter *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<Counter>(name);
+    Counter         *raw = h.get();
     counters_.push_back(std::move(h));
     return raw;
 }
 
 Gauge *MetricsRegistry::register_gauge(const std::string &name)
 {
-    auto   h   = std::make_unique<Gauge>(name);
-    Gauge *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<Gauge>(name);
+    Gauge           *raw = h.get();
     gauges_.push_back(std::move(h));
     return raw;
 }
 
 CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name, CallbackGauge::Callback cb)
 {
+    std::scoped_lock lock(flush_mutex_);
     auto             h   = std::make_unique<CallbackGauge>(name, std::move(cb));
     CallbackGauge   *raw = h.get();
     callback_gauges_.push_back(std::move(h));
@@ -58,14 +61,16 @@ CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name,
 
 Bandwidth *MetricsRegistry::register_bandwidth(const std::string &name)
 {
-    auto       h   = std::make_unique<Bandwidth>(name);
-    Bandwidth *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<Bandwidth>(name);
+    Bandwidth       *raw = h.get();
     bandwidths_.push_back(std::move(h));
     return raw;
 }
 
 LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 {
+    std::scoped_lock  lock(flush_mutex_);
     auto              h   = std::make_unique<LatencyHistogram>(name);
     LatencyHistogram *raw = h.get();
     histograms_.push_back(std::move(h));
@@ -74,8 +79,9 @@ LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 
 LatencySummary *MetricsRegistry::register_summary(const std::string &name)
 {
-    auto            h   = std::make_unique<LatencySummary>(name);
-    LatencySummary *raw = h.get();
+    std::scoped_lock lock(flush_mutex_);
+    auto             h   = std::make_unique<LatencySummary>(name);
+    LatencySummary  *raw = h.get();
     summaries_.push_back(std::move(h));
     return raw;
 }
@@ -106,7 +112,7 @@ template <typename T> static std::vector<size_t> sorted_indices(const std::vecto
 void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timestamp, const char *section_label,
                                size_t width, size_t count_w, size_t tps_w)
 {
-    std::lock_guard<std::mutex> lock(flush_mutex_);
+    std::scoped_lock lock(flush_mutex_);
 
     // Global max name length across all sections (or override from caller).
     size_t name_w = width;
@@ -238,8 +244,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
         for (const auto &g : callback_gauges_) {
             all_gauges.emplace_back(g->name(), g->get());
         }
-        std::sort(all_gauges.begin(), all_gauges.end(),
-                  [](const auto &a, const auto &b) { return a.first < b.first; });
+        std::sort(all_gauges.begin(), all_gauges.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
         std::fprintf(fp, "%-*s  value\n", static_cast<int>(name_w), "");
         for (const auto &[name, value] : all_gauges) {
             std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(name_w), name.c_str(),
@@ -305,7 +310,7 @@ void MetricsRegistry::stop()
         return;
     }
     {
-        std::lock_guard<std::mutex> lk(flush_mutex_);
+        std::scoped_lock lk(flush_mutex_);
     }
     stop_cv_.notify_all();
     if (flush_thread_.joinable()) {

@@ -1254,13 +1254,25 @@ test.describe('capacity · diskdb', () => {
     {
       const api = await apiContext(baseURL!);
       try {
-        const r = await api.get('/api/diskdb/instances');
-        expect(r.ok()).toBeTruthy();
-        const instances = await r.json();
-        const ddb = instances.find((i: { rpc_endpoint: string }) =>
-          i.rpc_endpoint.includes(String(rpcPort)));
+        // The diskdb registers with rpc_listen_addr = rpc_port + 2
+        // (see resolve_diskdb_config_path in lifecycle.rs). Poll until
+        // the instance appears in the service registry — the diskdb
+        // process registers asynchronously after startup.
+        const rpcListenPort = rpcPort + 2;
+        let ddb: { instance_id: number } | undefined;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const r = await api.get('/api/diskdb/instances');
+          if (r.ok()) {
+            const instances = await r.json();
+            ddb = (instances as { rpc_endpoint: string; instance_id: number }[]).find(
+              (i) => i.rpc_endpoint.includes(String(rpcListenPort)),
+            );
+            if (ddb) break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
         expect(ddb, 'diskdb instance should be registered').toBeTruthy();
-        instanceId = ddb.instance_id;
+        instanceId = ddb!.instance_id;
       } finally {
         await api.dispose();
       }

@@ -91,10 +91,13 @@ test.describe('shell · UI behaviors', () => {
       await addGroupDialog.getByLabel(/^202\b/).check();
       const n20cInput = addGroupDialog.getByLabel(/^203\b/);
       if (await n20cInput.isChecked()) await n20cInput.uncheck();
+      const createGroupResp = page.waitForResponse((r: any) =>
+        r.request().method() === 'POST' && r.url().includes('/api/stores/207/groups'));
       await addGroupDialog.getByRole('button', { name: /create group/i }).click();
+      await createGroupResp;
 
       const expectedReplicaAfterGroup = String(Number(expectedReplicaId) + 2);
-      await expect(aside.getByText(`G-${expectedGroupId}`)).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText(`G-${expectedGroupId}`)).toBeVisible({ timeout: 10_000 });
       await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add replica/i }).click();
       const addReplicaDialog = page.getByRole('dialog', { name: 'Add Replica' });

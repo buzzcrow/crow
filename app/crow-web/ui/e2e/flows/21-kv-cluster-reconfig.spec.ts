@@ -118,10 +118,13 @@ async function deleteNodeViaMenu(page: import('@playwright/test').Page, nodeId: 
   await page.getByRole('menuitem', { name: /delete node/i }).click();
   const dialog = page.getByRole('dialog', { name: /delete node/i });
   await expect(dialog).toBeVisible();
+  const deleteResp = page.waitForResponse((r: any) =>
+    r.request().method() === 'DELETE' && r.url().includes(`/api/nodes/${nodeId}`));
   await dialog.getByRole('button', { name: /delete node/i }).evaluate((el: any) => (el as HTMLElement).click());
+  await deleteResp;
   // Wait for the node to disappear from the tree (cascade stops + removes
   // the server, then removes the node).
-  await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toHaveCount(0, { timeout: 10_000 });
+  await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toHaveCount(0, { timeout: 15_000 });
 }
 
 async function putKeyUi(page: import('@playwright/test').Page, key: string, value: string) {

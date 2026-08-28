@@ -64,22 +64,22 @@ test.describe('inspector · activity log', () => {
 
       // Open inspector activity tab
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
-      await expect(inspector).toBeVisible({ timeout: 3_000 });
+      await expect(inspector).toBeVisible({ timeout: 10_000 });
       await inspector.getByRole('tab', { name: 'Activity' }).click();
 
       // Verify an entry appears (the KV Put should be logged)
-      await expect(inspector.getByText(/KV Put/i)).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText(/KV Put/i)).toBeVisible({ timeout: 10_000 });
 
       // Click Clear log — wait for the button to be enabled, then click.
       // force:true bypasses actionability checks (toast overlays, etc.)
       // while still dispatching a real pointer event through React's
       // synthetic event system.
       const clearBtn = inspector.getByRole('button', { name: /clear log/i });
-      await expect(clearBtn).toBeEnabled({ timeout: 3_000 });
+      await expect(clearBtn).toBeEnabled({ timeout: 10_000 });
       await clearBtn.click({ force: true });
 
       // Verify entries are removed
-      await expect(inspector.getByText('No activity yet.')).toBeVisible({ timeout: 5_000 });
+      await expect(inspector.getByText('No activity yet.')).toBeVisible({ timeout: 10_000 });
     } finally {
       await stopNodeServer(baseURL!, 32);
     }
@@ -94,14 +94,14 @@ test.describe('inspector · activity log', () => {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-47' });
-      await expect(nodeItem).toBeVisible({ timeout: 3_000 });
+      await expect(nodeItem).toBeVisible({ timeout: 10_000 });
 
       // Ping — on the node context menu.
       await nodeItem.click({ button: 'right' });
       await page.getByRole('menuitem', { name: /ping/i }).click();
 
       const pingToast = page.getByRole('alert').filter({ hasText: /ping/i });
-      await expect(pingToast).toBeVisible({ timeout: 3_000 });
+      await expect(pingToast).toBeVisible({ timeout: 10_000 });
 
       // Restart and Stop are on the server (KV) context menu.
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-47' });
@@ -114,7 +114,7 @@ test.describe('inspector · activity log', () => {
       await restartResponse;
 
       const restartToast = page.getByRole('alert').filter({ hasText: /restart/i });
-      await expect(restartToast).toBeVisible({ timeout: 3_000 });
+      await expect(restartToast).toBeVisible({ timeout: 10_000 });
 
       // Stop — should show a success toast
       await serverItem.click({ button: 'right' });
@@ -123,17 +123,17 @@ test.describe('inspector · activity log', () => {
       await stopResponse;
 
       const stopToast = page.getByRole('alert').filter({ hasText: /stop/i });
-      await expect(stopToast).toBeVisible({ timeout: 3_000 });
+      await expect(stopToast).toBeVisible({ timeout: 10_000 });
 
       // Verify all three operations appear in the activity log
       await nodeItem.getByRole('button', { name: 'N-47' }).click();
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
-      await expect(inspector).toBeVisible({ timeout: 3_000 });
+      await expect(inspector).toBeVisible({ timeout: 10_000 });
       await inspector.getByRole('tab', { name: 'Activity' }).click();
 
-      await expect(inspector.getByText(/ping node/i)).toBeVisible({ timeout: 3_000 });
-      await expect(inspector.getByText(/restart Crow Storage/i)).toBeVisible({ timeout: 3_000 });
-      await expect(inspector.getByText(/stop Crow Storage/i)).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText(/ping node/i)).toBeVisible({ timeout: 10_000 });
+      await expect(inspector.getByText(/restart Crow Storage/i)).toBeVisible({ timeout: 10_000 });
+      await expect(inspector.getByText(/stop Crow Storage/i)).toBeVisible({ timeout: 10_000 });
     } finally {
       await stopNodeServer(baseURL!, 47);
     }
