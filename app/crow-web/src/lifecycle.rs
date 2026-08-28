@@ -1228,6 +1228,7 @@ pub async fn http_internal_reset(
 
     // 8. Clear caches and workspace directories.
     state.openapi_cache.lock().unwrap().clear();
+    state.clear_kv_client().await;
     state
         .clear_workspaces()
         .map_err(|e| err_500(format!("clear workspaces: {e}")))?;

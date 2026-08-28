@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::cluster::{GroupHealth, NodeId};
-use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode, ScanOutcome};
+use crow_kv_client::{GetOutcome, ReadMode, ScanOutcome};
 use hex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -307,8 +307,8 @@ pub async fn http_kv_get(
 ) -> Result<Json<KvGetResponse>, (StatusCode, Json<ErrorBody>)> {
     let key = decode_key(q.key, q.key_hex)?;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -391,8 +391,8 @@ pub async fn http_kv_scan(
     };
     let limit = q.limit;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -443,8 +443,8 @@ pub async fn http_kv_put(
     let client_id = body.client_id;
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }
@@ -471,8 +471,8 @@ pub async fn http_kv_delete(
     let client_id = body.client_id;
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let transport = state.kv_rpc_transport().await;
-    let client = CrowkvClient::new_with_rpc_transport(ClientConfig::new(seeds), transport);
+    let client = state.kv_client().await;
+    client.set_mgmt_seeds(seeds);
     if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
         client.seed_leader(sid, gid, endpoint);
     }

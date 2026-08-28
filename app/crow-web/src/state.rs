@@ -32,9 +32,12 @@ pub struct AppState {
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     pub diskdb_client: Arc<tokio::sync::RwLock<Option<crow_diskdb_client::DiskdbClient>>>,
     /// Cached crow-rpc transport reused across KV requests to avoid
-    /// spawning 6+ threads per request. Shared by all `CrowkvClient`
-    /// instances created in `kv.rs`.
+    /// spawning 6+ threads per request. Shared by the cached `kv_client`.
     pub kv_rpc_transport: Arc<tokio::sync::RwLock<Option<Arc<crow_kv_client::KvRpcTransport>>>>,
+    /// Cached `CrowkvClient` reused across KV requests so the topology
+    /// cache persists — avoids re-discovering the leader from seeds on
+    /// every put/get/delete. Invalidated on `/internal/reset`.
+    pub kv_client: Arc<tokio::sync::RwLock<Option<Arc<crow_kv_client::CrowkvClient>>>>,
     /// Rate-limiter for repeated crow-rpc failure warnings: maps
     /// `endpoint` → last-warned timestamp. Prevents flooding the
     /// console with identical "instance query failed" warnings every
@@ -89,6 +92,7 @@ impl AppState {
             runtime_pids: Arc::new(std::sync::Mutex::new(HashMap::new())),
             diskdb_client: Arc::new(tokio::sync::RwLock::new(None)),
             kv_rpc_transport: Arc::new(tokio::sync::RwLock::new(None)),
+            kv_client: Arc::new(tokio::sync::RwLock::new(None)),
             warn_dedup: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -255,9 +259,8 @@ impl AppState {
 
     /// Get or create a cached `KvRpcTransport`. The transport (and its
     /// crow-rpc server/client + I/O thread) is reused across KV requests
-    /// to avoid spawning threads per request. A fresh `CrowkvClient` is
-    /// still created per request (cheap — no threads), sharing this
-    /// transport via `with_rpc_transport`.
+    /// to avoid spawning threads per request. Shared by the cached
+    /// `kv_client`.
     pub async fn kv_rpc_transport(&self) -> Arc<crow_kv_client::KvRpcTransport> {
         if let Some(t) = self.kv_rpc_transport.read().await.as_ref() {
             return Arc::clone(t);
@@ -269,6 +272,33 @@ impl AppState {
         let t = Arc::new(crow_kv_client::KvRpcTransport::new());
         *guard = Some(Arc::clone(&t));
         t
+    }
+
+    /// Get or create a cached `CrowkvClient` sharing the cached RPC
+    /// transport. The topology cache persists across requests so the
+    /// leader endpoint is not re-discovered from seeds on every call.
+    /// Call `seed_leader` before each use to keep the hint fresh.
+    pub async fn kv_client(&self) -> Arc<crow_kv_client::CrowkvClient> {
+        if let Some(c) = self.kv_client.read().await.as_ref() {
+            return Arc::clone(c);
+        }
+        let mut guard = self.kv_client.write().await;
+        if let Some(c) = guard.as_ref() {
+            return Arc::clone(c);
+        }
+        let transport = self.kv_rpc_transport().await;
+        let c = Arc::new(crow_kv_client::CrowkvClient::new_with_rpc_transport(
+            crow_kv_client::ClientConfig::new(Vec::new()),
+            transport,
+        ));
+        *guard = Some(Arc::clone(&c));
+        c
+    }
+
+    /// Drop the cached `CrowkvClient` so the next KV request rebuilds
+    /// the topology cache from scratch. Called on `/internal/reset`.
+    pub async fn clear_kv_client(&self) {
+        *self.kv_client.write().await = None;
     }
 }
 
