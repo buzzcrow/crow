@@ -42,6 +42,19 @@ function logPhaseTime(phase: string, startMs: number): number {
   return elapsed;
 }
 
+/** Test-level step timer. Wraps an async step and logs its duration.
+ * Use in E2E tests to measure individual test steps. */
+export async function stepTime<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now();
+  try {
+    return await fn();
+  } finally {
+    const elapsed = Date.now() - start;
+    const tag = elapsed >= VERY_SLOW_THRESHOLD_MS ? 'VERY_SLOW' : elapsed >= SLOW_THRESHOLD_MS ? 'SLOW' : 'OK';
+    console.log(`[STEP] ${label}: ${elapsed}ms (${tag})`);
+  }
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface TestRack {
