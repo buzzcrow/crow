@@ -51,6 +51,10 @@ pub struct PxKvStore {
     /// `ServerConfig::DEFAULT.enable_nagle`; overridden via
     /// `set_enable_nagle` before `start()`.
     pub(crate) enable_nagle: bool,
+    /// Enable `TCP_QUICKACK` on RPC connections (Linux only). Defaults to
+    /// `ServerConfig::DEFAULT.quickack`; overridden via `set_quickack`
+    /// before `start()`.
+    pub(crate) quickack: bool,
     /// Event-write mode for RPC transports. Defaults to
     /// `ServerConfig::DEFAULT.event_write`; overridden via
     /// `set_event_write` before `start()`.
@@ -82,6 +86,7 @@ impl PxKvStore {
             rpc_workers: 2,
             peer_pool_size: ServerConfig::DEFAULT.peer_pool_size,
             enable_nagle: ServerConfig::DEFAULT.enable_nagle,
+            quickack: ServerConfig::DEFAULT.quickack,
             event_write: ServerConfig::DEFAULT.event_write,
             send_queue_capacity: ServerConfig::DEFAULT.send_queue_capacity,
             #[cfg(feature = "test-util")]
@@ -111,6 +116,12 @@ impl PxKvStore {
     /// `CrowKVConfig.server.enable_nagle`. Called before `start()`.
     pub fn set_enable_nagle(&mut self, enabled: bool) {
         self.enable_nagle = enabled;
+    }
+
+    /// Override `TCP_QUICKACK` from the loaded
+    /// `CrowKVConfig.server.quickack`. Called before `start()`.
+    pub fn set_quickack(&mut self, enabled: bool) {
+        self.quickack = enabled;
     }
 
     /// Override the event-write mode from the loaded

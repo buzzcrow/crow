@@ -105,6 +105,9 @@ pub struct ClientConfig {
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`) on client RPC
     /// connections. Default false.
     pub enable_nagle: bool,
+    /// Enable `TCP_QUICKACK` on client RPC connections (Linux only).
+    /// Default false.
+    pub quickack: bool,
     /// Event-write mode — `submit()` enqueues to the I/O worker instead
     /// of calling `writev()` directly. Coalesces frames. Default false.
     pub event_write: bool,
@@ -127,6 +130,7 @@ impl ClientConfig {
             retry: RetryConfig::default(),
             read_endpoint_policy: ReadEndpointPolicy::default(),
             enable_nagle: false,
+            quickack: false,
             event_write: false,
             send_queue_capacity: 4096,
             rpc_workers: 2,

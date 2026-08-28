@@ -35,6 +35,7 @@ pub(crate) async fn bench_benchmark_rpc(args: super::RpcArgs, json: bool) -> Exi
     cfg.io_engines = args.io_engines;
     cfg.io_workers = args.io_workers;
     cfg.enable_nagle = args.enable_nagle;
+    cfg.quickack = args.quickack;
     cfg.server_port = Some(args.server_port);
     cfg.log_dir = args
         .log_dir

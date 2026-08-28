@@ -269,6 +269,18 @@ void crow_rpc_server_set_tcp_nodelay(crow_rpc_server_t server, int enabled)
     }
 }
 
+void crow_rpc_server_set_quickack(crow_rpc_server_t server, int enabled)
+{
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->transport()->set_quickack(enabled != 0);
+    }
+    catch (...) {
+    }
+}
+
 void crow_rpc_server_set_event_write(crow_rpc_server_t server, int enabled)
 {
     try {

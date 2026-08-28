@@ -130,6 +130,10 @@ pub struct ServerConfig {
     /// connections. Default false (Nagle off). Nagle degrades Paxos
     /// latency — leave off unless coalescing tiny frames on a WAN.
     pub enable_nagle: bool,
+    /// static: enable `TCP_QUICKACK` on RPC connections (Linux only).
+    /// Default false. Set true to break the Nagle + delayed-ACK deadlock
+    /// when Nagle is enabled. Adds a setsockopt per read.
+    pub quickack: bool,
     /// static: event-write mode — `submit()` enqueues to the I/O worker
     /// instead of calling `writev()` directly. Coalesces multiple frames
     /// into one writev at the cost of ~20-40us epoll wake latency.
@@ -146,6 +150,7 @@ impl ServerConfig {
         scan_byte_budget: 3 * 1024 * 1024 + 512 * 1024, // 3.5 MiB
         peer_pool_size: 2,
         enable_nagle: false,
+        quickack: false,
         event_write: false,
         send_queue_capacity: 4096,
     };

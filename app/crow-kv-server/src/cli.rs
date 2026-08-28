@@ -120,6 +120,11 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub enable_nagle: bool,
 
+    /// Enable `TCP_QUICKACK` on RPC connections (Linux only). Breaks the
+    /// Nagle + delayed-ACK deadlock when Nagle is enabled. Default: false.
+    #[arg(long, default_value_t = false)]
+    pub quickack: bool,
+
     /// Event-write mode: `submit()` enqueues to the I/O worker instead of
     /// calling `writev()` directly. Coalesces multiple frames into one
     /// writev at the cost of ~20-40us epoll wake latency. Default: false.

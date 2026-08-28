@@ -635,6 +635,9 @@ pub struct DeployNodeServerBody {
     /// `--enable-nagle` flag for RPC connections.
     #[serde(default)]
     enable_nagle: Option<bool>,
+    /// `--quickack` flag for RPC connections (Linux only).
+    #[serde(default)]
+    quickack: Option<bool>,
     /// `--event-write` flag for RPC transports.
     #[serde(default)]
     event_write: Option<bool>,
@@ -738,6 +741,7 @@ pub async fn http_deploy_node_server(
         coalesce_drain_threshold: body.coalesce_drain_threshold,
         peer_pool_size: body.peer_pool_size,
         enable_nagle: body.enable_nagle,
+        quickack: body.quickack,
         event_write: body.event_write,
         send_queue_capacity: body.send_queue_capacity,
         config: body.config.clone().map(std::path::PathBuf::from),

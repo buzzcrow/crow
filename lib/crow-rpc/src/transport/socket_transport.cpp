@@ -388,6 +388,14 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
             break;
         }
         bw_read().observe(static_cast<uint64_t>(n));
+#if defined(__linux__)
+        // Re-arm TCP_QUICKACK — the kernel resets it after sending each
+        // ACK. Without this, delayed ACKs stall Nagle's send (40ms/round).
+        if (conn->quickack) {
+            int quickack = 1;
+            ::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+        }
+#endif
         // Process all bytes in recv_buf — header+control via feed_data,
         // data via direct copy from recv_buf. Handles multiple frames.
         process_recv_bytes(0, static_cast<uint32_t>(n));
@@ -675,8 +683,16 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
 
     int nodelay = tcp_nodelay_ ? 1 : 0;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+#if defined(__linux__)
+    if (quickack_) {
+        int quickack = 1;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+    }
+#endif
 
-    return create_connection(fd, addr + ":" + std::to_string(port));
+    auto conn      = create_connection(fd, addr + ":" + std::to_string(port));
+    conn->quickack = quickack_;
+    return conn;
 }
 
 std::unique_ptr<SocketEngine> SocketTransport::create_engine()

@@ -375,6 +375,20 @@ class SocketTransport : public Transport
         return tcp_nodelay_;
     }
 
+    // TCP_QUICKACK control (Linux only). When true, accepted/connected
+    // sockets get TCP_QUICKACK set and re-armed after each read. Breaks
+    // the Nagle + delayed-ACK deadlock when Nagle is enabled. Default
+    // false. Must be called before listen/connect.
+    void set_quickack(bool enabled)
+    {
+        quickack_ = enabled;
+    }
+
+    bool quickack() const
+    {
+        return quickack_;
+    }
+
     // Event-write mode: when true, submit() enqueues the frame and
     // notifies the I/O worker to drain + writev (old Path B). When
     // false (default), submit() calls try_send() directly on the
@@ -407,6 +421,9 @@ class SocketTransport : public Transport
     // Direct-write mode: when true, submits use Path A (send_direct with
     // TCP_NODELAY setting for new connections. Default true.
     bool tcp_nodelay_{true};
+
+    // TCP_QUICKACK for new connections (Linux only). Default false.
+    bool quickack_{false};
 
     // Event-write mode: when true, submit() notifies the I/O worker
     // instead of calling try_send() directly. Default false.

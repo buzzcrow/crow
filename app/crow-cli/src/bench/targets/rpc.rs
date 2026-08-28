@@ -151,6 +151,7 @@ impl BenchTarget for RpcTarget {
         };
         server.set_send_queue_capacity(sq_cap);
         server.set_tcp_nodelay(!cfg.enable_nagle);
+        server.set_quickack(cfg.quickack);
         server.start();
 
         // Connect to the external fb server. These connections live

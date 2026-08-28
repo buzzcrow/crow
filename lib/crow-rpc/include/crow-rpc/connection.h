@@ -130,6 +130,11 @@ class Connection
     // layering dependency on socket_transport.h.
     void *io_worker = nullptr;
 
+    // Linux: re-arm TCP_QUICKACK after each read to break the
+    // Nagle + delayed-ACK deadlock. Set when Nagle is enabled
+    // (tcp_nodelay_ == false). No-op on non-Linux.
+    bool quickack = false;
+
     // User data slot (for caller-side bookkeeping).
     void *user_data = nullptr;
 

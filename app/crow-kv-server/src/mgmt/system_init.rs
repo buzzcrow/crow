@@ -119,6 +119,7 @@ pub(super) async fn system_init(
         store.set_scan_byte_budget(state.config.server.scan_byte_budget);
         store.set_peer_pool_size(state.config.server.peer_pool_size);
         store.set_enable_nagle(state.config.server.enable_nagle);
+        store.set_quickack(state.config.server.quickack);
         store.set_event_write(state.config.server.event_write);
         store.set_send_queue_capacity(state.config.server.send_queue_capacity);
         let store = Arc::new(store);

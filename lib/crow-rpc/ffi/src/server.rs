@@ -111,6 +111,12 @@ impl RpcServer {
         unsafe { sys::crow_rpc_server_set_tcp_nodelay(self.handle, if enabled { 1 } else { 0 }) };
     }
 
+    /// TCP_QUICKACK for new connections (Linux only). Default false.
+    /// Set true to break the Nagle + delayed-ACK deadlock when Nagle is enabled.
+    pub fn set_quickack(&self, enabled: bool) {
+        unsafe { sys::crow_rpc_server_set_quickack(self.handle, if enabled { 1 } else { 0 }) };
+    }
+
     /// Event-write mode. Default false (direct writev on caller thread).
     /// When true, submit() notifies the I/O worker to drain + writev.
     pub fn set_event_write(&self, enabled: bool) {

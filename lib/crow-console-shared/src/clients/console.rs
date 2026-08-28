@@ -114,6 +114,9 @@ pub struct DeployNodeServerBody {
     /// `--enable-nagle` flag for RPC connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_nagle: Option<bool>,
+    /// `--quickack` flag for RPC connections (Linux only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quickack: Option<bool>,
     /// `--event-write` flag for RPC transports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_write: Option<bool>,

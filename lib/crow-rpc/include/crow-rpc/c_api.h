@@ -66,7 +66,10 @@ crow_rpc_server_t crow_rpc_server_create_with_engines(crow_rpc_pool_t pool, uint
 void crow_rpc_server_set_send_queue_capacity(crow_rpc_server_t server, uint32_t capacity);
 // TCP_NODELAY for new connections. Default 1 (Nagle disabled).
 // Set to 0 to allow Nagle coalescing.
-void            crow_rpc_server_set_tcp_nodelay(crow_rpc_server_t server, int enabled);
+void crow_rpc_server_set_tcp_nodelay(crow_rpc_server_t server, int enabled);
+// TCP_QUICKACK for new connections (Linux only). Default 0. Set to 1
+// to break the Nagle + delayed-ACK deadlock when Nagle is enabled.
+void crow_rpc_server_set_quickack(crow_rpc_server_t server, int enabled);
 // Event-write mode. Default 0 (direct writev on caller thread).
 // Set to 1 to notify I/O worker to drain + writev (better batching,
 // adds epoll-wake latency).
@@ -91,8 +94,8 @@ typedef struct crow_rpc_latency_stats
 
 typedef struct crow_rpc_transport_stats
 {
-    crow_rpc_latency_stats_t submit_to_writev; // submit → writev (queue wait)
-    uint64_t send_queue_rejects;               // enqueue_send rejected (queue full/closed)
+    crow_rpc_latency_stats_t submit_to_writev;   // submit → writev (queue wait)
+    uint64_t                 send_queue_rejects; // enqueue_send rejected (queue full/closed)
 } crow_rpc_transport_stats_t;
 
 void crow_rpc_server_transport_stats(crow_rpc_server_t server, crow_rpc_transport_stats_t *out);

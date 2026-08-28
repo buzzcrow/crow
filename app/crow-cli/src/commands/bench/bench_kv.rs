@@ -90,6 +90,7 @@ pub(crate) async fn bench_benchmark_kv(args: super::KvArgs, json: bool) -> ExitC
         args.coalesce_drain_threshold,
         args.peer_pool_size,
         args.enable_nagle,
+        args.quickack,
         args.event_write,
         args.send_queue_capacity,
     );

@@ -42,6 +42,7 @@ DEFINE_uint32(io_workers, 1, "Total I/O worker threads. Must be divisible by --i
 DEFINE_uint32(w, 1, "Alias for --io_workers");
 DEFINE_bool(enable_nagle, false, "Enable Nagle's algorithm (disable TCP_NODELAY).");
 DEFINE_bool(n, false, "Alias for --enable_nagle");
+DEFINE_bool(quickack, false, "Enable TCP_QUICKACK on connections (Linux only). Breaks Nagle + delayed-ACK deadlock.");
 DEFINE_bool(event_write, false, "Event-write mode: submit() enqueues to I/O worker for coalesced writev.");
 DEFINE_uint32(send_queue_capacity, 4096, "Per-connection send queue capacity (backpressure bound).");
 DEFINE_string(logdir, "", "Log directory for server + metrics logs. Default: ./log.");
@@ -104,6 +105,7 @@ int main(int argc, char *argv[])
     }
 
     crow_rpc_server_set_tcp_nodelay(server, FLAGS_enable_nagle ? 0 : 1);
+    crow_rpc_server_set_quickack(server, FLAGS_quickack ? 1 : 0);
     crow_rpc_server_set_event_write(server, FLAGS_event_write ? 1 : 0);
     crow_rpc_server_set_send_queue_capacity(server, FLAGS_send_queue_capacity);
 

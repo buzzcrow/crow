@@ -76,12 +76,14 @@ impl KvRpcTransport {
     pub fn with_pool_size(
         pool_size: usize,
         enable_nagle: bool,
+        quickack: bool,
         event_write: bool,
         send_queue_capacity: u32,
         workers: u32,
     ) -> Self {
         let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server.set_tcp_nodelay(!enable_nagle);
+        server.set_quickack(quickack);
         server.set_event_write(event_write);
         server.set_send_queue_capacity(send_queue_capacity);
         server.start();
@@ -103,7 +105,7 @@ impl KvRpcTransport {
     /// endpoint and default tunables (backward-compatible).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_pool_size(1, false, false, 4096, 2)
+        Self::with_pool_size(1, false, false, false, 4096, 2)
     }
 
     fn next_id(&self) -> u64 {

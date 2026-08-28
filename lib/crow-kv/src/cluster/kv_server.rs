@@ -90,6 +90,7 @@ impl KvServer for Arc<PxKvStore> {
         let workers = self.rpc_workers;
         let server = Arc::new(RpcServer::with_engines(None, 1, workers));
         server.set_tcp_nodelay(!self.enable_nagle);
+        server.set_quickack(self.quickack);
         server.set_event_write(self.event_write);
         server.set_send_queue_capacity(self.send_queue_capacity);
         server
@@ -109,6 +110,7 @@ impl KvServer for Arc<PxKvStore> {
         let transport = Arc::new(PxRpcTransport::with_pool_size(
             self.peer_pool_size,
             self.enable_nagle,
+            self.quickack,
             self.event_write,
             self.send_queue_capacity,
             self.rpc_workers,

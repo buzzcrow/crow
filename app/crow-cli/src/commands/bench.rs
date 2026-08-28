@@ -32,6 +32,7 @@ pub enum BenchSub {
 
 /// Arguments for `crow-cli bench kv`.
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct KvArgs {
     /// Storage mode: `mem` (crow-tree + mem-block), `file` (crow-tree +
     /// file page store), or `block` (crow-tree + block page store).
@@ -151,6 +152,11 @@ pub struct KvArgs {
     #[arg(long, default_value_t = false)]
     pub enable_nagle: bool,
 
+    /// Enable `TCP_QUICKACK` on RPC connections (--quickack on each spawned
+    /// server, Linux only). Breaks Nagle + delayed-ACK deadlock. Default false.
+    #[arg(long, default_value_t = false)]
+    pub quickack: bool,
+
     /// Event-write mode (--event-write on each spawned server).
     /// Coalesces frames via I/O worker. Default false.
     #[arg(long, default_value_t = false)]
@@ -233,6 +239,10 @@ pub struct RpcArgs {
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
     #[arg(short = 'n', long, default_value_t = false)]
     pub enable_nagle: bool,
+
+    /// Enable `TCP_QUICKACK` (Linux only). Breaks Nagle + delayed-ACK deadlock.
+    #[arg(long, default_value_t = false)]
+    pub quickack: bool,
 
     #[arg(short = 's', long, default_value_t = 128)]
     pub value_size: usize,

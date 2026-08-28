@@ -59,6 +59,9 @@ pub struct DeployRequest {
     /// `--enable-nagle` flag. `None` leaves the spawned server's own
     /// default in effect.
     pub enable_nagle: Option<bool>,
+    /// `--quickack` flag. `None` leaves the spawned server's own
+    /// default in effect.
+    pub quickack: Option<bool>,
     /// `--event-write` flag. `None` leaves the spawned server's own
     /// default in effect.
     pub event_write: Option<bool>,
@@ -160,6 +163,9 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(true) = req.enable_nagle {
         cmd.arg("--enable-nagle");
+    }
+    if let Some(true) = req.quickack {
+        cmd.arg("--quickack");
     }
     if let Some(true) = req.event_write {
         cmd.arg("--event-write");

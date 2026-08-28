@@ -171,6 +171,8 @@ pub(crate) struct BenchConfig {
     pub(crate) send_queue_capacity: u32,
     /// Enable Nagle's algorithm (disable `TCP_NODELAY`). Default false.
     pub(crate) enable_nagle: bool,
+    /// Enable `TCP_QUICKACK` (Linux only). Breaks Nagle + delayed-ACK deadlock.
+    pub(crate) quickack: bool,
     /// Connect to external fb server on this port (RPC target only).
     /// The server must be started manually (e.g. via
     /// `tools/bench-rpc-regression.sh`). No auto-spawn.
@@ -218,6 +220,7 @@ impl BenchConfig {
             rpc_worker_mode: RpcWorkerMode::Coroutine,
             send_queue_capacity: 1024,
             enable_nagle: false,
+            quickack: false,
             server_port: None,
             log_dir: None,
             metrics_interval: 5,

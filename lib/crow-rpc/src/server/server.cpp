@@ -178,8 +178,18 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
 
         int nodelay = transport_->tcp_nodelay() ? 1 : 0;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+#if defined(__linux__)
+        // TCP_QUICKACK breaks the Nagle + delayed-ACK deadlock (40ms
+        // stalls per round). Controlled by set_quickack() — independent
+        // of Nagle. QUICKACK is not sticky — re-armed after each read.
+        if (transport_->quickack()) {
+            int quickack = 1;
+            ::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+        }
+#endif
 
-        auto conn = transport_->create_connection(fd, "client");
+        auto conn      = transport_->create_connection(fd, "client");
+        conn->quickack = transport_->quickack();
         conn->set_on_frame([this](Frame *frame, Connection *c) { dispatch(frame, c); });
         // Fail pending server-initiated requests when the connection closes.
         // Per-connection scoping: only fail requests sent on this connection.

@@ -30,6 +30,17 @@
 #   - pixi installed, project dependencies resolved
 #   - jq installed
 #   - release binary built (pixi run -- cargo build --release -p crow-cli)
+#
+# AMD (2026-08-28): Ryzen 9 5950X, 16c/32t, Linux 6.8. lin_16t config
+# (16T:16C, linearizable, limit=1000, 64B, 20s). TCP_QUICKACK decoupled
+# from Nagle into a separate --quickack flag. Nagle without QUICKACK
+# deadlocks (Nagle + delayed-ACK, 40ms/round, cluster can't elect a
+# leader). QUICKACK breaks the deadlock — only 3% slower than baseline.
+#   Config                  scans/s    avg    p50    p99   p999  err
+#   baseline               24,805    643us  631us  955us 1121us   0
+#   nagle (no qa)          HANG      —      —      —     —       —
+#   nagle + quickack       24,038    664us  651us  990us 1190us   0
+#   quickack only          22,966    695us  680us 1063us 1273us   0
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

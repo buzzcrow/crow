@@ -152,6 +152,7 @@ extern "C" {
     pub fn crow_rpc_server_port(server: crow_rpc_server_t) -> c_int;
     pub fn crow_rpc_server_set_send_queue_capacity(server: crow_rpc_server_t, capacity: u32);
     pub fn crow_rpc_server_set_tcp_nodelay(server: crow_rpc_server_t, enabled: c_int);
+    pub fn crow_rpc_server_set_quickack(server: crow_rpc_server_t, enabled: c_int);
     pub fn crow_rpc_server_set_event_write(server: crow_rpc_server_t, enabled: c_int);
 
     pub fn crow_rpc_server_transport_stats(server: crow_rpc_server_t, out: *mut CrowRpcTransportStats);

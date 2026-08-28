@@ -123,6 +123,7 @@ impl BenchFixture {
         coalesce_drain_threshold: Option<usize>,
         peer_pool_size: usize,
         enable_nagle: bool,
+        quickack: bool,
         event_write: bool,
         send_queue_capacity: u32,
     ) -> Result<Self> {
@@ -147,6 +148,7 @@ impl BenchFixture {
             coalesce_drain_threshold,
             peer_pool_size,
             enable_nagle,
+            quickack,
             event_write,
             send_queue_capacity,
         )
@@ -211,6 +213,7 @@ impl BenchFixture {
         coalesce_drain_threshold: Option<usize>,
         peer_pool_size: usize,
         enable_nagle: bool,
+        quickack: bool,
         event_write: bool,
         send_queue_capacity: u32,
     ) -> Result<(Vec<u64>, Vec<u32>, Vec<String>, Vec<String>)> {
@@ -254,6 +257,7 @@ impl BenchFixture {
                 coalesce_drain_threshold,
                 peer_pool_size: Some(peer_pool_size),
                 enable_nagle: Some(enable_nagle),
+                quickack: Some(quickack),
                 event_write: Some(event_write),
                 send_queue_capacity: Some(send_queue_capacity),
                 ..Default::default()
@@ -553,6 +557,7 @@ pub(crate) struct KvTarget {
     coalesce_drain_threshold: Option<usize>,
     peer_pool_size: usize,
     enable_nagle: bool,
+    quickack: bool,
     event_write: bool,
     send_queue_capacity: u32,
     fixture: Option<BenchFixture>,
@@ -572,6 +577,7 @@ impl KvTarget {
         coalesce_drain_threshold: Option<usize>,
         peer_pool_size: usize,
         enable_nagle: bool,
+        quickack: bool,
         event_write: bool,
         send_queue_capacity: u32,
     ) -> Self {
@@ -585,6 +591,7 @@ impl KvTarget {
             coalesce_drain_threshold,
             peer_pool_size,
             enable_nagle,
+            quickack,
             event_write,
             send_queue_capacity,
             fixture: None,
@@ -611,6 +618,7 @@ impl BenchTarget for KvTarget {
             self.coalesce_drain_threshold,
             self.peer_pool_size,
             self.enable_nagle,
+            self.quickack,
             self.event_write,
             self.send_queue_capacity,
         )
@@ -630,6 +638,7 @@ impl BenchTarget for KvTarget {
         client_config.pool_size_per_endpoint = cfg.connections as usize;
         client_config.read_endpoint_policy = cfg.read_endpoint_policy;
         client_config.enable_nagle = self.enable_nagle;
+        client_config.quickack = self.quickack;
         client_config.event_write = self.event_write;
         client_config.send_queue_capacity = self.send_queue_capacity;
         let client = CrowkvClient::new(client_config);

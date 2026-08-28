@@ -49,6 +49,18 @@
 #   1   1      1    1      23,564    41     42     69     102     0      0
 #   1   4     64    4    557,362   113    105    265     425     0      6
 #   1  16  1,000   32    849,575 1,156  1,063  2,652   3,838     0    591
+#
+# AMD (2026-08-28): same hw/build as 2026-08-27. TCP_QUICKACK decoupled
+# from Nagle into a separate --quickack flag. QUICKACK adds a setsockopt
+# per read + more ACK packets — hurts the RPC echo workload (continuous
+# request stream, Nagle never stalls). Only the 1000T/32C config tested.
+#   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   nagle  qa  err
+#   1  16  1,000   32  1,209,549   823    413  7,280  12,720     0    0    0
+#   1  16  1,000   32  1,949,603   508    363  2,142   3,250     1    0    0
+#   1  16  1,000   32  1,731,709   573    471  1,893   2,764     1    1    0
+#   1  16  1,000   32  1,206,111   825    420  5,844   9,600     0    1    0
+# Conclusion: nagle on, quickack off is optimal for RPC echo (-11% vs
+# nagle+quickack). QUICKACK is for Paxos (KV bench), not raw RPC echo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -240,6 +240,7 @@ impl CrowkvClient {
                 std::sync::Arc::new(crate::kv_rpc_transport::KvRpcTransport::with_pool_size(
                     config.pool_size_per_endpoint,
                     config.enable_nagle,
+                    config.quickack,
                     config.event_write,
                     config.send_queue_capacity,
                     config.rpc_workers,

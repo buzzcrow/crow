@@ -43,7 +43,7 @@ Rust workspace + C++ storage engine (via FFI).
 
 ## Bench Targets
 
-- `crow-cli bench kv` — 3-node Paxos cluster, measures full KV path (consensus + WAL + storage). Use `--mode mem|file|block` to select storage engine.
+- `crow-cli bench kv` — 3-node Paxos cluster, measures full KV path (consensus + WAL + storage). Use `--mode mem|file|block` to select storage engine. Spawns `crow-kv-server` as a subprocess (not a cargo dependency of `crow-cli`) — always build both: `pixi run -- cargo build --release -p crow-cli -p crow-kv-server`.
 - `crow-cli bench rpc` — 2-process RPC fb server, measures raw transport throughput (epoll/kqueue + framing + correlation). No KV layer. Use `tools/bench-rpc-regression.sh` for the regression sentinel.
 
 ## Dispatch — Read Before Acting
