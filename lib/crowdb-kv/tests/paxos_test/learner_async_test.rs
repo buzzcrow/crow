@@ -32,7 +32,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 /// actually still legal to call that (the `Ready` case).
 #[tokio::test]
 async fn engine_get_resolves_correctly_across_both_ready_and_pending() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("learner-async");
     let engine = CrowdbTreeEngine::open(&CrowdbTreeOptions {
         path: Some(tmp.path().to_string_lossy().into_owned()),
         ..Default::default()

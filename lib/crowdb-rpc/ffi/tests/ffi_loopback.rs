@@ -7,11 +7,12 @@
 //! connects a client, sends a ping request, and verifies the response.
 
 use crowdb_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs, FBMsgType};
-use crowdb_rpc_ffi::{BufferPool, RpcClient, RpcServer};
+use crowdb_rpc_ffi::{init_test_logging, BufferPool, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 
 #[test]
 fn server_create_listen_start_stop() {
+    init_test_logging();
     let server = RpcServer::new(None);
     server.listen("127.0.0.1", 0).expect("listen failed");
     let port = server.port();
@@ -32,6 +33,7 @@ fn buffer_pool_alloc_write_release() {
 
 #[test]
 fn server_connect_to_peer() {
+    init_test_logging();
     let server = RpcServer::new(None);
     server.listen("127.0.0.1", 0).expect("listen failed");
     let port = server.port();
@@ -52,6 +54,7 @@ fn server_connect_to_peer() {
 // the matching request id.
 #[tokio::test]
 async fn ping_loopback() {
+    init_test_logging();
     let server = RpcServer::new(None);
     server.listen("127.0.0.1", 0).expect("listen failed");
     let port = server.port();
@@ -111,6 +114,7 @@ async fn ping_loopback() {
 // (no data), so we just verify we get a response.
 #[tokio::test]
 async fn ping_loopback_with_data() {
+    init_test_logging();
     let server = RpcServer::new(None);
     server.listen("127.0.0.1", 0).expect("listen failed");
     let port = server.port();
@@ -171,6 +175,7 @@ async fn ping_loopback_with_data() {
 // request with data payload, and verify the response data matches.
 #[tokio::test]
 async fn echo_handler_loopback() {
+    init_test_logging();
     const ECHO_MSG_TYPE: u16 = 100;
     const DATA_SIZE: usize = 512;
 

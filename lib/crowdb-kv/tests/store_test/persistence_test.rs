@@ -70,7 +70,7 @@ async fn reopen_group(wal_dir: &Path) -> PxGroup {
 
 #[tokio::test]
 async fn store_reloads_kv_through_public_api_after_restart() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("store-persistence");
     let wal_dir = tmp.path().join("wal");
 
     // ── write phase: a single-leader WAL-backed store, then close ──

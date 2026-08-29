@@ -39,7 +39,7 @@ async fn spawn_upstream() -> Option<Upstream> {
     if !bin.exists() {
         return None;
     }
-    let workspace = std::env::temp_dir().join(format!(
+    let workspace = crowdb_test_harness::test_dirs::test_data_dir().join(format!(
         "crowdb_kv-mgmt-routes-test-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

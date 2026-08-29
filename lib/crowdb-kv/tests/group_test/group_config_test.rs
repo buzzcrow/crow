@@ -37,7 +37,7 @@ fn roundtrip_config() {
 
 #[tokio::test]
 async fn store_save_then_load_roundtrip() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("group-config");
     let store = GroupConfigStore::new(dir.path(), 1, 7);
 
     let cfg = PxGroupConfig {
@@ -65,7 +65,7 @@ async fn store_save_then_load_roundtrip() {
 
 #[tokio::test]
 async fn store_load_returns_none_when_no_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("group-config");
     let store = GroupConfigStore::new(dir.path(), 1, 7);
     let loaded = store.load().await.expect("load");
     assert!(loaded.is_none());
@@ -73,7 +73,7 @@ async fn store_load_returns_none_when_no_file() {
 
 #[tokio::test]
 async fn store_save_overwrites_previous_config() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("group-config");
     let store = GroupConfigStore::new(dir.path(), 1, 1);
 
     let cfg1 = PxGroupConfig {
@@ -113,7 +113,7 @@ async fn store_save_overwrites_previous_config() {
 
 #[tokio::test]
 async fn store_isolates_groups_by_store_and_group_id() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("group-config");
 
     let store_a = GroupConfigStore::new(dir.path(), 1, 1);
     let store_b = GroupConfigStore::new(dir.path(), 1, 2);

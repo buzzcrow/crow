@@ -1140,6 +1140,7 @@ impl ConsoleConfig {
 #[cfg(test)]
 mod tests {
     use super::{ConsoleConfig, GroupEntry, ReplicaEntry, ServerEntry, StoreEntry, TomlFileEngine};
+    use crowdb_test_harness::test_dirs;
 
     #[test]
     fn round_trip_load_save() {
@@ -1261,7 +1262,7 @@ mod tests {
     fn tempdir() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let base = std::env::temp_dir();
+        let base = test_dirs::test_data_dir();
         let unique = format!(
             "crowdb-console-cfg-{}-{}-{}",
             std::process::id(),

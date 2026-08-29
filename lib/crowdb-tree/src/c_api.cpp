@@ -370,6 +370,11 @@ void ct_init_logging(const char *log_dir, const char *level, size_t max_file_mb,
                                  file_prefix == nullptr ? "crowdb-tree" : std::string(file_prefix));
 }
 
+void ct_add_log_stderr(const char *level)
+{
+    crowdb::common::add_log_stderr(level == nullptr ? "error" : std::string(level));
+}
+
 void ct_flush_logging()
 {
     crowdb::common::flush_logging();

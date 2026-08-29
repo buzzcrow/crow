@@ -50,7 +50,7 @@ fn accepted_write(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
 
 #[tokio::test]
 async fn single_node_crash_restart_preserves_committed_state() {
-    let tmp = tempfile::tempdir().expect("create tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("a3-crash-restart");
     let wal_root = tmp.path().join("data").join("wal");
     let disks = vec![PathBuf::from(&wal_root)];
     let config = WalConfig {

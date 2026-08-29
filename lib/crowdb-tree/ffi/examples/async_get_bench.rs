@@ -86,7 +86,7 @@ fn main() {
 /// (a few-byte memcpy is noise either way), so the win only shows up
 /// clearly for a value past that threshold -- run both sizes to see it.
 async fn run_bench(value_len: usize, frame_bytes: u32) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-bench");
     let path = dir.path().join("bench.ct");
     let opt = Options {
         path: Some(path.to_string_lossy().into_owned()),

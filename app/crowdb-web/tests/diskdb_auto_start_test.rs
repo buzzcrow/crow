@@ -39,7 +39,7 @@ async fn diskdb_auto_starts_on_console_restart() {
         return;
     }
 
-    let dir = std::env::temp_dir().join(format!(
+    let dir = crowdb_test_harness::test_dirs::test_data_dir().join(format!(
         "crowdb-web-ddb-autostart-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

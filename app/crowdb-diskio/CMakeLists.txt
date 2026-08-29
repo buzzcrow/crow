@@ -78,11 +78,13 @@ include(GoogleTest)
 find_package(GTest REQUIRED)
 file(GLOB_RECURSE CROWDB_DISKIO_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
 if(CROWDB_DISKIO_TEST_SRC)
+  list(APPEND CROWDB_DISKIO_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crowdb-common/cpp/tests/test_main.cpp)
   add_executable(crowdb_diskio_tests ${CROWDB_DISKIO_TEST_SRC})
   target_include_directories(crowdb_diskio_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
     ${CMAKE_CURRENT_BINARY_DIR}/crowdb-rpc-build/generated
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/crowdb-common/cpp/include
   )
-  target_link_libraries(crowdb_diskio_tests PRIVATE crowdb-diskio-lib GTest::gtest GTest::gtest_main)
+  target_link_libraries(crowdb_diskio_tests PRIVATE crowdb-diskio-lib GTest::gtest)
   gtest_discover_tests(crowdb_diskio_tests DISCOVERY_MODE PRE_TEST)
 endif()

@@ -210,6 +210,22 @@ void add_log_file(const std::string &log_dir, size_t max_file_mb, size_t max_fil
     }
 }
 
+void add_log_stderr(const std::string &level)
+{
+    std::lock_guard<std::mutex> lk(g_log_mu);
+    if (!g_logger) {
+        return;
+    }
+    try {
+        auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        sink->set_level(spdlog::level::from_str(level));
+        g_logger->sinks().push_back(sink);
+    }
+    catch (const std::exception &) {
+        // Never take down the engine on a logging failure.
+    }
+}
+
 } // namespace crowdb::common
 
 #else // !CROWDB_HAVE_SPDLOG — no-op build
@@ -237,6 +253,10 @@ void init_logging(const std::string & /*log_dir*/, const std::string & /*level*/
 
 void add_log_file(const std::string & /*log_dir*/, size_t /*max_file_mb*/, size_t /*max_files*/,
                   const std::string & /*file_prefix*/)
+{
+}
+
+void add_log_stderr(const std::string & /*level*/)
 {
 }
 

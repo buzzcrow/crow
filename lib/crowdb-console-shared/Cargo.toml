@@ -32,3 +32,4 @@ axum = "0.7"
 # `KvClient` wrapper is gone; that test now exercises the real
 # `crowdb-kv-client` crate end-to-end instead).
 crowdb-kv-client = { path = "../crowdb-kv-client" }
+crowdb-test-harness = { path = "../crowdb-test-harness" }

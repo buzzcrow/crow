@@ -18,7 +18,7 @@ async fn detect_returns_file_backend() {
 
 #[tokio::test]
 async fn open_create_rw_succeeds() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let path = dir.path().join("test.wal");
     let backend = IoBackend::File;
 
@@ -40,7 +40,7 @@ async fn open_create_rw_succeeds() {
 
 #[tokio::test]
 async fn open_read_only_can_read() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let path = dir.path().join("ro.wal");
 
     // Create the file first with read-write.
@@ -65,7 +65,7 @@ async fn open_read_only_can_read() {
 
 #[tokio::test]
 async fn vectored_write_at_writes_all_buffers() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let path = dir.path().join("vwrite.wal");
     let backend = IoBackend::File;
 
@@ -88,7 +88,7 @@ async fn vectored_write_at_writes_all_buffers() {
 
 #[tokio::test]
 async fn fdatasync_succeeds_after_write() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let path = dir.path().join("sync.wal");
     let backend = IoBackend::File;
 
@@ -102,7 +102,7 @@ async fn fdatasync_succeeds_after_write() {
 
 #[tokio::test]
 async fn len_reports_file_size() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let path = dir.path().join("len.wal");
     let backend = IoBackend::File;
 
@@ -119,7 +119,7 @@ async fn len_reports_file_size() {
 
 #[tokio::test]
 async fn truncate_shrinks_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let path = dir.path().join("trunc.wal");
     let backend = IoBackend::File;
 
@@ -137,7 +137,7 @@ async fn truncate_shrinks_file() {
 
 #[tokio::test]
 async fn rename_moves_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let from = dir.path().join("a.wal");
     let to = dir.path().join("b.wal");
     let backend = IoBackend::File;
@@ -168,7 +168,7 @@ async fn rename_moves_file() {
 
 #[tokio::test]
 async fn unlink_removes_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let path = dir.path().join("del.wal");
     let backend = IoBackend::File;
 
@@ -187,7 +187,7 @@ async fn unlink_removes_file() {
 
 #[tokio::test]
 async fn create_dir_all_creates_nested_dirs() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let nested = dir.path().join("a/b/c");
     let backend = IoBackend::File;
 
@@ -197,7 +197,7 @@ async fn create_dir_all_creates_nested_dirs() {
 
 #[tokio::test]
 async fn read_dir_lists_entries() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let backend = IoBackend::File;
 
     // Create a few files.
@@ -216,7 +216,7 @@ async fn read_dir_lists_entries() {
 
 #[tokio::test]
 async fn exists_returns_false_for_missing_path() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let backend = IoBackend::File;
     assert!(!backend.exists(dir.path().join("nope.wal")).await);
 }
@@ -225,7 +225,7 @@ async fn exists_returns_false_for_missing_path() {
 async fn arc_backend_shares_across_tasks() {
     // Verify that Arc<IoBackend> can be cloned and used from multiple
     // "tasks" (here just sequential calls on the same Arc).
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("io-backend");
     let backend = Arc::new(IoBackend::File);
 
     let path1 = dir.path().join("a.wal");

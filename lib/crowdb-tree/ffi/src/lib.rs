@@ -33,5 +33,8 @@ pub use options::{Compression, Options, PageStoreBackend, SyncMode};
 pub use reactor::PinnedValue;
 pub use scan::{ScanEntry, ViewEntry};
 pub use stats::{GcStats, Stats};
-pub use tree::{ct_flush_logging, ct_init_logging, ct_shutdown_logging, Crowdbtree};
+pub use tree::{
+    ct_add_log_stderr, ct_flush_logging, ct_init_logging, ct_init_test_logging, ct_shutdown_logging,
+    Crowdbtree,
+};
 pub use write_handle::WriteHandle;

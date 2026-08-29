@@ -30,7 +30,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crowdb_test_harness::test_dirs::tempdir_in_test_data("startup");
     let wal_root = temp.path().join("wal-root");
     let config_root = temp.path().join("conf-root");
     let backend = Arc::new(IoBackend::detect());
@@ -125,7 +125,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
 /// scenario covers both the default buffered-file backend and the raw
 /// `O_DIRECT` block-device backend.
 async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTreeBackend) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crowdb_test_harness::test_dirs::tempdir_in_test_data("startup");
     let wal_root = temp.path().join("wal-root");
     let config_root = temp.path().join("conf-root");
     let data_root = temp.path().join("data-root");

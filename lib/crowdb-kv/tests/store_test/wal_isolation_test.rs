@@ -43,7 +43,7 @@ fn leader_group_with_wal(group_id: u64, wal: Arc<WalEngine>) -> PxGroup {
 /// group 2's records — no cross-group leakage.
 #[tokio::test]
 async fn per_group_wal_path_isolation() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-isolation");
     let wal_root = tmp.path().join("wal");
 
     let store = PxKvStore::new(0, "127.0.0.1:0".parse().unwrap());

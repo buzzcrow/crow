@@ -21,7 +21,7 @@ async fn spawn_web() -> SocketAddr {
     let addr_bind = SocketAddr::from(([127, 0, 0, 1], 0));
     let listener = tokio::net::TcpListener::bind(addr_bind).await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
-    let dir = std::env::temp_dir().join(format!(
+    let dir = crowdb_test_harness::test_dirs::test_data_dir().join(format!(
         "crowdb-web-diskdb-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

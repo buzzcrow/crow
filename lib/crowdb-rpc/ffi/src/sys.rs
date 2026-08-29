@@ -259,6 +259,7 @@ extern "C" {
         file_prefix: *const c_char,
     );
     pub fn crowdb_rpc_flush_logging();
+    pub fn crowdb_rpc_add_log_stderr(level: *const c_char);
     pub fn crowdb_rpc_shutdown_logging();
     pub fn crowdb_rpc_metrics_start(
         log_path: *const c_char,

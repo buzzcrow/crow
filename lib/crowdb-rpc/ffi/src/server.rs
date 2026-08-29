@@ -54,6 +54,9 @@ impl RpcServer {
     /// differences. Linux (epoll) is unaffected. A warning is logged
     /// once per process when the clamp activates.
     pub fn with_engines(pool: Option<&crate::BufferPool>, io_engines: u32, io_workers: u32) -> Self {
+        #[cfg(feature = "test-util")]
+        crate::logging::init_test_logging();
+
         static MACOS_CLAMP_WARNED: std::sync::Once = std::sync::Once::new();
         let effective_workers = if cfg!(target_os = "macos") && io_workers > 1 {
             MACOS_CLAMP_WARNED.call_once(|| {

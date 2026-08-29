@@ -37,3 +37,4 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
 crowdb-kv = { path = "../../lib/crowdb-kv" }
+crowdb-test-harness = { path = "../../lib/crowdb-test-harness" }

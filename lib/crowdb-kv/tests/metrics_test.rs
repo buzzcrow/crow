@@ -116,7 +116,7 @@ fn summary_avg_max_and_reset() {
 
 #[tokio::test]
 async fn registry_start_stop_lifecycle() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("metrics");
     let mut runner = MetricsRunner::new(
         crowdb_kv::common::logging::open_metrics_log(tmp.path(), "test", 30, 5).unwrap(),
         1, // 1 second interval
@@ -272,7 +272,7 @@ fn registry_shared_arc_mutex_usage() {
 
 #[tokio::test]
 async fn cpp_metrics_block_appears_with_matching_window() {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = crowdb_test_harness::test_dirs::test_data_dir().join(format!(
         "crowdb_kv_metrics_test_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -370,7 +370,7 @@ async fn wal_fsync_and_write_bw_counts_match() {
     use crowdb_kv::paxos::roles::{PxBallot, SlotIndex};
     use crowdb_kv::wal::{IoBackend, RecordType, WALRecord, WalConfig, WalEngine};
 
-    let dir = std::env::temp_dir().join(format!(
+    let dir = crowdb_test_harness::test_dirs::test_data_dir().join(format!(
         "crowdb_kv_wal_metrics_test_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()

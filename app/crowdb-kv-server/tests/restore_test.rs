@@ -18,7 +18,7 @@ fn client() -> reqwest::Client {
 
 #[tokio::test]
 async fn scan_local_groups_multi_store() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("restore");
     let waldata = dir.path().join("waldata");
     // store0/group0, store1/group1, store1/group2
     tokio::fs::create_dir_all(waldata.join("store0").join("group0"))
@@ -62,7 +62,7 @@ async fn scan_local_groups_multi_store() {
 
 #[tokio::test]
 async fn scan_local_groups_missing_dir_is_empty() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("restore");
     let waldata = dir.path().join("waldata"); // not created
     let groups = scan_local_groups(&waldata).await.unwrap();
     assert!(groups.is_empty());
@@ -70,7 +70,7 @@ async fn scan_local_groups_missing_dir_is_empty() {
 
 #[tokio::test]
 async fn group0_exists_true_and_false() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("restore");
     let waldata = dir.path().join("waldata");
     assert!(!group0_exists(&waldata));
     tokio::fs::create_dir_all(waldata.join("store0").join("group0"))
@@ -81,7 +81,7 @@ async fn group0_exists_true_and_false() {
 
 #[tokio::test]
 async fn group0_exists_ignores_other_stores() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("restore");
     let waldata = dir.path().join("waldata");
     tokio::fs::create_dir_all(waldata.join("store1").join("group1"))
         .await
@@ -93,7 +93,7 @@ async fn group0_exists_ignores_other_stores() {
 
 #[tokio::test]
 async fn restart_restores_group0_from_disk() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crowdb_test_harness::test_dirs::tempdir_in_test_data("restore");
     let root_path = root.path().to_path_buf();
 
     // First boot: no group 0 on disk → first-boot mode, empty mgmt API.

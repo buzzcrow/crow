@@ -22,7 +22,7 @@ use crowdb_kv_client::{ClientConfig, CrowdbClient, HardwareClient, RetryConfig, 
 struct ServerHandle {
     child: Child,
     base_url: String,
-    _root: tempfile::TempDir,
+    _root: crate::test_dirs::TestDir,
 }
 
 impl ServerHandle {
@@ -291,7 +291,7 @@ async fn start_kv_node_with_groups(
     replica_id: u64,
 ) -> std_io::Result<KvNode> {
     let group_str = group_ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-    let root = tempfile::tempdir()?;
+    let root = crate::test_dirs::TestDir::new("kv-node")?;
     let bin = crowdb_kv_server_bin().ok_or_else(|| {
         std_io::Error::new(std_io::ErrorKind::NotFound, "crowdb-kv-server binary not found")
     })?;

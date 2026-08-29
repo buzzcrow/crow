@@ -15,6 +15,8 @@ mod common;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crowdb_test_harness::test_dirs;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use crowdb_chunk_client::{ChunkAllocator, ChunkClientConfig, ChunkWriter, Result};
@@ -231,7 +233,7 @@ fn make_writer(
 #[tokio::test]
 async fn chunk_writer_strip_rotation() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = Arc::new(LocalFileDiskWriter::new(tmp.path()));
     let ec = ec_4_1();
     let config = test_config(1024 * 1024 * 1024);
@@ -266,7 +268,7 @@ async fn chunk_writer_strip_rotation() {
 #[tokio::test]
 async fn chunk_writer_on_demand_append() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = Arc::new(LocalFileDiskWriter::new(tmp.path()));
     let ec = ec_4_1();
     let config = test_config(1024 * 1024 * 1024);
@@ -297,7 +299,7 @@ async fn chunk_writer_on_demand_append() {
 #[tokio::test]
 async fn chunk_writer_is_full_and_seal() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = Arc::new(LocalFileDiskWriter::new(tmp.path()));
     let ec = ec_4_1();
     // max_chunk_size = 2 strips = 2 * 4 * 4096 = 32768 bytes.
@@ -334,7 +336,7 @@ async fn chunk_writer_is_full_and_seal() {
 #[tokio::test]
 async fn chunk_writer_abort() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = Arc::new(LocalFileDiskWriter::new(tmp.path()));
     let ec = ec_4_1();
     let config = test_config(1024 * 1024 * 1024);
@@ -365,7 +367,7 @@ async fn chunk_writer_abort() {
 #[tokio::test]
 async fn chunk_writer_empty_seal() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = Arc::new(LocalFileDiskWriter::new(tmp.path()));
     let ec = ec_4_1();
     let config = test_config(1024 * 1024 * 1024);

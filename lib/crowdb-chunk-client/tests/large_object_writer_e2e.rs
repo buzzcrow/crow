@@ -15,7 +15,7 @@ use crowdb_chunkdb_client::{ChunkdbClient, ChunkdbRpcTransport, RetryConfig as C
 use crowdb_common::ec::EcScheme;
 use crowdb_diskio_client::DiskioClient;
 use crowdb_protocol::common::DiskId as ProtoDiskId;
-use crowdb_rpc_ffi::RpcServer;
+use crowdb_rpc_ffi::{init_test_logging, RpcServer};
 use crowdb_test_harness::chunkdb::{self as cdb_harness, ChunkdbProcess};
 use crowdb_test_harness::cluster::KvCluster;
 use crowdb_test_harness::diskdb::{self as ddb_harness, DiskdbProcess};
@@ -78,6 +78,7 @@ struct E2eStack {
 }
 
 async fn start_e2e_stack() -> E2eStack {
+    init_test_logging();
     // 1. Start kv cluster.
     eprintln!("=== starting kv cluster ===");
     let cluster = KvCluster::start().await;

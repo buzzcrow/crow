@@ -187,10 +187,11 @@ impl Drop for MetricsRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crowdb_test_harness::test_dirs::tempdir_in_test_data;
 
     #[tokio::test]
     async fn runner_lifecycle_produces_flush_blocks() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempdir_in_test_data("metrics-runner");
         let file = crate::logging::open_metrics_log(tmp.path(), "test", 30, 5).unwrap();
 
         let mut runner = MetricsRunner::new(file, 1);

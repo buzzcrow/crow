@@ -127,6 +127,7 @@ void      ct_close(ct_tree *t);
 // when logging was never initialized (no-op).
 void      ct_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
                           const char *file_prefix);
+void      ct_add_log_stderr(const char *level);
 void      ct_flush_logging();
 void      ct_shutdown_logging();
 ct_status ct_snapshot(ct_tree *t, uint64_t *out_last_applied);

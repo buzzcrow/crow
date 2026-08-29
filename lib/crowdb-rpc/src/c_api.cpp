@@ -925,6 +925,11 @@ void crowdb_rpc_flush_logging()
     crowdb::common::flush_logging();
 }
 
+void crowdb_rpc_add_log_stderr(const char *level)
+{
+    crowdb::common::add_log_stderr(level == nullptr ? "error" : std::string(level));
+}
+
 void crowdb_rpc_shutdown_logging()
 {
     crowdb::common::shutdown_logging();

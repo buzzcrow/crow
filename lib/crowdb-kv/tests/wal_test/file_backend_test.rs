@@ -12,7 +12,7 @@ use crowdb_kv::wal::{IoBackend, OpenOptions};
 
 #[tokio::test]
 async fn file_backend_write_then_reopen_preserves_data() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("persist.wal");
     let backend = IoBackend::File;
 
@@ -40,7 +40,7 @@ async fn file_backend_write_then_reopen_preserves_data() {
 
 #[tokio::test]
 async fn file_backend_append_at_offset_extends_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("extend.wal");
     let backend = IoBackend::File;
 
@@ -65,7 +65,7 @@ async fn file_backend_append_at_offset_extends_file() {
 
 #[tokio::test]
 async fn file_backend_fsync_succeeds() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("fsync.wal");
     let backend = IoBackend::File;
 
@@ -79,7 +79,7 @@ async fn file_backend_fsync_succeeds() {
 
 #[tokio::test]
 async fn file_backend_read_at_returns_bytes_read() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("partial.wal");
     let backend = IoBackend::File;
 
@@ -99,7 +99,7 @@ async fn file_backend_read_at_returns_bytes_read() {
 
 #[tokio::test]
 async fn file_backend_read_exact_at_at_eof_errors() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("eof.wal");
     let backend = IoBackend::File;
 
@@ -117,7 +117,7 @@ async fn file_backend_read_exact_at_at_eof_errors() {
 
 #[tokio::test]
 async fn file_backend_truncate_to_zero_clears_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("zero.wal");
     let backend = IoBackend::File;
 
@@ -135,7 +135,7 @@ async fn file_backend_truncate_to_zero_clears_file() {
 
 #[tokio::test]
 async fn file_backend_overwrite_at_same_offset() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("overwrite.wal");
     let backend = IoBackend::File;
 
@@ -154,7 +154,7 @@ async fn file_backend_overwrite_at_same_offset() {
 
 #[tokio::test]
 async fn file_backend_create_new_rejects_existing() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("exists.wal");
     let backend = IoBackend::File;
 
@@ -173,7 +173,7 @@ async fn file_backend_create_new_rejects_existing() {
 
 #[tokio::test]
 async fn file_backend_create_rw_appends_to_existing() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-backend");
     let path = dir.path().join("append.wal");
     let backend = IoBackend::File;
 

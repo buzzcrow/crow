@@ -318,7 +318,7 @@ mod tests {
     static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn tempdir(tag: &str) -> PathBuf {
-        let base = std::env::temp_dir();
+        let base = crowdb_test_harness::test_dirs::test_data_dir();
         let unique = format!(
             "crowdb-web-state-{tag}-{}-{}",
             std::process::id(),

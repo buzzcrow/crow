@@ -56,7 +56,7 @@ async fn create_file_wal(wal_dir: PathBuf) -> Arc<WalEngine> {
 
 #[tokio::test]
 async fn file_backed_wal_recovers_state_after_reopen() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-restore");
     let wal_dir = tmp.path().join("wal");
     let disks = vec![wal_dir.clone()];
 
@@ -101,7 +101,7 @@ async fn file_backed_wal_recovers_state_after_reopen() {
 
 #[tokio::test]
 async fn file_backed_wal_resumes_writing_after_reopen() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("file-restore");
     let wal_dir = tmp.path().join("wal");
     let disks = vec![wal_dir.clone()];
 

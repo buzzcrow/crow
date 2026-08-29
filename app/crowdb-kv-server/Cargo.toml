@@ -36,7 +36,7 @@ utoipa = "5"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
-tempfile = "3"
+crowdb-test-harness = { path = "../../lib/crowdb-test-harness" }
 bytes = "1"
 
 [[test]]

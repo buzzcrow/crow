@@ -10,6 +10,9 @@
 
 use crate::sys;
 use std::ffi::CString;
+use std::sync::Once;
+
+static TEST_LOGGING_INIT: Once = Once::new();
 
 /// Initialize the C++ spdlog async file logger.
 ///
@@ -36,6 +39,14 @@ pub fn init_logging(log_dir: &str, level: &str, max_file_mb: usize, max_files: u
 /// Flush buffered C++ log messages to disk without stopping the logger.
 pub fn flush_logging() {
     unsafe { sys::crowdb_rpc_flush_logging() };
+}
+
+/// Add a stderr sink with a per-sink level filter (e.g. "error").
+/// Only messages at or above `level` go to stderr; file sinks keep their
+/// original level. No-op when the C++ build has no spdlog.
+pub fn add_log_stderr(level: &str) {
+    let level_c = CString::new(level).unwrap_or_default();
+    unsafe { sys::crowdb_rpc_add_log_stderr(level_c.as_ptr()) };
 }
 
 /// Flush and stop the C++ spdlog logger. Call at process exit.
@@ -66,4 +77,42 @@ pub fn metrics_start(
 /// Stop the metrics flush thread and do a final flush.
 pub fn metrics_stop() {
     unsafe { sys::crowdb_rpc_metrics_stop() };
+}
+
+/// Initialize C++ spdlog to write to a per-process directory under
+/// `<workspace_root>/test-logs/`. Idempotent (guarded by `Once`); safe
+/// to call from every test. Redirects C++ transport/engine logs (e.g.
+/// `socket_transport.cpp` worker teardown) to files under
+/// `test-logs/crowdb-rpc-test-<pid>/` instead of stderr. Error-level
+/// messages are also mirrored to stderr so they are visible in CI output
+/// for debugging. No-op when the C++ build was compiled without
+/// `CROWDB_HAVE_SPDLOG`.
+pub fn init_test_logging() {
+    TEST_LOGGING_INIT.call_once(|| {
+        let dir = test_log_dir().join(format!("crowdb-rpc-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let dir_str = dir.to_string_lossy().into_owned();
+        init_logging(&dir_str, "info", 30, 5, "test");
+        add_log_stderr("error");
+    });
+}
+
+/// Find the workspace root by walking up from `CARGO_MANIFEST_DIR`
+/// until a `pixi.toml` marker is found. Falls back to
+/// `CARGO_MANIFEST_DIR` if not found.
+fn workspace_root() -> std::path::PathBuf {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while !dir.join("pixi.toml").exists() {
+        if !dir.pop() {
+            return std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        }
+    }
+    dir
+}
+
+/// `<workspace_root>/test-logs/` — created if it does not exist.
+fn test_log_dir() -> std::path::PathBuf {
+    let dir = workspace_root().join("test-logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }

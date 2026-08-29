@@ -12,6 +12,12 @@ static TEST_SUBSCRIBER_INIT: Once = Once::new();
 
 pub fn init_test_subscriber() {
     TEST_SUBSCRIBER_INIT.call_once(|| {
+        // Always init C++ spdlog to a temp dir so transport/engine logs
+        // (e.g. socket_transport.cpp worker teardown) go to files instead
+        // of stderr. Tree first, then rpc adds a second file sink.
+        crowdb_tree_ffi::ct_init_test_logging();
+        crowdb_rpc_ffi::init_test_logging();
+
         if std::env::var("CROWDB_KV_TEST_LOG").is_err() {
             return;
         }

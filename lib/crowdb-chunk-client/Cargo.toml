@@ -35,5 +35,4 @@ crowdb-kv-client = { path = "../crowdb-kv-client" }
 crowdb-diskdb-client = { path = "../crowdb-diskdb-client" }
 crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
-tempfile = "3"
 bincode = "1"

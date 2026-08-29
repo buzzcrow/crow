@@ -102,7 +102,7 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
 
     // Real file-backed CrowdbTreeEngine, attached to a fresh replica with an
     // empty replay result.
-    let engine_dir = tempfile::tempdir().unwrap();
+    let engine_dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("maintenance");
     let engine = open_file_engine(engine_dir.path());
     let empty_replay = replay_group(&backend, &[PathBuf::from("/empty")], 1)
         .await
@@ -166,7 +166,7 @@ async fn maintenance_loop_uses_configured_tick_interval() {
     };
     let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
 
-    let engine_dir = tempfile::tempdir().unwrap();
+    let engine_dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("maintenance");
     let engine = open_file_engine(engine_dir.path());
     let empty_replay = replay_group(&backend, &[PathBuf::from("/empty")], 1)
         .await
@@ -237,7 +237,7 @@ async fn maintenance_pass_does_not_gc_wal_when_safe_slot_lags_snapshot() {
     wal.seal_all().await.unwrap();
     let seg_count_before = wal.index().lock().segments().count();
 
-    let engine_dir = tempfile::tempdir().unwrap();
+    let engine_dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("maintenance");
     let engine = open_file_engine(engine_dir.path());
     let empty_replay = replay_group(&backend, &[PathBuf::from("/empty")], 1)
         .await
@@ -288,7 +288,7 @@ async fn maintenance_pass_does_not_gc_wal_when_safe_slot_lags_snapshot() {
 /// applied slots), proving the durable prefix was written.
 #[tokio::test]
 async fn shutdown_persists_engine_snapshot() {
-    let engine_dir = tempfile::tempdir().unwrap();
+    let engine_dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("maintenance");
     let engine_path = engine_dir.path().join("data");
     std::fs::create_dir_all(&engine_path).unwrap();
 

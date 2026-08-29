@@ -83,7 +83,7 @@ pub struct DiskdbProcess {
     pub listen_port: i32,
     pub rpc_port: i32,
     pub http_port: i32,
-    pub config_file: tempfile::NamedTempFile,
+    pub config_path: std::path::PathBuf,
     pub log_path: std::path::PathBuf,
 }
 
@@ -144,15 +144,17 @@ interval_secs = 2
                 .join(", "),
         );
 
-        let config_file = tempfile::NamedTempFile::new().expect("create temp config");
-        std::fs::write(config_file.path(), &config_content).expect("write config");
+        let config_path =
+            crate::test_dirs::test_data_dir().join(format!("diskdb-config-{}.toml", std::process::id()));
+        std::fs::write(&config_path, &config_content).expect("write config");
 
-        let log_path = std::env::temp_dir().join(format!("crowdb-diskdb-e2e-{}.log", std::process::id()));
+        let log_path =
+            crate::test_dirs::test_log_dir().join(format!("crowdb-diskdb-e2e-{}.log", std::process::id()));
         let log_file = std::fs::File::create(&log_path).expect("create log file");
         let log_file2 = log_file.try_clone().expect("clone log file");
 
         let mut cmd = Command::new(&bin);
-        cmd.args(["--config", config_file.path().to_str().unwrap()])
+        cmd.args(["--config", config_path.to_str().unwrap()])
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file2));
 
@@ -164,7 +166,7 @@ interval_secs = 2
             listen_port,
             rpc_port,
             http_port,
-            config_file,
+            config_path,
             log_path,
         }
     }

@@ -6,6 +6,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::raw::c_int;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::Once;
 
 use tokio::io::unix::AsyncFd;
 
@@ -39,6 +40,9 @@ impl std::fmt::Debug for Crowdbtree {
 impl Crowdbtree {
     /// Open (recovering durable state when `path` is set, else fresh in-memory).
     pub fn open(opt: &Options) -> Result<Self, CtError> {
+        #[cfg(feature = "test-util")]
+        ct_init_test_logging();
+
         let cpath: Option<CString> = opt
             .path
             .as_ref()
@@ -385,4 +389,50 @@ pub fn ct_flush_logging() {
 /// was never initialized (no-op in that case).
 pub fn ct_shutdown_logging() {
     unsafe { sys::ct_shutdown_logging() };
+}
+
+/// Add a stderr sink with a per-sink level filter (e.g. "error").
+/// Only messages at or above `level` go to stderr; file sinks keep their
+/// original level. No-op when the C++ build has no spdlog.
+pub fn ct_add_log_stderr(level: &str) {
+    let level_c = CString::new(level).unwrap_or_default();
+    unsafe { sys::ct_add_log_stderr(level_c.as_ptr()) };
+}
+
+static TEST_LOGGING_INIT: Once = Once::new();
+
+/// Initialize C++ spdlog to write to a per-process directory under
+/// `<workspace_root>/test-logs/`. Idempotent (guarded by `Once`); safe
+/// to call from every test. Redirects C++ tree/engine logs to files
+/// under `test-logs/crowdb-tree-test-<pid>/` instead of stderr. Error-
+/// level messages are also mirrored to stderr so they are visible in CI
+/// output for debugging. No-op when the C++ build was compiled without
+/// `CROWDB_HAVE_SPDLOG`.
+pub fn ct_init_test_logging() {
+    TEST_LOGGING_INIT.call_once(|| {
+        let dir = test_log_dir().join(format!("crowdb-tree-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let dir_str = dir.to_string_lossy().into_owned();
+        ct_init_logging(&dir_str, "info", 30, 5, "test");
+        ct_add_log_stderr("error");
+    });
+}
+
+/// Find the workspace root by walking up from `CARGO_MANIFEST_DIR`
+/// until a `pixi.toml` marker is found.
+fn workspace_root() -> std::path::PathBuf {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while !dir.join("pixi.toml").exists() {
+        if !dir.pop() {
+            return std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        }
+    }
+    dir
+}
+
+/// `<workspace_root>/test-logs/` — created if it does not exist.
+fn test_log_dir() -> std::path::PathBuf {
+    let dir = workspace_root().join("test-logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }

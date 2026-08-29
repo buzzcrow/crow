@@ -215,6 +215,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crowdb_test_harness::test_dirs;
     use std::io::{BufRead, BufReader};
 
     #[test]
@@ -228,7 +229,7 @@ mod tests {
 
     #[test]
     fn ops_log_writes_jsonl_record() {
-        let tmp = std::env::temp_dir().join(format!("ops-log-test-{}.jsonl", std::process::id()));
+        let tmp = test_dirs::test_data_dir().join(format!("ops-log-test-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let log = OpsLog {
             file: Mutex::new(OpenOptions::new().create(true).append(true).open(&tmp).unwrap()),

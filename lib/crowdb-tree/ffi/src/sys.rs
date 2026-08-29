@@ -143,6 +143,7 @@ extern "C" {
         file_prefix: *const c_char,
     );
     pub fn ct_flush_logging();
+    pub fn ct_add_log_stderr(level: *const c_char);
     pub fn ct_shutdown_logging();
     pub fn ct_snapshot(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
     pub fn ct_last_applied_slot(t: *const ct_tree) -> u64;

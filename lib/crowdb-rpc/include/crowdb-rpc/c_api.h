@@ -279,6 +279,7 @@ void crowdb_rpc_server_set_request_client(crowdb_rpc_server_t server, crowdb_rpc
 //   file_prefix  — filename prefix (empty => "crowdb-rpc")
 void crowdb_rpc_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
                              const char *file_prefix);
+void crowdb_rpc_add_log_stderr(const char *level);
 void crowdb_rpc_flush_logging(void);
 void crowdb_rpc_shutdown_logging(void);
 

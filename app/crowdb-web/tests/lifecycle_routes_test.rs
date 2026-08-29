@@ -47,7 +47,7 @@ async fn spawn_web_with_path(path: std::path::PathBuf) -> SocketAddr {
 }
 
 fn tempdir(tag: &str) -> std::path::PathBuf {
-    let base = std::env::temp_dir();
+    let base = crowdb_test_harness::test_dirs::test_data_dir();
     let unique = format!(
         "crowdb-web-{tag}-{}-{}",
         std::process::id(),

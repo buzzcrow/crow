@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crowdb_diskio_client::{DiskId as DioDiskId, DiskIoRetCode, DiskioClient, DiskioError};
-use crowdb_rpc_ffi::RpcServer;
+use crowdb_rpc_ffi::{init_test_logging, RpcServer};
 
 use crate::hardware::{DG_ID, INSTANCE_ID, NODE_ID, RACK_ID};
 
@@ -144,7 +144,7 @@ impl DiskioProcess {
         });
 
         let inst = DISKIO_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let log_path = std::env::temp_dir().join(format!(
+        let log_path = crate::test_dirs::test_log_dir().join(format!(
             "crowdb-diskio-e2e-{}-{}-{}.log",
             opts.dummy_disk,
             std::process::id(),
@@ -685,6 +685,7 @@ pub const IO_SIZES: &[(usize, &str)] = &[
 pub fn connect_to_diskio(
     diskio: &DiskioProcess,
 ) -> (Arc<RpcServer>, crowdb_rpc_ffi::Connection, Arc<DiskioClient>) {
+    init_test_logging();
     let rpc_server = Arc::new(RpcServer::new(None));
     rpc_server.listen("127.0.0.1", 0).expect("listen for rpc client");
     rpc_server.start();

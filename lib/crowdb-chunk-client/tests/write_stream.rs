@@ -17,6 +17,8 @@ mod common;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crowdb_test_harness::test_dirs;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use crowdb_chunk_client::{
@@ -309,7 +311,7 @@ fn reconstruct_data(diskio: &LocalFileDiskWriter, num_strips: usize) -> Vec<u8> 
 #[tokio::test]
 async fn write_stream_empty_object() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
@@ -321,7 +323,7 @@ async fn write_stream_empty_object() {
 #[tokio::test]
 async fn write_stream_single_block_4mb() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
@@ -352,7 +354,7 @@ async fn write_stream_single_block_4mb() {
 #[tokio::test]
 async fn write_stream_partial_strip_3_blocks() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
@@ -373,7 +375,7 @@ async fn write_stream_partial_strip_3_blocks() {
 #[tokio::test]
 async fn write_stream_multi_strip_same_chunk() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
@@ -399,7 +401,7 @@ async fn write_stream_multi_strip_same_chunk() {
 #[tokio::test]
 async fn write_stream_chunk_rotation() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(4 * 4096));
@@ -427,7 +429,7 @@ async fn write_stream_chunk_rotation() {
 #[tokio::test]
 async fn write_stream_unknown_size_streaming() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
@@ -442,7 +444,7 @@ async fn write_stream_unknown_size_streaming() {
 #[tokio::test]
 async fn write_stream_data_integrity() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
@@ -467,7 +469,7 @@ async fn write_stream_parity_correctness() {
     use crowdb_common::ec::{decode, encode_parity_from_shards};
 
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
@@ -508,7 +510,7 @@ async fn write_stream_parity_correctness() {
 #[tokio::test]
 async fn write_stream_fsync_per_strip() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
@@ -529,7 +531,7 @@ async fn write_stream_whole_strip_retry() {
     // retry logic was in the old pipeline). This test verifies basic
     // 2-strip write without injected failure.
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
@@ -561,7 +563,7 @@ fn block(value: u8, size: usize) -> Bytes {
 #[tokio::test]
 async fn push_mode_basic_one_strip() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb.clone(), diskio.clone(), ec, test_config(1024 * 1024));
@@ -584,7 +586,7 @@ async fn push_mode_basic_one_strip() {
 #[tokio::test]
 async fn push_mode_empty_object() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
@@ -596,7 +598,7 @@ async fn push_mode_empty_object() {
 #[tokio::test]
 async fn push_mode_on_data_after_finish() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
@@ -610,7 +612,7 @@ async fn push_mode_on_data_after_finish() {
 #[tokio::test]
 async fn push_mode_on_finish_twice() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
@@ -624,7 +626,7 @@ async fn push_mode_on_finish_twice() {
 #[tokio::test]
 async fn push_mode_on_error_no_sealed() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
@@ -636,7 +638,7 @@ async fn push_mode_on_error_no_sealed() {
 #[tokio::test]
 async fn push_mode_on_error_after_sealed_chunk() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb.clone(), diskio, ec, test_config(4 * 4096));
@@ -657,7 +659,7 @@ async fn push_mode_on_error_after_sealed_chunk() {
 #[tokio::test]
 async fn push_mode_data_integrity() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio.clone(), ec, test_config(1024 * 1024));
@@ -680,7 +682,7 @@ async fn push_mode_data_integrity() {
 #[tokio::test]
 async fn push_mode_backpressure() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
@@ -708,7 +710,7 @@ async fn push_mode_backpressure() {
 #[tokio::test]
 async fn write_stream_size_hint_fewer_bytes() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
@@ -726,7 +728,7 @@ async fn write_stream_size_hint_fewer_bytes() {
 #[tokio::test]
 async fn write_stream_size_hint_more_bytes() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
@@ -746,7 +748,7 @@ async fn write_stream_size_hint_more_bytes() {
 #[tokio::test]
 async fn write_stream_exact_strip_capacity() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_writer(chunkdb.clone(), diskio, ec, test_config(1024 * 1024));
@@ -770,7 +772,7 @@ async fn write_stream_exact_strip_capacity() {
 #[tokio::test]
 async fn write_stream_bounded_prealloc() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
@@ -808,7 +810,7 @@ async fn push_mode_drop_mid_write_deletes_partial() {
     // verifies the API is sound — drop doesn't panic. Full drop-cleanup
     // is a future task.
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let mut writer = make_push_writer(chunkdb, diskio, ec, test_config(1024 * 1024));
@@ -827,7 +829,7 @@ async fn push_mode_drop_mid_write_deletes_partial() {
 #[tokio::test]
 async fn writer_pool_budget_rejects_over_budget() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
@@ -857,7 +859,7 @@ async fn writer_pool_budget_rejects_over_budget() {
 #[tokio::test]
 async fn writer_pool_per_writer_memory() {
     let chunkdb = MockChunkAllocator::new();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_dirs::tempdir_in_test_data("chunk-client");
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {

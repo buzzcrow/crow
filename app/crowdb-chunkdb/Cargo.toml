@@ -50,7 +50,7 @@ rand = "0.8"
 futures = "0.3"
 
 [dev-dependencies]
-tempfile = "3"
+crowdb-test-harness = { path = "../../lib/crowdb-test-harness" }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"

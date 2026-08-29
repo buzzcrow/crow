@@ -41,6 +41,13 @@ void init_logging(const std::string &log_dir, const std::string &level = "info",
 // crowdb-rpc to get its own log file alongside the crowdb-tree log file.
 void add_log_file(const std::string &log_dir, size_t max_file_mb, size_t max_files, const std::string &file_prefix);
 
+// Add a stderr sink to the existing logger with a per-sink level filter.
+// Only messages at or above `level` (spdlog name: trace/debug/info/warn/
+// error/off) are written to stderr; the original sinks keep their levels.
+// Used by tests so error logs are visible in CI while info/debug noise
+// stays in the file. No-op if logging was never initialized.
+void add_log_stderr(const std::string &level);
+
 // Flush buffered messages to the sink without stopping the logger.
 // Safe to call when uninitialized or already shut down (no-op).
 void flush_logging();

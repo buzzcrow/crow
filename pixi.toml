@@ -109,7 +109,7 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 # Grouping Guide"). Each group maps 1:1 to a parallel CI job. Run
 # `pixi run build-tests` once before any test task to pre-build all
 # Rust test binaries; C++ ctest tasks need `pixi run build-cpp`.
-clean-env = "pkill -9 -f 'crowdb-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
+clean-env = "pkill -9 -f 'crowdb-kv-server.*test-' 2>/dev/null; rm -rf test-logs test-data; true"
 # Pre-build ALL Rust test binaries + bin targets in one parallel cargo
 # invocation. Run this once at the start of a CI job so every subsequent
 # `cargo test -p <crate>` step just executes the pre-built binaries

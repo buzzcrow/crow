@@ -28,4 +28,3 @@ crowdb-test-harness = { path = "../crowdb-test-harness", features = ["diskdb"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
-tempfile = "3"

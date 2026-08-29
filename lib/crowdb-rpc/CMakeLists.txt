@@ -133,12 +133,14 @@ file(GLOB_RECURSE CROWDB_RPC_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_D
 if(NOT CROWDB_RPC_HAVE_RDMA)
   list(REMOVE_ITEM CROWDB_RPC_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/rdma_test.cpp)
 endif()
+list(APPEND CROWDB_RPC_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../crowdb-common/cpp/tests/test_main.cpp)
 add_executable(crowdb_rpc_tests ${CROWDB_RPC_TEST_SRC})
 target_include_directories(crowdb_rpc_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
     ${CROWDB_RPC_PROTO_GEN_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../crowdb-common/cpp/include
 )
-target_link_libraries(crowdb_rpc_tests PRIVATE crowdb-rpc GTest::gtest GTest::gtest_main)
+target_link_libraries(crowdb_rpc_tests PRIVATE crowdb-rpc GTest::gtest)
 gtest_discover_tests(crowdb_rpc_tests DISCOVERY_MODE PRE_TEST)
 
 # ── Example: standalone fb server ────────────────────────────────

@@ -36,6 +36,8 @@ app/crowdb-web/ui/e2e/runtime-data/
 # but keep the directory itself in the repo.
 /bench-runs/*
 test-logs/
+test-data/
+crowdb-data/
 
 app/crowdb-cli/bench-runs/
 

@@ -19,7 +19,10 @@ pub mod sys;
 
 pub use buffer::{Buffer, BufferPool};
 pub use client::{noop_completion, CallFuture, ClientRequest, Response, RpcClient};
-pub use logging::{flush_logging, init_logging, metrics_start, metrics_stop, shutdown_logging};
+pub use logging::{
+    add_log_stderr, flush_logging, init_logging, init_test_logging, metrics_start, metrics_stop,
+    shutdown_logging,
+};
 pub use server::{Connection, RpcError, RpcServer, ServerRequest};
 
 pub use sys::{CrowdbRpcLatencyStats, CrowdbRpcTransportStats};

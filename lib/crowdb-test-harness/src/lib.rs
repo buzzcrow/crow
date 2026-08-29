@@ -32,6 +32,7 @@
 )]
 
 pub mod cluster;
+pub mod test_dirs;
 
 #[cfg(feature = "hardware")]
 pub mod hardware;

@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_LIB_BACKTRACE: 1
 
 # 6 parallel jobs. See doc/working/plan-test.md § "CI Job Grouping Guide"
 # for the assignment rule and how to add new test tasks.
@@ -65,6 +67,27 @@ jobs:
       run: pixi run test-tree-ffi
     - name: Run RPC FFI tests
       run: pixi run test-rpc-ffi
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-cpp-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   UnitTests:
     runs-on: ubuntu-latest
@@ -96,6 +119,27 @@ jobs:
       run: pixi run test-kv-client
     - name: Run chunkdb-client tests
       run: pixi run test-chunkdb-client
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-unit-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   ServerTests:
     runs-on: ubuntu-latest
@@ -129,6 +173,27 @@ jobs:
       run: pixi run test-chunk-client
     - name: Run diskio-client tests
       run: pixi run test-diskio-client
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-server-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   ConsoleTests:
     runs-on: ubuntu-latest
@@ -158,6 +223,27 @@ jobs:
       run: pixi run test-console-cli
     - name: Run mgmt-api tests
       run: pixi run test-console-server
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-console-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   UITests:
     runs-on: ubuntu-latest
@@ -186,6 +272,27 @@ jobs:
         pixi run npx playwright install --with-deps chromium
     - name: Run real-backend E2E suite
       run: pixi run test-console-ui
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-ui-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
     - name: Upload Playwright report on failure
       if: failure()
       uses: actions/upload-artifact@v4

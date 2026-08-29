@@ -93,9 +93,10 @@ file(GLOB_RECURSE CROWDB_TREE_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROWDB_TREE_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/reactor_test.cpp)
 endif()
+list(APPEND CROWDB_TREE_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../crowdb-common/cpp/tests/test_main.cpp)
 add_executable(crowdb_tree_tests ${CROWDB_TREE_TEST_SRC})
 target_include_directories(crowdb_tree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(crowdb_tree_tests PRIVATE crowdb-tree GTest::gtest GTest::gtest_main)
+target_link_libraries(crowdb_tree_tests PRIVATE crowdb-tree GTest::gtest)
 # GCC 13 -Warray-bounds/-Wstringop-overflow false positives: buffer::alloc
 # returns heap memory, but GCC thinks b.data() points into the stack object b.
 # These flags are GCC-specific (clang doesn't know -Wstringop-overflow); guard

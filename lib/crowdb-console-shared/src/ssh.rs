@@ -289,7 +289,7 @@ fn known_hosts_store_for_session() -> Result<Arc<KnownHostsStore>> {
         // process. Persisting somewhere arbitrary would be surprising;
         // logging the fallback is the right escalation.
         warn!("ssh: cannot resolve $HOME or $CROWDB_KV_KNOWN_HOSTS; using in-memory known_hosts (keys will not persist)");
-        std::env::temp_dir().join(format!("crowdb-kv-known_hosts-{}", std::process::id()))
+        std::path::Path::new("crowdb-data").join(format!("crowdb-kv-known_hosts-{}", std::process::id()))
     });
     let store = KnownHostsStore::open(&path)
         .map_err(|e| Error::Config(format!("open known_hosts {}: {e}", path.display())))?;

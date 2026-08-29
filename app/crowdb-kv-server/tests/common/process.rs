@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 pub struct ServerHandle {
     child: Child,
     base_url: String,
-    root: Option<tempfile::TempDir>,
+    root: Option<crowdb_test_harness::test_dirs::TestDir>,
 }
 
 impl ServerHandle {
@@ -76,7 +76,7 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
     // One tempdir serves as the node root; waldata/conf/ctdata/log are
     // derived subdirs. No toml is needed (--config is optional; defaults
     // apply, and the e2e election profile is a CLI flag below).
-    let root = tempfile::tempdir()?;
+    let root = crowdb_test_harness::test_dirs::TestDir::new("kv-server")?;
     let mut handle = start_test_server_at(root.path(), args, ports).await?;
     handle.root = Some(root); // server owns the tempdir's lifetime
     Ok(handle)
@@ -84,7 +84,7 @@ pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_i
 
 /// Start a server at a caller-owned `root` path. The caller is
 /// responsible for keeping `root` alive for the process's lifetime
-/// (e.g. holding the `tempfile::TempDir`). Used by restart/restore
+/// (e.g. holding the `TestDir`). Used by restart/restore
 /// tests that need the same on-disk state across stop/start cycles.
 pub async fn start_test_server_at(
     root: &std::path::Path,

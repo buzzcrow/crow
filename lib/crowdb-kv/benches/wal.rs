@@ -182,7 +182,7 @@ fn run_case(rt: &tokio::runtime::Runtime, case: &Case) -> CaseResult {
             (wal, None)
         }
         Backend::File => {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-bench-file");
             let backend = Arc::new(IoBackend::File);
             let config = WalConfig {
                 wal_disks: vec![tmp.path().to_path_buf()],
@@ -193,7 +193,7 @@ fn run_case(rt: &tokio::runtime::Runtime, case: &Case) -> CaseResult {
             (wal, Some(tmp))
         }
         Backend::Block => {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-bench-block");
             let backend = Arc::new(IoBackend::BlockDevice(BlockDevice::new()));
             let config = WalConfig {
                 wal_disks: vec![tmp.path().to_path_buf()],

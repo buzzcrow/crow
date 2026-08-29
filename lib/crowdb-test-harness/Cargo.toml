@@ -27,7 +27,6 @@ chunkdb = ["hardware", "dep:crowdb-chunkdb-client"]
 [dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
-tempfile = "3"
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 
 # Optional, feature-gated

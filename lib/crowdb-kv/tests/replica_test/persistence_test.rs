@@ -113,7 +113,7 @@ async fn create_file_wal(wal_dir: PathBuf) -> Arc<WalEngine> {
 
 #[tokio::test]
 async fn wal_backed_replica_reloads_committed_kv_after_restart() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("persistence");
     let wal_dir = tmp.path().join("wal");
     let disks = vec![wal_dir.clone()];
 
@@ -169,7 +169,7 @@ async fn wal_backed_replica_reloads_committed_kv_after_restart() {
 
 #[tokio::test]
 async fn delete_survives_wal_restart() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("persistence");
     let wal_dir = tmp.path().join("wal");
     let disks = vec![wal_dir.clone()];
 
@@ -214,7 +214,7 @@ async fn delete_survives_wal_restart() {
 
 #[tokio::test]
 async fn put_then_delete_same_key_survives_restart() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("persistence");
     let wal_dir = tmp.path().join("wal");
     let disks = vec![wal_dir.clone()];
 
@@ -260,7 +260,7 @@ async fn put_then_delete_same_key_survives_restart() {
 
 #[tokio::test]
 async fn batch_with_put_and_delete_survives_restart() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("persistence");
     let wal_dir = tmp.path().join("wal");
     let disks = vec![wal_dir.clone()];
 
@@ -333,7 +333,7 @@ async fn batch_with_put_and_delete_survives_restart() {
 
 #[tokio::test]
 async fn mixed_put_delete_batch_survives_restart() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("persistence");
     let wal_dir = tmp.path().join("wal");
     let disks = vec![wal_dir.clone()];
 

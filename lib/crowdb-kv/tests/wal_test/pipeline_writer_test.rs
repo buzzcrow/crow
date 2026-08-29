@@ -54,7 +54,7 @@ async fn create_file_wal(wal_dir: std::path::PathBuf) -> Arc<WalEngine> {
 
 #[tokio::test]
 async fn concurrent_appends_coalesce_into_one_batch() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     // Spawn 10 concurrent appends — they should all land in one batch
@@ -88,7 +88,7 @@ async fn concurrent_appends_coalesce_into_one_batch() {
 
 #[tokio::test]
 async fn sequential_appends_each_get_ack() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     for slot in 1..=5u64 {
@@ -106,7 +106,7 @@ async fn sequential_appends_each_get_ack() {
 
 #[tokio::test]
 async fn append_returns_valid_slot_location() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     let entry = accepted_write(1, 1, b"k", b"v");
@@ -121,7 +121,7 @@ async fn append_returns_valid_slot_location() {
 
 #[tokio::test]
 async fn seal_all_flushes_pending_and_succeeds() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     // Append a few records.
@@ -144,7 +144,7 @@ async fn seal_all_flushes_pending_and_succeeds() {
 
 #[tokio::test]
 async fn append_after_seal_continues_in_new_segment() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     // Write + seal.
@@ -165,7 +165,7 @@ async fn append_after_seal_continues_in_new_segment() {
 
 #[tokio::test]
 async fn batch_stats_reflect_cumulative_flushes() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     // Initial stats are zero.
@@ -188,7 +188,7 @@ async fn batch_stats_reflect_cumulative_flushes() {
 
 #[tokio::test]
 async fn large_batch_single_flush() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     // Append 50 records concurrently — should batch into very few flushes.
@@ -219,7 +219,7 @@ async fn large_batch_single_flush() {
 
 #[tokio::test]
 async fn index_reflects_appended_slots() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     for slot in 1..=5u64 {
@@ -238,7 +238,7 @@ async fn index_reflects_appended_slots() {
 
 #[tokio::test]
 async fn append_promised_record_succeeds() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     let record = WALRecord::from_promised(GROUP, 1, 1, PxBallot::new(1, 1));
@@ -248,7 +248,7 @@ async fn append_promised_record_succeeds() {
 
 #[tokio::test]
 async fn wal_engine_not_failed_after_successful_appends() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("wal-pipeline");
     let wal = create_file_wal(dir.path().to_path_buf()).await;
 
     for slot in 1..=3u64 {

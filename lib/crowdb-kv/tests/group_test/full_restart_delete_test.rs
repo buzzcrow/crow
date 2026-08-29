@@ -37,7 +37,7 @@ struct WalNode {
 struct WalCluster {
     nodes: Vec<WalNode>,
     kv_transport: Arc<KvRpcTransport>,
-    _tmp: tempfile::TempDir,
+    _tmp: crowdb_test_harness::test_dirs::TestDir,
     _net: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -99,7 +99,7 @@ async fn build_wal_group(
 async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
     let net = crate::common::net_lock::lock().await;
     crate::common::logging::init_test_subscriber();
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("full-restart-delete");
     let cfg = PxElectionConfig::for_tests();
 
     let mut nodes = Vec::with_capacity(ids.len());

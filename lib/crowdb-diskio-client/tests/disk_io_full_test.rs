@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crowdb_diskio_client::{DiskId as DioDiskId, DiskioClient};
-use crowdb_rpc_ffi::RpcServer;
+use crowdb_rpc_ffi::{init_test_logging, RpcServer};
 use crowdb_test_harness::cluster::KvCluster;
 use crowdb_test_harness::diskio::*;
 use crowdb_test_harness::hardware::{seed_hardware, standard_disk_ids_4, DG_ID, NODE_ID, RACK_ID};
@@ -19,6 +19,7 @@ use crowdb_test_harness::hardware::{seed_hardware, standard_disk_ids_4, DG_ID, N
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn disk_io_e2e_full_flow() {
+    init_test_logging();
     if !check_binaries() {
         return;
     }

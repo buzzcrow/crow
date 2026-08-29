@@ -6,6 +6,7 @@
 
 use crowdb_diskio_client::{DiskId as DioDiskId, DiskIoRetCode, DiskioClient};
 use crowdb_test_harness::diskio::*;
+use crowdb_test_harness::test_dirs;
 
 /// Verify I2 (durability): write + fsync + process restart + read
 /// returns the same data. Uses `BlockDisk` on a temp file with
@@ -17,7 +18,7 @@ async fn disk_io_e2e_durability() {
         return;
     }
 
-    let temp_dir = std::env::temp_dir();
+    let temp_dir = test_dirs::test_data_dir();
     let data_path = temp_dir.join(format!("crowdb-diskio-durability-{}.dat", std::process::id()));
     eprintln!("=== durability: temp file {} ===", data_path.display());
     {

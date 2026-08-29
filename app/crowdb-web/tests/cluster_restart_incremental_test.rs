@@ -42,10 +42,6 @@ impl Drop for ProcessGuard {
     }
 }
 
-fn pick_free_port() -> u16 {
-    crowdb_console_shared::test_ports::unique_test_port()
-}
-
 /// Convert epoch millis to UTC (year, month, day, hour, min, sec, ms).
 /// Pure-Rust civil time calculation — no unsafe, no external deps.
 fn epoch_to_local(millis: u128) -> (u32, u32, u32, u32, u32, u32, u32) {
@@ -151,13 +147,16 @@ async fn deploy_server(
     node_id: u64,
     binary: &Path,
     election_profile: &str,
+    rest_port: u16,
+    rpc_port: u16,
 ) -> u32 {
+    eprintln!("deploy node {node_id}: rest_port={rest_port} rpc_port={rpc_port}");
     let (status, body) = json_post(
         client,
         &format!("{base}/api/nodes/{node_id}/server/deploy"),
         json!({
-            "rest_port": pick_free_port(),
-            "rpc_port": pick_free_port(),
+            "rest_port": rest_port,
+            "rpc_port": rpc_port,
             "binary": binary.to_string_lossy().to_string(),
             "election_profile": election_profile,
         }),
@@ -557,11 +556,30 @@ async fn setup_cluster(tag: &str, rack_nodes: &[(u64, u64)], bin: &Path, electio
         create_node(&client, &base, *node_id, *rack_id).await;
         node_ids.push(*node_id);
     }
+    // Batch-allocate all deploy ports atomically before concurrent
+    // deploys. unique_test_port() binds :0, reads the port, and drops
+    // the listener immediately — calling it concurrently (once per
+    // node) creates a TOCTOU race where one pick's dropped port is
+    // reassigned to another pick's :0 bind, causing EADDRINUSE when the
+    // kv-server later binds store 0. Batch-binding all listeners at
+    // once guarantees distinct ports with no inter-pick reuse.
+    let ports = crowdb_console_shared::test_ports::unique_test_ports(node_ids.len() * 2);
     // Deploy all nodes concurrently — each deploy polls /health until
     // ready, so parallel deploy overlaps the readiness waits.
     let deploy_futs: Vec<_> = node_ids
         .iter()
-        .map(|&nid| deploy_server(&client, &base, nid, bin, election_profile))
+        .enumerate()
+        .map(|(i, &nid)| {
+            deploy_server(
+                &client,
+                &base,
+                nid,
+                bin,
+                election_profile,
+                ports[i * 2],
+                ports[i * 2 + 1],
+            )
+        })
         .collect();
     let pids = futures::future::join_all(deploy_futs).await;
     for (nid, pid) in node_ids.iter().zip(pids) {

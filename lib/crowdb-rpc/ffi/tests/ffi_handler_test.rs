@@ -10,7 +10,7 @@ use crowdb_protocol::fb::{
     ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, ConnectionPingResponseArgs,
     FBMsgType, FBRetCode,
 };
-use crowdb_rpc_ffi::{BufferPool, RpcClient, RpcServer};
+use crowdb_rpc_ffi::{init_test_logging, BufferPool, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 use std::sync::Arc;
 
@@ -18,6 +18,7 @@ use std::sync::Arc;
 // and submits it via submit_response, then verify a client round-trip.
 #[tokio::test]
 async fn custom_rust_handler_loopback() {
+    init_test_logging();
     const HANDLER_MSG_TYPE: u16 = 200;
 
     let server = Arc::new(RpcServer::new(None));
@@ -96,6 +97,7 @@ async fn custom_rust_handler_loopback() {
 // requests and can echo it back in the response.
 #[tokio::test]
 async fn custom_rust_handler_with_data() {
+    init_test_logging();
     const HANDLER_MSG_TYPE: u16 = 201;
     const DATA_SIZE: usize = 256;
 

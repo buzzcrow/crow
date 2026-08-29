@@ -15,7 +15,7 @@ use crowdb_console_shared::ConsoleConfig;
 use crowdb_web::{router, AppState};
 
 fn tempdir(tag: &str) -> PathBuf {
-    let base = std::env::temp_dir().join("crowdb-deployer-tests");
+    let base = crowdb_test_harness::test_dirs::test_data_dir().join("crowdb-deployer-tests");
     let _ = std::fs::create_dir_all(&base);
     let pid = std::process::id();
     let dir = base.join(format!("{tag}-{pid}"));

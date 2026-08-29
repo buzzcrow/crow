@@ -86,7 +86,7 @@ fn config_defaults_match_design() {
 fn config_load_from_file_roundtrip() {
     let config = DdbConfig::default();
     let toml = toml::to_string_pretty(&config).expect("serialize");
-    let tmp = std::env::temp_dir().join("ddb_config_test.toml");
+    let tmp = crowdb_test_harness::test_dirs::test_data_dir().join("ddb_config_test.toml");
     std::fs::write(&tmp, &toml).expect("write temp");
     let loaded = crowdb_common::config::load_from_file::<DdbConfig>(&tmp).expect("load");
     assert_eq!(loaded.storage.block_size_bytes, config.storage.block_size_bytes);

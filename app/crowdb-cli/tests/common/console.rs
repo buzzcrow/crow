@@ -21,6 +21,7 @@ use crowdb_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceTy
 use crowdb_console_shared::lifecycle::{self, crowdb_kv_server_bin, DeployRequest};
 use crowdb_console_shared::monitor::{legacy_topology_to_node_stores, NodeRecord};
 use crowdb_console_shared::ConsoleConfig;
+use crowdb_test_harness::test_dirs;
 use crowdb_web::{router, AppState};
 
 /// Grab an ephemeral TCP port by binding and immediately dropping.
@@ -134,7 +135,7 @@ pub async fn spawn_upstream() -> Option<Upstream> {
     if !bin.exists() {
         return None;
     }
-    let workspace = std::env::temp_dir().join(format!(
+    let workspace = test_dirs::test_data_dir().join(format!(
         "crowdb-cli-test-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -280,7 +281,7 @@ pub async fn wait_for_leader(ip: &str, port: u16, sid: u64, gid: u64, timeout: D
 /// Unique temp directory for a test.
 #[must_use]
 pub fn tempdir(tag: &str) -> PathBuf {
-    let base = std::env::temp_dir();
+    let base = test_dirs::test_data_dir();
     let unique = format!(
         "crowdb-cli-{tag}-{}-{}",
         std::process::id(),

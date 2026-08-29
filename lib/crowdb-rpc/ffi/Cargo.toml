@@ -10,6 +10,13 @@ publish = false
 name = "crowdb_rpc_ffi"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Auto-init C++ spdlog to a temp dir on first RpcServer::new. Used by
+# this crate's own tests (via self dev-dependency) so transport logs go
+# to files instead of stderr without each test calling init_test_logging.
+test-util = []
+
 [dependencies]
 crowdb-common = { path = "../../crowdb-common/rust" }
 tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync"] }
@@ -18,6 +25,9 @@ tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync
 crowdb-common = { path = "../../crowdb-common/rust" }
 crowdb-protocol = { path = "../../crowdb-protocol" }
 flatbuffers = { workspace = true }
+# Self dev-dependency: turns on `test-util` so integration tests auto-init
+# C++ logging to a temp dir on first RpcServer::new.
+crowdb-rpc-ffi = { path = ".", features = ["test-util"] }
 
 [build-dependencies]
 cc = "1"

@@ -90,7 +90,7 @@ async fn replay_and_restore(wal_dir: &Path) -> PxLocalReplica {
 
 #[tokio::test]
 async fn restore_contiguous_slots_all_applied() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("replay-ordering");
     let wal_dir = tmp.path().join("wal");
 
     {
@@ -127,7 +127,7 @@ async fn restore_contiguous_slots_all_applied() {
 
 #[tokio::test]
 async fn restore_stops_at_hole_below_watermark() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("replay-ordering");
     let wal_dir = tmp.path().join("wal");
 
     {
@@ -175,7 +175,7 @@ async fn restore_stops_at_hole_below_watermark() {
 
 #[tokio::test]
 async fn restore_out_of_order_accepted_records() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("replay-ordering");
     let wal_dir = tmp.path().join("wal");
 
     {
@@ -225,7 +225,7 @@ async fn restore_out_of_order_accepted_records() {
 
 #[tokio::test]
 async fn restore_does_not_apply_without_snapshot() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("replay-ordering");
     let wal_dir = tmp.path().join("wal");
 
     {
@@ -271,7 +271,7 @@ async fn restore_does_not_apply_without_snapshot() {
 
 #[tokio::test]
 async fn restore_empty_wal_produces_zero_state() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("replay-ordering");
     let wal_dir = tmp.path().join("wal");
 
     {

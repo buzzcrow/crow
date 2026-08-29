@@ -127,7 +127,7 @@ fn node_config_remove_store() {
 
 #[tokio::test]
 async fn node_config_store_save_then_load_roundtrip() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("node-config");
     let store = NodeConfigStore::new(dir.path());
 
     let config = PxGroupConfig {
@@ -159,7 +159,7 @@ async fn node_config_store_save_then_load_roundtrip() {
 
 #[tokio::test]
 async fn node_config_store_load_returns_none_when_no_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("node-config");
     let store = NodeConfigStore::new(dir.path());
     let loaded = store.load_group(1, 1).await.expect("load");
     assert!(loaded.is_none());
@@ -167,7 +167,7 @@ async fn node_config_store_load_returns_none_when_no_file() {
 
 #[tokio::test]
 async fn node_config_store_load_returns_none_for_missing_group() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("node-config");
     let store = NodeConfigStore::new(dir.path());
     let config = PxGroupConfig {
         group_id: 1,
@@ -182,7 +182,7 @@ async fn node_config_store_load_returns_none_for_missing_group() {
 
 #[tokio::test]
 async fn node_config_store_save_overwrites_previous() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("node-config");
     let store = NodeConfigStore::new(dir.path());
 
     let cfg1 = PxGroupConfig {
@@ -217,7 +217,7 @@ async fn node_config_store_save_overwrites_previous() {
 
 #[tokio::test]
 async fn node_config_store_isolates_groups_by_store_and_group() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("node-config");
     let store = NodeConfigStore::new(dir.path());
 
     let cfg_a = PxGroupConfig {
@@ -251,7 +251,7 @@ async fn node_config_store_isolates_groups_by_store_and_group() {
 
 #[tokio::test]
 async fn node_config_store_remove_group_persists() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("node-config");
     let store = NodeConfigStore::new(dir.path());
 
     let cfg = PxGroupConfig {
@@ -269,7 +269,7 @@ async fn node_config_store_remove_group_persists() {
 
 #[tokio::test]
 async fn node_config_store_multiple_stores_in_one_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("node-config");
     let store = NodeConfigStore::new(dir.path());
 
     let g = PxGroupConfig {

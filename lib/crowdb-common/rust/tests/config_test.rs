@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crowdb_common::config::{load_from_file, to_toml, watch, BaseConfig};
+use crowdb_test_harness::test_dirs::tempdir_in_test_data;
 use serde::{Deserialize, Serialize};
 
 /// Mock config for testing — two fields, one with serde-skip.
@@ -39,7 +40,7 @@ impl BaseConfig for MockConfig {
 
 #[test]
 fn load_from_file_valid() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir_in_test_data("config-test");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "interval_secs = 10\nlabel = \"test\"\n").unwrap();
     let config = load_from_file::<MockConfig>(&path).unwrap();
@@ -50,7 +51,7 @@ fn load_from_file_valid() {
 
 #[test]
 fn load_from_file_validation_failure() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir_in_test_data("config-test");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "interval_secs = 0\nlabel = \"bad\"\n").unwrap();
     let err = load_from_file::<MockConfig>(&path).unwrap_err();
@@ -66,7 +67,7 @@ fn load_from_file_missing_file() {
 
 #[test]
 fn load_from_file_malformed_toml() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir_in_test_data("config-test");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "interval_secs = [invalid\n").unwrap();
     let err = load_from_file::<MockConfig>(&path).unwrap_err();
@@ -75,7 +76,7 @@ fn load_from_file_malformed_toml() {
 
 #[test]
 fn load_from_file_partial_uses_defaults() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir_in_test_data("config-test");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "interval_secs = 5\n").unwrap();
     let config = load_from_file::<MockConfig>(&path).unwrap();
@@ -99,7 +100,7 @@ fn to_toml_round_trip() {
 
 #[test]
 fn watch_reloads_on_file_change() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir_in_test_data("config-test");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "interval_secs = 10\nlabel = \"v1\"\n").unwrap();
 
@@ -125,7 +126,7 @@ fn watch_reloads_on_file_change() {
 
 #[test]
 fn watch_skips_invalid_reload() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir_in_test_data("config-test");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "interval_secs = 10\nlabel = \"v1\"\n").unwrap();
 

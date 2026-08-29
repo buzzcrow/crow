@@ -12,7 +12,7 @@ use crowdb_protocol::fb::{
     ConnectionPingRequest, ConnectionPingRequestArgs, ConnectionPingResponse, ConnectionPingResponseArgs,
     FBMsgType, FBRetCode,
 };
-use crowdb_rpc_ffi::{Buffer, BufferPool, CallFuture, RpcClient, RpcServer};
+use crowdb_rpc_ffi::{init_test_logging, Buffer, BufferPool, CallFuture, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 // on_response return-bool change and the server dispatch reorder.
 #[tokio::test]
 async fn client_to_server_regression() {
+    init_test_logging();
     let server = RpcServer::new(None);
     server.listen("127.0.0.1", 0).expect("listen failed");
     let port = server.port();
@@ -82,6 +83,7 @@ async fn client_to_server_regression() {
 // request_client's pending map in a loopback).
 #[tokio::test]
 async fn server_dispatch_handler_first_order() {
+    init_test_logging();
     const CUSTOM_MSG_TYPE: u16 = 300;
 
     let server = Arc::new(RpcServer::new(None));
@@ -169,6 +171,7 @@ async fn server_dispatch_handler_first_order() {
 // not the handler.
 #[tokio::test]
 async fn client_response_routing_precedence() {
+    init_test_logging();
     let server = RpcServer::new(None);
     server.listen("127.0.0.1", 0).expect("listen failed");
     let port = server.port();
@@ -246,6 +249,7 @@ async fn client_response_routing_precedence() {
 // (R114 originally dropped the NOTIFY buffer here).
 #[tokio::test]
 async fn client_handler_dispatch_via_server_chain() {
+    init_test_logging();
     const PING_MSG_TYPE: u16 = FBMsgType::EConnectionPingRequest.0 as u16;
     const NOTIFY_MSG_TYPE: u16 = 310;
     const NOTIFY_ACK_MSG_TYPE: u16 = FBMsgType::EConnectionPingResponse.0 as u16;
@@ -451,6 +455,7 @@ async fn client_handler_dispatch_via_server_chain() {
 // timeout path to be correct.
 #[tokio::test]
 async fn server_to_client_timeout_no_handler() {
+    init_test_logging();
     const PING_MSG_TYPE: u16 = FBMsgType::EConnectionPingRequest.0 as u16;
     const NO_HANDLER_MSG_TYPE: u16 = 320;
     const PING_ACK_MSG_TYPE: u16 = FBMsgType::EConnectionPingResponse.0 as u16;

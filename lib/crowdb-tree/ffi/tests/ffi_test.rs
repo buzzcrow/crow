@@ -115,7 +115,7 @@ fn mem_apply_batch_multi_key_and_dup_last_wins() {
 
 #[test]
 fn file_snapshot_reopen_smoke() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -150,7 +150,7 @@ fn file_snapshot_reopen_smoke() {
 // block-device backend.
 #[test]
 fn block_device_snapshot_reopen_smoke() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 4096,
@@ -234,7 +234,7 @@ fn open_rejects_path_with_nul() {
 
 #[tokio::test]
 async fn async_bridge_apply_get_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -266,7 +266,7 @@ async fn async_get_fast_path_completes_on_first_poll() {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -290,7 +290,7 @@ async fn async_get_fast_path_completes_on_first_poll() {
 
 #[tokio::test]
 async fn async_get_slow_path_completes_after_eviction() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -311,7 +311,7 @@ async fn async_get_slow_path_completes_after_eviction() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_async_gets_all_resolve_correctly() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -351,7 +351,7 @@ async fn async_scan_fast_path_completes_on_first_poll() {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -384,7 +384,7 @@ async fn async_scan_fast_path_completes_on_first_poll() {
 // produces the full, correct result.
 #[tokio::test]
 async fn async_scan_slow_path_completes_after_eviction() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -421,7 +421,7 @@ async fn async_scan_slow_path_completes_after_eviction() {
 // own synchronous semantics.
 #[tokio::test]
 async fn async_scan_respects_limit_and_truncated_flag() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -449,7 +449,7 @@ async fn async_scan_respects_limit_and_truncated_flag() {
 // is unchanged (vlen=0). Keys match a full scan; values are all empty.
 #[tokio::test]
 async fn async_scan_keys_only_skips_values() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -490,7 +490,7 @@ async fn async_scan_keys_only_skips_values() {
 
 #[tokio::test]
 async fn try_get_pinned_fast_path_returns_borrowed_value() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -518,7 +518,7 @@ async fn try_get_pinned_fast_path_returns_borrowed_value() {
 
 #[tokio::test]
 async fn try_get_pinned_slow_path_resolves_after_eviction() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
@@ -549,7 +549,7 @@ async fn try_get_pinned_slow_path_resolves_after_eviction() {
 
 #[tokio::test]
 async fn try_get_pinned_fast_path_with_large_value() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Options {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 1,
