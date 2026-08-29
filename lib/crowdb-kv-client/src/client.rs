@@ -665,19 +665,14 @@ impl CrowdbClient {
             match send_result {
                 Ok(resp) => {
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
-                    if resp.not_found {
-                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
-                        return Ok(GetOutcome::NotFound);
-                    }
-                    if resp.ok {
-                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
-                        return Ok(GetOutcome::Found {
-                            value: resp.value,
-                            revision: resp.revision,
-                        });
-                    }
-                    self.metrics.record_get_error();
+                    // Follow a `NotLeaderHint` before checking `not_found`/`ok`:
+                    // a linearizable read forwarded from a stale leader can
+                    // return `not_found=true` alongside a hint (the server
+                    // serves a stale local read + hint when leader-forward
+                    // fails). Returning `NotFound` here would discard the
+                    // redirect and surface stale data to the caller.
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
+                        self.metrics.record_get_error();
                         self.metrics.record_not_leader_hint();
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         self.metrics
@@ -693,6 +688,18 @@ impl CrowdbClient {
                         endpoint = new_endpoint;
                         continue;
                     }
+                    if resp.not_found {
+                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
+                        return Ok(GetOutcome::NotFound);
+                    }
+                    if resp.ok {
+                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
+                        return Ok(GetOutcome::Found {
+                            value: resp.value,
+                            revision: resp.revision,
+                        });
+                    }
+                    self.metrics.record_get_error();
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
@@ -759,6 +766,19 @@ impl CrowdbClient {
                 .map_err(|e| e.to_string());
             match send_result {
                 Ok(resp) => {
+                    // Follow a `NotLeaderHint` before checking `not_found`/`ok`:
+                    // a stale leader can return `not_found=true` with a hint,
+                    // and treating it as a benign idempotent delete would
+                    // silently drop the redirect.
+                    if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
+                        self.metrics.record_delete_error();
+                        self.metrics.record_not_leader_hint();
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &new_endpoint, "not_leader_hint");
+                        endpoint = new_endpoint;
+                        continue;
+                    }
                     if resp.not_found {
                         self.metrics
                             .record_delete_latency(t0.elapsed().as_micros() as u64);
@@ -777,14 +797,6 @@ impl CrowdbClient {
                         });
                     }
                     self.metrics.record_delete_error();
-                    if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
-                        self.metrics.record_not_leader_hint();
-                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                        self.metrics
-                            .on_leader_resolved(store_id, group_id, &new_endpoint, "not_leader_hint");
-                        endpoint = new_endpoint;
-                        continue;
-                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);

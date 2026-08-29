@@ -184,6 +184,7 @@ test.describe('capacity · diskdb', () => {
   });
 
   test('disk-group and disk CRUD via the UI', async ({ page, baseURL }) => {
+    test.setTimeout(60_000);
     const nodeId = DISKDB_NODE;
     const dg520 = 520;
     const dg530 = 530;

@@ -31,6 +31,7 @@ use crowdb_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crowdb_diskdb::recovery::ZoneLoader;
 use crowdb_diskdb::scanner::ScanState;
 use crowdb_diskdb::service::DiskdbRpcService;
+use crowdb_diskdb_client::DiskdbRpcTransport;
 use crowdb_kv_client::{ClientConfig, CrowdbClient, HardwareClient, RetryConfig, ServiceRegistryClient};
 use crowdb_protocol::common::{DiskId, HwStatus, NodeValue, RackValue};
 use crowdb_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -571,8 +572,13 @@ impl DiskdbServer {
             .await
             .expect("register diskdb");
 
-        // Give the server a moment to bind.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Probe the RPC server until it responds — the worker threads
+        // spawned by start() may not have entered their event loops yet,
+        // especially on slow CI runners. A fixed sleep is unreliable;
+        // instead, make a lightweight get_disk_group_info call with
+        // fresh transports (to avoid stale connection cache) until it
+        // succeeds or the deadline expires.
+        wait_for_rpc_ready(&rpc_endpoint, seeded_dg_ids()[0]).await;
 
         Self {
             container,
@@ -585,6 +591,27 @@ impl DiskdbServer {
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("local_addr").port()
+}
+
+/// Probe the diskdb RPC server until it responds. The worker threads
+/// spawned by `RpcServer::start()` may not have entered their event
+/// loops yet on slow runners. Each retry uses a fresh transport to
+/// avoid stale connections from a timed-out attempt.
+async fn wait_for_rpc_ready(rpc_endpoint: &str, dg_id: u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let transport = DiskdbRpcTransport::new();
+        match transport.get_disk_group_info(rpc_endpoint, dg_id).await {
+            Ok(_) => return,
+            Err(e) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "diskdb RPC server not ready at {rpc_endpoint} within 10s: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 pub async fn wait_for_disks_ready(

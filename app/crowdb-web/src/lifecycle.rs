@@ -1500,16 +1500,24 @@ pub async fn http_list_node_disk_groups(
             if let Some(rack_id) = rack_id {
                 match hw.list_disk_groups_on_node(rack_id, node_id).await {
                     Ok(g0_dgs) => {
-                        // Merge config names as metadata where available.
-                        let name_map: std::collections::HashMap<DiskGroupId, String> = {
+                        // Merge config names as metadata, and include
+                        // config-only DGs not yet synced to group-0 (the
+                        // add handler's sysdata sync is best-effort, so a
+                        // DG may exist in config before appearing in
+                        // group-0).
+                        let cfg_dgs: Vec<DiskGroupEntry> = {
                             let cfg = state.config.read().unwrap();
                             cfg.disk_groups
                                 .iter()
                                 .filter(|dg| dg.node_id == node_id)
-                                .map(|dg| (dg.id, dg.name.clone()))
+                                .cloned()
                                 .collect()
                         };
-                        let entries: Vec<DiskGroupEntry> = g0_dgs
+                        let name_map: std::collections::HashMap<DiskGroupId, String> =
+                            cfg_dgs.iter().map(|dg| (dg.id, dg.name.clone())).collect();
+                        let g0_ids: std::collections::HashSet<DiskGroupId> =
+                            g0_dgs.iter().map(|dg| dg.dg_id).collect();
+                        let mut entries: Vec<DiskGroupEntry> = g0_dgs
                             .into_iter()
                             .map(|dg| DiskGroupEntry {
                                 id: dg.dg_id,
@@ -1518,6 +1526,7 @@ pub async fn http_list_node_disk_groups(
                                 name: name_map.get(&dg.dg_id).cloned().unwrap_or_default(),
                             })
                             .collect();
+                        entries.extend(cfg_dgs.into_iter().filter(|dg| !g0_ids.contains(&dg.id)));
                         return Ok(Json(entries));
                     }
                     Err(e) => {
@@ -1618,6 +1627,8 @@ pub async fn http_add_node_disk_group(
         if let Err(e) = auto_assign_owner(&hw, rack_id, node_id, entry.id).await {
             tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: auto-assign owner failed");
         }
+    } else {
+        tracing::warn!(disk_group_id = entry.id, "sysdata sync skipped: group-0 endpoint not in monitor cache yet; DG is in config only and will sync on next add");
     }
 
     Ok((StatusCode::CREATED, Json(entry)))
@@ -1872,7 +1883,26 @@ pub async fn http_list_disks_in_group(
             if let Some(rack_id) = rack_id {
                 match hw.list_disks_in_group(rack_id, node_id, dg_id).await {
                     Ok(g0_disks) => {
-                        let entries: Vec<DiskEntry> = g0_disks
+                        // Merge config-only disks not yet synced to group-0
+                        // (the add handler's sysdata sync is best-effort).
+                        // Normalize config disk IDs to dashed format for
+                        // dedup comparison — config stores the raw client
+                        // string (bare hex), group-0 uses `{high:016x}-{low:016x}`.
+                        let cfg_disks: Vec<DiskEntry> = {
+                            let cfg = state.config.read().unwrap();
+                            cfg.disks
+                                .iter()
+                                .filter(|d| d.disk_group_id == dg_id && d.node_id == node_id)
+                                .cloned()
+                                .collect()
+                        };
+                        let g0_ids: std::collections::HashSet<String> = g0_disks
+                            .iter()
+                            .map(|(id, _)| {
+                                crowdb_protocol::diskdb_type_util::DiskIdExt::to_display_string(id)
+                            })
+                            .collect();
+                        let mut entries: Vec<DiskEntry> = g0_disks
                             .into_iter()
                             .map(|(disk_id, val)| {
                                 let unit_size = u64::from(val.unit_size_bytes);
@@ -1891,6 +1921,21 @@ pub async fn http_list_disks_in_group(
                                 }
                             })
                             .collect();
+                        entries.extend(cfg_disks.into_iter().filter_map(|mut d| {
+                            let normalized =
+                                <crowdb_protocol::common::DiskId as crowdb_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&d.disk_id)
+                                    .ok()
+                                    .map(|id| {
+                                        crowdb_protocol::diskdb_type_util::DiskIdExt::to_display_string(&id)
+                                    });
+                            if let Some(ref norm) = normalized {
+                                if g0_ids.contains(norm) {
+                                    return None;
+                                }
+                                d.disk_id.clone_from(norm);
+                            }
+                            Some(d)
+                        }));
                         return Ok(Json(entries));
                     }
                     Err(e) => {
@@ -2003,6 +2048,8 @@ pub async fn http_add_disk(
         if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id_proto, &value).await {
             tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
         }
+    } else {
+        tracing::warn!(disk_id = %entry.disk_id, "sysdata sync skipped: group-0 endpoint not in monitor cache yet; disk is in config only");
     }
 
     Ok((StatusCode::CREATED, Json(entry)))
@@ -2090,6 +2137,12 @@ pub async fn http_add_disks_batch(
                 sysdata_errors.push(msg);
             }
         }
+    } else {
+        tracing::warn!(
+            dg_id,
+            disk_count = validated.len(),
+            "batch sysdata sync skipped: group-0 endpoint not in monitor cache yet; disks are in config only"
+        );
     }
 
     Ok((
