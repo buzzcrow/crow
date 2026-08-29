@@ -14,18 +14,19 @@ name = "crowdb-web"
 path = "src/main.rs"
 
 [dependencies]
+crowdb-common = { path = "../../lib/crowdb-common/rust" }
 crowdb-console-shared = { path = "../../lib/crowdb-console-shared" }
 crowdb-diskdb-client = { path = "../../lib/crowdb-diskdb-client" }
 crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
 crowdb-protocol = { path = "../../lib/crowdb-protocol" }
 crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
 clap = { version = "4", features = ["derive"] }
+dirs = "5"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
 axum = "0.7"
 async-trait = "0.1"
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"

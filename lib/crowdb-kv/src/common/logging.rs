@@ -11,7 +11,7 @@
 pub use crowdb_common::logging::{open_metrics_log, LogGuards, RotatingLogWriter};
 
 /// `crowdb_kv` default `EnvFilter` directive used when `RUST_LOG` is unset.
-pub(crate) const CROWDB_KV_DEFAULT_FILTER: &str =
+pub const CROWDB_KV_DEFAULT_FILTER: &str =
     "warn,crowdb_kv=info,crowdb_kv_server=info,crowdb_web=info,crowdb_console_shared=info,crowdb_cli=info";
 
 /// Initializes file logging to the specified directory using the

@@ -250,6 +250,69 @@ pub fn open_metrics_log(
     .map_err(|e| format!("failed to open metrics log file; next step: check path permissions: {e}"))
 }
 
+/// Initializes file and console logging with **split** default filters:
+/// the file sink captures `file_default_filter` (typically `info`) while
+/// the console sink captures `console_default_filter` (typically `warn`).
+/// `RUST_LOG` overrides both sinks when set. The file layer uses a
+/// rotating `RotatingLogWriter`; the console layer writes to stdout with
+/// ANSI colors. Returns a `LogGuards` whose `Drop` flushes the
+/// non-blocking file appender — keep it alive for the process lifetime.
+///
+/// # Errors
+/// Returns `Err` if the log directory cannot be created due to permission issues or invalid path.
+pub fn init_file_and_console_logging_split(
+    log_dir: impl AsRef<Path>,
+    process_name: &str,
+    max_file_mb: usize,
+    max_files: usize,
+    file_default_filter: &str,
+    console_default_filter: &str,
+) -> Result<LogGuards, String> {
+    let pid = std::process::id();
+    let file_appender = RotatingLogWriter::new(
+        log_dir.as_ref().to_path_buf(),
+        process_name,
+        pid,
+        max_file_mb,
+        max_files,
+    )
+    .map_err(|e| format!("failed to open log file; next step: check path permissions: {e}"))?;
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+
+    // `EnvFilter::try_from_default_env()` returns `Ok(OFF)` for an
+    // empty `RUST_LOG` string (not an error), so the fallback would
+    // never fire. Treat empty/unset the same: use the caller's default.
+    let env = std::env::var("RUST_LOG").ok().filter(|s| !s.is_empty());
+    let file_filter = match env.as_deref() {
+        Some(s) => EnvFilter::new(s),
+        None => EnvFilter::new(file_default_filter),
+    };
+    let file_layer = fmt::layer()
+        .with_writer(file_writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_names(true)
+        .with_filter(file_filter);
+
+    let console_filter = match env.as_deref() {
+        Some(s) => EnvFilter::new(s),
+        None => EnvFilter::new(console_default_filter),
+    };
+    let console_layer = fmt::layer()
+        .with_ansi(true)
+        .with_target(true)
+        .with_thread_names(true)
+        .with_filter(console_filter);
+
+    tracing_subscriber::registry()
+        .with(file_layer)
+        .with(console_layer)
+        .try_init()
+        .map_err(|e| format!("failed to initialize tracing subscriber; next step: initialize logging only once per process: {e}"))?;
+
+    Ok(LogGuards { _file: file_guard })
+}
+
 /// Initializes file and console logging to the specified directory.
 ///
 /// `default_filter` is the `EnvFilter` directive string used when

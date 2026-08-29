@@ -32,11 +32,13 @@ async fn main() {
     let args = Cli::parse();
 
     let _guards = if args.log {
-        crowdb_kv::common::logging::init_file_and_console_logging(
+        crowdb_common::logging::init_file_and_console_logging_split(
             "log",
             "crowdb-kv-server",
             args.log_max_file_mb,
             args.log_max_files,
+            crowdb_kv::common::logging::CROWDB_KV_DEFAULT_FILTER,
+            "warn",
         )
         .expect("failed to initialize crowdb-kv-server logging")
     } else {

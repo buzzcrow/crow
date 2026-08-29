@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Dialog } from '../Dialog';
 import { Select } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
@@ -36,12 +36,19 @@ export function AssignDiskGroupDialog({
   const [groupId, setGroupId] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const { success, error } = useToast();
-
+  // Apply default selections once per open. The dialog's `instances` and
+  // `stores` props get fresh array references on every background poll
+  // (useCapacityTree / useLogicalTree refresh every 5s); depending on
+  // them directly re-ran this effect mid-dialog and wiped the user's
+  // group selection, leaving the confirm button disabled.
+  const defaultsApplied = useRef(false);
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || defaultsApplied.current) return;
+    if (instances.length === 0 && stores.length === 0) return;
     setInstanceId(instances.length > 0 ? String(instances[0].instance_id) : '');
     setStoreId(stores.length > 0 ? String(stores[0].store_id) : '');
     setGroupId('');
+    defaultsApplied.current = true;
   }, [isOpen, instances, stores]);
 
   const groupsForStore = useMemo(() => {

@@ -9,11 +9,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tracing::warn;
 
-use crowdb_diskdb_client::DiskdbRpcTransport;
+use crowdb_diskdb_client::{DiskdbClientError, DiskdbRpcTransport};
 use crowdb_kv_client::ServiceRegistryClient;
 use crowdb_protocol::common::{ChunkId, DiskId};
 use crowdb_protocol::diskdb::rpc::{
@@ -107,17 +108,31 @@ impl DiskdbClientPool {
 
     /// Allocate blocks on the diskdb instance owning `disk_group_id`.
     ///
+    /// Retries transient RPC failures (`DiskdbClientError::Unreachable`
+    /// — timeout, connection reset, endpoint-not-yet-cached) with
+    /// exponential backoff, mirroring `DiskdbClient::with_rpc_retry`.
+    /// This rides out momentary overload (e.g. a Paxos round spiking
+    /// past the client RPC reaper under concurrent load). Hard errors
+    /// (`DiskdbClientError::Rpc` — NoSpace, NotOwner, etc.) are
+    /// returned immediately. A timed-out attempt may leave orphaned
+    /// tentative segments on the diskdb side; the orphan scanner
+    /// reclaims them.
+    ///
     /// # Errors
-    /// Returns a String error if the endpoint is not cached or the RPC
-    /// fails.
+    /// Returns `DiskdbClientError::Unreachable` if the endpoint is not
+    /// cached or the RPC fails with a transient (retryable) error after
+    /// exhausting retries, or `DiskdbClientError::Rpc` for a hard RPC
+    /// failure.
     pub async fn allocate_blocks(
         &self,
         dg_id: u64,
         count: u32,
         unit_count: u32,
         owner_chunk: &ChunkId,
-    ) -> Result<AllocateResponse, String> {
-        let endpoint = self.endpoint_for_dg(dg_id).await?;
+    ) -> Result<AllocateResponse, DiskdbClientError> {
+        const MAX_TRANSIENT_RETRIES: u32 = 2;
+        const INITIAL_BACKOFF: Duration = Duration::from_millis(200);
+
         let req = AllocateBlocksRequest {
             disk_group_id: dg_id,
             unit_count,
@@ -125,10 +140,35 @@ impl DiskdbClientPool {
             exclude_disk_ids: vec![],
             owner_chunk: Some(*owner_chunk),
         };
-        self.transport
-            .allocate_blocks(&endpoint, &req)
-            .await
-            .map_err(|e| format!("allocate_blocks RPC: {e}"))
+
+        let mut backoff = INITIAL_BACKOFF;
+        let mut last_err: Option<DiskdbClientError> = None;
+        for attempt in 0..=MAX_TRANSIENT_RETRIES {
+            let endpoint = self.endpoint_for_dg(dg_id).await.map_err(|e| {
+                DiskdbClientError::Unreachable(format!("no endpoint for disk_group {dg_id}: {e}"))
+            })?;
+            match self.transport.allocate_blocks(&endpoint, &req).await {
+                Ok(resp) => return Ok(resp),
+                Err(e @ DiskdbClientError::Unreachable(_)) => {
+                    if attempt < MAX_TRANSIENT_RETRIES {
+                        warn!(
+                            disk_group_id = dg_id,
+                            attempt = attempt + 1,
+                            error = %e,
+                            "transient allocate_blocks RPC, retrying after backoff"
+                        );
+                        last_err = Some(e);
+                        let _ = self.refresh_endpoints().await;
+                        tokio::time::sleep(backoff).await;
+                        backoff *= 2;
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| DiskdbClientError::Unreachable("transient retries exhausted".into())))
     }
 
     /// Commit blocks (mark as permanent) on the diskdb instances that

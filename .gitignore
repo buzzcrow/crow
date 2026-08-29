@@ -27,6 +27,7 @@ app/crowdb-web/ui/dist/
 app/crowdb-web/ui/.vite/
 app/crowdb-web/ui/*.tsbuildinfo
 app/crowdb-web/ui/e2e/runtime-data/
+app/crowdb-web/ui/e2e/log/
 
 # ── Runtime artifacts (WAL, config, logs) ───────────────────────
 # Top-level artifact dirs (anchored to repo root).

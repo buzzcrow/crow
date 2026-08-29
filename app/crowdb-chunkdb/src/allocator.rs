@@ -127,7 +127,7 @@ impl ChunkAllocator {
                         .await
                         .map_err(|e| AllocError::AllocateFailed {
                             dg_id: dg,
-                            error: e.clone(),
+                            error: e.to_string(),
                         })
                 });
             }

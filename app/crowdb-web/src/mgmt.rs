@@ -255,8 +255,37 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crowdb_kv_
         }
     }
     if rpc_eps.is_empty() {
-        warn!("build_hardware_client: nodes exist but no group-0 endpoint found in monitor cache");
-        return None;
+        // The monitor cache is populated asynchronously by
+        // refresh_node_cache; right after cluster operations (deploy,
+        // restart, stop) a successful topology poll can transiently
+        // report store-0 with no listen_addr, so the cache lacks the
+        // group-0 endpoint even though the server is running. Actively
+        // refresh the running nodes and re-check before giving up — the
+        // endpoint exists, the cache just hasn't caught up.
+        let running: Vec<NodeId> = snap
+            .keys()
+            .copied()
+            .filter(|n| state.runtime_pid(*n).is_some())
+            .collect();
+        for nid in &running {
+            refresh_node_cache(state, *nid).await;
+        }
+        let snap2 = state.monitor_cache.snapshot().await;
+        for node_id in snap2.keys() {
+            if state.runtime_pid(*node_id).is_none() {
+                continue;
+            }
+            if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
+                rpc_eps.push(ep);
+                if let Ok(url) = mgmt_url_for_node(state, *node_id) {
+                    mgmt_seeds.push(url);
+                }
+            }
+        }
+        if rpc_eps.is_empty() {
+            warn!("build_hardware_client: nodes exist but no group-0 endpoint found in monitor cache");
+            return None;
+        }
     }
     let kv = crowdb_kv_client::CrowdbClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds));
     kv.seed_leader(0, 0, rpc_eps[0].clone());

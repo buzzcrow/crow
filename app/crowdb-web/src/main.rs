@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
+use crowdb_common::logging::init_file_and_console_logging_split;
 use crowdb_protocol::WEB_BASE;
 use tracing::info;
 
@@ -29,12 +30,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let args = Args::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Layered logging: INFO+ to rotating file, WARN+ to console.
+    // RUST_LOG overrides both sinks for debugging. The file layer uses
+    // the same ~/.crowdb-kv/log/ dir as the ops log; the guard must
+    // outlive the process so the non-blocking appender flushes on exit.
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".crowdb-kv")
+        .join("log");
+    let _log_guards = init_file_and_console_logging_split(
+        &log_dir,
+        "console-web",
+        crowdb_common::logging::DEFAULT_LOG_MAX_FILE_MB,
+        crowdb_common::logging::DEFAULT_LOG_MAX_FILES,
+        "info",
+        "warn",
+    )
+    .map_err(|e| {
+        eprintln!("failed to initialize logging: {e}");
+        e
+    })?;
 
     // Initialize the crowdb-rpc C++ spdlog logger so transport info/debug
     // messages go to rotating files instead of spdlog's default stderr

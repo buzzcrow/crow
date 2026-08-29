@@ -633,7 +633,6 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -747,7 +746,6 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -927,6 +925,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "crowdb-common",
  "crowdb-console-shared",
  "crowdb-diskdb-client",
  "crowdb-kv",
@@ -934,6 +933,7 @@ dependencies = [
  "crowdb-protocol",
  "crowdb-rpc-ffi",
  "crowdb-test-harness",
+ "dirs",
  "futures",
  "hex",
  "reqwest",
@@ -943,7 +943,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

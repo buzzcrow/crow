@@ -47,7 +47,17 @@ struct Cli {
 #[allow(clippy::too_many_lines)]
 async fn main() {
     let args = Cli::parse();
-    tracing_subscriber::fmt().init();
+    // Layered logging: INFO+ to rotating file, WARN+ to console.
+    // RUST_LOG overrides both sinks for debugging.
+    let _log_guards = crowdb_common::logging::init_file_and_console_logging_split(
+        "log",
+        "crowdb-chunkdb",
+        crowdb_common::logging::DEFAULT_LOG_MAX_FILE_MB,
+        crowdb_common::logging::DEFAULT_LOG_MAX_FILES,
+        "info",
+        "warn",
+    )
+    .expect("failed to initialize crowdb-chunkdb logging");
 
     let config = load_config(&args);
     info!(config = ?config, "crowdb-chunkdb starting");
