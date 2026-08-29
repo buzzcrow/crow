@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R125** — Bump this line in the same commit when adding a new item.
+**Next R number: R126** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -40,6 +40,35 @@ complexity, and dependency. Before implementation, follow the
   lifetime is kind-dependent; clean is per-service with a hard-to-
   mistake flow; `bench run` is a standalone verb with `--target`;
   prepare uses default put; handles live in named runtime folders.
+  **Phase split:** R124 lands the deploy/prepare/run/teardown
+  lifecycle verbs + read/scan script rewrites; the `bench clean`
+  verb + its new per-node `wipe-user-data` server endpoint are
+  deferred to R125 (the riskiest part — needs a new management
+  endpoint that wipes WAL + engine data while preserving group0
+  sysdata; no such API exists). The write-regression script rewrite
+  (which needs `clean`) is also deferred to R125; until then the
+  write script keeps the redeploy-per-sub-test flow.
+- **[R125](R125-server-wipe-user-data-endpoint.md)** — wipe-user-data
+  management endpoint + bench clean verb — Area: server / console /
+  cli / bench — phase 2 of R124. Adds `POST /stores/:sid/groups/:gid/
+  wipe-user-data` to `crowdb-kv-server` (wipes the group's WAL +
+  engine user data on the receiving node, keeps group0 sysdata +
+  store/group/replica topology intact), a new `WalEngine` wipe/reset
+  primitive + a coordinated `PxLocalReplica` wipe that reuses
+  `KVEngine::clear`, a `crowdb-kv-client` mgmt-client call, and the
+  deferred `bench clean --target <deploy>` CLI verb that invokes the
+  endpoint on every node hosting a replica of the target group then
+  waits for re-elect + healthy. Endpoint name/flow resolved:
+  `wipe-user-data` (single API, no `confirm` token, no two-step
+  challenge) — the deliberately non-trivial name (not a bare
+  `reset`/`wipe`/`clear`) plus per-group path scoping plus per-node
+  invocation is the friction layer against accidental triggering.
+  Completes R124's write-regression flow: `deploy` → (`clean` →
+  `run --workload write`) × N → `teardown`. Depends on R124's
+  `ClusterHandle` (mgmt URLs) + wait-leader/wait-healthy helpers.
+  Open questions: engine+WAL wipe coordination (drop-and-recreate vs.
+  in-place truncate-all); leader step-down before wipe vs. force
+  re-election.
 - **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
   test port prober — Area: cluster / protocol / server —
   `crowdb-protocol/src/ports.rs` already defines base ports + stride +

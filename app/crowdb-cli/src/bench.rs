@@ -8,6 +8,7 @@
 //! latency histograms, and JSON report files written to
 //! `bench-runs/<run-id>.json`.
 
+pub(crate) mod handle;
 pub(crate) mod metrics_flusher;
 pub(crate) mod metrics_log;
 pub(crate) mod report;

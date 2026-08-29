@@ -254,3 +254,342 @@ async fn bench_benchmark_rpc_end_to_end() {
     // RPC echo should have zero errors.
     assert!(stdout.contains("total_errors    : 0"), "stdout={stdout}");
 }
+
+// ── Lifecycle verbs: deploy / prepare / run / teardown ──────────────
+
+/// Unique deploy name for each test run (avoids collisions when tests
+/// share the same working directory).
+fn unique_deploy_name(prefix: &str) -> String {
+    format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    )
+}
+
+/// `bench deploy --name <n> --kind kv --mode mem` then `bench run` then
+/// `bench teardown` — the full lifecycle, end-to-end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_lifecycle_deploy_run_teardown() {
+    let _lock = bench_lock();
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+    if lifecycle::crowdb_kv_server_bin().is_none_or(|p| !p.exists()) {
+        eprintln!("skipping: crowdb-kv-server binary not built");
+        return;
+    }
+
+    let name = unique_deploy_name("life");
+
+    // Deploy.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench", "deploy", "--name", &name, "--kind", "kv", "--mode", "mem",
+        ],
+    );
+    assert_eq!(code, 0, "deploy stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("deployed cluster"), "stdout={stdout}");
+
+    // Run a quick read workload.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            &name,
+            "--workload",
+            "read",
+            "--duration-secs",
+            "1",
+            "--loader-num",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "32",
+        ],
+    );
+    assert_eq!(code, 0, "run stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("report (json):"), "stdout={stdout}");
+
+    // Teardown.
+    let (code, stdout, stderr) = run(&cli, "127.0.0.1", 0, &["bench", "teardown", "--target", &name]);
+    assert_eq!(code, 0, "teardown stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("torn down"), "stdout={stdout}");
+
+    // Teardown again — idempotent.
+    let (code, stdout, stderr) = run(&cli, "127.0.0.1", 0, &["bench", "teardown", "--target", &name]);
+    assert_eq!(code, 0, "teardown2 stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("already torn down"), "stdout={stdout}");
+}
+
+/// `bench deploy` + `bench prepare` + `bench run` — pre-populate then
+/// read with verification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_lifecycle_deploy_prepare_run() {
+    let _lock = bench_lock();
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+    if lifecycle::crowdb_kv_server_bin().is_none_or(|p| !p.exists()) {
+        eprintln!("skipping: crowdb-kv-server binary not built");
+        return;
+    }
+
+    let name = unique_deploy_name("prep");
+
+    // Deploy.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench", "deploy", "--name", &name, "--kind", "kv", "--mode", "mem",
+        ],
+    );
+    assert_eq!(code, 0, "deploy stdout={stdout}\nstderr={stderr}");
+
+    // Prepare 100 keys.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "prepare",
+            "--target",
+            &name,
+            "--keys",
+            "100",
+            "--value-size",
+            "32",
+        ],
+    );
+    assert_eq!(code, 0, "prepare stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("prepared 100 keys"), "stdout={stdout}");
+
+    // Run a read workload with verification.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            &name,
+            "--workload",
+            "read",
+            "--duration-secs",
+            "1",
+            "--loader-num",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "32",
+            "--verify-bytes",
+            "8",
+        ],
+    );
+    assert_eq!(code, 0, "run stdout={stdout}\nstderr={stderr}");
+
+    // Teardown.
+    let _ = run(&cli, "127.0.0.1", 0, &["bench", "teardown", "--target", &name]);
+}
+
+/// Multiple `bench run` invocations against the same deploy — the
+/// cluster stays running between runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_lifecycle_multiple_runs_same_deploy() {
+    let _lock = bench_lock();
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+    if lifecycle::crowdb_kv_server_bin().is_none_or(|p| !p.exists()) {
+        eprintln!("skipping: crowdb-kv-server binary not built");
+        return;
+    }
+
+    let name = unique_deploy_name("multi");
+
+    // Deploy.
+    let (code, _, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench", "deploy", "--name", &name, "--kind", "kv", "--mode", "mem",
+        ],
+    );
+    assert_eq!(code, 0, "deploy stderr={stderr}");
+
+    // First run (write).
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            &name,
+            "--workload",
+            "write",
+            "--duration-secs",
+            "1",
+            "--loader-num",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "32",
+        ],
+    );
+    assert_eq!(code, 0, "run1 stdout={stdout}\nstderr={stderr}");
+
+    // Second run (read) — cluster should still be running.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            &name,
+            "--workload",
+            "read",
+            "--duration-secs",
+            "1",
+            "--loader-num",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "32",
+        ],
+    );
+    assert_eq!(code, 0, "run2 stdout={stdout}\nstderr={stderr}");
+
+    let _ = run(&cli, "127.0.0.1", 0, &["bench", "teardown", "--target", &name]);
+}
+
+/// `bench run` on a nonexistent target exits 1 with a helpful error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_run_nonexistent_target() {
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            "nonexistent-deploy-xyz",
+            "--workload",
+            "read",
+            "--duration-secs",
+            "1",
+        ],
+    );
+    assert_ne!(code, 0, "should fail stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stderr.contains("not found") || stdout.contains("not found"),
+        "stderr={stderr}\nstdout={stdout}"
+    );
+}
+
+/// `bench deploy` with an existing name exits 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_deploy_existing_name() {
+    let _lock = bench_lock();
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+    if lifecycle::crowdb_kv_server_bin().is_none_or(|p| !p.exists()) {
+        eprintln!("skipping: crowdb-kv-server binary not built");
+        return;
+    }
+
+    let name = unique_deploy_name("dup");
+
+    // First deploy succeeds.
+    let (code, _, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench", "deploy", "--name", &name, "--kind", "kv", "--mode", "mem",
+        ],
+    );
+    assert_eq!(code, 0, "first deploy stderr={stderr}");
+
+    // Second deploy with same name fails.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench", "deploy", "--name", &name, "--kind", "kv", "--mode", "mem",
+        ],
+    );
+    assert_ne!(code, 0, "should fail stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stderr.contains("already exists") || stdout.contains("already exists"),
+        "stderr={stderr}\nstdout={stdout}"
+    );
+
+    let _ = run(&cli, "127.0.0.1", 0, &["bench", "teardown", "--target", &name]);
+}
+
+/// `bench deploy --kind chunk` returns "not yet implemented".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_deploy_chunk_not_implemented() {
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &["bench", "deploy", "--name", "chunk-test", "--kind", "chunk"],
+    );
+    assert_ne!(code, 0, "should fail stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stderr.contains("not yet implemented") || stdout.contains("not yet implemented"),
+        "stderr={stderr}\nstdout={stdout}"
+    );
+}

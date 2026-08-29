@@ -1,13 +1,21 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
+mod bench_deploy;
 mod bench_kv;
+mod bench_prepare;
 mod bench_report;
 mod bench_rpc;
+mod bench_run;
+mod bench_teardown;
 
+pub(crate) use bench_deploy::bench_deploy;
 pub(crate) use bench_kv::bench_benchmark_kv;
+pub(crate) use bench_prepare::bench_prepare;
 pub(crate) use bench_report::{bench_compare, bench_report};
 pub(crate) use bench_rpc::bench_benchmark_rpc;
+pub(crate) use bench_run::bench_run;
+pub(crate) use bench_teardown::bench_teardown;
 
 use clap::{Args, Subcommand};
 use std::process::ExitCode;
@@ -21,6 +29,14 @@ pub enum BenchSub {
     Kv(Box<KvArgs>),
     /// Run an RPC echo benchmark (2-process transport throughput, no KV layer).
     Rpc(Box<RpcArgs>),
+    /// Deploy a named cluster and leave it running for `bench run` to attach to.
+    Deploy(Box<DeployArgs>),
+    /// Pre-populate keys into a previously-deployed cluster.
+    Prepare(Box<PrepareArgs>),
+    /// Run a workload against a previously-deployed cluster.
+    Run(Box<RunArgs>),
+    /// Stop a previously-deployed cluster and remove its handle.
+    Teardown(Box<TeardownArgs>),
     /// Re-render a previously-saved report.
     Report {
         /// Run ID of the report to re-render.
@@ -278,18 +294,183 @@ pub struct BenchArgs {
     pub sub: Option<BenchSub>,
 }
 
+/// Arguments for `crowdb-cli bench deploy`.
+#[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct DeployArgs {
+    /// Deploy name — used as the `runtime/<name>/` folder and the
+    /// `--target` value for `bench run`/`prepare`/`teardown`.
+    #[arg(long)]
+    pub name: String,
+
+    /// Deploy kind: `kv` (default, 3-node Paxos cluster), `rpc`
+    /// (2-process fb server), `chunk`, or `storage` (not yet
+    /// implemented).
+    #[arg(long, default_value = "kv")]
+    pub kind: String,
+
+    /// Spawn a standalone `crowdb-web` process (survives CLI exit) so
+    /// the operator can use the UI. Default: headless (embedded
+    /// console-web, detached after deploy).
+    #[arg(long, default_value_t = false)]
+    pub web: bool,
+
+    // ── KV deploy tunables (same semantics as `bench kv`) ──────────
+    #[arg(short = 'M', long, default_value = "mem")]
+    pub mode: String,
+    #[arg(long, default_value_t = 32)]
+    pub max_inflight: usize,
+    #[arg(short = 'm', long, default_value_t = 5)]
+    pub metrics_interval: u64,
+    #[arg(short = 'N', long)]
+    pub node_config: Option<String>,
+    #[arg(short = 'C', long)]
+    pub coalesce_max_keys: Option<usize>,
+    #[arg(short = 'D', long)]
+    pub coalesce_drain_threshold: Option<usize>,
+    #[arg(long, default_value_t = 2)]
+    pub peer_pool_size: usize,
+    #[arg(short = 'n', long, default_value_t = false)]
+    pub enable_nagle: bool,
+    #[arg(short = 'q', long, default_value_t = false)]
+    pub quickack: bool,
+    #[arg(short = 'E', long, default_value_t = false)]
+    pub event_write: bool,
+    #[arg(short = 'S', long, default_value_t = 4096)]
+    pub send_queue_capacity: u32,
+}
+
+/// Arguments for `crowdb-cli bench prepare`.
+#[derive(Args, Debug)]
+pub struct PrepareArgs {
+    /// Deploy name (from `bench deploy --name`).
+    #[arg(long)]
+    pub target: String,
+
+    /// Number of keys to write (sequential `put` of `k{id:020}` for
+    /// `id in 0..keys`).
+    #[arg(short = 'P', long)]
+    pub keys: u64,
+
+    /// Value size in bytes (default 512).
+    #[arg(short = 's', long, default_value_t = 512)]
+    pub value_size: usize,
+
+    /// Mixed value-size distribution, as `size:percent,...` (e.g.
+    /// `64:70,1024:20,16384:10`). Overrides `--value-size` per key.
+    #[arg(short = 'x', long)]
+    pub value_size_mix: Option<String>,
+}
+
+/// Arguments for `crowdb-cli bench run`.
+#[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct RunArgs {
+    /// Deploy name (from `bench deploy --name`).
+    #[arg(long)]
+    pub target: String,
+
+    /// Workload kind: `read | write | list | mix`.
+    #[arg(short = 'w', long, default_value = "mix")]
+    pub workload: String,
+
+    /// Test duration in seconds.
+    #[arg(short = 'd', long, default_value_t = 20)]
+    pub duration_secs: u64,
+
+    /// Number of worker threads.
+    #[arg(short = 'L', long, default_value_t = 8)]
+    pub loader_num: u32,
+
+    #[arg(short = 'c', long, default_value_t = 4)]
+    pub connections: u32,
+
+    #[arg(short = 'k', long, default_value_t = 1_000_000)]
+    pub key_space: u64,
+
+    #[arg(short = 's', long, default_value_t = 512)]
+    pub value_size: usize,
+
+    /// Mixed value-size distribution for pre-population (see
+    /// `bench kv --value-size-mix`). Only used if `--pre-populate` is
+    /// set.
+    #[arg(short = 'x', long)]
+    pub value_size_mix: Option<String>,
+
+    /// Optional explicit run id; defaults to an auto-incremented
+    /// sequence number.
+    #[arg(short = 'r', long)]
+    pub run_id: Option<String>,
+
+    /// Read mode for read ops: `linearizable` (default) or `minslot`.
+    #[arg(short = 'R', long, default_value = "linearizable")]
+    pub read_mode: String,
+
+    /// `min_slot` policy for `MinSlot` reads: `auto`, `zero`, or a
+    /// fixed slot number.
+    #[arg(long, default_value = "auto")]
+    pub min_slot: String,
+
+    /// Pre-population count: write `<count>` keys before measurement.
+    /// Default 0 (use `bench prepare` for explicit pre-population).
+    #[arg(short = 'P', long)]
+    pub pre_populate: Option<u64>,
+
+    /// Number of random bytes to spot-check per `Found` read. Default 8.
+    #[arg(short = 'v', long, default_value_t = 8)]
+    pub verify_bytes: usize,
+
+    /// `MinSlot` read-endpoint selection policy: `leader`,
+    /// `any-replica`, `least-connections`, or `latency`.
+    #[arg(short = 'e', long)]
+    pub read_endpoint_policy: Option<String>,
+
+    /// Scan limit for `--workload list`. Default 1.
+    #[arg(short = 'l', long, default_value_t = 1)]
+    pub scan_limit: u32,
+
+    /// Scan prefix for `--workload list`. Empty = whole keyspace.
+    #[arg(long, default_value = "")]
+    pub scan_prefix: String,
+
+    /// Scan exclusive lower bound for `--workload list`.
+    #[arg(long, default_value = "")]
+    pub scan_start_after: String,
+
+    /// After pre-population, drain L0 into L1 on every node before
+    /// measurement.
+    #[arg(short = 'f', long, default_value_t = false)]
+    pub flush_after_prepopulate: bool,
+}
+
+/// Arguments for `crowdb-cli bench teardown`.
+#[derive(Args, Debug)]
+pub struct TeardownArgs {
+    /// Deploy name (from `bench deploy --name`).
+    #[arg(long)]
+    pub target: String,
+}
+
 pub(crate) async fn run_bench_verb(cli: &Cli, args: BenchArgs) -> ExitCode {
     match args.sub {
         Some(BenchSub::Kv(args)) => bench_benchmark_kv(*args, cli.json).await,
         Some(BenchSub::Rpc(args)) => bench_benchmark_rpc(*args, cli.json).await,
+        Some(BenchSub::Deploy(args)) => bench_deploy(*args, cli.json).await,
+        Some(BenchSub::Prepare(args)) => bench_prepare(*args, cli.json).await,
+        Some(BenchSub::Run(args)) => bench_run(*args, cli.json).await,
+        Some(BenchSub::Teardown(args)) => bench_teardown(*args, cli.json).await,
         Some(BenchSub::Report { run_id }) => bench_report(&run_id, cli.json),
         Some(BenchSub::Compare { run_id_1, run_id_2 }) => bench_compare(&run_id_1, &run_id_2, cli.json),
         None => {
-            eprintln!("usage: crowdb-cli bench <kv|rpc|report|compare>");
-            eprintln!("  kv      Run a KV benchmark (3-node cluster)");
-            eprintln!("  rpc     Run an RPC echo benchmark (transport throughput)");
-            eprintln!("  report  Re-render a previously-saved report");
-            eprintln!("  compare Compare two previously-saved reports");
+            eprintln!("usage: crowdb-cli bench <kv|rpc|deploy|prepare|run|teardown|report|compare>");
+            eprintln!("  kv        Run a KV benchmark (3-node cluster, all-in-one)");
+            eprintln!("  rpc       Run an RPC echo benchmark (transport throughput)");
+            eprintln!("  deploy    Deploy a named cluster and leave it running");
+            eprintln!("  prepare   Pre-populate keys into a deployed cluster");
+            eprintln!("  run       Run a workload against a deployed cluster");
+            eprintln!("  teardown  Stop a deployed cluster and remove its handle");
+            eprintln!("  report    Re-render a previously-saved report");
+            eprintln!("  compare   Compare two previously-saved reports");
             ExitCode::from(1)
         }
     }

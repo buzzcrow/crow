@@ -127,8 +127,10 @@ tests run headless; rpc uses an in-process server regardless.
 
 **One-line summary:** Split `bench kv`'s deploy/prepare/run/cleanup
 into standalone, script-orchestrated CLI verbs with named runtime
-folders, `bench run --target <name>`, a wipe-data-keep-group0 clean
-verb, and multi-kind deploy dispatch with `--web` opt-in console-web.
+folders, `bench run --target <name>`, and multi-kind deploy dispatch
+with `--web` opt-in console-web. The wipe-data-keep-group0 clean verb
+(item 5) and the write-regression script rewrite are deferred to
+**[R125](R125-server-wipe-user-data-endpoint.md)** (phase 2).
 
 **Numbered work items**
 
@@ -180,37 +182,24 @@ verb, and multi-kind deploy dispatch with `--web` opt-in console-web.
    attach mode that bypasses `target.provision`/`pre_populate`/
    `cleanup`. The legacy monolithic `bench kv` (no `--target`) is
    kept as the all-in-one path for quick one-shot benches.
-5. **`bench clean` verb — wipe data, keep group0**
-   (`commands/bench.rs`, new per-service management API endpoint in
-   `crowdb-kv-server`, client call in `crowdb-kv-client`/console) — wipes
-   WAL + engine data on each node but preserves group0 sysdata so
-   the cluster stays wired (store/group/replicas intact) and only
-   user data is gone. Implemented as a new per-node management API
-   endpoint invoked per node via the handle's mgmt URLs, then a wait
-   for the cluster to re-elect / re-become healthy. The endpoint name
-   and invocation flow are deliberately non-trivial (not a bare
-   `reset`/`wipe`) so it cannot be triggered accidentally — exact
-   name/flow TBD in design, but it must require an explicit,
-   hard-to-mistake action. Must be consistent with
-   `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules — if
-   that doc already defines a wipe API, wrap it instead of adding a
-   new one.
-6. **`bench teardown` verb** (`bench/bench_kv.rs`) — extracts
+5. **`bench teardown` verb** (`bench/bench_kv.rs`) — extracts
    `KvTarget::cleanup` (stop every node server + abort console task
    for kv/chunk/storage; stop in-process server for rpc) into a
    standalone verb that reads the handle (`--target <name>`).
    Idempotent; safe to call after a partial/crashed deploy (orphan
    cleanup). Leaves `runtime/<name>/` on disk for post-mortem logs.
-7. **Regression script rewrite** (`tools/bench-kv-{read,scan,write}-
-   regression.sh`) — restructure all three: read/scan become
+6. **Regression script rewrite — read/scan only**
+   (`tools/bench-kv-{read,scan}-regression.sh`) — restructure both:
    `deploy --name <run> --kind kv` → `prepare --target <run>
-   --keys N` → `run --target <run>` × N → `teardown --target <run>`;
-   write becomes `deploy` → (`clean --target <run>` → `run --target
-   <run> --workload write`) × N → `teardown`. The `run_bench` shell
-   helper is replaced by a `run_subtest` helper that calls `bench run
-   --target <run>` with the sub-test args. Reference result blocks +
-   headers updated to note the new flow.
-8. **Multi-kind deploy dispatch** (`commands/bench.rs`,
+   --keys N` → `run --target <run>` × N → `teardown --target <run>`.
+   The `run_bench` shell helper is replaced by a `run_subtest`
+   helper that calls `bench run --target <run>` with the sub-test
+   args. Reference result blocks + headers updated to note the new
+   flow. The write-regression script rewrite (which needs the
+   `bench clean` verb) is deferred to **[R125](R125-server-wipe-
+   user-data-endpoint.md)**; until R125 lands, the write script keeps
+   the current redeploy-per-sub-test flow.
+7. **Multi-kind deploy dispatch** (`commands/bench.rs`,
    `bench/target.rs`) — `--kind` routes to the matching
    `BenchTarget`'s provision. `KvTarget` is the first concrete kind
    (3-node cluster; console-web only with `--web`); `RpcTarget`
@@ -220,29 +209,36 @@ verb, and multi-kind deploy dispatch with `--web` opt-in console-web.
    This future-proofs the deploy verb so rpc/chunk/storage clusters
    reuse the same lifecycle verbs.
 
+The `bench clean` verb (wipe data, keep group0) and its new per-node
+`wipe-user-data` server endpoint are deferred to
+**[R125](R125-server-wipe-user-data-endpoint.md)** — see Open Questions
+§1 for the split rationale. R124's scope is the lifecycle verbs that
+work without a clean primitive (deploy/prepare/run/teardown + read/scan
+script rewrites); R125 completes the write-regression flow.
+
 **Flow diagram**
 
 ```
-read/scan regression                       write regression
------------------------                   ----------------------
-bench deploy --name R --kind kv           bench deploy --name W --kind kv
-        |                                          |
-   bench prepare --target R                (for each sub-test:)
-   --keys N                                  bench clean --target W
-        |                                          |
-   (for each sub-test:)                      bench run --target W
-        bench run --target R                       --workload write
-        |                                          |
-   bench teardown --target R               (loop)
-                                           bench teardown --target W
+read/scan regression (R124)
+-----------------------
+bench deploy --name R --kind kv
+        |
+   bench prepare --target R --keys N
+        |
+   (for each sub-test:)
+        bench run --target R
+        |
+   bench teardown --target R
 
 runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
+
+write regression (R125): deploy → (clean → run --workload write) × N → teardown
 ```
 
 **Edge cases at a glance**
 
 - Handle stale (cluster already torn down or crashed) → `run`/
-  `prepare`/`clean` detect unreachable console/leader, error with a
+  `prepare` detect unreachable console/leader, error with a
   clear "cluster `<name>` not running — redeploy" message; `teardown`
   is idempotent and best-effort cleans orphans.
 - `--target <name>` not found (no `runtime/<name>/`) → clear error
@@ -250,16 +246,12 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
 - Crash mid-deploy (some nodes up, some not) → `teardown` walks the
   handle's pids + console task and SIGTERMs survivors; a `--force`
   flag reaps orphans not in the handle.
-- `clean` called while a `run` is in flight → `clean` rejects with
-  "cluster busy" (detect via active-connection probe) — clean is a
-  between-sub-test primitive, not concurrent with measurement.
-  Combined with the deliberately non-trivial wipe endpoint name/flow,
-  this prevents accidental data loss.
 - Attach to wrong cluster kind → handle carries `kind`; `run`
   validates it matches the requested workload's expected kind.
 - Pre-populate on an already-populated cluster → `put` overwrites
   (default behavior); multiple `prepare` rounds accumulate a larger
-  dataset; `clean` resets when a fresh dataset is needed.
+  dataset. (Resetting to a fresh dataset is the `bench clean` verb,
+  deferred to R125.)
 - Console-web lifetime → only started when `--web` is passed to
   `deploy`, must outlive all subsequent verbs; see Decisions §1 for
   the lifetime model. Without `--web`, all kinds run headless.
@@ -269,28 +261,32 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
 
 **Dependencies**
 
-- None hard. The clean/reset verb should align with
-  `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules.
-  **Confirmed:** that doc does NOT define a "wipe data, keep group0"
-  API — its reset (`http_internal_reset`) tears down hardware
-  hierarchy + KV-cluster topology, and its group/store cleanup
-  removes the group/store from `node_config` entirely. So the clean
-  verb needs a **new** per-node management endpoint that wipes WAL +
-  engine data while leaving group0 sysdata intact. R118 (unify port
-  usage + port prober) is tangentially related — the bench's
-  `unique_test_port()` is the stopgap R118 replaces; no block.
+- None hard for R124's scope (lifecycle verbs). The clean/reset verb
+  and its new per-node server endpoint are deferred to
+  **[R125](R125-server-wipe-user-data-endpoint.md)**, which carries
+  the sysdata-lifecycle alignment work: that doc does NOT define a
+  "wipe data, keep group0" API — its reset (`http_internal_reset`)
+  tears down hardware hierarchy + KV-cluster topology, and its
+  group/store cleanup removes the group/store from `node_config`
+  entirely — so R125 needs a **new** per-node management endpoint
+  that wipes WAL + engine data while leaving group0 sysdata intact.
+  R118 (unify port usage + port prober) is tangentially related —
+  the bench's `unique_test_port()` is the stopgap R118 replaces; no
+  block.
 - Reusable groundwork already in place: the `BenchTarget` trait
   (`app/crowdb-cli/src/bench/target.rs`) with `provision` /
   `pre_populate` / `cleanup` / `run_workers` methods, and concrete
   `KvTarget` (`bench/targets/kv.rs`) + `RpcTarget`
-  (`bench/targets/rpc.rs`) implementations. R124's work is mostly
-  CLI orchestration, persistent handle, and the new clean endpoint —
-  the target abstractions are ready.
+  (`bench/targets/rpc.rs`) implementations. R124's work is CLI
+  orchestration + persistent handle — the target abstractions are
+  ready.
 - `.gitignore` already has `/runtime-data/` but not `/runtime/`; the
   named-folder work item must add `/runtime/` to `.gitignore`.
-- No item depends on R124 yet. Future rpc/chunk/storage bench
-  targets will reuse the deploy/prepare/run/teardown verbs R124
-  establishes.
+- **R125 depends on R124** (the `bench clean` verb reads mgmt URLs
+  from R124's `ClusterHandle` and reuses R124's wait-leader /
+  wait-healthy helpers). No other item depends on R124 yet. Future
+  rpc/chunk/storage bench targets will reuse the deploy/prepare/run/
+  teardown verbs R124 establishes.
 
 **Acceptance**
 
@@ -320,21 +316,10 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
 - `bench run --target nonexistent` errors with a clear message
   listing existing deploy names under `runtime/`. Integration test.
 
-**Clean (wipe data, keep group0):**
-- `crowdb-cli bench clean --target t1` against a deployed+populated
-  cluster wipes user data so a subsequent `bench run --target t1
-  --workload read` returns 0 found keys, **but** the store/group/
-  replica topology is intact (a `bench run --target t1 --workload
-  write` succeeds without re-wiring, and the leader endpoint from
-  the handle still serves). Integration test.
-- `bench clean` preserves group0 sysdata — cluster topology records
-  (`design-crowdb-kv-sysdata-lifecycle.md`) are unchanged after clean;
-  verify via the console topology API. Integration test.
-- `bench clean --target t1` while a `bench run` is in flight rejects
-  with a "cluster busy" error and does not wipe. Integration test.
-- The wipe endpoint name/flow is deliberately non-trivial (not a
-  bare `reset`/`wipe`) — verify the endpoint requires an explicit,
-  hard-to-mistake invocation. Integration test.
+**Clean (wipe data, keep group0):** deferred to
+**[R125](R125-server-wipe-user-data-endpoint.md)** — see Open Questions
+§1. The `bench clean` verb, the `wipe-user-data` server endpoint, and
+their acceptance bullets live in R125.
 
 **Multi-kind dispatch:**
 - `crowdb-cli bench deploy --name r1 --kind rpc` provisions the RPC
@@ -348,19 +333,19 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
   `kind` does not match the requested workload with a clear error.
   Integration test.
 
-**Regression scripts:**
+**Regression scripts (read/scan — R124 scope):**
 - `tools/bench-kv-read-regression.sh` rewritten to `deploy --name R
   --kind kv` → `prepare --target R --keys N` → `run --target R` × N
   → `teardown --target R`; produces the same result columns as today
   and 0 errors across all sub-tests. Manual run.
 - `tools/bench-kv-scan-regression.sh` rewritten the same way; 0
   errors, including the `largeval_16k` R67 sentinel. Manual run.
-- `tools/bench-kv-write-regression.sh` rewritten to `deploy --name W
-  --kind kv` → (`clean --target W` → `run --target W --workload
-  write`) × N → `teardown --target W`; 0 errors across all
-  sub-tests. Manual run.
 - Rewritten read/scan scripts support a `--keys` env override so a
   10M-key run is practical (amortized pre-pop). Manual run.
+- `tools/bench-kv-write-regression.sh` rewrite is deferred to
+  **[R125](R125-server-wipe-user-data-endpoint.md)** (it needs the
+  `bench clean` verb); until R125 lands, the write script keeps the
+  current redeploy-per-sub-test flow. Manual run.
 
 **Lint:**
 - `pixi run cargo fmt --all -- --check` passes.
@@ -382,18 +367,21 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
    invocations (daemonize the deploy process, or have `deploy` spawn +
    detach a console-web child whose pid is recorded in the handle) is a
    design-draft detail, not a backlog-level decision.
-2. **Clean/wipe — per-service, deliberately non-trivial name/flow.**
-   The wipe is a per-service management API endpoint (one per
-   service kind, since each service owns its own data layout), not
-   a single generic reset. The endpoint name and invocation flow
-   are deliberately complex so it cannot be triggered accidentally
-   — exact name/flow TBD in the design draft, but it must require
-   an explicit, hard-to-mistake action (not a bare `reset`/`wipe`).
-   Must still be consistent with
-   `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules; if
-   that doc already defines a wipe API, the per-service endpoints
-   wrap it rather than duplicate it. Open sub-question: read that
-   doc's reset section during design to confirm no duplication.
+2. **Clean/wipe — deferred to R125; name/flow resolved.** The wipe
+   is a per-service management API endpoint (one per service kind,
+   since each service owns its own data layout), not a single generic
+   reset. **Deferred to [R125](R125-server-wipe-user-data-endpoint.md)**
+   along with the `bench clean` verb (Open Questions §1). The endpoint
+   name/flow is now resolved (Open Questions §2):
+   `POST /stores/:sid/groups/:gid/wipe-user-data`, single API — no
+   `confirm=<token>` query param, no two-step challenge-response. The
+   deliberately non-trivial name/flow is satisfied by the name itself
+   (`wipe-user-data`, not a bare `reset`/`wipe`/`clear`) plus
+   per-group path scoping plus per-node invocation by the `bench
+   clean` verb. R125 must still confirm consistency with
+   `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules (its
+   §8 reset is the complementary primitive — destroys group0, leaves
+   user data; `wipe-user-data` preserves group0, destroys user data).
 3. **`bench run` — standalone verb with `--target <deploy-name>`.**
    A standalone `bench run` verb (not an `--attach` flag on
    `bench kv`). Each deploy has a name (`--name <deploy-name>` on
@@ -426,28 +414,33 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
 
 **Open Questions**
 
-1. **Split R124 into two phases?** — the deploy/prepare/run/teardown
-   lifecycle verbs (items 1-4, 6-8) are moderate effort, re-use the
-   existing `BenchTarget` trait, and deliver immediate value
-   (amortized deploy + pre-pop, larger datasets, parallel sub-tests).
-   The clean verb (item 5) is the riskiest part: it needs a **new**
-   per-node server management endpoint that wipes WAL + engine data
-   while preserving group0 sysdata — no such API exists in the
-   sysdata lifecycle design or the server. Candidate split: (a) land
-   the lifecycle verbs first (high value, moderate effort), then
-   design + add the clean endpoint as a follow-up; or (b) do it all
-   in one requirement. Trade-off: incremental delivery vs. completing
-   the write-regression flow (which needs clean) in one pass. Needs a
-   decision on whether the write regression can wait for the clean
-   endpoint or should keep the current redeploy-per-sub-test flow
-   temporarily.
+1. **Split R124 into two phases?** — **Resolved: yes, split.** R124
+   lands the deploy/prepare/run/teardown lifecycle verbs (items 1-4,
+   6-8) first — moderate effort, re-use the existing `BenchTarget`
+   trait, deliver immediate value (amortized deploy + pre-pop, larger
+   datasets, parallel sub-tests). The clean verb (item 5) is the
+   riskiest part: it needs a **new** per-node server management
+   endpoint that wipes WAL + engine data while preserving group0
+   sysdata — no such API exists in the sysdata lifecycle design or
+   the server. The clean verb + its server endpoint are deferred to
+   **[R125](R125-server-wipe-user-data-endpoint.md)** (phase 2), which
+   depends on R124's `ClusterHandle` (mgmt URLs) and lifecycle verbs.
+   The write-regression flow keeps the current redeploy-per-sub-test
+   flow temporarily until R125 lands; the read/scan regressions
+   benefit from R124 immediately. R124's item 5 and the write-script
+   rewrite (item 7, write portion) are removed from R124's scope and
+   moved to R125.
 
-2. **Clean endpoint name/flow — concrete decision needed.** — the
-   doc says "deliberately non-trivial name/flow" but does not specify
-   it. Candidates: `POST /stores/:sid/groups/:gid/wipe-user-data`
-   with a required `confirm=<token>` query param (token derived from
-   the deploy name); or a two-step `POST .../clean-request` →
-   `POST .../clean-confirm` challenge-response. The design draft must
-   pick one — the backlog's "TBD in design" is acceptable but the
-   implementer needs a concrete name to build against. Needs a
-   decision on the exact endpoint shape before implementation.
+2. **Clean endpoint name/flow — concrete decision needed.** —
+   **Resolved: `POST /stores/:sid/groups/:gid/wipe-user-data`, single
+   API.** No `confirm=<token>` query param, no two-step
+   challenge-response. The deliberately non-trivial name/flow (R124
+   Decisions §2) is satisfied by the name itself: `wipe-user-data`
+   (not a bare `reset`/`wipe`/`clear`), scoped under the full
+   `/stores/:sid/groups/:gid/` path so it is unambiguously a per-group
+   user-data operation, not a cluster-level reset. The `bench clean`
+   CLI verb invokes it on every node hosting a replica of the target
+   group (per-node invocation is itself a friction layer against
+   accidental triggering) and logs a clear banner before acting.
+   Concrete name + flow are now specified in R125; R124's Decisions §2
+   "TBD in design" is superseded by this decision.

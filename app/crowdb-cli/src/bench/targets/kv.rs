@@ -391,6 +391,33 @@ impl BenchFixture {
         self.console_task.abort();
     }
 
+    /// Detach the fixture: abort the embedded console-web task but
+    /// leave the deployed `crowdb-kv-server` processes running. Their
+    /// pids are recorded elsewhere (in a `ClusterHandle`). After
+    /// detach, `Drop` is a no-op (`stopped = true`) and `cleanup` is
+    /// a no-op. Used by `bench deploy` to persist a cluster across
+    /// CLI invocations.
+    pub fn detach(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        self.console_task.abort();
+    }
+
+    /// OS pids of the deployed `crowdb-kv-server` processes, in deploy
+    /// order (index-aligned with `node_ids()`).
+    #[must_use]
+    pub fn node_pids(&self) -> &[u32] {
+        &self.node_pids
+    }
+
+    /// Crowdb-rpc URLs of the deployed servers, in deploy order.
+    #[must_use]
+    pub fn node_rpc_urls(&self) -> &[String] {
+        &self.node_rpc_urls
+    }
+
     fn node_workspace(&self, node_id: u64) -> PathBuf {
         self.workspace_dir.join(format!("N-{node_id}"))
     }
@@ -932,5 +959,243 @@ impl KvBenchClient {
                 Err(_) => OpOutcome::default(),
             },
         }
+    }
+}
+
+// ── AttachedKvTarget: BenchTarget impl for `bench run` ──────────────
+
+use crate::bench::handle::ClusterHandle;
+
+/// KV bench target that attaches to a previously-deployed cluster (via
+/// `bench deploy`). Provision and cleanup are no-ops — the cluster is
+/// already running and `bench teardown` handles shutdown. The client is
+/// built from the handle's leader endpoint + tunables.
+pub(crate) struct AttachedKvTarget {
+    handle: ClusterHandle,
+    client: Option<Arc<CrowdbClient>>,
+}
+
+impl AttachedKvTarget {
+    pub(crate) fn new(handle: ClusterHandle) -> Self {
+        Self { handle, client: None }
+    }
+
+    pub(crate) fn handle_store_id(&self) -> u64 {
+        self.handle.store_id
+    }
+    pub(crate) fn handle_group_id(&self) -> u64 {
+        self.handle.group_id
+    }
+    pub(crate) fn handle_mode(&self) -> &str {
+        &self.handle.mode
+    }
+
+    /// Workspace per-node dir: `<workspace>/N-<node_id>/`.
+    fn node_workspace(&self, node_id: u64) -> PathBuf {
+        self.handle.workspace_dir.join(format!("N-{node_id}"))
+    }
+
+    /// Read a node's metrics log file (same logic as `BenchFixture`).
+    fn read_node_metrics_log(&self, node_id: u64, pid: u32) -> Option<String> {
+        let log_dir = self.node_workspace(node_id).join("log");
+        let suffix = format!("-{pid}.log");
+        let entries = std::fs::read_dir(log_dir).ok()?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.contains("-metrics-") && name.ends_with(suffix.as_str()) {
+                return std::fs::read_to_string(entry.path()).ok();
+            }
+        }
+        None
+    }
+
+    /// Copy every node's `log/` directory into `run_dir/node-<id>/`.
+    pub(crate) fn collect_logs(&self, run_dir: &Path) -> std::io::Result<()> {
+        for node_id in &self.handle.node_ids {
+            let src = self.node_workspace(*node_id).join("log");
+            let dst = run_dir.join(format!("node-{node_id}"));
+            std::fs::create_dir_all(&dst)?;
+            let Ok(entries) = std::fs::read_dir(&src) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry.path().is_file() {
+                    let _ = std::fs::copy(entry.path(), dst.join(entry.file_name()));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BenchTarget for AttachedKvTarget {
+    type Client = KvBenchClient;
+
+    fn label(&self) -> &'static str {
+        "kv"
+    }
+
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
+    async fn provision(&mut self, cfg: &BenchConfig) -> Result<()> {
+        let topology_seed = cfg.topology_seed.clone().or_else(|| {
+            if cfg.read_endpoint_policy.is_distributed() {
+                self.handle.node_mgmt_urls.first().cloned()
+            } else {
+                None
+            }
+        });
+
+        let mut client_config = ClientConfig::new(topology_seed.map(|s| vec![s]).unwrap_or_default());
+        client_config.pool_size_per_endpoint = cfg.connections as usize;
+        client_config.read_endpoint_policy = cfg.read_endpoint_policy;
+        client_config.enable_nagle = self.handle.tunables.enable_nagle;
+        client_config.quickack = self.handle.tunables.quickack;
+        client_config.event_write = self.handle.tunables.event_write;
+        client_config.send_queue_capacity = self.handle.tunables.send_queue_capacity;
+        let client = CrowdbClient::new(client_config);
+        client.seed_leader(cfg.store_id, cfg.group_id, self.handle.leader_endpoint.clone());
+        self.client = Some(Arc::new(client));
+        Ok(())
+    }
+
+    #[allow(clippy::unused_async_trait_impl, reason = "trait defines async fn")]
+    async fn build_client(&self) -> Result<KvBenchClient> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Config("attached kv target not provisioned".to_string()))?;
+        Ok(KvBenchClient {
+            client: Arc::clone(client),
+        })
+    }
+
+    async fn pre_populate(&self, _client: &KvBenchClient, cfg: &BenchConfig) -> Result<(u64, u64)> {
+        let Some(count) = cfg.pre_populate.filter(|c| *c > 0) else {
+            return Ok((0, 0));
+        };
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Config("attached kv target not provisioned".to_string()))?;
+        let pop_start = std::time::Instant::now();
+        let mut errors: u64 = 0;
+        for id in 0..count {
+            let key = format_key(id);
+            let vsize = cfg
+                .value_size_mix
+                .as_ref()
+                .map_or(cfg.value_size, |mix| mix.size_for(id));
+            let value = value_for(id, vsize);
+            let mut attempts = 0u32;
+            loop {
+                attempts += 1;
+                match client.put(cfg.store_id, cfg.group_id, &key, &value, None).await {
+                    Ok(_) => break,
+                    Err(ClientError::NotLeader { .. }) if attempts < 8 => {}
+                    Err(_) => {
+                        errors += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        let ms = u64::try_from(pop_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Ok((ms, errors))
+    }
+
+    async fn cleanup(&mut self) {
+        // No-op: the cluster stays running. `bench teardown` handles shutdown.
+    }
+
+    fn spawn_progress(
+        &self,
+        interval: Duration,
+        started: Instant,
+        deadline: Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+    ) -> Option<JoinHandle<()>> {
+        let client = self.client.as_ref()?;
+        Some(spawn_progress_snapshotter(
+            interval,
+            started,
+            deadline,
+            counters,
+            Arc::clone(client),
+        ))
+    }
+
+    fn spawn_metrics_flusher(
+        &self,
+        started: Instant,
+        deadline: Instant,
+        counters: Vec<Arc<WorkerCounters>>,
+        path: PathBuf,
+    ) -> Option<JoinHandle<()>> {
+        let client = self.client.as_ref()?;
+        Some(spawn_metrics_flusher(
+            Duration::from_secs(5),
+            started,
+            deadline,
+            counters,
+            Arc::clone(client),
+            path,
+        ))
+    }
+
+    fn client_metrics_snapshot(&self) -> crowdb_kv_client::ClientMetricsSnapshot {
+        self.client
+            .as_ref()
+            .map_or_else(crowdb_kv_client::ClientMetricsSnapshot::default, |c| c.metrics())
+    }
+
+    fn client_transport_stats(&self) -> super::super::report::TransportStatsSnapshot {
+        self.client.as_ref().and_then(|c| c.transport_stats()).map_or(
+            super::super::report::TransportStatsSnapshot::default(),
+            |s| super::super::report::TransportStatsSnapshot {
+                submit_to_writev_count: s.submit_to_writev.count,
+                submit_to_writev_avg_us: s
+                    .submit_to_writev
+                    .sum_ns
+                    .checked_div(s.submit_to_writev.count)
+                    .unwrap_or(0)
+                    / 1000,
+                send_queue_rejects: s.send_queue_rejects,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn node_ids(&self) -> Vec<u64> {
+        self.handle.node_ids.clone()
+    }
+
+    fn workspace_dir(&self) -> PathBuf {
+        self.handle.workspace_dir.clone()
+    }
+
+    fn endpoint_to_node_map(&self) -> std::collections::HashMap<String, String> {
+        self.handle
+            .node_ids
+            .iter()
+            .zip(self.handle.node_rpc_urls.iter())
+            .map(|(nid, url)| (url.clone(), nid.to_string()))
+            .collect()
+    }
+
+    fn collect_artifacts(&mut self) -> (ServerMetrics, usize) {
+        let per_node: Vec<ServerMetrics> = self
+            .handle
+            .node_ids
+            .iter()
+            .zip(&self.handle.node_pids)
+            .filter_map(|(node_id, pid)| self.read_node_metrics_log(*node_id, *pid))
+            .map(|content| parse_metrics_log(&content))
+            .collect();
+        (aggregate_server_metrics(&per_node), 0)
+    }
+
+    fn flush_mgmt_urls(&self) -> Vec<String> {
+        self.handle.node_mgmt_urls.clone()
     }
 }
