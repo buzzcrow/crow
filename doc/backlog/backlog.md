@@ -15,39 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R124](R124-console-bench-lifecycle-split.md)** — split bench
-  lifecycle into deploy/prepare/run/clean/teardown verbs — Area:
-  console / cli / bench — `bench kv` is monolithic per invocation
-  (provision + pre-pop + run + teardown every call), so the
-  regression sentinels pay deploy + pre-pop overhead on every
-  sub-test (read 11×, scan 14×, write 7×), capping practical dataset
-  size. Split into discrete CLI verbs orchestrated by the script:
-  `bench deploy --name <deploy> --kind kv|rpc|chunk|storage`
-  (multi-kind from the start; rpc needs no console-web, kv/chunk/
-  storage start one), `bench prepare --target <deploy>` (default
-  `put` semantics, multi-round to grow data), `bench run --target
-  <deploy>` (reads all connection info from the deploy folder, no
-  port re-entry), `bench clean --target <deploy>` (per-service wipe
-  endpoint with a deliberately non-trivial name/flow so it can't be
-  triggered accidentally; wipes WAL + engine data, keeps group0
-  sysdata), `bench teardown --target <deploy>`. Each deploy writes
-  metadata + node workspaces + server logs + cli logs under a named
-  `runtime/<deploy-name>/` folder (generalizing `bench-runs/`),
-  co-locating bench and cluster artifacts. Rewrite the three
-  `tools/bench-kv-*-regression.sh` scripts to deploy once → prepare
-  once → run × N → teardown (read/scan), and deploy once → (clean →
-  run) × N → teardown (write). Decisions resolved: console-web
-  lifetime is kind-dependent; clean is per-service with a hard-to-
-  mistake flow; `bench run` is a standalone verb with `--target`;
-  prepare uses default put; handles live in named runtime folders.
-  **Phase split:** R124 lands the deploy/prepare/run/teardown
-  lifecycle verbs + read/scan script rewrites; the `bench clean`
-  verb + its new per-node `wipe-user-data` server endpoint are
-  deferred to R125 (the riskiest part — needs a new management
-  endpoint that wipes WAL + engine data while preserving group0
-  sysdata; no such API exists). The write-regression script rewrite
-  (which needs `clean`) is also deferred to R125; until then the
-  write script keeps the redeploy-per-sub-test flow.
 - **[R125](R125-server-wipe-user-data-endpoint.md)** — wipe-user-data
   management endpoint + bench clean verb — Area: server / console /
   cli / bench — phase 2 of R124. Adds `POST /stores/:sid/groups/:gid/

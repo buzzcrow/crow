@@ -200,31 +200,7 @@ fn deploy_rpc(args: &super::DeployArgs, json: bool) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let handle = ClusterHandle {
-        name: args.name.clone(),
-        kind: DeployKind::Rpc,
-        store_id: 0,
-        group_id: 0,
-        leader_endpoint: format!("http://127.0.0.1:{port}"),
-        node_ids: vec![0],
-        node_pids: vec![pid],
-        node_rpc_urls: vec![format!("http://127.0.0.1:{port}")],
-        node_mgmt_urls: vec![],
-        workspace_dir: runtime_dir.clone(),
-        mode: "rpc".to_string(),
-        tunables: HandleTunables {
-            max_inflight: 32,
-            metrics_interval: args.metrics_interval,
-            peer_pool_size: 0,
-            enable_nagle: args.enable_nagle,
-            quickack: args.quickack,
-            event_write: false,
-            send_queue_capacity: 4096,
-        },
-        console_url: None,
-        console_pid: None,
-        created_at: chrono::Utc::now(),
-    };
+    let handle = build_rpc_handle(args, &runtime_dir, port, pid);
 
     match handle.save() {
         Ok(path) => {
@@ -248,6 +224,40 @@ fn deploy_rpc(args: &super::DeployArgs, json: bool) -> ExitCode {
             eprintln!("error: failed to save handle: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Build the `ClusterHandle` for a deployed RPC fb server.
+fn build_rpc_handle(
+    args: &super::DeployArgs,
+    runtime_dir: &std::path::Path,
+    port: u16,
+    pid: u32,
+) -> ClusterHandle {
+    ClusterHandle {
+        name: args.name.clone(),
+        kind: DeployKind::Rpc,
+        store_id: 0,
+        group_id: 0,
+        leader_endpoint: format!("http://127.0.0.1:{port}"),
+        node_ids: vec![0],
+        node_pids: vec![pid],
+        node_rpc_urls: vec![format!("http://127.0.0.1:{port}")],
+        node_mgmt_urls: vec![],
+        workspace_dir: runtime_dir.to_path_buf(),
+        mode: "rpc".to_string(),
+        tunables: HandleTunables {
+            max_inflight: 32,
+            metrics_interval: args.metrics_interval,
+            peer_pool_size: 0,
+            enable_nagle: args.enable_nagle,
+            quickack: args.quickack,
+            event_write: false,
+            send_queue_capacity: 4096,
+        },
+        console_url: None,
+        console_pid: None,
+        created_at: chrono::Utc::now(),
     }
 }
 

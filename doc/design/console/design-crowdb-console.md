@@ -467,6 +467,48 @@ this section covers design rules only.
 - `bench stress` invokes predesigned scenarios baked into the binary;
   `bench report` re-renders saved JSON.
 
+### 7.2 Bench lifecycle verbs (deploy / prepare / run / teardown)
+
+The all-in-one `bench kv` verb deploys a 3-node cluster, pre-populates
+keys, runs the workload, and tears down — all in one process. For
+regression suites that run many sub-tests against the same cluster
+configuration, this pays deploy + pre-pop overhead per sub-test. The
+lifecycle verbs split this monolith into discrete steps with persistent
+deploy metadata:
+
+- **`bench deploy --name <n> --kind kv --mode mem`** — provisions a
+  3-node cluster via `BenchFixture` (embedded console-web), then
+  detaches the fixture so the `crowdb-kv-server` processes survive CLI
+  exit. The deploy metadata (node pids, endpoints, tunables) is
+  serialized to `runtime/<name>/handle.json` (`ClusterHandle`). The
+  `--kind` flag dispatches to kv (default), rpc (spawns
+  `crowdb-rpc-fb-server`), or chunk/storage (not yet implemented).
+- **`bench prepare --target <n> --keys N`** — loads handle, builds a
+  `CrowdbClient` from the recorded leader endpoint, and writes N keys
+  via sequential `put`. Reuses the same `format_key` / `value_for`
+  logic as `bench kv`'s pre-populate path.
+- **`bench run --target <n> --workload read ...`** — loads handle,
+  builds an `AttachedKvTarget` (implements `BenchTarget` with no-op
+  provision/cleanup), and calls the shared `run_bench` runner. Reports
+  go to `runtime/<name>/runs/<timestamp>/`. The cluster stays running
+  after the run — multiple `bench run` invocations can attach to the
+  same deploy.
+- **`bench teardown --target <n>`** — loads handle, SIGTERMs the node
+  pids via `stop_pid_with_timeout`, removes `handle.json`. Idempotent:
+  a second teardown on the same name exits 0 with "already torn down".
+
+The legacy `bench kv` verb is preserved as the all-in-one path for
+quick one-shot benches. The regression scripts
+(`tools/bench-kv-read-regression.sh`,
+`tools/bench-kv-scan-regression.sh`) use the lifecycle flow: deploy
+once → prepare once → run N sub-tests → teardown once, amortizing
+overhead.
+
+`ClusterHandle` is a runtime artifact (JSON under `runtime/`), not a
+config extension. The `runtime/` directory is gitignored. The
+`crowdb-kv-server` child processes survive CLI exit because
+`lifecycle::deploy_local` spawns them with `kill_on_drop(false)`.
+
 ## 8. Swagger UI Hosting
 
 Split responsibility:
