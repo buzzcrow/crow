@@ -46,9 +46,19 @@ fn stop_pid_terminates_live_process() {
 /// after the timeout and return `Ok(false)`.
 #[test]
 fn stop_pid_force_kills_unresponsive_process() {
+    // The shell writes a sentinel file once `trap '' TERM` is installed,
+    // so we can wait deterministically for the trap to be in place before
+    // sending SIGTERM. A fixed sleep is racy under CI load — if SIGTERM
+    // arrives before the trap, the shell dies instantly (~1ms) and the
+    // timing assertion below fails.
+    let sentinel = std::env::temp_dir().join(format!("stop_pid_test_{}.ready", std::process::id()));
+    let _ = std::fs::remove_file(&sentinel);
+    let sentinel_str = sentinel.to_string_lossy();
     let mut child = Command::new("sh")
         .arg("-c")
-        .arg("trap '' TERM; while true; do sleep 1; done")
+        .arg(format!(
+            "trap '' TERM; touch {sentinel_str}; while true; do sleep 1; done"
+        ))
         .spawn()
         .expect("failed to spawn shell");
     let pid = child.id();
@@ -58,10 +68,16 @@ fn stop_pid_force_kills_unresponsive_process() {
         "child process should be alive before stop_pid"
     );
 
-    // Give the shell time to execute `trap '' TERM` before we send SIGTERM.
-    // Without this, a SIGTERM arriving before the trap is installed kills
-    // the shell instantly, causing the timing assertion below to fail.
-    std::thread::sleep(Duration::from_millis(200));
+    // Wait for the shell to install the trap (sentinel file appears).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !sentinel.exists() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("shell did not install trap within 5s");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     let start = std::time::Instant::now();
     let result = stop_pid_with_timeout(pid, Duration::from_secs(2)).unwrap();
@@ -79,4 +95,5 @@ fn stop_pid_force_kills_unresponsive_process() {
     );
 
     let _ = child.wait();
+    let _ = std::fs::remove_file(&sentinel);
 }
