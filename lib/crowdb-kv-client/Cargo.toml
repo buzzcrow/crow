@@ -1,0 +1,54 @@
+[package]
+name = "crowdb-kv-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone client library for CROWDB: topology cache, retry/idempotency, read-mode routing."
+
+[lib]
+# rlib for Rust dependents; cdylib for C++ consumers (crowdb-diskio FFI).
+# The cdylib only exports C ABI symbols when built with `--features ffi`.
+crate-type = ["rlib", "cdylib"]
+
+[features]
+# Enables test-only seams on `crowdb-kv` (e.g. `PxKvStore::set_get_delay_for_tests`)
+# for this crate's own test build. Auto-enabled via the self dev-dependency below;
+# no `--features` flag needed for `cargo test -p crowdb-kv-client`.
+test-util = ["crowdb-kv/test-util"]
+# Enables the C ABI FFI module (ffi.rs) for C++ consumers like crowdb-diskio.
+# Adds tokio rt-multi-thread for the FFI's dedicated runtime.
+ffi = ["tokio/rt-multi-thread"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# `crowdb-kv` gives us the KV RPC types (`crowdb_kv::rpc::*`, hand-written
+# in `crowdb-protocol`) and the `/topology` response shape
+# (`crowdb_kv::cluster::status::*`, already `Serialize`/`Deserialize`)
+# without depending on `crowdb-kv-server` or `crowdb-console`.
+crowdb-kv = { path = "../crowdb-kv" }
+crowdb-protocol = { path = "../crowdb-protocol" }
+crowdb-common = { path = "../crowdb-common/rust" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi" }
+bytes = "1"
+flatbuffers = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+tokio-stream = "0.1"
+dashmap = "6"
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util", "net"] }
+axum = "0.7"
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", features = ["test-util"] }
+# Self dev-dependency: auto-enables the `test-util` feature for this
+# crate's own test build (same pattern as `crowdb-kv`'s self dev-dep).
+crowdb-kv-client = { path = ".", features = ["test-util"] }

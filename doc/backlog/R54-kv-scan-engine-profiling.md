@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R54: Scan Engine Profiling — Identify the 32T Saturation Bottleneck
@@ -9,8 +9,8 @@ barrier — the read-mode split (R26) moved the bottleneck from the read
 barrier to the storage engine, but the specific hot spot inside the
 engine is unknown. The scan path is:
 
-`KV RPC` → `PxKvStore` → `KVEngine::scan` → `CrowTreeEngine::scan`
-(`crow_tree_engine.rs`) → `try_scan` (FFI) → **C++ crow-tree merge
+`KV RPC` → `PxKvStore` → `KVEngine::scan` → `CrowdbTreeEngine::scan`
+(`crowdb_tree_engine.rs`) → `try_scan` (FFI) → **C++ crowdb-tree merge
 loop**.
 
 The merge loop walks L0 (the `ConcurrentSkipList` from R50,
@@ -35,10 +35,10 @@ Without a flamegraph, optimizing any one of these is guessing.
   regime: 32T:32C with `valuesize_256B` (the config where both modes
   hit ~38k scans/s and the engine is the confirmed bottleneck).
 - **Profiling targets**:
-  - The C++ merge loop (`crow-tree` scan path) — the primary suspect.
+  - The C++ merge loop (`crowdb-tree` scan path) — the primary suspect.
   - The FFI boundary (`try_scan` → C++ → packed result → Rust decode).
   - The Rust scan-response serialization (`kv_service.rs::scan` → fbs
-    encode → crow-rpc send), to confirm the engine is truly dominant over
+    encode → crowdb-rpc send), to confirm the engine is truly dominant over
     the response path.
 - **Deliverable**: a working doc (`doc/working/scan-profile-findings.md`)
   with the top hot stacks, a ranked list of bottlenecks by CPU time,

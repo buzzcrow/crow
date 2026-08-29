@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R102: diskdb — Dynamic Disk-Group Binding Migration
@@ -48,11 +48,11 @@ shared between disk-group bind change and disk move.
 
 ### Design pointers
 
-- `doc/design/diskdb/design-crow-diskdb.md` §3.2 (disk-group → paxos
+- `doc/design/diskdb/design-crowdb-diskdb.md` §3.2 (disk-group → paxos
   group binding via a table, not hash — dynamic scaling without
   rehashing), §5 ("Map semantics" — `OwnerMapValue`,
   `BindMapValue` are operator-manual today).
-- `doc/design/kv/design-crow-kv-group0.md` §2.1 (`crow-kv-client` is
+- `doc/design/kv/design-crowdb-kv-group0.md` §2.1 (`crowdb-kv-client` is
   the single sysdata API surface), §2.6 (two monitoring models: push
   + pull).
 - `doc/backlog/R99-kv-dynamic-range-binding-framework.md` — common
@@ -114,7 +114,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
 
 ### Work items
 
-1. **diskdb binding schema** — `lib/crow-protocol/src/fbs/common_type.fbs`
+1. **diskdb binding schema** — `lib/crowdb-protocol/src/fbs/common_type.fbs`
    (extend): add `DiskdbBindingValue` (disk-group-id → paxos-group-id
    `(store_id, group_id)` + diskdb instance endpoint); stored in
    group-0 with key pattern `/diskdb/dg_bind/<disk_group_id>`. Add a
@@ -133,7 +133,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
    iff bind already points to `new_bind`). Add
    `ERROR_CODE_NOT_MY_BINDING` to `ret_code.fbs` for the
    reject-and-retry protocol.
-2. **diskdb binding client** — `lib/crow-kv-client/src/` (extend):
+2. **diskdb binding client** — `lib/crowdb-kv-client/src/` (extend):
    add `DiskdbBindingClient` (fetch + cache + watch/notify),
    following R99's `RangeBindingClient` pattern. Caches
    `DashMap<disk_group_id, (store_id, group_id, endpoint)>`,
@@ -142,8 +142,8 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
    clients to route zone-record writes to the correct paxos group.
    Reject-and-retry: on `NotMyBinding` error, refresh the binding
    cache, re-route, retry — follows the `NotLeaderHint` retry pattern
-   in `crow-kv-client/src/config.rs`.
-3. **diskdb server binding enforcement** — `app/crow-diskdb/src/`
+   in `crowdb-kv-client/src/config.rs`.
+3. **diskdb server binding enforcement** — `app/crowdb-diskdb/src/`
    (extend): add a binding guard (following `range_guard.rs` pattern
    from chunkdb). On every RPC, check the disk-group is bound to this
    instance's paxos group; reject with `NotMyBinding` error if not.
@@ -152,8 +152,8 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
    (`model/disk_group.rs:32`, `RwLock<(u64, u64)>`) is populated from
    the binding client instead of operator config.
 4. **Monitor integration (warning-only)** — the binding monitor
-   (relocated to `crow-kv-server` per R99 rework,
-   `app/crow-kv-server/src/`) observes the disk-group → KV-group
+   (relocated to `crowdb-kv-server` per R99 rework,
+   `app/crowdb-kv-server/src/`) observes the disk-group → KV-group
    distribution alongside chunkdb range binding; same leader-gated
    background task. For diskdb, the monitor computes the current
    distribution and emits an imbalance warning (log + metric) when
@@ -167,7 +167,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
 5. **Migration flow** — disk-group bind change and disk move share
    one flow at different scopes (whole disk-group vs one disk), reusing
    the existing `http_move_disk` + `copy_disk_records` pattern
-   (`app/crow-web/src/lifecycle.rs`). Both are operator-triggered via
+   (`app/crowdb-web/src/lifecycle.rs`). Both are operator-triggered via
    the console (the monitor only warns; it does not drive migration).
    The flow is five steps:
    (a) **Quiesce** — the console sets the disk-group (or disk) to
@@ -202,7 +202,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
 ### Flow diagram
 
 ```
-  driver: console (crow-web), operator-triggered
+  driver: console (crowdb-web), operator-triggered
           (monitor only warns — does not drive migration)
        │
   (a) QUIESCE
@@ -266,7 +266,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
   pattern, binding monitor, reject-and-retry protocol).
 - **R99 rework** (Phase 4-5 of `doc/working/plan-gaps-r99-r100.md`)
   must land first — the binding monitor must be relocated to
-  `crow-kv-server` (leader-gated background task on group-0
+  `crowdb-kv-server` (leader-gated background task on group-0
   replicas) before diskdb rebinding can be added to the same
   monitor.
 - **R103** (chunkdb range migration) is a sibling requirement. R102
@@ -275,7 +275,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
   while diskdb is a metadata allocator whose brief write pause with
   retry is tolerable, so R102 uses the simpler quiesce + copy + flip
   flow. They can still proceed in parallel.
-- **Disk move** (`app/crow-web/src/lifecycle.rs:1630`
+- **Disk move** (`app/crowdb-web/src/lifecycle.rs:1630`
   `http_move_disk` + `copy_disk_records`) is the existing
   disk-scope migration; R102 generalizes the same flow to
   disk-group scope and adds the `MigrationIntentValue` for
@@ -404,7 +404,7 @@ flow (Maintenance → copy → switch → cleanup → Up) at different scopes
   kv-group and conclude old busy blocks are free (data corruption)
   and frees of old blocks target the wrong group (leaks). The
   five-step flow copies records before the flip. No cross-group
-  replication is assumed in CROW v1.
+  replication is assumed in CROWDB v1.
 - **Imbalance warning threshold** — what ratio triggers the
   monitor's imbalance warning (e.g. max/min disk-groups per KV-group
   > 2×, or absolute deviation from the mean)? Needs a tunable

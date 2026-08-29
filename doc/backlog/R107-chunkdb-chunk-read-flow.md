@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R107: chunkdb — Chunk Object Read Flow
@@ -119,7 +119,7 @@ disks, and concatenating across multi-chunk objects.
 **Numbered work items**:
 
 1. **`ChunkReader`**
-   (`lib/crow-chunk-client/src/reader.rs`) — the main read API:
+   (`lib/crowdb-chunk-client/src/reader.rs`) — the main read API:
    ```rust
    pub struct ChunkReader {
        chunkdb: ChunkdbClient,
@@ -168,7 +168,7 @@ disks, and concatenating across multi-chunk objects.
      requested byte range, return.
    - If some data blocks fail (disk `Bad`): read the surviving data
      blocks + `code_num` (4) parity blocks, EC-decode via isa-l
-     (`crow_common::ec::decode`) to reconstruct the missing data
+     (`crowdb_common::ec::decode`) to reconstruct the missing data
      blocks, then concatenate and extract.
    - If more than `code_num` blocks are missing: the strip is
      unrecoverable → `ReadError::DataLoss`.
@@ -301,7 +301,7 @@ Caller                ChunkReader           chunkdb          diskio (R105)    is
 - **Depends on**: **R94** (large object writer) — uses the `Location`
   type. **R105** (disk IO engine) — reads strip blocks via
   `DiskIoClient`. **chunkdb** (landed, R85) — `query_chunk` RPC for
-  strip layout. **crow-common EC** (landed) — isa-l decode for EC
+  strip layout. **crowdb-common EC** (landed) — isa-l decode for EC
   recovery.
 - **Depended on by**: nothing (terminal data-path component). R83
   (chunkdb recovery) uses R107's EC decode logic for rebuilding lost
@@ -371,7 +371,7 @@ Caller                ChunkReader           chunkdb          diskio (R105)    is
 - Read from Active shared chunk, `Location` points to in-progress
   strip → `ReadError::NotYetAvailable`. Integration test.
 
-**Test commands**: `pixi run cargo test -p crow-chunkdb-client --test
+**Test commands**: `pixi run cargo test -p crowdb-chunkdb-client --test
 chunk_reader`, `pixi run cargo fmt --all -- --check`,
 `pixi run cargo clippy --all-targets -- -D warnings`.
 

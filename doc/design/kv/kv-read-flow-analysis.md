@@ -1,16 +1,16 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # KV Read Flow Analysis
 
-Point reads (`get`) from the client through crow-rpc, the Paxos read
+Point reads (`get`) from the client through crowdb-rpc, the Paxos read
 policy, and the storage engine. The benchmark sentinel is
 `tools/bench-kv-read-regression.sh`.
 
 ## 1. Flow
 
 ```text
-CrowkvClient::get(key, read_mode, min_slot?)
+CrowdbClient::get(key, read_mode, min_slot?)
   -> resolve_min_slot and resolve_read_endpoint
      Linearizable: cached leader
      MinSlot + AnyReplica: round-robin replicas, then leader fallback
@@ -23,7 +23,7 @@ CrowkvClient::get(key, read_mode, min_slot?)
   -> resolve_read_point -> ReadDecision
   -> learner.engine_get_bytes -> KVEngine::get_bytes
   -> KvResponse { read_slot, safe_slot, value: Bytes }
-  -> crow-rpc serializes the response
+  -> crowdb-rpc serializes the response
 ```
 
 Read policies:
@@ -36,7 +36,7 @@ Read policies:
 
 The hot path has no intermediate key copy after request decoding. Values use
 `Bytes`; the in-memory engine clones the value out of its shard, while the
-crow-tree fast path returns bytes backed by the resident frame. Serialization
+crowdb-tree fast path returns bytes backed by the resident frame. Serialization
 and the kernel socket copy remain unavoidable.
 
 ## 2. Latest Benchmark Results
@@ -113,13 +113,13 @@ throughput regression at steady state.
 removed — the fast path returns `PinnedValue` borrowing the frame, and the
 final `Bytes` is produced in one copy instead of frame → `Vec` → `Bytes`.
 
-Perf: one fewer heap allocation and one fewer memcpy per read on the crow-tree
+Perf: one fewer heap allocation and one fewer memcpy per read on the crowdb-tree
 fast path.
 
 ### TCP transport migration
 
 The internal Paxos path moved from the HTTP/2/legacy connection-lock transport
-to flatbuffer-over-TCP crow-rpc with concurrent frame handling.
+to flatbuffer-over-TCP crowdb-rpc with concurrent frame handling.
 
 Perf: compared with the previous Linux legacy baseline, throughput improved
 104–132% from 1T to 16T and 88–91% at 32T; p99 latency fell 34–61%. The 32T
@@ -128,14 +128,14 @@ Linearizable result went from 144,262 to 271,184 ops/s.
 ### Socket latency fix
 
 Before the fix, read latency was ~41ms due to Nagle + delayed ACK
-interaction in crow-rpc. Applying `TCP_NODELAY` to all client and server
+interaction in crowdb-rpc. Applying `TCP_NODELAY` to all client and server
 sockets dropped latency to ~138us.
 
 Perf: 290x latency reduction (41ms → 138us).
 
 ### Benchmark update (2026-08-28)
 
-Replaced the Linux reference with the current crow-rpc run and retained the
+Replaced the Linux reference with the current crowdb-rpc run and retained the
 macOS baseline. The current peak is 271,184 Linearizable ops/s at 32T:32C,
 with zero errors. The previous Linux baseline used the legacy legacy path;
 positive throughput deltas and negative p99 deltas are improvements.

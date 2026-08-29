@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R106: chunkdb — Small Object Shared Chunk Writer
@@ -109,7 +109,7 @@ pipeline scale in/out for max BW + TPS.
 **Numbered work items**:
 
 1. **`SmallObjectWriter`**
-   (`lib/crow-chunk-client/src/writer/small_object.rs`) — implements
+   (`lib/crowdb-chunk-client/src/writer/small_object.rs`) — implements
    `ChunkIoWriter` (R94). The entry point for small-object writes.
    Constructor takes `ec_scheme`, `mirror_copy_count` (default 3),
    `shared_chunk_size` (default 256 MB), `pipeline_config`. The
@@ -120,7 +120,7 @@ pipeline scale in/out for max BW + TPS.
    object's data.
 
 2. **`PipelineManager`**
-   (`lib/crow-chunk-client/src/writer/pipeline.rs`) — manages a
+   (`lib/crowdb-chunk-client/src/writer/pipeline.rs`) — manages a
    dynamic pool of `WritePipeline`s. Each pipeline has:
    - An inbound queue (`tokio::sync::mpsc` or a lock-free MPSC) of
      `PendingWrite` entries (object data + completion `oneshot`).
@@ -207,7 +207,7 @@ pipeline scale in/out for max BW + TPS.
    returns `true` and `on_data` returns `FeedStatus::Continue`
    again.
 
-8. **Metrics** (`lib/crow-chunk-client/src/writer/metrics.rs`) —
+8. **Metrics** (`lib/crowdb-chunk-client/src/writer/metrics.rs`) —
    `WriterMetrics` with counters: `objects_written`,
    `bytes_written`, `batches_submitted`, `avg_batch_size`,
    `pipelines_active`, `pipelines_scaled_out`,
@@ -382,7 +382,7 @@ Caller E (16KB) ─┘                          │                   │
   1000, `batches_submitted` ≈ 100, `avg_batch_size` ≈ 10.
   Integration test (verify metrics snapshot).
 
-**Test commands**: `pixi run cargo test -p crow-chunkdb-client --test
+**Test commands**: `pixi run cargo test -p crowdb-chunkdb-client --test
 small_object_writer`, `pixi run cargo fmt --all -- --check`,
 `pixi run cargo clippy --all-targets -- -D warnings`.
 

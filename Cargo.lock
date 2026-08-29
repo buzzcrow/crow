@@ -582,29 +582,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "crow-chunk-client"
+name = "crowdb-chunk-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bincode",
  "bytes",
- "crow-chunk-client",
- "crow-chunkdb-client",
- "crow-common",
- "crow-diskdb-client",
- "crow-diskio-client",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-test-harness",
- "tempfile",
+ "crowdb-chunk-client",
+ "crowdb-chunkdb-client",
+ "crowdb-common",
+ "crowdb-diskdb-client",
+ "crowdb-diskio-client",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "crow-chunkdb"
+name = "crowdb-chunkdb"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -612,13 +611,14 @@ dependencies = [
  "bincode",
  "bytes",
  "clap",
- "crow-chunkdb",
- "crow-common",
- "crow-diskdb",
- "crow-diskdb-client",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-chunkdb",
+ "crowdb-common",
+ "crowdb-diskdb",
+ "crowdb-diskdb-client",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "dashmap",
  "flatbuffers",
  "futures",
@@ -628,23 +628,21 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
  "tower",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
-name = "crow-chunkdb-client"
+name = "crowdb-chunkdb-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "dashmap",
  "flatbuffers",
  "thiserror 2.0.18",
@@ -653,19 +651,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-cli"
+name = "crowdb-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
  "clap",
  "crossbeam-channel",
- "crow-common",
- "crow-console-shared",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-web",
+ "crowdb-common",
+ "crowdb-console-shared",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
+ "crowdb-web",
  "dirs",
  "flatbuffers",
  "hex",
@@ -680,14 +679,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-common"
+name = "crowdb-common"
 version = "0.1.0"
 dependencies = [
+ "crowdb-test-harness",
  "flate2",
  "notify",
  "notify-debouncer-mini",
  "serde",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -697,13 +696,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-console-shared"
+name = "crowdb-console-shared"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "crow-kv-client",
- "crow-protocol",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "dirs",
  "form_urlencoded",
  "futures",
@@ -719,7 +720,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-diskdb"
+name = "crowdb-diskdb"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -728,78 +729,76 @@ dependencies = [
  "bytes",
  "clap",
  "crc32fast",
- "crow-common",
- "crow-diskdb",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-common",
+ "crowdb-diskdb",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "dashmap",
  "flatbuffers",
  "rand 0.9.5",
  "reqwest",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
  "tower",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
 [[package]]
-name = "crow-diskdb-client"
+name = "crowdb-diskdb-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-test-harness",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "dashmap",
  "flatbuffers",
  "reqwest",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "crow-diskio-client"
+name = "crowdb-diskio-client"
 version = "0.1.0"
 dependencies = [
- "crow-common",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-test-harness",
+ "crowdb-common",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "flatbuffers",
  "reqwest",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "crow-kv"
+name = "crowdb-kv"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytes",
  "criterion",
  "crossbeam-skiplist",
- "crow-common",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-tree-ffi",
+ "crowdb-common",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
+ "crowdb-tree-ffi",
  "dashmap",
  "flatbuffers",
  "flate2",
@@ -808,7 +807,6 @@ dependencies = [
  "pin-project-lite",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -820,16 +818,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-kv-client"
+name = "crowdb-kv-client"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
- "crow-common",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-common",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "dashmap",
  "flatbuffers",
  "parking_lot",
@@ -843,30 +841,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-kv-server"
+name = "crowdb-kv-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
  "clap",
- "crow-common",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-tree-ffi",
+ "crowdb-common",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
+ "crowdb-tree-ffi",
  "dashmap",
  "reqwest",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tracing",
  "utoipa",
 ]
 
 [[package]]
-name = "crow-protocol"
+name = "crowdb-protocol"
 version = "0.1.0"
 dependencies = [
  "bincode",
@@ -880,54 +878,62 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-rpc-ffi"
+name = "crowdb-rpc-ffi"
 version = "0.1.0"
 dependencies = [
  "cc",
- "crow-common",
- "crow-protocol",
+ "crowdb-common",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "ctor",
  "flatbuffers",
  "tokio",
 ]
 
 [[package]]
-name = "crow-test-harness"
+name = "crowdb-test-harness"
 version = "0.1.0"
 dependencies = [
- "crow-chunkdb-client",
- "crow-diskdb-client",
- "crow-diskio-client",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-chunkdb-client",
+ "crowdb-diskdb-client",
+ "crowdb-diskio-client",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-tree-ffi",
+ "ctor",
  "reqwest",
  "serde_json",
- "tempfile",
  "tokio",
 ]
 
 [[package]]
-name = "crow-tree-ffi"
+name = "crowdb-tree-ffi"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "cc",
- "tempfile",
+ "crowdb-test-harness",
+ "crowdb-tree-ffi",
  "tokio",
 ]
 
 [[package]]
-name = "crow-web"
+name = "crowdb-web"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
  "clap",
- "crow-console-shared",
- "crow-diskdb-client",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
+ "crowdb-common",
+ "crowdb-console-shared",
+ "crowdb-diskdb-client",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
+ "dirs",
  "futures",
  "hex",
  "reqwest",
@@ -937,7 +943,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -967,6 +972,16 @@ dependencies = [
  "generic-array",
  "rand_core 0.6.4",
  "typenum",
+]
+
+[[package]]
+name = "ctor"
+version = "1.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
+dependencies = [
+ "link-section",
+ "linktime-proc-macro",
 ]
 
 [[package]]
@@ -1943,6 +1958,18 @@ checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "link-section"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39c29a617ce3df32c08497bdc1ab6e2376e0b17948ac166a2fbe5977c5954cd9"
+
+[[package]]
+name = "linktime-proc-macro"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e57c38c1e860fd37c604281cdfb1dd2216977fd76a50f85ba2f388ef3219616"
 
 [[package]]
 name = "linux-raw-sys"

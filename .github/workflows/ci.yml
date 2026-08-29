@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_LIB_BACKTRACE: 1
 
 # 6 parallel jobs. See doc/working/plan-test.md § "CI Job Grouping Guide"
 # for the assignment rule and how to add new test tasks.
@@ -65,6 +67,27 @@ jobs:
       run: pixi run test-tree-ffi
     - name: Run RPC FFI tests
       run: pixi run test-rpc-ffi
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-cpp-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   UnitTests:
     runs-on: ubuntu-latest
@@ -96,6 +119,27 @@ jobs:
       run: pixi run test-kv-client
     - name: Run chunkdb-client tests
       run: pixi run test-chunkdb-client
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-unit-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   ServerTests:
     runs-on: ubuntu-latest
@@ -115,7 +159,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
     - name: Clean env
       run: pixi run clean-env
-    - name: Build all Rust test binaries + crow-kv-server
+    - name: Build all Rust test binaries + crowdb-kv-server
       run: pixi run build-tests
     - name: Run kv-server tests
       run: pixi run test-kv-server
@@ -129,6 +173,27 @@ jobs:
       run: pixi run test-chunk-client
     - name: Run diskio-client tests
       run: pixi run test-diskio-client
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-server-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   ConsoleTests:
     runs-on: ubuntu-latest
@@ -148,16 +213,37 @@ jobs:
       uses: Swatinem/rust-cache@v2
     - name: Clean env
       run: pixi run clean-env
-    - name: Build all Rust test binaries + crow-kv-server
+    - name: Build all Rust test binaries + crowdb-kv-server
       run: pixi run build-tests
-    - name: Build crow-rpc-fb-server (for bench rpc e2e test)
-      run: pixi run cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && pixi run cmake --build lib/crow-rpc/build --target crow-rpc-fb-server -j
+    - name: Build crowdb-rpc-fb-server (for bench rpc e2e test)
+      run: pixi run cmake -S lib/crowdb-rpc -B lib/crowdb-rpc/build -DCMAKE_BUILD_TYPE=Release && pixi run cmake --build lib/crowdb-rpc/build --target crowdb-rpc-fb-server -j
     - name: Run console-shared tests
       run: pixi run test-console-shared
     - name: Run CLI tests
       run: pixi run test-console-cli
     - name: Run mgmt-api tests
       run: pixi run test-console-server
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-console-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
 
   UITests:
     runs-on: ubuntu-latest
@@ -175,10 +261,10 @@ jobs:
         pixi-version: latest
     - name: Cache cargo + target
       uses: Swatinem/rust-cache@v2
-    - name: Build crow-kv-server + crow-diskdb binaries
+    - name: Build crowdb-kv-server + crowdb-diskdb binaries
       run: pixi run build-tests
     - name: Install Playwright Chromium (skip if system browser present)
-      working-directory: app/crow-web/ui
+      working-directory: app/crowdb-web/ui
       run: |
         for b in /snap/bin/chromium /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/microsoft-edge; do
           [ -x "$b" ] && { echo "System browser found at $b; skipping download."; exit 0; }
@@ -186,12 +272,33 @@ jobs:
         pixi run npx playwright install --with-deps chromium
     - name: Run real-backend E2E suite
       run: pixi run test-console-ui
+    - name: Capture runner state on failure
+      if: failure()
+      run: |
+        echo "=== Listening ports ==="
+        ss -tlnp 2>/dev/null || true
+        echo "=== Process list (crowdb) ==="
+        ps aux | grep -E 'crowdb|cargo' | grep -v grep || true
+        echo "=== Disk space ==="
+        df -h
+        echo "=== /tmp crowdb files ==="
+        ls -la /tmp/crowdb* 2>/dev/null || true
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-ui-${{ github.run_attempt }}
+        path: |
+          test-logs/
+          /tmp/crowdb-*
+        if-no-files-found: ignore
+        retention-days: 7
     - name: Upload Playwright report on failure
       if: failure()
       uses: actions/upload-artifact@v4
       with:
         name: playwright-report
         path: |
-          app/crow-web/ui/playwright-report
-          app/crow-web/ui/test-results
+          app/crowdb-web/ui/playwright-report
+          app/crowdb-web/ui/test-results
         retention-days: 7

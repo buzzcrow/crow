@@ -1,15 +1,15 @@
 ---
 name: coding
-description: CROW coding flow — conventions, doc-first
+description: CROWDB coding flow — conventions, doc-first
 triggers:
   - user
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW - Coding Flow
+# CROWDB - Coding Flow
 
 Companion skills: `/review` (pre-push), `/doc` (doc rules), `/console-ui-e2e` (console-ui-e2e).
 
@@ -40,12 +40,12 @@ Defaults: file=`debug`, console (`-l`)=`info`. Override via `RUST_LOG`.
 - Shared helpers: `tests/common/` (2018 style). Do not add new files under `testkit/`.
 - Test case files: `*_test.rs` suffix. Helper files: `common/<subject>.rs`. Helper types: `Test*` prefix.
 - Test fixtures stay in `tests/`, never in `src/` under `test-util` (that's for production-type hooks only).
-- Paxos suite: `crowkv/tests/paxos/*.rs` with `tests/paxos.rs` as entry stub.
-- Tracing in tests: `CROWKV_TEST_LOG=1`; init in `tests/common/logging.rs`.
+- Paxos suite: `crowdb/tests/paxos/*.rs` with `tests/paxos.rs` as entry stub.
+- Tracing in tests: `CROWDB_TEST_LOG=1`; init in `tests/common/logging.rs`.
 
 ### Health & Info Reporting
 
-When adding internal state to `crowkv` lib, add variants/fields to `StatusLevel` / `*Status` structs (`crowkv/src/cluster/status.rs`). Default to exposing useful internal state.
+When adding internal state to `crowdb` lib, add variants/fields to `StatusLevel` / `*Status` structs (`crowdb/src/cluster/status.rs`). Default to exposing useful internal state.
 
 ## Doc-First
 

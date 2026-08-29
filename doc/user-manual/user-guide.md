@@ -1,27 +1,27 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW User Guide
+# CROWDB User Guide
 
-CROW is a high-performance distributed storage platform, a foundation
+CROWDB is a high-performance distributed storage platform, a foundation
 layer for building storage systems where you own the hot path all the
-way down to the metal. The foundation is **crow-kv**, a distributed
+way down to the metal. The foundation is **crowdb-kv**, a distributed
 key-value cluster built on multi-group Multi-Paxos. This guide covers
-crow-kv operations: starting a cluster, performing basic KV operations,
+crowdb-kv operations: starting a cluster, performing basic KV operations,
 managing topology, and running upgrades.
 
-crow-kv provides three interfaces for cluster management and data
+crowdb-kv provides three interfaces for cluster management and data
 access:
 
-- **Web UI** — the `crow-web` service provides a visual dashboard
+- **Web UI** — the `crowdb-web` service provides a visual dashboard
   with cluster topology, group health, a KV Operator panel (store/group
   selector, paginated scan, inline CRUD, demo data injection), and
   Swagger UI for browsing the OpenAPI spec of any registered
-  `crow-kv-server` instance.
-- **CLI** — the `crow-cli` CLI tool is a thin wrapper over the same
-  service HTTP API. It talks to a `crow-web` service
+  `crowdb-kv-server` instance.
+- **CLI** — the `crowdb-cli` CLI tool is a thin wrapper over the same
+  service HTTP API. It talks to a `crowdb-web` service
   (`--ip` / `--port`, default `127.0.0.1:9920`); the service resolves
-  upstream `crow-kv-server` nodes. Use `--json` for machine-readable
+  upstream `crowdb-kv-server` nodes. Use `--json` for machine-readable
   output.
 - **RESTful API** — the service HTTP API is the underlying transport
   for both the Web UI and the CLI. All endpoints are documented in
@@ -31,33 +31,33 @@ The examples below show both CLI and curl for each operation. All
 curl examples assume these shell variables are set once:
 
 ```bash
-IP=127.0.0.1        # crow-web service IP
-PORT=9920           # crow-web service port
+IP=127.0.0.1        # crowdb-web service IP
+PORT=9920           # crowdb-web service port
 ```
 
 CLI commands omit `--ip`/`--port` for brevity; they default to
 `127.0.0.1:9920` (override with `--ip`/`--port` or the
-`CROW_KV_IP`/`CROW_KV_PORT` env vars).
+`CROWDB_KV_IP`/`CROWDB_KV_PORT` env vars).
 
 ### Prerequisites
 
 Before following the steps below:
 
-- **Build the binaries** — `pixi run build` produces `crow-web`,
-  `crow-kv-server`, and `crow-cli` in `target/debug/`.
-- **Start `crow-web`** — the CLI and Web UI both talk to this service.
+- **Build the binaries** — `pixi run build` produces `crowdb-web`,
+  `crowdb-kv-server`, and `crowdb-cli` in `target/debug/`.
+- **Start `crowdb-web`** — the CLI and Web UI both talk to this service.
   ```bash
-  crow-web --port 9920
+  crowdb-web --port 9920
   ```
   Add `--test-mode` for an in-memory config (no persisted TOML; changes
   are lost on restart).
-- **Set `CROW_KV_SERVER_BIN`** — the `server deploy` command spawns
-  `crow-kv-server` on each node. It searches for the binary in this
-  order: `$CROW_KV_SERVER_BIN`, a sibling of the running `crow-web`
+- **Set `CROWDB_KV_SERVER_BIN`** — the `server deploy` command spawns
+  `crowdb-kv-server` on each node. It searches for the binary in this
+  order: `$CROWDB_KV_SERVER_BIN`, a sibling of the running `crowdb-web`
   process, then `$PATH`. Set the env var explicitly if the binary is
   elsewhere:
   ```bash
-  export CROW_KV_SERVER_BIN=/path/to/crow-kv-server
+  export CROWDB_KV_SERVER_BIN=/path/to/crowdb-kv-server
   ```
 - **Node hosts** — the examples below use `--host 127.0.0.1` for a
   single-machine deployment (all nodes on localhost). For a real
@@ -70,7 +70,7 @@ Before following the steps below:
 ### 1.1 Register the physical topology
 
 Create a rack, add nodes, and deploy a server on each node. The
-`deploy` command starts `crow-kv-server` on the target node (via SSH
+`deploy` command starts `crowdb-kv-server` on the target node (via SSH
 if `ssh_user` is set, or as a local subprocess otherwise). No manual
 start needed.
 
@@ -78,13 +78,13 @@ start needed.
 
 ```bash
 # Create a rack
-crow-cli rack add --id r1 --name "rack-one"
+crowdb-cli rack add --id r1 --name "rack-one"
 
 # Register each node (repeat for n2, n3)
-crow-cli node add --id n1 --rack r1 --host 127.0.0.1
+crowdb-cli node add --id n1 --rack r1 --host 127.0.0.1
 
-# Deploy a crow-kv-server process on each node (repeat for n2, n3)
-crow-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001
+# Deploy a crowdb-kv-server process on each node (repeat for n2, n3)
+crowdb-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001
 ```
 
 **curl:**
@@ -98,7 +98,7 @@ curl -X POST "http://$IP:$PORT/api/racks" -H 'Content-Type: application/json' \
 curl -X POST "http://$IP:$PORT/api/nodes" -H 'Content-Type: application/json' \
   -d '{"id":"n1","rack_id":"r1","host":"127.0.0.1","ssh_port":22,"ssh_user":""}'
 
-# Deploy a crow-kv-server process on each node (repeat for n2, n3)
+# Deploy a crowdb-kv-server process on each node (repeat for n2, n3)
 curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
   -H 'Content-Type: application/json' \
   -d '{"rest_port":2001,"rpc_port":20001}'
@@ -115,7 +115,7 @@ the topology itself.
 
 ```bash
 # Initialize with all deployed nodes
-crow-cli cluster init --nodes n1,n2,n3
+crowdb-cli cluster init --nodes n1,n2,n3
 ```
 
 **curl:**
@@ -135,7 +135,7 @@ values). After initialization, data store/group creation is unblocked.
 For a single-node dev cluster, pass one node:
 
 ```bash
-crow-cli cluster init --nodes n1
+crowdb-cli cluster init --nodes n1
 ```
 
 ### 1.3 Create a store and group
@@ -146,10 +146,10 @@ A store is the logical container that owns one or more groups.
 
 ```bash
 # Create a store on n1
-crow-cli store add --store-id 3 --nodes n1
+crowdb-cli store add --store-id 3 --nodes n1
 
 # Create a group with an initial replica on n1
-crow-cli paxos add \
+crowdb-cli paxos add \
   --store-id 3 --group-id 3 --replica-id 1 --nodes n1
 ```
 
@@ -171,10 +171,10 @@ If the cluster has not been initialized, store/group creation returns
 **CLI:**
 
 ```bash
-crow-cli replica add \
+crowdb-cli replica add \
   --store-id 3 --group-id 3 --node n2 --replica-id 2
 
-crow-cli replica add \
+crowdb-cli replica add \
   --store-id 3 --group-id 3 --node n3 --replica-id 3
 ```
 
@@ -200,14 +200,14 @@ replica catches up via snapshot streaming before joining the voting set.
 
 ```bash
 # Check group health
-crow-cli paxos inspect --store-id 3 --group-id 3
+crowdb-cli paxos inspect --store-id 3 --group-id 3
 # Look for "leader=" and replica states
 
 # Put / Get
-crow-cli kv put --store-id 3 --group-id 3 \
+crowdb-cli kv put --store-id 3 --group-id 3 \
   --key hello --value world
 
-crow-cli kv get --store-id 3 --group-id 3 --key hello
+crowdb-cli kv get --store-id 3 --group-id 3 --key hello
 ```
 
 **curl:**
@@ -232,16 +232,16 @@ All KV operations target a specific `(store_id, group_id)`.
 
 ```bash
 # Put
-crow-cli kv put --store-id 3 --group-id 3 --key user:1 --value alice
+crowdb-cli kv put --store-id 3 --group-id 3 --key user:1 --value alice
 
 # Get
-crow-cli kv get --store-id 3 --group-id 3 --key user:1
+crowdb-cli kv get --store-id 3 --group-id 3 --key user:1
 
 # Delete
-crow-cli kv delete --store-id 3 --group-id 3 --key user:1
+crowdb-cli kv delete --store-id 3 --group-id 3 --key user:1
 
 # Prefix scan (list mode — fast, latest values, S3-list semantics)
-crow-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100
+crowdb-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100
 ```
 
 **curl:**
@@ -265,7 +265,7 @@ store/group selector, paginated scan, and inline editing.
 
 ### 2.1 Scan modes
 
-CROW provides two range-read modes for different use cases:
+CROWDB provides two range-read modes for different use cases:
 
 - **List scan** (`kv scan`) — the default scan. Fast, always returns the
   latest value per key at each page's read point. S3-list semantics:
@@ -294,14 +294,14 @@ unbounded pin retention.
 **Create a snapshot:**
 
 ```bash
-crow-cli snapshot create --store-id 3 --group-id 3
+crowdb-cli snapshot create --store-id 3 --group-id 3
 # Returns: snapshot_handle=42, at_slot=12345
 ```
 
 **List active snapshots:**
 
 ```bash
-crow-cli snapshot list --store-id 3 --group-id 3
+crowdb-cli snapshot list --store-id 3 --group-id 3
 # Returns: handle, at_slot, lease_remaining for each active snapshot
 ```
 
@@ -309,11 +309,11 @@ crow-cli snapshot list --store-id 3 --group-id 3
 
 ```bash
 # First page
-crow-cli snapshot scan --store-id 3 --group-id 3 \
+crowdb-cli snapshot scan --store-id 3 --group-id 3 \
   --handle 42 --prefix user: --limit 100
 
 # Next page (start_after = last key from previous page)
-crow-cli snapshot scan --store-id 3 --group-id 3 \
+crowdb-cli snapshot scan --store-id 3 --group-id 3 \
   --handle 42 --prefix user: --limit 100 \
   --start-after user:50
 ```
@@ -321,7 +321,7 @@ crow-cli snapshot scan --store-id 3 --group-id 3 \
 **Release a snapshot (free the pinned pages):**
 
 ```bash
-crow-cli snapshot release --store-id 3 --group-id 3 --handle 42
+crowdb-cli snapshot release --store-id 3 --group-id 3 --handle 42
 ```
 
 **curl:**
@@ -364,15 +364,15 @@ curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/gc-watermark" \
 
 ```bash
 # High-level summary (servers + store/group counts)
-crow-cli cluster status
+crowdb-cli cluster status
 
 # Full topology (logical stores/groups/replicas + physical nodes/servers)
-crow-cli cluster topology
+crowdb-cli cluster topology
 
 # Inspect a specific store, group, or node
-crow-cli cluster inspect s3          # store 3
-crow-cli cluster inspect s3/g3       # group 3 in store 3
-crow-cli cluster inspect n1          # node n1
+crowdb-cli cluster inspect s3          # store 3
+crowdb-cli cluster inspect s3/g3       # group 3 in store 3
+crowdb-cli cluster inspect n1          # node n1
 ```
 
 **curl:**
@@ -396,7 +396,7 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 **CLI:**
 
 ```bash
-crow-cli replica add --store-id 3 --group-id 3 --node n4 --replica-id 4
+crowdb-cli replica add --store-id 3 --group-id 3 --node n4 --replica-id 4
 ```
 
 **curl:**
@@ -415,7 +415,7 @@ joins the voting set automatically.
 **CLI:**
 
 ```bash
-crow-cli replica remove --store-id 3 --group-id 3 --replica-id 3
+crowdb-cli replica remove --store-id 3 --group-id 3 --replica-id 3
 ```
 
 **curl:**
@@ -438,7 +438,7 @@ waits for a new leader, then removes the replica.
    **CLI:**
 
    ```bash
-   crow-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001
+   crowdb-cli server deploy --node n1 --rest-port 2001 --rpc-port 20001
    ```
 
    **curl:**
@@ -450,11 +450,11 @@ waits for a new leader, then removes the replica.
    ```
 
    If `node-config.json` is lost, fall back to explicit bootstrap args
-   by starting `crow-kv-server` manually with `--stores`/`--groups`/
+   by starting `crowdb-kv-server` manually with `--stores`/`--groups`/
    `--replica`:
 
    ```bash
-   crow-kv-server \
+   crowdb-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default \
      --stores 3 --groups 3 --replica 1
@@ -479,7 +479,7 @@ For each node:
    **CLI:**
 
    ```bash
-   crow-cli server stop --node n1
+   crowdb-cli server stop --node n1
    ```
 
    **curl:**
@@ -496,7 +496,7 @@ For each node:
    **CLI:**
 
    ```bash
-   crow-cli server restart --node n1
+   crowdb-cli server restart --node n1
    ```
 
    **curl:**
@@ -505,11 +505,11 @@ For each node:
    curl -X POST "http://$IP:$PORT/api/nodes/n1/server/restart"
    ```
 
-   If `node-config.json` is missing, start `crow-kv-server` manually
+   If `node-config.json` is missing, start `crowdb-kv-server` manually
    with explicit args:
 
    ```bash
-   crow-kv-server \
+   crowdb-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default \
      --stores 3 --groups 3 --replica 1
@@ -521,14 +521,14 @@ For each node:
 4. **Wait for healthy:**
 
    ```bash
-   crow-cli cluster status
-   crow-cli paxos inspect --store-id 3 --group-id 3
+   crowdb-cli cluster status
+   crowdb-cli paxos inspect --store-id 3 --group-id 3
    ```
 
 5. **Smoke test:**
 
    ```bash
-   crow-cli kv get --store-id 3 --group-id 3 --key hello
+   crowdb-cli kv get --store-id 3 --group-id 3 --key hello
    ```
 
 6. Move to the next node.
@@ -559,13 +559,13 @@ leadership.
 
 ## 6. Backup
 
-CROW durability comes from the per-store WAL (`--wal-root`), the
+CROWDB durability comes from the per-store WAL (`--wal-root`), the
 per-node config cache (`--config-root`), and the durable KV engine
 (`--data-root`). For disaster recovery, back up:
 
 - `{wal-root}/store{store_id}/` for each store
 - `{config-root}/node-config.json` — per-node store/group config cache
-- `{data-root}/store{store_id}/group{group_id}/` if using crow-tree
+- `{data-root}/store{store_id}/group{group_id}/` if using crowdb-tree
   durable KV engine
 
 Restore by placing these on the replacement node and starting the
@@ -579,44 +579,44 @@ bootstrap args are needed. If the config is lost, use explicit
 
 **CLI:**
 
-The `crow-cli` CLI groups commands by resource type. All commands accept
+The `crowdb-cli` CLI groups commands by resource type. All commands accept
 `--ip <addr>` (default `127.0.0.1`), `--port <port>` (default `9920`),
 and `--json` for JSON output.
 
-- **`crow-cli cluster status`** — servers + store/group summary
-- **`crow-cli cluster topology`** — full logical + physical hierarchy
-- **`crow-cli cluster inspect <id>`** — `s<sid>`, `s<sid>/g<gid>`,
+- **`crowdb-cli cluster status`** — servers + store/group summary
+- **`crowdb-cli cluster topology`** — full logical + physical hierarchy
+- **`crowdb-cli cluster inspect <id>`** — `s<sid>`, `s<sid>/g<gid>`,
   `s<sid>/g<gid>/r<rid>`, or `<node-id>`
-- **`crow-cli cluster init --nodes n1,n2,...`** — initialize cluster (system group)
-- **`crow-cli rack add --id <id> [--name <name>]`**
-- **`crow-cli rack remove --id <id>`**
-- **`crow-cli rack list`**
-- **`crow-cli node add --id <id> --rack <rack> [--host <host>] [--ssh-user <user>]`**
-- **`crow-cli node remove --id <id>`**
-- **`crow-cli node list`**
-- **`crow-cli node ping <node>`**
-- **`crow-cli server deploy --node <id> --rest-port <p> --rpc-port <p>`**
-- **`crow-cli server restart --node <id>`**
-- **`crow-cli server stop --node <id>`**
-- **`crow-cli server list`**
-- **`crow-cli store add --store-id <id> [--nodes n1,n2,...]`**
-- **`crow-cli store remove --store-id <id>`**
-- **`crow-cli store list`**
-- **`crow-cli store inspect --store-id <id>`**
-- **`crow-cli paxos add --store-id <s> --group-id <g> --replica-id <r> --nodes n1,n2,...`**
-- **`crow-cli paxos remove --store-id <s> --group-id <g>`**
-- **`crow-cli paxos list --store-id <s>`**
-- **`crow-cli paxos inspect --store-id <s> --group-id <g>`**
-- **`crow-cli replica add --store-id <s> --group-id <g> --node <n> [--replica-id <r>]`**
-- **`crow-cli replica remove --store-id <s> --group-id <g> --replica-id <r>`**
-- **`crow-cli kv put --store-id <s> --group-id <g> --key <k> --value <v>`**
-- **`crow-cli kv get --store-id <s> --group-id <g> --key <k>`**
-- **`crow-cli kv delete --store-id <s> --group-id <g> --key <k>`**
-- **`crow-cli kv scan --store-id <s> --group-id <g> --prefix <p> [--limit <n>]`** — list scan (fast, latest values, S3-list semantics)
-- **`crow-cli snapshot create --store-id <s> --group-id <g>`** — pin a point-in-time snapshot
-- **`crow-cli snapshot list --store-id <s> --group-id <g>`** — list active snapshots
-- **`crow-cli snapshot scan --store-id <s> --group-id <g> --handle <h> --prefix <p> [--limit <n>] [--start-after <k>]`** — scan a pinned snapshot
-- **`crow-cli snapshot release --store-id <s> --group-id <g> --handle <h>`** — release a snapshot
+- **`crowdb-cli cluster init --nodes n1,n2,...`** — initialize cluster (system group)
+- **`crowdb-cli rack add --id <id> [--name <name>]`**
+- **`crowdb-cli rack remove --id <id>`**
+- **`crowdb-cli rack list`**
+- **`crowdb-cli node add --id <id> --rack <rack> [--host <host>] [--ssh-user <user>]`**
+- **`crowdb-cli node remove --id <id>`**
+- **`crowdb-cli node list`**
+- **`crowdb-cli node ping <node>`**
+- **`crowdb-cli server deploy --node <id> --rest-port <p> --rpc-port <p>`**
+- **`crowdb-cli server restart --node <id>`**
+- **`crowdb-cli server stop --node <id>`**
+- **`crowdb-cli server list`**
+- **`crowdb-cli store add --store-id <id> [--nodes n1,n2,...]`**
+- **`crowdb-cli store remove --store-id <id>`**
+- **`crowdb-cli store list`**
+- **`crowdb-cli store inspect --store-id <id>`**
+- **`crowdb-cli paxos add --store-id <s> --group-id <g> --replica-id <r> --nodes n1,n2,...`**
+- **`crowdb-cli paxos remove --store-id <s> --group-id <g>`**
+- **`crowdb-cli paxos list --store-id <s>`**
+- **`crowdb-cli paxos inspect --store-id <s> --group-id <g>`**
+- **`crowdb-cli replica add --store-id <s> --group-id <g> --node <n> [--replica-id <r>]`**
+- **`crowdb-cli replica remove --store-id <s> --group-id <g> --replica-id <r>`**
+- **`crowdb-cli kv put --store-id <s> --group-id <g> --key <k> --value <v>`**
+- **`crowdb-cli kv get --store-id <s> --group-id <g> --key <k>`**
+- **`crowdb-cli kv delete --store-id <s> --group-id <g> --key <k>`**
+- **`crowdb-cli kv scan --store-id <s> --group-id <g> --prefix <p> [--limit <n>]`** — list scan (fast, latest values, S3-list semantics)
+- **`crowdb-cli snapshot create --store-id <s> --group-id <g>`** — pin a point-in-time snapshot
+- **`crowdb-cli snapshot list --store-id <s> --group-id <g>`** — list active snapshots
+- **`crowdb-cli snapshot scan --store-id <s> --group-id <g> --handle <h> --prefix <p> [--limit <n>] [--start-after <k>]`** — scan a pinned snapshot
+- **`crowdb-cli snapshot release --store-id <s> --group-id <g> --handle <h>`** — release a snapshot
 
 **curl:**
 
@@ -690,7 +690,7 @@ and `--json` for JSON output.
 | Health check | `GET /health` |
 | Metrics | `GET /metrics` |
 
-These endpoints are on the `crow-kv-server` management API (internal,
-only called by `crow-kv-client`'s `KVClusterAdmin`). The console's
+These endpoints are on the `crowdb-kv-server` management API (internal,
+only called by `crowdb-kv-client`'s `KVClusterAdmin`). The console's
 `POST /api/cluster/init` orchestrates
 `/system/init` across nodes and auto-finalizes.

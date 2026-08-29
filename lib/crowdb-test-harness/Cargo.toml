@@ -1,0 +1,40 @@
+[package]
+name = "crowdb-test-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared test harness for CROWDB E2E tests: cluster lifecycle, hardware seeding, service-specific helpers."
+autobenches = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# KvCluster client helpers (make_hardware_client, make_service_registry_client).
+kv-client = ["dep:crowdb-kv-client"]
+# Hardware seeding (seed_hardware). Implies kv-client.
+hardware = ["kv-client", "dep:crowdb-protocol"]
+# Diskio test harness (DiskioProcess, test_io_round, etc.). Implies hardware.
+diskio = ["hardware", "dep:crowdb-diskio-client", "dep:crowdb-rpc-ffi", "dep:crowdb-tree-ffi"]
+# Diskdb test harness (DiskdbProcess, etc.). Implies hardware.
+diskdb = ["hardware", "dep:crowdb-diskdb-client", "dep:crowdb-rpc-ffi", "dep:crowdb-tree-ffi"]
+# Chunkdb test harness (ChunkdbProcess, etc.). Implies hardware.
+chunkdb = ["hardware", "dep:crowdb-chunkdb-client", "dep:crowdb-rpc-ffi", "dep:crowdb-tree-ffi"]
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+
+# Optional, feature-gated
+crowdb-kv-client = { path = "../crowdb-kv-client", optional = true }
+crowdb-protocol = { path = "../crowdb-protocol", optional = true }
+crowdb-diskio-client = { path = "../crowdb-diskio-client", optional = true }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", optional = true }
+crowdb-tree-ffi = { path = "../crowdb-tree/ffi", optional = true }
+crowdb-diskdb-client = { path = "../crowdb-diskdb-client", optional = true }
+crowdb-chunkdb-client = { path = "../crowdb-chunkdb-client", optional = true }
+ctor = "1.0.13"

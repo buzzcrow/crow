@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R112: chunkdb / diskdb / diskio — Small-Write IO Error Handling (Multi-Service Cooperation)
@@ -93,11 +93,11 @@ across batches.
 mirror vs EC, `replica_count`). diskdb design §8 (Disk Status
 Management — `HwStatus` transitions, `Suspect`/`Bad` states,
 allocation requires `Up`). R106 (small object shared chunk writer —
-the write path being hardened; `lib/crow-chunk-client/src/writer/`,
+the write path being hardened; `lib/crowdb-chunk-client/src/writer/`,
 shared chunk buffer, pipeline worker tasks). R93 (mirror→EC
 conversion — the background conversion path; boundary with R112).
 R110 (large-write IO error handling — defines the negative list
-`lib/crow-chunk-client/src/negative_list.rs` and single-block
+`lib/crowdb-chunk-client/src/negative_list.rs` and single-block
 replacement that R112 reuses). R111 (read IO error handling —
 mirror replica fallback + rebuild for the read path, same strips
 R112 writes). R105 (diskio — `DiskIoClient::write` / `fsync` error
@@ -190,17 +190,17 @@ writer, and draws a clear boundary with R93's mirror→EC conversion.
 
 **Numbered work items**:
 
-1. **Negative list reuse** (`lib/crow-chunk-client/src/negative_list.rs`)
+1. **Negative list reuse** (`lib/crowdb-chunk-client/src/negative_list.rs`)
    — R112 reuses R110's negative list (TTL-based disk exclusion)
    verbatim; no new module. The small-object writer consults it
    before allocating replacement mirror blocks and before scaling
    out new pipelines (a new pipeline should not land on a
    negative-listed disk).
-   **Services**: diskdb (allocation exclusion), crow-chunk-client
+   **Services**: diskdb (allocation exclusion), crowdb-chunk-client
    (list consultation — shared with R110/R111).
 
 2. **Mirror-replica replacement on write**
-   (`lib/crow-chunk-client/src/writer/` — shared chunk writer) —
+   (`lib/crowdb-chunk-client/src/writer/` — shared chunk writer) —
    when a diskio `write` or `fsync` fails for one mirror replica in
    a strip, the writer re-allocates that replica on a healthy disk
    (via diskdb `AllocateBlocks` with the negative list filter),
@@ -213,7 +213,7 @@ writer, and draws a clear boundary with R93's mirror→EC conversion.
    (new block allocation), chunkdb (strip metadata update).
 
 3. **Batch-aware per-object retry**
-   (`lib/crow-chunk-client/src/writer/` — batch tracking) — when a
+   (`lib/crowdb-chunk-client/src/writer/` — batch tracking) — when a
    batch write fails partway (e.g. disk fills up mid-batch), the
    writer tracks which objects in the batch were successfully
    written and which were not, re-allocates a new mirror block, and
@@ -226,7 +226,7 @@ writer, and draws a clear boundary with R93's mirror→EC conversion.
    block).
 
 4. **Shared chunk rotation safety**
-   (`lib/crow-chunk-client/src/writer/` — chunk rotation) — when a
+   (`lib/crowdb-chunk-client/src/writer/` — chunk rotation) — when a
    batch write triggers chunk rotation (batch spans the old chunk's
    tail and a new chunk's head) and the new chunk's first write
    fails, the writer must not corrupt the old chunk's sealed
@@ -274,7 +274,7 @@ writer, and draws a clear boundary with R93's mirror→EC conversion.
        │  │            │               │
        │  ▼            │               │
        │ ┌─────────────────────────────┐
-       │ │ crow-chunk-client (writer)  │
+       │ │ crowdb-chunk-client (writer)  │
        │ │  add disk → negative list   │
        │ │  (shared with R110/R111)    │
        │ └────────────┬────────────────┘
@@ -378,7 +378,7 @@ the dependency list is organized by service.
     conversion-path failures). R93 must land first (R106 depends
     on it).
   - **R110** (large-write IO error handling) — defines the negative
-    list (`lib/crow-chunk-client/src/negative_list.rs`) and
+    list (`lib/crowdb-chunk-client/src/negative_list.rs`) and
     escalation reporting that R112 reuses. R110 must land first
     (R112 reuses its machinery).
   - **R83** (complete recovery flow) — the escalation path when
@@ -449,9 +449,9 @@ the dependency list is organized by service.
   by diskdb GC. Integration test (drop mid-write, verify partial
   batch deleted, no orphaned blocks).
 
-**Test commands**: `pixi run cargo test -p crow-chunk-client --test
+**Test commands**: `pixi run cargo test -p crowdb-chunk-client --test
 small_write_error_handling` (unit + integration), `pixi run cargo
-test -p crow-chunk-client --test small_write_error_handling_e2e`
+test -p crowdb-chunk-client --test small_write_error_handling_e2e`
 (E2E with real servers + fault injection), `pixi run cargo fmt --all
 -- --check`, `pixi run cargo clippy --all-targets -- -D warnings`.
 

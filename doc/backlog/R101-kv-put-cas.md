@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R101: kv — Compare-and-Set on Put
@@ -7,9 +7,9 @@
 
 **Current behavior + impact**
 
-`KvSetRequest` (`lib/crow-protocol/src/fbs/kv_client.fbs:29`) is a blind
+`KvSetRequest` (`lib/crowdb-protocol/src/fbs/kv_client.fbs:29`) is a blind
 overwrite — it has no `expected_revision` field. The KV server's `put`
-handler (`lib/crow-kv/src/rpc/kv_service.rs:217`) calls `kv_put` →
+handler (`lib/crowdb-kv/src/rpc/kv_service.rs:217`) calls `kv_put` →
 `propose_and_respond` → paxos propose, with no precondition check. The
 last writer wins, silently overwriting whatever was there before.
 
@@ -27,20 +27,20 @@ read-modify-write callers, not just chunkdb.
 
 **Design pointers**
 
-- `doc/design/kv/design-crow-kv-group0.md` §2.1 — `crow-kv-client` is the
+- `doc/design/kv/design-crowdb-kv-group0.md` §2.1 — `crowdb-kv-client` is the
   single sysdata API surface; the CAS method would live here.
-- `doc/design/chunkdb/design-crow-chunkdb.md` §9 (Chunk Lifecycle) —
+- `doc/design/chunkdb/design-crowdb-chunkdb.md` §9 (Chunk Lifecycle) —
   "Concurrency: KV CAS or state machine guards prevent conflicting
   transitions." R101 implements the KV CAS half of this statement (R100
   implements the state-machine-guard half via the in-process mutex).
-- `lib/crow-protocol/src/fbs/kv_client.fbs:29` — `KvSetRequest` message to
+- `lib/crowdb-protocol/src/fbs/kv_client.fbs:29` — `KvSetRequest` message to
   extend.
-- `lib/crow-kv/src/cluster/px_kv_store.rs:488` — `propose_and_respond`,
+- `lib/crowdb-kv/src/cluster/px_kv_store.rs:488` — `propose_and_respond`,
   the propose path where the CAS check would be inserted (read-before-
   propose, lease-protected).
-- `lib/crow-kv/src/paxos/learner.rs:548` — `apply_entry`, the apply path
+- `lib/crowdb-kv/src/paxos/learner.rs:548` — `apply_entry`, the apply path
   (no change needed — CAS is checked at propose time, not apply time).
-- `lib/crow-kv-client/src/client.rs:500` — `put` method to extend with
+- `lib/crowdb-kv-client/src/client.rs:500` — `put` method to extend with
   an optional `expected_revision`.
 
 **Use scenarios**
@@ -85,14 +85,14 @@ the propose, so the check is authoritative.
 
 **Numbered work items**
 
-- **`KvSetRequest` fbs extension** (`lib/crow-protocol/src/fbs/kv_client.fbs`)
+- **`KvSetRequest` fbs extension** (`lib/crowdb-protocol/src/fbs/kv_client.fbs`)
   — add `optional uint64 expected_revision = 10;` to `KvSetRequest`
   (field number 10, next available after the existing fields 1-9). When
   absent (0 / None), behavior is unchanged (blind overwrite, the default).
   When present, the server checks the key's current revision before
   proposing.
 - **CAS check in the `put` handler**
-  (`lib/crow-kv/src/rpc/kv_service.rs:217`) — before calling
+  (`lib/crowdb-kv/src/rpc/kv_service.rs:217`) — before calling
   `store.kv_put`, if `req.expected_revision != 0`:
   - Do a linearizable read of the key (via the existing `kv_get` path or
     an internal `get_revision(group_id, key)` helper) to get the key's
@@ -108,7 +108,7 @@ the propose, so the check is authoritative.
   — new error code. The `KvResponse` on CAS failure includes the
   current revision in the `revision` field (normally the write's slot;
   on CAS failure, it's the key's current revision for client retry).
-- **`put_cas` client method** (`lib/crow-kv-client/src/client.rs`) —
+- **`put_cas` client method** (`lib/crowdb-kv-client/src/client.rs`) —
   new method `put_cas(store_id, group_id, key, value, expected_revision,
   ids) -> Result<WriteOutcome>`. Like `put` but passes
   `expected_revision` in the request. On `KV_ERROR_CAS_FAILED`, returns
@@ -116,7 +116,7 @@ the propose, so the check is authoritative.
   Alternatively, extend the existing `put` method with an optional
   `expected_revision: Option<u64>` parameter (preferred — one method,
   fewer code paths).
-- **`ChunkStore::put_chunk_cas`** (`app/crow-chunkdb/src/storage.rs:51`)
+- **`ChunkStore::put_chunk_cas`** (`app/crowdb-chunkdb/src/storage.rs:51`)
   — new method or extend `put_chunk` with an optional
   `expected_revision: Option<u64>`. Passes the revision from the
   `get_chunk` read to the `put_cas` call. On `CasFailed`, returns
@@ -256,15 +256,15 @@ Client calls put_cas(key, value, expected_revision=N)
 
 **Error mapping**:
 
-- `CasFailed` maps to a crow-rpc error with the current revision in the
+- `CasFailed` maps to a crowdb-rpc error with the current revision in the
   error detail (so the client can retry without a separate read). Unit
   test.
 
 **Test commands**:
 
-- `pixi run cargo test -p crow-kv --test cas_test` (new test file)
-- `pixi run cargo test -p crow-kv-client --test put_cas_test`
-- `pixi run cargo test -p crow-chunkdb --test lifecycle_test`
+- `pixi run cargo test -p crowdb-kv --test cas_test` (new test file)
+- `pixi run cargo test -p crowdb-kv-client --test put_cas_test`
+- `pixi run cargo test -p crowdb-chunkdb --test lifecycle_test`
 - `pixi run cargo fmt --all -- --check`
 - `pixi run cargo clippy --all-targets -- -D warnings`
 

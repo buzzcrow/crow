@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # R52 — Reverse Scan
@@ -18,7 +18,7 @@ which is O(N log N) and defeats the O(limit) scan pushdown.
 
 ## Scope
 
-- **Engine** (`crow-tree`): the `LeafChainCursor` (R48) seeks and
+- **Engine** (`crowdb-tree`): the `LeafChainCursor` (R48) seeks and
   advances forward. A reverse cursor needs backward traversal:
   - `seek(start_before)` targets the leaf containing `start_before`
     and positions at the last entry < `start_before`.
@@ -37,7 +37,7 @@ which is O(N log N) and defeats the O(limit) scan pushdown.
 - **RPC** (`KvScanRequest`): add a `direction` field. The
   S3-style pagination uses the first key of each page as the next
   `start_before` (vs the last key as `start_after` in forward mode).
-- **Client** (`CrowkvClient::scan`): add a `direction` parameter;
+- **Client** (`CrowdbClient::scan`): add a `direction` parameter;
   pagination state tracks `start_before` instead of `start_after`.
 
 ## Cost Shape

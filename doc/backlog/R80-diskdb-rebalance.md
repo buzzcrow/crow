@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R80: diskdb — Space Rebalance Across Disks + Disk-Groups
@@ -65,7 +65,7 @@ status = `max(node, group, disk)`), §9 (Space Metrics — per-disk /
 per-disk-group / per-zone usage; keepalive-piggybacked
 `DiskGroupUsageKey` summary; gauges are derived snapshots), §10
 (Background Scanner — `ScannerTask` / `BgRunner` background-task
-pattern, KV-persisted progress, resume after restart). CROW's
+pattern, KV-persisted progress, resume after restart). CROWDB's
 caller-routed disk-group model (§3.2) makes cross-disk-group rebalance
 a caller concern, which is new; the per-disk load-aware allocation and
 the rebalance-planner-with-owner-hand-off are new work shaped on R76's
@@ -125,7 +125,7 @@ move), and emit relocation plans with owner hand-off for persistent
 imbalance (placeholder relocation in v1; real move deferred to a future
 `diskio` service).
 
-1. **Imbalance metrics** — `app/crow-diskdb/src/metrics/` (extends
+1. **Imbalance metrics** — `app/crowdb-diskdb/src/metrics/` (extends
    `DiskdbMetrics` from R74) + the keepalive reporting loop:
    - Per-disk-group gauges computed from
      `DdbDiskGroup::aggregate_usage()` (disk_group.rs:229):
@@ -143,7 +143,7 @@ imbalance (placeholder relocation in v1; real move deferred to a future
    - These give operators the visibility that is entirely missing today.
 
 2. **Load-aware allocation skewing** —
-   `app/crow-diskdb/src/model/disk_group.rs` `allocate_block` /
+   `app/crowdb-diskdb/src/model/disk_group.rs` `allocate_block` /
    `allocate_blocks` (disk_group.rs:116 / :150):
    - Replace the pure round-robin cursor (`pos_v_disk_ctx` fetch_add %
      ctx_len) with a **load-weighted** selection over
@@ -167,7 +167,7 @@ imbalance (placeholder relocation in v1; real move deferred to a future
      converges imbalance over time via new allocations + churn.
 
 3. **Rebalance planner (background task + KV-persisted plan,
-   placeholder relocation)** — `app/crow-diskdb/src/rebalance/
+   placeholder relocation)** — `app/crowdb-diskdb/src/rebalance/
    planner.rs` (new), following the `BgRunner` + `BackgroundTask`
    pattern (R75 `ScannerTask`, R76 `RecoveryScanTask`):
    - `RebalancePlannerTask` — a per-disk-group background task that
@@ -212,8 +212,8 @@ imbalance (placeholder relocation in v1; real move deferred to a future
      emit a new plan.
 
 4. **Rebalance plan KV schema** —
-   `lib/crow-protocol/src/fbs/diskdb.fbs` +
-   `lib/crow-protocol/src/key/`:
+   `lib/crowdb-protocol/src/fbs/diskdb.fbs` +
+   `lib/crowdb-protocol/src/key/`:
    - New key type `RebalancePlanKey { disk_group_id }` (BinaryKey, on
      the bound data group alongside zone records).
    - New value type `RebalancePlanValue { status, source_blocks,
@@ -228,7 +228,7 @@ imbalance (placeholder relocation in v1; real move deferred to a future
      relocation.
 
 5. **Disk-group-level imbalance hint API** —
-   `app/crow-diskdb` crow-rpc service (`DiskdbService`, §4 Protocol):
+   `app/crowdb-diskdb` crowdb-rpc service (`DiskdbService`, §4 Protocol):
    - Add `GetRebalanceHint` RPC — returns per-owned-disk-group
      `used_pct` + `allocatable_disk_count` + an `imbalance_spread`
      flag, derived from `aggregate_usage()`. The caller / placement

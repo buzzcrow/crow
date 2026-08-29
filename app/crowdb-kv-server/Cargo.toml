@@ -1,0 +1,85 @@
+[package]
+name = "crowdb-kv-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CROWDB server binary: single-group, multi-group, and cluster modes."
+autotests = false
+
+[[bin]]
+name = "crowdb-kv-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+crowdb-kv = { path = "../../lib/crowdb-kv" }
+crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
+crowdb-common = { path = "../../lib/crowdb-common/rust" }
+crowdb-protocol = { path = "../../lib/crowdb-protocol", features = ["schema"] }
+crowdb-tree-ffi = { path = "../../lib/crowdb-tree/ffi" }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+tracing = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dashmap = "6"
+utoipa = "5"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi", features = ["test-util"] }
+crowdb-test-harness = { path = "../../lib/crowdb-test-harness" }
+bytes = "1"
+
+[[test]]
+name = "async_ops_test"
+path = "tests/async_ops_test.rs"
+
+[[test]]
+name = "cli_parse_test"
+path = "tests/cli_parse_test.rs"
+
+[[test]]
+name = "cluster_e2e_test"
+path = "tests/cluster_e2e_test.rs"
+
+[[test]]
+name = "deployment_reconfig_test"
+path = "tests/deployment_reconfig_test.rs"
+
+[[test]]
+name = "multi_store_test"
+path = "tests/multi_store_test.rs"
+
+[[test]]
+name = "reconcile_test"
+path = "tests/reconcile_test.rs"
+
+[[test]]
+name = "restore_test"
+path = "tests/restore_test.rs"
+
+[[test]]
+name = "server_api_test"
+path = "tests/server_api_test.rs"
+
+[[test]]
+name = "snapshot_join_e2e_test"
+path = "tests/snapshot_join_e2e_test.rs"
+
+[[test]]
+name = "startup_test"
+path = "tests/startup_test.rs"
+
+[[test]]
+name = "system_init_test"
+path = "tests/system_init_test.rs"

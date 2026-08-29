@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R66: WAL io_uring Backend — Eliminate `spawn_blocking` on the Durability Path
@@ -17,19 +17,19 @@ pool (default 512 threads). This is correct but suboptimal:
    can become a bottleneck. `fdatasync` is a slow syscall (disk
    latency, typically 10-100 µs for NVMe, 1-10 ms for SSD). If 512
    fsync calls are in flight, the pool is fully consumed and other
-   `spawn_blocking` calls (e.g. crow-tree FFI, lifecycle) queue behind
+   `spawn_blocking` calls (e.g. crowdb-tree FFI, lifecycle) queue behind
    them.
 3. **No true async I/O** — `tokio::fs` is a thin `spawn_blocking`
    wrapper around `std::fs`, not a completion-based async I/O
-   substrate. The WAL design doc (`design-crow-kv-wal.md` §4.6)
+   substrate. The WAL design doc (`design-crowdb-kv-wal.md` §4.6)
    acknowledges this: `File` is the "works everywhere" fallback, and
    io_uring is the planned production backend.
 
-The crow-tree B-tree engine already has a mature io_uring engine
-(`DiskIOUring` in `crow-common`, `lib/crow-common/cpp/src/diskio_uring.cpp`)
+The crowdb-tree B-tree engine already has a mature io_uring engine
+(`DiskIOUring` in `crowdb-common`, `lib/crowdb-common/cpp/src/diskio_uring.cpp`)
 that submits read/write/fsync SQEs on io_uring pipelines and
 dispatches CQE completions via callbacks. It is Linux-only (guarded by
-`CROW_HAVE_LIBURING`), uses `liburing` (already in the pixi
+`CROWDB_HAVE_LIBURING`), uses `liburing` (already in the pixi
 environment as `liburing-2.14`), and handles `O_DIRECT` aligned I/O.
 The WAL should reuse this infrastructure rather than building a
 parallel io_uring path.
@@ -52,7 +52,7 @@ durability path.
    - **DiskIOUring sharing**: the WAL creates its own `DiskIOUring`
      instance (one per store, not per group) — a single-pipeline
      topology is sufficient (WAL I/O is not CPU-bound; it's
-     syscall-bound). Alternatively, the WAL can share the crow-tree
+     syscall-bound). Alternatively, the WAL can share the crowdb-tree
      engine's `DiskIOUring` if a store has both (preferred — one
      polling thread per store, serving both B-tree page I/O and WAL
      segment I/O). The design should evaluate both options and pick
@@ -70,13 +70,13 @@ durability path.
 2. **`WalFile` integration** — add `WalFileInner::Uring` variant that
    implements `fdatasync`, `fsync`, `write_at`, `read_at`, `len`,
    `truncate` via `DiskIOUring` SQE submission + CQE completion futures.
-   The Rust FFI layer (`crow-tree-ffi`) exposes `DiskIOUring`'s submit
+   The Rust FFI layer (`crowdb-tree-ffi`) exposes `DiskIOUring`'s submit
    API as async functions (returning a `Future` that resolves on CQE
    completion). The WAL's `WalFile` dispatches to these.
 
    - **Completion-based futures**: `DiskIOUring`'s CQE callback resolves
      a oneshot channel or `ct_future` handle, which the Rust side
-     polls as a `Future`. This is the same pattern crow-tree uses for
+     polls as a `Future`. This is the same pattern crowdb-tree uses for
      `get`/`flush`/`snapshot` async operations — no `spawn_blocking`,
      no thread hop.
    - **Batched submission**: `DiskIOUring` batches SQEs and submits them
@@ -97,11 +97,11 @@ durability path.
      internal implementation (`DiskIOUring` SQE vs `spawn_blocking`).
 
 4. **Shared io_uring module** — `DiskIOUring` already lives in
-   `crow-common` and is shared by crow-tree and diskio. The WAL reuses
+   `crowdb-common` and is shared by crowdb-tree and diskio. The WAL reuses
    it via FFI. Options:
 
    - **Option A (preferred)**: expose `DiskIOUring`'s submit API via
-     FFI (`crow-tree-ffi`), letting the Rust WAL call
+     FFI (`crowdb-tree-ffi`), letting the Rust WAL call
      `uring_submit_write` / `uring_submit_fsync` / `uring_submit_read`
      directly. `DiskIOUring` is already C++ with a C-callable submit
      API (`diskio_uring.h`'s `submit_read`/`submit_write`/`submit_fsync`).
@@ -113,33 +113,33 @@ durability path.
      Defer unless Option A proves awkward.
 
    Option A is preferred because the C++ `DiskIOUring` is already proven
-   (used by crow-tree's page store for demand-load reads, flush, and
+   (used by crowdb-tree's page store for demand-load reads, flush, and
    snapshot), handles `O_DIRECT` alignment, and has tested error
    paths. The FFI surface is small (3 submit functions + 1 completion
    poll).
 
 **Scope**:
-- `lib/crow-kv/src/wal/io_backend.rs` — add `IoBackend::Uring` variant.
+- `lib/crowdb-kv/src/wal/io_backend.rs` — add `IoBackend::Uring` variant.
   Update `IoBackend::detect` to probe for `liburing` + Linux and return
   `Uring` when available, `File` otherwise.
-- `lib/crow-kv/src/wal/wal_file.rs` — add `WalFileInner::Uring` variant
+- `lib/crowdb-kv/src/wal/wal_file.rs` — add `WalFileInner::Uring` variant
   implementing `fdatasync` / `fsync` / `write_at` / `read_at` / `len` /
   `truncate` via `DiskIOUring` SQE submission.
-- `lib/crow-kv/src/wal/file_backend.rs` — no change (fallback backend).
-- `lib/crow-kv/src/wal/block_backend.rs` — no change (test/bench
+- `lib/crowdb-kv/src/wal/file_backend.rs` — no change (fallback backend).
+- `lib/crowdb-kv/src/wal/block_backend.rs` — no change (test/bench
   backend).
-- `lib/crow-kv/src/wal/pipeline_writer.rs` — no API change; the
+- `lib/crowdb-kv/src/wal/pipeline_writer.rs` — no API change; the
   `Uring` backend's `fdatasync` / `write_at` are drop-in async fn
   replacements.
-- `lib/crow-tree/ffi/src/lib.rs` — expose `DiskIOUring` submit API as
+- `lib/crowdb-tree/ffi/src/lib.rs` — expose `DiskIOUring` submit API as
   Rust async functions (`uring_write` / `uring_fsync` / `uring_read`).
   These return a `Future` that resolves on CQE completion.
-- `lib/crow-common/cpp/include/crow-common/diskio_uring.h` — no change
+- `lib/crowdb-common/cpp/include/crowdb-common/diskio_uring.h` — no change
   (submit API already exists: `submit_read` / `submit_write` /
   `submit_fsync`).
-- `lib/crow-kv/src/wal/segment.rs` — no change (dispatches through
+- `lib/crowdb-kv/src/wal/segment.rs` — no change (dispatches through
   `WalFile`).
-- `lib/crow-kv/tests/wal/` — add tests for the `Uring` backend:
+- `lib/crowdb-kv/tests/wal/` — add tests for the `Uring` backend:
   - `fdatasync` via `DiskIOUring` resolves correctly (data durable
     after CQE).
   - `write_at` via `DiskIOUring` writes correct data at correct
@@ -149,7 +149,7 @@ durability path.
   - Fallback to `File` when `liburing` not available (non-Linux).
   - Error injection: `DiskIOUring` CQE with error result propagates
     to `WalFile::fdatasync` caller.
-- `doc/design/kv/design-crow-kv-wal.md` §4.6 — update to document the
+- `doc/design/kv/design-crowdb-kv-wal.md` §4.6 — update to document the
   `Uring` variant and the `DiskIOUring` sharing model.
 
 **Complexity**: Medium-High — the `DiskIOUring` submit API already
@@ -158,7 +158,7 @@ exists in C++ and is proven. The main work is the FFI bridge (exposing
 `WalFileInner::Uring` variant. The `pipeline_writer` and `segment`
 layers need no changes (they already use `async fn` interfaces). The
 hardest part is `DiskIOUring` lifecycle management (creation, sharing
-with crow-tree, shutdown ordering) and ensuring the CQE completion
+with crowdb-tree, shutdown ordering) and ensuring the CQE completion
 future integrates cleanly with Tokio's polling model.
 
 **Dependencies**: None (`DiskIOUring` and `liburing` already exist in
@@ -206,4 +206,4 @@ the build). This is a self-contained performance improvement.
 - `pipeline_writer` and `segment` layers unchanged (drop-in async fn
   replacement).
 - `DiskIOUring` lifecycle: one instance per store (shared with
-  crow-tree if present), clean shutdown on store close.
+  crowdb-tree if present), clean shutdown on store close.

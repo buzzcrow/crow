@@ -19,7 +19,7 @@ labels: bug
 
 - OS:
 - Rust version: (`rustc --version`)
-- CROW version / commit:
+- CROWDB version / commit:
 - Pixi version:
 
 ## Logs

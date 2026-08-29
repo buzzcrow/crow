@@ -1,10 +1,10 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # RPC Flow Analysis
 
 End-to-end analysis of the standalone RPC echo benchmark. It measures
-crow-rpc transport only: epoll/kqueue, framing, request correlation, and the
+crowdb-rpc transport only: epoll/kqueue, framing, request correlation, and the
 request/response callback. There is no KV or storage layer.
 
 ## 1. Flow

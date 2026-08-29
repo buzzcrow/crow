@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R121: tree — C++ mutex/lock review fixes
@@ -34,7 +34,7 @@ are documented for reference and need no action.
   thread names are set once and never change (runs on spdlog's async
   backend, so doesn't block app threads directly, but serializes log
   formatting).
-- `Crowtree::resident` cold path holds `load_mutex_` during disk I/O,
+- `Crowdbtree::resident` cold path holds `load_mutex_` during disk I/O,
   serializing all demand loads globally (by design — hot path is
   lock-free; only a concern if cold-path concurrency becomes a
   bottleneck).
@@ -42,12 +42,12 @@ are documented for reference and need no action.
   tracking (low priority — slots are mostly in-order, set stays small).
 
 **Design pointers:**
-- `design/tree/design-crow-tree.md` — buffer pool and page cache design
+- `design/tree/design-crowdb-tree.md` — buffer pool and page cache design
   (the `BufferPool::pin` finding is the storage engine's core page-access
   path).
-- `design/rpc/design-crow-rpc.md` §6 (zero-copy dispatch, handler
+- `design/rpc/design-crowdb-rpc.md` §6 (zero-copy dispatch, handler
   registration model — the `HandlerRegistry` finding).
-- `design/kv/design-crow-kv-observability.md` — metrics registry design
+- `design/kv/design-crowdb-kv-observability.md` — metrics registry design
   (the `MetricsRegistry` data-race finding).
 
 **Use scenarios:**
@@ -77,7 +77,7 @@ fix the metrics registry data race; lower-priority findings are
 documented with recommended approaches for later.
 
 1. **`BufferPool::pin` — I/O outside the pool lock** —
-   `lib/crow-tree/src/buffer_pool.cpp` lines 177–218. Split the fast
+   `lib/crowdb-tree/src/buffer_pool.cpp` lines 177–218. Split the fast
    path (hit: lock, increment pin count, unlock) from the slow path
    (miss: lock, find victim, unlock, do I/O, re-lock, install). Also
    fix `acquire_victim()` (line 144 → `write_back()` under `mu_`) and
@@ -87,8 +87,8 @@ documented with recommended approaches for later.
    split-path approach still contends on re-install.
 
 2. **`ConcurrentSkipList` spinlock backoff** —
-   `lib/crow-tree/include/crow-tree/skip_list.h` lines 225–244;
-   `lib/crow-tree/src/skip_list.cpp` lines 109, 210. Add exponential
+   `lib/crowdb-tree/include/crowdb-tree/skip_list.h` lines 225–244;
+   `lib/crowdb-tree/src/skip_list.cpp` lines 109, 210. Add exponential
    backoff (`std::this_thread::yield()` or PAUSE) to the
    `SpinlockGuard`. For higher contention, consider a ticket lock
    (fair) or per-shard spinlocks. Verify the actual concurrency model
@@ -96,36 +96,36 @@ documented with recommended approaches for later.
    contention may be low in practice.
 
 3. **`HandlerRegistry::get_handler` — lock-free dispatch** —
-   `lib/crow-rpc/include/crow-rpc/server/handler.h` lines 49–57.
+   `lib/crowdb-rpc/include/crowdb-rpc/server/handler.h` lines 49–57.
    Populate a `std::unordered_map` (or flat array indexed by `msg_type`
    if the type space is small) at startup and make it read-only — no
    lock needed for reads. Falls back to `std::shared_mutex` if
    late registration must be supported.
 
 4. **`MetricsRegistry::register_*` — fix the data race** —
-   `lib/crow-common/cpp/src/metrics/metrics.cpp` lines 35–73. Either
+   `lib/crowdb-common/cpp/src/metrics/metrics.cpp` lines 35–73. Either
    hold `flush_mutex_` in `register_*`, or document/enforce that all
    registration must complete before `start()` (with a panic or clear
    error on late registration), or freeze the registry after start.
 
 5. **`thread_name_flag::format` — lock-free thread-name lookup** —
-   `lib/crow-common/cpp/src/log.cpp` lines 59–65. Use
+   `lib/crowdb-common/cpp/src/log.cpp` lines 59–65. Use
    `std::shared_mutex` (shared for format, unique for
    `set_current_thread_name`), or a lock-free read path since names
    are set once.
 
 6. **`ConnectionPool::get`/`get_for` — low priority** —
-   `lib/crow-rpc/src/pool.cpp` lines 13–45. Only if profiling shows
+   `lib/crowdb-rpc/src/pool.cpp` lines 13–45. Only if profiling shows
    contention: lock-free round-robin over a snapshot, or per-thread
    connection caching.
 
-7. **`Crowtree::resident` cold path — low priority** —
-   `lib/crow-tree/src/crow-tree.cpp` lines 332–371. Acceptable as-is
+7. **`Crowdbtree::resident` cold path — low priority** —
+   `lib/crowdb-tree/src/crowdb-tree.cpp` lines 332–371. Acceptable as-is
    (hot path is lock-free by design). If cold-path concurrency becomes
    a bottleneck, use per-page load locks (striped by `page_id`).
 
 8. **`slot_mutex_` — low priority** —
-   `lib/crow-tree/src/crow-tree.cpp` lines 776–779, 875–878. Acceptable
+   `lib/crowdb-tree/src/crowdb-tree.cpp` lines 776–779, 875–878. Acceptable
    as-is (slots mostly in-order, set stays small). If out-of-order gaps
    are common, use a lock-free bitmap or bounded ring buffer.
 
@@ -143,9 +143,9 @@ documented with recommended approaches for later.
 ## Dependencies
 
 - None — all findings are in landed code. The `BufferPool` fix is
-  self-contained within `crow-tree`; the `HandlerRegistry` fix is
-  self-contained within `crow-rpc`; the `MetricsRegistry` fix is
-  self-contained within `crow-common`. No cross-component ordering.
+  self-contained within `crowdb-tree`; the `HandlerRegistry` fix is
+  self-contained within `crowdb-rpc`; the `MetricsRegistry` fix is
+  self-contained within `crowdb-common`. No cross-component ordering.
 - R122 (Rust lock review) shares the same `MetricsRunner` collector
   pattern (Rust `MetricsRunner` holds `registry.lock()` during the
   collector callback — same root cause as C++ finding #4); the two can

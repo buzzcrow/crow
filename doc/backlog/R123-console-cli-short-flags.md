@@ -1,11 +1,11 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R123: console — CLI short flag aliases for all subcommands
 
 **Problem**
 
-The `crow-cli` has inconsistent short flag coverage. Only `bench rpc`
+The `crowdb-cli` has inconsistent short flag coverage. Only `bench rpc`
 and the global `--config` (`-p`) define short aliases. All other
 subcommands — `bench kv` (24 args), `diskdb`, `disk`, `server`,
 `paxos`, `node`, and the global `--ip`/`--port`/`--json` — are long-only.
@@ -31,15 +31,15 @@ frequently-used args.
 **Design pointers**
 
 No formal design doc covers CLI ergonomics. This is a self-contained
-cleanup within `app/crow-cli/src`.
+cleanup within `app/crowdb-cli/src`.
 
 **Use scenarios**
 
-- Operator runs a quick KV bench: `crow-cli bench kv -d 60 -L 64 -s 1024`
+- Operator runs a quick KV bench: `crowdb-cli bench kv -d 60 -L 64 -s 1024`
   instead of typing `--duration-secs 60 --loader-num 64 --value-size 1024`.
-- Operator deploys a server: `crow-cli server deploy -n node1 -r 9920 -R 9930`
+- Operator deploys a server: `crowdb-cli server deploy -n node1 -r 9920 -R 9930`
   instead of `--node node1 --rest-port 9920 --rpc-port 9930`.
-- Operator adds a paxos group: `crow-cli paxos add -s 1 -g 1 -r 100 -N 1,2,3`
+- Operator adds a paxos group: `crowdb-cli paxos add -s 1 -g 1 -r 100 -N 1,2,3`
   instead of `--store-id 1 --group-id 1 --replica-id 100 --nodes 1,2,3`.
 - Operator runs `--help` and sees both short and long forms for every
   argument, consistent across all subcommands.
@@ -51,7 +51,7 @@ across all CLI subcommands. Use clap's `short` attribute (single char
 only — clap does not support multi-char short flags).
 
 **One-line summary:** Add single-char short flag aliases to every
-`#[arg]` across all `crow-cli` subcommands, following the `bench rpc`
+`#[arg]` across all `crowdb-cli` subcommands, following the `bench rpc`
 precedent.
 
 **Numbered work items**
@@ -84,7 +84,7 @@ precedent.
 7. **`node` args (`commands/node.rs`)** — add short aliases to all args
    across Add, Remove.
 
-8. **Short flag conflict audit** — run `crow-cli <sub> --help` for every
+8. **Short flag conflict audit** — run `crowdb-cli <sub> --help` for every
    subcommand to verify no clap panic on duplicate short flags. Clap
    enforces uniqueness at parse time (panics in debug). Global args
    (`-p`, `-i`, `-o`, `-j`) are `global = true` so they occupy their
@@ -102,30 +102,30 @@ precedent.
 
 **Dependencies**
 
-None. Self-contained within `app/crow-cli/src`.
+None. Self-contained within `app/crowdb-cli/src`.
 
 **Acceptance**
 
-- `crow-cli bench kv --help` shows short aliases for all 24 args.
+- `crowdb-cli bench kv --help` shows short aliases for all 24 args.
   Integration test (smoke).
-- `crow-cli bench rpc --help` still shows the existing short aliases
+- `crowdb-cli bench rpc --help` still shows the existing short aliases
   (no regression). Integration test (smoke).
-- `crow-cli diskdb <sub> --help` shows short aliases for all args in
+- `crowdb-cli diskdb <sub> --help` shows short aliases for all args in
   every diskdb subcommand. Integration test (smoke).
-- `crow-cli disk <sub> --help` shows short aliases for all args in
+- `crowdb-cli disk <sub> --help` shows short aliases for all args in
   every disk subcommand. Integration test (smoke).
-- `crow-cli server <sub> --help` shows short aliases for all args in
+- `crowdb-cli server <sub> --help` shows short aliases for all args in
   every server subcommand. Integration test (smoke).
-- `crow-cli paxos <sub> --help` shows short aliases for all args in
+- `crowdb-cli paxos <sub> --help` shows short aliases for all args in
   every paxos subcommand. Integration test (smoke).
-- `crow-cli node <sub> --help` shows short aliases for all args in
+- `crowdb-cli node <sub> --help` shows short aliases for all args in
   every node subcommand. Integration test (smoke).
-- `crow-cli --help` shows `-i`, `-o`, `-j`, `-p` for global args.
+- `crowdb-cli --help` shows `-i`, `-o`, `-j`, `-p` for global args.
   Integration test (smoke).
 - No clap panic (duplicate short flag) for any subcommand — verified by
   running `--help` on every subcommand. Integration test (smoke).
 - `pixi run cargo fmt --all -- --check` passes. Unit test.
-- `pixi run cargo clippy -p crow-cli -- -D warnings` passes. Unit test.
+- `pixi run cargo clippy -p crowdb-cli -- -D warnings` passes. Unit test.
 
 **Open Questions**
 

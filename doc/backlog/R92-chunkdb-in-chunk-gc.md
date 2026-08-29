@@ -1,11 +1,11 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R87: chunkdb — In-Chunk GC Operations
 
 **Problem**: Shared chunks accumulate unused space as objects are deleted.
 Without in-chunk GC, this space is never reclaimed, leading to storage
-waste. CROW needs localized GC operations confined to individual chunks
+waste. CROWDB needs localized GC operations confined to individual chunks
 to avoid global merge overhead.
 
 **Solution**: Implement in-chunk GC operations (ReclaimStrip, CollapseStrip,

@@ -1,16 +1,16 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # KV Scan Flow Analysis
 
-Range reads from the client through crow-rpc, the read policy, and the
-crow-tree cursors. The benchmark sentinel is
+Range reads from the client through crowdb-rpc, the read policy, and the
+crowdb-tree cursors. The benchmark sentinel is
 `tools/bench-kv-scan-regression.sh`.
 
 ## 1. Flow
 
 ```text
-CrowkvClient::scan(prefix, start_after, end_key, limit, read_mode, min_slot?)
+CrowdbClient::scan(prefix, start_after, end_key, limit, read_mode, min_slot?)
   -> resolve_min_slot and resolve_read_endpoint
   -> paginated KvScanRequest
      server byte budget: 3.5 MiB per page
@@ -20,8 +20,8 @@ CrowkvClient::scan(prefix, start_after, end_key, limit, read_mode, min_slot?)
      Linearizable: forward to leader once
      MinSlot: serve locally
   -> PxKvStore::kv_scan -> resolve_read_point
-  -> KVEngine::scan -> CrowTreeEngine::scan -> try_scan
-  -> crow-tree scan cursors
+  -> KVEngine::scan -> CrowdbTreeEngine::scan -> try_scan
+  -> crowdb-tree scan cursors
      L0: lock-free skip-list cursor
      L1: lazy LeafChainCursor over delta chain and base frame
      merge sources, discard collisions by highest slot, stop at end_key
@@ -196,7 +196,7 @@ consecutive zero-error runs.
 
 ### Benchmark update (2026-08-28)
 
-Replaced the Linux reference with the current crow-rpc run and retained the
+Replaced the Linux reference with the current crowdb-rpc run and retained the
 macOS baseline. The latest run has zero errors in all 14 configurations;
 large and mixed-value scans remain engine-limited. The previous Linux
 baseline used the legacy legacy path; positive throughput deltas and negative

@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R68: Large-Value Write Benchmark — Verify Maintenance-Loop Snapshot Stall Doesn't Cause Election Churn Under Write Load
@@ -74,7 +74,7 @@ large-value config, and verify 0 write errors across consecutive runs.
 - `doc/design/kv/kv-write-flow-analysis.md` — add a large-value
   results section (if chosen) documenting the large-value write
   results and CPU model.
-- No `crow-kv` / `crow-cli` code changes expected unless the bench
+- No `crowdb-kv` / `crowdb-cli` code changes expected unless the bench
   surfaces a real write-path stall, in which case scope expands to the
   RCA fix and a follow-up requirement.
 

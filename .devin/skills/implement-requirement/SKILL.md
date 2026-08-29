@@ -6,10 +6,10 @@ triggers:
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW - Implement Requirement Flow
+# CROWDB - Implement Requirement Flow
 
 Use this skill when picking up an item from `doc/backlog/backlog.md`.
 Open the matched `R**-<component>-<topic>.md` detail doc for the full

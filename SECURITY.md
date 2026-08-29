@@ -2,15 +2,15 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in CROW, please report it responsibly:
+If you discover a security vulnerability in CROWDB, please report it responsibly:
 
 1. **Do not** open a public GitHub issue.
-2. Email **buzzcrow@126.com** with a description of the vulnerability and reproduction steps.
+2. Email **crow.db@outlook.com** with a description of the vulnerability and reproduction steps.
 3. You will receive an acknowledgment within 48 hours.
 
 ## Scope
 
-CROW is currently a pre-production project. Security fixes will be prioritized but may not have defined SLAs.
+CROWDB is currently a pre-production project. Security fixes will be prioritized but may not have defined SLAs.
 
 ## Disclosure
 

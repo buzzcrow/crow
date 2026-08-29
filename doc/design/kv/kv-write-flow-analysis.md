@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # KV Write Flow Analysis
@@ -45,7 +45,7 @@ storms.
 ## 2. Latest Benchmark Results
 
 The Linux reference is the current run: 3-node cluster, 512B values, 1M key
-space, 10s mem mode, coalescing enabled, and zero-copy crow-rpc handlers. The
+space, 10s mem mode, coalescing enabled, and zero-copy crowdb-rpc handlers. The
 macOS run is an older legacy baseline with different coalescing and inflight
 settings, so it shows platform and transport context rather than a strict
 A/B comparison.
@@ -85,7 +85,7 @@ coalescing up to 32 keys, and `max_inflight=128`.
 | 128 | 32 | 78,155 | 86,840 | 1,590 | 2,654 | 3,794 | 0 |
 | 256 | 32 | 87,448 | 86,619 | 2,870 | 4,704 | 7,004 | 0 |
 
-The macOS legacy run peaks at 87,448 ops/s. The current Linux crow-rpc run
+The macOS legacy run peaks at 87,448 ops/s. The current Linux crowdb-rpc run
 reaches 190,769 ops/s at the matching 256-thread load, but the transport and
 benchmark settings differ.
 
@@ -128,7 +128,7 @@ the coalesce arm in `pipeline_writer.rs` were deleted.
 
 ### Transport migration
 
-Zero-copy crow-rpc replaced the legacy serialization and thread-pool handoff on
+Zero-copy crowdb-rpc replaced the legacy serialization and thread-pool handoff on
 the Linux path. C++ Frame ownership transfers to Rust; flatbuffers are parsed
 zero-copy in the tokio task; responses use `FlatBufferBuilder::collapse()` +
 external C++ Buffer.
@@ -138,13 +138,13 @@ improvement. The macOS legacy baseline (87K at 256T) is retained for context.
 
 ### Benchmark update (2026-08-26)
 
-Replaced the Linux reference with the current crow-rpc/coalescing run and
+Replaced the Linux reference with the current crowdb-rpc/coalescing run and
 retained the macOS legacy baseline. The current run has zero errors and reaches
 191K ops/s before the high-load accept-round ceiling. The previous Linux
 baseline used legacy transport without coalescing; positive throughput deltas
 are improvements.
 
-| Threads | Conn | Old ops/s (legacy) | New ops/s (crow-rpc) | Δ ops/s |
+| Threads | Conn | Old ops/s (legacy) | New ops/s (crowdb-rpc) | Δ ops/s |
 | ---: | ---: | ---: | ---: | ---: |
 | 1 | 1 | 3,249 | 3,770 | +16.0% |
 | 16 | 2 | 25,802 | 63,393 | +145.7% |
@@ -155,4 +155,4 @@ are improvements.
 | 1,000 | 16 | 28,898 | 182,541 | +531.7% |
 
 The legacy baseline plateaued at ~29K ops/s across all high-thread configs;
-crow-rpc + coalescing scales to 191K at 128T before the accept-round ceiling.
+crowdb-rpc + coalescing scales to 191K at 128T before the accept-round ceiling.

@@ -1,15 +1,15 @@
 ---
 name: doc
-description: CROW documentation hierarchy and conventions
+description: CROWDB documentation hierarchy and conventions
 triggers:
   - user
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW Documentation Structure
+# CROWDB Documentation Structure
 
 ## Entry Point
 
@@ -21,8 +21,8 @@ triggers:
 doc_index.md                                (table of contents — the only file at doc root)
 design/
     ├── {kv,tree,console,diskdb,diskio,protocol,rpc}/  (one subdir per component area)
-    │   ├── design-crow-<area>.md           (root design for that area)
-    │   ├── design-crow-<area>-<topic>.md   (sub-design docs)
+    │   ├── design-crowdb-<area>.md           (root design for that area)
+    │   ├── design-crowdb-<area>-<topic>.md   (sub-design docs)
     │   └── kv-{read,scan,write}-flow-analysis.md  (KV only: long-lived flow analyses)
 user-manual/
     ├── user-guide.md                       (user guide: Web UI, CLI, REST API)
@@ -38,7 +38,7 @@ working/
 
 ## Naming
 
-- **Sub-design docs** — `design-crow-<area>-<topic>.md`, `lowercase-kebab-case`. Example: `design/kv/design-crow-kv-wal.md`.
+- **Sub-design docs** — `design-crowdb-<area>-<topic>.md`, `lowercase-kebab-case`. Example: `design/kv/design-crowdb-kv-wal.md`.
 - **Backlog requirements** — `R**-<component>-<topic>.md`, where `<component>` is the owning crate/area (`kv`, `tree`, `console`, `client`, `server`, `diskdb`). Prefix with the owning component, not every component it touches; cross-component requirements take the primary owner's prefix. See [`doc-backlog`](doc-backlog.md) for the full doc structure.
 
 ## Flow-Analysis Docs
@@ -48,10 +48,10 @@ working/
 ## Core Rules
 
 1. **Index first** — read `doc/doc_index.md` before opening any other doc; update it in the same commit when you add, rename, delete, or re-scope a doc. One row per doc with a short "when to read" phrase.
-2. **No upstream violations** — fix the root design doc (`design/<area>/design-crow-<area>.md`) first if a gap is found.
-3. **Single source of truth** — architecture and rationale in `design/<area>/design-crow-<area>.md`, detailed design in `design/<area>/design-crow-<area>-<topic>.md`, user operations in `user-manual/user-guide.md`.
+2. **No upstream violations** — fix the root design doc (`design/<area>/design-crowdb-<area>.md`) first if a gap is found.
+3. **Single source of truth** — architecture and rationale in `design/<area>/design-crowdb-<area>.md`, detailed design in `design/<area>/design-crowdb-<area>-<topic>.md`, user operations in `user-manual/user-guide.md`.
 4. **Traceability** — every doc links upstream via section anchors.
-5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/<area>/design-crow-<area>-<topic>.md` and add a row to `doc_index.md`.
+5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/<area>/design-crowdb-<area>-<topic>.md` and add a row to `doc_index.md`.
 6. **No temp docs in `doc_index.md`** — the index tracks long-lived permanent docs only. Backlog and working docs are self-indexed.
 7. **Working doc hygiene** — delete `plan-<topic>.md` and `design-<topic>.md` when the effort is complete.
 8. **Raw-readable formatting** — docs are read as raw markdown most times, not rendered. Prefer definition lists or nested bullets. Tables only for data/metric comparison; `doc_index.md` always uses tables.
@@ -77,7 +77,7 @@ working/
 
 Open the matched guide before writing or revising that doc type:
 
-- **Formal design doc** (`doc/design/<area>/design-crow-<area>(-<topic>)?.md`) — see [`doc-design`](doc-design.md). Permanent, human-readable design record (root + sub-design); the target when folding working drafts back in.
+- **Formal design doc** (`doc/design/<area>/design-crowdb-<area>(-<topic>)?.md`) — see [`doc-design`](doc-design.md). Permanent, human-readable design record (root + sub-design); the target when folding working drafts back in.
 - **Backlog requirement doc** (`doc/backlog/R**-<component>-<topic>.md`) — see [`doc-backlog`](doc-backlog.md). Structure: Problem → Solution → Dependencies → Acceptance.
 - **Design draft** (`doc/working/design-<topic>.md`) — see [`doc-working-design`](doc-working-design.md). Implementation detail (with Scope + Complexity) that gets folded into the formal design doc and deleted after merge.
 - **Task plan** (`doc/working/plan-<topic>.md`) — see [`doc-working-plan`](doc-working-plan.md). Checkbox-driven execution checklist with file-level granularity.

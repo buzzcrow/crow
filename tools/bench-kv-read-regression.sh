@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# --- CrowKV read regression benchmark ---
+# --- CrowDB read regression benchmark ---
 # Usage: bash tools/bench-kv-read-regression.sh
 #
 # Regression sentinel for point-read (get) throughput and latency. Covers
@@ -32,7 +32,7 @@
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
-#   - release binary built (pixi run -- cargo build --release -p crow-cli)
+#   - release binary built (pixi run -- cargo build --release -p crowdb-cli)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -54,7 +54,7 @@ run_bench() {
     fi
     echo ">>> $display ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
+    output=$(pixi run -- cargo run --release -p crowdb-cli -- bench kv \
         --mode mem --workload read --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \

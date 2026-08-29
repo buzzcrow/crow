@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R103: chunkdb — Range Ownership Migration
@@ -11,9 +11,9 @@ R99 stubbed the chunkdb instance range migration flow. The `ChunkdbRangeMigratio
 
 ### Design pointers
 
-- `doc/design/chunkdb/design-crow-chunkdb.md` §3.6 — stateless with KV persistence.
+- `doc/design/chunkdb/design-crowdb-chunkdb.md` §3.6 — stateless with KV persistence.
 - `doc/backlog/R99-kv-dynamic-range-binding-framework.md` — binding framework, `ChunkdbRangeMigrationValue`.
-- `doc/design/kv/design-crow-kv-group0.md` §2.6 — monitoring models.
+- `doc/design/kv/design-crowdb-kv-group0.md` §2.6 — monitoring models.
 
 ### Use scenarios
 
@@ -28,11 +28,11 @@ Implement the full chunkdb range ownership migration flow (`Copying` → `Cutove
 
 ### Work items
 
-1. **Migration state machine** — `app/crow-chunkdb/src/migration.rs` extend: implement `Copying`/`Cutover`/`Complete` state transitions for range ownership transfer. The `ChunkdbRangeMigrationValue` proto already exists from R99.
+1. **Migration state machine** — `app/crowdb-chunkdb/src/migration.rs` extend: implement `Copying`/`Cutover`/`Complete` state transitions for range ownership transfer. The `ChunkdbRangeMigrationValue` proto already exists from R99.
 2. **Dual-serve during Cutover** — both old and new instance serve read requests (`query_chunk`) during `Cutover`; write requests (`allocate`/`append`/`seal`/`delete`) go to the new owner only; old owner rejects writes with `NotMyRange` hint pointing to new owner.
 3. **Background metadata verification** — during `Copying`, the new instance verifies it can access all chunk metadata for the range (chunk metadata is in KV groups, not in the chunkdb instance, so this is a routing verification, not a data copy).
-4. **Client redirect** — `lib/crow-chunkdb-client/src/client.rs` update: on `NotMyRange` during migration, refresh binding cache, check migration status, route to current owner (or original owner during transition per R99 rework routing).
-5. **Monitor coordination** — the binding monitor (in `crow-kv-server` per R99 rework) initiates migrations, writes `ChunkdbRangeMigrationValue` to group-0, monitors progress, and finalizes cutover.
+4. **Client redirect** — `lib/crowdb-chunkdb-client/src/client.rs` update: on `NotMyRange` during migration, refresh binding cache, check migration status, route to current owner (or original owner during transition per R99 rework routing).
+5. **Monitor coordination** — the binding monitor (in `crowdb-kv-server` per R99 rework) initiates migrations, writes `ChunkdbRangeMigrationValue` to group-0, monitors progress, and finalizes cutover.
 
 ### Flow diagram
 
@@ -66,7 +66,7 @@ Implement the full chunkdb range ownership migration flow (`Copying` → `Cutove
 ## Dependencies
 
 - Depends on **R99** — binding framework, `ChunkdbRangeMigrationValue` proto, `NotMyRange` protocol.
-- Depends on **R99 rework** — non-contiguous ranges, monitor relocation to `crow-kv-server`.
+- Depends on **R99 rework** — non-contiguous ranges, monitor relocation to `crowdb-kv-server`.
 - **R100** (per-chunk lock) is not a hard dependency, but the lock helps serialize concurrent migrations on the same chunk.
 
 ## Acceptance
@@ -118,6 +118,6 @@ Implement the full chunkdb range ownership migration flow (`Copying` → `Cutove
 ## Open Questions
 
 - Should `Cutover` allow writes to both instances with conflict resolution, or strictly new-owner-only?
-  → **Resolved**: writes go to new owner only; reads try new owner first, then old owner (dual-serve for reads). See `doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5.6.
+  → **Resolved**: writes go to new owner only; reads try new owner first, then old owner (dual-serve for reads). See `doc/design/chunkdb/design-crowdb-chunkdb-range-binding.md` §5.6.
 - Is metadata verification needed if chunk metadata is already in shared KV groups, or can `Copying` be skipped for crash-recovery migrations?
   → **Resolved**: chunkdb instances are stateless (chunk metadata is in KV groups, not in the instance). There is no data copy — migration is a routing change. The `Copying` phase is replaced by `InTransition` (dual-serve reads + new-owner-only writes) with a grace period before cutover to `Stable`. See §5.6 of the range-binding design doc.

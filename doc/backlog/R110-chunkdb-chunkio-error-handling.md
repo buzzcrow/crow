@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R110: chunkdb / diskdb / diskio — Large-Write IO Error Handling (Write Path)
@@ -141,20 +141,20 @@ missing), and escalates to R83 recovery when retries are exhausted.
 
 **Numbered work items**:
 
-1. **Negative list** (`lib/crow-chunk-client/src/negative_list.rs`)
+1. **Negative list** (`lib/crowdb-chunk-client/src/negative_list.rs`)
    — an in-memory, TTL-based set of disk IDs (and optionally node
    IDs) that are temporarily excluded from allocation placement.
    The writer consults it before allocating replacement blocks;
    diskdb's `AllocateBlocks` request includes an `exclude_disks`
    filter. Entries expire after a configurable TTL (default 60 s);
    a disk that keeps failing gets an extended TTL. Lives in
-   `crow-chunk-client` (shared by writer + reader — R111 and R112
+   `crowdb-chunk-client` (shared by writer + reader — R111 and R112
    reuse it).
-   **Services**: diskdb (allocation exclusion), crow-chunk-client
+   **Services**: diskdb (allocation exclusion), crowdb-chunk-client
    (list management).
 
 2. **Single-block replacement on write**
-   (`lib/crow-chunk-client/src/writer/large_object.rs`) — when a
+   (`lib/crowdb-chunk-client/src/writer/large_object.rs`) — when a
    diskio `write` or `fsync` fails for one block in a strip, the
    writer does NOT discard the whole strip. It allocates a new
    block on a healthy disk (via diskdb `AllocateBlocks` with the
@@ -166,8 +166,8 @@ missing), and escalates to R83 recovery when retries are exhausted.
    (new block allocation), chunkdb (strip metadata update).
 
 3. **Degraded strip tracking**
-   (`lib/crow-chunk-client/src/writer/large_object.rs` +
-   `lib/crow-chunkdb-client/` protocol) — when a parity task fails
+   (`lib/crowdb-chunk-client/src/writer/large_object.rs` +
+   `lib/crowdb-chunkdb-client/` protocol) — when a parity task fails
    (EC encode error or parity write failure after retries), the
    strip is marked degraded: data blocks are durable but parity is
    missing. The chunk can still be sealed. The degraded state is
@@ -209,7 +209,7 @@ missing), and escalates to R83 recovery when retries are exhausted.
        │  │            │               │
        │  ▼            │               │
        │ ┌─────────────────────────────┐
-       │ │ crow-chunk-client (writer)  │
+       │ │ crowdb-chunk-client (writer)  │
        │ │  add disk → negative list   │
        │ │  (TTL 60s, exp. backoff)    │
        │ └────────────┬────────────────┘
@@ -351,9 +351,9 @@ organized by service.
   by diskdb GC. Integration test (drop mid-write, verify partial
   chunk deleted, no orphaned blocks).
 
-**Test commands**: `pixi run cargo test -p crow-chunk-client --test
+**Test commands**: `pixi run cargo test -p crowdb-chunk-client --test
 error_handling` (unit + integration), `pixi run cargo test -p
-crow-chunk-client --test error_handling_e2e` (E2E with real servers
+crowdb-chunk-client --test error_handling_e2e` (E2E with real servers
 + fault injection), `pixi run cargo fmt --all -- --check`,
 `pixi run cargo clippy --all-targets -- -D warnings`.
 

@@ -529,7 +529,7 @@ def convert_markdown(md: str) -> tuple[str, list[dict]]:
 
 
 def build_sidebar(toc: list[dict]) -> str:
-    lines = ['<div class="sidebar-brand"><span class="brand-mark"></span>CrowKV</div>', "<nav>"]
+    lines = ['<div class="sidebar-brand"><span class="brand-mark"></span>CrowdbKV</div>', "<nav>"]
     for entry in toc:
         cls = "sub" if entry["level"] == 2 else ""
         lines.append(
@@ -553,7 +553,7 @@ def build() -> None:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CrowKV User Guide</title>
+<title>CrowdbKV User Guide</title>
 <style>
 {CSS}
 </style>

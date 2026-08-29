@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# --- CrowKV scan regression benchmark ---
+# --- CrowDB scan regression benchmark ---
 # Usage: bash tools/bench-kv-scan-regression.sh
 #
 # Regression sentinel for scan (list) throughput and latency. Covers
@@ -29,7 +29,7 @@
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
-#   - release binary built (pixi run -- cargo build --release -p crow-cli)
+#   - release binary built (pixi run -- cargo build --release -p crowdb-cli)
 #
 # AMD (2026-08-28): Ryzen 9 5950X, 16c/32t, Linux 6.8. lin_16t config
 # (16T:16C, linearizable, limit=1000, 64B, 20s). TCP_QUICKACK decoupled
@@ -71,7 +71,7 @@ run_bench() {
     fi
     echo ">>> $label (${threads}T:${connections}C) ..."
     local output
-    output=$(pixi run -- cargo run --release -p crow-cli -- bench kv \
+    output=$(pixi run -- cargo run --release -p crowdb-cli -- bench kv \
         --mode mem --workload list --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \

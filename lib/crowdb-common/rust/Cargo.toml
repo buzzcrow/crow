@@ -1,0 +1,27 @@
+[package]
+name = "crowdb-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared utilities (metrics, logging, time, operation report) for the crow storage-system components."
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+flate2 = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+notify = "8.2"
+notify-debouncer-mini = "0.7"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+crowdb-test-harness = { path = "../../crowdb-test-harness" }

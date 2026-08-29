@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R79: diskdb — Free Batch (Size-Threshold Grouping, No Timer)
@@ -27,7 +27,7 @@ batch and flush via one `batch_write` when the batch reaches a
 configurable size. **No timer.** The flush is synchronous on the free
 path, not a background loop.
 
-1. **`FreeBatch`** — create `app/crow-diskdb/src/persistence/free_batch.rs`:
+1. **`FreeBatch`** — create `app/crowdb-diskdb/src/persistence/free_batch.rs`:
 
    - `FreeBatch` — `inner: Mutex<Vec<FreeEntry>>` where `FreeEntry`
      is `{ disk_id, zone_idx, unit_offset, unit_count,
@@ -36,7 +36,7 @@ path, not a background loop.
    - **No background flush loop.** No `FreeFlushLoop`, no
      `tokio::spawn`, no `sleep(interval)`.
 
-2. **Free path** — update `app/crow-diskdb/src/persistence/free.rs`
+2. **Free path** — update `app/crowdb-diskdb/src/persistence/free.rs`
    (from R72):
 
    - `free_block(node, segment, free_batch, journal) -> Result<()>`:
@@ -53,7 +53,7 @@ path, not a background loop.
         buffered and will flush on a later free that hits the
         threshold.
 
-3. **Graceful shutdown** — update `app/crow-diskdb/src/main.rs`:
+3. **Graceful shutdown** — update `app/crowdb-diskdb/src/main.rs`:
 
    - On graceful shutdown, drain and flush the `FreeBatch` before
      exit (one final `batch_write` per affected data group). This
@@ -73,11 +73,11 @@ path, not a background loop.
 
 **Scope** (expected changed files):
 
-- `app/crow-diskdb/src/persistence/free_batch.rs` — `FreeBatch` struct.
-- `app/crow-diskdb/src/persistence/free.rs` — size-threshold flush on
+- `app/crowdb-diskdb/src/persistence/free_batch.rs` — `FreeBatch` struct.
+- `app/crowdb-diskdb/src/persistence/free.rs` — size-threshold flush on
   the free path.
-- `app/crow-diskdb/src/main.rs` — graceful-shutdown drain + flush.
-- `app/crow-diskdb/src/config.rs` — `free_batch_enabled`,
+- `app/crowdb-diskdb/src/main.rs` — graceful-shutdown drain + flush.
+- `app/crowdb-diskdb/src/config.rs` — `free_batch_enabled`,
   `free_flush_max_batch`.
 
 **Dependencies**: R72 (free path, `DataGroupClient`).

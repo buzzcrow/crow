@@ -1,12 +1,12 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R118: cluster — Unify Port Usage & Test Port Dispatcher
 
 **Problem**
 
-CROW runs many servers (crow-kv-server, crow-diskdb, crow-chunkdb,
-crow-web), each listening on one or more ports. During tests, multiple
+CROWDB runs many servers (crowdb-kv-server, crowdb-diskdb, crowdb-chunkdb,
+crowdb-web), each listening on one or more ports. During tests, multiple
 instances of the same server are started and torn down in short windows,
 so port conflict (`Address already in use`) is a common failure that has
 already cost real debugging/CI time. There is no single source of truth
@@ -15,22 +15,22 @@ collide on the famous ports or on whatever a test harness hardcodes.
 
 **Current behavior + impact**
 
-- `lib/crow-protocol/src/ports.rs` already defines base ports + stride
+- `lib/crowdb-protocol/src/ports.rs` already defines base ports + stride
   rules + a `ServicePort` enum for all current services (kv-server
   mgmt/listen/consensus-rpc/client-rpc, diskdb listen/http/rpc, chunkdb
   listen/http/rpc, web). But adoption is incomplete and inconsistent:
-  - `crow-kv-server` CLI (`app/crow-kv-server/src/cli.rs`) exposes
+  - `crowdb-kv-server` CLI (`app/crowdb-kv-server/src/cli.rs`) exposes
     `--management-port` (default `KV_SERVER_MGMT_BASE`) and `--ports`
     (listen pool, optional free-form list) but has **no CLI flag** for the
     consensus RPC port (`KV_RPC_BASE`) or the client-facing RPC port
     (`KV_CLIENT_RPC_BASE`). Those listeners fall back to constants the
     operator cannot override per-start.
-  - `crow-diskdb` (`app/crow-diskdb/src/main.rs`) takes listen addresses
+  - `crowdb-diskdb` (`app/crowdb-diskdb/src/main.rs`) takes listen addresses
     from TOML config (`rpc_listen_addr`, `http_listen_addr`,
     `listen_addr`), not from CLI flags with `ports.rs` defaults — so the
     famous ports are not enforced at the CLI boundary and an operator
     cannot override per-start without editing config.
-  - `KvServer::start` (`lib/crow-kv/src/cluster/kv_server.rs` ~lines
+  - `KvServer::start` (`lib/crowdb-kv/src/cluster/kv_server.rs` ~lines
     68-71) explicitly supports **port 0 for OS-assigned** ports: "Bind a
     TCP listener to determine the actual port (supports port 0 for
     OS-assigned)". This contradicts the project flow — servers must
@@ -39,7 +39,7 @@ collide on the famous ports or on whatever a test harness hardcodes.
     clients without extra plumbing, breaking the deterministic-port flow
     the cluster expects.
   - The console UI E2E fixture ships its **own ad-hoc port allocator**
-    disconnected from `ports.rs`: `app/crow-web/ui/e2e/fixtures/consoleSetup.ts`
+    disconnected from `ports.rs`: `app/crowdb-web/ui/e2e/fixtures/consoleSetup.ts`
     ~lines 13-26 define `PORT_BASE = 30000` / `PORT_CEILING = 32768`
     (hardcoded, chosen only to stay below the Linux ephemeral range) and
     a `freePort()` that is a bare monotonic counter (`return nextPort++`)
@@ -56,7 +56,7 @@ collide on the famous ports or on whatever a test harness hardcodes.
     "check-existing-ports-and-pick-a-new-number" logic the user wants
     consolidated into one place — but it (a) only works because tests
     are forced serial, (b) never probes bind, so a stale TIME_WAIT
-    socket or a non-CROW process on 30xxx silently collides, (c) is
+    socket or a non-CROWDB process on 30xxx silently collides, (c) is
     console-UI-test-only, not shared with the Rust integration tests or
     bench scripts, and (d) uses a range that has no relationship to the
     `ServicePort` scheme the rest of the project standardizes on.
@@ -65,7 +65,7 @@ collide on the famous ports or on whatever a test harness hardcodes.
   failures. The port-0 escape hatch makes it worse by hiding the actual
   port from peers. The console UI's hand-rolled `freePort()` forces E2E
   to run serial (`workers: 1`) and still cannot guarantee a port is
-  free, so restart-within-TIME_WAIT and any non-CROW process on the
+  free, so restart-within-TIME_WAIT and any non-CROWDB process on the
   30000-32768 range cause flaky failures. Tests cannot run in parallel
   safely.
 - Root cause: deferred placeholder. `ports.rs` landed the constants and
@@ -78,35 +78,35 @@ collide on the famous ports or on whatever a test harness hardcodes.
 
 **Design pointers**
 
-- `doc/design/protocol/design-crow-protocol.md` — root protocol design.
+- `doc/design/protocol/design-crowdb-protocol.md` — root protocol design.
   **Design gap:** this doc has no section covering the port-allocation
-  scheme that `crow-protocol/src/ports.rs` already implements
+  scheme that `crowdb-protocol/src/ports.rs` already implements
   (base/stride/`ServicePort`). R118 must add a "Port allocation" section
   to the protocol design doc anchoring the scheme; the backlog
   references it as `§<new>` once added. Flagged here rather than
   inventing architecture in the backlog.
-- `doc/design/kv/design-crow-kv-server.md` — `crow-kv-server` binary
+- `doc/design/kv/design-crowdb-kv-server.md` — `crowdb-kv-server` binary
   startup / HTTP management API / group lifecycle; the per-listener port
   wiring lands here.
-- `doc/design/diskdb/design-crow-diskdb.md` and
-  `doc/design/chunkdb/design-crow-chunkdb-rpc.md` — diskdb/chunkdb
+- `doc/design/diskdb/design-crowdb-diskdb.md` and
+  `doc/design/chunkdb/design-crowdb-chunkdb-rpc.md` — diskdb/chunkdb
   listen-address config; CLI-flag unification touches these.
 
 **Use scenarios**
 
 - **Operator single-instance start** — operator runs
-  `crow-kv-server --root /node1` with no port flags → server listens on
+  `crowdb-kv-server --root /node1` with no port flags → server listens on
   `KV_SERVER_MGMT_BASE` (mgmt), `KV_SERVER_LISTEN_BASE` (listen pool first
   port), `KV_RPC_BASE` (consensus), `KV_CLIENT_RPC_BASE` (client RPC).
-  Same for `crow-diskdb` and `crow-chunkdb` with their famous defaults.
+  Same for `crowdb-diskdb` and `crowdb-chunkdb` with their famous defaults.
   No port 0 anywhere.
 - **Operator explicit override** — operator runs
-  `crow-kv-server --root /node1 --management-port 9915 --listen-port 28005
+  `crowdb-kv-server --root /node1 --management-port 9915 --listen-port 28005
   --consensus-rpc-port 28105 --client-rpc-port 28205` → server listens
   on exactly those ports; defaults ignored for the flags passed.
   Passing `0` is rejected at CLI parse with a clear error.
 - **Test parallel cluster start** — a test harness starts 3
-  `crow-kv-server` instances + 3 `crow-diskdb` instances on one host in
+  `crowdb-kv-server` instances + 3 `crowdb-diskdb` instances on one host in
   parallel. The port dispatcher assigns each instance a distinct
   instance index per service type; every listen port is computed via
   `ServicePort::port(instance)` and is non-conflicting across all
@@ -125,7 +125,7 @@ collide on the famous ports or on whatever a test harness hardcodes.
 - **Console UI E2E uses the shared prober** — the Playwright fixture
   (`consoleSetup.ts`) stops using its private `freePort()` counter and
   `PORT_BASE`/`PORT_CEILING`/`portBase` magic numbers; instead it
-  shells out to `crow-port-alloc` (the CLI binary) to get ports, then
+  shells out to `crowdb-port-alloc` (the CLI binary) to get ports, then
   passes them to `deployNodeServer` / `deployDiskdb` as before. E2E can
   then lift the `workers: 1` serial constraint and run flows in
   parallel, and a restart-within-TIME_WAIT no longer collides because
@@ -143,44 +143,44 @@ needs to nail down the CLI surface, the claim-file format, and the
 claim-to-bind TOCTOU mitigation, but the shape is settled.
 
 **One-line summary**: Wire every server to accept explicit per-listener
-ports (defaults from `crow-protocol::ports`), reject port 0, and add an
+ports (defaults from `crowdb-protocol::ports`), reject port 0, and add an
 in-process port-prober + flock-coordinated claim file (library + small
 CLI binary) that is the single place picking ports, so tests and cluster
 bootstrap run in parallel without bind collisions.
 
 Numbered work items:
 
-1. **Protocol design anchor** — `doc/design/protocol/design-crow-protocol.md`
-   (new "Port allocation" section) + `lib/crow-protocol/src/ports.rs`.
+1. **Protocol design anchor** — `doc/design/protocol/design-crowdb-protocol.md`
+   (new "Port allocation" section) + `lib/crowdb-protocol/src/ports.rs`.
    Document the base/stride/`ServicePort` scheme as design (currently
    code-only), add any missing service types (e.g. diskio when it
    lands), and state the "no port 0" rule as a design invariant. Closes
    the design gap flagged above.
-2. **`crow-kv-server` CLI unification** — `app/crow-kv-server/src/cli.rs`
-   + `lib/crow-kv/src/cluster/kv_server.rs`. Add `--consensus-rpc-port`
+2. **`crowdb-kv-server` CLI unification** — `app/crowdb-kv-server/src/cli.rs`
+   + `lib/crowdb-kv/src/cluster/kv_server.rs`. Add `--consensus-rpc-port`
    (default `KV_RPC_BASE`) and `--client-rpc-port` (default
    `KV_CLIENT_RPC_BASE`); keep `--management-port` and `--ports` (listen
    pool). All port flags reject `0`. Remove the port-0 / OS-assigned
    branch in `KvServer::start` (~lines 68-71) — bind exactly the
    requested port; bind failure is a hard error with a clear message.
-3. **`crow-diskdb` CLI unification** — `app/crow-diskdb/src/main.rs` +
+3. **`crowdb-diskdb` CLI unification** — `app/crowdb-diskdb/src/main.rs` +
    diskdb config. Add CLI flags `--listen-port` (default
    `DISKDB_LISTEN_BASE`), `--http-port` (default `DISKDB_HTTP_BASE`),
    `--rpc-port` (default `DISKDB_RPC_BASE`) that override config; keep
    config as the fallback when the flag is absent. Reject `0`. The
    paired-port invariant (http = listen + 1 per instance) is enforced or
    documented as overridden when flags are passed individually.
-4. **`crow-chunkdb` CLI unification** — chunkdb server entry + config.
+4. **`crowdb-chunkdb` CLI unification** — chunkdb server entry + config.
    Same shape as diskdb: `--listen-port` / `--http-port` / `--rpc-port`
    with `CHUNKDB_*_BASE` defaults, reject `0`. Blocked on the chunkdb
    server component landing (see Dependencies).
-5. **`crow-web` / `crow-cli` port flags** — `app/crow-web/src/main.rs`,
-   `app/crow-cli/src/main.rs`. Already use `WEB_BASE` default; verify
+5. **`crowdb-web` / `crowdb-cli` port flags** — `app/crowdb-web/src/main.rs`,
+   `app/crowdb-cli/src/main.rs`. Already use `WEB_BASE` default; verify
    `0` is rejected and the flag name is consistent with the unified
    scheme.
 6. **Port prober + claim file** — new module
-   (`lib/crow-protocol/src/port_alloc.rs`) + a small CLI binary
-   (`crow-port-alloc`, in `app/crow-port-alloc/`). The **single place**
+   (`lib/crowdb-protocol/src/port_alloc.rs`) + a small CLI binary
+   (`crowdb-port-alloc`, in `app/crowdb-port-alloc/`). The **single place**
    that picks ports. Mechanism: `flock` a claim file → probe the system
    for an actually-unused port (bind probe, not a counter) that is not
    already listed in the file → write the selected port to the file →
@@ -194,15 +194,15 @@ Numbered work items:
    specify: the claim-file path + format, the probe algorithm (port
    range, bind vs. connect probe), and the claim-to-bind TOCTOU
    mitigation (see Edge cases).
-7. **Test harness integration** — `crates/crow-kv/tests/`,
-   `crates/crow-diskdb/tests/`, bench scripts under `tools/`, and the
-   console UI E2E fixture (`app/crow-web/ui/e2e/fixtures/consoleSetup.ts`).
+7. **Test harness integration** — `crates/crowdb-kv/tests/`,
+   `crates/crowdb-diskdb/tests/`, bench scripts under `tools/`, and the
+   console UI E2E fixture (`app/crowdb-web/ui/e2e/fixtures/consoleSetup.ts`).
    - Rust harnesses call the `port_alloc` library directly.
    - Shell scripts and the console UI TS fixture shell out to
-     `crow-port-alloc` (TS via `child_process.execSync`).
+     `crowdb-port-alloc` (TS via `child_process.execSync`).
    - Replace the console UI's private `freePort()` / `PORT_BASE` /
      `PORT_CEILING` / `TopologyDescriptor.portBase` with
-     `crow-port-alloc` calls; replace hardcoded/port-0 startup in the
+     `crowdb-port-alloc` calls; replace hardcoded/port-0 startup in the
      Rust integration tests and bench scripts likewise.
    - Goal: every test harness gets ports from the one prober so tests
      can run in parallel without serial gating (`workers: 1` can be
@@ -215,13 +215,13 @@ Flow diagram (shape only):
                 │  port_alloc::alloc()   │   read claimed set     │
    shell       ─┤  (library call)        │   probe free port      │
    script      ─┤                        ├──▶ write port ── unlock │
-   console UI  ─┘  crow-port-alloc       │                        │
+   console UI  ─┘  crowdb-port-alloc       │                        │
    (TS)          (CLI, shells out)       └────────────────────────┘
                         │ selected port
                         ▼ explicit --*-port flags
             ┌────────────────────────────────────────┐
-            │ crow-kv-server / crow-diskdb /          │
-            │ crow-chunkdb / crow-web                 │
+            │ crowdb-kv-server / crowdb-diskdb /          │
+            │ crowdb-chunkdb / crowdb-web                 │
             │  - default = ports.rs BASE              │
             │  - reject port 0                        │
             │  - bind exactly requested port          │
@@ -242,7 +242,7 @@ Edge cases at a glance:
   it → server bind fails. Mitigation: server retries bind with backoff
   and asks the prober for a fresh port on failure (the prober adds the
   failed port back to the claim file as "tried-and-failed" within the
-  same flock session, or the server just re-runs `crow-port-alloc`).
+  same flock session, or the server just re-runs `crowdb-port-alloc`).
   Outcome: the test eventually binds a free port, no silent failure.
   The design draft must specify the exact retry/re-allocate loop.
 - Claim file stale after a crashed test → the file lists ports no
@@ -281,13 +281,13 @@ Edge cases at a glance:
 
 **CLI unification (kv-server)**:
 
-- `crow-kv-server --root /tmp/n1` (no port flags) → mgmt listens on
+- `crowdb-kv-server --root /tmp/n1` (no port flags) → mgmt listens on
   `KV_SERVER_MGMT_BASE`, listen pool first port on `KV_SERVER_LISTEN_BASE`,
   consensus on `KV_RPC_BASE`, client RPC on `KV_CLIENT_RPC_BASE`.
   E2E test.
-- `crow-kv-server --root /tmp/n1 --management-port 0` → CLI parse error
+- `crowdb-kv-server --root /tmp/n1 --management-port 0` → CLI parse error
   mentioning port 0 is not allowed. Unit test (CLI parse).
-- `crow-kv-server --root /tmp/n1 --consensus-rpc-port 28105
+- `crowdb-kv-server --root /tmp/n1 --consensus-rpc-port 28105
   --client-rpc-port 28205` → consensus listens on 28105, client RPC on
   28205, other ports stay at defaults. E2E test.
 - `KvServer::start` with a port already in use → returns a hard error
@@ -296,14 +296,14 @@ Edge cases at a glance:
 
 **CLI unification (diskdb / chunkdb / web)**:
 
-- `crow-diskdb` with no port flags → listen on `DISKDB_LISTEN_BASE`, HTTP on
-  `DISKDB_HTTP_BASE`, crow-rpc on `DISKDB_RPC_BASE`. E2E test.
-- `crow-diskdb --listen-port 0` → CLI parse error. Unit test.
-- `crow-diskdb --listen-port 9943 --http-port 9944` → listens on those
+- `crowdb-diskdb` with no port flags → listen on `DISKDB_LISTEN_BASE`, HTTP on
+  `DISKDB_HTTP_BASE`, crowdb-rpc on `DISKDB_RPC_BASE`. E2E test.
+- `crowdb-diskdb --listen-port 0` → CLI parse error. Unit test.
+- `crowdb-diskdb --listen-port 9943 --http-port 9944` → listens on those
   ports; paired invariant http = listen + 1 holds. E2E test.
-- `crow-chunkdb` equivalent of the above (skipped if server not landed
+- `crowdb-chunkdb` equivalent of the above (skipped if server not landed
   — stated reason). E2E test / skip.
-- `crow-web --port 0` → CLI parse error. Unit test.
+- `crowdb-web --port 0` → CLI parse error. Unit test.
 
 **Port dispatcher**:
 
@@ -333,7 +333,7 @@ Edge cases at a glance:
   reads `TopologyDescriptor.portBase`; every `deployNodeServer` /
   `deployDiskdb` call sources its ports from the shared dispatcher.
   Static check: grep for `freePort` / `PORT_BASE` / `portBase` in
-  `app/crow-web/ui/e2e/` returns nothing. Unit test (static check).
+  `app/crowdb-web/ui/e2e/` returns nothing. Unit test (static check).
 - **Console UI E2E parallel** — after migration, a representative E2E
   flow runs green with `workers > 1` (exact worker count pending
   design) and 0 port-conflict errors across N consecutive runs. E2E
@@ -345,11 +345,11 @@ Edge cases at a glance:
   `bind.*0` / `port.*0` in server start paths returns nothing). Unit
   test (static check).
 - Every server CLI port flag has a `default_value_t` sourced from
-  `crow-protocol::ports` (no literal port numbers in CLI defaults).
+  `crowdb-protocol::ports` (no literal port numbers in CLI defaults).
   Unit test (static check).
 
 **Test commands**: `pixi run test-protocol` (ports + dispatcher unit
-tests), `pixi run cargo test -p crow-kv -p crow-diskdb` (server CLI +
+tests), `pixi run cargo test -p crowdb-kv -p crowdb-diskdb` (server CLI +
 dispatcher integration), relevant `pixi run test-tree-ct` only if C++
 changes (none expected), plus `pixi run cargo fmt --all -- --check` and
 `pixi run cargo clippy --all-targets -- -D warnings`.
@@ -364,14 +364,14 @@ changes (none expected), plus `pixi run cargo fmt --all -- --check` and
    server's bind then fails. Candidate mitigations:
    - **(i) Server bind-retry + re-allocate** — server retries bind with
      backoff and asks the prober for a fresh port on failure (re-runs
-     `crow-port-alloc`). Fits CROW's existing server-start flow (servers
+     `crowdb-port-alloc`). Fits CROWDB's existing server-start flow (servers
      already return a hard error on bind failure; adding a retry-and-
      re-ask loop is small). The prober should mark the failed port as
      "tried-and-failed" in the claim file so the next probe skips it
      within the same run.
    - **(ii) Prober holds flock until caller signals "bound"** — caller
      writes back the port it successfully bound, then the prober
-     unlocks. Tighter race window but needs a hand-off seam (CROW
+     unlocks. Tighter race window but needs a hand-off seam (CROWDB
      servers bind themselves, they don't take a pre-bound socket), so
      the server must call back into the prober library after bind —
      doesn't work for the CLI binary path (shell/TS callers can't call
@@ -385,9 +385,9 @@ changes (none expected), plus `pixi run cargo fmt --all -- --check` and
    a retry loop to every server's start path. Needs a decision on
    whether the retry loop is acceptable in the server start path or
    should live in the test harness only (harness re-runs
-   `crow-port-alloc` + restarts the server on bind failure).
+   `crowdb-port-alloc` + restarts the server on bind failure).
 2. **Claim-file path + format** — where does the claim file live and
-   what format? Candidates: a fixed path under `/tmp/crow-port-alloc/
+   what format? Candidates: a fixed path under `/tmp/crowdb-port-alloc/
    claims` (per-host, per-user via `$USER`); a path the caller passes
    (so different test sessions can use different files); a TOML/JSON/
    plain-text format. Plain text (one port per line) is the simplest

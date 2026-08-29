@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R83: chunkdb — Complete Recovery Flow (Real Data Recovery + Speed Control)
@@ -9,7 +9,7 @@
   disk-layer only and stops at the hand-off boundary. diskdb has zone
   bitmap reconstruction (zone-management §6, strategies 1/2/3) and the
   per-disk failure recovery scan (R76, `RecoveryScanTask` in
-  `app/crow-diskdb/src/recovery/disk_recovery.rs`). The R76 scan does
+  `app/crowdb-diskdb/src/recovery/disk_recovery.rs`). The R76 scan does
   the right *discovery* work — it iterates a `Bad` disk's zones, lists
   live `BusyBlockValue`s, and collects each impacted block's
   `owner_chunk` (`ChunkId`, 192-bit, §3.4) — but the *repair* step is a
@@ -33,7 +33,7 @@
   chunk→strip→segment mapping and drives rebuild I/O), not at diskdb
   (which has no data I/O envelope, §2).
 - **Design pointers** —
-  [`doc/design/diskdb/design-crow-diskdb.md`](../design/diskdb/design-crow-diskdb.md)
+  [`doc/design/diskdb/design-crowdb-diskdb.md`](../design/diskdb/design-crowdb-diskdb.md)
   §2 (Non-Goals — no data I/O; "a future diskio-like component does
   data I/O"), §3.4 (records are the source of truth;
   `BusyBlockValue` carries `owner_chunk` — the recovery hand-off
@@ -42,7 +42,7 @@
   is "handed to a future recovery/relocation path: the data-IO layer
   rebuilds from EC/mirror, or the owner is notified to re-allocate
   elsewhere"),
-  [`design-crow-diskdb-zone-management.md`](../design/diskdb/design-crow-diskdb-zone-management.md)
+  [`design-crowdb-diskdb-zone-management.md`](../design/diskdb/design-crowdb-diskdb-zone-management.md)
   §6 (crash recovery strategies 1/2/3 — diskdb-layer bitmap
   reconstruction only). Fbs schema surfaces:
   `chunkdb.fbs` (`Chunk`, `ChunkStrip`, `MirrorStrip`,
@@ -50,7 +50,7 @@
   `ChunkdbService` — `AllocateChunk` /
   `AppendChunk` / `SealChunk` / `DeleteChunk` / `UpdateChunkStrip` /
   `ListChunks`), `diskio.fbs` (`DiskWrite` / `DiskRead`).
-  CROW's chunkdb owns disk-failure recovery: it rebuilds lost blocks
+  CROWDB's chunkdb owns disk-failure recovery: it rebuilds lost blocks
   from mirror/EC at the chunk layer, driving rebuild I/O and pacing it.
 - **Use scenarios** —
   - **Mirror replica rebuild after disk failure** — a disk goes `Bad`;
@@ -103,13 +103,13 @@
 
 - **Numbered work items**:
   1. **chunkdb server component (prerequisite)** —
-     `app/crow-chunkdb` (new crate, not yet existing) implementing
+     `app/crowdb-chunkdb` (new crate, not yet existing) implementing
      `ChunkdbService` (`AllocateChunk` / `AppendChunk` / `SealChunk` /
      `DeleteChunk` / `UpdateChunkStrip` / `ListChunks`). This is a
      prerequisite for R83, not part of it — it should be filed as its
      own backlog item. R83 assumes chunkdb exists and owns the
-     chunk→strip→segment mapping persisted to CROW KV.
-  2. **Recovery orchestration** (`app/crow-chunkdb/src/recovery/`) —
+     chunk→strip→segment mapping persisted to CROWDB KV.
+  2. **Recovery orchestration** (`app/crowdb-chunkdb/src/recovery/`) —
      consume diskdb's impacted-blocks + `owner_chunk` hand-off (R76
      `RecoveryScanTask` output); for each impacted chunk, read its
      strip layout, classify each impacted strip (`MirrorStrip` vs
@@ -128,7 +128,7 @@
      strip to reference the new `Segment`, then `FreeBlocks` the old
      segment on the `Bad` disk (after the disk is replaced/removed, or
      once the strip no longer references it).
-  5. **Recovery speed control** (`app/crow-chunkdb/src/recovery/throttle.rs`)
+  5. **Recovery speed control** (`app/crowdb-chunkdb/src/recovery/throttle.rs`)
      — pace rebuild I/O at the chunkdb layer: configurable
      `recovery.max_bandwidth_bytes`, `recovery.max_iops`,
      `recovery.max_concurrent_rebuilds` (live-reloadable). The
@@ -137,7 +137,7 @@
      recovery-progress + throttle metrics (`recovery.rebuilt_blocks`,
      `recovery.pending_chunks`, `recovery.throttle_utilization`).
   6. **Recovery progress persistence** — per-chunk / per-strip
-     recovery progress written to CROW KV (schema follows R76's
+     recovery progress written to CROWDB KV (schema follows R76's
      `RecoveryScanProgressValue` precedent, keyed by `ChunkId` /
      strip index). On chunkdb restart, resume from the last completed
      strip; no double-rebuild of completed strips.

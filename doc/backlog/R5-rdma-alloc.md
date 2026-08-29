@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R5: RDMA-pinned allocation
@@ -14,6 +14,6 @@ built (separate effort).
 
 **Blocked by**: RDMA `BlockPageStore` medium (not started).
 
-**Files**: `crowtree/include/crowtree/buffer.h` (seam only)
+**Files**: `crowdbtree/include/crowdbtree/buffer.h` (seam only)
 
 **Acceptance**: N/A until RDMA backend exists. Seam remains intact.

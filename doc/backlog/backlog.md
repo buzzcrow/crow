@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # New Requirements — Backlog & Analysis
@@ -42,41 +42,41 @@ complexity, and dependency. Before implementation, follow the
   prepare uses default put; handles live in named runtime folders.
 - **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
   test port prober — Area: cluster / protocol / server —
-  `crow-protocol/src/ports.rs` already defines base ports + stride +
+  `crowdb-protocol/src/ports.rs` already defines base ports + stride +
   `ServicePort` for all services, but adoption is incomplete:
-  `crow-kv-server` has no CLI flag for the consensus (`KV_RPC_BASE`) or
-  client-facing (`KV_CLIENT_RPC_BASE`) RPC ports; `crow-diskdb` takes
+  `crowdb-kv-server` has no CLI flag for the consensus (`KV_RPC_BASE`) or
+  client-facing (`KV_CLIENT_RPC_BASE`) RPC ports; `crowdb-diskdb` takes
   listen addrs from TOML config (not CLI flags with `ports.rs` defaults);
   and `KvServer::start` still supports port 0 (OS-assigned), contradicting
   the project flow. Wire every server to accept explicit per-listener
-  port flags (defaults from `crow-protocol::ports`), reject port 0, and
+  port flags (defaults from `crowdb-protocol::ports`), reject port 0, and
   add an in-process port-prober + flock-coordinated claim file (library
-  + `crow-port-alloc` CLI binary, no daemon) that is the single place
+  + `crowdb-port-alloc` CLI binary, no daemon) that is the single place
   picking ports, so tests and cluster bootstrap run in parallel without
   `Address already in use`. Console UI E2E shells out to the CLI binary
   to replace its private `freePort()` counter. Open questions: claim-to-
   bind TOCTOU mitigation, claim-file path/format, probe port range,
   cross-host scope, paired-port override semantics.
 - **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
-  review & unification — Area: cluster / observability — CROW has
-  two logging stacks (Rust `tracing` in `crow-common/rust`, C++
-  `spdlog` in `crow-common/cpp`) and four servers + `crow-cli`, but
-  only `crow-kv-server` wires up file logging with rotation +
-  compression; `crow-diskdb`, `crow-chunkdb`, and `crow-web`
+  review & unification — Area: cluster / observability — CROWDB has
+  two logging stacks (Rust `tracing` in `crowdb-common/rust`, C++
+  `spdlog` in `crowdb-common/cpp`) and four servers + `crowdb-cli`, but
+  only `crowdb-kv-server` wires up file logging with rotation +
+  compression; `crowdb-diskdb`, `crowdb-chunkdb`, and `crowdb-web`
   initialize console-only `tracing_subscriber::fmt().init()` and
-  lose every log line when daemonized. The `crow-rpc` C++ library
-  ships a `crow_rpc_init_logging` C API that no Rust caller ever
+  lose every log line when daemonized. The `crowdb-rpc` C++ library
+  ships a `crowdb_rpc_init_logging` C API that no Rust caller ever
   invokes (no FFI wrapper, no call site), so the consensus
   transport layer is silent. Log directories diverge (`"log"`,
-  `~/.crow-kv/log`, temp paths), log formats differ between Rust
+  `~/.crowdb-kv/log`, temp paths), log formats differ between Rust
   and C++, and no audit has been done of whether log lines are
   meaningful and self-explaining. R119 does a two-prong audit
   (code review of every logging call site + run each service's
   e2e test and read the real log output), then unifies every
   server on the shared rotating-file logging stack, wires the
-  crow-rpc C++ logging through an FFI bridge, adopts one log
+  crowdb-rpc C++ logging through an FFI bridge, adopts one log
   directory + format convention, adds a "Logging" section to
-  `design-crow-kv-observability.md` (current design gap — the doc
+  `design-crowdb-kv-observability.md` (current design gap — the doc
   covers metrics only), and fixes log lines that are opaque,
   noisy, or missing context. Verification: each service's e2e
   test asserts its log file exists, is non-empty, and contains
@@ -89,16 +89,16 @@ complexity, and dependency. Before implementation, follow the
   Distinct from R102: R103 transfers which chunkdb instance serves a hash
   range; R102 rebinds which paxos group stores a disk-group's data. Both
   reuse the common `BindingStrategy` framework
-  (`doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5).
+  (`doc/design/chunkdb/design-crowdb-chunkdb-range-binding.md` §5).
 - **[R102](R102-diskdb-dynamic-binding-migration.md)** — diskdb dynamic
   disk-group binding migration — Area: diskdb / kv — Reuse the common
   `BindingStrategy` framework
-  (`doc/design/chunkdb/design-crow-chunkdb-range-binding.md` §5) to
+  (`doc/design/chunkdb/design-crowdb-chunkdb-range-binding.md` §5) to
   dynamically rebind diskdb disk-groups to paxos groups, replacing the
   operator-manual `BindMapValue` write with automatic monitoring +
   rebinding. Monitor detects instance join/leave, rebalances disk-group
   assignments, migrates data during rebinding.
-- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv — Add `expected_revision` to `KvSetRequest` for optimistic concurrency; leader checks key revision before propose (lease-protected). Defense-in-depth for the chunkdb per-chunk lock (`doc/design/chunkdb/design-crow-chunkdb.md` §10); enables cross-instance CAS on `put_chunk` if range ownership is ever bypassed.
+- **[R101](R101-kv-put-cas.md)** — KV compare-and-set on Put — Area: kv — Add `expected_revision` to `KvSetRequest` for optimistic concurrency; leader checks key revision before propose (lease-protected). Defense-in-depth for the chunkdb per-chunk lock (`doc/design/chunkdb/design-crowdb-chunkdb.md` §10); enables cross-instance CAS on `put_chunk` if range ownership is ever bypassed.
 - **[R79](R79-diskdb-free-batch.md)** — diskdb free batch
   (size-threshold, no timer) — Area: diskdb — Group frees into a
   batch and flush via one `batch_write` when the batch reaches a
@@ -139,7 +139,7 @@ complexity, and dependency. Before implementation, follow the
   through `tokio::fs` / `std::fs`, both of which use `spawn_blocking`
   internally (thread hop + blocking pool saturation under burst load).
   Add `IoBackend::Uring` variant that reuses `DiskIOUring` in
-  `crow-common` (already proven for B-tree page I/O) for WAL segment
+  `crowdb-common` (already proven for B-tree page I/O) for WAL segment
   I/O via `io_uring` SQE/CQE. Expose `DiskIOUring`'s submit API
   (`submit_read`/`submit_write`/`submit_fsync`) via FFI as Rust async
   functions. `WalFileInner::Uring` implements all `WalFile` operations
@@ -268,7 +268,7 @@ below); R32 depends on R115.
   Medium: `MetricsRegistry::register_*` data race (unsynchronized
   `push_back` vs. `flush_to` iteration), `thread_name_flag` mutex on
   every log line, `ConnectionPool` mutex on every connection acquire,
-  `Crowtree::resident` cold-path load serialization, `slot_mutex_` set
+  `Crowdbtree::resident` cold-path load serialization, `slot_mutex_` set
   insert on the apply path. R121 tracks the fixes; OK findings document
   correct patterns and need no action.
 - **[R122](R122-kv-rust-lock-review.md)** — Rust mutex/lock review
@@ -327,8 +327,8 @@ below); R32 depends on R115.
   safety net. Blocked on the chunkdb server component (unlanded) and
   R81 Part 2.
 - **[R32](R32-kv-custom-rust-rpc.md)** — KV consensus hot path →
-  `crow-rpc` — Area: kv / RPC — Migrate the internal replica-to-replica
-  Paxos path from the legacy tonic/h2 stack to the `crow-rpc` flatbuffer RPC library.
+  `crowdb-rpc` — Area: kv / RPC — Migrate the internal replica-to-replica
+  Paxos path from the legacy tonic/h2 stack to the `crowdb-rpc` flatbuffer RPC library.
   Recovers the ~17% h2-lock throughput loss at 2T:1C
   (measured in `kv-read-flow-analysis.md`). Protocol semantics
   preserved (same request/response shapes, `NotLeaderHint`, error
@@ -338,14 +338,14 @@ below); R32 depends on R115.
   API stays on Axum/HTTP. Open Question resolved: full `.fbs`
   conversion (no prost bridge — the rejected approach), consistent with R105/diskio.
 
-### RPC Migration (legacy → crow-rpc)
+### RPC Migration (legacy → crowdb-rpc)
 
 Dependency order: R115 → R116 (unary); R117 (streaming) depends on
 R114 (finished) + R32. R115 lands first to validate the
 migration pattern (schema, server, client, error mapping, mixed
 rollout) before the streaming services. All four items follow the
-zero-copy wrapper convention (`design-crow-rpc.md` §6): `FB`-prefixed
-flatbuffer types, wrapper classes in `crow-protocol`, no owned
+zero-copy wrapper convention (`design-crowdb-rpc.md` §6): `FB`-prefixed
+flatbuffer types, wrapper classes in `crowdb-protocol`, no owned
 intermediate structs, no per-field copy. All four items (R115 diskdb,
 R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
 
@@ -362,15 +362,15 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   whether the R67 fix has a write-path gap and file a follow-up
   requirement. Low complexity; verifies R67's coverage extends to
   writes.
-- **[R33](R33-crow-tree-rename.md)** — Extract crow-tree to separate repo and rename — Area:
-  workspace — Move `crowtree/` into its own git repository (preserving
-  history), wire `crow-kv` to depend on `crow-tree-ffi` as an external
-  dependency, and rename the crate/namespace/macros from `crowtree` to
-  `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crow-kv` →
-  `crow-tree` dependency boundary analogous to `crow-kv` → `crow-common`.
+- **[R33](R33-crowdb-tree-rename.md)** — Extract crowdb-tree to separate repo and rename — Area:
+  workspace — Move `crowdbtree/` into its own git repository (preserving
+  history), wire `crowdb-kv` to depend on `crowdb-tree-ffi` as an external
+  dependency, and rename the crate/namespace/macros from `crowdbtree` to
+  `crowdb-tree` / `crow::tree` / `CROWDB_TREE_*`. Establishes the `crowdb-kv` →
+  `crowdb-tree` dependency boundary analogous to `crowdb-kv` → `crowdb-common`.
   Most naturally done after R12.
 - **[R50](R50-epoch-protected-memtable.md)** — Epoch-protected
-  lock-free MemTable — Area: scan / get / crow-tree engine —
+  lock-free MemTable — Area: scan / get / crowdb-tree engine —
   **Done.** `MemTable::snapshot()` deep-copied every live L0 entry
   (key + full cell payload) on every scan regardless of range or
   `limit`, and an L0 `get` hit copied twice. Root cause: L0 was the
@@ -381,20 +381,20 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   under their existing epoch guard with zero copy; the cursor seeks
   directly (no `upper_bound` skip pass); `get_view` borrows the
   cell directly off the node. Closes the known gap at
-  `crow-tree.h:81`. All 383 `test-tree-ct` tests pass.
+  `crowdb-tree.h:81`. All 383 `test-tree-ct` tests pass.
 
 ### Low Priority
 
 **Complexity — Low (placeholder):**
-- **[R5](R5-rdma-alloc.md)** — RDMA-pinned allocation — Blocked by: RDMA backend — Area: crowtree
+- **[R5](R5-rdma-alloc.md)** — RDMA-pinned allocation — Blocked by: RDMA backend — Area: crowdbtree
   engine — `buffer::allocate` seam is designed for RDMA-pinned memory but no
   RDMA backend exists yet; placeholder only.
 
 **Complexity — Medium:**
-- **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
+- **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowdbtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
-- **[R52](R52-reverse-scan.md)** — Reverse scan — Area: scan / crow-tree
+- **[R52](R52-reverse-scan.md)** — Reverse scan — Area: scan / crowdb-tree
   engine — `scan` is forward-only today (ascending key order). Reverse
   scan (descending order, `start_before` instead of `start_after`) is a
   distinct cost shape: the B+tree descent targets the leaf containing
@@ -408,8 +408,8 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   behavior — backward leaf traversal touches pages in reverse
   allocation order).
 - **[R54](R54-kv-scan-engine-profiling.md)** — Scan engine profiling —
-  Area: scan / crow-tree engine — both read modes saturate near ~38k
-  scans/s at 32T:32C; the bottleneck moved to the C++ crow-tree merge
+  Area: scan / crowdb-tree engine — both read modes saturate near ~38k
+  scans/s at 32T:32C; the bottleneck moved to the C++ crowdb-tree merge
   loop (L0 skip-list + L1 B+tree cursor) but the specific hot spot is
   unknown. Add `tools/profile-scan.sh` (mirroring
   `tools/profile-write.sh`), profile the 32T:32C scan bench, and
@@ -417,11 +417,11 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   changes. If a clear optimization target emerges, file a follow-up
   requirement with the profiling evidence. Low complexity.
 - **[R60](R60-tree-scan-sibling-leaf-readahead.md)** — Sibling-leaf
-  readahead on cold scans — Area: scan / crow-tree engine — the scan
+  readahead on cold scans — Area: scan / crowdb-tree engine — the scan
   path demand-loads each L1 leaf inline (sync) or one pending page per
   reactor round trip (async), so a cold multi-leaf range pays one
   stall/round-trip per leaf, serialized with merge work on prior
-  leaves. The scan knows `right_sibling` (`crow-tree.cpp:1822/2074`)
+  leaves. The scan knows `right_sibling` (`crowdb-tree.cpp:1822/2074`)
   before finishing the current leaf — issue a readahead for the next
   leaf to overlap I/O with merging. Sync path: prefetch the
   right-sibling page id via a page-cache async-resolve seam. Async
@@ -442,13 +442,13 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   whether the R67 fix has a write-path gap and file a follow-up
   requirement. Low complexity; verifies R67's coverage extends to
   writes.
-- **[R120](R120-kv-ignored-test-migration.md)** — revive crow-rpc migrated
+- **[R120](R120-kv-ignored-test-migration.md)** — revive crowdb-rpc migrated
   ignored tests — Area: kv / tests — Two `#[ignore]`d test stubs in
   `group_test.rs` cover real contracts with no other coverage at the
-  `crow-kv` layer: the forwarded-flag loop guard on `Get`/`Scan` (a
+  `crowdb-kv` layer: the forwarded-flag loop guard on `Get`/`Scan` (a
   follower must not re-forward an already-forwarded request) and malformed
   `Accept` rejection on the LearnerStream bidi path. Both have empty
-  bodies pending crow-rpc migration; the infrastructure now exists — write
+  bodies pending crowdb-rpc migration; the infrastructure now exists — write
   the test bodies and un-ignore. Low complexity; no dependencies.
 - **[R123](R123-console-cli-short-flags.md)** — CLI short flag aliases
   for all subcommands — Area: console / cli — Only `bench rpc` and the

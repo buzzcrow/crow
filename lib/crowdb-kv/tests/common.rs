@@ -1,0 +1,15 @@
+// Copyright 2026-present Gian <crow.db@outlook.com>
+// Licensed under the Apache License, Version 2.0.
+
+//! Shared deterministic test harness for `crowdb_kv` integration tests.
+//!
+//! Real content lands incrementally with each phase:
+//! - P1 M2: `TestTimer`, `TestRouter`, `TestNode`.
+//! - P2 M0: `SimDisk` (async I/O simulated backend).
+
+pub mod cluster;
+pub mod logging;
+pub mod net_lock;
+pub mod simdisk;
+pub mod test_client;
+pub mod timer;

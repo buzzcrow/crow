@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R113: chunkio — Batch strip allocation + deferred chunkdb confirm
@@ -6,7 +6,7 @@
 ## Problem
 
 **Current behavior + impact:** The large-object write path
-(`crow-chunk-client`, R94) allocates strips one at a time. Each strip
+(`crowdb-chunk-client`, R94) allocates strips one at a time. Each strip
 triggers an `append_chunk` RPC to chunkdb with `strip_count=1`, which
 internally calls diskdb to allocate `data_num + code_num` blocks,
 persists the updated chunk metadata to KV, and returns the full
@@ -23,19 +23,19 @@ chunkdb's KV persistence. This is the allocation-rate bottleneck for
 large objects.
 
 **Design pointers:**
-- `doc/design/chunkio/design-crow-chunkio.md` §3 (Write Flow —
+- `doc/design/chunkio/design-crowdb-chunkio.md` §3 (Write Flow —
   prealloc task), §2 (Key Design Decisions — bounded preallocation).
-- `doc/design/chunkdb/design-crow-chunkdb.md` §8 (Allocation Flow —
+- `doc/design/chunkdb/design-crowdb-chunkdb.md` §8 (Allocation Flow —
   parallel strip allocation, rollback on failure), §9 (Chunk
   Lifecycle — state transitions), §3.6 (Stateless with KV
   persistence — all state changes persisted before acknowledge).
-- `doc/design/diskdb/design-crow-diskio.md` — `BusyBlockValue`
+- `doc/design/diskdb/design-crowdb-diskio.md` — `BusyBlockValue`
   `commit_state` field (`TENTATIVE` → `COMMITTED`), two-phase
   allocate (sync bitmap claim + async KV persist).
-- `lib/crow-protocol/src/fbs/chunkdb.fbs` —
+- `lib/crowdb-protocol/src/fbs/chunkdb.fbs` —
   `AppendChunkRequest` already has `strip_count` field (currently
   always sent as 1).
-- `lib/crow-protocol/src/fbs/diskdb.fbs` —
+- `lib/crowdb-protocol/src/fbs/diskdb.fbs` —
   `BusyBlockValue.commit_state`, `CommitState` enum.
 
 **Use scenarios:**
@@ -115,7 +115,7 @@ confirm flow for crash safety.
      disk-group selection) — currently chunkdb's job per §7. This
      either duplicates placement logic in the client or requires a
      new "placement hint" RPC from chunkdb. The client calls diskdb
-     directly — a new dependency (`crow-diskio-client` → diskdb
+     directly — a new dependency (`crowdb-diskio-client` → diskdb
      allocation RPCs, not just block IO). Crash recovery for
      `TENTATIVE` blocks with written data is the hard part.
    - **Confirm flow:** Blocks are `TENTATIVE` after diskdb
@@ -133,36 +133,36 @@ confirm flow for crash safety.
 ### Work items (approach-dependent, refined in design)
 
 1. **Batch `append_chunk` in `ChunkWriter` strip prefetch** —
-   `lib/crow-chunk-client/src/chunk/chunk_writer.rs`. The internal
+   `lib/crowdb-chunk-client/src/chunk/chunk_writer.rs`. The internal
    strip prefetch task requests `prealloc_depth` strips in one
    `append_chunk(strip_count=N)` call instead of N calls. Config
    knob for batch size (default = `prealloc_depth`). Required for
    approach 1; optional fallback for approach 2.
 
 2. **chunkdb batch allocation path** —
-   `app/crow-chunkdb/src/lifecycle.rs`. Verify that
+   `app/crowdb-chunkdb/src/lifecycle.rs`. Verify that
    `append_chunk(strip_count=N)` allocates N strips in parallel
    (§8 already supports this) and persists once. Optimize if the
    current implementation serializes per-strip. Required for
    approach 1.
 
 3. **Client-side placement (approach 2 only)** —
-   `lib/crow-chunk-client/src/chunk/`. New module that queries
+   `lib/crowdb-chunk-client/src/chunk/`. New module that queries
    chunkdb for placement hints (which disk-groups to use) and calls
    diskdb directly to allocate blocks. Duplicates or extracts
    chunkdb's placement logic (§7). Blocked on a placement-hint RPC
    in chunkdb.
 
 4. **Deferred confirm RPC (approach 2 only)** —
-   `lib/crow-protocol/src/fbs/chunkdb.fbs`,
-   `app/crow-chunkdb/src/lifecycle.rs`. New RPC
+   `lib/crowdb-protocol/src/fbs/chunkdb.fbs`,
+   `app/crowdb-chunkdb/src/lifecycle.rs`. New RPC
    (`ConfirmStripsRequest`) that takes a `ChunkId` + pre-allocated
    segments (from direct diskdb allocation) and persists them to
    KV, transitioning blocks from `TENTATIVE` to `COMMITTED`. Does
    not allocate new blocks — just confirms existing ones.
 
 5. **TENTATIVE block reaper (approach 2 only)** —
-   `app/crow-diskdb/src/`. Background task that reclaims
+   `app/crowdb-diskdb/src/`. Background task that reclaims
    `TENTATIVE` blocks older than a timeout (no chunkdb confirm
    received). Frees the blocks back to the free pool. Crash safety
    for the aggressive approach.
@@ -312,9 +312,9 @@ confirm flow for crash safety.
   verify `append_chunk` RPC count reduced by ~10× vs. per-strip.
   Verify write throughput ≥ per-strip baseline (no regression).
   Verify all `Location`s correct, data reconstructs. E2E test.
-- `pixi run cargo test -p crow-chunk-client --all-targets` — all
+- `pixi run cargo test -p crowdb-chunk-client --all-targets` — all
   existing tests pass (no regression from batch optimization).
-- `pixi run cargo test -p crow-diskdb --all-targets` — diskdb
+- `pixi run cargo test -p crowdb-diskdb --all-targets` — diskdb
   tests pass (approach 2: TENTATIVE/COMMITTED transition, reaper).
 - `pixi run cargo fmt --all -- --check` +
   `pixi run cargo clippy --all-targets -- -D warnings`.

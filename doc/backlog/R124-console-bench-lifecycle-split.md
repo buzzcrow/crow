@@ -1,11 +1,11 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R124: console — split bench lifecycle into deploy/prepare/run/clean/teardown verbs
 
 **Problem**
 
-The `crow-cli bench kv` command is monolithic per invocation: every call
+The `crowdb-cli bench kv` command is monolithic per invocation: every call
 provisions a fresh 3-node cluster, pre-populates data, runs the workload,
 then tears the whole cluster down. The three regression sentinels
 (`tools/bench-kv-{read,scan,write}-regression.sh`) invoke `bench kv` once
@@ -31,21 +31,21 @@ clean→run between sub-tests so each write test starts from a
 data-empty (group0-only) state. This amortizes deploy + pre-pop and
 unlocks larger datasets.
 
-The same deploy primitive should serve `crow-kv-server` ad-hoc test
-deployments (today those use `crow-cli server deploy` per node, with
+The same deploy primitive should serve `crowdb-kv-server` ad-hoc test
+deployments (today those use `crowdb-cli server deploy` per node, with
 no cluster_init/store/group wiring), and should be designed
 multi-kind from the start — rpc, chunk, and storage clusters are
 coming, and they all need the same deploy→prepare→run→teardown shape.
 
 **Current behavior + impact**
 
-- `bench kv` (`app/crow-cli/src/commands/bench/bench_kv.rs`) calls
+- `bench kv` (`app/crowdb-cli/src/commands/bench/bench_kv.rs`) calls
   `run_bench` (`bench/runner.rs`), which calls `target.provision()` →
   `target.pre_populate()` → run workers → (back in `bench_kv.rs`)
   `target.cleanup()`. All four phases run inside one CLI process.
 - `KvTarget::provision` (`bench/targets/kv.rs`) constructs a
-  `BenchFixture` that embeds its own `crow-web` console instance
-  (`ConsoleClient` + `axum::serve`), deploys 3 `crow-kv-server` nodes
+  `BenchFixture` that embeds its own `crowdb-web` console instance
+  (`ConsoleClient` + `axum::serve`), deploys 3 `crowdb-kv-server` nodes
   via `client.deploy_node_server`, runs `cluster_init` +
   `provision_store_and_group`, and waits for leader + health. The
   fixture holds the console task, node ids, pids, endpoints, and
@@ -58,17 +58,17 @@ coming, and they all need the same deploy→prepare→run→teardown shape.
   `0..count`, inside `run_bench`.
 - Impact: (1) deploy + pre-pop overhead is paid per sub-test, capping
   dataset size; (2) the bench's embed-console-per-run model cannot be
-  reused by ad-hoc `crow-kv-server` test deployments that want the
+  reused by ad-hoc `crowdb-kv-server` test deployments that want the
   same cluster_init/store/group wiring; (3) there is no "reset to
   clean group0" primitive, so write tests cannot cheaply reuse a
   deployed cluster across sub-tests.
 
 **Design pointers**
 
-- `doc/design/console/design-crow-console.md` — root console design
+- `doc/design/console/design-crowdb-console.md` — root console design
   (console-web, SSH/local-fork lifecycle, bootstrap). The deploy verb
   reuses the console deploy path the bench already uses.
-- `doc/design/kv/design-crow-kv-sysdata-lifecycle.md` — sysdata
+- `doc/design/kv/design-crowdb-kv-sysdata-lifecycle.md` — sysdata
   lifecycle, including cluster reset. The clean/reset verb must be
   consistent with the group0 sysdata preservation rules defined here;
   if this doc already specifies a wipe/reset API, the clean verb
@@ -93,7 +93,7 @@ coming, and they all need the same deploy→prepare→run→teardown shape.
   `bench clean --target W` (wipe data, keep group0) → `bench run
   --target W --workload write`. Each write test starts from a
   data-empty, group0-intact cluster without a full redeploy.
-- Operator deploys a `crow-kv-server` test cluster ad-hoc (not for
+- Operator deploys a `crowdb-kv-server` test cluster ad-hoc (not for
   bench): `bench deploy --name mycluster --kind kv` brings up the
   cluster with cluster_init/store/group wiring, then the operator
   runs manual puts/gets against it (or `bench run --target mycluster
@@ -162,7 +162,7 @@ verb, and multi-kind deploy dispatch with `--web` opt-in console-web.
    leader) for kv.
 3. **`bench prepare` verb** (`bench/bench_kv.rs`) — extracts the
    `KvTarget::pre_populate` sequential `put` loop into a standalone
-   verb. Reads the handle (`--target <name>`), builds a `CrowkvClient`
+   verb. Reads the handle (`--target <name>`), builds a `CrowdbClient`
    seeded from the recorded leader endpoint, pre-populates `--keys N`
    (with `--value-size`/`--value-size-mix`). Uses default `put`
    semantics (overwrite) — multiple `bench prepare` rounds can be
@@ -182,7 +182,7 @@ verb, and multi-kind deploy dispatch with `--web` opt-in console-web.
    kept as the all-in-one path for quick one-shot benches.
 5. **`bench clean` verb — wipe data, keep group0**
    (`commands/bench.rs`, new per-service management API endpoint in
-   `crow-kv-server`, client call in `crow-kv-client`/console) — wipes
+   `crowdb-kv-server`, client call in `crowdb-kv-client`/console) — wipes
    WAL + engine data on each node but preserves group0 sysdata so
    the cluster stays wired (store/group/replicas intact) and only
    user data is gone. Implemented as a new per-node management API
@@ -192,7 +192,7 @@ verb, and multi-kind deploy dispatch with `--web` opt-in console-web.
    `reset`/`wipe`) so it cannot be triggered accidentally — exact
    name/flow TBD in design, but it must require an explicit,
    hard-to-mistake action. Must be consistent with
-   `design-crow-kv-sysdata-lifecycle.md`'s cluster-reset rules — if
+   `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules — if
    that doc already defines a wipe API, wrap it instead of adding a
    new one.
 6. **`bench teardown` verb** (`bench/bench_kv.rs`) — extracts
@@ -270,7 +270,7 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
 **Dependencies**
 
 - None hard. The clean/reset verb should align with
-  `design-crow-kv-sysdata-lifecycle.md`'s cluster-reset rules; if
+  `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules; if
   that doc prescribes a specific wipe API, this wraps it. R118
   (unify port usage + port prober) is tangentially related — the
   bench's `unique_test_port()` is the stopgap R118 replaces; no
@@ -282,23 +282,23 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
 **Acceptance**
 
 **Lifecycle verbs:**
-- `crow-cli bench deploy --name t1 --kind kv` brings up a 3-node
+- `crowdb-cli bench deploy --name t1 --kind kv` brings up a 3-node
   cluster headless (deploys nodes, cluster_init, store/group, waits
   for leader) and writes a handle under `runtime/t1/`; subsequent
   `bench run --target t1` attaches to it. Integration test.
-- `crow-cli bench deploy --name t1w --kind kv --web` brings up the
+- `crowdb-cli bench deploy --name t1w --kind kv --web` brings up the
   same 3-node cluster plus a console-web instance bound to a recorded
   port in the handle; `bench teardown --target t1w` stops both.
   Integration test.
-- `crow-cli bench prepare --target t1 --keys 100000` against a
+- `crowdb-cli bench prepare --target t1 --keys 100000` against a
   deployed handle pre-populates 100k keys with 0 errors; a follow-up
   `bench run --target t1 --workload read` reads them back with 0
   `correctness_errors`. Integration test.
-- `crow-cli bench run --target t1 --workload read` runs a workload
+- `crowdb-cli bench run --target t1 --workload read` runs a workload
   against the deployed cluster, produces a JSON + markdown report
   under `runtime/t1/`, and does **not** tear the cluster down (a
   second `bench run --target t1` succeeds). Integration test.
-- `crow-cli bench teardown --target t1` stops all node servers +
+- `crowdb-cli bench teardown --target t1` stops all node servers +
   aborts the console task; a second `teardown --target t1` is a
   no-op (idempotent). Integration test.
 - `bench teardown --target t1` after a simulated mid-deploy crash
@@ -308,14 +308,14 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
   listing existing deploy names under `runtime/`. Integration test.
 
 **Clean (wipe data, keep group0):**
-- `crow-cli bench clean --target t1` against a deployed+populated
+- `crowdb-cli bench clean --target t1` against a deployed+populated
   cluster wipes user data so a subsequent `bench run --target t1
   --workload read` returns 0 found keys, **but** the store/group/
   replica topology is intact (a `bench run --target t1 --workload
   write` succeeds without re-wiring, and the leader endpoint from
   the handle still serves). Integration test.
 - `bench clean` preserves group0 sysdata — cluster topology records
-  (`design-crow-kv-sysdata-lifecycle.md`) are unchanged after clean;
+  (`design-crowdb-kv-sysdata-lifecycle.md`) are unchanged after clean;
   verify via the console topology API. Integration test.
 - `bench clean --target t1` while a `bench run` is in flight rejects
   with a "cluster busy" error and does not wipe. Integration test.
@@ -324,11 +324,11 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
   hard-to-mistake invocation. Integration test.
 
 **Multi-kind dispatch:**
-- `crow-cli bench deploy --name r1 --kind rpc` provisions the RPC
+- `crowdb-cli bench deploy --name r1 --kind rpc` provisions the RPC
   bench target (reuses `bench/targets/rpc.rs` `RpcTarget::provision`,
   no console-web) and writes a handle with `kind=rpc`. Integration
   test.
-- `crow-cli bench deploy --name c1 --kind chunk` (and `--kind
+- `crowdb-cli bench deploy --name c1 --kind chunk` (and `--kind
   storage`) returns a clear "not yet implemented" error (reserved
   kinds). Integration test.
 - `bench run --target r1 --workload read` rejects a handle whose
@@ -377,7 +377,7 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
    — exact name/flow TBD in the design draft, but it must require
    an explicit, hard-to-mistake action (not a bare `reset`/`wipe`).
    Must still be consistent with
-   `design-crow-kv-sysdata-lifecycle.md`'s cluster-reset rules; if
+   `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules; if
    that doc already defines a wipe API, the per-service endpoints
    wrap it rather than duplicate it. Open sub-question: read that
    doc's reset section during design to confirm no duplication.

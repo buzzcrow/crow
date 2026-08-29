@@ -1,0 +1,31 @@
+[package]
+name = "crowdb-diskdb-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client library for CROWDB diskdb: allocate/free/query disk blocks."
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crowdb-protocol = { path = "../crowdb-protocol" }
+crowdb-kv-client = { path = "../crowdb-kv-client" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi" }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+bytes = "1"
+flatbuffers = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"
+
+[dev-dependencies]
+crowdb-kv-client = { path = "../crowdb-kv-client" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", features = ["test-util"] }
+crowdb-test-harness = { path = "../crowdb-test-harness", features = ["diskdb"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"

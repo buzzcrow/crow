@@ -1,0 +1,390 @@
+include "common_type.fbs";
+
+namespace crowdb.diskdb.proto;
+
+// diskdb service flatbuffer control messages (R115: legacy → crowdb-rpc
+// migration). Mirrors diskdb_op.proto + diskdb_type.proto + the
+// diskdb-relevant subset of common_type.proto / error_code.proto.
+//
+// Conventions (design-crowdb-rpc.md §6, todo_fb.md "Rules to Follow"):
+// - Every request/response table carries `id` (request_id, matched by
+//   the RPC framework) + `rpc_create_nano` (creation timestamp) as its
+//   first two fields, same as diskio.fbs.
+// - Every response carries `ret_code` (FBDiskdbRetCode) + optional
+//   `error_msg`. On Success the data fields are populated; on error the
+//   data fields are empty and `error_msg` describes the failure.
+// - `FBInt128` (from common_type.fbs) is used for DiskId / ChunkId.
+// - `FBSegment` is an inline struct (fixed-layout, no vtable) — it is
+//   the allocation handle and is embedded in vectors on the
+//   allocate/free/commit hot path.
+
+// ── Return codes (mirrors error_code.proto diskdb subset) ────────
+enum FBDiskdbRetCode : int16 {
+    Success = 0,
+    InvalidArgument = 1,
+    NotFound = 2,
+    Internal = 5,
+    Unavailable = 6,
+    NoSpace = 10,
+    NotOwner = 11,
+    DiskNotFound = 12,
+    DiskGroupNotFound = 13,
+    NodeNotFound = 14,
+    RackNotFound = 15,
+    DiskBlockFreed = 16,
+    Degraded = 17,
+}
+
+// ── Shared enums (from diskdb_type.proto + common_type.proto) ─────
+
+enum FBHwStatus : int16 {
+    Init = 0,
+    Up = 1,
+    Maintenance = 2,
+    Suspect = 3,
+    Missing = 4,
+    Bad = 5,
+    Offline = 6,
+}
+
+enum FBDiskType : int16 {
+    BlockHdd = 0,
+    BlockSsd = 1,
+    ZoneSsd = 2,
+    SmrHdd = 3,
+}
+
+enum FBZoneAllocationState : int16 {
+    Active = 0,
+    Available = 1,
+    Full = 2,
+}
+
+enum FBBlockState : int16 {
+    Ok = 0,
+    Suspect = 1,
+    Corrupt = 2,
+}
+
+enum FBCommitState : int16 {
+    Tentative = 0,
+    Committed = 1,
+}
+
+enum FBRecoveryScanStatus : int16 {
+    InProgress = 0,
+    Stopped = 1,
+    Complete = 2,
+}
+
+// ── Segment (allocation handle, inline struct) ───────────────────
+// Fixed-layout: ordered by alignment (FBInt128 → uint64 → uint32).
+// No node_id/disk_group_id — disk_id is globally unique.
+struct FBSegment {
+    disk_id:crowdb.rpc.proto.FBInt128;
+    owner_chunk:crowdb.rpc.proto.FBInt128;
+    unit_offset:uint64;
+    zone_index:uint32;
+    unit_count:uint32;
+}
+
+// ── Nested query response types ──────────────────────────────────
+
+// Per-zone brief usage — counts only. The full `usage_bitmap` is
+// populated only for a specific-zone query; omitted at disk level.
+table FBZoneUsage {
+    zone_index:uint32;
+    capacity_bytes:uint64;
+    busy_bytes:uint64;
+    free_bytes:uint64;
+    busy_block_count:uint32;
+    free_block_count:uint32;
+    alloc_state:FBZoneAllocationState;
+    // Populated only for a specific-zone query; omitted at disk level.
+    usage_bitmap:[ubyte];
+}
+
+// Disk info for query responses — key + value fields flattened.
+table FBDiskInfo {
+    // Key fields.
+    rack_id:uint64;
+    node_id:uint64;
+    disk_group_id:uint64;
+    disk_id:crowdb.rpc.proto.FBInt128;
+    // Value fields.
+    disk_type:FBDiskType;
+    capacity_units:uint64;
+    zone_size_units:uint64;
+    unit_size_bytes:uint32;
+    zone_count:uint32;
+    status:FBHwStatus;
+    // Live usage (bitmap-derived; 0 when not populated).
+    busy_units:uint64;
+    free_units:uint64;
+    capacity_bytes:uint64;
+    busy_bytes:uint64;
+    free_bytes:uint64;
+    active_zone_count:uint32;
+    // Brief per-zone entries (disk-level query only).
+    zone_usages:[FBZoneUsage];
+    device_path:string;
+}
+
+// Disk-group info for query responses — key + value + member disks.
+table FBDiskGroupInfo {
+    // Key fields.
+    rack_id:uint64;
+    node_id:uint64;
+    disk_group_id:uint64;
+    // Value fields.
+    status:FBHwStatus;
+    disk_ids:[crowdb.rpc.proto.FBInt128];
+    // Member disks.
+    disks:[FBDiskInfo];
+    // Aggregated usage (bitmap-derived; 0 when not populated).
+    capacity_bytes:uint64;
+    busy_bytes:uint64;
+    free_bytes:uint64;
+    allocatable_disk_count:uint32;
+}
+
+// Scanner cycle summary.
+table FBScanSummary {
+    started_at_ms:uint64;
+    duration_ms:uint64;
+    zones_scanned:uint64;
+    zones_skipped_active:uint64;
+    zones_skipped_compacting:uint64;
+    ghost_busy:uint64;
+    ghost_free:uint64;
+    uncompacted_lag:uint64;
+    corrupt_snapshots:uint64;
+    corrupt_records:uint64;
+    owner_mismatches:uint64;
+    leak_status:string;
+}
+
+// Recalc results (R74 drift verification).
+table FBZoneRecalcResult {
+    disk_id:crowdb.rpc.proto.FBInt128;
+    zone_index:uint32;
+    matches:bool;
+    drift_detected:bool;
+    live_busy_blocks:uint32;
+    replayed_busy_blocks:uint32;
+    live_snapshot_slot:uint64;
+    replayed_snapshot_slot:uint64;
+    // Absent if strategy 2 succeeded.
+    fallback_reason:string;
+}
+
+table FBDiskGroupRecalcResult {
+    disk_group_id:uint64;
+    drift_detected:bool;
+    zones:[FBZoneRecalcResult];
+}
+
+// Compaction results.
+table FBZoneCompactionResult {
+    zone_index:uint32;
+    success:bool;
+    free_records_deleted:uint32;
+    // Absent on success.
+    error:string;
+}
+
+// ── Allocate ─────────────────────────────────────────────────────
+
+table FBAllocateBlocksRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    disk_group_id:uint64;
+    unit_count:uint32;
+    count:uint32;
+    exclude_disk_ids:[crowdb.rpc.proto.FBInt128];
+    owner_chunk:crowdb.rpc.proto.FBInt128;
+}
+
+table FBAllocateResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    segments:[FBSegment];
+}
+
+// ── Free ─────────────────────────────────────────────────────────
+
+table FBFreeBlocksRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    segments:[FBSegment];
+}
+
+table FBFreeResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    freed_count:uint32;
+}
+
+// ── Commit (two-phase allocate → persist) ────────────────────────
+
+table FBCommitBlocksRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    segments:[FBSegment];
+}
+
+table FBCommitBlocksResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    committed_count:uint32;
+}
+
+// ── Query capacity stats ─────────────────────────────────────────
+
+table FBQueryCapacityStatsRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    // 0 = all owned; set = specific group.
+    disk_group_id:uint64;
+    // Drill-down: set for disk-level or zone-level query.
+    disk_id:crowdb.rpc.proto.FBInt128;
+    // Drill-down: set with disk_id for zone-level. has_zone_index=false
+    // means "not set" (disk-level); true means zone-level with zone_index.
+    has_zone_index:bool;
+    zone_index:uint32;
+}
+
+table FBQueryCapacityStatsResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    disk_groups:[FBDiskGroupInfo];
+}
+
+// ── Get info ─────────────────────────────────────────────────────
+
+table FBGetDiskGroupInfoRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    disk_group_id:uint64;
+}
+
+table FBGetDiskGroupInfoResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    group:FBDiskGroupInfo;
+}
+
+table FBGetDiskInfoRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    rack_id:uint64;
+    node_id:uint64;
+    disk_group_id:uint64;
+    disk_id:crowdb.rpc.proto.FBInt128;
+}
+
+table FBGetDiskInfoResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    disk:FBDiskInfo;
+}
+
+// ── Rebuild zone bitmap ──────────────────────────────────────────
+
+table FBRebuildZoneBitmapRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    disk_id:crowdb.rpc.proto.FBInt128;
+    // u32::MAX = all zones on the disk.
+    zone_index:uint32;
+}
+
+table FBRebuildZoneBitmapResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    rebuilt_zone_count:uint32;
+    total_busy_units:uint64;
+    total_free_units:uint64;
+}
+
+// ── Recalc disk usage (drift verification) ───────────────────────
+
+table FBRecalcDiskUsageRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    // has_disk_group_id=false = recalc all owned; true = recalc one.
+    has_disk_group_id:bool;
+    disk_group_id:uint64;
+}
+
+table FBRecalcDiskUsageResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    results:[FBDiskGroupRecalcResult];
+}
+
+// ── Compact zone ─────────────────────────────────────────────────
+
+table FBCompactZoneRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    disk_id:crowdb.rpc.proto.FBInt128;
+    // empty = all zones on the disk.
+    zone_indices:[uint32];
+}
+
+table FBCompactZoneResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    compacted_zone_count:uint32;
+    total_free_records_deleted:uint32;
+    zones:[FBZoneCompactionResult];
+}
+
+// ── Scanner admin ────────────────────────────────────────────────
+
+table FBTriggerScanRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+}
+
+table FBTriggerScanResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    summary:FBScanSummary;
+    scan_in_progress:bool;
+}
+
+table FBGetScanStatusRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+}
+
+table FBGetScanStatusResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBDiskdbRetCode;
+    error_msg:string;
+    summary:FBScanSummary;
+    has_run:bool;
+}

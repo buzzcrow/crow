@@ -7,7 +7,7 @@ triggers:
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # Debug Test Failure Flow
@@ -39,7 +39,7 @@ Do not jump to a fix — first identify exactly where the test diverges from exp
 
 ## Step 3 — Inspect Logs and On-Disk Data
 
-Check Rust logs (`RUST_BACKTRACE=full`), C++ logs (`log_level="debug"`), WAL segments, and crow-tree files for `WARN`/`ERROR`, `panic`, or unexpected state.
+Check Rust logs (`RUST_BACKTRACE=full`), C++ logs (`log_level="debug"`), WAL segments, and crowdb-tree files for `WARN`/`ERROR`, `panic`, or unexpected state.
 
 ## Step 3b — Crash Analysis
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# --- CrowKV write regression benchmark ---
+# --- CrowDB write regression benchmark ---
 # Usage: bash tools/bench-kv-write-regression.sh
 #
 # Regression sentinel for write throughput with coalescing enabled.
@@ -20,12 +20,12 @@
 # 7 runs × 20s ≈ 140s + deploy overhead.
 #
 # Reference platform: AMD Ryzen 9 5950X (16c/32t, x86_64, Linux).
-# Peak ~234K ops/s at 512T with zero-copy crow-rpc + event-write.
+# Peak ~234K ops/s at 512T with zero-copy crowdb-rpc + event-write.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
-#   - release binary built (pixi run -- cargo build --release -p crow-cli -p crow-kv-server)
+#   - release binary built (pixi run -- cargo build --release -p crowdb-cli -p crowdb-kv-server)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -38,7 +38,7 @@ run_bench() {
     local threads="$1" conn="$2" win="$3" coalesce="$4" workers="$5" label="$6"
     echo ">>> $label ..."
     local output
-    output=$(CROW_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crow-cli -- bench kv \
+    output=$(CROWDB_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crowdb-cli -- bench kv \
         --mode mem --workload write --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$conn" \
         --max-inflight "$win" \
@@ -96,11 +96,11 @@ run_bench() {
 # first, otherwise silent performance regressions slip in.
 #
 # Reference results (2026-08-27, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
-#   Zero-copy crow-rpc + event-write + peer-pool=4. Event-write coalesces
+#   Zero-copy crowdb-rpc + event-write + peer-pool=4. Event-write coalesces
 #   frames via I/O worker (one writev for N queued frames). Peer-pool=4
 #   spreads consensus send pressure across 4 connections per peer.
 #   win=32 (64 for 512T+), coalesce=16, 10s mem mode, 3-node cluster,
-#   512B values, 1M keys. CROW_RPC_WORKERS tuned per config.
+#   512B values, 1M keys. CROWDB_RPC_WORKERS tuned per config.
 #
 #   T    C    W    win  co        ops/s     WAL/node  p50    p99    err  sagg  ragg  r2    r2tps    r3    r3tps    enq   wait
 #   1    1    2    32   0.5/16    4,019     80,396    256    348    0    1     0.9   0     4,119    0     4,119    0     0
@@ -111,7 +111,7 @@ run_bench() {
 #   512  16   4    64   26.7/64   233,601   87,458    1930   5564   0    2.8   2.6   3250  4,926    240   4,926    0     0
 #   1000 16   4    64   28.3/64   208,114   73,545    4340   12856  0    3     3.1   996   4,265    1052  4,264    0     0
 #
-# Zero-copy crow-rpc + event-write beats legacy at every thread count.
+# Zero-copy crowdb-rpc + event-write beats legacy at every thread count.
 # Peak ~234K at 512T (was ~124K with legacy, ~191K without event-write).
 # 1000T now uses co=64 (was co=32) — 1000 threads fill 64-key batches
 # as well as 512T. Coalesce fill: 48% at co=16 (256T), 42% at co=64

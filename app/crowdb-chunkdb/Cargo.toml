@@ -1,0 +1,58 @@
+[package]
+name = "crowdb-chunkdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CROWDB chunkdb server: distributed chunk manager (stateless; persists to CROWDB KV, allocates via diskdb)."
+autobenches = false
+
+[[bin]]
+name = "crowdb-chunkdb"
+path = "src/main.rs"
+
+[lib]
+name = "crowdb_chunkdb"
+path = "src/lib.rs"
+
+[features]
+# Exposes internal types/methods for integration tests.
+# Auto-enabled for this crate's own tests via the self dev-dependency.
+test-util = []
+
+[lints]
+workspace = true
+
+[dependencies]
+crowdb-protocol = { path = "../../lib/crowdb-protocol" }
+crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
+crowdb-diskdb-client = { path = "../../lib/crowdb-diskdb-client" }
+crowdb-common = { path = "../../lib/crowdb-common/rust" }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
+flatbuffers = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "net", "sync"] }
+bytes = "1"
+bincode = "1"
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+arc-swap = "1.9"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"
+parking_lot = "0.12"
+quick_cache = "0.7"
+rand = "0.8"
+futures = "0.3"
+
+[dev-dependencies]
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi", features = ["test-util"] }
+crowdb-test-harness = { path = "../../lib/crowdb-test-harness", features = ["chunkdb", "diskdb"] }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+crowdb-diskdb = { path = "../crowdb-diskdb" }
+crowdb-chunkdb = { path = ".", features = ["test-util"] }

@@ -1,25 +1,25 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW
+# CROWDB
 
-Distributed KV store: Paxos consensus, per-key slots, WAL durability, crow-tree storage engine.
+Distributed KV store: Paxos consensus, per-key slots, WAL durability, crowdb-tree storage engine.
 Rust workspace + C++ storage engine (via FFI).
 
 ## Crates
 
-- **`crow-kv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
-- **`crow-kv-client`** — client library (retry, topology cache, `NotLeaderHint`) + group-0 sysdata service classes (`HardwareClient`, `ServiceRegistryClient`, `KVClusterMetaClient`, `KVClusterAdmin`); `ffi` feature exposes a C ABI for C++ consumers (primarily `crow-diskio`).
-- **`crow-kv-server`** — binary: CLI, HTTP management API (internal — only called by `crow-kv-client`), store/group/replica wiring, keep-alive loop.
-- **`crow-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, crow-rpc service stubs; allocation logic is R72).
-- **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CROW.
-- **`lib/crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
-- **`lib/crow-rpc/ffi`** — Rust async facade over C++ crow-rpc C ABI (epoll/kqueue transport, flatbuffer framing, request/response correlation via oneshot channels).
+- **`crowdb-kv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
+- **`crowdb-kv-client`** — client library (retry, topology cache, `NotLeaderHint`) + group-0 sysdata service classes (`HardwareClient`, `ServiceRegistryClient`, `KVClusterMetaClient`, `KVClusterAdmin`); `ffi` feature exposes a C ABI for C++ consumers (primarily `crowdb-diskio`).
+- **`crowdb-kv-server`** — binary: CLI, HTTP management API (internal — only called by `crowdb-kv-client`), store/group/replica wiring, keep-alive loop.
+- **`crowdb-diskdb`** — binary: distributed disk-block allocator (sync loop, status management, crowdb-rpc service stubs; allocation logic is R72).
+- **`crowdb-console-shared`** / **`crowdb-web`** / **`crowdb-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CROWDB.
+- **`lib/crowdb-tree/ffi`** — Rust FFI bindings to C++ crowdb-tree storage engine.
+- **`lib/crowdb-rpc/ffi`** — Rust async facade over C++ crowdb-rpc C ABI (epoll/kqueue transport, flatbuffer framing, request/response correlation via oneshot channels).
 
 ## Hard Constraints
 
 - All build/test/run commands run under **pixi** — never bare `cargo`, `clang-format`, or `cargo run`. Pixi provides system deps (e.g. `isa-l` headers) that bare cargo can't find.
-- `unsafe_code = deny` (except `crow-tree-ffi` and `crow-kv-client` `ffi` feature); Clippy `pedantic = warn`.
+- `unsafe_code = deny` (except `crowdb-tree-ffi` and `crowdb-kv-client` `ffi` feature); Clippy `pedantic = warn`.
 - **Prefer lock-free flow** — use lock-free structures (atomics, lock-free MPSC/SPSC channels, `Bytes` ref counts, EBR) for hot data paths. If a mutex, `RwLock`, or other blocking lock is needed, **stop and raise it** — analyze why lock-free is insufficient (contention pattern, ordering requirement, complexity tradeoff) and let the user decide. Do not add locks silently.
 - Markdown is read as raw text — prefer bullet or definition lists; tables allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results). `doc_index.md` always uses tables.
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
@@ -34,7 +34,7 @@ Rust workspace + C++ storage engine (via FFI).
 - **Pre-commit quality gate — do not skip:**
   - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `tree-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
   - Tests: run only relevant tests (Rust or `test-tree-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
-- **Playwright E2E uses the system browser** — `app/crow-web/ui/playwright.config.ts` auto-detects Chromium/Edge/Chrome via its `localBrowsers` list; never run `npx playwright install` locally. The CI workflow's install step is conditional (downloads only when no system browser is found). Override with `PLAYWRIGHT_CHANNEL` or `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
+- **Playwright E2E uses the system browser** — `app/crowdb-web/ui/playwright.config.ts` auto-detects Chromium/Edge/Chrome via its `localBrowsers` list; never run `npx playwright install` locally. The CI workflow's install step is conditional (downloads only when no system browser is found). Override with `PLAYWRIGHT_CHANNEL` or `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
 - **Shell commands — short timeout, full output, no filtering:**
   - Default `timeout` to `60000` ms (60s); only raise it when explicitly told a command is long-running.
   - For anything potentially long-running or hang-prone, use `timeout: 0` (background) + `get_output` polling instead of a long blocking wait.
@@ -43,8 +43,8 @@ Rust workspace + C++ storage engine (via FFI).
 
 ## Bench Targets
 
-- `crow-cli bench kv` — 3-node Paxos cluster, measures full KV path (consensus + WAL + storage). Use `--mode mem|file|block` to select storage engine. Spawns `crow-kv-server` as a subprocess (not a cargo dependency of `crow-cli`) — always build both: `pixi run -- cargo build --release -p crow-cli -p crow-kv-server`.
-- `crow-cli bench rpc` — 2-process RPC fb server, measures raw transport throughput (epoll/kqueue + framing + correlation). No KV layer. Use `tools/bench-rpc-regression.sh` for the regression sentinel.
+- `crowdb-cli bench kv` — 3-node Paxos cluster, measures full KV path (consensus + WAL + storage). Use `--mode mem|file|block` to select storage engine. Spawns `crowdb-kv-server` as a subprocess (not a cargo dependency of `crowdb-cli`) — always build both: `pixi run -- cargo build --release -p crowdb-cli -p crowdb-kv-server`.
+- `crowdb-cli bench rpc` — 2-process RPC fb server, measures raw transport throughput (epoll/kqueue + framing + correlation). No KV layer. Use `tools/bench-rpc-regression.sh` for the regression sentinel.
 
 ## Dispatch — Read Before Acting
 

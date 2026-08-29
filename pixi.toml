@@ -1,7 +1,7 @@
 [workspace]
-name = "crow-kv"
+name = "crowdb-kv"
 version = "0.1.0"
-description = "CROW — distributed key-value store with multi-paxos groups"
+description = "CROWDB — distributed key-value store with multi-paxos groups"
 channels = ["conda-forge"]
 # Keep glibc requirement low (2.17 = CentOS 7 / Ubuntu 16.04 era) so that
 # Linux binaries built in this environment run on older distributions.
@@ -12,22 +12,22 @@ platforms = [
 ]
 
 [dependencies]
-# C++ build toolchain (lib/crow-tree)
+# C++ build toolchain (lib/crowdb-tree)
 cmake = ">=3.20"
 make = "*"
 cxx-compiler = "*"
 gtest = "*"
 lz4 = "*"
-libabseil = "*"  # lib/crow-tree MemTable uses absl::btree_map (plan-tree #9)
-spdlog = ">=1.17.0,<2"  # lib/crow-tree async file logging (plan-tree #10)
+libabseil = "*"  # lib/crowdb-tree MemTable uses absl::btree_map (plan-tree #9)
+spdlog = ">=1.17.0,<2"  # lib/crowdb-tree async file logging (plan-tree #10)
 clang-format = ">=19.0.0"
 clang-tools = "*"
 folly = "*"
 isa-l = "*"
-# Flatbuffer schema compiler + runtime headers for crow-rpc (R104) and
-# crow-protocol's .fbs codegen. Provides `flatc` and flatbuffers/cpp headers.
+# Flatbuffer schema compiler + runtime headers for crowdb-rpc (R104) and
+# crowdb-protocol's .fbs codegen. Provides `flatc` and flatbuffers/cpp headers.
 flatbuffers = "*"
-# Rust toolchain (crow-kv)
+# Rust toolchain (crowdb-kv)
 rust = ">=1.96"
 openssl = "*"
 pkg-config = "*"
@@ -43,15 +43,15 @@ zstd = ">=1.5.7,<2"
 bzip2 = ">=1.0.8,<2"
 snappy = ">=1.2.2,<2"
 
-# io_uring reactor (lib/crow-tree/include/lib/crow-tree/reactor.h).
+# io_uring reactor (lib/crowdb-tree/include/lib/crowdb-tree/reactor.h).
 # Linux-only kernel interface -- no osx-arm64 conda-forge build exists, so this
 # must be a per-platform target dependency, not a top-level one (design doc
-# design/tree/design-crow-tree-engine.md §3.5: the reactor itself is excluded from macOS
-# builds; see lib/crow-tree/CMakeLists.txt's CROW_TREE_HAVE_LIBURING gate).
+# design/tree/design-crowdb-tree-engine.md §3.5: the reactor itself is excluded from macOS
+# builds; see lib/crowdb-tree/CMakeLists.txt's CROWDB_TREE_HAVE_LIBURING gate).
 [target.linux-64.dependencies]
 liburing = "*"
-# RDMA transport for crow-rpc (R104 Phase 5), gated behind
-# CROW_RPC_HAVE_RDMA in lib/crow-rpc/CMakeLists.txt. No macOS RNICs, so
+# RDMA transport for crowdb-rpc (R104 Phase 5), gated behind
+# CROWDB_RPC_HAVE_RDMA in lib/crowdb-rpc/CMakeLists.txt. No macOS RNICs, so
 # these stay Linux-only (mirrors the liburing per-platform pattern).
 # rdma-core provides both libibverbs and librdmacm.
 rdma-core = "*"
@@ -59,13 +59,13 @@ rdma-core = "*"
 [tasks]
 
 # ── Build ────────────────────────────────────────────────────────
-# C++ libraries only (crow-tree, crow-rpc, crow-diskio). Needed by C++
+# C++ libraries only (crowdb-tree, crowdb-rpc, crowdb-diskio). Needed by C++
 # ctest tasks. Rust FFI crates compile their own C++ via cc::Build in
 # build.rs, so Rust tests do NOT depend on this.
-build-cpp = { cmd = "cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-tree/build -j && cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crow-rpc/build -j && cmake -S app/crow-diskio -B app/crow-diskio/build -DCMAKE_BUILD_TYPE=Release && cmake --build app/crow-diskio/build -j" }
+build-cpp = { cmd = "cmake -S lib/crowdb-tree -B lib/crowdb-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crowdb-tree/build -j && cmake -S lib/crowdb-rpc -B lib/crowdb-rpc/build -DCMAKE_BUILD_TYPE=Release && cmake --build lib/crowdb-rpc/build -j && cmake -S app/crowdb-diskio -B app/crowdb-diskio/build -DCMAKE_BUILD_TYPE=Release && cmake --build app/crowdb-diskio/build -j" }
 # npm deps only (for UI tests and ts-lint). Separated from install-deps
 # so test-console-ui doesn't trigger cargo installs of profiling tools.
-install-ui-deps = "test -d app/crow-web/ui/node_modules || (cd app/crow-web/ui && npm ci)"
+install-ui-deps = "test -d app/crowdb-web/ui/node_modules || (cd app/crowdb-web/ui && npm ci)"
 install-deps = '''
 bash -c '
 set -e
@@ -77,29 +77,29 @@ cargo install --locked inferno || echo "Warning: inferno install failed"
 '
 '''
 tree-fmt = '''
-find lib/crow-tree/src lib/crow-tree/include lib/crow-tree/tests lib/crow-tree/bench lib/crow-common/cpp lib/crow-rpc/src lib/crow-rpc/include lib/crow-rpc/tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
+find lib/crowdb-tree/src lib/crowdb-tree/include lib/crowdb-tree/tests lib/crowdb-tree/bench lib/crowdb-common/cpp lib/crowdb-rpc/src lib/crowdb-rpc/include lib/crowdb-rpc/tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
 '''
 tree-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"
 rs-lint = "cargo clippy --all-targets -- -D warnings"
-ts-lint = { cmd = "cd app/crow-web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-ui-deps"] }
+ts-lint = { cmd = "cd app/crowdb-web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-ui-deps"] }
 # Full build: C++ libs + release Rust binaries + frontend. Used by
 # run/bench/profile. Tests use build-cpp (C++ tests) or nothing (Rust tests).
-build = { cmd = "cargo build --release --workspace --exclude crow-kv-client && cargo build --release -p crow-kv-client --features ffi && cd app/crow-web/ui && npm run build", depends-on = ["build-cpp", "install-ui-deps"] }
+build = { cmd = "cargo build --release --workspace --exclude crowdb-kv-client && cargo build --release -p crowdb-kv-client --features ffi && cd app/crowdb-web/ui && npm run build", depends-on = ["build-cpp", "install-ui-deps"] }
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
-web = { cmd = "echo 'CROW console starting at: http://127.0.0.1:9920/' && cargo run --release -p crow-web", depends-on = ["build"] }
+web = { cmd = "echo 'CROWDB console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowdb-web", depends-on = ["build"] }
 
 # ── Benchmark ────────────────────────────────────────────────────
-bench = { cmd = "cargo run --release -p crow-cli -- bench kv --mode mem --duration-secs 12 --loader-num 2 --connections 1 --workload write", depends-on = ["build"] }
-bench-mem = { cmd = "cargo run --release -p crow-cli -- bench kv --mode mem --duration-secs 30", depends-on = ["build"] }
-bench-file = { cmd = "cargo run --release -p crow-cli -- bench kv --mode file --duration-secs 30", depends-on = ["build"] }
-bench-block = { cmd = "cargo run --release -p crow-cli -- bench kv --mode block --duration-secs 30", depends-on = ["build"] }
-bench-burst = { cmd = "cargo run --release -p crow-cli -- bench kv --mode mem --duration-secs 10 --loader-num 64 --connections 8 --key-space 10000 --value-size 256 --workload mix", depends-on = ["build"] }
-bench-soak = { cmd = "cargo run --release -p crow-cli -- bench kv --mode mem --duration-secs 30 --loader-num 8 --connections 4 --key-space 100000 --value-size 1024 --workload write", depends-on = ["build"] }
-bench-hotread = { cmd = "cargo run --release -p crow-cli -- bench kv --mode mem --duration-secs 15 --loader-num 32 --connections 4 --key-space 64 --value-size 64 --workload read", depends-on = ["build"] }
-bench-compare = { cmd = "cargo run --release -p crow-cli -- bench compare", depends-on = ["build"] }
+bench = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode mem --duration-secs 12 --loader-num 2 --connections 1 --workload write", depends-on = ["build"] }
+bench-mem = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode mem --duration-secs 30", depends-on = ["build"] }
+bench-file = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode file --duration-secs 30", depends-on = ["build"] }
+bench-block = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode block --duration-secs 30", depends-on = ["build"] }
+bench-burst = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode mem --duration-secs 10 --loader-num 64 --connections 8 --key-space 10000 --value-size 256 --workload mix", depends-on = ["build"] }
+bench-soak = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode mem --duration-secs 30 --loader-num 8 --connections 4 --key-space 100000 --value-size 1024 --workload write", depends-on = ["build"] }
+bench-hotread = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode mem --duration-secs 15 --loader-num 32 --connections 4 --key-space 64 --value-size 64 --workload read", depends-on = ["build"] }
+bench-compare = { cmd = "cargo run --release -p crowdb-cli -- bench compare", depends-on = ["build"] }
 
 # ── Profile ───────────────────────────────────────────────────────
 profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
@@ -109,12 +109,12 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 # Grouping Guide"). Each group maps 1:1 to a parallel CI job. Run
 # `pixi run build-tests` once before any test task to pre-build all
 # Rust test binaries; C++ ctest tasks need `pixi run build-cpp`.
-clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
+clean-env = "pkill -9 -f 'crowdb-kv-server.*test-' 2>/dev/null; rm -rf test-logs test-data; true"
 # Pre-build ALL Rust test binaries + bin targets in one parallel cargo
 # invocation. Run this once at the start of a CI job so every subsequent
 # `cargo test -p <crate>` step just executes the pre-built binaries
-# without recompiling. Also builds the crow-kv-server / crow-diskdb
-# debug binaries that subprocess-spawning tests (crow-web, crow-console-shared)
+# without recompiling. Also builds the crowdb-kv-server / crowdb-diskdb
+# debug binaries that subprocess-spawning tests (crowdb-web, crowdb-console-shared)
 # need at target/debug/.
 build-tests = "cargo test --workspace --all-targets --no-run"
 
@@ -122,36 +122,36 @@ build-tests = "cargo test --workspace --all-targets --no-run"
 # (uses rs-fmt / rs-lint / tree-lint defined above, no separate test-* tasks)
 
 # ── CppTests job: C++ ctest (needs build-cpp) + Rust FFI (cc::Build) ──
-test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build-cpp"] }
-test-common-ct = { cmd = "lib/crow-tree/build/crow-common-build/crowcommon_tests", depends-on = ["build-cpp"] }
-test-rpc-ct = { cmd = "ctest --test-dir lib/crow-rpc/build --output-on-failure", depends-on = ["build-cpp"] }
-test-diskio-ct = { cmd = "ctest --test-dir app/crow-diskio/build --output-on-failure", depends-on = ["build-cpp"] }
-test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets" }
-test-rpc-ffi = { cmd = "cargo test -p crow-rpc-ffi --all-targets" }
+test-tree-ct = { cmd = "ctest --test-dir lib/crowdb-tree/build --output-on-failure", depends-on = ["build-cpp"] }
+test-common-ct = { cmd = "lib/crowdb-tree/build/crowdb-common-build/crowdbcommon_tests", depends-on = ["build-cpp"] }
+test-rpc-ct = { cmd = "ctest --test-dir lib/crowdb-rpc/build --output-on-failure", depends-on = ["build-cpp"] }
+test-diskio-ct = { cmd = "ctest --test-dir app/crowdb-diskio/build --output-on-failure", depends-on = ["build-cpp"] }
+test-tree-ffi = { cmd = "cargo test -p crowdb-tree-ffi --all-targets" }
+test-rpc-ffi = { cmd = "cargo test -p crowdb-rpc-ffi --all-targets" }
 
 # ── UnitTests job: pure Rust, no subprocess spawning ──
-test-common = { cmd = "cargo test -p crow-common --all-targets" }
-test-protocol = { cmd = "cargo test -p crow-protocol --all-targets" }
-test-kv-core = { cmd = "cargo test -p crow-kv --all-targets" }
-test-kv-client = { cmd = "cargo test -p crow-kv-client --all-targets" }
-test-chunkdb-client = { cmd = "cargo test -p crow-chunkdb-client --all-targets" }
+test-common = { cmd = "cargo test -p crowdb-common --all-targets" }
+test-protocol = { cmd = "cargo test -p crowdb-protocol --all-targets" }
+test-kv-core = { cmd = "cargo test -p crowdb-kv --all-targets" }
+test-kv-client = { cmd = "cargo test -p crowdb-kv-client --all-targets" }
+test-chunkdb-client = { cmd = "cargo test -p crowdb-chunkdb-client --all-targets" }
 
-# ── ServerTests job: spawns crow-kv-server / crow-diskdb / crow-diskio ──
-test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets" }
-test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets" }
-test-diskdb-client = { cmd = "cargo test -p crow-diskdb-client --all-targets" }
-test-chunkdb = { cmd = "cargo test -p crow-chunkdb --all-targets" }
-test-chunk-client = { cmd = "cargo test -p crow-chunk-client --all-targets" }
-test-diskio-client = { cmd = "cargo test -p crow-diskio-client --all-targets" }
+# ── ServerTests job: spawns crowdb-kv-server / crowdb-diskdb / crowdb-diskio ──
+test-kv-server = { cmd = "cargo test -p crowdb-kv-server --all-targets" }
+test-diskdb = { cmd = "cargo test -p crowdb-diskdb --all-targets" }
+test-diskdb-client = { cmd = "cargo test -p crowdb-diskdb-client --all-targets" }
+test-chunkdb = { cmd = "cargo test -p crowdb-chunkdb --all-targets" }
+test-chunk-client = { cmd = "cargo test -p crowdb-chunk-client --all-targets" }
+test-diskio-client = { cmd = "cargo test -p crowdb-diskio-client --all-targets" }
 
-# ── ConsoleTests job: spawns crow-kv-server via lifecycle::deploy_local ──
+# ── ConsoleTests job: spawns crowdb-kv-server via lifecycle::deploy_local ──
 # Build the debug binary explicitly so tests find it at target/debug/.
-test-console-shared = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-console-shared --all-targets" }
-test-console-cli = { cmd = "cargo test -p crow-cli --all-targets" }
-test-console-server = { cmd = "cargo build -p crow-kv-server && cargo test -p crow-web --all-targets" }
+test-console-shared = { cmd = "cargo build -p crowdb-kv-server && cargo test -p crowdb-console-shared --all-targets" }
+test-console-cli = { cmd = "cargo test -p crowdb-cli --all-targets" }
+test-console-server = { cmd = "cargo build -p crowdb-kv-server && cargo test -p crowdb-web --all-targets" }
 
 # ── UITests job: Playwright browser E2E + subprocess spawning ──
-test-console-ui = { cmd = "cargo build -p crow-kv-server -p crow-diskdb && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-ui-deps"] }
+test-console-ui = { cmd = "cargo build -p crowdb-kv-server -p crowdb-diskdb && export CROWDB_KV_SERVER_BINARY=$(pwd)/target/debug/crowdb-kv-server && cd app/crowdb-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-ui-deps"] }
 
 # ── Full local suite (not a CI job; runs everything in one process) ──
 # Grouped by CI job order. clean-env runs at start and before the
@@ -194,19 +194,19 @@ pixi run test-console-ui
 
 # ── Coverage & LOC ───────────────────────────────────────────────
 coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-deps"] }
-loc = "tokei . .github --exclude swagger-ui --exclude 'lib/crow-tree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py' --exclude package-lock.json"
+loc = "tokei . .github --exclude swagger-ui --exclude 'lib/crowdb-tree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py' --exclude package-lock.json"
 
 # ── Clean ────────────────────────────────────────────────────────
 # Removes all build/test/runtime artifacts, keeping only git-tracked
 # files, the pixi env (.pixi/), and install-deps caches (node_modules).
-# System-temp dirs (crow-web-*, crow-cli-test-* from std::env::temp_dir)
+# System-temp dirs (crowdb-web-*, crowdb-cli-test-* from std::env::temp_dir)
 # live outside the repo and are not touched.
 clean = { cmd = '''
 bash -c '
 set -e
-pkill crow-kv-server || true
-pkill crow-web || true
-pkill crow-cli || true
+pkill crowdb-kv-server || true
+pkill crowdb-web || true
+pkill crowdb-cli || true
 
 # ── Rust build artifacts ──
 echo "[clean] cargo clean"
@@ -214,32 +214,32 @@ cargo clean
 echo "[clean] tarpaulin report"
 rm -f tarpaulin-report.html
 
-# ── C++ build artifacts (crow-tree, crow-rpc, crow-diskio) ──
+# ── C++ build artifacts (crowdb-tree, crowdb-rpc, crowdb-diskio) ──
 echo "[clean] C++ build dirs"
-rm -rf lib/crow-tree/build lib/crow-tree/build-*
-rm -rf lib/crow-tree/Testing lib/crow-tree/.cache
-rm -rf lib/crow-rpc/build lib/crow-rpc/build-* lib/crow-rpc/.cache
-rm -rf app/crow-diskio/build app/crow-diskio/build-* app/crow-diskio/.cache
+rm -rf lib/crowdb-tree/build lib/crowdb-tree/build-*
+rm -rf lib/crowdb-tree/Testing lib/crowdb-tree/.cache
+rm -rf lib/crowdb-rpc/build lib/crowdb-rpc/build-* lib/crowdb-rpc/.cache
+rm -rf app/crowdb-diskio/build app/crowdb-diskio/build-* app/crowdb-diskio/.cache
 
 # ── Frontend build artifacts (keep node_modules) ──
 echo "[clean] frontend build artifacts"
-rm -rf app/crow-web/ui/dist app/crow-web/ui/.vite app/crow-web/ui/test-results
-rm -f app/crow-web/ui/*.tsbuildinfo
+rm -rf app/crowdb-web/ui/dist app/crowdb-web/ui/.vite app/crowdb-web/ui/test-results
+rm -f app/crowdb-web/ui/*.tsbuildinfo
 
 # ── Test runtime data (in-repo) ──
 echo "[clean] test runtime data"
-rm -rf test-logs runtime-data .test-tmp lib/crow-tree/.test-tmp
-rm -rf app/crow-web/ui/e2e/runtime-data
-rm -rf app/crow-web/ctdata app/crow-web/waldata
-rm -rf app/crow-cli/bench-runs bench-runs/*
+rm -rf test-logs runtime-data .test-tmp lib/crowdb-tree/.test-tmp
+rm -rf app/crowdb-web/ui/e2e/runtime-data
+rm -rf app/crowdb-web/ctdata app/crowdb-web/waldata
+rm -rf app/crowdb-cli/bench-runs bench-runs/*
 
 # `log/` is dangerous as a glob (common Rust module name) — explicit per crate.
-# Repo-root `log/` is where crow-kv-server writes (CWD-relative); the per-crate
+# Repo-root `log/` is where crowdb-kv-server writes (CWD-relative); the per-crate
 # paths are future-proofing (those bins currently log under runtime-data/).
 echo "[clean] log dirs"
-rm -rf log app/crow-kv-server/log app/crow-diskdb/log app/crow-chunkdb/log \
-  app/crow-cli/log lib/crow-console-shared/log app/crow-web/log \
-  lib/crow-chunk-client/log lib/crow-diskdb-client/log lib/crow-diskio-client/log
+rm -rf log app/crowdb-kv-server/log app/crowdb-diskdb/log app/crowdb-chunkdb/log \
+  app/crowdb-cli/log lib/crowdb-console-shared/log app/crowdb-web/log \
+  lib/crowdb-chunk-client/log lib/crowdb-diskdb-client/log lib/crowdb-diskio-client/log
 
 # ── Profiling artifacts ──
 echo "[clean] profiling artifacts"
@@ -256,7 +256,7 @@ find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -pr
 
 # Per-crate runtime dirs — globs are safe (names do not appear in src/).
 # Exclude app/ — tracked config templates live in app/*/conf/ (e.g.
-# app/crow-diskdb/conf/crow_diskdb_config.toml) and must not be deleted.
+# app/crowdb-diskdb/conf/crow_diskdb_config.toml) and must not be deleted.
 echo "[clean] waldata/ctdata/conf runtime dirs"
 find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -prune \
   -o -type d \( -name waldata -o -name ctdata -o -name conf \) ! -path "*/src/*" ! -path "./app/*" \
@@ -271,42 +271,42 @@ echo "[clean] done"
 '
 ''' }
 
-# ── lib/crow-tree sanitizers ──────────────────────────────────────────
+# ── lib/crowdb-tree sanitizers ──────────────────────────────────────────
 
 # AddressSanitizer build + tests. setarch -R disables ASLR (Linux only);
 # on macOS we run ctest directly.
 tree-asan = '''
 set -e
-cmake -S lib/crow-tree -B lib/crow-tree/build-asan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=address
-cmake --build lib/crow-tree/build-asan -j
+cmake -S lib/crowdb-tree -B lib/crowdb-tree/build-asan -DCMAKE_BUILD_TYPE=Debug -DCROWDB_TREE_SANITIZER=address
+cmake --build lib/crowdb-tree/build-asan -j
 if command -v setarch > /dev/null 2>&1; then
-  setarch -R ctest --test-dir lib/crow-tree/build-asan --output-on-failure
+  setarch -R ctest --test-dir lib/crowdb-tree/build-asan --output-on-failure
 else
-  ctest --test-dir lib/crow-tree/build-asan --output-on-failure
+  ctest --test-dir lib/crowdb-tree/build-asan --output-on-failure
 fi
 '''
 
 # ThreadSanitizer build + tests.
 tree-tsan = '''
 set -e
-cmake -S lib/crow-tree -B lib/crow-tree/build-tsan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=thread
-cmake --build lib/crow-tree/build-tsan -j
+cmake -S lib/crowdb-tree -B lib/crowdb-tree/build-tsan -DCMAKE_BUILD_TYPE=Debug -DCROWDB_TREE_SANITIZER=thread
+cmake --build lib/crowdb-tree/build-tsan -j
 if command -v setarch > /dev/null 2>&1; then
-  setarch -R ctest --test-dir lib/crow-tree/build-tsan --output-on-failure
+  setarch -R ctest --test-dir lib/crowdb-tree/build-tsan --output-on-failure
 else
-  ctest --test-dir lib/crow-tree/build-tsan --output-on-failure
+  ctest --test-dir lib/crowdb-tree/build-tsan --output-on-failure
 fi
 '''
 
 # UndefinedBehaviorSanitizer build + tests.
 tree-ubsan = '''
 set -e
-cmake -S lib/crow-tree -B lib/crow-tree/build-ubsan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=undefined
-cmake --build lib/crow-tree/build-ubsan -j
+cmake -S lib/crowdb-tree -B lib/crowdb-tree/build-ubsan -DCMAKE_BUILD_TYPE=Debug -DCROWDB_TREE_SANITIZER=undefined
+cmake --build lib/crowdb-tree/build-ubsan -j
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
 if command -v setarch > /dev/null 2>&1; then
-  setarch -R ctest --test-dir lib/crow-tree/build-ubsan --output-on-failure
+  setarch -R ctest --test-dir lib/crowdb-tree/build-ubsan --output-on-failure
 else
-  ctest --test-dir lib/crow-tree/build-ubsan --output-on-failure
+  ctest --test-dir lib/crowdb-tree/build-ubsan --output-on-failure
 fi
 '''
