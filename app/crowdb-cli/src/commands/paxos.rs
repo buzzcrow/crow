@@ -15,34 +15,34 @@ pub enum GroupVerb {
     /// orchestrates the per-node `PxGroup` creation across `--nodes`
     /// and wires bidirectional remote-replica entries.
     Add {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
         /// Base replica id; subsequent nodes get `replica_id + i`.
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         replica_id: u64,
         /// Comma-separated node ids that should host a replica.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(short = 'N', long, value_delimiter = ',')]
         nodes: Vec<u64>,
     },
     /// Remove a Paxos group from every node hosting it.
     Remove {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
     },
     /// List groups in a store (logical view).
     List {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
     },
     /// Inspect one group (logical view: replicas + leader).
     Inspect {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
     },
 }

@@ -15,14 +15,14 @@ pub enum ServerVerb {
     /// Deploy a `crowdb-kv-server` on the given node. The console owns
     /// the SSH/local-fork transport; the CLI just forwards ports.
     Deploy {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         rest_port: u16,
-        #[arg(long)]
+        #[arg(short = 'R', long)]
         rpc_port: u16,
         /// Override `CROWDB_KV_SERVER_BIN` for this deploy.
-        #[arg(long)]
+        #[arg(short = 'b', long)]
         binary: Option<String>,
     },
     /// Restart the `crowdb-kv-server` on a node: stop the tracked
@@ -30,12 +30,12 @@ pub enum ServerVerb {
     /// Aliased as `start` for backward compatibility.
     #[command(alias = "start")]
     Restart {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
     },
     /// Stop the `crowdb-kv-server` running on the given node.
     Stop {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
     },
     /// List every deployed `crowdb-kv-server` (node, endpoints, health).

@@ -29,7 +29,7 @@ pub enum ClusterVerb {
     /// called before creating non-zero stores/groups.
     Init {
         /// Comma-separated node ids to bootstrap (e.g. `n1,n2,n3`).
-        #[arg(long, value_delimiter = ',')]
+        #[arg(short = 'n', long, value_delimiter = ',')]
         nodes: Vec<String>,
     },
 }

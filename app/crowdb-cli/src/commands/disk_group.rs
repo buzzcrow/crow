@@ -12,21 +12,21 @@ use crate::Cli;
 #[derive(Subcommand, Debug)]
 pub enum DiskGroupVerb {
     Add {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         id: String,
-        #[arg(long, default_value = "")]
+        #[arg(short = 'N', long, default_value = "")]
         name: String,
     },
     Remove {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         id: String,
     },
     List {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
     },
 }

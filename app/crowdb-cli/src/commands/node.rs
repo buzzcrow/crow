@@ -12,24 +12,24 @@ use crate::Cli;
 #[derive(Subcommand, Debug)]
 pub enum NodeVerb {
     Add {
-        #[arg(long, value_parser = clap::value_parser!(u64))]
+        #[arg(short = 'I', long, value_parser = clap::value_parser!(u64))]
         id: NodeId,
-        #[arg(long, value_parser = clap::value_parser!(u64))]
+        #[arg(short = 'r', long, value_parser = clap::value_parser!(u64))]
         rack: RackId,
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 22)]
         ssh_port: u16,
         /// SSH user. Empty disables SSH and uses local-fork lifecycle.
-        #[arg(long, default_value = "")]
+        #[arg(short = 'u', long, default_value = "")]
         ssh_user: String,
-        #[arg(long)]
+        #[arg(short = 'k', long)]
         ssh_key: Option<String>,
         #[arg(long)]
         ssh_password: Option<String>,
     },
     Remove {
-        #[arg(long, value_parser = clap::value_parser!(u64))]
+        #[arg(short = 'I', long, value_parser = clap::value_parser!(u64))]
         id: NodeId,
     },
     List,

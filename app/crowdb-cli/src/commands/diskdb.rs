@@ -14,81 +14,81 @@ pub enum DiskdbVerb {
     Instances,
     /// Query capacity usage (cluster-wide or per disk-group).
     Usage {
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         dg: Option<u64>,
-        #[arg(long)]
+        #[arg(short = 'D', long)]
         disk: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'z', long)]
         zone: Option<u32>,
     },
     /// Get scan status.
     ScanStatus {
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         dg: Option<u64>,
     },
     /// Trigger a scan.
     Scan {
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         dg: Option<u64>,
     },
     /// Recalculate disk usage.
     Recalc {
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         dg: Option<u64>,
     },
     /// Compact zones on a disk.
     Compact {
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         disk: String,
-        #[arg(long, value_delimiter = ',')]
+        #[arg(short = 'z', long, value_delimiter = ',')]
         zones: Option<Vec<u32>>,
     },
     /// Rebuild a zone bitmap.
     Rebuild {
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         disk: String,
-        #[arg(long)]
+        #[arg(short = 'z', long)]
         zone: Option<u32>,
     },
     /// Set a disk's hardware status.
     SetStatus {
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         disk: String,
-        #[arg(long)]
+        #[arg(short = 's', long)]
         status: String,
     },
     /// Set a disk-group's hardware status.
     SetDgStatus {
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         rack: u64,
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: u64,
-        #[arg(long)]
+        #[arg(short = 'd', long)]
         dg: u64,
-        #[arg(long)]
+        #[arg(short = 's', long)]
         status: String,
     },
     /// Deploy a diskdb instance on a node.
     Deploy {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: u64,
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         rpc_port: u16,
     },
     /// Restart a diskdb instance on a node.
     Restart {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: u64,
     },
     /// Stop a diskdb instance on a node.
     Stop {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: u64,
     },
     /// Stop (best-effort) and remove a diskdb instance's `ServerEntry`.
     /// Use when `stop` fails with no tracked PID (console restarted).
     Delete {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: u64,
     },
 }

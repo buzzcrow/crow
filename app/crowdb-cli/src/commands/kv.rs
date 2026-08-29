@@ -14,18 +14,18 @@ pub enum KvVerb {
     /// Put a key/value. Bytes are taken as UTF-8 from the CLI; use
     /// `--value-file <path>` for binary payloads.
     Put {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
-        #[arg(long)]
+        #[arg(short = 'k', long)]
         key: String,
-        #[arg(long, conflicts_with = "value_file")]
+        #[arg(short = 'v', long, conflicts_with = "value_file")]
         value: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'V', long)]
         value_file: Option<PathBuf>,
         /// Optional client id for idempotency tracking. Defaults to 0.
-        #[arg(long, default_value_t = 0)]
+        #[arg(short = 'c', long, default_value_t = 0)]
         client_id: u64,
         /// Optional client sequence for idempotency. Defaults to 0.
         #[arg(long, default_value_t = 0)]
@@ -34,24 +34,24 @@ pub enum KvVerb {
     /// Get a single key. Prints the value as UTF-8 (lossy) by default;
     /// use `--hex` to dump a hex-encoded payload.
     Get {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
-        #[arg(long)]
+        #[arg(short = 'k', long)]
         key: String,
-        #[arg(long)]
+        #[arg(short = 'x', long)]
         hex: bool,
     },
     /// Delete a key. No-op (`not found`) is reported but not an error.
     Delete {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
-        #[arg(long)]
+        #[arg(short = 'k', long)]
         key: String,
-        #[arg(long, default_value_t = 0)]
+        #[arg(short = 'c', long, default_value_t = 0)]
         client_id: u64,
         #[arg(long, default_value_t = 0)]
         seq: u64,
@@ -60,24 +60,24 @@ pub enum KvVerb {
     /// more keys exist past the limit a `(truncated:...)` note is written
     /// to stderr (raise `--limit` to see them).
     List {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
         #[arg(long, default_value = "")]
         prefix: String,
-        #[arg(long, default_value_t = 100)]
+        #[arg(short = 'l', long, default_value_t = 100)]
         limit: u32,
     },
     /// Alias for `list` (same `--limit` truncation contract).
     Scan {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
         #[arg(long, default_value = "")]
         prefix: String,
-        #[arg(long, default_value_t = 100)]
+        #[arg(short = 'l', long, default_value_t = 100)]
         limit: u32,
     },
     /// Snapshot versioning API (R59): create/list/scan/release
@@ -93,38 +93,38 @@ pub enum SnapshotVerb {
     /// Create a snapshot: flush L0 → L1, pin the durable view at
     /// `last_applied_slot`. Returns a snapshot handle + `at_slot`.
     Create {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
     },
     /// List active snapshot handles for a group with their `at_slot` and
     /// remaining lease.
     List {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
     },
     /// Iterate a pinned snapshot with prefix/pagination. Prints up to
     /// `--limit` matching key/value rows from the frozen view.
     Scan {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
         #[arg(long)]
         handle: u64,
         #[arg(long, default_value = "")]
         prefix: String,
-        #[arg(long, default_value_t = 100)]
+        #[arg(short = 'l', long, default_value_t = 100)]
         limit: u32,
     },
     /// Release a snapshot handle, dropping the pinned view.
     Release {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
         #[arg(long)]
         handle: u64,

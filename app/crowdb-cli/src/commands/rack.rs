@@ -12,13 +12,13 @@ use crate::Cli;
 #[derive(Subcommand, Debug)]
 pub enum RackVerb {
     Add {
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         id: String,
-        #[arg(long, default_value = "")]
+        #[arg(short = 'n', long, default_value = "")]
         name: String,
     },
     Remove {
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         id: String,
     },
     List,

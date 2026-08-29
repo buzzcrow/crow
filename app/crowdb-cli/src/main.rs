@@ -36,11 +36,17 @@ struct Cli {
     /// Service IP address of the `crowdb-web` instance. The CLI talks
     /// to the service, not directly to a `crowdb-kv-server`; the service
     /// resolves upstream nodes from its config and the monitor cache.
-    #[arg(long, global = true, env = "CROWDB_KV_IP", default_value = "127.0.0.1")]
+    #[arg(
+        short = 'i',
+        long,
+        global = true,
+        env = "CROWDB_KV_IP",
+        default_value = "127.0.0.1"
+    )]
     ip: String,
 
     /// Service port of the `crowdb-web` instance.
-    #[arg(long, global = true, env = "CROWDB_KV_PORT", default_value_t = WEB_BASE)]
+    #[arg(short = 'o', long, global = true, env = "CROWDB_KV_PORT", default_value_t = WEB_BASE)]
     port: u16,
 
     /// Path to the console config file. Defaults to
@@ -49,7 +55,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Emit JSON instead of human-readable output where applicable.
-    #[arg(long, global = true)]
+    #[arg(short = 'j', long, global = true)]
     json: bool,
 
     #[command(subcommand)]

@@ -451,12 +451,14 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   bodies pending crowdb-rpc migration; the infrastructure now exists — write
   the test bodies and un-ignore. Low complexity; no dependencies.
 - **[R123](R123-console-cli-short-flags.md)** — CLI short flag aliases
-  for all subcommands — Area: console / cli — Only `bench rpc` and the
-  global `--config` (`-p`) have short aliases; all other subcommands
-  (`bench kv`, `diskdb`, `disk`, `server`, `paxos`, `node`) and global
-  args (`--ip`, `--port`, `--json`) are long-only. Add `short = '<char>'`
-  to every `#[arg]` across all subcommands, following the `bench rpc`
-  precedent. Low complexity; no dependencies.
+  for all subcommands — Area: console / cli — Only `bench rpc`
+  (partially: 9 of 13 args) and the global `--config` (`-p`) have
+  short aliases; all other subcommands (`bench kv` (29 args),
+  `diskdb`, `disk`, `server`, `paxos`, `node`, `cluster`, `rack`,
+  `replica`, `store`, `kv`, `disk_group`) and global args (`--ip`,
+  `--port`, `--json`) are long-only (~154 args total). Add
+  `short = '<char>'` to every `#[arg]` across all subcommands,
+  following the `bench rpc` precedent. Low complexity; no dependencies.
 
 ---
 

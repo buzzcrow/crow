@@ -36,28 +36,28 @@ pub enum BenchSub {
 pub struct KvArgs {
     /// Storage mode: `mem` (crowdb-tree + mem-block), `file` (crowdb-tree +
     /// file page store), or `block` (crowdb-tree + block page store).
-    #[arg(long, default_value = "mem")]
+    #[arg(short = 'M', long, default_value = "mem")]
     pub mode: String,
 
     /// Test duration in seconds.
-    #[arg(long, default_value_t = 20)]
+    #[arg(short = 'd', long, default_value_t = 20)]
     pub duration_secs: u64,
 
     /// Workload kind: `read | write | list | mix`.
-    #[arg(long, default_value = "mix")]
+    #[arg(short = 'w', long, default_value = "mix")]
     pub workload: String,
 
     /// Number of worker threads.
-    #[arg(long, default_value_t = 8)]
+    #[arg(short = 'L', long, default_value_t = 8)]
     pub loader_num: u32,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(short = 'c', long, default_value_t = 4)]
     pub connections: u32,
 
-    #[arg(long, default_value_t = 1_000_000)]
+    #[arg(short = 'k', long, default_value_t = 1_000_000)]
     pub key_space: u64,
 
-    #[arg(long, default_value_t = 512)]
+    #[arg(short = 's', long, default_value_t = 512)]
     pub value_size: usize,
 
     /// Mixed value-size distribution for pre-population, as
@@ -66,7 +66,7 @@ pub struct KvArgs {
     /// Percentages must sum to 100. When set, overrides `--value-size`
     /// for pre-population only. Useful for scan benches that want to
     /// exercise multiple value sizes in a single run.
-    #[arg(long)]
+    #[arg(short = 'x', long)]
     pub value_size_mix: Option<String>,
 
     /// Config-driven (SSH) cluster deployment. Accepted but not yet
@@ -77,7 +77,7 @@ pub struct KvArgs {
 
     /// Optional explicit run id; defaults to an auto-incremented
     /// sequence number.
-    #[arg(long)]
+    #[arg(short = 'r', long)]
     pub run_id: Option<String>,
 
     /// Maximum in-flight proposals per group (--max-inflight on each
@@ -87,12 +87,12 @@ pub struct KvArgs {
 
     /// Server metrics log flush interval in seconds (--metrics-interval
     /// on each spawned server). Default: 5. Set to 1 for short bench runs.
-    #[arg(long, default_value_t = 5)]
+    #[arg(short = 'm', long, default_value_t = 5)]
     pub metrics_interval: u64,
 
     /// Read mode for read ops: `linearizable` (default) or `minslot`.
     /// Ignored for write/delete ops.
-    #[arg(long, default_value = "linearizable")]
+    #[arg(short = 'R', long, default_value = "linearizable")]
     pub read_mode: String,
 
     /// `min_slot` policy for `MinSlot` reads: `auto` (carry client
@@ -106,13 +106,13 @@ pub struct KvArgs {
     /// workloads (so reads return `Found`), 0 for write/mix/list (no
     /// pre-pop needed). Set to 0 to disable. Not measured (reported
     /// separately as `pre_pop_ms`).
-    #[arg(long)]
+    #[arg(short = 'P', long)]
     pub pre_populate: Option<u64>,
 
     /// Number of random bytes to spot-check per `Found` read against
     /// the deterministic value formula. Default 8. Set to 0 to disable
     /// verification.
-    #[arg(long, default_value_t = 8)]
+    #[arg(short = 'v', long, default_value_t = 8)]
     pub verify_bytes: usize,
 
     /// `MinSlot` read-endpoint selection policy: `leader` (default,
@@ -123,23 +123,23 @@ pub struct KvArgs {
     /// lowest recent RTT). Ignored for `Linearizable` reads. When not
     /// specified, defaults to `any-replica` for `--read-mode minslot`
     /// and `leader` for `--read-mode linearizable`.
-    #[arg(long)]
+    #[arg(short = 'e', long)]
     pub read_endpoint_policy: Option<String>,
 
     /// Optional `CrowDBConfig` JSON file passed as `--config` to each
     /// benchmark node. Useful for tuning `wal_early_ack` or other
     /// config fields without changing defaults.
-    #[arg(long)]
+    #[arg(short = 'N', long)]
     pub node_config: Option<String>,
 
     /// R45 max ops per coalesced batch (--coalesce-max-keys on each
     /// spawned server). `0` disables (default).
-    #[arg(long)]
+    #[arg(short = 'C', long)]
     pub coalesce_max_keys: Option<usize>,
 
     /// R45b drain threshold (--coalesce-drain-threshold on each
     /// spawned server). Default `1`. `0` = always drain.
-    #[arg(long)]
+    #[arg(short = 'D', long)]
     pub coalesce_drain_threshold: Option<usize>,
 
     /// Inter-server RPC connection pool size (--peer-pool-size on each
@@ -149,28 +149,28 @@ pub struct KvArgs {
 
     /// Enable Nagle on RPC connections (--enable-nagle on each spawned
     /// server). Default false.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'n', long, default_value_t = false)]
     pub enable_nagle: bool,
 
     /// Enable `TCP_QUICKACK` on RPC connections (--quickack on each spawned
     /// server, Linux only). Breaks Nagle + delayed-ACK deadlock. Default false.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'q', long, default_value_t = false)]
     pub quickack: bool,
 
     /// Event-write mode (--event-write on each spawned server).
     /// Coalesces frames via I/O worker. Default false.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'E', long, default_value_t = false)]
     pub event_write: bool,
 
     /// Per-connection send queue capacity (--send-queue-capacity on
     /// each spawned server). Default 4096.
-    #[arg(long, default_value_t = 4096)]
+    #[arg(short = 'S', long, default_value_t = 4096)]
     pub send_queue_capacity: u32,
 
     /// Scan limit (max entries per scan op) for `--workload list`.
     /// Default 1 (the historical stub behavior). Set higher for
     /// bounded-limit / full-keyspace scan benches.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 'l', long, default_value_t = 1)]
     pub scan_limit: u32,
 
     /// Scan prefix for `--workload list`. Empty (default) = whole
@@ -193,7 +193,7 @@ pub struct KvArgs {
     /// verifying the 1KiB anomaly hypothesis. Default off — without
     /// the flag, L0 size at scan time depends on value size (historical
     /// behavior).
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'f', long, default_value_t = false)]
     pub flush_after_prepopulate: bool,
 }
 
@@ -213,7 +213,7 @@ pub struct RpcArgs {
     /// `RpcClient::call()` via oneshot channels). The tokio mode
     /// measures the async FFI path overhead (Box<oneshot::Sender> +
     /// scheduler wake/re-schedule per op).
-    #[arg(long, default_value = "coroutine")]
+    #[arg(short = 'M', long, default_value = "coroutine")]
     pub mode: String,
 
     /// Number of TCP connections to the fb server.
@@ -241,7 +241,7 @@ pub struct RpcArgs {
     pub enable_nagle: bool,
 
     /// Enable `TCP_QUICKACK` (Linux only). Breaks Nagle + delayed-ACK deadlock.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'q', long, default_value_t = false)]
     pub quickack: bool,
 
     #[arg(short = 's', long, default_value_t = 128)]
@@ -249,7 +249,7 @@ pub struct RpcArgs {
 
     /// Optional explicit run id; defaults to an auto-incremented
     /// sequence number.
-    #[arg(long)]
+    #[arg(short = 'r', long)]
     pub run_id: Option<String>,
 
     /// FB server port. Defaults to 18080 (the fb server's default
@@ -262,7 +262,7 @@ pub struct RpcArgs {
 
     /// Log directory for the fb server and client logs. Defaults to
     /// `bench-runs/<run>/`. All logs (server.log, metrics.log) go here.
-    #[arg(long)]
+    #[arg(short = 'l', long)]
     pub log_dir: Option<String>,
 
     /// Metrics flush interval in seconds (counters + latency histogram).

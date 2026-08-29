@@ -12,45 +12,45 @@ use crate::Cli;
 #[derive(Subcommand, Debug)]
 pub enum DiskVerb {
     Add {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group: String,
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         id: String,
-        #[arg(long, default_value = "Hdd")]
+        #[arg(short = 't', long, default_value = "Hdd")]
         disk_type: String,
-        #[arg(long)]
+        #[arg(short = 'c', long)]
         capacity_bytes: u64,
-        #[arg(long)]
+        #[arg(short = 'z', long)]
         zone_size_bytes: u64,
-        #[arg(long, default_value = "4096")]
+        #[arg(short = 'u', long, default_value = "4096")]
         unit_size_bytes: u32,
-        #[arg(long, default_value = "")]
+        #[arg(short = 'D', long, default_value = "")]
         device_path: String,
     },
     Remove {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group: String,
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         id: String,
     },
     List {
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: String,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group: String,
     },
     Move {
-        #[arg(long)]
+        #[arg(short = 'I', long)]
         id: String,
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         new_rack: String,
-        #[arg(long)]
+        #[arg(short = 'N', long)]
         new_node: String,
-        #[arg(long)]
+        #[arg(short = 'G', long)]
         new_group: String,
     },
 }

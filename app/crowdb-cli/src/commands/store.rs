@@ -13,24 +13,24 @@ pub enum StoreVerb {
     /// Create a new logical store across the listed nodes. The console
     /// orchestrates per-node creation and rolls back on partial failure.
     Add {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
         /// Comma-separated node ids that should host the store. If
         /// empty, the console picks the first node with a running
         /// `crowdb-kv-server`.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(short = 'n', long, value_delimiter = ',')]
         nodes: Vec<u64>,
     },
     /// Remove a store from every node hosting it.
     Remove {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
     },
     /// List logical stores aggregated from the monitor cache.
     List,
     /// Print detailed info for one logical store.
     Inspect {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
     },
 }

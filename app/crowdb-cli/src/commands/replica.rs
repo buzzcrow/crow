@@ -14,26 +14,26 @@ pub enum ReplicaVerb {
     /// orchestrates the bidirectional remote wiring (and rolls back
     /// on partial failure).
     Add {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
         /// Target node id. The console looks up the node's crowdb-rpc URL
         /// from its config; the operator never sees `host:port`.
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         node: u64,
         /// Optional explicit replica id; defaults to `max + 1`.
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         replica_id: Option<u64>,
     },
     /// Remove a replica from its hosting node and deregister it
     /// from every peer.
     Remove {
-        #[arg(long)]
+        #[arg(short = 's', long)]
         store_id: u64,
-        #[arg(long)]
+        #[arg(short = 'g', long)]
         group_id: u64,
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         replica_id: u64,
     },
 }
