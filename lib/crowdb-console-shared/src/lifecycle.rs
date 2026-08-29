@@ -264,7 +264,7 @@ async fn deploy_local_in_workspace(
         // Non-workspace deploy: create a unique temp dir as the node
         // root (waldata/conf/ctdata/log derived under it).
         let root =
-            std::path::Path::new("crowdb-data").join(format!("crowdb-kv-server-deploy-{}", req.rest_port));
+            std::path::Path::new("temp-data").join(format!("crowdb-kv-server-deploy-{}", req.rest_port));
         std::fs::create_dir_all(&root).map_err(Error::Io)?;
         cmd.arg("--root").arg(&root);
         cmd.stdout(Stdio::piped());

@@ -228,7 +228,7 @@ rm -f app/crowdb-web/ui/*.tsbuildinfo
 
 # ── Test runtime data (in-repo) ──
 echo "[clean] test runtime data"
-rm -rf test-logs runtime-data .test-tmp lib/crowdb-tree/.test-tmp
+rm -rf test-logs test-data runtime-data .test-tmp lib/crowdb-tree/.test-tmp
 rm -rf app/crowdb-web/ui/e2e/runtime-data
 rm -rf app/crowdb-web/ctdata app/crowdb-web/waldata
 rm -rf app/crowdb-cli/bench-runs bench-runs/*
@@ -239,6 +239,7 @@ rm -rf app/crowdb-cli/bench-runs bench-runs/*
 echo "[clean] log dirs"
 rm -rf log app/crowdb-kv-server/log app/crowdb-diskdb/log app/crowdb-chunkdb/log \
   app/crowdb-cli/log lib/crowdb-console-shared/log app/crowdb-web/log \
+  app/crowdb-web/ui/e2e/log \
   lib/crowdb-chunk-client/log lib/crowdb-diskdb-client/log lib/crowdb-diskio-client/log
 
 # ── Profiling artifacts ──
@@ -260,6 +261,15 @@ find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -pr
 echo "[clean] waldata/ctdata/conf runtime dirs"
 find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -prune \
   -o -type d \( -name waldata -o -name ctdata -o -name conf \) ! -path "*/src/*" ! -path "./app/*" \
+  -print -exec rm -rf {} \; 2>/dev/null || true
+
+# temp-data/ — CWD-relative runtime scratch from crowdb-console-shared
+# (non-workspace deploys + SSH known_hosts fallback). Can appear at repo
+# root or under app/crowdb-web/ depending on which binary creates it, so
+# no app/ exclusion (unlike conf above — no tracked templates live here).
+echo "[clean] temp-data runtime dirs"
+find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -prune \
+  -o -type d -name temp-data ! -path "*/src/*" \
   -print -exec rm -rf {} \; 2>/dev/null || true
 
 # ── OS junk ──

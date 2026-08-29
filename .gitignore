@@ -38,7 +38,7 @@ app/crowdb-web/ui/e2e/log/
 /bench-runs/*
 test-logs/
 test-data/
-crowdb-data/
+temp-data/
 
 app/crowdb-cli/bench-runs/
 
