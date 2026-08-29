@@ -61,7 +61,7 @@ TEST(InnerMerge, DeleteHeavyCollapsesTreeAndReopens)
     int                                tall_height = 0;
     {
         Crowdbtree t(opt);
-        uint64_t slot = 0;
+        uint64_t   slot = 0;
         for (int i = 0; i < N; ++i) {
             ++slot;
             std::string v = "v" + std::to_string(i);

@@ -137,12 +137,12 @@ TEST(AsyncGet, FastPathValueSurvivesRepeatedPollsUntilExplicitFree)
 TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 {
     crowdb::tree_test::TempDir tmp;
-    ct_options               opt = {};
-    opt.path                     = tmp.path.c_str();
-    opt.backend                  = CT_BACKEND_BLOCK;
-    opt.iu_size                  = 4096;
-    opt.frame_bytes              = 4096;
-    ct_tree *t                   = nullptr;
+    ct_options                 opt = {};
+    opt.path                       = tmp.path.c_str();
+    opt.backend                    = CT_BACKEND_BLOCK;
+    opt.iu_size                    = 4096;
+    opt.frame_bytes                = 4096;
+    ct_tree *t                     = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 20; ++i) {
@@ -197,11 +197,11 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
     crowdb::tree_test::TempDir tmp;
-    ct_options               opt = {};
-    opt.path                     = tmp.path.c_str();
-    opt.iu_size                  = 4096;
-    opt.frame_bytes              = 4096;
-    ct_tree *t                   = nullptr;
+    ct_options                 opt = {};
+    opt.path                       = tmp.path.c_str();
+    opt.iu_size                    = 4096;
+    opt.frame_bytes                = 4096;
+    ct_tree *t                     = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 20; ++i) {
@@ -236,11 +236,11 @@ TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
 {
     crowdb::tree_test::TempDir tmp;
-    ct_options               opt = {};
-    opt.path                     = tmp.path.c_str();
-    opt.iu_size                  = 4096;
-    opt.frame_bytes              = 4096;
-    ct_tree *t                   = nullptr;
+    ct_options                 opt = {};
+    opt.path                       = tmp.path.c_str();
+    opt.iu_size                    = 4096;
+    opt.frame_bytes                = 4096;
+    ct_tree *t                     = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     ASSERT_EQ(ct_apply_put(t, 1, reinterpret_cast<const uint8_t *>("a"), 1, reinterpret_cast<const uint8_t *>("va"), 2),
@@ -281,13 +281,13 @@ TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
 TEST(AsyncSnapshot, BlockBackendAsyncSnapshotRoundTrip)
 {
     crowdb::tree_test::TempDir tmp;
-    ct_options               opt = {};
-    opt.path                     = tmp.path.c_str();
-    opt.backend                  = CT_BACKEND_BLOCK;
-    opt.iu_size                  = 4096;
-    opt.frame_bytes              = 4096;
-    opt.block_size               = 8 * 1024; // small blocks to force multi-extent
-    ct_tree *t                   = nullptr;
+    ct_options                 opt = {};
+    opt.path                       = tmp.path.c_str();
+    opt.backend                    = CT_BACKEND_BLOCK;
+    opt.iu_size                    = 4096;
+    opt.frame_bytes                = 4096;
+    opt.block_size                 = 8 * 1024; // small blocks to force multi-extent
+    ct_tree *t                     = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     // Write enough data to fill at least one block and exercise the write path.

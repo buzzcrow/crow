@@ -380,7 +380,9 @@ async fn deploy_then_stop_local_server() {
     assert!(dir.join("N-1/bin").is_dir());
     assert!(dir.join("N-1/log").is_dir());
     assert!(std::fs::read_dir(dir.join("N-1/bin")).unwrap().next().is_some());
-    assert!(dir.join(format!("N-1/log/crowdb-kv-server-{pid}.out.log")).exists());
+    assert!(dir
+        .join(format!("N-1/log/crowdb-kv-server-{pid}.out.log"))
+        .exists());
 
     // GET /api/nodes/:id/server confirms deployment.
     let (s, v) = json_get(&client, &format!("{base}/api/nodes/1/server")).await;

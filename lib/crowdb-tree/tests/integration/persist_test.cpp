@@ -369,7 +369,7 @@ TEST(Persist, FileBackendRoundTrip)
         Options opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
-        Crowdbtree     t(opt);
+        Crowdbtree   t(opt);
         std::mt19937 rng(7);
         uint64_t     slot = 0;
         for (int i = 0; i < 200; ++i) {
@@ -437,7 +437,7 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
         Options opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
-        Crowdbtree     t(opt);
+        Crowdbtree   t(opt);
         std::mt19937 rng(7);
         uint64_t     slot = 0;
         for (int i = 0; i < 200; ++i) {
@@ -541,7 +541,7 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
         Options opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
-        Crowdbtree     t(opt);
+        Crowdbtree   t(opt);
         std::mt19937 rng(42);
         uint64_t     slot = 0;
         for (int i = 0; i < 300; ++i) {
@@ -639,7 +639,7 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
         Crowdbtree t(opt);
-        uint64_t slot = 0;
+        uint64_t   slot = 0;
         for (int i = 0; i < 300; ++i) {
             ++slot;
             std::string k = make_key(i);

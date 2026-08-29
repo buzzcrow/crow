@@ -1619,7 +1619,7 @@ test.describe('capacity · diskdb', () => {
 
       // Right-click KV → Stop CrowDB Storage.
       const kvStopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/server/stop'));
-      await clickMenuItem(page, aside.getByText(`KV-${nodeId}`, { exact: true }), /stop crow storage/i);
+      await clickMenuItem(page, aside.getByText(`KV-${nodeId}`, { exact: true }), /stop crowdb storage/i);
       await kvStopResponse;
 
       // KV PID should be gone; DDB entry + PID must be unaffected.
@@ -1659,7 +1659,7 @@ test.describe('capacity · diskdb', () => {
 
       // --- restart KV, verify DDB unaffected ---
       const kvRestartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/server/restart'));
-      await clickMenuItem(page, aside.getByText(`KV-${nodeId}`, { exact: true }), /restart crow storage/i);
+      await clickMenuItem(page, aside.getByText(`KV-${nodeId}`, { exact: true }), /restart crowdb storage/i);
       await kvRestartResponse;
 
       {

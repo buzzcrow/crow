@@ -218,7 +218,7 @@ mod tests {
     use std::io::{BufRead, BufReader};
 
     #[test]
-    fn default_path_is_under_crow_kv_log() {
+    fn default_path_is_under_crowdb_kv_log() {
         let p = default_path("test");
         let s = p.to_string_lossy().to_string();
         assert!(s.contains(".crowdb-kv"), "{s}");

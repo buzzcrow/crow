@@ -189,7 +189,7 @@ impl WatchRegistry {
 
     /// Register a crowdb-rpc watcher for `prefix`. Returns the
     /// `watcher_id` for later removal. Sets `has_watchers = true`.
-    pub fn subscribe_crow_rpc(&self, prefix: &[u8], target: Arc<CrowdbRpcPushTarget>) -> u64 {
+    pub fn subscribe_crowdb_rpc(&self, prefix: &[u8], target: Arc<CrowdbRpcPushTarget>) -> u64 {
         self.subscribe_with_target(prefix, PushTarget::CrowdbRpc(target))
     }
 
@@ -287,7 +287,7 @@ impl WatchRegistry {
                 for (_, watcher) in watchers {
                     match watcher {
                         PushTarget::CrowdbRpc(target) => {
-                            self.push_crow_rpc_notify(target, group_id, slot, &prefix, &keys, &values);
+                            self.push_crowdb_rpc_notify(target, group_id, slot, &prefix, &keys, &values);
                         }
                     }
                 }
@@ -299,7 +299,7 @@ impl WatchRegistry {
     /// Fire-and-forget via `RpcClient::send`. On connection errors the
     /// watcher is lazily removed (counter incremented; actual removal
     /// happens on the next emit pass or via the safety-net poller).
-    fn push_crow_rpc_notify(
+    fn push_crowdb_rpc_notify(
         &self,
         target: &Arc<CrowdbRpcPushTarget>,
         group_id: u64,

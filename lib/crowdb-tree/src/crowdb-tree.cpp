@@ -285,7 +285,7 @@ Crowdbtree::~Crowdbtree()
         // Destructors must not throw.
     }
     CRB_LOG_INFO("[{}] close: done last_applied={} contiguous={}", name_, last_applied_slot_.load(),
-                contiguous_slot_.load());
+                 contiguous_slot_.load());
 }
 
 void Crowdbtree::retire_page(PageBase *p)
@@ -348,7 +348,7 @@ PageBase *Crowdbtree::resident(uint64_t page_id) const
     // to a miss, since the lock-free path can't propagate a Status).
     if (!s.ok()) {
         CRB_LOG_ERROR("[{}] demand-load I/O fault: pid={} addr={} len={} status={}", name_, page_id, addr, phys_len,
-                     s.to_string());
+                      s.to_string());
         io_failed_.store(true);
         if (metrics_.demand_load_l != nullptr) {
             auto ns =
@@ -372,7 +372,7 @@ PageBase *Crowdbtree::resident(uint64_t page_id) const
 }
 
 PageBase *Crowdbtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_t /*plen*/,
-                                        const std::vector<uint8_t> &blob) const
+                                          const std::vector<uint8_t> &blob) const
 {
     uint32_t raw_len = durable_blob_raw_len(blob.data(), blob.size());
     if (raw_len == 0) {
@@ -1324,7 +1324,7 @@ void Crowdbtree::split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> 
 }
 
 void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t child_page_id, std::string sep,
-                                      uint64_t right_page_id)
+                                        uint64_t right_page_id)
 {
     if (path.empty()) {
         // child was the root: grow a new root one level up.
@@ -1774,7 +1774,7 @@ void Crowdbtree::get_async(Slice key, std::function<void(GetView)> on_done) cons
 }
 
 void Crowdbtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::function<void(GetView)> on_done,
-                                 bool same_thread) const
+                                   bool same_thread) const
 {
     GetView  result;
     uint64_t pending_page_id = kInvalidPageId;
@@ -1823,7 +1823,7 @@ void Crowdbtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::
             [this, page_id = pending_page_id, addr, plen, blob, key_owned, on_done](Status st) mutable {
                 if (!st.ok()) {
                     CRB_LOG_ERROR("[{}] get_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
-                                 page_id, addr, plen, st.to_string());
+                                  page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
                     on_done(GetView()); // not found; no guard was ever entered
                     return;
@@ -1887,11 +1887,12 @@ std::vector<get_result> Crowdbtree::multi_get(const std::vector<Slice> &keys) co
     return results;
 }
 
-Status Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
-                      uint64_t                 deadline_ms,
-                      std::vector<scan_entry> *out, // NOLINT(readability-non-const-parameter) written to via push_back
-                      bool *truncated, bool include_tombstones, ScanPackedBuf *out_packed,
-                      size_t *out_count) // NOLINT(readability-non-const-parameter) written to via *out_count
+Status
+Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+                 uint64_t                 deadline_ms,
+                 std::vector<scan_entry> *out, // NOLINT(readability-non-const-parameter) written to via push_back
+                 bool *truncated, bool include_tombstones, ScanPackedBuf *out_packed,
+                 size_t *out_count) // NOLINT(readability-non-const-parameter) written to via *out_count
     const
 {
     if (out != nullptr) {
@@ -2080,7 +2081,7 @@ Status Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t l
         accumulated_bytes += entry_bytes;
         if (byte_budget != 0 && entry_bytes > byte_budget) {
             CRB_LOG_WARN("[{}] scan: oversized entry key_size={} value_size={} exceeds byte_budget={}", name_, key_size,
-                        value_size, byte_budget);
+                         value_size, byte_budget);
         }
         return true;
     };
@@ -2530,7 +2531,7 @@ bool Crowdbtree::try_scan_no_load(
         accumulated_bytes += entry_bytes;
         if (byte_budget != 0 && entry_bytes > byte_budget) {
             CRB_LOG_WARN("[{}] scan: oversized entry key_size={} value_size={} exceeds byte_budget={}", name_, key_size,
-                        value_size, byte_budget);
+                         value_size, byte_budget);
         }
         return true;
     };
@@ -2811,8 +2812,8 @@ static std::shared_ptr<std::string> make_resume_after(const std::shared_ptr<std:
 }
 
 void Crowdbtree::scan_async(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget,
-                          bool keys_only, uint64_t deadline_ms,
-                          std::function<void(Status, ScanPackedBuf, bool)> on_done) const
+                            bool keys_only, uint64_t deadline_ms,
+                            std::function<void(Status, ScanPackedBuf, bool)> on_done) const
 {
     // Copy the keys upfront: unlike scan()'s Slice (borrowed, valid only
     // for this one synchronous call), scan_async's keys must survive across
@@ -2862,11 +2863,11 @@ static std::string last_key_from_packed(const uint8_t *data, size_t len)
 }
 
 void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
-                                  const std::shared_ptr<std::string> &start_after_owned,
-                                  const std::shared_ptr<std::string> &end_key_owned, size_t limit, size_t byte_budget,
-                                  bool keys_only, uint64_t deadline_ms, std::shared_ptr<ScanPackedBuf> accumulated,
-                                  std::shared_ptr<std::string> last_key, size_t accumulated_count,
-                                  std::function<void(Status, ScanPackedBuf, bool)> on_done) const
+                                    const std::shared_ptr<std::string> &start_after_owned,
+                                    const std::shared_ptr<std::string> &end_key_owned, size_t limit, size_t byte_budget,
+                                    bool keys_only, uint64_t deadline_ms, std::shared_ptr<ScanPackedBuf> accumulated,
+                                    std::shared_ptr<std::string> last_key, size_t accumulated_count,
+                                    std::function<void(Status, ScanPackedBuf, bool)> on_done) const
 {
     // Adjust the byte budget by entries already accumulated across prior
     // cold-leaf retries, mirroring the remaining_limit adjustment below.
@@ -2959,7 +2960,7 @@ void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_o
              on_done](Status st) mutable {
                 if (!st.ok()) {
                     CRB_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
-                                 page_id, addr, plen, st.to_string());
+                                  page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
                     on_done(st, ScanPackedBuf{}, false);
                     return;
@@ -3089,7 +3090,8 @@ Status Crowdbtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint
     return Status::Ok();
 }
 
-Status Crowdbtree::collect_native_frames(std::vector<NativeFrame> *out, uint64_t *out_root_page_id, uint64_t *out_at_slot)
+Status Crowdbtree::collect_native_frames(std::vector<NativeFrame> *out, uint64_t *out_root_page_id,
+                                         uint64_t *out_at_slot)
 {
     std::lock_guard<std::mutex> lk(write_mutex_);
     uint64_t                    gc = gc_floor_.load();
@@ -3373,7 +3375,7 @@ void Crowdbtree::init_metrics(const std::string &prefix)
 }
 
 std::string Crowdbtree::flush_metrics_str(double window_secs, const char *timestamp, size_t width, size_t count_w,
-                                        size_t tps_w)
+                                          size_t tps_w)
 {
     if (metrics_registry_ == nullptr) {
         return {};
@@ -3574,9 +3576,9 @@ std::string Crowdbtree::assemble_overflow_value(uint64_t head_page_id, uint64_t 
 }
 
 std::vector<leaf_entry> Crowdbtree::resolve_leaf_chain_for_rebuild(PageBase *head, uint64_t gc_floor,
-                                                                 std::vector<uint64_t> *dead_overflow,
-                                                                 size_t                *out_tombstones_dropped,
-                                                                 size_t                *out_bytes_dropped)
+                                                                   std::vector<uint64_t> *dead_overflow,
+                                                                   size_t                *out_tombstones_dropped,
+                                                                   size_t                *out_bytes_dropped)
 {
     std::map<std::string, std::string> resolved; // key -> encoded storage cell
     auto                               consider = [&](Slice key, Slice cell) {

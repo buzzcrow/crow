@@ -73,53 +73,53 @@ void set_current_thread_name(const char *name);
 // init_logging), then defers to spdlog's own compile-time level filtering
 // (SPDLOG_ACTIVE_LEVEL) and runtime level. Args use fmt formatting, e.g.
 // CRB_LOG_INFO("open iu={} frame={}", iu, frame_bytes).
-#    define CRB_LOG_ERROR(...)                        \
-        do {                                         \
+#    define CRB_LOG_ERROR(...)                         \
+        do {                                           \
             if (::crowdb::common::logging_enabled()) { \
-                SPDLOG_ERROR(__VA_ARGS__);           \
-            }                                        \
+                SPDLOG_ERROR(__VA_ARGS__);             \
+            }                                          \
         } while (0)
-#    define CRB_LOG_WARN(...)                         \
-        do {                                         \
+#    define CRB_LOG_WARN(...)                          \
+        do {                                           \
             if (::crowdb::common::logging_enabled()) { \
-                SPDLOG_WARN(__VA_ARGS__);            \
-            }                                        \
+                SPDLOG_WARN(__VA_ARGS__);              \
+            }                                          \
         } while (0)
-#    define CRB_LOG_INFO(...)                         \
-        do {                                         \
+#    define CRB_LOG_INFO(...)                          \
+        do {                                           \
             if (::crowdb::common::logging_enabled()) { \
-                SPDLOG_INFO(__VA_ARGS__);            \
-            }                                        \
+                SPDLOG_INFO(__VA_ARGS__);              \
+            }                                          \
         } while (0)
-#    define CRB_LOG_DEBUG(...)                        \
-        do {                                         \
+#    define CRB_LOG_DEBUG(...)                         \
+        do {                                           \
             if (::crowdb::common::logging_enabled()) { \
-                SPDLOG_DEBUG(__VA_ARGS__);           \
-            }                                        \
+                SPDLOG_DEBUG(__VA_ARGS__);             \
+            }                                          \
         } while (0)
-#    define CRB_LOG_TRACE(...)                        \
-        do {                                         \
+#    define CRB_LOG_TRACE(...)                         \
+        do {                                           \
             if (::crowdb::common::logging_enabled()) { \
-                SPDLOG_TRACE(__VA_ARGS__);           \
-            }                                        \
+                SPDLOG_TRACE(__VA_ARGS__);             \
+            }                                          \
         } while (0)
 
 #else // !CROWDB_HAVE_SPDLOG — zero-cost no-ops
 
 #    define CRB_LOG_ERROR(...) \
-        do {                  \
+        do {                   \
         } while (0)
 #    define CRB_LOG_WARN(...) \
-        do {                 \
+        do {                  \
         } while (0)
 #    define CRB_LOG_INFO(...) \
-        do {                 \
+        do {                  \
         } while (0)
 #    define CRB_LOG_DEBUG(...) \
-        do {                  \
+        do {                   \
         } while (0)
 #    define CRB_LOG_TRACE(...) \
-        do {                  \
+        do {                   \
         } while (0)
 
 #endif // CROWDB_HAVE_SPDLOG

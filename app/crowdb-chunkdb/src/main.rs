@@ -314,8 +314,9 @@ async fn run_http_server(addr: SocketAddr, locks: Arc<ChunkLockMap>) {
 
 fn load_config(args: &Cli) -> ChunkdbConfig {
     let config_path = &args.config;
-    let mut config = crowdb_common::config::load_from_file::<ChunkdbConfig>(std::path::Path::new(config_path))
-        .unwrap_or_else(|e| panic!("failed to load config file {config_path}: {e}"));
+    let mut config =
+        crowdb_common::config::load_from_file::<ChunkdbConfig>(std::path::Path::new(config_path))
+            .unwrap_or_else(|e| panic!("failed to load config file {config_path}: {e}"));
 
     if let Some(addr) = &args.listen_addr {
         config.server.listen_addr.clone_from(addr);

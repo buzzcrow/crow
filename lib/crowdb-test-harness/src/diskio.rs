@@ -85,7 +85,7 @@ pub fn crowdb_lib_dir() -> Option<std::path::PathBuf> {
     ];
     for c in &candidates {
         let p = std::path::PathBuf::from(c);
-        if p.join("libcrow_kv_client.so").exists() {
+        if p.join("libcrowdb_kv_client.so").exists() {
             return p.canonicalize().ok();
         }
     }
@@ -138,7 +138,9 @@ impl DiskioProcess {
             panic!("crowdb-diskio binary not found; set CROWDB_DISKIO_BIN or build app/crowdb-diskio")
         });
         let lib_dir = crowdb_lib_dir().unwrap_or_else(|| {
-            panic!("libcrow_kv_client.so not found; build with cargo build -p crowdb-kv-client --features ffi")
+            panic!(
+                "libcrowdb_kv_client.so not found; build with cargo build -p crowdb-kv-client --features ffi"
+            )
         });
 
         let inst = DISKIO_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);

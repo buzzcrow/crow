@@ -154,7 +154,7 @@ async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTree
 
     // The durable crowdb-tree file was created under data_root, not left at the
     // default in-memory (no file) path.
-    let ct_path = crowdb_kv_server::startup::store_crow_tree_path(&data_root, store_id, group_id);
+    let ct_path = crowdb_kv_server::startup::store_crowdb_tree_path(&data_root, store_id, group_id);
     assert!(
         ct_path.exists(),
         "expected a durable crowdb-tree file at {}",
@@ -210,13 +210,13 @@ async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTree
 }
 
 #[tokio::test]
-async fn create_group_with_wal_crow_tree_engine_persists_across_restart() {
+async fn create_group_with_wal_crowdb_tree_engine_persists_across_restart() {
     crowdb_tree_engine_persists_across_restart(CrowdbTreeBackend::File).await;
 }
 
 /// : same scenario, through `BlockPageStore` (`O_DIRECT`)
 /// instead of the default `FilePageStore`.
 #[tokio::test]
-async fn create_group_with_wal_crow_tree_block_backend_persists_across_restart() {
+async fn create_group_with_wal_crowdb_tree_block_backend_persists_across_restart() {
     crowdb_tree_engine_persists_across_restart(CrowdbTreeBackend::Block).await;
 }

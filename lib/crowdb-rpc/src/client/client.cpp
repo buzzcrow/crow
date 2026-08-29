@@ -113,7 +113,7 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
                         delete frame;
                         rpc_submit_fail().inc();
                         CRB_LOG_WARN("send: submit failed (slab) request_id={} conn_id={}",
-                                    static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
+                                     static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
                         return false;
                     }
                     return true;
@@ -145,7 +145,7 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
             delete frame;
             rpc_submit_fail().inc();
             CRB_LOG_WARN("send: submit failed (map) request_id={} conn_id={}",
-                        static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
+                         static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
             return false;
         }
         return true;
@@ -182,7 +182,7 @@ void RpcClient::dispatch_request(Frame *frame, Connection *conn)
     bool     is_one_way = (frame->header.flags & FLAG_ONE_WAY) != 0;
 
     crowdb_rpc_handler_fn cb        = nullptr;
-    void               *user_data = nullptr;
+    void                 *user_data = nullptr;
     {
         std::lock_guard<std::mutex> lock(handler_mu_);
         auto                        it = request_handlers_.find(msg_type);

@@ -46,7 +46,7 @@ struct CoState
     // Rust callbacks.
     crowdb_rpc_co_build_request build_fn;
     crowdb_rpc_co_on_response   on_response_fn;
-    void                     *rust_ctx;
+    void                       *rust_ctx;
 
     // C++ handles.
     RpcClient  *client;
@@ -63,9 +63,9 @@ struct CoState
 
     // The awaitable for the current in-flight request. Filled by
     // co_on_complete; read by the coroutine after resume.
-    crowdb_rpc_buffer_t       resp_control = nullptr;
-    crowdb_rpc_buffer_t       resp_data    = nullptr;
-    crowdb_rpc_status         resp_status  = CROWDB_RPC_OK;
+    crowdb_rpc_buffer_t     resp_control = nullptr;
+    crowdb_rpc_buffer_t     resp_data    = nullptr;
+    crowdb_rpc_status       resp_status  = CROWDB_RPC_OK;
     std::coroutine_handle<> handle; // set by await_suspend
 
     std::atomic<bool> *running;
@@ -86,8 +86,8 @@ struct CoState
 // The C++ → Rust callback that resumes the coroutine. Set as the slab
 // slot's callback. Called inline on the I/O worker thread when the
 // response arrives.
-[[maybe_unused]] static void co_on_complete(uint64_t /*request_id*/, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                            crowdb_rpc_status status, void *user_data)
+[[maybe_unused]] static void co_on_complete(uint64_t /*request_id*/, crowdb_rpc_buffer_t control,
+                                            crowdb_rpc_buffer_t data, crowdb_rpc_status status, void *user_data)
 {
     auto *s = static_cast<CoState *>(user_data);
     // Store the response — the coroutine reads it after resume (or
@@ -285,9 +285,9 @@ static CoTask co_run(CoState *s)
 // ── C API ─────────────────────────────────────────────────────────
 
 extern "C" void crowdb_rpc_co_spawn(crowdb_rpc_client_t client, crowdb_rpc_server_t server, crowdb_rpc_conn_t *conns,
-                                  size_t num_conns, uint32_t num_coroutines, uint16_t msg_type,
-                                  crowdb_rpc_co_build_request build_request, crowdb_rpc_co_on_response on_response,
-                                  void *ctx)
+                                    size_t num_conns, uint32_t num_coroutines, uint16_t msg_type,
+                                    crowdb_rpc_co_build_request build_request, crowdb_rpc_co_on_response on_response,
+                                    void *ctx)
 {
     if (client == nullptr || server == nullptr || conns == nullptr || num_conns == 0) {
         return;

@@ -123,7 +123,7 @@ build-tests = "cargo test --workspace --all-targets --no-run"
 
 # ── CppTests job: C++ ctest (needs build-cpp) + Rust FFI (cc::Build) ──
 test-tree-ct = { cmd = "ctest --test-dir lib/crowdb-tree/build --output-on-failure", depends-on = ["build-cpp"] }
-test-common-ct = { cmd = "lib/crowdb-tree/build/crowdb-common-build/crowcommon_tests", depends-on = ["build-cpp"] }
+test-common-ct = { cmd = "lib/crowdb-tree/build/crowdb-common-build/crowdbcommon_tests", depends-on = ["build-cpp"] }
 test-rpc-ct = { cmd = "ctest --test-dir lib/crowdb-rpc/build --output-on-failure", depends-on = ["build-cpp"] }
 test-diskio-ct = { cmd = "ctest --test-dir app/crowdb-diskio/build --output-on-failure", depends-on = ["build-cpp"] }
 test-tree-ffi = { cmd = "cargo test -p crowdb-tree-ffi --all-targets" }

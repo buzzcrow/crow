@@ -18,7 +18,7 @@ extern "C" {
 // Caller must free with crowdb_common_metrics_global_free().
 // section_label is typically "cpp-metrics-global".
 char *crowdb_common_metrics_global_flush(double window_secs, const char *timestamp, const char *section_label,
-                                       size_t width, size_t count_w, size_t tps_w);
+                                         size_t width, size_t count_w, size_t tps_w);
 
 // Max metric name length in the global C++ registry (for column alignment).
 size_t crowdb_common_metrics_global_max_name_len(void);

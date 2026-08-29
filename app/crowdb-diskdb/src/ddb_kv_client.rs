@@ -394,10 +394,11 @@ impl DdbKvClient {
             .await?;
         match outcome {
             GetOutcome::Found { value, .. } => {
-                let zv = ZoneValue::from_bytes(&value).map_err(|e| crowdb_kv_client::Error::SysdataDecode {
-                    key: format!("{:02x?}", key.to_bytes()),
-                    reason: e,
-                })?;
+                let zv =
+                    ZoneValue::from_bytes(&value).map_err(|e| crowdb_kv_client::Error::SysdataDecode {
+                        key: format!("{:02x?}", key.to_bytes()),
+                        reason: e,
+                    })?;
                 Ok(Some(zv))
             }
             GetOutcome::NotFound => Ok(None),

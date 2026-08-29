@@ -668,7 +668,9 @@ fn build_strip_body_offset(
     FBStripBody,
     Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
 ) {
-    use crowdb_protocol::chunkdb_fb::{FBEcStrip, FBEcStripArgs, FBMirrorStrip, FBMirrorStripArgs, FBSegment};
+    use crowdb_protocol::chunkdb_fb::{
+        FBEcStrip, FBEcStripArgs, FBMirrorStrip, FBMirrorStripArgs, FBSegment,
+    };
 
     let Some(ref body) = strip.strip else {
         return (FBStripBody::NONE, None);

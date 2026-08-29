@@ -9,8 +9,9 @@
 #include <cstdlib>
 #include <cstring>
 
-extern "C" char *crowdb_common_metrics_global_flush(double window_secs, const char *timestamp, const char *section_label,
-                                                  size_t width, size_t count_w, size_t tps_w)
+extern "C" char *crowdb_common_metrics_global_flush(double window_secs, const char *timestamp,
+                                                    const char *section_label, size_t width, size_t count_w,
+                                                    size_t tps_w)
 {
     if (timestamp == nullptr) {
         return nullptr;

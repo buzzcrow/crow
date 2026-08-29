@@ -60,7 +60,7 @@ void build_tree(benchmark::State &state, std::unique_ptr<Crowdbtree> *t, std::ve
 static void BM_ReadPath_GetHit(benchmark::State &state)
 {
     std::unique_ptr<Crowdbtree> t;
-    std::vector<std::string>  keys;
+    std::vector<std::string>    keys;
     build_tree(state, &t, &keys);
     for (auto _ : state) {
         uint64_t    s;
@@ -78,7 +78,7 @@ BENCHMARK(BM_ReadPath_GetHit)->Arg(1000)->Arg(10000);
 static void BM_ReadPath_Scan(benchmark::State &state)
 {
     std::unique_ptr<Crowdbtree> t;
-    std::vector<std::string>  keys;
+    std::vector<std::string>    keys;
     build_tree(state, &t, &keys);
     for (auto _ : state) {
         std::vector<scan_entry> out;

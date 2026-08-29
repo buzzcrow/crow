@@ -18,8 +18,8 @@
 //!   violate the orphan rule; a free function avoids it.
 
 pub use crowdb_protocol::mgmt::{
-    CrowdbTreeStatsView, GroupStatus, InflightStatus, KvStoreStatus, RemoteStatus, ReplicaStatus, StatusLevel,
-    StoreStatus,
+    CrowdbTreeStatsView, GroupStatus, InflightStatus, KvStoreStatus, RemoteStatus, ReplicaStatus,
+    StatusLevel, StoreStatus,
 };
 pub(crate) use crowdb_protocol::mgmt::{ElectionStateView, ReadStateView};
 

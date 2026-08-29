@@ -182,7 +182,13 @@ impl BenchTarget for RpcTarget {
             let metrics_path = std::path::PathBuf::from(log_dir).join("client-metrics.log");
             #[allow(clippy::cast_precision_loss, reason = "interval fits in f64")]
             let interval = self.metrics_interval as f64;
-            crowdb_rpc_ffi::logging::metrics_start(metrics_path.to_str().unwrap_or(""), interval, 30, 5, true);
+            crowdb_rpc_ffi::logging::metrics_start(
+                metrics_path.to_str().unwrap_or(""),
+                interval,
+                30,
+                5,
+                true,
+            );
         }
 
         Ok(())

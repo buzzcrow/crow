@@ -90,7 +90,7 @@ TEST(ScheduledExecutorTest, NextDeadline)
 TEST(ConnectionPoolTest, RoundRobinSkipsUnhealthy)
 {
     crowdb::rpc::ConnectionPool pool;
-    SystemBufferPool          buf_pool;
+    SystemBufferPool            buf_pool;
 
     auto c1 = std::make_shared<Connection>(1, "node1", &buf_pool);
     auto c2 = std::make_shared<Connection>(2, "node2", &buf_pool);
@@ -116,7 +116,7 @@ TEST(ConnectionPoolTest, RoundRobinSkipsUnhealthy)
 TEST(ConnectionPoolTest, AllDownReturnsNull)
 {
     crowdb::rpc::ConnectionPool pool;
-    SystemBufferPool          buf_pool;
+    SystemBufferPool            buf_pool;
 
     auto c1 = std::make_shared<Connection>(1, "node1", &buf_pool);
     pool.add(c1);
@@ -129,7 +129,7 @@ TEST(ConnectionPoolTest, AllDownReturnsNull)
 TEST(ConnectionPoolTest, GetForEndpoint)
 {
     crowdb::rpc::ConnectionPool pool;
-    SystemBufferPool          buf_pool;
+    SystemBufferPool            buf_pool;
 
     auto c1 = std::make_shared<Connection>(1, "node1:8080", &buf_pool);
     auto c2 = std::make_shared<Connection>(2, "node2:8080", &buf_pool);
@@ -174,8 +174,8 @@ class CallerLoopbackTest : public ::testing::Test
             ::close(listen_fd_);
     }
 
-    int                        listen_fd_ = -1;
-    uint16_t                   port_      = 0;
+    int                          listen_fd_ = -1;
+    uint16_t                     port_      = 0;
     crowdb::common::RequestIdGen id_gen_;
 };
 
@@ -305,7 +305,7 @@ struct SlabCallbackState
     std::atomic<uint64_t> last_request_id{0};
 };
 
-extern "C" void slab_test_cb(uint64_t        request_id, crowdb_rpc_buffer_t /*control*/, crowdb_rpc_buffer_t /*data*/,
+extern "C" void slab_test_cb(uint64_t request_id, crowdb_rpc_buffer_t /*control*/, crowdb_rpc_buffer_t /*data*/,
                              crowdb_rpc_status status, void *user_data)
 {
     auto *s = static_cast<SlabCallbackState *>(user_data);

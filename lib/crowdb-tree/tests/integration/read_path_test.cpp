@@ -51,7 +51,7 @@ TEST(ReadPath, GetAfterPutAndDelete)
 TEST(ReadPath, GetViewNotFound)
 {
     Crowdbtree t;
-    GetView  v = t.get_view(Slice("missing"));
+    GetView    v = t.get_view(Slice("missing"));
     EXPECT_FALSE(v.found());
 }
 
@@ -98,7 +98,7 @@ TEST(ReadPath, GetViewOverflowValueIsMaterialized)
 {
     Options opt;
     opt.max_inline_value = 8; // force any value above 8 bytes to spill to overflow
-    Crowdbtree    t(opt);
+    Crowdbtree  t(opt);
     std::string big(500, 'z');
     ASSERT_TRUE(t.apply(1, put_one("a", big)).ok());
     ASSERT_TRUE(t.flush().ok());
@@ -146,8 +146,8 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves)
     Options opt;
     opt.max_delta_len    = 1;
     opt.leaf_split_bytes = 120; // force multiple leaves
-    Crowdbtree  t(opt);
-    const int N = 100;
+    Crowdbtree t(opt);
+    const int  N = 100;
     for (int i = 0; i < N; ++i) {
         uint64_t s = i + 1;
         ASSERT_TRUE(t.apply(s, put_one(make_key(i), "val" + std::to_string(i))).ok());
@@ -199,8 +199,8 @@ TEST(ReadPath, ScanStartAfterCursorSkipsEarlierEntries)
     Options opt;
     opt.max_delta_len    = 1;
     opt.leaf_split_bytes = 120; // force multiple leaves
-    Crowdbtree  t(opt);
-    const int N = 30;
+    Crowdbtree t(opt);
+    const int  N = 30;
     for (int i = 0; i < N; ++i) {
         ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "v" + std::to_string(i))).ok());
         ASSERT_TRUE(t.flush().ok());

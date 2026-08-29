@@ -74,7 +74,7 @@ class BlockAsyncPageStore : public AsyncPageStore
     void     cancel(uint64_t op_id) override;
 
   private:
-    BlockPageStore              *store_;
+    BlockPageStore                *store_;
     ::crowdb::common::DiskIOUring *uring_;
 };
 #endif // CROWDB_HAVE_LIBURING

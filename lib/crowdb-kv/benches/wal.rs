@@ -258,7 +258,9 @@ fn main() {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if cfg!(test) && !force_run {
-        eprintln!("Skipping wal bench in cargo test mode; set CROWDB_KV_RUN_WAL_BENCH=1 to run real results.");
+        eprintln!(
+            "Skipping wal bench in cargo test mode; set CROWDB_KV_RUN_WAL_BENCH=1 to run real results."
+        );
         return;
     }
 

@@ -1094,7 +1094,7 @@ impl KvRpcService {
             Arc::clone(&self.forwarder.server),
         ));
         let registry = group.watch_registry.clone();
-        let watcher_id = registry.subscribe_crow_rpc(&prefix, target);
+        let watcher_id = registry.subscribe_crowdb_rpc(&prefix, target);
         debug!(
             store_id = self.store.store_id,
             group_id,

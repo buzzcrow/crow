@@ -135,7 +135,10 @@ extern "C" {
     pub fn crowdb_rpc_pool_destroy(pool: crowdb_rpc_pool_t);
 
     pub fn crowdb_rpc_server_create(pool: crowdb_rpc_pool_t) -> crowdb_rpc_server_t;
-    pub fn crowdb_rpc_server_create_with_workers(pool: crowdb_rpc_pool_t, num_workers: u32) -> crowdb_rpc_server_t;
+    pub fn crowdb_rpc_server_create_with_workers(
+        pool: crowdb_rpc_pool_t,
+        num_workers: u32,
+    ) -> crowdb_rpc_server_t;
     pub fn crowdb_rpc_server_create_with_engines(
         pool: crowdb_rpc_pool_t,
         io_engines: u32,
@@ -165,7 +168,11 @@ extern "C" {
 
     pub fn crowdb_rpc_client_set_completion_pool_size(client: crowdb_rpc_client_t, max_in_flight: u32);
 
-    pub fn crowdb_rpc_client_start_reaper(client: crowdb_rpc_client_t, timeout_ns: u64, scan_interval_ns: u64);
+    pub fn crowdb_rpc_client_start_reaper(
+        client: crowdb_rpc_client_t,
+        timeout_ns: u64,
+        scan_interval_ns: u64,
+    );
 
     pub fn crowdb_rpc_client_stop_reaper(client: crowdb_rpc_client_t);
 
@@ -193,7 +200,11 @@ extern "C" {
         user_data: *mut c_void,
     ) -> crowdb_rpc_status;
 
-    pub fn crowdb_rpc_connect(server: crowdb_rpc_server_t, addr: *const c_char, port: c_int) -> crowdb_rpc_conn_t;
+    pub fn crowdb_rpc_connect(
+        server: crowdb_rpc_server_t,
+        addr: *const c_char,
+        port: c_int,
+    ) -> crowdb_rpc_conn_t;
 
     pub fn crowdb_rpc_server_register_echo_handler(server: crowdb_rpc_server_t, msg_type: u16);
 

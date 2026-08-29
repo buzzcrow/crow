@@ -35,11 +35,11 @@ typedef int32_t crowdb_rpc_status;
 
 // ── Buffer ────────────────────────────────────────────────────────
 crowdb_rpc_buffer_t crowdb_rpc_buffer_alloc(crowdb_rpc_pool_t pool, uint32_t capacity);
-void              crowdb_rpc_buffer_write(crowdb_rpc_buffer_t buf, const uint8_t *data, uint32_t len);
-const uint8_t    *crowdb_rpc_buffer_data(crowdb_rpc_buffer_t buf);
-uint32_t          crowdb_rpc_buffer_len(crowdb_rpc_buffer_t buf);
+void                crowdb_rpc_buffer_write(crowdb_rpc_buffer_t buf, const uint8_t *data, uint32_t len);
+const uint8_t      *crowdb_rpc_buffer_data(crowdb_rpc_buffer_t buf);
+uint32_t            crowdb_rpc_buffer_len(crowdb_rpc_buffer_t buf);
 crowdb_rpc_buffer_t crowdb_rpc_buffer_ref(crowdb_rpc_buffer_t buf);
-void              crowdb_rpc_buffer_release(crowdb_rpc_buffer_t buf);
+void                crowdb_rpc_buffer_release(crowdb_rpc_buffer_t buf);
 // Create a standalone buffer (not pool-allocated) from raw bytes. The
 // buffer owns a malloc'd copy of the data; release frees it. Used by
 // client-side code to build control messages without a pool reference.
@@ -50,16 +50,17 @@ crowdb_rpc_buffer_t crowdb_rpc_buffer_create(const uint8_t *data, uint32_t len);
 // called to drop the external owner. Used for zero-copy response paths
 // where Rust passes a Vec allocation directly to C++ without copying.
 crowdb_rpc_buffer_t crowdb_rpc_buffer_create_external(const uint8_t *data, uint32_t len, void (*free_cb)(void *),
-                                                  void *free_ctx);
+                                                      void *free_ctx);
 
 // ── Pool ──────────────────────────────────────────────────────────
 crowdb_rpc_pool_t crowdb_rpc_pool_create(uint32_t max_buffers);
-void            crowdb_rpc_pool_destroy(crowdb_rpc_pool_t pool);
+void              crowdb_rpc_pool_destroy(crowdb_rpc_pool_t pool);
 
 // ── Server ────────────────────────────────────────────────────────
 crowdb_rpc_server_t crowdb_rpc_server_create(crowdb_rpc_pool_t pool);
 crowdb_rpc_server_t crowdb_rpc_server_create_with_workers(crowdb_rpc_pool_t pool, uint32_t num_workers);
-crowdb_rpc_server_t crowdb_rpc_server_create_with_engines(crowdb_rpc_pool_t pool, uint32_t io_engines, uint32_t io_workers);
+crowdb_rpc_server_t crowdb_rpc_server_create_with_engines(crowdb_rpc_pool_t pool, uint32_t io_engines,
+                                                          uint32_t io_workers);
 // Set per-connection send queue capacity (backpressure bound). Must be
 // called before listen/connect creates connections. Default 1024.
 // Rounded up to next power of two internally.
@@ -73,12 +74,12 @@ void crowdb_rpc_server_set_quickack(crowdb_rpc_server_t server, int enabled);
 // Event-write mode. Default 0 (direct writev on caller thread).
 // Set to 1 to notify I/O worker to drain + writev (better batching,
 // adds epoll-wake latency).
-void            crowdb_rpc_server_set_event_write(crowdb_rpc_server_t server, int enabled);
-void            crowdb_rpc_server_destroy(crowdb_rpc_server_t server);
+void              crowdb_rpc_server_set_event_write(crowdb_rpc_server_t server, int enabled);
+void              crowdb_rpc_server_destroy(crowdb_rpc_server_t server);
 crowdb_rpc_status crowdb_rpc_server_listen(crowdb_rpc_server_t server, const char *addr, int port);
-void            crowdb_rpc_server_start(crowdb_rpc_server_t server);
-void            crowdb_rpc_server_stop(crowdb_rpc_server_t server);
-int             crowdb_rpc_server_port(crowdb_rpc_server_t server);
+void              crowdb_rpc_server_start(crowdb_rpc_server_t server);
+void              crowdb_rpc_server_stop(crowdb_rpc_server_t server);
+int               crowdb_rpc_server_port(crowdb_rpc_server_t server);
 
 // Transport-level stats: syscall counts + latency histograms.
 // Aggregation ratios:
@@ -95,7 +96,7 @@ typedef struct crowdb_rpc_latency_stats
 typedef struct crowdb_rpc_transport_stats
 {
     crowdb_rpc_latency_stats_t submit_to_writev;   // submit → writev (queue wait)
-    uint64_t                 send_queue_rejects; // enqueue_send rejected (queue full/closed)
+    uint64_t                   send_queue_rejects; // enqueue_send rejected (queue full/closed)
 } crowdb_rpc_transport_stats_t;
 
 void crowdb_rpc_server_transport_stats(crowdb_rpc_server_t server, crowdb_rpc_transport_stats_t *out);
@@ -115,7 +116,7 @@ void crowdb_rpc_client_get_counters(crowdb_rpc_client_t client, crowdb_rpc_clien
 
 // ── Client ────────────────────────────────────────────────────────
 crowdb_rpc_client_t crowdb_rpc_client_create(void);
-void              crowdb_rpc_client_destroy(crowdb_rpc_client_t client);
+void                crowdb_rpc_client_destroy(crowdb_rpc_client_t client);
 
 // Attach the client to a connection so responses are routed to the
 // client's response handler. Must be called once per connection before
@@ -127,7 +128,7 @@ void crowdb_rpc_client_attach(crowdb_rpc_client_t client, crowdb_rpc_conn_t conn
 // Completion callback — invoked on the C++ I/O thread when the response
 // arrives or on error. Must be O(1) and non-blocking.
 typedef void (*crowdb_rpc_on_complete)(uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                     crowdb_rpc_status status, void *user_data);
+                                       crowdb_rpc_status status, void *user_data);
 
 // Size the callback completion pool. Must be called before
 // any send(). The pool is sized to the next power of two >=
@@ -156,8 +157,8 @@ void crowdb_rpc_client_stop_reaper(crowdb_rpc_client_t client);
 // returns CROWDB_RPC_ERR_SEND_QUEUE (callback NOT invoked).
 // The pool must be sized first (set_completion_pool_size).
 crowdb_rpc_status crowdb_rpc_client_send(crowdb_rpc_client_t client, crowdb_rpc_server_t server, crowdb_rpc_conn_t conn,
-                                     uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                     uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data);
+                                         uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
+                                         uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data);
 
 // Variant for server-handler use: conn_handle is a raw Connection* (as
 // passed to the dispatch callback), NOT a crowdb_rpc_conn_t. Use this from
@@ -166,8 +167,9 @@ crowdb_rpc_status crowdb_rpc_client_send(crowdb_rpc_client_t client, crowdb_rpc_
 // (created by crowdb_rpc_connect); using it with a handler's conn_handle
 // would dereference invalid memory.
 crowdb_rpc_status crowdb_rpc_client_send_conn(crowdb_rpc_client_t client, crowdb_rpc_server_t server, void *conn_handle,
-                                          uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                          uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data);
+                                              uint64_t request_id, crowdb_rpc_buffer_t control,
+                                              crowdb_rpc_buffer_t data, uint16_t msg_type,
+                                              crowdb_rpc_on_complete on_complete, void *user_data);
 
 // ── Connection (for client-side use) ──────────────────────────────
 crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *addr, int port);
@@ -206,8 +208,8 @@ void crowdb_rpc_server_register_echo_handler(crowdb_rpc_server_t server, uint16_
 // Drop on the Rust wrapper). The control/data pointers are valid only
 // while the frame is alive.
 typedef void (*crowdb_rpc_handler_fn)(uint64_t request_id, uint64_t rpc_create_nano, uint16_t msg_type,
-                                    const uint8_t *control, uint32_t control_len, const uint8_t *data,
-                                    uint32_t data_len, void *conn_handle, void *frame_handle, void *user_data);
+                                      const uint8_t *control, uint32_t control_len, const uint8_t *data,
+                                      uint32_t data_len, void *conn_handle, void *frame_handle, void *user_data);
 
 // Release a frame_handle previously passed to a crowdb_rpc_handler_fn.
 // Must be called exactly once per frame_handle. Passing nullptr is a no-op.
@@ -219,24 +221,24 @@ void crowdb_rpc_frame_release(void *frame_handle);
 // a C++ HandlerFn. Re-registering the same msg_type replaces the prior
 // handler.
 void crowdb_rpc_server_register_handler(crowdb_rpc_server_t server, uint16_t msg_type, crowdb_rpc_handler_fn callback,
-                                      void *user_data);
+                                        void *user_data);
 
 // Submit a response on a server-side connection. Allocates buffers from
 // the pool, builds an OutFrame, and calls transport->submit (enqueue +
 // try_send). Thread-safe — may be called from any thread (e.g. a Rust
 // thread pool worker). conn_handle is the raw pointer passed to the
 // dispatch callback.
-crowdb_rpc_status crowdb_rpc_server_submit_response(crowdb_rpc_server_t server, void *conn_handle, const uint8_t *control,
-                                                uint32_t control_len, const uint8_t *data, uint32_t data_len,
-                                                uint16_t msg_type, uint64_t request_id);
+crowdb_rpc_status crowdb_rpc_server_submit_response(crowdb_rpc_server_t server, void *conn_handle,
+                                                    const uint8_t *control, uint32_t control_len, const uint8_t *data,
+                                                    uint32_t data_len, uint16_t msg_type, uint64_t request_id);
 
 // Submit a response using pre-filled buffer handles (zero-copy). The
 // server takes ownership of the buffers (they are released when the
 // OutFrame is sent). control or data may be NULL (no control / no data
 // payload). Thread-safe.
 crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t server, void *conn_handle,
-                                                       crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                                       uint16_t msg_type, uint64_t request_id);
+                                                           crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
+                                                           uint16_t msg_type, uint64_t request_id);
 
 // ── Client-side request handler dispatch (R114) ───────────────────
 
@@ -248,7 +250,7 @@ crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t s
 // response via crowdb_rpc_server_submit_response (the Rust closure
 // captures the server handle). The callback must be non-blocking.
 void crowdb_rpc_client_register_handler(crowdb_rpc_client_t client, uint16_t msg_type, crowdb_rpc_handler_fn callback,
-                                      void *user_data);
+                                        void *user_data);
 
 // Set the transport on a client for submitting UnknownMessage responses
 // when no handler matches an incoming request msg_type. The transport
@@ -276,7 +278,7 @@ void crowdb_rpc_server_set_request_client(crowdb_rpc_server_t server, crowdb_rpc
 //   max_files    — max rotated files to keep (0 => 5)
 //   file_prefix  — filename prefix (empty => "crowdb-rpc")
 void crowdb_rpc_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
-                           const char *file_prefix);
+                             const char *file_prefix);
 void crowdb_rpc_flush_logging(void);
 void crowdb_rpc_shutdown_logging(void);
 
@@ -286,7 +288,7 @@ void crowdb_rpc_shutdown_logging(void);
 // max_file_mb / max_files: rotation params (0 => 30 / 5).
 // console: 1 = also flush to stdout, 0 = file only.
 void crowdb_rpc_metrics_start(const char *log_path, double interval_secs, size_t max_file_mb, size_t max_files,
-                            int console);
+                              int console);
 void crowdb_rpc_metrics_stop(void);
 
 // Register a callback gauge that reports the server's live connection

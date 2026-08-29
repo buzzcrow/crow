@@ -126,7 +126,7 @@ TEST(CApiLoadTest, MultiWorkerOneshotSharedTransport)
             }
 
             crowdb_rpc_status status = crowdb_rpc_client_send(client, server, conns[cidx], req_id, ctrl, data,
-                                                          ECHO_MSG_TYPE, on_complete_cb, pr);
+                                                              ECHO_MSG_TYPE, on_complete_cb, pr);
 
             if (status != CROWDB_RPC_OK) {
                 failure_count.fetch_add(1, std::memory_order_relaxed);

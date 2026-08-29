@@ -113,8 +113,8 @@ bool read_u32(const uint8_t *buf, size_t len, size_t *pos, uint32_t *v)
 
 struct ct_tree
 {
-    std::unique_ptr<PageStore> store; // null for pure in-memory engine
-    std::unique_ptr<Crowdbtree>  tree;
+    std::unique_ptr<PageStore>  store; // null for pure in-memory engine
+    std::unique_ptr<Crowdbtree> tree;
 #ifdef CROWDB_HAVE_LIBURING
     // Both null for an in-memory tree, or if opening the async twin failed
     // (see ct_open) -- get_async/flush_async/snapshot_async then fall back
@@ -123,7 +123,7 @@ struct ct_tree
     // mirroring Options' own comment) and both outlive `tree`, which is
     // what actually calls into them.
     std::unique_ptr<crowdb::common::DiskIOUring> uring;
-    std::unique_ptr<AsyncPageStore>            async_store;
+    std::unique_ptr<AsyncPageStore>              async_store;
 #endif
 };
 
@@ -275,7 +275,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         h->store     = std::move(bs);
         o.page_store = h->store.get();
         std::unique_ptr<Crowdbtree> t;
-        Status                    os = Crowdbtree::open(o, &t);
+        Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
             return to_status(os);
         }
@@ -294,7 +294,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         h->store     = std::move(ts);
         o.page_store = h->store.get();
         std::unique_ptr<Crowdbtree> t;
-        Status                    os = Crowdbtree::open(o, &t);
+        Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
             return to_status(os);
         }
@@ -308,7 +308,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         h->store     = std::move(ms);
         o.page_store = h->store.get();
         std::unique_ptr<Crowdbtree> t;
-        Status                    os = Crowdbtree::open(o, &t);
+        Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
             return to_status(os);
         }
@@ -347,7 +347,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         o.async_page_store = h->async_store.get();
 #endif
         std::unique_ptr<Crowdbtree> t;
-        Status                    os = Crowdbtree::open(o, &t);
+        Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
             return to_status(os);
         }
@@ -366,8 +366,8 @@ void ct_init_logging(const char *log_dir, const char *level, size_t max_file_mb,
                      const char *file_prefix)
 {
     crowdb::common::init_logging(log_dir == nullptr ? "" : std::string(log_dir),
-                               level == nullptr ? "info" : std::string(level), max_file_mb, max_files,
-                               file_prefix == nullptr ? "crowdb-tree" : std::string(file_prefix));
+                                 level == nullptr ? "info" : std::string(level), max_file_mb, max_files,
+                                 file_prefix == nullptr ? "crowdb-tree" : std::string(file_prefix));
 }
 
 void ct_flush_logging()
@@ -571,7 +571,7 @@ ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t o
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     std::vector<Crowdbtree::encoded_op> encoded;
-    size_t                            pos = 0;
+    size_t                              pos = 0;
     encoded.reserve(count);
     for (uint64_t i = 0; i < count; ++i) {
         if (pos >= ops_len) {

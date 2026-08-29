@@ -86,7 +86,7 @@ TEST(Compression, CheckpointReopenWithCompressedPages)
         Options      raw_opt = opt;
         raw_opt.page_store   = &raw_store;
         raw_opt.compression  = compress_algo::kNone;
-        Crowdbtree                           raw(raw_opt);
+        Crowdbtree                         raw(raw_opt);
         std::map<std::string, std::string> raw_oracle;
         fill_buf(&raw, 200, &raw_oracle);
         ASSERT_TRUE(raw.snapshot(nullptr).ok());

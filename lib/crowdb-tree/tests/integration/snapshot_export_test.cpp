@@ -85,12 +85,12 @@ void transfer(Crowdbtree &a, Crowdbtree &b, size_t chunk_bytes, uint64_t *at_slo
 TEST(SnapshotExport, ExportImportCompareEmpty)
 {
     Options                            opt; // pure in-memory engines
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
     Crowdbtree b(opt);
-    uint64_t at = 0;
+    uint64_t   at = 0;
     transfer(a, b, 4096, &at);
     EXPECT_EQ(at, a.last_applied_slot());
     EXPECT_EQ(b.last_applied_slot(), a.last_applied_slot());
@@ -105,12 +105,12 @@ TEST(SnapshotExport, ExportImportCompareEmpty)
 TEST(SnapshotExport, CrossEngineParityVsOracle)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
     Crowdbtree b(opt);
-    uint64_t at = 0;
+    uint64_t   at = 0;
     transfer(a, b, 8192, &at);
 
     // Every live key reads back; deleted keys are gone.
@@ -132,7 +132,7 @@ TEST(SnapshotExport, CrossEngineParityVsOracle)
 TEST(SnapshotExport, ConcurrentReadersDuringImportNoUAF)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
@@ -181,7 +181,7 @@ TEST(SnapshotExport, ConcurrentReadersDuringImportNoUAF)
 TEST(SnapshotExport, FileDumpLoadRoundTrip)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
@@ -204,7 +204,7 @@ TEST(SnapshotExport, FileDumpLoadRoundTrip)
 TEST(SnapshotExport, ChunkBoundaryDeterminism)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
@@ -236,7 +236,7 @@ TEST(SnapshotExport, ChunkBoundaryDeterminism)
 TEST(SnapshotExport, CrcTamperRejected)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
@@ -252,7 +252,7 @@ TEST(SnapshotExport, CrcTamperRejected)
     ASSERT_GT(stream.size(), 64U);
     stream[40] = static_cast<char>(stream[40] ^ 0xff); // flip a byte in the tuple body
 
-    Crowdbtree       b(opt);
+    Crowdbtree     b(opt);
     SnapshotImport imp(b);
     ASSERT_TRUE(imp.feed(Slice(stream)).ok());
     EXPECT_EQ(imp.finish(nullptr).code(), Code::kCorruption);
@@ -264,12 +264,12 @@ TEST(SnapshotExport, CrcTamperRejected)
 TEST(SnapshotExport, NativeExportImportRoundTrip)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
     Crowdbtree b(opt);
-    uint64_t at = 0;
+    uint64_t   at = 0;
     transfer(a, b, 4096, &at, snapshot_format::kNative);
     EXPECT_EQ(at, a.last_applied_slot());
     EXPECT_EQ(b.last_applied_slot(), a.last_applied_slot());
@@ -296,14 +296,14 @@ TEST(SnapshotExport, NativeExportImportRoundTrip)
 TEST(SnapshotExport, NativeEquivalentToPortable)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
     Crowdbtree b_native(opt);
     Crowdbtree c_portable(opt);
-    uint64_t at_native   = 0;
-    uint64_t at_portable = 0;
+    uint64_t   at_native   = 0;
+    uint64_t   at_portable = 0;
     transfer(a, b_native, 4096, &at_native, snapshot_format::kNative);
     transfer(a, c_portable, 4096, &at_portable, snapshot_format::kPortable);
     EXPECT_EQ(at_native, at_portable);
@@ -318,10 +318,10 @@ TEST(SnapshotExport, NativeEquivalentToPortable)
 // (the common new-member-install shape) with no residual state.
 TEST(SnapshotExport, NativeEmptyTreeRoundTrip)
 {
-    Options  opt;
+    Options    opt;
     Crowdbtree a(opt); // never written to -- exports just the empty root leaf
     Crowdbtree b(opt);
-    uint64_t at = 123; // sentinel to prove it gets overwritten to 0
+    uint64_t   at = 123; // sentinel to prove it gets overwritten to 0
     transfer(a, b, kSnapshotChunkBytes, &at, snapshot_format::kNative);
     EXPECT_EQ(at, 0U);
     EXPECT_EQ(b.last_applied_slot(), 0U);
@@ -332,7 +332,7 @@ TEST(SnapshotExport, NativeEmptyTreeRoundTrip)
 TEST(SnapshotExport, NativeCrcTamperRejected)
 {
     Options                            opt;
-    Crowdbtree                           a(opt);
+    Crowdbtree                         a(opt);
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
@@ -348,7 +348,7 @@ TEST(SnapshotExport, NativeCrcTamperRejected)
     ASSERT_GT(stream.size(), 64U);
     stream[40] = static_cast<char>(stream[40] ^ 0xff); // flip a byte in the frame body
 
-    Crowdbtree       b(opt);
+    Crowdbtree     b(opt);
     SnapshotImport imp(b);
     ASSERT_TRUE(imp.feed(Slice(stream)).ok());
     EXPECT_EQ(imp.finish(nullptr).code(), Code::kCorruption);

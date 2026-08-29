@@ -146,7 +146,7 @@ TEST(WritePath, ApplyThenFlushVisible)
 TEST(WritePath, IntraBatchLastWins)
 {
     Crowdbtree t;
-    Batch    b{
+    Batch      b{
         {{.key = "k", .kind = OpKind::kPut, .value = "first"},
          {.key = "k", .kind = OpKind::kPut, .value = "second"},
          {.key = "k", .kind = OpKind::kPut, .value = "third"}}

@@ -119,7 +119,7 @@ TEST(DurableEdgeCases, OverflowChunkBoundarySizes)
     const uint32_t                     cap = overflow_chunk_cap(opt.frame_bytes); // payload per frame
     std::map<std::string, std::string> oracle;
     {
-        Crowdbtree            t(opt);
+        Crowdbtree          t(opt);
         std::vector<size_t> sizes = {cap - 1,
                                      cap,
                                      cap + 1,

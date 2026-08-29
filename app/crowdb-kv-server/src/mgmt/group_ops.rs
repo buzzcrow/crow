@@ -450,7 +450,7 @@ pub(super) async fn remove_group(
     }
 
     // Delete the engine dir for this group.
-    let engine_dir = crate::startup::store_crow_tree_path(&state.config.data_root, sid, gid);
+    let engine_dir = crate::startup::store_crowdb_tree_path(&state.config.data_root, sid, gid);
     if let Err(e) = tokio::fs::remove_dir_all(&engine_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(store_id = sid, group_id = gid, error = %e, "failed to delete engine dir; continuing");

@@ -37,7 +37,7 @@
 struct crowdb_rpc_pool_s
 {
     crowdb::rpc::BufferPool *pool;
-    bool                   owns;
+    bool                     owns;
 };
 
 // Opaque handle struct definitions are in c_api_internal.h (shared
@@ -161,7 +161,7 @@ crowdb_rpc_buffer_t crowdb_rpc_buffer_create(const uint8_t *data, uint32_t len)
 // The data is NOT copied; free_cb(free_ctx) is called on release to drop
 // the external owner.
 crowdb_rpc_buffer_t crowdb_rpc_buffer_create_external(const uint8_t *data, uint32_t len, void (*free_cb)(void *),
-                                                  void *free_ctx)
+                                                      void *free_ctx)
 {
     try {
         if (data == nullptr || len == 0 || free_cb == nullptr) {
@@ -234,7 +234,8 @@ crowdb_rpc_server_t crowdb_rpc_server_create_with_workers(crowdb_rpc_pool_t pool
     }
 }
 
-crowdb_rpc_server_t crowdb_rpc_server_create_with_engines(crowdb_rpc_pool_t pool, uint32_t io_engines, uint32_t io_workers)
+crowdb_rpc_server_t crowdb_rpc_server_create_with_engines(crowdb_rpc_pool_t pool, uint32_t io_engines,
+                                                          uint32_t io_workers)
 {
     try {
         crowdb::rpc::BufferPool *bp = (pool != nullptr) ? pool->pool : nullptr;
@@ -554,8 +555,8 @@ void crowdb_rpc_client_stop_reaper(crowdb_rpc_client_t client)
 }
 
 crowdb_rpc_status crowdb_rpc_client_send(crowdb_rpc_client_t client, crowdb_rpc_server_t server, crowdb_rpc_conn_t conn,
-                                     uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                     uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data)
+                                         uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
+                                         uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data)
 {
     try {
         if (client == nullptr || server == nullptr || conn == nullptr || control == nullptr || on_complete == nullptr) {
@@ -596,8 +597,9 @@ crowdb_rpc_status crowdb_rpc_client_send(crowdb_rpc_client_t client, crowdb_rpc_
 // Using crowdb_rpc_client_send with a Connection* would dereference invalid
 // memory (conn->conn.get() on the wrong struct).
 crowdb_rpc_status crowdb_rpc_client_send_conn(crowdb_rpc_client_t client, crowdb_rpc_server_t server, void *conn_handle,
-                                          uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                          uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data)
+                                              uint64_t request_id, crowdb_rpc_buffer_t control,
+                                              crowdb_rpc_buffer_t data, uint16_t msg_type,
+                                              crowdb_rpc_on_complete on_complete, void *user_data)
 {
     try {
         if (client == nullptr || server == nullptr || conn_handle == nullptr || control == nullptr ||
@@ -658,10 +660,10 @@ crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *add
 // logic as the load_test.cpp echo handler, compiled into the library.
 static crowdb::rpc::OutFrame *echo_handler(crowdb::rpc::Frame *request, crowdb::rpc::Connection *conn)
 {
-    uint64_t               req_id      = request->request_id;
-    uint64_t               create_nano = request->rpc_create_nano;
+    uint64_t                 req_id      = request->request_id;
+    uint64_t                 create_nano = request->rpc_create_nano;
     crowdb::rpc::BufferPool *pool        = conn->pool();
-    uint64_t           resp_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    uint64_t             resp_nano = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
     crowdb::rpc::Buffer *resp_ctrl = crowdb::rpc::build_ping_response(pool, req_id, create_nano, resp_nano);
 
     crowdb::rpc::Buffer *resp_data = nullptr;
@@ -738,7 +740,7 @@ void crowdb_rpc_frame_release(void *frame_handle)
 }
 
 void crowdb_rpc_server_register_handler(crowdb_rpc_server_t server, uint16_t msg_type, crowdb_rpc_handler_fn callback,
-                                      void *user_data)
+                                        void *user_data)
 {
     try {
         if (server == nullptr || callback == nullptr) {
@@ -754,9 +756,9 @@ void crowdb_rpc_server_register_handler(crowdb_rpc_server_t server, uint16_t msg
     }
 }
 
-crowdb_rpc_status crowdb_rpc_server_submit_response(crowdb_rpc_server_t server, void *conn_handle, const uint8_t *control,
-                                                uint32_t control_len, const uint8_t *data, uint32_t data_len,
-                                                uint16_t msg_type, uint64_t request_id)
+crowdb_rpc_status crowdb_rpc_server_submit_response(crowdb_rpc_server_t server, void *conn_handle,
+                                                    const uint8_t *control, uint32_t control_len, const uint8_t *data,
+                                                    uint32_t data_len, uint16_t msg_type, uint64_t request_id)
 {
     try {
         if (server == nullptr || conn_handle == nullptr) {
@@ -807,8 +809,8 @@ crowdb_rpc_status crowdb_rpc_server_submit_response(crowdb_rpc_server_t server, 
 // Submit a response using pre-filled buffer handles (zero-copy). The
 // server takes ownership of the buffers.
 crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t server, void *conn_handle,
-                                                       crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                                       uint16_t msg_type, uint64_t request_id)
+                                                           crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
+                                                           uint16_t msg_type, uint64_t request_id)
 {
     try {
         if (server == nullptr || conn_handle == nullptr) {
@@ -856,7 +858,7 @@ crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t s
 // ── Client-side request handler dispatch (R114) ──────────────────
 
 void crowdb_rpc_client_register_handler(crowdb_rpc_client_t client, uint16_t msg_type, crowdb_rpc_handler_fn callback,
-                                      void *user_data)
+                                        void *user_data)
 {
     try {
         if (client == nullptr || callback == nullptr) {
@@ -897,7 +899,7 @@ void crowdb_rpc_server_set_request_client(crowdb_rpc_server_t server, crowdb_rpc
 // ── Logging ───────────────────────────────────────────────────────
 
 void crowdb_rpc_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
-                           const char *file_prefix)
+                             const char *file_prefix)
 {
     // If the default logger already exists (crowdb-tree called init_logging
     // first), add a second file sink so rpc messages go to a separate file
@@ -909,12 +911,12 @@ void crowdb_rpc_init_logging(const char *log_dir, const char *level, size_t max_
     // default stderr logger.
     if (crowdb::common::logger_initialized()) {
         crowdb::common::add_log_file(log_dir == nullptr ? "" : std::string(log_dir), max_file_mb, max_files,
-                                   file_prefix == nullptr ? "crowdb-rpc" : std::string(file_prefix));
+                                     file_prefix == nullptr ? "crowdb-rpc" : std::string(file_prefix));
     }
     else {
         crowdb::common::init_logging(log_dir == nullptr ? "" : std::string(log_dir),
-                                   level == nullptr ? "info" : std::string(level), max_file_mb, max_files,
-                                   file_prefix == nullptr ? "crowdb-rpc" : std::string(file_prefix));
+                                     level == nullptr ? "info" : std::string(level), max_file_mb, max_files,
+                                     file_prefix == nullptr ? "crowdb-rpc" : std::string(file_prefix));
     }
 }
 
@@ -929,11 +931,11 @@ void crowdb_rpc_shutdown_logging()
 }
 
 void crowdb_rpc_metrics_start(const char *log_path, double interval_secs, size_t max_file_mb, size_t max_files,
-                            int console)
+                              int console)
 {
-    crowdb::common::metrics::MetricsRegistry::global().start(log_path != nullptr ? std::string(log_path) : std::string(),
-                                                           interval_secs, max_file_mb == 0 ? 30 : max_file_mb,
-                                                           max_files == 0 ? 5 : max_files, console != 0);
+    crowdb::common::metrics::MetricsRegistry::global().start(
+        log_path != nullptr ? std::string(log_path) : std::string(), interval_secs, max_file_mb == 0 ? 30 : max_file_mb,
+        max_files == 0 ? 5 : max_files, console != 0);
 }
 
 void crowdb_rpc_metrics_stop(void)

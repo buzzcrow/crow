@@ -281,7 +281,8 @@ async fn restore_from_replay_with_engine_uses_injected_engine() {
 
     // `path: None` selects an in-memory crowdb-tree store -- same restore path
     // crowdb-kv-server's `--kv-engine crowdb-tree` uses, minus the on-disk file.
-    let engine = CrowdbTreeEngine::open(&CrowdbTreeOptions::default()).expect("open in-memory crowdb-tree engine");
+    let engine =
+        CrowdbTreeEngine::open(&CrowdbTreeOptions::default()).expect("open in-memory crowdb-tree engine");
     let restored = PxLocalReplica::restore_from_replay_with_engine(
         7,
         PxLocalReplicaRole::Follower,

@@ -8,7 +8,9 @@
 use super::op::Cell;
 use super::{Batch, KVEngine, KVFuture, Op, SnapshotViewEntry};
 use bytes::Bytes;
-use crowdb_tree_ffi::{AsyncCrowdbtree, Crowdbtree, CtError, ExtOp, GetOutcome, PinnedGetOutcome, ScanOutcome};
+use crowdb_tree_ffi::{
+    AsyncCrowdbtree, Crowdbtree, CtError, ExtOp, GetOutcome, PinnedGetOutcome, ScanOutcome,
+};
 use std::sync::Arc;
 
 pub use crowdb_tree_ffi::Options as CrowdbTreeOptions;

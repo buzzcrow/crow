@@ -118,7 +118,7 @@ struct Options
     // instance; async_page_store must be backed by the
     // *same* durable store as `page_store` (see BlockAsyncPageStore).
     ::crowdb::common::DiskIOUring *async_uring      = nullptr;
-    AsyncPageStore              *async_page_store = nullptr;
+    AsyncPageStore                *async_page_store = nullptr;
 #endif
 
     // ── Buffer pool ──
@@ -160,11 +160,11 @@ struct Options
     // process-global and must be initialized by the application via
     // init_logging() (or ct_init_logging in the C API) before any open().
     // They are retained for API compatibility.
-    std::string log_dir;                       // unused (see init_logging)
-    std::string log_level       = "info";      // unused (see init_logging)
+    std::string log_dir;                         // unused (see init_logging)
+    std::string log_level       = "info";        // unused (see init_logging)
     std::string log_file_prefix = "crowdb-tree"; // unused (see init_logging)
-    size_t      log_max_file_mb = 30;          // unused (see init_logging)
-    size_t      log_max_files   = 5;           // unused (see init_logging)
+    size_t      log_max_file_mb = 30;            // unused (see init_logging)
+    size_t      log_max_files   = 5;             // unused (see init_logging)
 };
 
 } // namespace crowdb::tree

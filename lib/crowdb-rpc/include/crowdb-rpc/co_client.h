@@ -33,14 +33,14 @@ extern "C" {
 // buffers from the pool and returns them via out params. Returns
 // false to stop the coroutine (e.g. deadline reached).
 typedef bool (*crowdb_rpc_co_build_request)(void *ctx, uint64_t request_id, crowdb_rpc_buffer_t *out_control,
-                                          crowdb_rpc_buffer_t *out_data);
+                                            crowdb_rpc_buffer_t *out_data);
 
 // Rust callback: process the response. Records stats, checks deadline.
 // The control + data buffers are owned by C++ and released after this
 // callback returns. latency_ns is the round-trip time for this op.
 // Returns false to stop the coroutine.
 typedef bool (*crowdb_rpc_co_on_response)(void *ctx, uint64_t request_id, crowdb_rpc_buffer_t control,
-                                        crowdb_rpc_buffer_t data, crowdb_rpc_status status, uint64_t latency_ns);
+                                          crowdb_rpc_buffer_t data, crowdb_rpc_status status, uint64_t latency_ns);
 
 // Spawn N coroutines on the client's I/O workers. Each coroutine uses
 // the given connection (round-robin if multiple). The coroutines run
@@ -50,9 +50,9 @@ typedef bool (*crowdb_rpc_co_on_response)(void *ctx, uint64_t request_id, crowdb
 // The client must have its completion pool sized
 // (crowdb_rpc_client_set_completion_pool_size) to >= num_coroutines
 // before calling this.
-void crowdb_rpc_co_spawn(crowdb_rpc_client_t client, crowdb_rpc_server_t server, crowdb_rpc_conn_t *conns, size_t num_conns,
-                       uint32_t num_coroutines, uint16_t msg_type, crowdb_rpc_co_build_request build_request,
-                       crowdb_rpc_co_on_response on_response, void *ctx);
+void crowdb_rpc_co_spawn(crowdb_rpc_client_t client, crowdb_rpc_server_t server, crowdb_rpc_conn_t *conns,
+                         size_t num_conns, uint32_t num_coroutines, uint16_t msg_type,
+                         crowdb_rpc_co_build_request build_request, crowdb_rpc_co_on_response on_response, void *ctx);
 
 // Aggregated stats from the coroutine client. Read after
 // crowdb_rpc_co_spawn returns.

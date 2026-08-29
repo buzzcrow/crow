@@ -73,12 +73,12 @@ constexpr uint8_t SLOT_PENDING_CLAIMED = 3;
 // atomic wrapper avoids TSan false positives).
 struct CompletionSlot
 {
-    std::atomic<uint8_t>  state{SLOT_FREE};
-    uint64_t              request_id{0}; // set when PENDING
-    crowdb_rpc_on_complete  cb{nullptr};   // C ABI callback
-    void                 *user_data{nullptr};
-    std::atomic<uint64_t> deadline_ns{0};
-    Connection           *conn{nullptr}; // for per-connection fail_all
+    std::atomic<uint8_t>   state{SLOT_FREE};
+    uint64_t               request_id{0}; // set when PENDING
+    crowdb_rpc_on_complete cb{nullptr};   // C ABI callback
+    void                  *user_data{nullptr};
+    std::atomic<uint64_t>  deadline_ns{0};
+    Connection            *conn{nullptr}; // for per-connection fail_all
 };
 
 // Map entry for the pending map (oneshot call() path + slab fallback).
@@ -183,7 +183,7 @@ class RpcClient
     // Handler registry for incoming requests (server→client direction).
     // Maps msg_type → (C callback, user_data). Same trampoline pattern
     // as the server-side handler dispatch.
-    std::mutex                                                           handler_mu_;
+    std::mutex                                                             handler_mu_;
     std::unordered_map<uint16_t, std::pair<crowdb_rpc_handler_fn, void *>> request_handlers_;
 
     // Transport for submitting UnknownMessage responses when no handler

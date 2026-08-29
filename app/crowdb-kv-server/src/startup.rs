@@ -72,7 +72,7 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
 /// `{path}/{store_id}-{group_id}/`, `BlockPageStore` creates `.blk-*` files
 /// directly in `path`).
 #[must_use]
-pub fn store_crow_tree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
+pub fn store_crowdb_tree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
     data_root
         .join(format!("store{store_id}"))
         .join(format!("group{group_id}"))
@@ -86,14 +86,14 @@ pub fn store_crow_tree_path(data_root: &Path, store_id: u64, group_id: u64) -> P
 ///
 /// Returns an I/O error if the parent directory cannot be created, or if
 /// `CrowdbTreeEngine::open` fails (e.g. a corrupt or unreadable file).
-async fn open_crow_tree_engine(
+async fn open_crowdb_tree_engine(
     data_root: &Path,
     store_id: u64,
     group_id: u64,
     backend: CrowdbTreeBackend,
     log_dir: &str,
 ) -> io::Result<Box<dyn KVEngine>> {
-    let path = store_crow_tree_path(data_root, store_id, group_id);
+    let path = store_crowdb_tree_path(data_root, store_id, group_id);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -120,8 +120,12 @@ async fn open_crow_tree_engine(
     // core directly rather than adding a thread-pool hop with no genuine
     // asynchrony behind it (see `crowdb_kv::kv::CrowdbTreeEngine`'s docs). This
     // runs once per group at boot, not on a hot path.
-    let engine = CrowdbTreeEngine::open(&opt)
-        .map_err(|e| io::Error::other(format!("CrowdbTreeEngine::open({}) failed: {e:?}", path.display())))?;
+    let engine = CrowdbTreeEngine::open(&opt).map_err(|e| {
+        io::Error::other(format!(
+            "CrowdbTreeEngine::open({}) failed: {e:?}",
+            path.display()
+        ))
+    })?;
     Ok(Box::new(engine))
 }
 
@@ -154,7 +158,7 @@ pub async fn create_group_with_wal(
     let wal = WalEngine::create_with_next_segment_id(wal_backend, wal_config, group_id, next_seg).await?;
 
     let mut local_replica = {
-        let engine = open_crow_tree_engine(
+        let engine = open_crowdb_tree_engine(
             &config.data_root,
             store_id,
             group_id,

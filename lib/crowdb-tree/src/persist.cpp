@@ -341,8 +341,8 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
                 a.empty_blocks.insert(i);
             }
         }
-        CRB_LOG_INFO("[{}] build_allocator: live_extents={} empty_blocks={} max_blk={} block_size={}", name, live.size(),
-                    a.empty_blocks.size(), max_blk, block_size);
+        CRB_LOG_INFO("[{}] build_allocator: live_extents={} empty_blocks={} max_blk={} block_size={}", name,
+                     live.size(), a.empty_blocks.size(), max_blk, block_size);
 
         // Exclude gaps in sparse blocks from the gap list.
         if (!a.gaps.empty()) {
@@ -359,7 +359,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
             size_t gaps_before = a.gaps.size();
             a.gaps             = std::move(filtered);
             CRB_LOG_INFO("[{}] build_allocator: gap filtering {} -> {} (sparse-block threshold {})", name, gaps_before,
-                        a.gaps.size(), kSparseBlockThreshold);
+                         a.gaps.size(), kSparseBlockThreshold);
         }
     }
 
@@ -691,8 +691,8 @@ void Crowdbtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
     version_.fetch_add(1);
     snapshot_total_.fetch_add(1, std::memory_order_relaxed);
     CRB_LOG_INFO("[{}] snapshot committed: seq={} last_applied={} live_pages={} written={} segdir_len={}", name_,
-                prepared.seq, prepared.last_applied_slot, prepared.live_page_count, prepared.pages_written,
-                prepared.segdir_len);
+                 prepared.seq, prepared.last_applied_slot, prepared.live_page_count, prepared.pages_written,
+                 prepared.segdir_len);
 }
 
 void Crowdbtree::acquire_snapshot_slot()
@@ -805,7 +805,7 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
                 }
             }
             CRB_LOG_INFO("[{}] block compaction: empty_now={} empty_prev={} to_delete={}", name_,
-                        prepared.empty_blocks.size(), prev_empty_blocks_.size(), to_delete.size());
+                         prepared.empty_blocks.size(), prev_empty_blocks_.size(), to_delete.size());
             for (uint32_t blk : to_delete) {
                 CRB_LOG_INFO("[{}] block compaction: deleting empty block {}", name_, blk);
                 Status ds = bps->delete_block(blk);
@@ -860,7 +860,7 @@ void Crowdbtree::snapshot_async(
     on_done(st, last_applied);
 }
 
-void Crowdbtree::snapshot_write_next_async(                      // NOLINT(readability-convert-member-functions-to-static)
+void Crowdbtree::snapshot_write_next_async(                    // NOLINT(readability-convert-member-functions-to-static)
     std::shared_ptr<PreparedSnapshot> prepared,                // NOLINT(performance-unnecessary-value-param)
     size_t idx, std::function<void(Status, uint64_t)> on_done) // NOLINT(performance-unnecessary-value-param)
 {
@@ -1049,7 +1049,7 @@ Status Crowdbtree::open(const Options &opt, std::unique_ptr<Crowdbtree> *out)
     tree->version_.store(anchor.snapshot_seq);
 
     CRB_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
-                anchor.last_applied_slot, anchor.root_page_id, entries.size());
+                 anchor.last_applied_slot, anchor.root_page_id, entries.size());
     tree->init_metrics(make_metrics_prefix(opt));
     *out = std::move(tree);
     return Status::Ok();

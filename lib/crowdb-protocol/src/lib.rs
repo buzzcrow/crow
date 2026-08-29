@@ -263,8 +263,8 @@ pub use sysdata::{DiskGroupEntry, DiskdbOwnerEntry, KVGroupBindEntry};
 
 pub mod mgmt;
 pub use mgmt::{
-    AddGroupInitialRole, AddGroupRequest, AddStoreRequest, CrowdbTreeStatsView, ElectionStateView, GroupStatus,
-    HealthResponse, InflightStatus, KvStoreStatus, MetricField, MetricPoint, MetricsResponse,
+    AddGroupInitialRole, AddGroupRequest, AddStoreRequest, CrowdbTreeStatsView, ElectionStateView,
+    GroupStatus, HealthResponse, InflightStatus, KvStoreStatus, MetricField, MetricPoint, MetricsResponse,
     MetricsSnapshot, ReadStateView, RemoteListResponse, RemoteReplicaInfo, RemoteStatus, ReplicaStatus,
     StatusLevel, StepDownRequest, StepDownResult, StoreDetail, StoreListResponse, StoreStatus, StoreSummary,
     SystemInitRequest, SystemInitResponse, TopologyResponse,

@@ -81,7 +81,7 @@ TEST(Alignment, Iu4096AllocatorReuseStaysAligned)
     opt.leaf_split_bytes = 200;
 
     std::map<std::string, std::string> oracle;
-    Crowdbtree                           t(opt);
+    Crowdbtree                         t(opt);
     fill_buf(&t, 80, &oracle);
     ASSERT_TRUE(t.snapshot(nullptr).ok());
     uint64_t early = store.size();

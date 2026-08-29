@@ -177,11 +177,11 @@ TEST(AsyncScan, MatchesSyncScanOutputIncludingTruncation)
 TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
 {
     crowdb::tree_test::TempDir tmp;
-    ct_options               opt = {};
-    opt.path                     = tmp.path.c_str();
-    opt.iu_size                  = 4096;
-    opt.frame_bytes              = 4096;
-    ct_tree *t                   = nullptr;
+    ct_options                 opt = {};
+    opt.path                       = tmp.path.c_str();
+    opt.iu_size                    = 4096;
+    opt.frame_bytes                = 4096;
+    ct_tree *t                     = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 40; ++i) {
@@ -219,11 +219,11 @@ TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
 TEST(AsyncScan, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
     crowdb::tree_test::TempDir tmp;
-    ct_options               opt = {};
-    opt.path                     = tmp.path.c_str();
-    opt.iu_size                  = 4096;
-    opt.frame_bytes              = 4096;
-    ct_tree *t                   = nullptr;
+    ct_options                 opt = {};
+    opt.path                       = tmp.path.c_str();
+    opt.iu_size                    = 4096;
+    opt.frame_bytes                = 4096;
+    ct_tree *t                     = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 40; ++i) {

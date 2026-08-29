@@ -28,12 +28,12 @@ test.describe('physical · server lifecycle', () => {
         await aside.getByText('N-490', { exact: true }).click({ button: 'right' });
 
         // Should have Deploy CrowDB Storage and Delete Node.
-        await expect(page.getByRole('menuitem', { name: /deploy crow storage/i })).toBeVisible();
+        await expect(page.getByRole('menuitem', { name: /deploy crowdb storage/i })).toBeVisible();
         await expect(page.getByRole('menuitem', { name: /delete node/i })).toBeVisible();
 
         // Should NOT have restart/stop (no server deployed).
-        await expect(page.getByRole('menuitem', { name: /restart crow storage/i })).toHaveCount(0);
-        await expect(page.getByRole('menuitem', { name: /stop crow storage/i })).toHaveCount(0);
+        await expect(page.getByRole('menuitem', { name: /restart crowdb storage/i })).toHaveCount(0);
+        await expect(page.getByRole('menuitem', { name: /stop crowdb storage/i })).toHaveCount(0);
 
         await page.keyboard.press('Escape');
       });
@@ -64,8 +64,8 @@ test.describe('physical · server lifecycle', () => {
         await expect(page.getByRole('menuitem', { name: /delete node/i })).toBeVisible();
 
         // Should NOT have restart/stop on the node — those are on the service.
-        await expect(page.getByRole('menuitem', { name: /restart crow storage/i })).toHaveCount(0);
-        await expect(page.getByRole('menuitem', { name: /stop crow storage/i })).toHaveCount(0);
+        await expect(page.getByRole('menuitem', { name: /restart crowdb storage/i })).toHaveCount(0);
+        await expect(page.getByRole('menuitem', { name: /stop crowdb storage/i })).toHaveCount(0);
 
         await page.keyboard.press('Escape');
       });
@@ -91,9 +91,9 @@ test.describe('physical · server lifecycle', () => {
         // Right-click the server (KV) node.
         await aside.getByText('KV-492', { exact: true }).click({ button: 'right' });
 
-        await expect(page.getByRole('menuitem', { name: /restart crow storage/i })).toBeVisible();
-        await expect(page.getByRole('menuitem', { name: /stop crow storage/i })).toBeVisible();
-        await expect(page.getByRole('menuitem', { name: /delete crow storage/i })).toBeVisible();
+        await expect(page.getByRole('menuitem', { name: /restart crowdb storage/i })).toBeVisible();
+        await expect(page.getByRole('menuitem', { name: /stop crowdb storage/i })).toBeVisible();
+        await expect(page.getByRole('menuitem', { name: /delete crowdb storage/i })).toBeVisible();
 
         // Should NOT have "Deploy" or "Delete Node" on the service.
         await expect(page.getByRole('menuitem', { name: /deploy/i })).toHaveCount(0);
@@ -258,7 +258,7 @@ test.describe('physical · server lifecycle', () => {
       }
     }
 
-    // --- Delete crow storage service removes server but keeps node ---
+    // --- Delete crowdb storage service removes server but keeps node ---
     {
       await step('cascade: setup delete-svc', async () => {
         await createRack(baseURL!, { id: 494, name: 'Rack 494' });
@@ -275,12 +275,12 @@ test.describe('physical · server lifecycle', () => {
 
         // Right-click server → Delete CrowDB Storage.
         await aside.getByText('KV-494', { exact: true }).click({ button: 'right' });
-        await page.getByRole('menuitem', { name: /delete crow storage/i }).click();
+        await page.getByRole('menuitem', { name: /delete crowdb storage/i }).click();
 
         // Confirm.
-        const deleteDialog = page.getByRole('dialog', { name: /delete crow storage/i });
+        const deleteDialog = page.getByRole('dialog', { name: /delete crowdb storage/i });
         await expect(deleteDialog).toBeVisible();
-        const confirmBtn = deleteDialog.getByRole('button', { name: /delete crow storage/i });
+        const confirmBtn = deleteDialog.getByRole('button', { name: /delete crowdb storage/i });
         await confirmBtn.evaluate((el) => (el as HTMLElement).click());
 
         // Server disappears from tree, node remains.

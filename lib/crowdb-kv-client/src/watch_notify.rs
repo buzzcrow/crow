@@ -156,7 +156,7 @@ async fn crowdb_rpc_reader_loop(
         let notify_tx_clone = Arc::new(notify_tx.clone());
         let reconnect_tx_clone = reconnect_tx.clone();
         let kv_clone = Arc::clone(&kv);
-        register_crow_rpc_handlers(
+        register_crowdb_rpc_handlers(
             transport.rpc(),
             transport.server(),
             &notify_tx_clone,
@@ -251,7 +251,7 @@ async fn crowdb_rpc_reader_loop(
 /// Register client-side handlers for `FBWatchNotify` (1119) and
 /// `FBWatchNotifyError` (1120) push frames. The handlers parse the
 /// flatbuffer and forward to the notify channel / reconnect signal.
-fn register_crow_rpc_handlers(
+fn register_crowdb_rpc_handlers(
     rpc: &Arc<RpcClient>,
     _server: &Arc<RpcServer>,
     notify_tx: &Arc<mpsc::Sender<WatchNotify>>,

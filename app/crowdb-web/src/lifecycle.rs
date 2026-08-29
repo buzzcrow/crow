@@ -882,7 +882,8 @@ pub async fn http_restart_node_server(
         ..Default::default()
     };
     let deployed = if node.ssh_enabled() {
-        let server_bin = std::env::var("CROWDB_KV_SERVER_BIN").unwrap_or_else(|_| "crowdb-kv-server".to_string());
+        let server_bin =
+            std::env::var("CROWDB_KV_SERVER_BIN").unwrap_or_else(|_| "crowdb-kv-server".to_string());
         crowdb_console_shared::ssh::deploy_via_ssh(&req, &node, &server_bin)
             .await
             .map_err(|e| err_502(format!("ssh redeploy (restart): {e}")))?

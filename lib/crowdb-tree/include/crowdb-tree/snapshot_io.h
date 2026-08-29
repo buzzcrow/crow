@@ -101,7 +101,7 @@ class SnapshotImport
 
   private:
     Status      finish_native(const uint8_t *p, size_t len, uint64_t *out_at_slot);
-    Crowdbtree   &tree_;
+    Crowdbtree &tree_;
     std::string buf_;
 };
 

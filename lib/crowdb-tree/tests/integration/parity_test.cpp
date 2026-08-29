@@ -56,7 +56,7 @@ Options small_tree()
 
 TEST(Parity, InOrderRandomOpsWithPeriodicCompare)
 {
-    Crowdbtree                           t(small_tree());
+    Crowdbtree                         t(small_tree());
     std::map<std::string, std::string> oracle;
     std::mt19937                       rng(2024);
 

@@ -23,7 +23,14 @@ pub fn flush_cpp_global_metrics(
     let label = CString::new(section_label).ok()?;
     // SAFETY: ts and label are valid null-terminated C strings.
     let ptr = unsafe {
-        sys::crowdb_common_metrics_global_flush(window_secs, ts.as_ptr(), label.as_ptr(), width, count_w, tps_w)
+        sys::crowdb_common_metrics_global_flush(
+            window_secs,
+            ts.as_ptr(),
+            label.as_ptr(),
+            width,
+            count_w,
+            tps_w,
+        )
     };
     if ptr.is_null() {
         return None;

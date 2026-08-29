@@ -21,7 +21,9 @@ use crowdb_diskdb::recovery::compaction::{CompactionEngine, PreparatoryThread};
 use crowdb_diskdb::recovery::ZoneLoader;
 use crowdb_diskdb::scanner::{ScanState, ScannerTask};
 use crowdb_diskdb::service::DiskdbRpcService;
-use crowdb_kv_client::{ClientConfig, CrowdbClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient};
+use crowdb_kv_client::{
+    ClientConfig, CrowdbClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient,
+};
 use tracing::info;
 
 /// CROWDB diskdb server CLI.

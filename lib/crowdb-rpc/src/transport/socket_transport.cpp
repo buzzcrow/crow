@@ -194,7 +194,7 @@ void Worker::run_loop()
                             // Map erase is deferred to after the pending-write
                             // flush to avoid dangling raw pointers.
                             CRB_LOG_INFO("worker: conn closed on read fd={} conn_id={} name={}", ev.fd,
-                                        static_cast<long long>(ev.conn->id()), ev.conn->name());
+                                         static_cast<long long>(ev.conn->id()), ev.conn->name());
                             int wfd = ev.conn->write_fd;
                             engine_->remove_connection(ev.fd, wfd);
                             ::close(ev.fd);
@@ -221,7 +221,7 @@ void Worker::run_loop()
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
                             CRB_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
-                                        static_cast<long long>(ev.conn->id()), ev.conn->name());
+                                         static_cast<long long>(ev.conn->id()), ev.conn->name());
                             int rfd = static_cast<int>(ev.conn->transport_handle);
                             engine_->remove_connection(rfd, ev.fd);
                             ::close(ev.fd);
@@ -247,7 +247,7 @@ void Worker::run_loop()
                 case SocketEvent::Error:
                     if (ev.conn != nullptr && ev.conn->is_open()) {
                         CRB_LOG_WARN("worker: socket error event fd={} conn_id={} name={}", ev.fd,
-                                    static_cast<long long>(ev.conn->id()), ev.conn->name());
+                                     static_cast<long long>(ev.conn->id()), ev.conn->name());
                         int rfd = static_cast<int>(ev.conn->transport_handle);
                         int wfd = ev.conn->write_fd;
                         ev.conn->close();
@@ -544,7 +544,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
         cnt_send_queue_reject().inc();
         stats_.send_queue_rejects.fetch_add(1, std::memory_order_relaxed);
         CRB_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
-                    static_cast<long long>(conn->id()), conn->name());
+                     static_cast<long long>(conn->id()), conn->name());
         return false;
     }
 
@@ -667,13 +667,15 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
     sa.sin_family = AF_INET;
     sa.sin_port   = htons(static_cast<uint16_t>(port));
     if (::inet_pton(AF_INET, addr.c_str(), &sa.sin_addr) <= 0) {
-        CRB_LOG_WARN("connect: inet_pton failed addr={} port={} errno={} ({})", addr, port, errno, std::strerror(errno));
+        CRB_LOG_WARN("connect: inet_pton failed addr={} port={} errno={} ({})", addr, port, errno,
+                     std::strerror(errno));
         ::close(fd);
         return nullptr;
     }
 
     if (::connect(fd, reinterpret_cast<struct sockaddr *>(&sa), sizeof(sa)) < 0) {
-        CRB_LOG_WARN("connect: connect() failed addr={} port={} errno={} ({})", addr, port, errno, std::strerror(errno));
+        CRB_LOG_WARN("connect: connect() failed addr={} port={} errno={} ({})", addr, port, errno,
+                     std::strerror(errno));
         ::close(fd);
         return nullptr;
     }

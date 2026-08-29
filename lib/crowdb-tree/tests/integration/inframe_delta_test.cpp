@@ -111,7 +111,7 @@ TEST(InFrameDelta, ParityWithDefaultMode)
         opt.inframe_delta     = inframe;
         opt.max_inframe_delta = 6;
         opt.leaf_split_bytes  = 1024;
-        Crowdbtree     t(opt);
+        Crowdbtree   t(opt);
         std::mt19937 rng(2024);
         uint64_t     slot = 0;
         for (int r = 0; r < 600; ++r) {
@@ -147,7 +147,7 @@ TEST(InFrameDelta, MicrobenchVsCowRebuild)
         opt.max_inframe_delta = 16;
         opt.leaf_split_bytes  = 1U << 20; // single leaf: isolate the overlay vs rebuild cost
         Crowdbtree t(opt);
-        uint64_t slot = 0;
+        uint64_t   slot = 0;
         // Pre-populate a sizeable base so a rebuild is non-trivial.
         for (int i = 0; i < 300; ++i) {
             ++slot;

@@ -51,7 +51,7 @@ std::string make_value(int value_size, int i)
 
 struct Setup
 {
-    std::unique_ptr<Crowdbtree>     tree;
+    std::unique_ptr<Crowdbtree>   tree;
     std::shared_ptr<MemPageStore> store;
 };
 

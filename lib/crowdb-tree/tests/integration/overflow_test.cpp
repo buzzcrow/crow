@@ -75,7 +75,7 @@ TEST(Overflow, PutGetScanReopenMultiFrame)
     std::map<std::string, std::string> oracle;
     {
         Crowdbtree t(opt);
-        uint64_t slot = 0;
+        uint64_t   slot = 0;
         for (size_t i = 0; i < sizes.size(); ++i) {
             ++slot;
             std::string v = big_val(sizes[i], static_cast<uint32_t>(i + 1));
@@ -123,7 +123,7 @@ TEST(Overflow, EvictionReload)
 {
     MemPageStore store(1);
     Options      opt = overflow_opts(&store);
-    Crowdbtree     t(opt);
+    Crowdbtree   t(opt);
 
     std::map<std::string, std::string> oracle;
     uint64_t                           slot = 0;
@@ -150,7 +150,7 @@ TEST(Overflow, OverwriteAndDeleteRetiresChains)
     MemPageStore store(1);
     Options      opt = overflow_opts(&store);
     {
-        Crowdbtree          t(opt);
+        Crowdbtree        t(opt);
         uint64_t          slot = 0;
         const std::string k    = make_key(1);
 

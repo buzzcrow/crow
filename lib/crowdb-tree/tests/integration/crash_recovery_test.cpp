@@ -149,7 +149,7 @@ TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression)
     std::map<std::string, std::string> gen1;
     {
         Crowdbtree t(opt);
-        uint64_t slot = 0;
+        uint64_t   slot = 0;
         for (int i = 0; i < 20; ++i) {
             ++slot;
             std::string v = big_val(5000 + i, static_cast<char>('A' + (i % 26))); // ~2 frames
@@ -197,7 +197,7 @@ TEST(CrashRecovery, AlignedTwoGenerationFallback)
     std::map<std::string, std::string> gen1;
     {
         Crowdbtree t(opt);
-        uint64_t slot = 0;
+        uint64_t   slot = 0;
         for (int i = 0; i < 60; ++i) {
             ++slot;
             std::string v = "v" + std::to_string(i);

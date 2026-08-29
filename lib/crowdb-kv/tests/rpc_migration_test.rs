@@ -25,7 +25,7 @@ struct CrowdbRpcCluster {
 }
 
 /// Start a 2-node cluster where consensus RPCs flow over crowdb-rpc.
-async fn start_crow_rpc_cluster() -> CrowdbRpcCluster {
+async fn start_crowdb_rpc_cluster() -> CrowdbRpcCluster {
     init_test_subscriber();
     let net = lock().await;
 
@@ -85,7 +85,7 @@ impl CrowdbRpcCluster {
 
 #[tokio::test]
 async fn crowdb_rpc_prepare_accept_roundtrip() {
-    let cluster = start_crow_rpc_cluster().await;
+    let cluster = start_crowdb_rpc_cluster().await;
 
     // Get the leader's remote replica (points at follower).
     let leader_group = cluster.leader.get_group(1).expect("leader group");
@@ -143,7 +143,7 @@ async fn crowdb_rpc_prepare_accept_roundtrip() {
 
 #[tokio::test]
 async fn crowdb_rpc_chosen_notification_fire_and_forget() {
-    let cluster = start_crow_rpc_cluster().await;
+    let cluster = start_crowdb_rpc_cluster().await;
 
     let leader_group = cluster.leader.get_group(1).expect("leader group");
     let follower_remote = leader_group.get_remote_replica(2).expect("follower remote");
@@ -197,7 +197,7 @@ async fn crowdb_rpc_chosen_notification_fire_and_forget() {
 
 #[tokio::test]
 async fn crowdb_rpc_fetch_gap() {
-    let cluster = start_crow_rpc_cluster().await;
+    let cluster = start_crowdb_rpc_cluster().await;
 
     // Prepare + Accept slot 1 on both leader (locally) and follower (via RPC).
     let ballot = PxBallot::new(1, 1);

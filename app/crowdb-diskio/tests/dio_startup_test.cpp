@@ -41,7 +41,7 @@ namespace
 // Find the crowdb-diskio binary relative to the test executable.
 std::string find_binary()
 {
-    // The test executable is at app/crowdb-diskio/build/crow_diskio_tests.
+    // The test executable is at app/crowdb-diskio/build/crowdb_diskio_tests.
     // The binary is at app/crowdb-diskio/build/crowdb-diskio.
     char    buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -50,12 +50,12 @@ std::string find_binary()
     }
     buf[n] = '\0';
     std::string path(buf);
-    // Replace "crow_diskio_tests" with "crowdb-diskio".
-    size_t pos = path.rfind("crow_diskio_tests");
+    // Replace "crowdb_diskio_tests" with "crowdb-diskio".
+    size_t pos = path.rfind("crowdb_diskio_tests");
     if (pos == std::string::npos) {
         return "";
     }
-    path.replace(pos, std::string("crow_diskio_tests").length(), "crowdb-diskio");
+    path.replace(pos, std::string("crowdb_diskio_tests").length(), "crowdb-diskio");
     return path;
 }
 

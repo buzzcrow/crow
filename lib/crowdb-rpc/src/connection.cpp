@@ -227,7 +227,7 @@ retry:
             }
             cnt_write_error().inc();
             CRB_LOG_WARN("try_send: writev hard error fd={} conn_id={} name={} errno={} ({})", fd,
-                        static_cast<long long>(id_), name_, errno, std::strerror(errno));
+                         static_cast<long long>(id_), name_, errno, std::strerror(errno));
             for (int i = 0; i < frame_count; i++) {
                 release_frame(frames[i]);
             }

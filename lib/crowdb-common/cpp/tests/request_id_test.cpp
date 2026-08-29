@@ -20,7 +20,7 @@ TEST(RequestIdGen, NextIsMonotonicallyIncreasing)
 
 TEST(RequestIdGen, NextIsUniqueUnderConcurrency)
 {
-    crowdb::common::RequestIdGen         gen;
+    crowdb::common::RequestIdGen       gen;
     const int                          n_threads  = 8;
     const int                          per_thread = 1000;
     std::vector<std::thread>           threads;
