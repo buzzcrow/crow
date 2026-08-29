@@ -435,6 +435,18 @@ backend-facing contract here:
 - `cluster inspect <id>` uses a compact id grammar: `s<store_id>`,
   `s<store_id>/g<group_id>`, `s<store_id>/g<group_id>/r<replica_id>`,
   or a bare node id string.
+- **Short flag aliases.** Every `#[arg]` gets a `short = '<char>'`
+  using the natural mnemonic (first letter of the long name, or an
+  established convention: `-s` store, `-g` group, `-n` node, `-r`
+  rack/replica, `-k` key, `-d` duration/disk, `-c` connections,
+  `-L` loaders, `-m` metrics, `-j` json). Global args occupy `-i`
+  (ip), `-o` (port), `-p` (config), `-j` (json) across all
+  subcommands. **Conflict rule:** if the natural mnemonic char is
+  already taken (by a global arg or a sibling in the same
+  subcommand), the arg stays long-only — no reshuffling, no awkward
+  uppercase fallback. Established non-conflicting uppercase shorts
+  (e.g. `-P` for `--server-port`, `-I` for `--id` to avoid `-i`)
+  are kept as-is.
 - Output: JSON by default for scripting; `--json` flag is a no-op.
   Human-readable table formatting is a future enhancement.
 
