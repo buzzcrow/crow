@@ -32,7 +32,8 @@ app/crowdb-web/ui/e2e/log/
 # ── Runtime artifacts (WAL, config, logs) ───────────────────────
 # Top-level artifact dirs (anchored to repo root).
 /log/
-/runtime-data/ 
+/runtime-data/
+/runtime/
 # bench-runs/ holds datetime-stamped run dirs; ignore contents
 # but keep the directory itself in the repo.
 /bench-runs/*

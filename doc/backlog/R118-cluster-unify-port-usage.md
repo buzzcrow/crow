@@ -17,8 +17,11 @@ collide on the famous ports or on whatever a test harness hardcodes.
 
 - `lib/crowdb-protocol/src/ports.rs` already defines base ports + stride
   rules + a `ServicePort` enum for all current services (kv-server
-  mgmt/listen/consensus-rpc/client-rpc, diskdb listen/http/rpc, chunkdb
-  listen/http/rpc, web). But adoption is incomplete and inconsistent:
+  mgmt/listen/consensus-rpc/client-rpc, diskdb listen/http, chunkdb
+  listen/http/rpc, web). But adoption is incomplete and inconsistent.
+  Note: `DISKDB_RPC_BASE` is defined as a constant but `DiskdbRpc` is
+  **missing** from the `ServicePort` enum — so `ServicePort::port()`
+  cannot compute diskdb RPC ports today; item 1 must add the variant.
   - `crowdb-kv-server` CLI (`app/crowdb-kv-server/src/cli.rs`) exposes
     `--management-port` (default `KV_SERVER_MGMT_BASE`) and `--ports`
     (listen pool, optional free-form list) but has **no CLI flag** for the
@@ -29,7 +32,13 @@ collide on the famous ports or on whatever a test harness hardcodes.
     from TOML config (`rpc_listen_addr`, `http_listen_addr`,
     `listen_addr`), not from CLI flags with `ports.rs` defaults — so the
     famous ports are not enforced at the CLI boundary and an operator
-    cannot override per-start without editing config.
+    cannot override per-start without editing config. CLI has full
+    `--listen-addr` / `--http-addr` address overrides (not per-port
+    flags); `0` is not rejected.
+  - `crowdb-chunkdb` (`app/crowdb-chunkdb/src/main.rs`, now landed) has
+    the same shape as diskdb: `--listen-addr` / `--http-addr` address
+    overrides, TOML config with `CHUNKDB_*_BASE` defaults, no per-port
+    flags, no `0` rejection.
   - `KvServer::start` (`lib/crowdb-kv/src/cluster/kv_server.rs` ~lines
     68-71) explicitly supports **port 0 for OS-assigned** ports: "Bind a
     TCP listener to determine the actual port (supports port 0 for
@@ -39,8 +48,10 @@ collide on the famous ports or on whatever a test harness hardcodes.
     clients without extra plumbing, breaking the deterministic-port flow
     the cluster expects.
   - The console UI E2E fixture ships its **own ad-hoc port allocator**
-    disconnected from `ports.rs`: `app/crowdb-web/ui/e2e/fixtures/consoleSetup.ts`
-    ~lines 13-26 define `PORT_BASE = 30000` / `PORT_CEILING = 32768`
+    disconnected from `ports.rs`: the counter now lives in
+    `app/crowdb-web/ui/e2e/fixtures/crowClusterDeployer.ts` (lines 13-26;
+    `consoleSetup.ts` is now a re-export shim) and defines
+    `PORT_BASE = 30000` / `PORT_CEILING = 32768`
     (hardcoded, chosen only to stay below the Linux ephemeral range) and
     a `freePort()` that is a bare monotonic counter (`return nextPort++`)
     — it does **not** check whether a port is actually free, just hands
@@ -60,6 +71,14 @@ collide on the famous ports or on whatever a test harness hardcodes.
     console-UI-test-only, not shared with the Rust integration tests or
     bench scripts, and (d) uses a range that has no relationship to the
     `ServicePort` scheme the rest of the project standardizes on.
+  - The Rust test harnesses and bench targets use a **different stopgap**:
+    `crowdb_console_shared::test_ports::unique_test_port()` (binds
+    `127.0.0.1:0`, reads the OS-assigned port, drops the listener). This
+    is reliable for parallel tests but relies on port 0 — the very escape
+    hatch R118 wants to remove from server CLIs. `tools/bench-rpc-
+    regression.sh` hardcodes `SERVER_PORT=18080`. So there are **three**
+    parallel port-picking mechanisms (E2E counter, Rust `:0` bind, shell
+    hardcoded) none of which is the `ServicePort` scheme.
 - Impact: with no unified CLI surface and no dispatcher, test instances
   collide on famous ports, producing flaky `Address already in use`
   failures. The port-0 escape hatch makes it worse by hiding the actual
@@ -154,8 +173,10 @@ Numbered work items:
    (new "Port allocation" section) + `lib/crowdb-protocol/src/ports.rs`.
    Document the base/stride/`ServicePort` scheme as design (currently
    code-only), add any missing service types (e.g. diskio when it
-   lands), and state the "no port 0" rule as a design invariant. Closes
-   the design gap flagged above.
+   lands), add the missing `DiskdbRpc` variant to the `ServicePort` enum
+   (`DISKDB_RPC_BASE` exists but has no enum variant), and state the "no
+   port 0" rule as a design invariant. Closes the design gap flagged
+   above.
 2. **`crowdb-kv-server` CLI unification** — `app/crowdb-kv-server/src/cli.rs`
    + `lib/crowdb-kv/src/cluster/kv_server.rs`. Add `--consensus-rpc-port`
    (default `KV_RPC_BASE`) and `--client-rpc-port` (default
@@ -170,10 +191,10 @@ Numbered work items:
    config as the fallback when the flag is absent. Reject `0`. The
    paired-port invariant (http = listen + 1 per instance) is enforced or
    documented as overridden when flags are passed individually.
-4. **`crowdb-chunkdb` CLI unification** — chunkdb server entry + config.
-   Same shape as diskdb: `--listen-port` / `--http-port` / `--rpc-port`
-   with `CHUNKDB_*_BASE` defaults, reject `0`. Blocked on the chunkdb
-   server component landing (see Dependencies).
+4. **`crowdb-chunkdb` CLI unification** — `app/crowdb-chunkdb/src/main.rs`
+   + chunkdb config. Same shape as diskdb: `--listen-port` / `--http-port`
+   / `--rpc-port` with `CHUNKDB_*_BASE` defaults, reject `0`. The chunkdb
+   server binary has landed; this item is now unblocked.
 5. **`crowdb-web` / `crowdb-cli` port flags** — `app/crowdb-web/src/main.rs`,
    `app/crowdb-cli/src/main.rs`. Already use `WEB_BASE` default; verify
    `0` is rejected and the flag name is consistent with the unified
@@ -265,10 +286,8 @@ Edge cases at a glance:
 **Dependencies**
 
 - None on other `R**` items for the CLI unification (items 1–5) —
-  `ports.rs` already exists.
-- Item 4 (chunkdb CLI) is blocked on the chunkdb server component
-  landing (currently only a reserved proto surface per R83/R84 backlog
-  notes); if not landed, item 4 is deferred.
+  `ports.rs` already exists. The chunkdb server binary has landed
+  (`app/crowdb-chunkdb/`), so item 4 is no longer blocked.
 - Item 6 (dispatcher) has no upstream `R**` dependency but is the input
   to item 7 (test harness integration) and to any future cluster-
   bootstrap tool.
@@ -301,8 +320,8 @@ Edge cases at a glance:
 - `crowdb-diskdb --listen-port 0` → CLI parse error. Unit test.
 - `crowdb-diskdb --listen-port 9943 --http-port 9944` → listens on those
   ports; paired invariant http = listen + 1 holds. E2E test.
-- `crowdb-chunkdb` equivalent of the above (skipped if server not landed
-  — stated reason). E2E test / skip.
+- `crowdb-chunkdb` equivalent of the above (server has landed; no
+  skip). E2E test.
 - `crowdb-web --port 0` → CLI parse error. Unit test.
 
 **Port dispatcher**:
@@ -420,3 +439,29 @@ changes (none expected), plus `pixi run cargo fmt --all -- --check` and
    operator expected the default; stay-at-default is explicit but can
    produce a confusingly split pair. Needs a human decision on the
    override rule.
+6. **Port-0 rule vs `unique_test_port()` conflict** — R118 wants to
+   reject port 0 on every server CLI flag and remove the port-0 bind
+   path in `KvServer::start`. But the Rust test harnesses and bench
+   targets rely on `unique_test_port()` (bind `127.0.0.1:0` → read
+   OS-assigned port → drop listener → pass that port to the server CLI
+   as an explicit `--*-port`). So the "no port 0" rule applies to the
+   **server CLI parse**, not to the test helper that picks the port.
+   This is consistent (the server still binds an explicit non-zero
+   port), but the doc should state this distinction clearly so the
+   implementer does not remove `unique_test_port()`. Needs confirmation
+   that the rule is "server CLIs reject literal `0` on a port flag" and
+   not "no code anywhere may bind port 0".
+7. **Is the flock claim-file prober over-engineered?** — the existing
+   `unique_test_port()` (OS `:0` bind) already solves test parallelism
+   reliably and is the standard pattern; it is used by ~15 test files.
+   The flock-coordinated claim file adds complexity (TOCTOU window,
+   stale-file cleanup, NFS caveat, claim-file path/format decision) for
+   the marginal benefit of using `ServicePort`-scheme ports in tests
+   instead of OS-assigned ones. Candidate simplification: (a) adopt
+   `unique_test_port()` in the E2E fixture (replacing the naive counter,
+   lifting `workers: 1`) and defer the flock prober unless a real need
+   arises (e.g. cluster bootstrap needing famous-port coordination); or
+   (b) build the flock prober as designed. Trade-off: simplicity vs.
+   test-port discoverability/famous-port alignment. Needs a decision on
+   whether the flock prober is in scope for R118 or should be split into
+   a separate requirement.

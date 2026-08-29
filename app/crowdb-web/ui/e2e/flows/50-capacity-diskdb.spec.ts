@@ -1331,8 +1331,13 @@ test.describe('capacity · diskdb', () => {
     await addGroup(baseURL!, storeId, groupId, 1, [nodeId]);
 
     try {
+      // The disk-groups data arrives via fetchNodeDiskGroups (async, not
+      // polled) which lags the racks tree on slow CI runners. Wait for
+      // the API response before asserting DG visibility.
+      const dgResponse = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
       await page.goto('/');
       await page.getByRole('button', { name: 'Capacity' }).click();
+      await dgResponse;
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
@@ -1342,7 +1347,7 @@ test.describe('capacity · diskdb', () => {
       // Expand the node to see the disk-group.
       const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNode.count() > 0) await expandNode.click();
-      await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 5_000 });
+      await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 10_000 });
 
       // --- Right-click DG → "Assign to DiskDB" context menu item ---
       await clickMenuItem(page, aside.getByText(/DG-590/, { exact: true }), /assign to diskdb/i);
@@ -1404,9 +1409,11 @@ test.describe('capacity · diskdb', () => {
 
         if (usageReachable) {
           // --- Verify the capacity panel shows non-zero ---
+          const dgResponse2 = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
           await page.goto('/');
           await page.getByRole('button', { name: 'Capacity' }).click();
-          await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 5_000 });
+          await dgResponse2;
+          await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 10_000 });
           // The Total Capacity card should show a non-zero value (not "0 B").
           const capacityText = page.getByText(/Total Capacity/).locator('..');
           await expect(capacityText.getByText(/0 B/)).toHaveCount(0, { timeout: 10_000 });

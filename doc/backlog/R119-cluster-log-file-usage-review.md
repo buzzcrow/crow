@@ -26,62 +26,81 @@ the project has log *infrastructure* but no reviewed log *content*.
   (size-based rotation, gzip compression of rotated files, default
   30 MiB per file, 5 rotated files kept). File naming:
   `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`, rotated to `.log.gz`.
-  `init_file_logging` / `init_file_and_console_logging` build a
+  `init_file_logging` / `init_file_and_console_logging` (and a
+  `_split` variant separating file vs console levels) build a
   `tracing-subscriber` `fmt` layer (no ANSI for file, `with_target`
   + `with_thread_names`) over a `tracing-appender` non-blocking
   wrapper. `EnvFilter` from `RUST_LOG` with a per-project default
   fallback (`crowdb-kv/src/common/logging.rs::CROWDB_KV_DEFAULT_FILTER`).
   A separate `open_metrics_log` writes a metrics log with the same
-  rotation scheme. Only `crowdb-kv-server` uses any of this.
+  rotation scheme. Now used by `crowdb-kv-server`, `crowdb-diskdb`,
+  `crowdb-chunkdb`, and `crowdb-web` — but only `crowdb-kv-server`
+  exposes CLI flags (`--log`, `--log-max-file-mb`, `--log-max-files`)
+  to tune it; the others hardcode the defaults.
 - **C++ logging infrastructure** —
   `crowdb-common/cpp/src/log.cpp` + `log.h` provide an async spdlog
   logger over `compressing_file_sink_mt` (same size-rotation +
   gzip scheme, same `{prefix}-{ts}-{pid}.log` naming). Macros
-  `CR_LOG_*` gate on a runtime `logging_enabled()` atomic. No-op
-  when built without `CROWDB_HAVE_SPDLOG` (the Rust FFI `cc` build).
-  `crowdb-tree-ffi::ct_init_logging` (`lib/crowdb-tree/ffi/src/tree.rs`)
-  bridges it. `crowdb-rpc` has `crowdb_rpc_init_logging` /
-  `crowdb_rpc_flush_logging` / `crowdb_rpc_shutdown_logging` in
-  `lib/crowdb-rpc/include/crowdb-rpc/c_api.h` — but there is NO Rust
-  FFI wrapper for these symbols and NO caller anywhere in the
-  workspace (grep for `crowdb_rpc_init_logging` in `*.rs` returns
-  nothing). So crowdb-rpc's C++ logs are never initialized.
-- **Per-server logging setup (the inconsistencies)**:
+  `CRB_LOG_*` (not `CR_LOG_*`) gate on a runtime `logging_enabled()`
+  atomic. No-op when built without `CROWDB_HAVE_SPDLOG` (the Rust FFI
+  `cc` build). `crowdb-tree-ffi::ct_init_logging`
+  (`lib/crowdb-tree/ffi/src/tree.rs`) bridges it. `crowdb-rpc` has
+  `crowdb_rpc_init_logging` / `crowdb_rpc_flush_logging` /
+  `crowdb_rpc_shutdown_logging` in
+  `lib/crowdb-rpc/include/crowdb-rpc/c_api.h` — a Rust FFI wrapper
+  now exists (`lib/crowdb-rpc/ffi/src/logging.rs::init_logging`) and
+  is called by `crowdb-kv-server` and `crowdb-web` at startup. But
+  `crowdb-diskdb` and `crowdb-chunkdb` do NOT call it, so their
+  crowdb-rpc C++ transport logs are still silent.
+- **Per-server logging setup (the remaining inconsistencies)**:
   - `crowdb-kv-server` (`app/crowdb-kv-server/src/main.rs` ~lines
-    34-61) — full file logging: Rust
-    `init_file_and_console_logging` / `init_file_logging` to dir
-    `"log"`, prefix `"crowdb-kv-server"`; C++ crowdb-tree via
+    34-74) — full file logging: Rust
+    `init_file_and_console_logging_split` to dir `"log"`, prefix
+    `"crowdb-kv-server"`; C++ crowdb-tree via
     `ct_init_logging("log", "info", ...)` prefix
-    `"crowdb-kv-server-tree"`; metrics log via `MetricsRunner` prefix
+    `"crowdb-kv-server-tree"`; C++ crowdb-rpc via
+    `crowdb_rpc_ffi::init_logging("log", "info", ...)` prefix
+    `"crowdb-kv-server-rpc"`; metrics log via `MetricsRunner` prefix
     `"crowdb-kv-server-metrics"`. CLI flags `--log-max-file-mb`
     (default 30), `--log-max-files` (default 5), `--log` (console
-    toggle), `--metrics-interval` (default 5s, 0 disables). The
-    C++ level is hardcoded to `"info"` — not driven by `RUST_LOG`
-    or any CLI flag. crowdb-rpc C++ logging is NOT initialized.
-  - `crowdb-diskdb` (`app/crowdb-diskdb/src/main.rs` line 48) —
-    `tracing_subscriber::fmt().init()`: console/stderr only. No
-    file logging, no rotation, no compression, no metrics log.
-  - `crowdb-chunkdb` (`app/crowdb-chunkdb/src/main.rs` line 46) —
-    `tracing_subscriber::fmt().init()`: console/stderr only.
-    Same gap as diskdb.
-  - `crowdb-web` (`app/crowdb-web/src/main.rs` lines 32-37) —
-    `tracing_subscriber::fmt().with_env_filter(...).init()`:
-    console only. Also opens an `ops_log` (JSON-Lines operation
-    log for HTTP/RPC/SSH calls) at
+    toggle, short `-l`), `--metrics-interval` (default 5s, 0
+    disables). Remaining gap: the C++ level (both tree and rpc) is
+    hardcoded to `"info"` — not driven by `RUST_LOG` or any CLI
+    flag; the log dir is hardcoded `"log"` (no `--log-dir` flag).
+  - `crowdb-diskdb` (`app/crowdb-diskdb/src/main.rs` lines 56-64) —
+    file logging is now wired via
+    `init_file_and_console_logging_split("log", "crowdb-diskdb",
+    30, 5, "info", "warn")`. Remaining gaps: no `--log` /
+    `--log-dir` / `--log-max-file-mb` / `--log-max-files` CLI flags
+    (defaults hardcoded); no metrics log; C++ crowdb-rpc logging
+    NOT initialized (transport layer silent); log dir hardcoded
+    `"log"`.
+  - `crowdb-chunkdb` (`app/crowdb-chunkdb/src/main.rs` lines 52-60)
+    — file logging is now wired, same shape as diskdb. Same
+    remaining gaps: no CLI flags, no crowdb-rpc logging, log dir
+    hardcoded. The chunkdb server binary has landed.
+  - `crowdb-web` (`app/crowdb-web/src/main.rs` lines 33-68) — file
+    logging is now wired via `init_file_and_console_logging_split`
+    to `~/.crowdb-kv/log`, prefix `"console-web"`. Also opens an
+    `ops_log` (JSON-Lines operation log for HTTP/RPC/SSH calls) at
     `~/.crowdb-kv/log/console-web-{secs}-{pid}.log`
     (`crowdb-console-shared/src/ops_log.rs`) — no rotation, no
-    compression, no size cap.
+    compression, no size cap. Remaining gaps: no CLI flags for log
+    tuning; `ops_log` unbounded; log dir hardcoded to
+    `~/.crowdb-kv/log` (different from the `"log"` used by
+    kv-server/diskdb/chunkdb).
   - `crowdb-cli` (`app/crowdb-cli/src/main.rs` line 133) — no
     `tracing_subscriber` init in main; opens `ops_log` via
     `ops_log::init_default("cli")` at
     `~/.crowdb-kv/log/console-cli-{secs}-{pid}.log` — no rotation.
-- **Log directory inconsistency** — `crowdb-kv-server` writes to
-  `"log"` (relative to CWD, though `--root` derives `log_dir` in
-  config); `ops_log` writes to `~/.crowdb-kv/log`; the test harness
+- **Log directory inconsistency** — `crowdb-kv-server`,
+  `crowdb-diskdb`, and `crowdb-chunkdb` all write to `"log"`
+  (relative to CWD); `crowdb-web` and `ops_log` write to
+  `~/.crowdb-kv/log`; the test harness
   (`crowdb-test-harness/src/{diskdb,chunkdb,diskio}.rs`) redirects
-  child stdout/stderr to a temp file like
-  `/tmp/crowdb-diskdb-e2e-{pid}.log` (no rotation, single file). An
-  operator cannot point all servers at one log root.
+  child stdout/stderr to `<workspace_root>/test-logs/crowdb-*-e2e-
+  {pid}.log` (no rotation, single file). An operator cannot point
+  all servers at one log root.
 - **Log format inconsistency** — Rust tracing `fmt` layer emits
   target + thread names, no ANSI on file, ANSI on console; the
   in-line timestamp is tracing's own. C++ spdlog emits
@@ -96,19 +115,23 @@ the project has log *infrastructure* but no reviewed log *content*.
   log at all. The only way to know what a server actually writes
   is to run it and read the output — which console-only servers
   discard under normal deployment.
-- Impact: in a real deployment, `crowdb-diskdb`, `crowdb-chunkdb`, and
-  `crowdb-web` produce no persistent logs — an operator debugging a
-  disk allocation failure, a chunk placement error, or a console
-  API timeout has nothing to read. `crowdb-kv-server` has logs but
-  the C++ crowdb-rpc transport layer (used by the consensus hot path
-  per R32) is silent. Log content is unreviewed, so even where
-  logs exist they may not explain the behavior they report.
-- Root cause: deferred placeholder. The shared logging
-  infrastructure was built for `crowdb-kv-server` (and crowdb-tree)
-  but never extended to the other servers; the crowdb-rpc C API was
-  declared but never wired; no logging section exists in the
-  observability design doc to anchor a unified scheme; and no
-  content review pass was ever scheduled.
+- Impact: file logging is now present on all four servers, so the
+  "no persistent logs" gap is largely closed. Remaining impact: (1)
+  `crowdb-diskdb` and `crowdb-chunkdb` do not wire crowdb-rpc C++
+  logging, so their transport layer is silent; (2) the C++ log level
+  is hardcoded `"info"` on every server — operators cannot tune it;
+  (3) no server has a `--log-dir` flag, so log directories diverge
+  (`"log"` vs `~/.crowdb-kv/log`) and cannot be unified per-deploy;
+  (4) `ops_log` has no rotation/size cap and can grow unbounded on a
+  long-running `crowdb-web`; (5) log content is unreviewed, so even
+  where logs exist they may not explain the behavior they report;
+  (6) no e2e test asserts log file existence or key content lines.
+- Root cause: partially-landed placeholder. The shared logging
+  infrastructure was extended to diskdb/chunkdb/web and the
+  crowdb-rpc FFI bridge was built, but the work stopped short of:
+  CLI flag unification, C++ level propagation, crowdb-rpc wiring in
+  diskdb/chunkdb, `ops_log` rotation, a logging design-doc section,
+  log content review, and e2e log assertions.
 
 **Design pointers**
 
@@ -173,12 +196,13 @@ the project has log *infrastructure* but no reviewed log *content*.
 
 **Solution**
 
-**No clear solution yet — deferred to design.** The unification
-target is clear (every server initializes file logging with
-rotation + compression via the shared `crowdb-common` stack; C++
-libraries' logging is wired through their FFI bridges and
-coordinated with the Rust process; one log directory convention;
-one timestamp/format scheme; log content reviewed for meaning), but
+File logging is now wired on all four servers and the crowdb-rpc
+FFI bridge exists, so the remaining work is smaller than when this
+doc was written. The unification target is clear (every server
+exposes `--log-dir` / `--log` / `--log-max-file-mb` / `--log-max-
+files` CLI flags; C++ log level driven by the same source as Rust;
+crowdb-rpc logging wired in diskdb/chunkdb; `ops_log` rotation; one
+log directory convention; log content reviewed for meaning), but
 the specific decisions — whether to unify Rust and C++ into one
 file or keep per-stack files, how to propagate log level from CLI
 to both stacks, whether `ops_log` adopts the shared rotation or
@@ -188,17 +212,18 @@ prerequisite: its findings determine the remediation scope.
 
 **One-line summary**: Audit log infrastructure and log content
 across all servers and C++ libraries (code review + e2e log
-inspection), then unify every server on the shared rotating-file
-logging stack, wire the crowdb-rpc C++ logging through its FFI
-bridge, adopt one log directory and format convention, and fix log
-lines that are not meaningful or self-explaining.
+inspection), then unify the remaining gaps: add `--log-*` CLI flags
+to diskdb/chunkdb/web, drive C++ log level from CLI/env, wire
+crowdb-rpc logging in diskdb/chunkdb, add `ops_log` rotation, adopt
+one log directory convention, and fix log lines that are not
+meaningful or self-explaining.
 
 Numbered work items:
 
 1. **Audit pass — code** — every crate/binary under `lib/` and
    `app/`. Catalog every logging init call site, every log
    directory, every rotation/compression setting, every C++ FFI
-   logging bridge, and a sample of `tracing::*` / `CR_LOG_*` call
+   logging bridge, and a sample of `tracing::*` / `CRB_LOG_*` call
    sites per component. Output: a findings list (which servers
    lack file logging, which C++ libs are unwired, which log lines
    are opaque/noisy/redundant, where log directories diverge).
@@ -221,48 +246,47 @@ Numbered work items:
   propagation (CLI flag / env → both stacks), and log content
   guidelines (what every line must carry: component, event,
   identifiers, outcome). Closes the design gap flagged above.
-4. **`crowdb-diskdb` file logging** —
+4. **`crowdb-diskdb` logging CLI flags + crowdb-rpc wiring** —
    `app/crowdb-diskdb/src/main.rs` + `app/crowdb-diskdb/src/ddb_config.rs`.
-   Replace `tracing_subscriber::fmt().init()` with
-   `crowdb_common::logging::init_file_logging` (or the
-   `crowdb_kv`-style wrapper if one is extracted to `crowdb-common`).
-   Add `--log-dir`, `--log-max-file-mb`, `--log-max-files`,
-   `--log` (console toggle) CLI flags (or config fields) with the
-   same defaults as `crowdb-kv-server`. Add a metrics log if diskdb
-   metrics warrant one (pending audit). No C++ library logging
-   needed unless diskdb adopts a C++ engine (it does not today).
-5. **`crowdb-chunkdb` file logging** —
-   `app/crowdb-chunkdb/src/main.rs` + chunkdb config. Same shape as
-   diskdb: replace console-only init with the shared file logging
-   stack; add the same CLI/config flags.
-6. **`crowdb-web` + `crowdb-cli` file logging + ops_log rotation** —
+   File logging is already wired (`init_file_and_console_logging_split`,
+   defaults 30/5). Remaining: add `--log-dir`, `--log-max-file-mb`,
+   `--log-max-files`, `--log` (console toggle) CLI flags (or config
+   fields) with the same defaults as `crowdb-kv-server`; wire
+   `crowdb_rpc_ffi::init_logging` at startup with prefix
+   `"crowdb-diskdb-rpc"` (currently not called — transport layer
+   silent); add a metrics log if diskdb metrics warrant one (pending
+   audit).
+5. **`crowdb-chunkdb` logging CLI flags + crowdb-rpc wiring** —
+   `app/crowdb-chunkdb/src/main.rs` + chunkdb config. File logging
+   is already wired, same shape as diskdb. Same remaining work: add
+   CLI flags, wire `crowdb_rpc_ffi::init_logging` with prefix
+   `"crowdb-chunkdb-rpc"`.
+6. **`crowdb-web` + `crowdb-cli` logging CLI flags + ops_log rotation** —
    `app/crowdb-web/src/main.rs`, `app/crowdb-cli/src/main.rs`,
-   `lib/crowdb-console-shared/src/ops_log.rs`. Replace console-only
-   `tracing` init with the shared file logging stack for the
-   service log. Decide (in design) whether `ops_log` adopts
-   `RotatingLogWriter` or stays a separate append-only JSON-Lines
-   file with its own rotation. `crowdb-cli` is short-lived so its
-   logging may be console-only by design — the audit + design
-   decide.
-7. **`crowdb-rpc` C++ logging FFI bridge** —
-   `lib/crowdb-rpc/ffi/src/` (new Rust wrapper mirroring
-   `crowdb-tree-ffi::ct_init_logging`), `app/crowdb-kv-server/src/main.rs`,
+   `lib/crowdb-console-shared/src/ops_log.rs`. File logging is
+   already wired on `crowdb-web` (to `~/.crowdb-kv/log`). Remaining:
+   add `--log-dir` / `--log-*` CLI flags; decide (in design) whether
+   `ops_log` adopts `RotatingLogWriter` or stays a separate
+   append-only JSON-Lines file with its own rotation/size cap
+   (currently unbounded). `crowdb-cli` is short-lived so its logging
+   may be console-only by design — the audit + design decide.
+7. **`crowdb-rpc` C++ logging — wire diskdb/chunkdb** —
+   `lib/crowdb-rpc/ffi/src/logging.rs` (FFI wrapper already exists),
    `app/crowdb-diskdb/src/main.rs`, `app/crowdb-chunkdb/src/main.rs`.
-   Add a Rust FFI wrapper for `crowdb_rpc_init_logging` /
-   `crowdb_rpc_flush_logging` / `crowdb_rpc_shutdown_logging`. Every
-   server that uses crowdb-rpc (kv-server consensus + client RPC,
-   diskdb, chunkdb) calls it at startup with the same log dir,
-   level, rotation settings, and a per-server prefix
-   (`crowdb-kv-server-rpc`, `crowdb-diskdb-rpc`, `crowdb-chunkdb-rpc`).
-   The C++ level must be driven by the same CLI flag / env as the
-   Rust stack, not hardcoded.
+   The Rust FFI wrapper (`init_logging` / `flush_logging` /
+   `shutdown_logging`) is built and called by `crowdb-kv-server` and
+   `crowdb-web`. Remaining: `crowdb-diskdb` and `crowdb-chunkdb`
+   must call `crowdb_rpc_ffi::init_logging` at startup with the same
+   log dir, level, rotation settings, and per-server prefix. The
+   C++ level must be driven by the same CLI flag / env as the Rust
+   stack, not hardcoded.
 8. **`crowdb-kv-server` logging cleanup** —
-   `app/crowdb-kv-server/src/main.rs` ~lines 55-61. Drive the C++
-   crowdb-tree level from the same source as the Rust level (CLI
-   flag / `RUST_LOG`), not the hardcoded `"info"`. Adopt the
-   unified `--log-dir` convention. Ensure crowdb-rpc logging is
-   initialized (work item 7).
-9. **Log content remediation** — every `tracing::*` / `CR_LOG_*`
+   `app/crowdb-kv-server/src/main.rs` ~lines 57-74. Drive the C++
+   crowdb-tree AND crowdb-rpc level from the same source as the Rust
+   level (CLI flag / `RUST_LOG`), not the hardcoded `"info"`. Adopt
+   the unified `--log-dir` convention. crowdb-rpc logging is already
+   initialized — only the level and log-dir are stale.
+9. **Log content remediation** — every `tracing::*` / `CRB_LOG_*`
    call site flagged by the audit (work items 1 + 2). Fix lines
    that are opaque (add component + event + identifiers), remove
    or downgrade noise (move chatty lines to `debug`), add missing
@@ -345,11 +369,12 @@ Edge cases at a glance:
 **Dependencies**
 
 - None on other `R**` items for the audit (work items 1 + 2) or
-  the diskdb/chunkdb/web file-logging adoption (items 4-6) — the
-  shared `crowdb-common` logging stack already exists.
-- Item 7 (crowdb-rpc FFI logging bridge) has no upstream `R**`
-  dependency — the C API already exists in `c_api.h`; only the
-  Rust wrapper and call sites are missing.
+  the remaining diskdb/chunkdb/web CLI-flag + crowdb-rpc wiring
+  (items 4-7) — the shared `crowdb-common` logging stack and the
+  crowdb-rpc FFI wrapper already exist.
+- Item 7 (crowdb-rpc logging in diskdb/chunkdb) has no upstream
+  `R**` dependency — the C API and Rust wrapper already exist; only
+  the diskdb/chunkdb call sites are missing.
 - Item 3 (observability design section) is the design anchor for
   items 4-9; it should land before the remediation so the
   unification target is agreed.
@@ -514,3 +539,15 @@ code changes, plus `pixi run cargo fmt --all -- --check` and
    self-explanatory") is subjective and hard to test. Trade-off:
    machine-parseability vs. author flexibility. Needs a decision
    on whether logs are for humans, scripts, or both.
+6. **Should the merged-file option (Q1) be rejected outright?** —
+   per-stack files (`crowdb-kv-server.log` +
+   `crowdb-kv-server-tree.log` + `crowdb-kv-server-rpc.log`) are
+   already the landed pattern and work well; the operator
+   interleaves by timestamp (both stacks use
+   `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log` naming with PID
+   suffix, so files from one process are grouped). Merging Rust +
+   C++ into one file requires cross-FFI write coordination (a
+   shared mutex or a single writer thread) for marginal operator
+   convenience. Recommendation: reject the merged-file option,
+   keep per-stack files, and document the interleaving workflow.
+   Needs confirmation.

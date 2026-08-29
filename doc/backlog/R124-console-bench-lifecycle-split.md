@@ -270,11 +270,24 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
 **Dependencies**
 
 - None hard. The clean/reset verb should align with
-  `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules; if
-  that doc prescribes a specific wipe API, this wraps it. R118
-  (unify port usage + port prober) is tangentially related — the
-  bench's `unique_test_port()` is the stopgap R118 replaces; no
-  block.
+  `design-crowdb-kv-sysdata-lifecycle.md`'s cluster-reset rules.
+  **Confirmed:** that doc does NOT define a "wipe data, keep group0"
+  API — its reset (`http_internal_reset`) tears down hardware
+  hierarchy + KV-cluster topology, and its group/store cleanup
+  removes the group/store from `node_config` entirely. So the clean
+  verb needs a **new** per-node management endpoint that wipes WAL +
+  engine data while leaving group0 sysdata intact. R118 (unify port
+  usage + port prober) is tangentially related — the bench's
+  `unique_test_port()` is the stopgap R118 replaces; no block.
+- Reusable groundwork already in place: the `BenchTarget` trait
+  (`app/crowdb-cli/src/bench/target.rs`) with `provision` /
+  `pre_populate` / `cleanup` / `run_workers` methods, and concrete
+  `KvTarget` (`bench/targets/kv.rs`) + `RpcTarget`
+  (`bench/targets/rpc.rs`) implementations. R124's work is mostly
+  CLI orchestration, persistent handle, and the new clean endpoint —
+  the target abstractions are ready.
+- `.gitignore` already has `/runtime-data/` but not `/runtime/`; the
+  named-folder work item must add `/runtime/` to `.gitignore`.
 - No item depends on R124 yet. Future rpc/chunk/storage bench
   targets will reuse the deploy/prepare/run/teardown verbs R124
   establishes.
@@ -410,3 +423,31 @@ runtime/<name>/ holds: handle + node workspaces + server logs + cli logs
    exact top-level folder name (`runtime/` vs reusing `bench-runs/`
    restructured) is a minor design-draft detail; `runtime/` is the
    working name.
+
+**Open Questions**
+
+1. **Split R124 into two phases?** — the deploy/prepare/run/teardown
+   lifecycle verbs (items 1-4, 6-8) are moderate effort, re-use the
+   existing `BenchTarget` trait, and deliver immediate value
+   (amortized deploy + pre-pop, larger datasets, parallel sub-tests).
+   The clean verb (item 5) is the riskiest part: it needs a **new**
+   per-node server management endpoint that wipes WAL + engine data
+   while preserving group0 sysdata — no such API exists in the
+   sysdata lifecycle design or the server. Candidate split: (a) land
+   the lifecycle verbs first (high value, moderate effort), then
+   design + add the clean endpoint as a follow-up; or (b) do it all
+   in one requirement. Trade-off: incremental delivery vs. completing
+   the write-regression flow (which needs clean) in one pass. Needs a
+   decision on whether the write regression can wait for the clean
+   endpoint or should keep the current redeploy-per-sub-test flow
+   temporarily.
+
+2. **Clean endpoint name/flow — concrete decision needed.** — the
+   doc says "deliberately non-trivial name/flow" but does not specify
+   it. Candidates: `POST /stores/:sid/groups/:gid/wipe-user-data`
+   with a required `confirm=<token>` query param (token derived from
+   the deploy name); or a two-step `POST .../clean-request` →
+   `POST .../clean-confirm` challenge-response. The design draft must
+   pick one — the backlog's "TBD in design" is acceptable but the
+   implementer needs a concrete name to build against. Needs a
+   decision on the exact endpoint shape before implementation.
