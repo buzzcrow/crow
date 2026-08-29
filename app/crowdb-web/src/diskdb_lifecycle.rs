@@ -349,7 +349,7 @@ pub async fn http_delete_diskdb(
     use crowdb_console_shared::config::ServiceType;
     use crowdb_console_shared::lifecycle;
 
-    {
+    let pid = {
         let cfg = state.config.read().unwrap();
         if !cfg
             .servers
@@ -363,15 +363,12 @@ pub async fn http_delete_diskdb(
                 }),
             ));
         }
-    }
-    // Best-effort stop: the PID may be gone (console restart).
-    if let Some(pid) = state.diskdb_runtime_pid(node_id) {
-        let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
-            .await
-            .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
-            .map_err(|e| err_500(format!("stop_pid: {e}")))?;
-        state.clear_diskdb_runtime_pid(node_id);
-    }
+        state.diskdb_runtime_pid(node_id)
+    };
+
+    // Remove the deployment record first so the UI and /api/servers reflect
+    // the deletion immediately. The process stop and cache refresh are
+    // best-effort and run in the background.
     {
         let mut cfg = state.config.write().unwrap();
         let pos = cfg
@@ -383,9 +380,19 @@ pub async fn http_delete_diskdb(
         }
     }
     state.persist().map_err(|e| err_500(format!("{e}")))?;
-    // Refresh the monitor cache: if KV is still running it stays Up;
-    // if this was a DDB-only node, it marks Down.
-    crate::mgmt::refresh_node_cache(&state, node_id).await;
+    state.clear_diskdb_runtime_pid(node_id);
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        // Best-effort stop: the PID may be gone (console restart).
+        if let Some(pid) = pid {
+            let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await;
+        }
+        // Refresh the monitor cache: if KV is still running it stays Up;
+        // if this was a DDB-only node, it marks Down.
+        crate::mgmt::refresh_node_cache(&state_clone, node_id).await;
+    });
+
     Ok(StatusCode::NO_CONTENT)
 }
 
