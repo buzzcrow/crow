@@ -36,6 +36,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
 
+    // Initialize the crowdb-rpc C++ spdlog logger so transport info/debug
+    // messages go to rotating files instead of spdlog's default stderr
+    // logger (which floods the console with per-connection noise). Only
+    // warn/error reach the console via the stderr sink. No-op without spdlog.
+    crowdb_rpc_ffi::init_logging("log", "info", 30, 5, "crowdb-web-rpc");
+    crowdb_rpc_ffi::add_log_stderr("warn");
+
     // Open the per-session operation log file. Outbound HTTP/crowdb-rpc/SSH
     // calls append a JSON-Lines record carrying the correlation id and
     // a curl-reproducible summary. Best-effort: a filesystem failure

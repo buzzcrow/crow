@@ -33,6 +33,6 @@ crowdb-chunk-client = { path = ".", features = ["test-util"] }
 crowdb-test-harness = { path = "../crowdb-test-harness", features = ["diskio", "diskdb", "chunkdb"] }
 crowdb-kv-client = { path = "../crowdb-kv-client" }
 crowdb-diskdb-client = { path = "../crowdb-diskdb-client" }
-crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", features = ["test-util"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
 bincode = "1"

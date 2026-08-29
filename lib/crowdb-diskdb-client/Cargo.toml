@@ -24,6 +24,7 @@ dashmap = "6"
 
 [dev-dependencies]
 crowdb-kv-client = { path = "../crowdb-kv-client" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", features = ["test-util"] }
 crowdb-test-harness = { path = "../crowdb-test-harness", features = ["diskdb"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 reqwest = { version = "0.12", features = ["json"] }

@@ -26,3 +26,12 @@ pub use logging::{
 pub use server::{Connection, RpcError, RpcServer, ServerRequest};
 
 pub use sys::{CrowdbRpcLatencyStats, CrowdbRpcTransportStats};
+
+// Auto-init C++ spdlog before any test runs so transport info/debug logs
+// go to test-logs/ files instead of stderr. Only active with --features
+// test-util. Error-level messages are mirrored to stderr for CI visibility.
+#[cfg(feature = "test-util")]
+#[ctor::ctor(unsafe)]
+fn auto_init() {
+    logging::init_test_logging();
+}

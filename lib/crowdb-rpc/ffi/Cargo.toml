@@ -12,14 +12,16 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Auto-init C++ spdlog to a temp dir on first RpcServer::new. Used by
-# this crate's own tests (via self dev-dependency) so transport logs go
-# to files instead of stderr without each test calling init_test_logging.
-test-util = []
+# Auto-init C++ spdlog to a temp dir before any test runs (via ctor)
+# and on first RpcServer::new. Used by this crate's own tests (via self
+# dev-dependency) and by downstream test binaries (e.g. crowdb-web tests)
+# so transport logs go to files instead of stderr.
+test-util = ["dep:ctor"]
 
 [dependencies]
 crowdb-common = { path = "../../crowdb-common/rust" }
 tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+ctor = { version = "1.0.13", optional = true }
 
 [dev-dependencies]
 crowdb-common = { path = "../../crowdb-common/rust" }

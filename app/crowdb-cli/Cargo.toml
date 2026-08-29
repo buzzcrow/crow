@@ -41,6 +41,7 @@ libc = "0.2.189"
 crossbeam-channel = "0.5.16"
 
 [dev-dependencies]
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi", features = ["test-util"] }
 crowdb-test-harness = { path = "../../lib/crowdb-test-harness" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 

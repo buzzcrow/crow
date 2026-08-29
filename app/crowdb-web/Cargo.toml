@@ -18,6 +18,7 @@ crowdb-console-shared = { path = "../../lib/crowdb-console-shared" }
 crowdb-diskdb-client = { path = "../../lib/crowdb-diskdb-client" }
 crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
 crowdb-protocol = { path = "../../lib/crowdb-protocol" }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
 axum = "0.7"
@@ -37,4 +38,5 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
 crowdb-kv = { path = "../../lib/crowdb-kv" }
-crowdb-test-harness = { path = "../../lib/crowdb-test-harness" }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi", features = ["test-util"] }
+crowdb-test-harness = { path = "../../lib/crowdb-test-harness", features = ["diskdb"] }

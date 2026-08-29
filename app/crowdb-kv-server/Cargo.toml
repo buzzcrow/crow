@@ -36,6 +36,7 @@ utoipa = "5"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi", features = ["test-util"] }
 crowdb-test-harness = { path = "../../lib/crowdb-test-harness" }
 bytes = "1"
 

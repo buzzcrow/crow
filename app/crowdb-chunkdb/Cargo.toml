@@ -50,6 +50,7 @@ rand = "0.8"
 futures = "0.3"
 
 [dev-dependencies]
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi", features = ["test-util"] }
 crowdb-test-harness = { path = "../../lib/crowdb-test-harness", features = ["chunkdb", "diskdb"] }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", features = ["json"] }

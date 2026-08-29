@@ -55,6 +55,7 @@ crowdb-kv = { path = ".", features = ["test-util"] }
 # Used by integration-test helpers (`tests/common/test_client.rs`) to build
 # the crowdb-rpc `KvRpcTransport`/`PxRpcTransport` facades.
 crowdb-kv-client = { path = "../crowdb-kv-client" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", features = ["test-util"] }
 crowdb-test-harness = { path = "../crowdb-test-harness" }
 
 [[bench]]

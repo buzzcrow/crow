@@ -704,6 +704,7 @@ dependencies = [
  "axum",
  "crowdb-kv-client",
  "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "crowdb-test-harness",
  "dirs",
  "form_urlencoded",
@@ -886,6 +887,7 @@ dependencies = [
  "crowdb-common",
  "crowdb-protocol",
  "crowdb-rpc-ffi",
+ "ctor",
  "flatbuffers",
  "tokio",
 ]
@@ -930,6 +932,7 @@ dependencies = [
  "crowdb-kv",
  "crowdb-kv-client",
  "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "crowdb-test-harness",
  "futures",
  "hex",
