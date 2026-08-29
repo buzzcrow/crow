@@ -34,6 +34,9 @@
 pub mod cluster;
 pub mod test_dirs;
 
+#[cfg(any(feature = "diskio", feature = "diskdb", feature = "chunkdb"))]
+pub mod logging;
+
 #[cfg(feature = "hardware")]
 pub mod hardware;
 

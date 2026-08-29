@@ -145,6 +145,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
     const reqId = ++scanReqIdRef.current;
     setScanLoading(true);
     setErrorMsg(null);
+    let scannedCount = 0;
     try {
       if (groupId === ALL_GROUPS) {
         const allRows: ScanRow[] = [];
@@ -163,6 +164,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
         setScanTruncated(anyTruncated);
         setScanCursors(cursors);
         setScanDone(true);
+        scannedCount = allRows.length;
       } else {
         const result = await kvScan(storeId, groupId, scanPrefix);
         if (reqId !== scanReqIdRef.current) return;
@@ -174,9 +176,10 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
           cursors.set(groupId, { lastKey: result.items[result.items.length - 1].key_utf8, truncated: result.truncated });
         }
         setScanCursors(cursors);
+        scannedCount = result.items.length;
       }
-      log({ action: 'KV Scan', target: targetLabel, status: 'Success', message: `Found ${scanRows.length} keys` });
-      success(`Scanned ${scanRows.length} keys`);
+      log({ action: 'KV Scan', target: targetLabel, status: 'Success', message: `Found ${scannedCount} keys` });
+      success(`Scanned ${scannedCount} keys`);
     } catch (err) {
       if (reqId !== scanReqIdRef.current) return;
       const msg = err instanceof Error ? err.message : 'Scan failed';
@@ -188,7 +191,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
         setScanLoading(false);
       }
     }
-  }, [storeId, groupId, scanPrefix, groupIdsInStore, targetLabel, log, success, error, scanRows.length]);
+  }, [storeId, groupId, scanPrefix, groupIdsInStore, targetLabel, log, success, error]);
 
   const handleScanRef = useRef(handleScan);
   useEffect(() => { handleScanRef.current = handleScan; }, [handleScan]);

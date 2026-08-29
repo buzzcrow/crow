@@ -245,6 +245,15 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     for disk in &disks {
         let zone_size_units = disk.disk_value.read().unwrap().zone_size_units;
         let zone_count = disk.disk_value.read().unwrap().zone_count;
+        // Collect all recovered zones first (no lock held during async
+        // recovery calls). Then clear any zones the background_zone_load
+        // task (spawned by keepalive.tick) may have added and push the
+        // strategy-1 recovered zones atomically. That task uses strategy
+        // 2 (journal replay), which intentionally ignores free ops
+        // (Option B) — the freed bit stays SET in the bitmap. This test
+        // validates strategy 1 (full scan), which correctly clears freed
+        // bits (no busy record → bit not set).
+        let mut recovered_zones: Vec<Arc<DdbZone>> = Vec::new();
         for zi in 0..zone_count {
             #[allow(clippy::cast_possible_truncation)]
             let unit_capacity = if zi == zone_count - 1 {
@@ -258,10 +267,14 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
                 .rebuild_zone_bitmap_full_scan(bind2, disk.disk_id, zi, DG_ID, unit_capacity)
                 .await
                 .expect("recovery should succeed");
-            // Replace the empty zone with the recovered zone.
-            let mut zones = disk.zones.write().unwrap();
-            zones[zi as usize] = Arc::new(recovered_zone);
+            recovered_zones.push(Arc::new(recovered_zone));
         }
+        let mut zones = disk.zones.write().unwrap();
+        zones.clear();
+        for zone in recovered_zones {
+            zones.push(zone);
+        }
+        drop(zones);
         disk.rebuild_active_zones(4);
     }
     dg2.rebuild_allocating_disks();

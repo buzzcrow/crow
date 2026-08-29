@@ -997,6 +997,38 @@ impl CrowdbClient {
             match send_result {
                 Ok(resp) => {
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
+                    // Follow a `not_leader_hint` before honoring `ok`: a
+                    // linearizable scan that fails mid-forward to the leader
+                    // falls back to a stale local read + hint (see
+                    // `patch_scan_not_leader_hint` in kv_rpc_service). That
+                    // stale read returns `ok=true` with empty items, so
+                    // checking `ok` first would surface empty data to the
+                    // caller. Mirrors the get/delete hint-first fix.
+                    if !resp.not_leader_hint.is_empty() {
+                        if page_read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
+                            self.metrics.record_read_endpoint_fallback();
+                        }
+                        self.metrics.record_scan_error();
+                        self.metrics.record_not_leader_hint();
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        self.metrics.on_leader_resolved(
+                            store_id,
+                            group_id,
+                            &resp.not_leader_hint,
+                            "not_leader_hint",
+                        );
+                        self.topology
+                            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
+                        endpoint = resp.not_leader_hint;
+                        // Resume from the last received key (S3-style
+                        // pagination is keyed on `start_after`, so no
+                        // duplicates or gaps). Only reset to the caller's
+                        // `start_after` when nothing has been received yet.
+                        page_start_after = all_items
+                            .last()
+                            .map_or_else(|| start_after.to_vec(), |(k, _)| k.to_vec());
+                        continue;
+                    }
                     if resp.ok {
                         let page_len = resp.items.len();
                         let resp_truncated = resp.truncated;
@@ -1056,28 +1088,6 @@ impl CrowdbClient {
                         });
                     }
                     self.metrics.record_scan_error();
-                    // Follow a `not_leader_hint` redirect (uncounted,
-                    // mirroring the `get` path) so a `MinSlot` scan
-                    // against a follower that hasn't applied `min_slot`
-                    // falls back to the leader rather than being treated
-                    // as a plain error. Resume pagination from the last
-                    // received key on the new endpoint (see below).
-                    if !resp.not_leader_hint.is_empty() {
-                        if page_read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
-                            self.metrics.record_read_endpoint_fallback();
-                        }
-                        self.topology
-                            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
-                        endpoint = resp.not_leader_hint;
-                        // Resume from the last received key (S3-style
-                        // pagination is keyed on `start_after`, so no
-                        // duplicates or gaps). Only reset to the caller's
-                        // `start_after` when nothing has been received yet.
-                        page_start_after = all_items
-                            .last()
-                            .map_or_else(|| start_after.to_vec(), |(k, _)| k.to_vec());
-                        continue;
-                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                 }
                 Err(msg) => {

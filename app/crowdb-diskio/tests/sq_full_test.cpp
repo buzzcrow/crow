@@ -197,7 +197,13 @@ TEST(SqFullBackpressureTest, BlockingEngineMixedWriteFsync)
         }
     }
 
-    for (int i = 0; i < 300 && write_completed.load(std::memory_order_acquire) < NUM_IOS; i++) {
+    // Wait for both writes and fsyncs: fsyncs are submitted after the
+    // writes at i=9,19,29, so the last fsync may still be in flight when
+    // all writes have completed (4 worker threads drain writes faster
+    // than the slow fsync syscall).
+    for (int i = 0; i < 300 && (write_completed.load(std::memory_order_acquire) < NUM_IOS ||
+                                fsync_completed.load(std::memory_order_acquire) < 3);
+         i++) {
         std::this_thread::sleep_for(10ms);
     }
     EXPECT_EQ(write_completed.load(std::memory_order_acquire), NUM_IOS);

@@ -1504,7 +1504,12 @@ pub async fn http_list_node_disk_groups(
                         // config-only DGs not yet synced to group-0 (the
                         // add handler's sysdata sync is best-effort, so a
                         // DG may exist in config before appearing in
-                        // group-0).
+                        // group-0). Conversely, filter out group-0 DGs
+                        // no longer in config: the delete handler's
+                        // group-0 cascade-remove is also best-effort, so
+                        // a deleted DG can linger in group-0. Using config
+                        // as the existence filter keeps add and delete
+                        // consistent.
                         let cfg_dgs: Vec<DiskGroupEntry> = {
                             let cfg = state.config.read().unwrap();
                             cfg.disk_groups
@@ -1515,10 +1520,13 @@ pub async fn http_list_node_disk_groups(
                         };
                         let name_map: std::collections::HashMap<DiskGroupId, String> =
                             cfg_dgs.iter().map(|dg| (dg.id, dg.name.clone())).collect();
+                        let cfg_ids: std::collections::HashSet<DiskGroupId> =
+                            cfg_dgs.iter().map(|dg| dg.id).collect();
                         let g0_ids: std::collections::HashSet<DiskGroupId> =
                             g0_dgs.iter().map(|dg| dg.dg_id).collect();
                         let mut entries: Vec<DiskGroupEntry> = g0_dgs
                             .into_iter()
+                            .filter(|dg| cfg_ids.contains(&dg.dg_id))
                             .map(|dg| DiskGroupEntry {
                                 id: dg.dg_id,
                                 rack_id: dg.rack_id,
@@ -1867,6 +1875,7 @@ fn validate_disk_input(
 ///
 /// # Errors
 /// Returns `404` if the disk-group does not exist.
+#[allow(clippy::too_many_lines)]
 pub async fn http_list_disks_in_group(
     State(state): State<AppState>,
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
@@ -1885,6 +1894,10 @@ pub async fn http_list_disks_in_group(
                     Ok(g0_disks) => {
                         // Merge config-only disks not yet synced to group-0
                         // (the add handler's sysdata sync is best-effort).
+                        // Conversely, filter out group-0 disks no longer in
+                        // config: the delete handler's group-0 cascade-remove
+                        // is also best-effort, so a deleted disk can linger
+                        // in group-0. Config is the existence filter.
                         // Normalize config disk IDs to dashed format for
                         // dedup comparison — config stores the raw client
                         // string (bare hex), group-0 uses `{high:016x}-{low:016x}`.
@@ -1896,6 +1909,16 @@ pub async fn http_list_disks_in_group(
                                 .cloned()
                                 .collect()
                         };
+                        let cfg_ids: std::collections::HashSet<String> = cfg_disks
+                            .iter()
+                            .filter_map(|d| {
+                                <crowdb_protocol::common::DiskId as crowdb_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&d.disk_id)
+                                    .ok()
+                                    .map(|id| {
+                                        crowdb_protocol::diskdb_type_util::DiskIdExt::to_display_string(&id)
+                                    })
+                            })
+                            .collect();
                         let g0_ids: std::collections::HashSet<String> = g0_disks
                             .iter()
                             .map(|(id, _)| {
@@ -1904,6 +1927,11 @@ pub async fn http_list_disks_in_group(
                             .collect();
                         let mut entries: Vec<DiskEntry> = g0_disks
                             .into_iter()
+                            .filter(|(id, _)| {
+                                cfg_ids.contains(
+                                    &crowdb_protocol::diskdb_type_util::DiskIdExt::to_display_string(id),
+                                )
+                            })
                             .map(|(disk_id, val)| {
                                 let unit_size = u64::from(val.unit_size_bytes);
                                 DiskEntry {

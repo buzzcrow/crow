@@ -1883,7 +1883,13 @@ test.describe('capacity · diskdb', () => {
       // No diskdb is deployed on this node, so the DG should still
       // appear under the node in the Physical view.
       await page.goto('/');
+      // The Physical view's disk-group data arrives via a fetch chain
+      // (listNodes → fetchNodeDiskGroups) that lags the racks tree on
+      // slow CI runners. Wait for the disk-groups response for this
+      // node before asserting, rather than relying on the 5 s poll.
+      const dgResponse = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
       await page.getByRole('button', { name: 'Physical' }).click();
+      await dgResponse;
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');

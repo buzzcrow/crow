@@ -341,8 +341,13 @@ async fn t1_1_kill_in_cas_persist_window_value_survives() {
     commit_one_write(&cluster, key, value, 1).await;
 
     // Re-find the leader that actually processed the write — it may differ
-    // from the initial leader if the election was still converging.
-    let leader_id = cluster.elected_leader().expect("leader present after write").id;
+    // from the initial leader if the election was still converging. Use
+    // wait_for_leader (retry loop) instead of a one-shot elected_leader()
+    // check, because the leader may be in a brief transition state.
+    let leader_id = cluster
+        .wait_for_leader(Duration::from_secs(5))
+        .await
+        .expect("leader present after write");
 
     // The value is Paxos-chosen (quorum accepted on followers, leader CAS
     // done). The leader's local WAL persist is blocked on the gate.

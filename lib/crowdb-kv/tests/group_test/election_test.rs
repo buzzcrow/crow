@@ -191,7 +191,13 @@ async fn single_voter_candidate_becomes_leader() {
 
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(test_cfg().election_max_ms + 10)).await;
-    for _ in 0..16 {
+    // The election driver needs multiple yield points to process the
+    // timer firing, become candidate, win self-quorum, and become leader.
+    // Poll with yields until the role transitions to Leader.
+    for _ in 0..100 {
+        if group.local_replica().role() == PxLocalReplicaRole::Leader {
+            break;
+        }
         tokio::task::yield_now().await;
     }
 

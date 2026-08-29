@@ -255,6 +255,14 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       await step('iso-stores: scan UI', async () => {
         await page.goto('/');
         await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
+        // Uncheck auto-scan: group selection triggers an auto-scan whose
+        // response waitForResponse would race with the explicit Scan
+        // click's response, causing the auto-scan's discarded result to
+        // be awaited while the explicit scan is still in flight.
+        const autoScanCheckbox = page.getByRole('checkbox', { name: 'auto-scan' });
+        if (await autoScanCheckbox.isChecked()) {
+          await autoScanCheckbox.uncheck();
+        }
         await page.getByLabel('Store').selectOption('380');
         await page.getByLabel('Group').selectOption('3800');
 

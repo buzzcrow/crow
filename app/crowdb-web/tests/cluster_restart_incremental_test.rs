@@ -188,13 +188,25 @@ async fn restart_server(client: &reqwest::Client, base: &str, node_id: u64) -> u
 }
 
 async fn create_store(client: &reqwest::Client, base: &str, store_id: u64, nodes: &[u64]) {
-    let (status, body) = json_post(
-        client,
-        &format!("{base}/api/stores"),
-        json!({ "store_id": store_id, "nodes": nodes }),
-    )
-    .await;
-    assert_eq!(status.as_u16(), 201, "create store {store_id}: {body}");
+    // Retry with backoff — a node may be momentarily unreachable
+    // right after concurrent deploy (the REST server may not have
+    // started listening yet). Mirrors the retry in create_group.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = json_post(
+            client,
+            &format!("{base}/api/stores"),
+            json!({ "store_id": store_id, "nodes": nodes }),
+        )
+        .await;
+        if status.as_u16() == 201 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            assert_eq!(status.as_u16(), 201, "create store {store_id}: {body}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn create_group(
@@ -725,13 +737,26 @@ async fn restart_recovery(
     eprintln!("test-logs: {}", cluster.dir.display());
 
     // Step 0: Initialize the system group so non-zero stores can be created.
-    let (status, body) = json_post(
-        &cluster.client,
-        &format!("{}/api/cluster/init", cluster.base),
-        json!({ "nodes": cluster.node_ids }),
-    )
-    .await;
-    assert_eq!(status.as_u16(), 201, "cluster init: {body}");
+    // Retry with backoff — a node's KV server may fail to bind its RPC
+    // port on the first attempt if a previous test's process hasn't
+    // fully released the port (TIME_WAIT) or the node server hasn't
+    // started its listener yet.
+    let init_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (status, body) = json_post(
+            &cluster.client,
+            &format!("{}/api/cluster/init", cluster.base),
+            json!({ "nodes": cluster.node_ids }),
+        )
+        .await;
+        if status.as_u16() == 201 {
+            break;
+        }
+        if Instant::now() >= init_deadline {
+            assert_eq!(status.as_u16(), 201, "cluster init: {body}");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     // Step 1a: Create all stores + groups first (concurrent startup)
     // Collect the union of nodes for each store_id so the store is created
