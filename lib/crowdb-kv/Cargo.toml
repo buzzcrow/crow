@@ -1,0 +1,110 @@
+[package]
+name = "crowdb-kv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CROWDB core library: consensus, engine, WAL, I/O, RPC, reconfiguration."
+autobenches = false
+autotests = false
+
+[lints]
+workspace = true
+
+[features]
+# Exposes crate-internal hooks that need private-field access: PxGroup test
+# hooks (proposer-window semaphore, single-step repair, peer-applied injection)
+# and SimDisk I/O backend. InMemKV has been moved to tests/ and no longer needs
+# this feature. Enabled automatically for this crate's own test build via the
+# self dev-dependency below, so `cargo test` needs no extra flags.
+test-util = []
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "fs", "sync", "io-util"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+bytes = "1"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dashmap = "6"
+parking_lot = "0.12"
+arc-swap = "1.9"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+flate2 = { workspace = true }
+pin-project-lite = { workspace = true }
+crowdb-common = { workspace = true }
+crowdb-protocol = { path = "../crowdb-protocol", features = ["schema"] }
+crowdb-tree-ffi = { path = "../crowdb-tree/ffi" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi" }
+flatbuffers = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+crossbeam-skiplist = "0.1"
+# Self dev-dependency: turns on the `test-util` feature for this crate's own
+# test/bench build so integration tests can reach the test-only hooks under
+# plain `cargo test` (no `--features` needed).
+crowdb-kv = { path = ".", features = ["test-util"] }
+# Used by integration-test helpers (`tests/common/test_client.rs`) to build
+# the crowdb-rpc `KvRpcTransport`/`PxRpcTransport` facades.
+crowdb-kv-client = { path = "../crowdb-kv-client" }
+tempfile = "3"
+
+[[bench]]
+name = "slot_list"
+harness = false
+
+[[test]]
+name = "election_test"
+path = "tests/election_test.rs"
+
+[[test]]
+name = "group_test"
+path = "tests/group_test.rs"
+
+[[test]]
+name = "rpc_migration_test"
+path = "tests/rpc_migration_test.rs"
+
+[[test]]
+name = "kv_test"
+path = "tests/kv_test.rs"
+
+[[test]]
+name = "metrics_test"
+path = "tests/metrics_test.rs"
+
+[[test]]
+name = "node_config_test"
+path = "tests/node_config_test.rs"
+
+[[test]]
+name = "paxos_test"
+path = "tests/paxos_test.rs"
+
+[[test]]
+name = "replica_test"
+path = "tests/replica_test.rs"
+
+[[test]]
+name = "slot_test"
+path = "tests/slot_test.rs"
+
+[[test]]
+name = "store_test"
+path = "tests/store_test.rs"
+
+[[test]]
+name = "wal_test"
+path = "tests/wal_test.rs"
+
+[[bench]]
+name = "wal"
+harness = false

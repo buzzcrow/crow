@@ -1,0 +1,277 @@
+include "common_type.fbs";
+include "diskdb.fbs";
+
+namespace crowdb.chunkdb.proto;
+
+// chunkdb service flatbuffer control messages (R116: legacy → crowdb-rpc
+// migration). Mirrors chunkdb_service.proto + chunkdb_op.proto +
+// chunkdb_type.proto.
+//
+// Conventions (design-crowdb-rpc.md §6, todo_fb.md "Rules to Follow"):
+// - Every request/response table carries `id` (request_id, matched by
+//   the RPC framework) + `rpc_create_nano` (creation timestamp) as its
+//   first two fields, same as diskdb.fbs / kv_client.fbs.
+// - Every response carries `ret_code` (FBChunkdbRetCode) + optional
+//   `error_msg`. On Success the data fields are populated; on error the
+//   data fields are empty and `error_msg` describes the failure.
+// - `FBInt128` (from common_type.fbs) is used for ChunkId.
+// - `FBSegment` (from diskdb.fbs) is reused for disk-block allocation
+//   handles embedded in strip segments.
+// - `NotMyRangeHint` is NOT a separate message — it is `ret_code =
+//   NotMyRange` + `range_start`/`range_end` diagnostic fields on every
+//   response table. The server does not know the owning instance; the
+//   client refreshes its binding cache from group-0 and re-routes.
+
+// ── Return codes (mirrors LifecycleError + RPC status mapping) ──
+enum FBChunkdbRetCode : int16 {
+    Success = 0,
+    InvalidArgument = 1,
+    NotFound = 2,
+    AlreadyExists = 3,
+    FailedPrecondition = 4,
+    Aborted = 5,
+    Internal = 6,
+    Unavailable = 7,
+    NotMyRange = 8,
+    StripIndexOutOfRange = 9,
+}
+
+// ── Enums (from chunkdb_type.proto) ──────────────────────────────
+
+enum FBEcState : int16 {
+    NoParity = 0,
+    Parity = 1,
+}
+
+enum FBChunkState : int16 {
+    Init = 0,
+    Active = 1,
+    Sealed = 2,
+    Deleted = 3,
+}
+
+enum FBStripType : int16 {
+    Mirror = 0,
+    Ec = 1,
+}
+
+enum FBChunkType : int16 {
+    Repo = 0,
+    Wal = 1,
+    BtreePage = 2,
+    PageIndex = 3,
+}
+
+// ── Strip types ──────────────────────────────────────────────────
+
+// Mirror strip — N copies of the same data on different disks.
+table FBMirrorStrip {
+    segments:[crowdb.diskdb.proto.FBSegment];
+}
+
+// EC strip — data_num + code_num blocks.
+table FBEcStrip {
+    data_num:uint32;
+    code_num:uint32;
+    ec_state:FBEcState;
+    segments:[crowdb.diskdb.proto.FBSegment];
+}
+
+// Union for the strip body (mirrors proto oneof strip).
+// flatbuffers auto-generates NONE at 0; member names must match the
+// table types they reference.
+union FBStripBody {
+    FBMirrorStrip = 1,
+    FBEcStrip = 2,
+}
+
+// A single strip within a chunk.
+table FBChunkStrip {
+    chunk_offset:uint32;
+    strip_sequence:uint32;
+    unit_kb:uint32;
+    capacity:uint32;
+    create_ts_ms:uint64;
+    sealed_ts_ms:uint64;
+    sealed_length:uint32;
+    strip_type:FBStripType;
+    strip_body:FBStripBody;
+    usage_bitmap:[ubyte];
+}
+
+// A chunk — logical block composed of strips.
+table FBChunk {
+    id:crowdb.rpc.proto.FBInt128;
+    state:FBChunkState;
+    create_ts_ms:uint64;
+    sealed_ts_ms:uint64;
+    capacity:uint32;
+    sealed_length:uint32;
+    strips:[FBChunkStrip];
+    chunk_type:FBChunkType;
+}
+
+// ── AllocateChunk ────────────────────────────────────────────────
+
+table FBAllocateChunkRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    chunk_id:crowdb.rpc.proto.FBInt128;
+    write_granularity:uint32;
+    strip_count:uint32;
+    strip_type:FBStripType;
+    data_num:uint32;
+    code_num:uint32;
+    copy_count:uint32;
+    chunk_type:FBChunkType;
+}
+
+table FBAllocateChunkResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+    chunk:FBChunk;
+}
+
+// ── AppendChunk ──────────────────────────────────────────────────
+
+table FBAppendChunkRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    chunk_id:crowdb.rpc.proto.FBInt128;
+    strip_size:uint32;
+    strip_count:uint32;
+    strip_type:FBStripType;
+    data_num:uint32;
+    code_num:uint32;
+    copy_count:uint32;
+}
+
+table FBAppendChunkResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+    chunk:FBChunk;
+}
+
+// ── QueryChunk ───────────────────────────────────────────────────
+
+table FBQueryChunkRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    chunk_id:crowdb.rpc.proto.FBInt128;
+}
+
+table FBQueryChunkResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+    chunk:FBChunk;
+}
+
+// ── SealChunk ────────────────────────────────────────────────────
+
+table FBSealChunkRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    chunk_id:crowdb.rpc.proto.FBInt128;
+    seal_length:uint32;
+}
+
+table FBSealChunkResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+    chunk:FBChunk;
+}
+
+// ── DeleteChunk ──────────────────────────────────────────────────
+
+table FBDeleteChunkRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    chunk_id:crowdb.rpc.proto.FBInt128;
+}
+
+table FBDeleteChunkResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+    chunk:FBChunk;
+}
+
+// ── DeleteChunkRange ─────────────────────────────────────────────
+
+table FBDeleteChunkRangeRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    chunk_id:crowdb.rpc.proto.FBInt128;
+    chunk_offset:uint32;
+    chunk_size:uint32;
+}
+
+table FBDeleteChunkRangeResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+}
+
+// ── UpdateChunkStrip ─────────────────────────────────────────────
+
+table FBUpdateChunkStripRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    chunk_id:crowdb.rpc.proto.FBInt128;
+    strip_index:uint32;
+    strip:FBChunkStrip;
+}
+
+table FBUpdateChunkStripResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+    chunk:FBChunk;
+}
+
+// ── ListChunks ───────────────────────────────────────────────────
+
+table FBListChunksRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    start_token:crowdb.rpc.proto.FBInt128;
+    partition:uint32;
+    max_keys:uint32;
+}
+
+table FBListChunksResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    ret_code:FBChunkdbRetCode;
+    error_msg:string;
+    range_start:uint32;
+    range_end:uint32;
+    chunks:[FBChunk];
+    next_token:crowdb.rpc.proto.FBInt128;
+    has_next_token:bool;
+}

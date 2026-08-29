@@ -1,0 +1,23 @@
+[package]
+name = "crowdb-rpc-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Safe Rust async facade over the crowdb-rpc C ABI (R104)."
+publish = false
+
+[lib]
+name = "crowdb_rpc_ffi"
+path = "src/lib.rs"
+
+[dependencies]
+crowdb-common = { path = "../../crowdb-common/rust" }
+tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+crowdb-common = { path = "../../crowdb-common/rust" }
+crowdb-protocol = { path = "../../crowdb-protocol" }
+flatbuffers = { workspace = true }
+
+[build-dependencies]
+cc = "1"

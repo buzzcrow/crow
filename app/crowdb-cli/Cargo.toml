@@ -1,0 +1,68 @@
+[package]
+name = "crowdb-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+autotests = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crowdb-cli"
+path = "src/main.rs"
+
+[dependencies]
+crowdb-console-shared = { path = "../../lib/crowdb-console-shared" }
+crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
+crowdb-common = { path = "../../lib/crowdb-common/rust" }
+crowdb-protocol = { path = "../../lib/crowdb-protocol" }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
+flatbuffers = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+rand = { version = "0.8", features = ["small_rng"] }
+tracing = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+thiserror = "1"
+# R10 benchmark framework: `bench benchmark` embeds a console-web
+# instance in-process to provision the fixture's 3-node cluster (also
+# used by the A12 kv_cli integration test to spawn a real crowdb-web
+# in front of crowdb-kv-server, previously a dev-dependency-only use).
+crowdb-web = { path = "../crowdb-web" }
+axum = "0.7"
+dirs = "5"
+libc = "0.2.189"
+crossbeam-channel = "0.5.16"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[[test]]
+name = "bench_benchmark_test"
+path = "tests/bench_benchmark_test.rs"
+
+[[test]]
+name = "cluster_cli_test"
+path = "tests/cluster_cli_test.rs"
+
+[[test]]
+name = "kv_cli_test"
+path = "tests/kv_cli_test.rs"
+
+[[test]]
+name = "lifecycle_cli_test"
+path = "tests/lifecycle_cli_test.rs"
+
+[[test]]
+name = "mgmt_cli_test"
+path = "tests/mgmt_cli_test.rs"
+
+[[test]]
+name = "diskdb_cli_test"
+path = "tests/diskdb_cli_test.rs"

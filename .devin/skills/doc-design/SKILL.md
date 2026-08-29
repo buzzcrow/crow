@@ -1,18 +1,18 @@
 ---
 name: doc-design
-description: How to write and refine doc/design/<area>/design-crow-<area>(-<topic>)?.md
+description: How to write and refine doc/design/<area>/design-crowdb-<area>(-<topic>)?.md
 triggers:
   - user
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # Formal Design Doc Guide
 
-How to write and refine `doc/design/<area>/design-crow-<area>.md` (root)
-and `doc/design/<area>/design-crow-<area>-<topic>.md` (sub-design) — the
+How to write and refine `doc/design/<area>/design-crowdb-<area>.md` (root)
+and `doc/design/<area>/design-crowdb-<area>-<topic>.md` (sub-design) — the
 permanent, human-readable design record. `<area>` ∈ `kv`, `tree`,
 `console`, `diskdb`, `diskio`, `protocol`, `rpc`.
 
@@ -24,17 +24,17 @@ truth for the current state.
 
 ## Two Flavors
 
-- **Root** (`design-crow-<area>.md`) — *what* the area is, *why* key
+- **Root** (`design-crowdb-<area>.md`) — *what* the area is, *why* key
   choices were made, *how* it is structured. Architecture and decisions
   only; a Non-Goals section bounds the envelope; maps its sub-designs.
-- **Sub-design** (`design-crow-<area>-<topic>.md`) — detailed design for
+- **Sub-design** (`design-crowdb-<area>-<topic>.md`) — detailed design for
   one topic. Created when a topic exceeds ~200 lines or has independent
   phases (Core Rule 5). Carries `Depends on:` / `Satisfies:` linking
   upstream. No Non-Goals (the root sets the envelope once).
 
 ## Structure
 
-- **Header** — license comment, then `# CROW - Design: <Title>` (root
+- **Header** — license comment, then `# CROWDB - Design: <Title>` (root
   may append `(Overview)`).
 - **Depends on / Satisfies** (sub-design only) — two lines after the
   title: `Depends on:` links upstream docs; `Satisfies:` lists the

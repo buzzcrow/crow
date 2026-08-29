@@ -1,0 +1,34 @@
+[package]
+name = "crowdb-console-shared"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+form_urlencoded = "1"
+hex = "0.4"
+tokio = { workspace = true, features = ["rt", "macros", "time", "process", "io-util"] }
+futures = "0.3"
+tracing = { workspace = true }
+dirs = "5"
+russh = "0.45"
+async-trait = "0.1"
+crowdb-protocol = { path = "../crowdb-protocol" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
+axum = "0.7"
+# KV data-plane crowdb-rpc client for `tests/kv_e2e_test.rs` (C6's own crowdb-rpc
+# `KvClient` wrapper is gone; that test now exercises the real
+# `crowdb-kv-client` crate end-to-end instead).
+crowdb-kv-client = { path = "../crowdb-kv-client" }

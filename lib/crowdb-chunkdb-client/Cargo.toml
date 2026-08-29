@@ -1,0 +1,23 @@
+[package]
+name = "crowdb-chunkdb-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client library for CROWDB chunkdb: allocate/seal/delete/query chunks."
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crowdb-protocol = { path = "../crowdb-protocol" }
+crowdb-kv-client = { path = "../crowdb-kv-client" }
+crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi" }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+bytes = "1"
+flatbuffers = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"

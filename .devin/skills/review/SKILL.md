@@ -7,10 +7,10 @@ triggers:
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW - Code Review
+# CROWDB - Code Review
 
 Goal: lean, correct, no dead code.
 
@@ -22,13 +22,13 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
 - No mutex on critical paths — use atomics. `std::sync::Mutex` ok for `start`/`stop` lifecycle. `tokio::sync::Mutex` only when held across `.await`.
 - Pre-size collections (`with_capacity`) or use stack.
 
-### Flatbuffer (crow-rpc handlers)
+### Flatbuffer (crowdb-rpc handlers)
 
-The flatbuffer control message IS the buffer — field access is a memory-offset read, no deserialize step. Full spec: `doc/design/rpc/design-crow-rpc.md` §6.
+The flatbuffer control message IS the buffer — field access is a memory-offset read, no deserialize step. Full spec: `doc/design/rpc/design-crowdb-rpc.md` §6.
 
 - **No owned intermediate struct.** Read through the flatbuffer root pointer in place; don't deserialize into a Rust struct with `String` + `Vec` fields.
 - **No allocating accessor on the hot path.** `fb.field().to_string()` / `.to_vec()` heap-allocates per call. Use the flatbuffer reference directly.
-- **Wrappers live in `crow-protocol`.** One shared definition per flatbuffer type.
+- **Wrappers live in `crowdb-protocol`.** One shared definition per flatbuffer type.
 - **Data payload: zero-copy when consumed by reference.** Copy to owned only when the handler retains data past the frame's lifetime.
 - **Write path: build, finish, attach, drop.** No retained builder state.
 

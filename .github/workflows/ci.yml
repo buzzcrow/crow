@@ -115,7 +115,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
     - name: Clean env
       run: pixi run clean-env
-    - name: Build all Rust test binaries + crow-kv-server
+    - name: Build all Rust test binaries + crowdb-kv-server
       run: pixi run build-tests
     - name: Run kv-server tests
       run: pixi run test-kv-server
@@ -148,10 +148,10 @@ jobs:
       uses: Swatinem/rust-cache@v2
     - name: Clean env
       run: pixi run clean-env
-    - name: Build all Rust test binaries + crow-kv-server
+    - name: Build all Rust test binaries + crowdb-kv-server
       run: pixi run build-tests
-    - name: Build crow-rpc-fb-server (for bench rpc e2e test)
-      run: pixi run cmake -S lib/crow-rpc -B lib/crow-rpc/build -DCMAKE_BUILD_TYPE=Release && pixi run cmake --build lib/crow-rpc/build --target crow-rpc-fb-server -j
+    - name: Build crowdb-rpc-fb-server (for bench rpc e2e test)
+      run: pixi run cmake -S lib/crowdb-rpc -B lib/crowdb-rpc/build -DCMAKE_BUILD_TYPE=Release && pixi run cmake --build lib/crowdb-rpc/build --target crowdb-rpc-fb-server -j
     - name: Run console-shared tests
       run: pixi run test-console-shared
     - name: Run CLI tests
@@ -175,10 +175,10 @@ jobs:
         pixi-version: latest
     - name: Cache cargo + target
       uses: Swatinem/rust-cache@v2
-    - name: Build crow-kv-server + crow-diskdb binaries
+    - name: Build crowdb-kv-server + crowdb-diskdb binaries
       run: pixi run build-tests
     - name: Install Playwright Chromium (skip if system browser present)
-      working-directory: app/crow-web/ui
+      working-directory: app/crowdb-web/ui
       run: |
         for b in /snap/bin/chromium /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/microsoft-edge; do
           [ -x "$b" ] && { echo "System browser found at $b; skipping download."; exit 0; }
@@ -192,6 +192,6 @@ jobs:
       with:
         name: playwright-report
         path: |
-          app/crow-web/ui/playwright-report
-          app/crow-web/ui/test-results
+          app/crowdb-web/ui/playwright-report
+          app/crowdb-web/ui/test-results
         retention-days: 7

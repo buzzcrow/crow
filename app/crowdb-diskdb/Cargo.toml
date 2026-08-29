@@ -1,0 +1,115 @@
+[package]
+name = "crowdb-diskdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CROWDB diskdb server: distributed disk-block allocator (lightweight, stateless; persists to CROWDB KV)."
+autobenches = false
+autotests = false
+
+[[bin]]
+name = "crowdb-diskdb"
+path = "src/main.rs"
+
+[lib]
+name = "crowdb_diskdb"
+path = "src/lib.rs"
+
+[features]
+# `test-util` exposes internal types/methods for integration tests.
+# Auto-enabled for this crate's own tests via the self dev-dependency
+# below, so `cargo test` needs no extra flags.
+test-util = []
+
+[lints]
+workspace = true
+
+[dependencies]
+crowdb-protocol = { path = "../../lib/crowdb-protocol" }
+crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
+crowdb-common = { path = "../../lib/crowdb-common/rust" }
+crowdb-rpc-ffi = { path = "../../lib/crowdb-rpc/ffi" }
+flatbuffers = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "net", "sync"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+arc-swap = "1.9"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dashmap = "6"
+crc32fast = "1"
+bincode = "1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.9.5"
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+tower = { version = "0.5", features = ["util"] }
+# Self dev-dependency: turns on the `test-util` feature for this
+# crate's own tests, so integration tests can access internal types.
+crowdb-diskdb = { path = ".", features = ["test-util"] }
+
+[[test]]
+name = "zone_alloc_test"
+path = "tests/zone_alloc_test.rs"
+
+[[test]]
+name = "disk_alloc_test"
+path = "tests/disk_alloc_test.rs"
+
+[[test]]
+name = "diskdb_e2e_test"
+path = "tests/diskdb_e2e_test.rs"
+
+[[test]]
+name = "recovery_test"
+path = "tests/recovery_test.rs"
+
+[[test]]
+name = "ddb_config_test"
+path = "tests/ddb_config_test.rs"
+
+[[test]]
+name = "config_reload_test"
+path = "tests/config_reload_test.rs"
+
+[[test]]
+name = "state_machine_test"
+path = "tests/state_machine_test.rs"
+
+[[test]]
+name = "lifecycle_test"
+path = "tests/lifecycle_test.rs"
+
+[[test]]
+name = "bg_task_test"
+path = "tests/bg_task_test.rs"
+
+[[test]]
+name = "health_test"
+path = "tests/health_test.rs"
+
+[[test]]
+name = "usage_aggregation_test"
+path = "tests/usage_aggregation_test.rs"
+
+[[test]]
+name = "space_flow_test"
+path = "tests/space_flow_test.rs"
+
+[[test]]
+name = "query_handler_test"
+path = "tests/query_handler_test.rs"
+
+[[test]]
+name = "scanner_test"
+path = "tests/scanner_test.rs"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# --- CrowKV write profiling with flamechart output ---
+# --- CrowDB write profiling with flamechart output ---
 #
-# Builds crow-cli + crow-kv-server with debug symbols and frame
+# Builds crowdb-cli + crowdb-kv-server with debug symbols and frame
 # pointers (Rust + C++ via cc crate), then runs a write benchmark
 # under perf record (primary, generates flamegraph SVG) or
 # samply (alternative, Firefox Profiler UI).
@@ -23,7 +23,7 @@
 #   - samply + inferno: installed via `pixi run install-deps`
 #   - perf:   linux-tools for running kernel
 set -euo pipefail
-cd /cjdata/cpp/crow
+cd /cjdata/cpp/crowdb
 
 if [ "$(uname -s)" = "Darwin" ]; then
     DEFAULT_SAMPLER="samply"
@@ -42,7 +42,7 @@ MAX_INFLIGHT=32
 KEYSPACE=1000000
 VALUE_SIZE=512
 
-echo "=== CrowKV write profiling ($SAMPLER) ==="
+echo "=== CrowDB write profiling ($SAMPLER) ==="
 echo "Config: ${THREADS}T:${CONNECTIONS}C max-inflight=${MAX_INFLIGHT} ${DURATION}s"
 echo ""
 
@@ -53,25 +53,25 @@ export RUSTFLAGS="-Cforce-frame-pointers=yes"
 export CXXFLAGS="-g -fno-omit-frame-pointer"
 export CFLAGS="-g -fno-omit-frame-pointer"
 
-pixi run -- cargo build --release -p crow-cli -p crow-kv-server 2>&1 | tail -3
+pixi run -- cargo build --release -p crowdb-cli -p crowdb-kv-server 2>&1 | tail -3
 echo "    Done."
 echo ""
 
 # Verify debug symbols
-if ! readelf -S target/release/crow-kv-server 2>/dev/null | grep -q debug; then
-    echo "WARNING: crow-kv-server binary has no debug sections."
+if ! readelf -S target/release/crowdb-kv-server 2>/dev/null | grep -q debug; then
+    echo "WARNING: crowdb-kv-server binary has no debug sections."
     echo "         Flamecharts will show addresses, not function names."
 fi
 
 # ── Step 2: Profile ──
 # Bypass pixi for the actual run — set LD_LIBRARY_PATH so the
 # binaries find libspdlog/libfmt/libz from the pixi env. This keeps
-# the process tree clean (samply -> crow-cli -> crow-kv-server)
-# instead of samply -> pixi -> cargo -> crow-cli -> crow-kv-server.
-PIXI_LIB="$(cd /cjdata/cpp/crow/.pixi/envs/default/lib && pwd)"
+# the process tree clean (samply -> crowdb-cli -> crowdb-kv-server)
+# instead of samply -> pixi -> cargo -> crowdb-cli -> crowdb-kv-server.
+PIXI_LIB="$(cd /cjdata/cpp/crowdb/.pixi/envs/default/lib && pwd)"
 export LD_LIBRARY_PATH="${PIXI_LIB}:${LD_LIBRARY_PATH:-}"
-export CROW_KV_SERVER_BIN="$(cd /cjdata/cpp/crow && pwd)/target/release/crow-kv-server"
-CLI_BIN="$(cd /cjdata/cpp/crow && pwd)/target/release/crow-cli"
+export CROWDB_KV_SERVER_BIN="$(cd /cjdata/cpp/crowdb && pwd)/target/release/crowdb-kv-server"
+CLI_BIN="$(cd /cjdata/cpp/crowdb && pwd)/target/release/crowdb-cli"
 
 mkdir -p "$RESULTS_DIR"
 
@@ -147,7 +147,7 @@ elif [ "$SAMPLER" = "perf" ]; then
         echo "    Generating flamegraph SVG..."
         perf script -i "$PERFDIR/perf.data" 2>/dev/null | \
             inferno-collapse-perf --all | \
-            inferno-flamegraph --title "CrowKV write ${THREADS}T:${CONNECTIONS}C MI=${MAX_INFLIGHT}" \
+            inferno-flamegraph --title "CrowDB write ${THREADS}T:${CONNECTIONS}C MI=${MAX_INFLIGHT}" \
             > "$PERFDIR/flamegraph.svg"
         echo "    Flamegraph SVG: ${PERFDIR}/flamegraph.svg"
     else

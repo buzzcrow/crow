@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R111: chunkdb / diskdb / diskio — Chunk Read IO Error Handling (Unified Read Path)
@@ -7,7 +7,7 @@
 
 R107 (chunk read flow) defines the unified read path that reconstructs
 object bytes from a `Location` array. The same `ChunkReader`
-(`lib/crow-chunk-client/src/reader.rs`) serves both object sizes:
+(`lib/crowdb-chunk-client/src/reader.rs`) serves both object sizes:
 - **Large objects** (R94) — EC strips; read `data_num` data blocks,
   EC-decode missing blocks from surviving data + parity.
 - **Small objects** (R106) — mirror strips (before R93 conversion);
@@ -172,18 +172,18 @@ failure is unrecoverable inline.
 **Numbered work items**:
 
 1. **EC decode fallback on read**
-   (`lib/crow-chunk-client/src/reader.rs`) — when a diskio `read`
+   (`lib/crowdb-chunk-client/src/reader.rs`) — when a diskio `read`
    fails for one block in an EC strip, the reader reads the
    surviving data + parity blocks via diskio and EC-decodes the
-   missing block via isa-l (`crow_common::ec::decode`). This is
+   missing block via isa-l (`crowdb_common::ec::decode`). This is
    transparent to the caller — the read completes with
    reconstructed data. Only fires when the failure is within EC
    tolerance (`failed_count ≤ code_num`).
    **Services**: diskio (error detection + surviving block reads),
-   crow-common (EC decode).
+   crowdb-common (EC decode).
 
 2. **Mirror replica fallback on read**
-   (`lib/crow-chunk-client/src/reader.rs`) — when a diskio `read`
+   (`lib/crowdb-chunk-client/src/reader.rs`) — when a diskio `read`
    fails for a mirror strip's primary replica, the reader falls back
    to the next replica (mirror strips have `replica_count` replicas,
    no parity). Transparent to the caller. Fires for each failed
@@ -191,7 +191,7 @@ failure is unrecoverable inline.
    **Services**: diskio (error detection + replica reads).
 
 3. **Read-path rebuild + replace**
-   (`lib/crow-chunk-client/src/reader.rs`) — after a successful EC
+   (`lib/crowdb-chunk-client/src/reader.rs`) — after a successful EC
    decode or mirror fallback, the reader triggers a background
    rebuild: allocate a new block via diskdb (with the negative list
    filter from R110), write the reconstructed data via diskio,
@@ -204,7 +204,7 @@ failure is unrecoverable inline.
    reconstructed data), chunkdb (strip metadata update).
 
 4. **Partial read result**
-   (`lib/crow-chunk-client/src/reader.rs` + `crow-chunk-client`
+   (`lib/crowdb-chunk-client/src/reader.rs` + `crowdb-chunk-client`
    public API) — when a read cannot complete (EC decode fails
    because too many blocks are lost, or all mirror replicas
    failed), the reader returns a partial result: the byte ranges
@@ -214,11 +214,11 @@ failure is unrecoverable inline.
    (single-shot) and `ChunkReadStream` (streaming — the stream
    delivers successful ranges then a final error item for the
    failed range). The caller can retry after R83 recovery.
-   **Services**: diskio (read failures), crow-chunk-client (partial
+   **Services**: diskio (read failures), crowdb-chunk-client (partial
    result assembly).
 
 5. **Degraded strip read tolerance**
-   (`lib/crow-chunk-client/src/reader.rs`) — the reader must
+   (`lib/crowdb-chunk-client/src/reader.rs`) — the reader must
    tolerate reading strips marked degraded by the write path
    (R110/R112 — parity missing, data durable). A full-data read of
    a degraded strip reads all data blocks directly (no parity
@@ -258,7 +258,7 @@ failure is unrecoverable inline.
        │  │            │               │
        │  ▼            │               │
        │ ┌─────────────────────────────┐
-       │ │ crow-chunk-client (reader)  │
+       │ │ crowdb-chunk-client (reader)  │
        │ │  add disk → negative list   │
        │ │  (shared with R110/R112)    │
        │ └────────────┬────────────────┘
@@ -354,7 +354,7 @@ the dependency list is organized by service.
   - **R107** (chunk read flow) — the read path being hardened; R111
     modifies `reader.rs` to add fallback + rebuild + partial result.
   - **R110** (large-write IO error handling) — defines the negative
-    list (`lib/crow-chunk-client/src/negative_list.rs`) and
+    list (`lib/crowdb-chunk-client/src/negative_list.rs`) and
     degraded-strip tracking that R111 reuses for the read path.
     R111 can ship before R110 (it just doesn't rebuild — only
     fallback + partial result), but the full read-error story needs
@@ -423,9 +423,9 @@ the dependency list is organized by service.
   Integration test (verify diskdb receives the report; R83 recovery
   is a separate test in R83's acceptance).
 
-**Test commands**: `pixi run cargo test -p crow-chunk-client --test
+**Test commands**: `pixi run cargo test -p crowdb-chunk-client --test
 read_error_handling` (unit + integration), `pixi run cargo test -p
-crow-chunk-client --test read_error_handling_e2e` (E2E with real
+crowdb-chunk-client --test read_error_handling_e2e` (E2E with real
 servers + fault injection), `pixi run cargo fmt --all -- --check`,
 `pixi run cargo clippy --all-targets -- -D warnings`.
 

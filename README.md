@@ -1,18 +1,18 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW
+# CROWDB
 
-[![CI](https://github.com/buzzcrow/crow/actions/workflows/ci.yml/badge.svg)](https://github.com/buzzcrow/crow/actions/workflows/ci.yml)
+[![CI](https://github.com/buzzcrow/crowdb/actions/workflows/ci.yml/badge.svg)](https://github.com/buzzcrow/crowdb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-CROW is a high-performance distributed storage platform — a foundation layer for building storage systems where you own the hot path all the way down to the metal.
+CROWDB is a high-performance distributed storage platform — a foundation layer for building storage systems where you own the hot path all the way down to the metal.
 
-The foundation is **crow-kv**, a distributed key-value cluster built on multi-group Multi-Paxos. Where Raft serializes every commit through a single log, Multi-Paxos decides slots in parallel, turning the write hot path into a fully parallel commit. That is the consensus core. On top of it comes a chunk-based common storage layer, and on top of that, distributed data structures like KV and streams that scale out far beyond any single node's local limitation, with no node owning the data it serves.
+The foundation is **crowdb-kv**, a distributed key-value cluster built on multi-group Multi-Paxos. Where Raft serializes every commit through a single log, Multi-Paxos decides slots in parallel, turning the write hot path into a fully parallel commit. That is the consensus core. On top of it comes a chunk-based common storage layer, and on top of that, distributed data structures like KV and streams that scale out far beyond any single node's local limitation, with no node owning the data it serves.
 
 ## Why This Project
 
-Storage systems are usually assembled from off-the-shelf parts: a consensus library here, a KV engine there, a log component somewhere else. Each of those arrives with an architecture already decided, and once you build on top of one you live inside that decision. When it turns into the bottleneck, all you can do is work around it. CROW owns the whole flow instead — consensus, WAL, storage engine, I/O path — so every layer is ours to move.
+Storage systems are usually assembled from off-the-shelf parts: a consensus library here, a KV engine there, a log component somewhere else. Each of those arrives with an architecture already decided, and once you build on top of one you live inside that decision. When it turns into the bottleneck, all you can do is work around it. CROWDB owns the whole flow instead — consensus, WAL, storage engine, I/O path — so every layer is ours to move.
 
 That control matters because the ground under storage keeps shifting. io_uring and NVMe moved the bottleneck once already, and GPUDirect Storage, DMA paths that skip the CPU, high-bandwidth fabrics, and offload to accelerator cards will move it again. Adopting any of them is never a patch to a single module; it reaches through consensus, durability, and the data path at the same time, which only works if all three are yours.
 
@@ -40,12 +40,12 @@ Not because the off-the-shelf parts are bad, but because a foundation that can't
 
 Raft's log is contiguous by construction: a leader cannot acknowledge slot N+1 until slot N is committed. Under high concurrency this becomes a sequential bottleneck.
 
-Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **decided and applied out of order**, turning a sequential wait into a fully pipelined commit path. crow-kv pays for this with extra complexity around gap repair and a slightly more conservative read frontier — a tradeoff documented in detail in the [design doc](doc/design/kv/design-crow-kv.md#1-overview).
+Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **decided and applied out of order**, turning a sequential wait into a fully pipelined commit path. crowdb-kv pays for this with extra complexity around gap repair and a slightly more conservative read frontier — a tradeoff documented in detail in the [design doc](doc/design/kv/design-crowdb-kv.md#1-overview).
 
 ## Architecture at a Glance
 
 ```
-                         crow-kv Cluster
+                         crowdb-kv Cluster
   ┌──────────────────────────────────────────────────────────┐
   │   Node A                Node B                Node C     │
   │   ┌─────────┐          ┌─────────┐          ┌─────────┐  │
@@ -53,14 +53,14 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
   │   │Group-2 F│          │Group-2 L│          │Group-2 F│  │
   │   └─────────┘          └─────────┘          └─────────┘  │
   └───────▲──────────────────────────────────────────────────┘
-          │  HTTP /topology + per-group crow-rpc reads/writes
+          │  HTTP /topology + per-group crowdb-rpc reads/writes
      ┌────┴────┐
      │ Client  │
      └─────────┘
 ```
 
 - **Multi-group sharding** — each node hosts multiple Paxos groups; routing is by explicit `group_id`. Group membership and key ranges are operator-defined.
-- **Pluggable storage** — the WAL is the source of truth; the key-value engine is a derived projection. An in-memory engine and `crow-tree` (a custom B+tree with delta-chain encoding, io_uring async I/O, and epoch-safe lock-free reads) are both implemented behind a unified `KVEngine` trait.
+- **Pluggable storage** — the WAL is the source of truth; the key-value engine is a derived projection. An in-memory engine and `crowdb-tree` (a custom B+tree with delta-chain encoding, io_uring async I/O, and epoch-safe lock-free reads) are both implemented behind a unified `KVEngine` trait.
 - **Raft where it doesn't matter, Paxos where it does** — leader election, leases, snapshot install, and reconfiguration follow settled Raft designs. Only the write hot path diverges into Multi-Paxos.
 - **Console** — a web UI and CLI for cluster lifecycle management (bootstrap, rolling upgrade, replica add/remove, health monitoring).
 
@@ -68,26 +68,26 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
 
 | Crate | What it is |
 | --- | --- |
-| `crow-kv` | Core library: Multi-Paxos consensus, WAL, storage engine trait, RPC, reconfiguration |
-| `crow-kv-server` | Server binary: hosts groups, serves crow-rpc + HTTP management API |
-| `crow-kv-client` | Client library: topology cache, retry, idempotency |
-| `crow-tree` | Custom storage engine (C++ core): B+tree, delta chains, io_uring reactor, buffer pool |
-| `crow-tree-ffi` | Rust FFI bindings to `crow-tree` — exposes the C++ engine as a `KVEngine` trait impl |
-| `crow-common` | Shared C++/Rust utilities: async logging (spdlog), compressing file sink |
-| `crow-console-shared` | Console core library: cluster config, lifecycle (deploy/stop), SSH, topology model |
-| `crow-web` | Web console (Axum + React): cluster lifecycle UI, KV operator panel, Swagger |
-| `crow-cli` | CLI console (`clap`): same management surface as the web console |
+| `crowdb-kv` | Core library: Multi-Paxos consensus, WAL, storage engine trait, RPC, reconfiguration |
+| `crowdb-kv-server` | Server binary: hosts groups, serves crowdb-rpc + HTTP management API |
+| `crowdb-kv-client` | Client library: topology cache, retry, idempotency |
+| `crowdb-tree` | Custom storage engine (C++ core): B+tree, delta chains, io_uring reactor, buffer pool |
+| `crowdb-tree-ffi` | Rust FFI bindings to `crowdb-tree` — exposes the C++ engine as a `KVEngine` trait impl |
+| `crowdb-common` | Shared C++/Rust utilities: async logging (spdlog), compressing file sink |
+| `crowdb-console-shared` | Console core library: cluster config, lifecycle (deploy/stop), SSH, topology model |
+| `crowdb-web` | Web console (Axum + React): cluster lifecycle UI, KV operator panel, Swagger |
+| `crowdb-cli` | CLI console (`clap`): same management surface as the web console |
 
 <details>
 <summary><b>Getting Started</b></summary>
 
-CROW uses [Pixi](https://pixi.sh) for environment management — it pins the C++ toolchain, Rust compiler, and all native dependencies (cmake, gtest, lz4, folly, flatbuffers, etc.) in a single lockfile. The Linux build targets glibc 2.17 (CentOS 7 / Ubuntu 16.04 era), so binaries built once run on virtually any modern Linux distribution.
+CROWDB uses [Pixi](https://pixi.sh) for environment management — it pins the C++ toolchain, Rust compiler, and all native dependencies (cmake, gtest, lz4, folly, flatbuffers, etc.) in a single lockfile. The Linux build targets glibc 2.17 (CentOS 7 / Ubuntu 16.04 era), so binaries built once run on virtually any modern Linux distribution.
 
 ```bash
 # Install pixi (if not already installed)
 curl -fsSL https://pixi.sh/install.sh | sh
 
-# Build everything (crow-tree C++ + Rust workspace + web UI)
+# Build everything (crowdb-tree C++ + Rust workspace + web UI)
 pixi run build
 
 # Run all tests (C++ ctest + Rust unit/integration + web + Playwright e2e)
@@ -98,7 +98,7 @@ pixi run test-suite
 
 ## Performance
 
-crow-kv's hot path is built around a few core design choices:
+crowdb-kv's hot path is built around a few core design choices:
 
 - **Pipelined inflight window** — Multi-Paxos decides slots out of order, so the leader admits many proposals in parallel instead of serializing one at a time like Raft.
 - **Server-side proposal coalescing** — concurrent single-key client ops are batched into one slot and one quorum round, amortizing the consensus RPC cost across the whole batch.
@@ -130,13 +130,13 @@ Peak **123K ops/s** at 256 threads — 4.3× the non-coalesced ceiling (~29K) fr
 | 24 | 24 | 120,494 | 403 µs | 112,172 | 444 µs |
 | 48 | 48 | 144,486 | 828 µs | 135,928 | 884 µs |
 
-Peak **145K ops/s** — ~1.17× the coalesced write peak (124K). Reads skip the consensus critical path entirely (no WAL, no quorum RPC); the lease barrier costs ~0 when valid, so a linearizable read is just engine get + crow-rpc RTT.
+Peak **145K ops/s** — ~1.17× the coalesced write peak (124K). Reads skip the consensus critical path entirely (no WAL, no quorum RPC); the lease barrier costs ~0 when valid, so a linearizable read is just engine get + crowdb-rpc RTT.
 
 ## Documentation
 
 The full design lives in [`doc/`](doc/). Start with:
 
-- [**Design**](doc/design/kv/design-crow-kv.md) — what crow-kv is, why key choices were made, and how the system is structured
+- [**Design**](doc/design/kv/design-crowdb-kv.md) — what crowdb-kv is, why key choices were made, and how the system is structured
 - [**User Guide**](doc/user-manual/user-guide.md) — quick start, KV operations, cluster management, and API reference
 - [**Doc Index**](doc/doc_index.md) — a navigable map to every design doc and sub-topic
 

@@ -16,7 +16,7 @@ if ! pixi run cargo fmt --all -- --check; then
 fi
 
 # Collect staged C++ files
-staged_cpp=$(git diff --cached --name-only --diff-filter=ACM -- 'lib/crow-tree/src/*.cpp' 'lib/crow-tree/include/crow-tree/*.h')
+staged_cpp=$(git diff --cached --name-only --diff-filter=ACM -- 'lib/crowdb-tree/src/*.cpp' 'lib/crowdb-tree/include/crowdb-tree/*.h')
 
 # Check C++ formatting (only staged files)
 if [ -n "$staged_cpp" ]; then
@@ -38,17 +38,17 @@ if [ $? -ne 0 ]; then
 fi
 
 # Run clang-tidy (only on staged .cpp files)
-staged_cpp_src=$(git diff --cached --name-only --diff-filter=ACM -- 'lib/crow-tree/src/*.cpp')
-if [ -n "$staged_cpp_src" ] && [ -d lib/crow-tree/build ]; then
+staged_cpp_src=$(git diff --cached --name-only --diff-filter=ACM -- 'lib/crowdb-tree/src/*.cpp')
+if [ -n "$staged_cpp_src" ] && [ -d lib/crowdb-tree/build ]; then
     echo "Running clang-tidy on staged C++ files..."
     # Mirror CMake's liburing gate: reactor.cpp, block_async_page_store.cpp,
     # and any file that includes reactor.h require liburing headers; on macOS
     # (and anywhere liburing is missing) they are excluded from the build, so
     # clang-tidy must skip them too. clang-tidy uses clang (not GCC) and can't
     # find liburing.h in the pixi env, so skip these files when liburing.h is
-    # not at a system path. Most crow-tree source files transitively include
-    # reactor.h via crow-tree.h → options.h, so when liburing.h is not at a
-    # system path, skip clang-tidy entirely for crow-tree sources.
+    # not at a system path. Most crowdb-tree source files transitively include
+    # reactor.h via crowdb-tree.h → options.h, so when liburing.h is not at a
+    # system path, skip clang-tidy entirely for crowdb-tree sources.
     have_liburing=false
     if [ -f /opt/homebrew/include/liburing.h ] || [ -f /usr/local/include/liburing.h ] || [ -f /usr/include/liburing.h ]; then
         have_liburing=true
@@ -64,7 +64,7 @@ if [ -n "$staged_cpp_src" ] && [ -d lib/crow-tree/build ]; then
                     cpp_files+=("$f")
                 else
                     # Skip: clang-tidy can't find liburing.h (transitively
-                    # included via crow-tree.h → options.h → reactor.h).
+                    # included via crowdb-tree.h → options.h → reactor.h).
                     echo "   Skipping clang-tidy for $f (liburing.h not at system path)"
                 fi
                 ;;
@@ -75,7 +75,7 @@ if [ -n "$staged_cpp_src" ] && [ -d lib/crow-tree/build ]; then
         fail=0
         for f in "${cpp_files[@]}"; do
             base=$(basename "$f")
-            (pixi run clang-tidy "$f" -p lib/crow-tree/build 2>&1 | grep -E '^(error:|warning:|/.*: error:|/.*: warning:)' > "$tmpdir/$base.out") &
+            (pixi run clang-tidy "$f" -p lib/crowdb-tree/build 2>&1 | grep -E '^(error:|warning:|/.*: error:|/.*: warning:)' > "$tmpdir/$base.out") &
         done
         wait
         for f in "${cpp_files[@]}"; do
@@ -91,8 +91,8 @@ if [ -n "$staged_cpp_src" ] && [ -d lib/crow-tree/build ]; then
             exit 1
         fi
     fi
-elif [ -n "$staged_cpp_src" ] && [ ! -d lib/crow-tree/build ]; then
-    echo "⚠️  Skipping clang-tidy: lib/crow-tree/build not found. Run 'pixi run build' first."
+elif [ -n "$staged_cpp_src" ] && [ ! -d lib/crowdb-tree/build ]; then
+    echo "⚠️  Skipping clang-tidy: lib/crowdb-tree/build not found. Run 'pixi run build' first."
 fi
 
 echo "✅ All checks passed!"

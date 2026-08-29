@@ -1,0 +1,39 @@
+[package]
+name = "crowdb-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crowdb-web"
+path = "src/main.rs"
+
+[dependencies]
+crowdb-console-shared = { path = "../../lib/crowdb-console-shared" }
+crowdb-diskdb-client = { path = "../../lib/crowdb-diskdb-client" }
+crowdb-kv-client = { path = "../../lib/crowdb-kv-client" }
+crowdb-protocol = { path = "../../lib/crowdb-protocol" }
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
+axum = "0.7"
+async-trait = "0.1"
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json = "1"
+tower = { version = "0.5", features = ["util"] }
+crowdb-kv = { path = "../../lib/crowdb-kv" }

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# CrowRPC echo regression benchmark.
+# CrowdbRPC echo regression benchmark.
 # Usage: bash tools/bench-rpc-regression.sh
 #
-# Starts a standalone crow-rpc-fb-server (built via `pixi run build-cpp`),
-# then runs crow-cli bench rpc against it for each config. The server is
+# Starts a standalone crowdb-rpc-fb-server (built via `pixi run build-cpp`),
+# then runs crowdb-cli bench rpc against it for each config. The server is
 # restarted per config so its io_engines/io_workers match the client.
 #
 # After a run, update doc/design/rpc/rpc-flow-analysis.md: add a
@@ -34,7 +34,7 @@
 # writev/read syscall). Nagle gives +62-113% throughput and 4x lower p99
 # at high concurrency — bursty coroutine workloads are syscall-bound.
 # raggr/saggr columns dropped (frames_sent/frames_parsed moved to
-# crow-common metrics histograms); nagle column added.
+# crowdb-common metrics histograms); nagle column added.
 # Coroutine (nagle off):
 #   Eng Wkr    T    C  ops/s        avg    p50    p99    p999   nagle  err
 #   1   1      1    1      52,759    17     17     25      31     0      0
@@ -67,8 +67,8 @@ cd "$(dirname "$0")/.."
 RESULTS_FILE="doc/working/bench-rpc-regression.tsv"
 DURATION=20
 VALUE_SIZE=128
-SERVER_BIN="lib/crow-rpc/build/crow-rpc-fb-server"
-SERVER_LOG_DIR="/tmp/crow-rpc-bench-server"
+SERVER_BIN="lib/crowdb-rpc/build/crowdb-rpc-fb-server"
+SERVER_LOG_DIR="/tmp/crowdb-rpc-bench-server"
 SERVER_PORT=18080
 SERVER_PID=""
 
@@ -128,7 +128,7 @@ stop_server() {
 # can't just take the last block — we scan all blocks.
 # Extracts: writev_total, read_total, submit_to_writev_count.
 # NOTE: frames_sent/frames_parsed are no longer emitted as raw counters
-# (moved to crow-common metrics histograms), so raggr/saggr cannot be
+# (moved to crowdb-common metrics histograms), so raggr/saggr cannot be
 # computed. These columns are dropped from the output.
 parse_server_totals() {
     local metrics_log="$SERVER_LOG_DIR/metrics.log"
@@ -158,7 +158,7 @@ run_bench() {
     if [ "$nagle" = "1" ]; then
         nagle_flag="--enable-nagle"
     fi
-    local client_cmd="pixi run -- ./target/release/crow-cli bench rpc \
+    local client_cmd="pixi run -- ./target/release/crowdb-cli bench rpc \
         --duration-secs $DURATION \
         --loader-num $loaders --connections $conn \
         --value-size $VALUE_SIZE \

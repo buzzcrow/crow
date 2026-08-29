@@ -1,19 +1,19 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# Contributing to CROW
+# Contributing to CROWDB
 
 Thanks for your interest in contributing! This guide covers setup, conventions, and the PR process.
 
 ## Development Environment
 
-CROW uses [Pixi](https://pixi.sh) to pin the C++ toolchain, Rust compiler, and all native dependencies in a single lockfile.
+CROWDB uses [Pixi](https://pixi.sh) to pin the C++ toolchain, Rust compiler, and all native dependencies in a single lockfile.
 
 ```bash
 # Install pixi
 curl -fsSL https://pixi.sh/install.sh | sh
 
-# Build everything (crow-tree C++ + Rust workspace + web UI)
+# Build everything (crowdb-tree C++ + Rust workspace + web UI)
 pixi run build
 
 # Run all tests
@@ -32,23 +32,23 @@ See `pixi.toml` for the full list of tasks.
 
 ### Rust
 
-- `unsafe_code = deny` (except `crow-tree-ffi`). Clippy `pedantic = warn`.
+- `unsafe_code = deny` (except `crowdb-tree-ffi`). Clippy `pedantic = warn`.
 - `Px` prefix for Paxos types (e.g. `PxGroupId`, `PxReplicaService`).
 - Integration tests only — under each crate's `tests/`. No inline `#[cfg(test)] mod tests`.
 - Shared test helpers: `tests/testkit/<topic>.rs`.
 - Logging via `tracing` with structured fields, not inline in messages.
 - No doc references in code comments — keep docs in `doc/`.
 
-### C++ (crow-tree)
+### C++ (crowdb-tree)
 
 - Follow `.clang-format` and `.clang-tidy` configs.
-- GoogleTest for tests under `lib/crow-tree/tests/`.
+- GoogleTest for tests under `lib/crowdb-tree/tests/`.
 
 ### Design Docs
 
 - Start at `doc/doc_index.md` — match your task to a row, then open only that doc.
 - If you add/rename/rescope a doc, update `doc_index.md` in the same commit.
-- See `doc/design/kv/design-crow-kv.md` for architecture context before making non-trivial changes.
+- See `doc/design/kv/design-crowdb-kv.md` for architecture context before making non-trivial changes.
 
 ## Pull Request Process
 
@@ -63,11 +63,11 @@ See `pixi.toml` for the full list of tasks.
 
 | Crate | What it is |
 | --- | --- |
-| `crow-kv` | Core library: Multi-Paxos consensus, WAL, storage engine, RPC |
-| `crow-kv-server` | Server binary: crow-rpc + HTTP management API |
-| `crow-kv-client` | Client library: topology cache, retry, idempotency |
-| `crow-tree` | C++ storage engine (B+tree, delta chains, io_uring, buffer pool) |
-| `crow-console` | Operations console: web UI (Axum + React) and CLI |
+| `crowdb-kv` | Core library: Multi-Paxos consensus, WAL, storage engine, RPC |
+| `crowdb-kv-server` | Server binary: crowdb-rpc + HTTP management API |
+| `crowdb-kv-client` | Client library: topology cache, retry, idempotency |
+| `crowdb-tree` | C++ storage engine (B+tree, delta chains, io_uring, buffer pool) |
+| `crowdb-console` | Operations console: web UI (Axum + React) and CLI |
 
 See `AGENTS.md` for a dispatch table on which docs to read for each type of task.
 

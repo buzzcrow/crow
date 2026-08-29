@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R84: chunkdb — Post-Disk-Move Chunk Placement Scanner
@@ -35,7 +35,7 @@
   [`doc/backlog/R81-sysdata-id-reuse-safety-and-disk-move.md`](R81-sysdata-id-reuse-safety-and-disk-move.md)
   Part 2 (disk move, record copy during Maintenance, records keyed
   by `DiskId`, no full scan),
-  [`doc/design/diskdb/design-crow-diskdb.md`](../design/diskdb/design-crow-diskdb.md)
+  [`doc/design/diskdb/design-crowdb-diskdb.md`](../design/diskdb/design-crowdb-diskdb.md)
   §3.9 (unit-based sizes; disk-id key routing — record keys carry
   `DiskId`, no `node_id`/`disk_group_id`), §8 (disk status management
   — effective status = `max(node, group, disk)`; `Missing` detection
@@ -45,7 +45,7 @@
   `GetScanStatus`). Fbs schema surfaces: `chunkdb.fbs` (`Chunk`,
   `ChunkStrip`, `MirrorStrip`, `EcStrip`, `Segment` reference),
   `chunkdb.fbs` (`ListChunks` — paginated chunk scan).
-  CROW's disk-move model (R81) is new, so the post-move chunk
+  CROWDB's disk-move model (R81) is new, so the post-move chunk
   placement scanner is new work shaped on diskdb's `ScannerTask`
   precedent.
 - **Use scenarios** —
@@ -89,8 +89,8 @@
   and reports any segment that is unreachable or orphaned.
 
 - **Numbered work items**:
-  1. **Placement scanner task** (`app/crow-chunkdb/src/scanner/placement.rs`,
-     new — or `app/crow-diskdb/src/scanner/` if the design picks
+  1. **Placement scanner task** (`app/crowdb-chunkdb/src/scanner/placement.rs`,
+     new — or `app/crowdb-diskdb/src/scanner/` if the design picks
      diskdb as the host) — a background task following the
      `BgRunner` + `BackgroundTask` pattern (R75 / §10 `ScannerTask`).
      Runs on a configurable interval (`scanner.placement_interval_secs`,

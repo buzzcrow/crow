@@ -1,10 +1,10 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R60: Scan — Sibling-Leaf Readahead on Cold Scans
 
 **Problem**: the scan path demand-loads each L1 leaf inline. The sync
-path (`Crowtree::scan`) resolves a leaf via the page cache when the
+path (`Crowdbtree::scan`) resolves a leaf via the page cache when the
 merge loop reaches it — the read stalls the loop until the leaf is
 resident. The async path (`scan_async_attempt`) resolves one pending
 page per reactor round trip and retries the whole scan, so a multi-leaf
@@ -12,7 +12,7 @@ cold range pays one reactor round trip per cold leaf, serialized with
 the merge work on prior leaves.
 
 A scan knows its next leaf before finishing the current one: the merge
-loop reads `base->right_sibling()` (`crow-tree.cpp:1822/2074`) right
+loop reads `base->right_sibling()` (`crowdb-tree.cpp:1822/2074`) right
 after descending into a leaf, before iterating that leaf's entries. So
 the page id of the next leaf is available while the current leaf is
 still being merged. Today nothing is done with it until the current
@@ -23,7 +23,7 @@ read stalls.
 as soon as its page id is known, overlapping the next leaf's I/O with
 the current leaf's merge work.
 
-- **Sync path** (`Crowtree::scan` / `try_scan_no_load`): after reading
+- **Sync path** (`Crowdbtree::scan` / `try_scan_no_load`): after reading
   `right_sibling`, call the page cache's prefetch/async-resolve seam
   for that page id (non-blocking — enqueues the read, does not wait).
   When `refill_l1` later walks to that leaf, the read is already in
@@ -43,13 +43,13 @@ the current leaf's merge work.
   memory bounded; the bench can sweep it.
 
 **Scope**:
-- `lib/crow-tree/src/crow-tree.cpp` — `scan` / `try_scan_no_load`:
+- `lib/crowdb-tree/src/crowdb-tree.cpp` — `scan` / `try_scan_no_load`:
   after `page_id = base->right_sibling()`, issue a prefetch. The
   prefetch seam must already exist or be added to the page cache
   (check `PageCache::resolve` / `Reactor` for an async-resolve or
   `posix_fadvise`/`readahead` hook). If no seam exists, this is blocked
   on adding one (small).
-- `lib/crow-tree/src/crow-tree.cpp` — `scan_async_attempt`: batch the
+- `lib/crowdb-tree/src/crowdb-tree.cpp` — `scan_async_attempt`: batch the
   right-sibling read with the current leaf's read in the reactor
   submission.
 - Tests: `test-tree-ct` scan tests must pass unchanged (readahead is

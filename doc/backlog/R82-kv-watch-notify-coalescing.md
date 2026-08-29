@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R82: kv — Watch/Notify Coalescing (Debounce)
@@ -19,7 +19,7 @@
   safety-net poller covers any missed notifies. The impact is purely
   load/efficiency under bursty workloads.
 - **Design pointers** —
-  [`doc/design/kv/design-crow-kv-watch-notify.md`](../design/kv/design-crow-kv-watch-notify.md)
+  [`doc/design/kv/design-crowdb-kv-watch-notify.md`](../design/kv/design-crowdb-kv-watch-notify.md)
   §3 (Coalescing — deferred) states the rationale and points
   back to this backlog item. The original coalescer design (struct
   shape, timer-task lifecycle, per-prefix debounce, step-down flush)
@@ -58,7 +58,7 @@
 
 - **Numbered work items**:
   1. **`WatchCoalescer` struct**
-     (`lib/crow-kv/src/cluster/watch_registry.rs`) — new struct
+     (`lib/crowdb-kv/src/cluster/watch_registry.rs`) — new struct
      holding `debounce_ms: AtomicU64` + `pending:
      Mutex<HashMap<Vec<u8>, (HashSet<Vec<u8>>,
      Option<JoinHandle<()>>)>>`. The apply-path hook calls
@@ -73,27 +73,27 @@
      coalescer's removal from the initial watch/notify extension —
      the original code captured no refs and silently dropped buffered
      keys.
-  3. **`PxLearner` wiring** (`lib/crow-kv/src/paxos/learner.rs`) —
+  3. **`PxLearner` wiring** (`lib/crowdb-kv/src/paxos/learner.rs`) —
      the `watch_registry` `OnceLock` gains a third element
      (`Arc<WatchCoalescer>`); `set_watch_registry` takes the
      coalescer; the apply-path hook calls `coalescer.record_chosen`
      instead of `registry.emit`.
-  4. **`PxGroup` wiring** (`lib/crow-kv/src/cluster/group.rs`) —
+  4. **`PxGroup` wiring** (`lib/crowdb-kv/src/cluster/group.rs`) —
      `watch_coalescer: Arc<WatchCoalescer>` field; constructed in
      `PxGroup::new` with the configured `debounce_ms`; wired into
      the learner via `set_watch_registry`.
   5. **Step-down flush**
-     (`lib/crow-kv/src/cluster/group_election.rs`,
-     `lib/crow-kv/src/cluster/group_propose.rs`) — `step_down` and
+     (`lib/crowdb-kv/src/cluster/group_election.rs`,
+     `lib/crowdb-kv/src/cluster/group_propose.rs`) — `step_down` and
      the two propose-path direct `become_follower` calls call
      `watch_coalescer.flush_and_clear()` before
      `watch_registry.clear()`, emitting any pending notifies so no
      notify is lost on leader change.
-  6. **Configuration** (`lib/crow-kv/src/common/config.rs`,
-     `app/crow-diskdb/src/ddb_config.rs`) — add
-     `watch_notify_debounce_ms` to `CrowKVConfig` (default 100,
+  6. **Configuration** (`lib/crowdb-kv/src/common/config.rs`,
+     `app/crowdb-diskdb/src/ddb_config.rs`) — add
+     `watch_notify_debounce_ms` to `CrowDBConfig` (default 100,
      dynamic) and `notify_debounce_ms` to `NotifyConfig` (default
-     100, documentation/operator intent — the crow-kv config is
+     100, documentation/operator intent — the crowdb-kv config is
      authoritative). Live reload via `set_from_config` propagates
      to the coalescer's `AtomicU64`.
 
@@ -141,14 +141,14 @@
 
 - Depends on the watch/notify extension (`WatchRegistry`,
   `WatchCoalescer` apply-path hook, `WatchNotifyClient` — see
-  [`doc/design/kv/design-crow-kv-watch-notify.md`](../design/kv/design-crow-kv-watch-notify.md)).
+  [`doc/design/kv/design-crowdb-kv-watch-notify.md`](../design/kv/design-crowdb-kv-watch-notify.md)).
   That extension must be landed first; this item adds the coalescer
   layer on top.
 - No items depend on R82 — it is a pure load optimization.
 
 **Acceptance**:
 
-**WatchCoalescer** (`lib/crow-kv/src/cluster/watch_registry.rs`):
+**WatchCoalescer** (`lib/crowdb-kv/src/cluster/watch_registry.rs`):
 - `debounce_ms=0`, `record_chosen` a payload with 2 keys →
   immediate emit (no timer). Unit test.
 - `debounce_ms=50`, `record_chosen` 3 payloads to the same prefix
@@ -180,9 +180,9 @@
 
 **Open Questions**:
 
-- **Q1 — `debounce_ms` ownership: crow-kv config vs per-subscription.**
-  The coalescer runs on the crow-kv leader (group 0). Options: (a)
-  one global `debounce_ms` on `CrowKVConfig` — simple, but all
+- **Q1 — `debounce_ms` ownership: crowdb-kv config vs per-subscription.**
+  The coalescer runs on the crowdb-kv leader (group 0). Options: (a)
+  one global `debounce_ms` on `CrowDBConfig` — simple, but all
   watchers share the same window; (b) per-subscription debounce sent
   as a `WatchSubscribe` parameter — more ergonomic, adds per-watcher
   debounce timer state. Recommendation: (a) for v1 — one global

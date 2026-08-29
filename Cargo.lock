@@ -582,21 +582,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "crow-chunk-client"
+name = "crowdb-chunk-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bincode",
  "bytes",
- "crow-chunk-client",
- "crow-chunkdb-client",
- "crow-common",
- "crow-diskdb-client",
- "crow-diskio-client",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-test-harness",
+ "crowdb-chunk-client",
+ "crowdb-chunkdb-client",
+ "crowdb-common",
+ "crowdb-diskdb-client",
+ "crowdb-diskio-client",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -604,7 +604,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-chunkdb"
+name = "crowdb-chunkdb"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -612,13 +612,13 @@ dependencies = [
  "bincode",
  "bytes",
  "clap",
- "crow-chunkdb",
- "crow-common",
- "crow-diskdb",
- "crow-diskdb-client",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-chunkdb",
+ "crowdb-common",
+ "crowdb-diskdb",
+ "crowdb-diskdb-client",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "dashmap",
  "flatbuffers",
  "futures",
@@ -638,13 +638,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-chunkdb-client"
+name = "crowdb-chunkdb-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "dashmap",
  "flatbuffers",
  "thiserror 2.0.18",
@@ -653,19 +653,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-cli"
+name = "crowdb-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
  "clap",
  "crossbeam-channel",
- "crow-common",
- "crow-console-shared",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-web",
+ "crowdb-common",
+ "crowdb-console-shared",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-web",
  "dirs",
  "flatbuffers",
  "hex",
@@ -680,7 +680,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-common"
+name = "crowdb-common"
 version = "0.1.0"
 dependencies = [
  "flate2",
@@ -697,13 +697,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-console-shared"
+name = "crowdb-console-shared"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "crow-kv-client",
- "crow-protocol",
+ "crowdb-kv-client",
+ "crowdb-protocol",
  "dirs",
  "form_urlencoded",
  "futures",
@@ -719,7 +719,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-diskdb"
+name = "crowdb-diskdb"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -728,11 +728,11 @@ dependencies = [
  "bytes",
  "clap",
  "crc32fast",
- "crow-common",
- "crow-diskdb",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-common",
+ "crowdb-diskdb",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "dashmap",
  "flatbuffers",
  "rand 0.9.5",
@@ -750,14 +750,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-diskdb-client"
+name = "crowdb-diskdb-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-test-harness",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "dashmap",
  "flatbuffers",
  "reqwest",
@@ -769,14 +769,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-diskio-client"
+name = "crowdb-diskio-client"
 version = "0.1.0"
 dependencies = [
- "crow-common",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-test-harness",
+ "crowdb-common",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-test-harness",
  "flatbuffers",
  "reqwest",
  "serde_json",
@@ -787,19 +787,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-kv"
+name = "crowdb-kv"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytes",
  "criterion",
  "crossbeam-skiplist",
- "crow-common",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-tree-ffi",
+ "crowdb-common",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-tree-ffi",
  "dashmap",
  "flatbuffers",
  "flate2",
@@ -820,16 +820,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-kv-client"
+name = "crowdb-kv-client"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
- "crow-common",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-common",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "dashmap",
  "flatbuffers",
  "parking_lot",
@@ -843,18 +843,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-kv-server"
+name = "crowdb-kv-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
  "clap",
- "crow-common",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
- "crow-tree-ffi",
+ "crowdb-common",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
+ "crowdb-tree-ffi",
  "dashmap",
  "reqwest",
  "serde",
@@ -866,7 +866,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-protocol"
+name = "crowdb-protocol"
 version = "0.1.0"
 dependencies = [
  "bincode",
@@ -880,26 +880,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-rpc-ffi"
+name = "crowdb-rpc-ffi"
 version = "0.1.0"
 dependencies = [
  "cc",
- "crow-common",
- "crow-protocol",
+ "crowdb-common",
+ "crowdb-protocol",
  "flatbuffers",
  "tokio",
 ]
 
 [[package]]
-name = "crow-test-harness"
+name = "crowdb-test-harness"
 version = "0.1.0"
 dependencies = [
- "crow-chunkdb-client",
- "crow-diskdb-client",
- "crow-diskio-client",
- "crow-kv-client",
- "crow-protocol",
- "crow-rpc-ffi",
+ "crowdb-chunkdb-client",
+ "crowdb-diskdb-client",
+ "crowdb-diskio-client",
+ "crowdb-kv-client",
+ "crowdb-protocol",
+ "crowdb-rpc-ffi",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -907,7 +907,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-tree-ffi"
+name = "crowdb-tree-ffi"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -917,17 +917,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "crow-web"
+name = "crowdb-web"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
  "clap",
- "crow-console-shared",
- "crow-diskdb-client",
- "crow-kv",
- "crow-kv-client",
- "crow-protocol",
+ "crowdb-console-shared",
+ "crowdb-diskdb-client",
+ "crowdb-kv",
+ "crowdb-kv-client",
+ "crowdb-protocol",
  "futures",
  "hex",
  "reqwest",

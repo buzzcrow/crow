@@ -8,25 +8,25 @@ tarpaulin-report.html
 # ── Pixi ────────────────────────────────────────────────────────
 .pixi/
 
-# ── C++ (crow-tree) build artifacts ──────────────────────────────
+# ── C++ (crowdb-tree) build artifacts ──────────────────────────────
 build/
-lib/crow-tree/build/
-lib/crow-tree/build-asan/
-lib/crow-tree/build-tsan/
-lib/crow-tree/build-bench/
-lib/crow-tree/build*/
-lib/crow-tree/Testing/
+lib/crowdb-tree/build/
+lib/crowdb-tree/build-asan/
+lib/crowdb-tree/build-tsan/
+lib/crowdb-tree/build-bench/
+lib/crowdb-tree/build*/
+lib/crowdb-tree/Testing/
 Testing/
-lib/crow-tree/.cache/
-lib/crow-tree/.test-tmp/
+lib/crowdb-tree/.cache/
+lib/crowdb-tree/.test-tmp/
 .test-tmp/
 
-# ── Frontend (app/crow-web/ui) ────────────────────────────
-app/crow-web/ui/node_modules/
-app/crow-web/ui/dist/
-app/crow-web/ui/.vite/
-app/crow-web/ui/*.tsbuildinfo
-app/crow-web/ui/e2e/runtime-data/
+# ── Frontend (app/crowdb-web/ui) ────────────────────────────
+app/crowdb-web/ui/node_modules/
+app/crowdb-web/ui/dist/
+app/crowdb-web/ui/.vite/
+app/crowdb-web/ui/*.tsbuildinfo
+app/crowdb-web/ui/e2e/runtime-data/
 
 # ── Runtime artifacts (WAL, config, logs) ───────────────────────
 # Top-level artifact dirs (anchored to repo root).
@@ -37,7 +37,7 @@ app/crow-web/ui/e2e/runtime-data/
 /bench-runs/*
 test-logs/
 
-app/crow-cli/bench-runs/
+app/crowdb-cli/bench-runs/
 
 # Per-crate runtime dirs — these names don't appear in source code,
 # so globbing is safe and avoids repeating per crate.
@@ -45,20 +45,20 @@ app/crow-cli/bench-runs/
 **/ctdata/
 # Runtime config dirs (operator-supplied real configs, not tracked).
 # Tracked default configs live in app/<crate>/conf/*.json.
-app/crow-diskdb/conf/runtime/
-app/crow-kv-server/conf/runtime/
-lib/crow-console-shared/conf/
+app/crowdb-diskdb/conf/runtime/
+app/crowdb-kv-server/conf/runtime/
+lib/crowdb-console-shared/conf/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.
-app/crow-kv-server/log/
-app/crow-cli/log/
-lib/crow-console-shared/log/
-app/crow-web/log/
-app/crow-diskdb/log/
-app/crow-chunkdb/log/
-lib/crow-diskdb-client/log/
-lib/crow-diskio-client/log/
+app/crowdb-kv-server/log/
+app/crowdb-cli/log/
+lib/crowdb-console-shared/log/
+app/crowdb-web/log/
+app/crowdb-diskdb/log/
+app/crowdb-chunkdb/log/
+lib/crowdb-diskdb-client/log/
+lib/crowdb-diskio-client/log/
 
 # ── Profiling artifacts ─────────────────────────────────────────
 # samply / perf / flamegraph output (profile-write-*.zip, profile-write-*/)
@@ -73,15 +73,15 @@ flamegraph.svg
 .idea/
 .DS_Store
 
-# crow-rpc build + clangd cache
-lib/crow-rpc/build/
-lib/crow-rpc/build-asan/
-lib/crow-rpc/build-tsan/
-lib/crow-rpc/build*/
-lib/crow-rpc/.cache/
+# crowdb-rpc build + clangd cache
+lib/crowdb-rpc/build/
+lib/crowdb-rpc/build-asan/
+lib/crowdb-rpc/build-tsan/
+lib/crowdb-rpc/build*/
+lib/crowdb-rpc/.cache/
 
-# crow-diskio build + clangd cache
-app/crow-diskio/build/
-app/crow-diskio/build*/
-app/crow-diskio/.cache/
-lib/crow-chunk-client/log/
+# crowdb-diskio build + clangd cache
+app/crowdb-diskio/build/
+app/crowdb-diskio/build*/
+app/crowdb-diskio/.cache/
+lib/crowdb-chunk-client/log/

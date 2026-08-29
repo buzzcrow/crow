@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R122: kv — Rust mutex/lock review fixes
@@ -60,13 +60,13 @@ design and need no action.
   atomic mirrors exist for the hot path).
 
 **Design pointers:**
-- `design/kv/design-crow-kv-consensus.md` §5 (Learner — chosen-frontier
+- `design/kv/design-crowdb-kv-consensus.md` §5 (Learner — chosen-frontier
   and apply-frontier advance, the `PxLearner::out_of_order` finding).
-- `design/kv/design-crow-kv-wal.md` — WAL pipeline + index design (the
+- `design/kv/design-crowdb-kv-wal.md` — WAL pipeline + index design (the
   `WalEngine::index` finding).
-- `design/kv/design-crow-kv-observability.md` — metrics runner/collector
+- `design/kv/design-crowdb-kv-observability.md` — metrics runner/collector
   design (the `MetricsRunner` finding, shared root cause with R121 #4).
-- `design/chunkdb/design-crow-chunkdb-range-binding.md` §5 (the
+- `design/chunkdb/design-crowdb-chunkdb-range-binding.md` §5 (the
   `RangeBindingClient` finding — `arc_swap` pattern reference).
 
 **Use scenarios:**
@@ -102,7 +102,7 @@ collect metrics before taking the registry lock; lower-priority findings
 are documented with recommended approaches for later.
 
 1. **`PxLearner::out_of_order` — lock-free frontier** —
-   `lib/crow-kv/src/paxos/learner.rs` lines 89, 344, 373, 404, 413.
+   `lib/crowdb-kv/src/paxos/learner.rs` lines 89, 344, 373, 404, 413.
    Replace the `last_chosen_term` mutex fence (lines 373/404) with a
    `compare_exchange` loop on a packing atomic. For the frontier drain,
    use a lock-free skip list or a sharded map (by `slot % N`), or defer
@@ -111,54 +111,54 @@ are documented with recommended approaches for later.
    follower apply throughput is a bottleneck.
 
 2. **`WalEngine::index` — sharded index** —
-   `lib/crow-kv/src/wal/pipeline_writer.rs` lines 447, 655;
-   `lib/crow-kv/src/wal/wal_engine.rs` line 82. Shard the index (one
+   `lib/crowdb-kv/src/wal/pipeline_writer.rs` lines 447, 655;
+   `lib/crowdb-kv/src/wal/wal_engine.rs` line 82. Shard the index (one
    mutex per pipeline, merged on read) or use a lock-free concurrent
    map. Lower priority than #1 since append is lock-free; revisit if
    multi-disk flush throughput is bounded by index contention.
 
 3. **`ClientMetrics::window_lat` — per-thread histograms** —
-   `lib/crow-kv-client/src/metrics.rs` lines 161, 166–168. Use
+   `lib/crowdb-kv-client/src/metrics.rs` lines 161, 166–168. Use
    per-thread histograms drained into the window on flush (thread-local
    accumulation), or a lock-free histogram. Medium priority for
    high-QPS multi-threaded clients.
 
 4. **`RangeBindingClient::bindings` — `arc_swap`** —
-   `lib/crow-kv-client/src/range_binding.rs` line 98. Convert
+   `lib/crowdb-kv-client/src/range_binding.rs` line 98. Convert
    `RwLock<Vec<ChunkdbRangeBinding>>` to
    `arc_swap::ArcSwap<Vec<ChunkdbRangeBinding>>` for lock-free reads
    (refresh = swap to a new `Arc<Vec>`). Matches the `watch_registry`
    pattern already used in the learner.
 
 5. **`MetricsRunner` — collect before lock** —
-   `lib/crow-common/rust/src/metrics/runner.rs` lines 116–134;
-   `app/crow-kv-server/src/engine_collector.rs` lines 135–220. Run the
+   `lib/crowdb-common/rust/src/metrics/runner.rs` lines 116–134;
+   `app/crowdb-kv-server/src/engine_collector.rs` lines 135–220. Run the
    collector before taking `registry.lock()` (collect into a local
    buffer, then lock + apply). Same fix as C++ R121 finding #4.
 
 6. **`PxGroup::coalescer` — acceptable, low priority** —
-   `lib/crow-kv/src/cluster/group.rs` line 244. Acceptable as-is (short
+   `lib/crowdb-kv/src/cluster/group.rs` line 244. Acceptable as-is (short
    critical section, fair mutex). If profiling shows contention,
    consider an MPSC channel into the coalescer.
 
 7. **`PxGroup::peer_applied`/`peer_durable` — low priority** —
-   `lib/crow-kv/src/cluster/group.rs` lines 145, 157. A `DashMap` or
+   `lib/crowdb-kv/src/cluster/group.rs` lines 145, 157. A `DashMap` or
    per-peer atomic `SlotIndex` would eliminate the lock, but the gain
   is marginal at typical replica-set sizes (3–7).
 
 8. **`PxLocalReplica::gap_slots` — low priority** —
-   `lib/crow-kv/src/cluster/local_replica_apply.rs` lines 117, 147,
+   `lib/crowdb-kv/src/cluster/local_replica_apply.rs` lines 117, 147,
    167, 347. A `DashMap<SlotIndex, ()>` or lock-free bounded ring would
    reduce contention under heavy gap load, but the steady-state path
    is fine.
 
 9. **`DdbDiskGroup::allocating_disks` — low priority** —
-   `app/crow-diskdb/src/model/disk_group.rs` lines 144, 195. Convert
+   `app/crowdb-diskdb/src/model/disk_group.rs` lines 144, 195. Convert
    to `arc_swap::ArcSwap<AllocateDiskContext>` for truly lock-free
    reads. Low priority since the critical section is one `Arc::clone`.
 
 10. **`PxLocalReplica::election_state` — low priority** —
-    `lib/crow-kv/src/cluster/local_replica.rs` lines 555, 561, 567,
+    `lib/crowdb-kv/src/cluster/local_replica.rs` lines 555, 561, 567,
     587, 659, 667, 671, 675. Audit callers of `current_term()` /
     `voted_for()` and switch to `current_term_snapshot()` where a stale
     snapshot is safe (observations, logging).
@@ -181,10 +181,10 @@ are documented with recommended approaches for later.
 ## Dependencies
 
 - None — all findings are in landed code. The learner fix is
-  self-contained within `crow-kv`; the WAL index fix is self-contained
-  within `crow-kv`; the client metrics fix is self-contained within
-  `crow-kv-client`; the `RangeBindingClient` fix is self-contained
-  within `crow-kv-client`. No cross-component ordering.
+  self-contained within `crowdb-kv`; the WAL index fix is self-contained
+  within `crowdb-kv`; the client metrics fix is self-contained within
+  `crowdb-kv-client`; the `RangeBindingClient` fix is self-contained
+  within `crowdb-kv-client`. No cross-component ordering.
 - R121 (C++ lock review) shares the same `MetricsRunner`/`MetricsRegistry`
   collector pattern (Rust `MetricsRunner` holds `registry.lock()` during
   the collector callback — same root cause as C++ R121 finding #4); the

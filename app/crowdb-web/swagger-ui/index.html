@@ -1,0 +1,51 @@
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
+<!-- Licensed under the Apache License, Version 2.0. -->
+
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CrowdbKV — Swagger UI</title>
+    <link rel="stylesheet" href="swagger-ui.css">
+    <link rel="icon" type="image/png" href="favicon-32x32.png" sizes="32x32">
+    <link rel="icon" type="image/png" href="favicon-16x16.png" sizes="16x16">
+    <style>html,body { margin:0; padding:0; }</style>
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="swagger-ui-bundle.js" charset="UTF-8"></script>
+<script src="swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+<script>
+// Resolve the upstream OpenAPI document via the console's per-node proxy.
+// The SwaggerPanel passes ?url=<encoded specUrl> which points at
+// /api/nodes/<nodeId>/openapi.json, and ?serverUrl=<mgmtUrl> so that
+// try-it-out requests route to the correct crowkv-server instance.
+function buildOpenApiUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const url = params.get('url');
+    return url || '/api/openapi.json';
+}
+
+function buildServers() {
+    const params = new URLSearchParams(window.location.search);
+    const serverUrl = params.get('serverUrl');
+    return serverUrl ? [{ url: serverUrl }] : undefined;
+}
+
+window.onload = function () {
+    const config = {
+        url: buildOpenApiUrl(),
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        plugins: [SwaggerUIBundle.plugins.DownloadUrl],
+        layout: 'StandaloneLayout'
+    };
+    const servers = buildServers();
+    if (servers) config.servers = servers;
+    window.ui = SwaggerUIBundle(config);
+};
+</script>
+</body>
+</html>

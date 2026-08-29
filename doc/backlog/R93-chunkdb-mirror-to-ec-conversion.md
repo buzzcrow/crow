@@ -1,4 +1,4 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ### R93: chunkdb — Mirror-to-EC Conversion
@@ -80,7 +80,7 @@ swap atomically.
 A background conversion service in chunkdb that transforms mirror
 strips to EC strips using the existing `update_chunk_strip` RPC as
 the atomic swap primitive. The conversion reads mirror data via
-diskio (R105), EC-encodes via isa-l (crow-common), allocates EC strip
+diskio (R105), EC-encodes via isa-l (crowdb-common), allocates EC strip
 blocks via chunkdb, writes EC data+parity via diskio, and swaps the
 strip atomically. Conversion is triggered by a configurable policy
 (seal age, mirror strip count, manual trigger) and throttled to avoid
@@ -92,7 +92,7 @@ for the atomic swap — reclaims 3×→1.5× storage on shared chunks.
 
 **Numbered work items**:
 
-1. **Conversion task** (`app/crow-chunkdb/src/conversion.rs`) — a
+1. **Conversion task** (`app/crowdb-chunkdb/src/conversion.rs`) — a
    background `BgRunner` task (following the diskdb `ScannerTask`/
    `BgRunner` pattern, §10) that scans for convertible chunks. A
    chunk is convertible if: (a) it has mirror strips, (b) it is
@@ -102,12 +102,12 @@ for the atomic swap — reclaims 3×→1.5× storage on shared chunks.
    configurable concurrency (default 4 parallel conversions) and
    bandwidth throttling (default 50 MB/s, configurable).
 
-2. **Conversion logic** (`app/crow-chunkdb/src/conversion.rs`) —
+2. **Conversion logic** (`app/crowdb-chunkdb/src/conversion.rs`) —
    for each mirror strip:
    - Read the mirror data from one replica via `DiskIoClient::read`
      (R105). If the primary replica's disk is `Bad`, fall back to
      another replica.
-   - EC-encode the data via `crow-common` isa-l wrapper: split the
+   - EC-encode the data via `crowdb-common` isa-l wrapper: split the
      mirror data into `data_num` data blocks, encode `code_num`
      parity blocks.
    - Allocate an EC strip via chunkdb's `AllocateStrip` (placement:
@@ -122,7 +122,7 @@ for the atomic swap — reclaims 3×→1.5× storage on shared chunks.
      chunkdb, leave the mirror strip untouched, log the error, retry
      later.
 
-3. **Conversion policy** (`app/crow-chunkdb/src/conversion.rs`) —
+3. **Conversion policy** (`app/crowdb-chunkdb/src/conversion.rs`) —
    configurable triggers:
    - `conversion_min_seal_age_secs` (default 3600) — only convert
      strips in chunks sealed more than N seconds ago.
@@ -135,7 +135,7 @@ for the atomic swap — reclaims 3×→1.5× storage on shared chunks.
    - Manual trigger via HTTP endpoint `POST /convert_chunk` with
      `{ "chunk_id": ... }` or `POST /convert_all` with a filter.
 
-4. **Metrics + observability** (`app/crow-chunkdb/src/metrics.rs`) —
+4. **Metrics + observability** (`app/crowdb-chunkdb/src/metrics.rs`) —
    extend `LifecycleMetrics` with conversion counters:
    `conversion_started_count`, `conversion_completed_count`,
    `conversion_failed_count`, `conversion_bytes_read`,
@@ -143,7 +143,7 @@ for the atomic swap — reclaims 3×→1.5× storage on shared chunks.
    blocks freed). HTTP endpoint `GET /conversion_metrics` returns the
    snapshot.
 
-5. **ChunkdbClient conversion API** (`lib/crow-chunkdb-client/`) —
+5. **ChunkdbClient conversion API** (`lib/crowdb-chunkdb-client/`) —
    `async fn trigger_conversion(&self, chunk_id: &ChunkId) ->
    Result<(), ConversionError>` (manual trigger for a single chunk),
    `async fn trigger_conversion_batch(&self, filter: &
@@ -221,7 +221,7 @@ Conversion Task                chunkdb           diskio (R105)       isa-l
 - **Depends on**: **R105** (disk IO engine) — reads mirror data and
   writes EC blocks via `DiskIoClient`. **chunkdb** (landed, R85) —
   uses `update_chunk_strip` RPC, `AllocateStrip`, chunk metadata.
-  **crow-common EC** (landed with R85) — isa-l encode.
+  **crowdb-common EC** (landed with R85) — isa-l encode.
 - **Depended on by**:
   - **R106** (small object writer) — depends on R93 to convert the
     mirror strips that the writer produces. R106 can land before R93
@@ -280,8 +280,8 @@ Conversion Task                chunkdb           diskio (R105)       isa-l
   MB (3 × 12 blocks × 1 MB for 8+4 EC), `conversion_stripes_freed` =
   9 (3 strips × 3 mirror replicas). Integration test.
 
-**Test commands**: `pixi run cargo test -p crow-chunkdb --test
-conversion`, `pixi run cargo test -p crow-chunkdb-client --test
+**Test commands**: `pixi run cargo test -p crowdb-chunkdb --test
+conversion`, `pixi run cargo test -p crowdb-chunkdb-client --test
 conversion_api`, `pixi run cargo fmt --all -- --check`,
 `pixi run cargo clippy --all-targets -- -D warnings`.
 

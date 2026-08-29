@@ -1,7 +1,7 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW Test Task Backlog
+# CROWDB Test Task Backlog
 
 <!-- DO NOT DELETE THIS FILE — it is a persistent backlog, not a per-task draft. -->
 
@@ -12,7 +12,7 @@ itself remains as the ongoing test task backlog. This overrides the
 `plan-<topic>.md`.
 
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
-For test strategy, layer scope, and coverage details, see [`design/kv/design-crow-kv-test.md`](../design/kv/design-crow-kv-test.md).
+For test strategy, layer scope, and coverage details, see [`design/kv/design-crowdb-kv-test.md`](../design/kv/design-crowdb-kv-test.md).
 
 ## CI Job Grouping Guide
 
@@ -23,7 +23,7 @@ job, not the sum.
 
 **Assignment rule:** a test task's job is determined by two questions:
 1. Does it need CMake-built C++ binaries (ctest)? → **CppTests**
-2. Does it spawn real subprocesses (crow-kv-server, crow-diskdb, crow-diskio)?
+2. Does it spawn real subprocesses (crowdb-kv-server, crowdb-diskdb, crowdb-diskio)?
    - No → **UnitTests** (pure Rust, in-memory)
    - Yes, and it's a console/CLI test → **ConsoleTests**
    - Yes, and it's a server/storage test → **ServerTests**
@@ -35,15 +35,15 @@ job, not the sum.
 | **Lint** | `cargo fmt --check`, `cargo clippy` | none | Fast feedback; fails without blocking tests |
 | **CppTests** | `test-tree-ct`, `test-common-ct`, `test-rpc-ct`, `test-diskio-ct`, `test-tree-ffi`, `test-rpc-ffi` | `build-cpp` + `build-tests` | C++ ctest needs CMake; FFI tests are Rust but test C++ via cc::Build |
 | **UnitTests** | `test-common`, `test-protocol`, `test-kv-core`, `test-kv-client`, `test-chunkdb-client` | `build-tests` | Pure Rust, no subprocess spawning |
-| **ServerTests** | `test-kv-server`, `test-diskdb`, `test-diskdb-client`, `test-chunkdb`, `test-chunk-client`, `test-diskio-client` | `build-tests` | Spawns crow-kv-server / crow-diskdb / crow-diskio subprocesses |
-| **ConsoleTests** | `test-console-shared`, `test-console-cli`, `test-console-server` | `build-tests` | Spawns crow-kv-server via lifecycle::deploy_local |
+| **ServerTests** | `test-kv-server`, `test-diskdb`, `test-diskdb-client`, `test-chunkdb`, `test-chunk-client`, `test-diskio-client` | `build-tests` | Spawns crowdb-kv-server / crowdb-diskdb / crowdb-diskio subprocesses |
+| **ConsoleTests** | `test-console-shared`, `test-console-cli`, `test-console-server` | `build-tests` | Spawns crowdb-kv-server via lifecycle::deploy_local |
 | **UITests** | `test-console-ui` | `build-tests` + `install-ui-deps` | Playwright browser E2E + subprocess spawning |
 
 **Adding a new test task:**
 1. Add the task to `pixi.toml` under `# ── Test ──` with the right `depends-on`:
    - C++ ctest → `depends-on = ["build-cpp"]`
    - Rust test (no subprocess) → no `depends-on`
-   - Rust test (spawns subprocess) → add `cargo build -p crow-kv-server` to the cmd
+   - Rust test (spawns subprocess) → add `cargo build -p crowdb-kv-server` to the cmd
 2. Assign it to the matching CI job in `.github/workflows/ci.yml` using the table above.
 3. If the job doesn't already run `build-tests`, add a `Build all Rust test binaries` step.
 
@@ -85,17 +85,17 @@ pre-existing failures to 1 (the `task-fb` pull fixed 7).
 
 ## WAL Subsystem
 
-Source: `lib/crow-kv/src/wal/`. Tests: 12 files, ~92 tests.
+Source: `lib/crowdb-kv/src/wal/`. Tests: 12 files, ~92 tests.
 
 - [ ] **WAL disk-loss recovery (full fail-out)**: the full fail-out procedure
-  (step-out RPC + reconfiguration, `design-crow-kv-wal.md` §8.1) is not yet
+  (step-out RPC + reconfiguration, `design-crowdb-kv-wal.md` §8.1) is not yet
   implemented. The test should verify the node fails out of the group and
   rejoins via snapshot install after the disk is replaced. **Blocked** on the
   fail-out feature landing.
 
 ## Store
 
-Source: `lib/crow-kv/src/store/`. Tests: 8 files, 26 tests.
+Source: `lib/crowdb-kv/src/store/`. Tests: 8 files, 26 tests.
 
 - [ ] **Per-group WAL disk isolation**: `WalConfig.wal_disks` is per-`WalEngine`,
   not per-group within a store — the server startup path
@@ -105,7 +105,7 @@ Source: `lib/crow-kv/src/store/`. Tests: 8 files, 26 tests.
 
 ## Deployment
 
-Source: `app/crow-kv-server/`. Tests: 9 files.
+Source: `app/crowdb-kv-server/`. Tests: 9 files.
 
 - [ ] **Network partition between processes**: verify cluster behavior when
   network connectivity between processes is severed and restored. **Blocked**:
@@ -115,8 +115,8 @@ Source: `app/crow-kv-server/`. Tests: 9 files.
 
 ## Console UI E2E (`test-console-ui`)
 
-Source: `app/crow-web/ui/e2e/`. 50 tests, ~4.5 min (single worker, real
-backend + real `crow-kv-server` subprocess).
+Source: `app/crowdb-web/ui/e2e/`. 50 tests, ~4.5 min (single worker, real
+backend + real `crowdb-kv-server` subprocess).
 
 ### Stability
 
@@ -130,12 +130,12 @@ raising the timeout to 10 s. Pass rate after fix: 100 % across all rounds.
 
 - **`50-capacity-diskdb` test 41 "assign disk-group to diskdb"** — was 30.8 s
   every round. The `expect.poll` for diskdb usage had `timeout: 30_000,
-  intervals: [2_000]`. The diskdb's crow-rpc is never reachable in the test
+  intervals: [2_000]`. The diskdb's crowdb-rpc is never reachable in the test
   environment, so the full 30 s was wasted. Reduced to `timeout: 12_000,
   intervals: [500]` (12 s = 1.2 keepalive-sync cycles; 500 ms catches the
   first report faster when it does arrive). **Saved ~17 s per round.**
 - **`51-capacity-canvas` test 49 "datacenter root"** — was 21.2 s. The usage
-  poll had `timeout: 15_000`. Same root cause (crow-rpc unreachable).
+  poll had `timeout: 15_000`. Same root cause (crowdb-rpc unreachable).
   Reduced to `timeout: 12_000`. **Saved ~3 s per round.**
 - **`11-physical-server-lifecycle` "deploy-ui: poll server"** — `expect.poll`
   used default 500 ms interval. Added `intervals: [100]` for faster
@@ -156,7 +156,7 @@ without changing the backend or the test scenario:
   full page reload is required because `selectOption` hangs on stale options
   after node deletions without it (see comment in `openKvPanel`).
 - **`440: putKeyUi+getKeyUi` (5 s)** — each KV op goes through the UI →
-  web server → crow-kv-server → consensus round → WAL → storage engine.
+  web server → crowdb-kv-server → consensus round → WAL → storage engine.
   The 5 s is the end-to-end latency for two sequential KV ops (put + get).
 - **`kv: scan` (3.5 s) / `kv: inline delete` (4.2 s)** — KV scan/delete API
   call + table re-render. The scan API serializes all matching keys; the

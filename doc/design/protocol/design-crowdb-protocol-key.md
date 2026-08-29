@@ -1,0 +1,452 @@
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
+<!-- Licensed under the Apache License, Version 2.0. -->
+
+# CROWDB - Design: Key Encoding
+
+Depends on: [`design-crowdb-protocol.md`](design-crowdb-protocol.md)
+Satisfies: [`design-crowdb-protocol.md`](design-crowdb-protocol.md) key encoding scope
+
+This is the sub-design for **key encoding** within the protocol area.
+Architecture decisions and the area envelope live in the root
+[`design-crowdb-protocol.md`](design-crowdb-protocol.md); this doc covers
+the detailed design: how every CROWDB key that is stored in crowdb-kv is
+serialized to and parsed from bytes, via two encoding traits:
+`BinaryKey` (binary, for data groups) and `TextKey` (text-path, for
+group 0). It is shared across all components (diskdb first; future
+components reuse the same scheme). Field-level detail lives in the
+Rust source (`lib/crowdb-protocol/src/key/`); this doc covers decisions
+and the frozen layouts only.
+
+**Scope boundary:** this doc defines the **encoding protocol** — the
+rules, frozen layouts, and evolution policy. **Which keys are
+persisted where, their value types, who writes them, and their scan
+patterns** are persistence concerns, defined in:
+
+- `doc/design/kv/design-crowdb-kv-group0.md` §3 — group-0 sysdata schema
+  (text keys + JSON values).
+- `doc/design/diskdb/design-crowdb-diskdb.md` §5 and §7 — data-group
+  zone records (binary keys + flatbuffer values).
+
+## Table of Contents
+
+- [1. Problem](#1-problem)
+- [2. Goals](#2-goals)
+- [3. Key Design Decisions](#3-key-design-decisions)
+- [4. Unified Key Concept — Two Encodings](#4-unified-key-concept--two-encodings)
+- [5. Evolution (Append-Only)](#5-evolution-append-only)
+- [6. Relationship to RPC (Flatbuffer) Types](#6-relationship-to-rpc-flatbuffer-types)
+- [7. Crate Home](#7-crate-home)
+- [8. Trait Shape](#8-trait-shape)
+- [9. Testing](#9-testing)
+- [10. References](#10-references)
+
+---
+
+## 1. Problem
+
+crowdb-kv's `KVEngine` treats keys as raw `&[u8]` and runs prefix/range
+scans by **lexicographic byte order** (`get(&[u8])`,
+`scan(prefix, start_after, end_key, …)`). A key encoding must
+therefore satisfy two rules:
+
+- **Deterministic, self-sorting bytes** — lexicographic byte order of
+  the encoded key must match the intended scan order, with no
+  per-field metadata interleaved.
+- **Prefix-stable** — truncating the encoded key at a field boundary
+  must yield a valid scan prefix that returns exactly the child range.
+
+Flatbuffer-serialized `*Key` messages satisfy neither. Flatbuffers emits a
+tag byte (field number + wire type) before every field, omits fields
+that are at their default, and does not guarantee field order across
+implementations. The result:
+
+- A prefix scan cannot list "all disks under node N" without
+  deserializing every hit to read the `node_id` field — the tag bytes
+  sit between the hierarchy fields, so no byte prefix corresponds to
+  "node N".
+- Lexicographic order of serialized bytes is meaningless (tags dominate
+  ordering, not field values), so range scans return rows in the wrong
+  order.
+
+Conclusion: **flatbuffer `*Key` messages must never be used as KV key
+bytes.** CROWDB controls its own binary key format.
+
+## 2. Goals
+
+- **Prefix scans without deserialization** — list children of any
+  hierarchy level by scanning a byte prefix.
+- **Sorted scans** — range scans return keys in numeric/hierarchy
+  order, not tag order.
+- **Append-only evolution** — new key kinds can be added without
+  changing any existing layout. Existing layouts are frozen once
+  shipped.
+- **One source of truth** — the Rust key types in `crowdb-protocol` are
+  the sole producers/consumers of KV key bytes. No second encoder in
+  any component.
+- **Cross-component** — diskdb, and any future component stored in
+  crowdb-kv, share the same magic, trait, and field-encoding rules.
+
+## 3. Key Design Decisions
+
+### 3.1 Flat per-kind struct, not path segments
+
+Each key kind is one flat Rust struct with a fixed, positional binary
+layout. All hierarchy fields are inline in fixed positions
+(e.g. `DiskKey = magic | tag | node_id | disk_group_id | disk_id`).
+There is no segment list, no delimiters, no recursive path structure.
+
+Tradeoff, accepted: a single scan cannot return "everything under
+node N regardless of kind" (disks + disk-groups + zones) in one
+prefix, because each kind has its own type tag. Cross-kind listing is
+done as one scan per kind. This is fine. Every real query in diskdb
+targets one kind at a time (list disks of a node, list zones of a
+disk, list busy blocks of a zone).
+
+### 3.2 Three-byte header: magic + type tag
+
+Every key starts with:
+
+- **magic** — 1 byte, the constant `CROWDB_KEY_MAGIC`. Identifies "this
+  is a CROWDB binary key" and partitions CROWDB keys from any non-CROWDB
+  tenant that might share a group. Stable forever once shipped.
+- **type tag** — 2 bytes, big-endian `u16`, identifies the key kind.
+  Append-only (§6). Implicitly identifies the owning subsystem, since
+  each key kind belongs to exactly one subsystem. Two bytes gives
+  65,536 kind slots — enough for append-only assignment across all
+  CROWDB components without ever reusing a tag, even for deprecated
+  kinds. The tag does not participate in scan ordering (cross-kind
+  scans are never done), so its endianness is purely a decode concern;
+  big-endian is chosen for consistency with all other fields.
+
+The header is followed by the kind's fixed fields, in hierarchy order,
+most-significant parent first.
+
+### 3.3 Big-endian fixed-width integers
+
+All integer fields are encoded big-endian, fixed width (`u64` = 8
+bytes, `u32` = 4 bytes). Big-endian makes lexicographic byte order
+match numeric order, so range scans return rows sorted by value.
+Fixed width means a field always consumes its bytes — no varint, no
+default-omission. This is the rule the user stated: "we cannot ignore
+the fields in a key, it always uses some bytes."
+
+### 3.4 Fixed-width 128-bit / 192-bit identifiers
+
+`DiskId` (128-bit = `high:u64` + `low:u64`) encodes as 16 bytes:
+`high` big-endian followed by `low` big-endian. `ChunkId` (192-bit)
+would encode as 24 bytes the same way if it ever appears in a key (it
+does not today). Fixed 16-byte width makes `disk_id` a stable block
+inside any key that contains it, so prefix scans on the fields before
+it work regardless of the id's value.
+
+### 3.5 All keys are fixed-width
+
+Every key field is a fixed-width integer (`u64`, `u32`) or a
+fixed-width identifier (`DiskId` = 16 bytes). There are no
+variable-length fields. `instance_id` is a `u64` (assigned at
+registration), not a string. The human-readable endpoint/hostname
+lives in the value (`InstanceValue`), not the key. This makes the
+entire encoding uniform: the decoder reads a known number of bytes per
+field, no length prefixes, no terminators, no sort-order edge cases.
+
+### 3.6 String fields (reserved: null-termination)
+
+If a future key kind cannot avoid a UTF-8 string field, it is encoded
+as `utf8_bytes | 0x00`: the UTF-8 bytes followed by a single `0x00`
+terminator byte. This is the standard ordered-KV technique (used
+internally by LevelDB/RocksDB).
+
+The `0x00` terminator goes **only on string fields**, never on
+fixed-width integer fields:
+
+- **Fixed-width fields** (integers, `DiskId`) have a known byte length.
+  The decoder reads exactly that many bytes; no end marker is needed.
+  A prefix scan on a fixed-width field uses exactly its byte width as
+  the prefix — the known length provides the boundary.
+- **String fields** have no fixed length. The decoder needs the `0x00`
+  to find where the string ends and the next field begins. A prefix
+  scan on a string field uses `utf8_bytes | 0x00` as the prefix —
+  without the terminator, `"a"` (`61`) would match `"ab"` (`61 62`);
+  with it, `"a"` (`61 00`) is not a byte-prefix of `"ab"`
+  (`61 62 00`).
+
+Adding `0x00` to fixed-width fields would be overhead and would
+corrupt sort order (a `u64` whose high byte is `0x00` would look like
+a terminator).
+
+**Sort order is preserved in all positions.** The terminator makes
+lexicographic byte order match lexicographic string order:
+`"a"` (`61 00`) < `"ab"` (`61 62 00`) < `"b"` (`62 00`). This holds
+whether the string is the first field, a middle field, or the last
+field, mixed `int|string`, `string|int`, and `string|string`
+combinations all sort correctly because the `0x00` byte (`0`) is
+lower than any valid UTF-8 data byte (`1`–`255`).
+
+**UTF-8 constraint:** the string must not contain `0x00`. UTF-8
+guarantees this for any non-null string. `0x00` only encodes the null
+character, which does not appear in identifiers. If arbitrary bytes
+(including `0x00`) are ever needed, use byte escaping (`0x00` →
+`0x00 0x01`, terminator `0x00 0x00`) instead; not required for UTF-8
+strings.
+
+### 3.7 Decode rejects trailing bytes and bad headers
+
+`decode` verifies:
+
+1. The magic byte matches `CROWDB_KEY_MAGIC`.
+2. The type tag matches the kind's `TYPE_TAG`.
+3. The field bytes parse exactly, no leftover bytes, no short buffer.
+
+Any mismatch returns `Err(KeyError)`. Decoders never guess and never
+silently truncate. This keeps a corrupted or misrouted key from being
+misinterpreted as a different kind.
+
+### 3.8 Prefix constructors make scan intent explicit
+
+Rather than have callers hand-craft prefix byte vectors, each key
+struct exposes typed prefix constructors, e.g.:
+
+- `DiskKey::prefix_for_node(node_id) -> Vec<u8>` —
+  `magic | TAG_DISK | node_id`, returns all disks under a node.
+- `BusyBlockKey::prefix_for_zone(disk_id, zone_index) -> Vec<u8>` —
+  returns all busy blocks in one zone.
+
+A prefix constructor is just `encode` stopped at a field boundary. It
+is the only sanctioned way to build a scan prefix, so the scan's
+intent is visible at the call site and the prefix bytes can never
+drift from the key layout.
+
+## 4. Unified Key Concept — Two Encodings
+
+A CROWDB key has three parts: a magic (namespace), a key type (kind
+discriminator), and ordered key fields (hierarchy path). The **key
+concept** (struct + fields) is the single source of truth in
+`lib/crowdb-protocol/src/key/`. Two encoding traits map the same struct
+to bytes:
+
+- **`BinaryKey`** — `magic_byte | type_tag:u16 BE | fields BE`,
+  flatbuffer-encoded values. Used by data groups (high-volume,
+  machine-only).
+- **`TextKey`** — `/magic/type/<field1>/<field2>/...` slash-delimited
+  path, JSON-encoded values (serde on the same flatbuffer types). Used by
+  group 0 (small, human-inspected, scan-friendly).
+
+**Design decisions:**
+
+- **Encoding choice is per-namespace.** Group 0 uses text keys + JSON
+  values; data groups use binary keys + flatbuffer values. A key type
+  implements `BinaryKey`, `TextKey`, or both. Group-0 keys implement
+  both (text for group 0, binary available for future use); data-group
+  keys (`ZoneKey`, `BusyBlockKey`, `FreeBlockKey`) implement
+  `BinaryKey` only.
+- **Two independent magic sets.** `BinaryKey::TYPE_TAG` and
+  `TextKey::PATH_TYPE` are two representations of the same kind
+  discriminator. The binary magic (`CROWDB_KEY_MAGIC` = `0xC0`) is one
+  const today; the text encoding uses different path-prefix magics per
+  namespace from the start (`/hw`, `/srv`, `/kv`). The text magic set
+  does not need to mirror the binary magic set.
+
+**This doc defines the encoding protocol**: the rules, the frozen
+layouts, and the evolution policy. **Which keys are persisted where,
+their value types, and their scan patterns are defined in the
+persistence docs**: `doc/design/kv/design-crowdb-kv-group0.md` §3
+(group-0 sysdata schema) and `doc/design/diskdb/design-crowdb-diskdb.md`
+§5/§7 (data-group zone records).
+
+### 4.1 Frozen Binary Key Layouts
+
+All binary layouts below are **frozen** once the first implementation
+ships. Changing a field width, field order, or field set is a breaking
+change and is not allowed; add a new key kind instead (§6).
+
+Header for every binary key: `magic:1 | type_tag:2`.
+
+- **RackKey** — `rack_id:u64 BE`. Total 11 bytes.
+  Tag `0x0002`. Scan prefix `magic|0x0002` = all racks.
+- **NodeKey** — `rack_id:u64 BE | node_id:u64 BE`. Total 19 bytes.
+  Tag `0x0001`. Scan prefix `magic|0x0001|rack_id` = all nodes in a
+  rack.
+- **DiskGroupKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE`. Total 27 bytes. Tag `0x0003`.
+  Scan prefix `magic|0x0003|rack_id|node_id` = all disk-groups under
+  a node.
+- **DiskKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE | disk_id:16 bytes`. Total 43 bytes.
+  Tag `0x0004`.
+  Scan prefix `magic|0x0004|rack_id|node_id` = all disks under a
+  node; `magic|0x0004|rack_id|node_id|disk_group_id` = all disks
+  under one disk-group.
+- **ZoneKey** — `disk_id:16 bytes | zone_index:u32 BE`.
+  Total 23 bytes. Tag `0x0005`. No `rack_id`/`node_id`/
+  `disk_group_id` (zone records live on the bound data group, keyed
+  by globally-unique `disk_id`). Binary-only.
+  Scan prefix `magic|0x0005|disk_id` = all zones of a disk.
+- **BusyBlockKey** — `disk_id:16 bytes | zone_index:u32 BE |
+  unit_offset:u64 BE`. Total 31 bytes. Tag `0x0006`. Binary-only.
+  Scan prefix `magic|0x0006|disk_id|zone_index` = all busy blocks in
+  a zone (in `unit_offset` order, because `unit_offset` is last and
+  big-endian).
+- **FreeBlockKey** — `disk_id:16 bytes | zone_index:u32 BE |
+  unit_offset:u64 BE`. Total 31 bytes. Tag `0x0007`. Binary-only.
+  Scan prefix `magic|0x0007|disk_id|zone_index` = all free blocks in
+  a zone.
+- **OwnerMapKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE`. Total 27 bytes. Tag `0x0008`. Same field
+  shape as `DiskGroupKey`, distinct tag.
+  Scan prefix `magic|0x0008` = all ownership-map entries.
+- **BindMapKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE`. Total 27 bytes. Tag `0x0009`. Same field
+  shape as `DiskGroupKey`, distinct tag.
+  Scan prefix `magic|0x0009` = all bind-map entries.
+- **InstanceKey** — `service_len:u32 BE | service:UTF8 |
+  instance_id:u64 BE`. Variable length. Tag `0x000A`.
+  `instance_id` is a `u64` assigned at registration; `service` is the
+  service name string (e.g. "diskdb", "kv-server").
+  Scan prefix `magic|0x000A` = all service instances.
+
+`disk_id` 16-byte encoding is `high:u64 BE | low:u64 BE`.
+
+Reserved type tags: `0x000B` and above. Assigned sequentially as new
+kinds are added; never reused, never reordered.
+
+`CROWDB_KEY_MAGIC` is a named constant in `lib/crowdb-protocol/src/key/`.
+Its exact value is fixed at first ship and never changed afterward.
+
+### 4.2 Text Key Layouts (Group 0)
+
+Text keys are slash-delimited paths: `/magic/type/<fields...>`. Values
+are JSON-encoded (serde on the same flatbuffer types). The path segments
+for integer fields are decimal strings; `DiskId` is a 32-char
+lowercase hex string (`high:low`, zero-padded).
+
+Text magic namespaces: `/hw` (hardware), `/srv` (service registry),
+`/kv` (KV-cluster topology).
+
+Frozen text key path shapes (the encoding spec; value types and scan
+patterns are in `design-crowdb-kv-group0.md` §3):
+
+- **RackKey** — `/hw/rack/<rack_id>`.
+- **NodeKey** — `/hw/node/<rack_id>/<node_id>`.
+- **DiskGroupKey** — `/hw/dg/<rack_id>/<node_id>/<dg_id>`.
+- **DiskKey** — `/hw/dg/<rack_id>/<node_id>/<dg_id>/<disk_id_hex>`.
+- **OwnerMapKey** — `/hw/dg_owner/<rack_id>/<node_id>/<dg_id>`.
+- **BindMapKey** — `/hw/dg_bind/<rack_id>/<node_id>/<dg_id>`.
+- **InstanceKey** — `/srv/<service>/<instance_id>`.
+  Does not implement `TextKey` (path type segment is dynamic — the
+  service name); use inherent `to_path`/`from_path` methods.
+- **KvStoreKey** — `/kv/store/<store_id>`. (Text-only.)
+- **KvGroupKey** — `/kv/group/<store_id>/<group_id>`. (Text-only.)
+- **KvReplicaKey** — `/kv/replica/<store_id>/<group_id>/<replica_id>`.
+  (Text-only.)
+
+## 5. Evolution (Append-Only)
+
+- **Add a key kind** — pick the next free type tag, define a new struct
+  with its own fixed layout, implement `BinaryKey`. Existing kinds and
+  their layouts are untouched. Old decoders that encounter the new tag
+  return `Err` (they do not know it); they never misparse it.
+- **Do not change an existing kind.** No field added, removed,
+  reordered, or resized. If a kind needs more fields, define a new
+  kind with a new tag and migrate writes to it; the old kind's layout
+  stays frozen so historical keys still decode.
+- **Do not change the magic.** It is a permanent namespace marker.
+- **Do not change integer endianness or width.** Big-endian fixed-width
+  is part of each frozen layout.
+
+In short: key types are append-only — new kinds are added, existing
+kinds are never changed.
+
+## 6. Relationship to RPC (Flatbuffer) Types
+
+KV keys and RPC messages are separate concerns:
+
+- **KV key bytes** — produced and consumed only by the Rust
+  `BinaryKey` types in `crowdb-protocol`. These bytes go to
+  `crowdb-kv-client`'s `put` / `get` / `scan` and never appear on the
+  crowdb-rpc wire as a serialized key message.
+- **RPC responses/requests** — use flatbuffer `**Info` messages that
+  **flatten key fields and value fields into one message**
+  (e.g. `DiskInfo` carries `node_id`, `disk_group_id`, `disk_id`
+  alongside `disk_type`, `capacity_units`, …). Requests that identify
+  a row take the identifying scalars inline (e.g.
+  `GetDiskInfoRequest { node_id, disk_group_id, disk_id }`), not a
+  serialized key.
+
+There are no `*Key` flatbuffer messages (`DiskKey`, `ZoneKey`,
+`DiskGroupKey`, `BusyBlockKey`, `FreeBlockKey`, `RackKey`, `NodeKey`).
+There is no second representation of a key: the Rust `BinaryKey` types
+are the keys; the `**Info` flatbuffer messages are the RPC shape that
+happens to repeat the key's fields as plain scalars.
+
+## 7. Crate Home
+
+The `BinaryKey` trait, the key structs, the `CROWDB_KEY_MAGIC` constant,
+the type-tag constants, and the prefix constructors live in
+`lib/crowdb-protocol/src/key/` and are re-exported from the crate root.
+`crowdb-protocol` already hosts the shared flatbuffer types and is the
+cross-component protocol crate, so it is the natural home for the
+shared key encoding. Components (`crowdb-diskdb`, future components)
+depend on `crowdb-protocol` and build keys via the key structs; they do
+not implement their own encoders.
+
+`crowdb-protocol` gains no new external dependency for this — encoding
+is pure Rust byte writes (no `bytes` crate needed on the encode path;
+`Vec<u8>` suffices, and `bytes::Bytes` is already a dependency for the
+scan-result path).
+
+## 8. Trait Shape
+
+```rust
+pub trait BinaryKey: Sized {
+    const TYPE_TAG: u16;
+    fn encode_to(&self, out: &mut Vec<u8>);
+    fn decode(buf: &[u8]) -> Result<Self, KeyError>;
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        self.encode_to(&mut v);
+        v
+    }
+    fn from_bytes(buf: &[u8]) -> Result<Self, KeyError> {
+        Self::decode(buf)
+    }
+}
+```
+
+`encode_to` writes `magic | TYPE_TAG | fields…`. `decode` checks the
+magic and tag, parses the fixed fields, and rejects leftover or short
+input. The trait is closed (implementors live only in this crate) so
+no external type can claim a type tag.
+
+`KeyError` is a small enum: `BadMagic`, `BadTag`, `ShortInput`,
+`TrailingBytes`. (A `BadLength` variant is reserved for future
+string-field kinds; not needed while all keys are fixed-width.)
+
+## 9. Testing
+
+- **Round-trip** — every key: `from_bytes(to_bytes(k)) == k`.
+- **Order** — for keys with integer sort fields, an ordered list of
+  keys encodes to lexicographically ordered bytes.
+- **Prefix** — each prefix constructor's output is a byte-prefix of
+  every key it should match, and not a prefix of any key it should
+  not.
+- **Rejection** — `decode` returns `Err` for bad magic, wrong tag,
+  short input, and trailing bytes.
+- **Unknown tag** — a key with an unassigned tag decodes to
+  `Err(BadTag)`; it is not misparsed as any known kind.
+- **String fields (when added)** — null-termination round-trip, sort
+  order (`"a"` < `"ab"` < `"b"`), and prefix exactness (`"a"` prefix
+  does not match `"ab"` key). Fixed-width fields adjacent to string
+  fields still decode correctly (the `0x00` terminator is consumed
+  by the string decoder, not mistaken for the next field).
+
+## 10. References
+
+- crowdb-kv `KVEngine` trait (key bytes, prefix scan).
+- diskdb key kinds and their hierarchy:
+  `doc/design/diskdb/design-crowdb-diskdb.md` §5 (group-0 sysdata) and
+  §7 (zone records).
+- Flatbuffer types: the `crowdb-protocol` flatbuffer module.
+  `common_type.fbs` (`RackKey`, `NodeKey`), `diskdb_type.fbs`
+  (`ZoneKey`, `DiskKey`, `DiskGroupKey`, `BusyBlockKey`,
+  `FreeBlockKey`).

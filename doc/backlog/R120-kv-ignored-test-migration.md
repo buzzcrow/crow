@@ -1,25 +1,25 @@
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R120: kv — revive crow-rpc migrated ignored tests
+### R120: kv — revive crowdb-rpc migrated ignored tests
 
-Two `#[ignore]`d test stubs in `lib/crow-kv/tests/group_test/` were left
-behind when the wire transport migrated from tonic to crow-rpc. Both are
+Two `#[ignore]`d test stubs in `lib/crowdb-kv/tests/group_test/` were left
+behind when the wire transport migrated from tonic to crowdb-rpc. Both are
 empty function bodies (`{}`) with an ignore reason pointing at the missing
-migration path. The underlying crow-rpc infrastructure now exists — the
+migration path. The underlying crowdb-rpc infrastructure now exists — the
 tests just need to be written.
 
 **Current behavior + impact:** `group_test.rs` reports `7 ignored` (after
 R120's sibling cleanup deleted the 5 watch-notify stubs, this drops to
 `2 ignored`). The two remaining stubs cover real contracts that have no
-other test coverage at the `crow-kv` layer:
+other test coverage at the `crowdb-kv` layer:
 - The forwarded-flag loop guard on `Get`/`Scan` (a follower must not
   re-forward an already-forwarded request).
 - Malformed `Accept` rejection on the LearnerStream bidi path.
 
-**Design pointers:** `design/kv/design-crow-kv-rpc.md` §3 (crow-rpc
+**Design pointers:** `design/kv/design-crowdb-kv-rpc.md` §3 (crowdb-rpc
 flatbuffer framing) and §4 (KvService request/response schema, including
-the `forwarded` flag). `design/kv/design-crow-kv-consensus.md` §6
+the `forwarded` flag). `design/kv/design-crowdb-kv-consensus.md` §6
 (LearnerStream accept validation).
 
 **Use scenarios:**
@@ -35,10 +35,10 @@ the `forwarded` flag). `design/kv/design-crow-kv-consensus.md` §6
 ## Solution
 
 **One-line summary:** Write the two ignored test bodies against the
-existing crow-rpc flatbuffer and LearnerStream APIs.
+existing crowdb-rpc flatbuffer and LearnerStream APIs.
 
 1. **`forwarded_request_does_not_re_forward`** —
-   `lib/crow-kv/tests/group_test/kv_forward_test.rs`. Use the existing
+   `lib/crowdb-kv/tests/group_test/kv_forward_test.rs`. Use the existing
    `start_cluster` + `cluster.kv_client` harness. Write a key through the
    leader, wait for Paxos propagation to the follower, then send a `Get`
    to the follower with `forwarded = true` set in the flatbuffer request.
@@ -47,8 +47,8 @@ existing crow-rpc flatbuffer and LearnerStream APIs.
    variant) to pass the `forwarded` flag through `KvRpcTransport::send_get`.
 
 2. **`malformed_accept_request_is_rejected_by_rpc_boundary`** —
-   `lib/crow-kv/tests/group_test/paxos_error_test.rs`. Construct a raw
-   crow-rpc frame with an invalid `Accept` payload (e.g. slot = 0 or
+   `lib/crowdb-kv/tests/group_test/paxos_error_test.rs`. Construct a raw
+   crowdb-rpc frame with an invalid `Accept` payload (e.g. slot = 0 or
    ballot with `round = 0, leader_id = 0`) and send it over a
    `PxRpcTransport` bidi stream to a running server. Assert the stream
    is closed with an error, no panic. Requires a test helper to build
@@ -65,7 +65,7 @@ existing crow-rpc flatbuffer and LearnerStream APIs.
 
 ## Dependencies
 
-- None — all infrastructure (crow-rpc transport, flatbuffer `forwarded`
+- None — all infrastructure (crowdb-rpc transport, flatbuffer `forwarded`
   flag, LearnerStream bidi path) is already landed.
 
 ## Acceptance

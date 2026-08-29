@@ -6,7 +6,7 @@ triggers:
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 # Design Doc Guide (working draft)
@@ -28,7 +28,7 @@ link back to the backlog doc instead.
 - **Header** — license comment, then `# <Title> (R**)`.
 - **Intro** — one paragraph: what this draft covers, a link to the backlog
   doc (`doc/backlog/R**-<component>-<topic>.md`), a pointer to the root
-  design doc (`doc/design/<area>/design-crow-<area>.md` §X), and what is
+  design doc (`doc/design/<area>/design-crowdb-<area>.md` §X), and what is
   already landed (prior `R**` + code paths). State: "Architecture decisions
   and rationale are in the root design; this doc does not repeat them."
 - **Solution** (numbered sections, `## 1`, `## 2`, ...) — the real design,

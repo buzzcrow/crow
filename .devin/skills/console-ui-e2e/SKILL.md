@@ -1,20 +1,20 @@
 ---
 name: console-ui-e2e
-description: CROW console UI E2E (Playwright) — invoke when writing or modifying E2E tests, or when fixing a UI bug or changing user-visible UI code under app/crow-web/ui
+description: CROWDB console UI E2E (Playwright) — invoke when writing or modifying E2E tests, or when fixing a UI bug or changing user-visible UI code under app/crowdb-web/ui
 subagent: true
 triggers:
   - user
   - model
 ---
 
-<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Copyright 2026-present Gian <crow.db@outlook.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CROW - E2E / Playwright Tests
+# CROWDB - E2E / Playwright Tests
 
-Applies to `crow-web/ui/e2e`. Companion: `/coding` (general conventions).
+Applies to `crowdb-web/ui/e2e`. Companion: `/coding` (general conventions).
 E2E is the most important test surface — it covers the real end-to-end path
-(browser → `crow-web` → `crow-kv-server` / `crow-diskdb` → group-0 sysdata).
+(browser → `crowdb-web` → `crowdb-kv-server` / `crowdb-diskdb` → group-0 sysdata).
 
 ## File Organization
 
@@ -41,7 +41,7 @@ Cluster setup (server deploys) dominates runtime, not browser interaction.
 
 ## Verification & Regression
 
-- **Run what you change** — any change to `app/crow-web/ui/src/**` or `e2e/**` must be verified by running the affected spec. TypeScript compiling is not proof for a UI fix.
+- **Run what you change** — any change to `app/crowdb-web/ui/src/**` or `e2e/**` must be verified by running the affected spec. TypeScript compiling is not proof for a UI fix.
 - **Every UI bug fix gets a regression assertion** — add to an existing test in the matching area file. Must fail pre-fix, pass post-fix.
 - **Label/text changes: update specs in the same change** — grep E2E specs for the old string and fix every match.
 - **When E2E is genuinely blocked** — state the blocker, still add the regression assertion, mark the run deferred with the reason. Never silently skip.
@@ -59,9 +59,9 @@ Most E2E iteration loops come from asserting on assumptions about the UI/API tha
 Prerequisite: build spawned binaries first.
 
 ```
-pixi run cargo build -p crow-kv-server -p crow-diskdb
-pixi run bash -c 'export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server \
-  && cd app/crow-web/ui \
+pixi run cargo build -p crowdb-kv-server -p crowdb-diskdb
+pixi run bash -c 'export CROWDB_KV_SERVER_BINARY=$(pwd)/target/debug/crowdb-kv-server \
+  && cd app/crowdb-web/ui \
   && npx playwright test --config=e2e/realBackend.config.ts e2e/flows/NN-<area>-<fn>.spec.ts'
 ```
 
