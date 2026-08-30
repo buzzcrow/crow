@@ -18,14 +18,14 @@ already added `cluster reset`, `cluster clean`, and `kv server delete`
 require-empty to the CLI — none are in the web backend).
 
 Beyond the backend duplication, the current UI layout (three-pane shell
-with Physical/Capacity/KV view-modes, `design-crowdb-console-ui.md` §3)
+with `Physical | Logical | Capacity` view-modes — header labels
+"Physical / KV Cluster / Capacity", `design-crowdb-console-ui.md` §3)
 was designed before the `ops` module existed. The four-domain structure
 (`cluster`/`kv`/`chunk`/`bench`) that R126 introduced for the CLI is a
 cleaner mental model and should inform the UI's information architecture.
-The current three view-modes (Physical / Capacity / KV) do not map
-cleanly to the four domains, and the sidebar tree + topology canvas +
-inspector layout was designed for resource-type browsing, not
-domain-oriented workflows.
+The current three view-modes do not map cleanly to the four domains, and
+the sidebar tree + topology canvas + inspector layout was designed for
+resource-type browsing, not domain-oriented workflows.
 
 **Current behavior + impact**
 
@@ -37,8 +37,8 @@ domain-oriented workflows.
   UI has no equivalent (`POST /internal/reset` is a different, older
   teardown path).
 - `kv server delete` with require-empty check exists only in the CLI.
-- The web UI's three view-modes (Physical / Capacity / KV) predate the
-  four-domain CLI structure and don't align with it.
+- The web UI's three view-modes (`Physical | Logical | Capacity`) predate
+  the four-domain CLI structure and don't align with it.
 - Root cause: R126 moved the CLI to `ops` but left the web backend
   unchanged; the UI layout was never revisited.
 
@@ -52,8 +52,9 @@ domain-oriented workflows.
   (`cluster`/`kv`/`chunk`/`bench`).
 - `design-crowdb-console-ui.md` §3 (Information Architecture) — current
   three-pane shell + three view-modes.
-- `design-crowdb-console-ui.md` §13 (View-Mode Restructure) — current
-  Physical / Capacity / KV split.
+- `design-crowdb-console-ui.md` §12 (View-Mode Restructure) — current
+  `Physical | Logical | Capacity` split (header labels: Physical / KV
+  Cluster / Capacity).
 
 **Use scenarios**
 
@@ -73,17 +74,16 @@ domain-oriented workflows.
   confirms. The handler calls `ops::cluster::reset`, which tears down
   all groups, stores, servers, and sysdata in dependency order.
 - Operator browses the cluster in the web UI using a domain-oriented
-  layout (cluster / kv / chunk) instead of resource-type view-modes
-  (Physical / Capacity / KV), matching the CLI's mental model.
+  layout (Cluster / KV / Chunk) instead of resource-type view-modes
+  (`Physical | Logical | Capacity`), matching the CLI's mental model.
 
 **Solution**
 
-**No clear solution yet — deferred to design.** The backend migration
-approach is clear (share `ops` module, same as CLI), but the UI layout
-needs agreement before implementation. Below are the two parts and
-their open questions.
+The backend migration and UI layout are both decided. The old UI is
+dropped entirely and replaced with the new three-domain layout — no
+gradual backend-first-keep-old-UI phase. Below are the two parts.
 
-**Backend migration (approach clear):**
+**Backend migration:**
 
 One-line summary: web Axum handlers become thin wrappers around
 `ops::*` functions, constructing `OpContext` from `AppState` per
@@ -104,19 +104,37 @@ request.
 4. **Migrate KV data-plane** — `app/crowdb-web/src/kv.rs`: replace
    manual leader resolution + `CrowdbKvClient` calls with
    `ops::kv_data::*`.
-5. **Add missing web endpoints** — `POST /api/cluster/reset`,
-   `POST /api/cluster/clean`, `DELETE /api/nodes/:id/server` (with
-   require-empty). These mirror CLI commands added in R126.
-6. **DiskDB runtime** — `app/crowdb-web/src/diskdb.rs`: decide whether
-   to route through `ops::chunk::*` (currently stubs) or retain the
-   existing proxy layer. Deferred to design.
+5. **Migrate / add cluster-op endpoints** — `POST /api/cluster/reset`
+   already exists (mapped to `lifecycle::http_internal_reset`); migrate
+   the handler to call `ops::cluster::reset`. `POST /api/cluster/clean`
+   is genuinely new — add the route + handler calling `ops::cluster::clean`.
+   `DELETE /api/nodes/:id/server` already exists (mapped to
+   `lifecycle::http_delete_node_server`, which lacks require-empty);
+   migrate the handler to call `ops::kv_server::delete` (adds the
+   require-empty check). These mirror CLI commands added in R126.
+6. **DiskDB runtime** — `app/crowdb-web/src/diskdb.rs`: retain the
+   existing REST proxy layer (`/api/diskdb/*`) as a separate
+   `AppState`-scoped `DiskdbClient` until `ops::chunk` is implemented
+   (currently stubs). The proxy is not migrated to `ops` in this
+   requirement; it stays behind `AppState.diskdb_client`.
+7. **Remove Swagger UI** — drop the embedded Swagger panel from the
+   UI and the Swagger UI hosting from the backend. Delete
+   `app/crowdb-web/swagger-ui/` (committed static assets), the
+   `/api/swagger/` proxy route, the `/api/nodes/:id/openapi.json`
+   proxy route, `SwaggerPanel.tsx`, the header's node selector +
+   API toggle, the `'swagger'` entry in the `CrowdbConsoleProps.modules`
+   opt-out, the `initialNodeId` prop, and `swagger_routes_test.rs`. The
+   OpenAPI document remains served by `crowdb-kv-server` at
+   `/openapi.json` for direct access; the console no longer embeds or
+   proxies it.
 
-**UI layout (needs agreement):**
+**UI layout:**
 
-One-line summary: replace the current three view-modes (Physical /
-Capacity / KV) with three domains (Cluster / KV / Chunk) that map to
-the CLI's domain structure, each with a distinct sidebar tree, center
-panel layout, and shared right inspector.
+One-line summary: replace the current three view-modes
+(`Physical | Logical | Capacity`) with three domains
+(`Cluster | KV | Chunk`) that map to the CLI's domain structure, each
+with a distinct sidebar tree, center panel layout, and shared right
+inspector.
 
 The shell keeps the same three-pane structure (sidebar / center /
 inspector) but the header's view-mode toggle switches between three
@@ -179,32 +197,41 @@ context menu (deploy / restart / stop / delete). Right-click on a
 deployed KV-server opens the logical context menu (add store, add
 group, add replica).
 
-Center panel is split vertically into two resizable halves:
+Center panel uses a tab bar to switch between two views — no
+top/bottom split:
 
-- **Top half**: logical view — the cluster's store → group → replica
+- **Cluster tab** — logical view: the cluster's store → group → replica
   hierarchy rendered as a topology canvas (React Flow). This is the
   same logical tree the current KV view-mode shows.
-- **Bottom half**: KV operation panel — put / get / delete / scan
-  controls targeting the selected store/group. This is the current KV
-  Operator panel, moved into the bottom half of the center panel.
+- **KV tab** — KV operation panel: put / get / delete / scan controls
+  targeting the selected store/group. This is the current KV Operator
+  panel.
 
-The top/bottom split is draggable (resize handle). The operator can
-collapse the bottom half to give the topology canvas full height, or
-collapse the top half to focus on KV operations.
+Only one tab is visible at a time; the operator switches between
+browsing topology and running KV ops via the tab bar. The selected
+store/group persists across tab switches so the operator can inspect a
+group in the Cluster tab, switch to the KV tab, and operate on it
+without re-selecting.
 
 ```
-┌─ Sidebar ─────┐┌─ Center: logical view (top) ──────────────────────┐
+┌─ Sidebar ─────┐┌─ Center: [Cluster] [KV] ──────────────────────────┐
 │ ▾ Rack 1      ││  Store 1                                          │
 │   ▾ Node 1    ││   ├─ Group 1                                      │
 │     ▸ kv-srv  ││   │   ├─ Replica 0 (node 1)                       │
 │   ▸ Node 2    ││   │   └─ Replica 1 (node 2)                       │
 │ ▾ Rack 2      ││   └─ Group 2 ...                                  │
 │   ▸ Node 3    ││  Store 2 ...                                      │
-│               │├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤
-│               ││  KV Operator: [store ▾] [group ▾]                 │
-│               ││  key: [_______]  value: [_______]  [Put]          │
-│               ││  key: [_______]  [Get]  [Delete]                  │
-│               ││  scan: [prefix___] [Scan]  results: ...           │
+│               ││  (Cluster tab shown — click [KV] for operator)    │
+└───────────────┘└───────────────────────────────────────────────────┘
+
+KV tab active:
+┌─ Sidebar ─────┐┌─ Center: [Cluster] [KV] ──────────────────────────┐
+│ ▾ Rack 1      ││  KV Operator: [store ▾] [group ▾]                 │
+│   ▾ Node 1    ││  key: [_______]  value: [_______]  [Put]          │
+│     ▸ kv-srv  ││  key: [_______]  [Get]  [Delete]                  │
+│   ▸ Node 2    ││  scan: [prefix___] [Scan]  results: ...           │
+│ ▾ Rack 2      ││                                                   │
+│   ▸ Node 3    ││                                                   │
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
@@ -222,9 +249,10 @@ Center panel has a button toggle with two sub-views:
   Capacity view-mode). Shows disk-group usage, disk health, and
   allocation heatmaps.
 - **Chunk** — chunk-level view showing chunkdb instances, their bound
-  ranges, and chunk metadata. (This sub-view is a stub initially,
-  matching the CLI's `chunk` domain stubs — it will be filled in when
-  `ops::chunk` is implemented.)
+  ranges, and chunk metadata. Initially empty but clickable — the tab
+  renders with no content until `ops::chunk` is implemented. No
+  placeholder text; the panel is blank so future content drops in
+  without UI changes.
 
 ```
 ┌─ Sidebar ─────┐┌─ Center: [Capacity] [Chunk] ──────────────────────┐
@@ -250,9 +278,14 @@ Center panel has a button toggle with two sub-views:
   context menu for the same node.
 - The inspector (right panel) is domain-agnostic — it renders details
   for whatever is selected, regardless of which domain is active.
-- The header domain toggle replaces the current Physical/Capacity/KV
-  toggle. The embedding contract's `initialViewMode` becomes
-  `initialDomain` with values `cluster` / `kv` / `chunk`.
+- The header domain toggle replaces the current
+  `Physical | Logical | Capacity` toggle. The `ViewMode` enum is
+  renamed to `Domain` with values `Cluster | KV | Chunk` (capitalized
+  string values, matching the current enum's convention). The embedding
+  contract's `initialViewMode` becomes `initialDomain` with values
+  `'Cluster'` / `'KV'` / `'Chunk'`. The `'swagger'` entry in the
+  `modules` opt-out and the `initialNodeId` prop (previously "Pre-select
+  a node for the Swagger panel") are removed since Swagger is dropped.
 
 **Edge cases at a glance**
 
@@ -265,9 +298,9 @@ Center panel has a button toggle with two sub-views:
   shows a progress log + any remaining resources.
 - Web handler called while config is being mutated by another request
   → `RwLock` on `OpContext.config` serializes access; no corruption.
-- DiskDB runtime proxy needs a `DiskdbClient` not in `OpContext` →
-  retained as a separate `AppState`-scoped client until `ops::chunk`
-  is implemented.
+- DiskDB runtime proxy (`/api/diskdb/*`) stays on `AppState.diskdb_client`
+  (not in `OpContext`) until `ops::chunk` is implemented — no behavior
+  change for diskdb runtime endpoints in this requirement.
 
 **Dependencies**
 
@@ -275,13 +308,10 @@ Center panel has a button toggle with two sub-views:
   `crowdb-console-shared` must exist with `OpContext`,
   `ops::hardware`, `ops::kv_server`, `ops::kv_logical`, `ops::kv_data`,
   `ops::cluster`.
-- **Depends on UI layout agreement** — the UI layout is defined in
-  the Solution section above; implementation can proceed once the
-  layout is reviewed and confirmed. The backend migration can proceed
-  independently of the UI layout implementation.
 - **Blocks future chunk/diskdb UI work** — the `ops::chunk` module is
   currently stubs; a full chunk/diskdb UI depends on implementing
-  `ops::chunk` first.
+  `ops::chunk` first. The Chunk domain's Chunk tab is empty-but-
+  clickable until then.
 
 **Acceptance**
 
@@ -298,21 +328,30 @@ Center panel has a button toggle with two sub-views:
 - `POST /api/nodes/:id/server/deploy` calls `ops::kv_server::deploy`
   → verify process spawn + `ServerEntry` recording via handler test.
   Integration test.
-- `DELETE /api/nodes/:id/server` calls `ops::kv_server::delete` with
-  require-empty check → verify 409 Conflict when replicas exist, 200
-  when empty. E2E test.
+- `DELETE /api/nodes/:id/server` (existing route) calls
+  `ops::kv_server::delete` with require-empty check → verify 409
+  Conflict when replicas exist, 204 when empty. E2E test.
 - `POST /api/stores` calls `ops::kv_logical::add_store` → verify
   fan-out + rollback via handler test. Integration test.
 - `POST /api/stores/:sid/groups` calls `ops::kv_logical::add_group`
   → verify fan-out + rollback via handler test. Integration test.
 - `GET /api/stores/:sid/groups/:gid/kv/get` calls `ops::kv_data::get`
   → verify leader resolution + get via handler test. Integration test.
-- `POST /api/cluster/reset` calls `ops::cluster::reset` → verify
-  full teardown via E2E test. E2E test.
-- `POST /api/cluster/clean` calls `ops::cluster::clean` → verify
-  orphan removal via E2E test. E2E test.
+- `POST /api/cluster/reset` (existing route, migrated handler) calls
+  `ops::cluster::reset` → verify full teardown via E2E test. E2E test.
+- `POST /api/cluster/clean` (new route) calls `ops::cluster::clean`
+  → verify orphan removal via E2E test. E2E test.
 - `AppState` builds `OpContext` sharing the cached `CrowdbKvClient`
   → verify no duplicate connection pool via unit test. Unit test.
+- `/api/swagger/` and `/api/nodes/:id/openapi.json` proxy routes
+  return 404 (removed) → verify via handler test. Integration test.
+- `app/crowdb-web/swagger-ui/` directory is deleted; no Swagger
+  assets committed → verify via `git ls-files app/crowdb-web/swagger-ui/`
+  returns empty. Unit test.
+- `SwaggerPanel.tsx`, the header's API toggle / node selector, the
+  `'swagger'` entry in the `modules` opt-out, and the `initialNodeId`
+  prop are removed from the UI → verify via Playwright E2E that no
+  Swagger panel or API toggle renders. E2E test.
 
 **UI layout:**
 
@@ -322,13 +361,15 @@ Center panel has a button toggle with two sub-views:
   center panel shows hierarchy chart with disk-group boxes containing
   disk elements with short UUIDs → verify via Playwright E2E. E2E test.
 - KV domain: sidebar shows rack → node (no disk-groups/disks);
-  right-click node shows KV-server context menu; center panel is
-  split top (logical topology) / bottom (KV operator) with resize
-  handle → verify via Playwright E2E. E2E test.
+  right-click node shows KV-server context menu; center panel has a
+  [Cluster] [KV] tab bar — Cluster tab shows logical topology, KV tab
+  shows the KV operator panel; selected store/group persists across
+  tab switches → verify via Playwright E2E. E2E test.
 - Chunk domain: sidebar shows rack → node → chunkdb/diskdb/diskio
   servers; center panel has Capacity / Chunk button toggle; Capacity
-  sub-view shows disk-group usage canvas → verify via Playwright E2E.
-  E2E test.
+  sub-view shows disk-group usage canvas; Chunk sub-view is empty but
+  clickable (renders blank, no placeholder text) → verify via
+  Playwright E2E. E2E test.
 - Inspector panel shows Details + Activity for the selected item
   across all three domains → verify via Playwright E2E. E2E test.
 - All existing CRUD dialogs (AddRack, AddNode, DeployServer, AddStore,
@@ -342,23 +383,10 @@ Center panel has a button toggle with two sub-views:
 
 - `pixi run -- cargo test -p crowdb-web`
 - `pixi run -- cargo test -p crowdb-console-shared`
-- `pixi run -- cargo clippy -p crowdb-web -- -D warnings`
+- `pixi run -- cargo clippy --all-targets -- -D warnings`
 - `pixi run -- cargo fmt --all -- --check`
-- Playwright E2E: `cd app/crowdb-web/ui && npx playwright test`
-  (uses system browser, no `npx playwright install`)
-
-**Open Questions**
-
-1. **Chunk sub-view stub** — the Chunk domain's "Chunk" sub-view (the
-   second button after "Capacity") is a stub initially because
-   `ops::chunk` is not yet implemented. Should the stub show a
-   placeholder ("chunk management coming soon") or be hidden entirely
-   until `ops::chunk` is ready? The Capacity sub-view is fully
-   functional regardless. Needs human input.
-
-2. **Migration strategy** — should the backend migration and UI layout
-   rework be done in one R-item or split into two? The backend
-   migration is clear; the UI layout is now defined but needs
-   implementation. Alternatives: do backend first (thin wrappers
-   around `ops`, keep current UI), then UI rework in a follow-up; or
-   do both together. Needs human input on preferred sequencing.
+- Playwright E2E (build binaries first):
+  `pixi run -- cargo build -p crowdb-kv-server -p crowdb-diskdb` then
+  `cd app/crowdb-web/ui && npx playwright test --config=e2e/realBackend.config.ts`
+  (uses system browser, no `npx playwright install`). Full suite:
+  `pixi run test-console-ui`.

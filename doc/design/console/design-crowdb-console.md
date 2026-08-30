@@ -43,12 +43,11 @@ design is detailed in the sub-design `design-crowdb-console-ui.md`.
   - [7.5 `kv server delete` — graceful + require-empty](#75-kv-server-delete--graceful--require-empty)
   - [7.6 Bench subcommand](#76-bench-subcommand)
   - [7.7 Bench lifecycle verbs (deploy / prepare / run / teardown)](#77-bench-lifecycle-verbs-deploy--prepare--run--teardown)
-- [8. Swagger UI Hosting](#8-swagger-ui-hosting)
-- [9. Error Model and Operation Logging](#9-error-model-and-operation-logging)
-- [10. Observability](#10-observability)
-- [11. Open Questions](#11-open-questions)
-- [12. Sysdata sync — rack/node/disk-group/disk handlers](#12-sysdata-sync--racknodedisk-groupdisk-handlers)
-- [13. Cluster reset](#13-cluster-reset)
+- [8. Error Model and Operation Logging](#8-error-model-and-operation-logging)
+- [9. Observability](#9-observability)
+- [10. Open Questions](#10-open-questions)
+- [11. Sysdata sync — rack/node/disk-group/disk handlers](#11-sysdata-sync--racknodedisk-groupdisk-handlers)
+- [12. Cluster reset](#12-cluster-reset)
 
 ## 1. Goals and Non-Goals
 
@@ -56,7 +55,6 @@ design is detailed in the sub-design `design-crowdb-console-ui.md`.
 - Single workspace project `crowdb-console` delivering a Web UI and a CLI that share one Rust core.
 - Operate against any number of `crowdb-kv-server` instances via their public surfaces (HTTP management API + crowdb-rpc KV / health).
 - Model a **Rack → Node → Server Instance → Store → Group → Replica** hierarchy, including a "simulated hardware" mode that runs entirely on `127.0.0.1`.
-- Host the Swagger UI static bundle in `crowdb-web` (one pinned offline release); the OpenAPI document shown inside it is proxied from the user-selected `crowdb-kv-server`, so the SPA can inspect a specific server's API even though all servers of the same version produce the same doc.
 
 ### Non-Goals
 - Bypassing `crowdb-kv-server` to talk to Paxos / WAL / storage internals.
@@ -72,10 +70,9 @@ names use the `crowdb-*` prefix without `kv`.
 
 ```
 lib/crowdb-console-shared/   (lib)   data models, HTTP+crowdb-rpc clients, registry, aggregator, error model, SSH session pool, workload generator
-app/crowdb-web/              (bin)   Axum backend, static asset server, Swagger UI mount, proxy routes
+app/crowdb-web/              (bin)   Axum backend, static asset server, proxy routes
   src/                             Rust source
   ui/                              React + Vite frontend source (TS, shadcn/ui, React Flow)
-  swagger-ui/                      committed Swagger UI assets (one pinned version, served by crowdb-web)
   tests/                           integration tests
 app/crowdb-cli/              (bin)   clap-based CLI; depends on shared
 ```
@@ -391,12 +388,13 @@ is the low-level primitive. It touches exactly that node, never fans
 out. Logical writes are implemented on top of physical primitives.
 
 **R4. No `server_id` namespace.**
-Process lifecycle, reachability probes, and Swagger proxying use
+Process lifecycle and reachability probes use
 `/api/nodes/:node_id/server/...`. Node identity *is* server identity.
 
 > **Retired contracts (no compatibility shim):** `?server=<mgmt_url>`
 > query parameter, `/api/servers/:sid/...`,
-> `/api/openapi.json?server=<id>`, `/api/cluster/snapshot`.
+> `/api/openapi.json?server=<id>`, `/api/cluster/snapshot`,
+> `/api/swagger/...`, `/api/nodes/:id/openapi.json`.
 
 The full endpoint list is defined in the Axum route handlers and the
 OpenAPI spec; this section covers design rules only.
@@ -449,7 +447,6 @@ backend-facing contract here:
 - The SPA polls per-resource live endpoints on a short interval. No
   WebSocket/SSE. All reads are served from the monitor cache.
 - No `/api/cluster/snapshot` aggregate endpoint.
-- The Swagger panel embeds `/api/swagger/?url=/api/nodes/:node_id/openapi.json`.
 
 ## 7. CLI Design
 
@@ -672,24 +669,7 @@ config extension. The `runtime/` directory is gitignored. The
 `crowdb-kv-server` child processes survive CLI exit because
 `lifecycle::deploy_local` spawns them with `kill_on_drop(false)`.
 
-## 8. Swagger UI Hosting
-
-Split responsibility:
-
-- **Swagger UI assets** (HTML / JS / CSS) are hosted by `crowdb-web`
-  from one pinned, offline release. No internet at runtime.
-- **OpenAPI documents** are served by each `crowdb-kv-server` at
-  `/openapi.json`. The console proxies this per-node via
-  `/api/nodes/:node_id/openapi.json` so the SPA can inspect a specific
-  server's API without CORS issues.
-
-**The bundle is not hosted on `crowdb-kv-server`.** Hosting it there
-would force every server to ship Swagger UI even when not needed, and
-would require the SPA to load assets from the upstream's URL,
-conflicting with the embeddability rule that no upstream `host:port`
-ever appears in the browser.
-
-## 9. Error Model and Operation Logging
+## 8. Error Model and Operation Logging
 
 - `shared::Error` enum covers `NodeUnreachable`, `UpstreamRpc`,
   `Validation`, `NotFound`, `Conflict`. HTTP maps to 4xx/5xx; CLI maps
@@ -698,7 +678,7 @@ ever appears in the browser.
   every outbound action (HTTP/crowdb-rpc/SSH) with enough detail to reproduce
   by copy-pasting the equivalent curl/crowdb-cli/ssh command.
 
-## 10. Observability
+## 9. Observability
 
 - `tracing` everywhere; `--vv` switches CLI to debug.
 - Web backend exposes `/healthz`. **`/metrics` is deferred**. The Rust
@@ -707,7 +687,7 @@ ever appears in the browser.
 - All console-issued operations attach a correlation id propagated as
   `x-crowdb-kv-corr-id` to `crowdb-kv-server` request headers.
 
-## 11. Open Questions
+## 10. Open Questions
 
 - **SSH crate**: `russh` (decided). Defaults to `~/.ssh/*`; `(user,
   password)` is an explicit alternative.
@@ -720,7 +700,7 @@ ever appears in the browser.
 - **Multiple servers per node**: UI and console enforce one; lower
   layers remain unrestricted.
 
-## 12. Sysdata sync — rack/node/disk-group/disk handlers
+## 11. Sysdata sync — rack/node/disk-group/disk handlers
 
 Console add/remove handlers for racks, nodes, disk-groups, and disks
 update the console config TOML then sync group-0 sysdata via
@@ -729,7 +709,7 @@ update the console config TOML then sync group-0 sysdata via
 sysdata sync is skipped — `cluster_init` Phase 5 writes the full
 hierarchy on bootstrap.
 
-## 13. Cluster reset
+## 12. Cluster reset
 
 `cluster reset` is full teardown. It is implemented in
 `crowdb-console-shared`'s `ops::cluster::reset` as a hybrid operation

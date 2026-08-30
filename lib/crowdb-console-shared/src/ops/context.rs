@@ -29,6 +29,16 @@ pub struct OpContext {
     config: RwLock<ConsoleConfig>,
 }
 
+impl std::fmt::Debug for OpContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpContext")
+            .field("sysmd", &"CrowdbSysmdClient")
+            .field("kv", &"Arc<CrowdbKvClient>")
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
 impl OpContext {
     /// Build an `OpContext` from a group-0 endpoint (e.g.
     /// `127.0.0.1:28001`) and an initial [`ConsoleConfig`].
@@ -54,6 +64,31 @@ impl OpContext {
         }
     }
 
+    /// Build an `OpContext` from a pre-built shared [`CrowdbKvClient`].
+    ///
+    /// Used by the web backend (`AppState::op_context`) to share the
+    /// cached client (topology cache + connection pool) across requests
+    /// rather than building a new one per request. `group0_endpoint`
+    /// seeds the leader hint for store 0 / group 0; `mgmt_seeds` are
+    /// additional topology-discovery seeds (already in the shared
+    /// client's config — accepted for API symmetry with [`Self::new`]).
+    #[must_use]
+    pub fn with_shared_client(
+        kv: Arc<CrowdbKvClient>,
+        group0_endpoint: String,
+        mgmt_seeds: &[String],
+        config: ConsoleConfig,
+    ) -> Self {
+        let _ = mgmt_seeds; // seeds are already in the shared client's config
+        kv.seed_leader(0, 0, group0_endpoint);
+        let sysmd = CrowdbSysmdClient::from_shared(Arc::clone(&kv));
+        Self {
+            sysmd,
+            kv,
+            config: RwLock::new(config),
+        }
+    }
+
     /// Access the [`CrowdbSysmdClient`] for group-0 system metadata.
     #[must_use]
     pub fn sysmd(&self) -> &CrowdbSysmdClient {
@@ -63,6 +98,14 @@ impl OpContext {
     /// Access the [`CrowdbKvClient`] for the KV data-plane.
     #[must_use]
     pub fn kv(&self) -> &CrowdbKvClient {
+        &self.kv
+    }
+
+    /// Access the shared [`Arc<CrowdbKvClient>`] for the KV data-plane.
+    /// Used by the web backend to verify the client is shared (not
+    /// duplicated) between `AppState` and `OpContext`.
+    #[must_use]
+    pub fn kv_arc(&self) -> &Arc<CrowdbKvClient> {
         &self.kv
     }
 

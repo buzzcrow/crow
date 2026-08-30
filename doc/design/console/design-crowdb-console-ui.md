@@ -23,27 +23,26 @@ what we chose and why. Requirements (the *what*) live in
   - [5.3 Interactions](#53-interactions)
 - [6. Inspector Panel](#6-inspector-panel)
 - [6.1 KV Operator Panel (center panel)](#61-kv-operator-panel-center-panel)
-- [7. Embedded Swagger Panel](#7-embedded-swagger-panel)
-- [8. Embedding Contract](#8-embedding-contract)
-- [9. Data & Polling Strategy](#9-data--polling-strategy)
-- [10. Module Layout](#10-module-layout)
-- [11. Accessibility](#11-accessibility)
-- [12. Testing](#12-testing)
-- [13. View-Mode Restructure: Physical / Capacity / KV](#13-view-mode-restructure-physical--capacity--kv)
-  - [13.1 Three view-modes](#131-three-view-modes)
-  - [13.2 Physical view: DiskDB Server sub-tree](#132-physical-view-diskdb-server-sub-tree)
-  - [13.3 Capacity view sidebar + dialogs](#133-capacity-view-sidebar--dialogs)
-  - [13.4 Batch Add Disk](#134-batch-add-disk)
-- [14. DiskDB Server Deploy / Restart / Stop](#14-diskdb-server-deploy--restart--stop)
-- [15. REST Proxy for DiskDB Runtime](#15-rest-proxy-for-diskdb-runtime)
-- [16. Capacity Panel (Canvas Visualization)](#16-capacity-panel-canvas-visualization)
-  - [16.1 Rendering](#161-rendering)
-  - [16.2 Color encoding](#162-color-encoding)
-  - [16.3 Polling](#163-polling)
-  - [16.4 Scope dispatch and module structure](#164-scope-dispatch-and-module-structure)
-- [17. Console-Shared DiskDB Client + CLI](#17-console-shared-diskdb-client--cli)
-  - [17.1 Console-shared client](#171-console-shared-client)
-  - [17.2 CLI subcommands](#172-cli-subcommands)
+- [7. Embedding Contract](#7-embedding-contract)
+- [8. Data & Polling Strategy](#8-data--polling-strategy)
+- [9. Module Layout](#9-module-layout)
+- [10. Accessibility](#10-accessibility)
+- [11. Testing](#11-testing)
+- [12. View-Mode Restructure: Physical / Capacity / KV](#12-view-mode-restructure-physical--capacity--kv)
+  - [12.1 Three view-modes](#121-three-view-modes)
+  - [12.2 Physical view: DiskDB Server sub-tree](#122-physical-view-diskdb-server-sub-tree)
+  - [12.3 Capacity view sidebar + dialogs](#123-capacity-view-sidebar--dialogs)
+  - [12.4 Batch Add Disk](#124-batch-add-disk)
+- [13. DiskDB Server Deploy / Restart / Stop](#13-diskdb-server-deploy--restart--stop)
+- [14. REST Proxy for DiskDB Runtime](#14-rest-proxy-for-diskdb-runtime)
+- [15. Capacity Panel (Canvas Visualization)](#15-capacity-panel-canvas-visualization)
+  - [15.1 Rendering](#151-rendering)
+  - [15.2 Color encoding](#152-color-encoding)
+  - [15.3 Polling](#153-polling)
+  - [15.4 Scope dispatch and module structure](#154-scope-dispatch-and-module-structure)
+- [16. Console-Shared DiskDB Client + CLI](#16-console-shared-diskdb-client--cli)
+  - [16.1 Console-shared client](#161-console-shared-client)
+  - [16.2 CLI subcommands](#162-cli-subcommands)
 
 ## 1. Goals (recap)
 
@@ -52,7 +51,7 @@ what we chose and why. Requirements (the *what*) live in
   drive the sidebar tree, the topology canvas, and the inspector
   together.
 - Full operator surface: rack/node/server lifecycle, store/group/replica
-  CRUD, KV data plane, embedded Swagger.
+  CRUD, KV data plane.
 - Offline-capable: no third-party CDN at runtime.
 - Lean: minimal dependencies, no feature the requirement does not mandate.
 
@@ -80,10 +79,10 @@ Capacity / KV) selects which hierarchy every pane renders.
 ```
 ┌─ Header ───────────────────────────────────────────────────────────┐
 │ brand · health pill · view toggle (Physical/Logical) · last refresh │
-│ · refresh · node selector (Swagger only) · KV / API panel toggles   │
+│ · refresh · KV panel toggle                                        │
 ├─ Sidebar ─────┬─ Center panel ─────────────┬─ Inspector ────────────┤
 │ filter input  │ Topology canvas (default)  │ Details (key/value)    │
-│ hierarchy     │ Swagger panel (API toggle) │ Activity (recent ops)  │
+│ hierarchy     │ KV Operator panel (KV)     │ Activity (recent ops)  │
 │ tree of the   │ KV Operator panel (KV)     │                        │
 │ active view   │                            │                        │
 │ (+ context    │                            │                        │
@@ -92,8 +91,7 @@ Capacity / KV) selects which hierarchy every pane renders.
 ```
 
 - **Header** (~56px): brand label, cluster health pill, Physical/Logical
-  toggle, last-refresh time, manual refresh button, node selector
-  (consumed only by the Swagger panel).
+  toggle, last-refresh time, manual refresh button.
 - **Sidebar** (~240px): a text filter plus the hierarchy tree for the
   active view. Click selects; right-click opens the per-layer context
   menu. No favorites, no recent, no saved presets.
@@ -101,10 +99,10 @@ Capacity / KV) selects which hierarchy every pane renders.
   wheel zooms (React Flow default), click selects. Selection is shared
   with the sidebar and inspector via `SelectionContext`. No floating
   toolbar.
-- **Center panel**: one of three modes, toggled from the header:
-  Topology canvas (default), Swagger panel, or KV Operator panel. The
-  KV and Swagger toggles are mutually exclusive with the topology view;
-  selecting one replaces the canvas.
+- **Center panel**: one of two modes, toggled from the header:
+  Topology canvas (default) or KV Operator panel. The KV toggle is
+  mutually exclusive with the topology view; selecting it replaces the
+  canvas.
 - **Inspector** (~320px, collapsible): tabs scoped to the selection:
   Details and Activity only. KV operations have moved to the center KV
   Operator panel (§6.1).
@@ -187,8 +185,8 @@ surface with store/group selectors, scan results, and an action bar.
 ## 6.1 KV Operator Panel (center panel)
 
 A full-width center panel for KV data-plane operations, toggled from the
-header via a "KV" button (mutually exclusive with Swagger and topology
-canvas). Replaces the former Inspector KV tab, which was too cramped at
+header via a "KV" button (mutually exclusive with the topology canvas).
+Replaces the former Inspector KV tab, which was too cramped at
 320px for comfortable key browsing.
 
 **Design choices:**
@@ -231,15 +229,7 @@ deletes with 16-way parallel `kvDelete`. If more than 1000 keys exist,
 scan+delete continues in batches after confirmation. The confirmation
 dialog shows "1000+" when the count may be higher.
 
-## 7. Embedded Swagger Panel
-
-- Lives inside the SPA; opening it does not navigate or open a new tab.
-- Hosts an `<iframe>` at `${apiPrefix}/swagger/?url=${apiPrefix}/nodes/:node_id/openapi.json`,
-  where `:node_id` is the header's node selector.
-- Switching the node reloads the iframe `url` only.
-- Loaded lazily (code-split) so initial page load is not blocked.
-
-## 8. Embedding Contract
+## 7. Embedding Contract
 
 The SPA is mountable as a sub-component with a minimal props interface
 (`apiPrefix`, `basePath`, `readonly`, `modules` opt-out, `initialViewMode`,
@@ -251,7 +241,7 @@ The SPA is mountable as a sub-component with a minimal props interface
 - **Standalone** — `index.html` mounts at the document root with defaults;
   `embed.ts` exports the component for hosts.
 
-## 9. Data & Polling Strategy
+## 8. Data & Polling Strategy
 
 - **Two-tree contract** — the SPA speaks physical (`/api/racks`,
   `/api/nodes`) and logical (`/api/stores`) trees per `design-crowdb-console.md`.
@@ -265,11 +255,11 @@ The SPA is mountable as a sub-component with a minimal props interface
   hand-edit cached data. This trades a round-trip for correctness
   simplicity.
 
-## 10. Module Layout
+## 9. Module Layout
 
 The source tree follows the pane structure: `shell/` (Header, Sidebar,
 Inspector), `topology/` (canvas + layout), `panels/` (KvOperatorPanel,
-SwaggerPanel, ActivityLog), `components/` (Dialog, ContextMenu, dialogs,
+ActivityLog), `components/` (Dialog, ContextMenu, dialogs,
 UI primitives), and `contexts/` (ViewMode, Selection, Toast, Activity).
 `api.ts` and `types/index.ts` are the single URL-builder and data-model
 modules respectively.
@@ -278,7 +268,7 @@ modules respectively.
 utils, bulk action dialog, metrics history, theme context. None are
 needed for the lean surface.
 
-## 11. Accessibility
+## 10. Accessibility
 
 - Keyboard reachable: Tab/Enter/Escape on tree rows, dialogs, and menus;
   context menus mirror to keyboard-activatable buttons where practical.
@@ -286,7 +276,7 @@ needed for the lean surface.
 - Strings go through a single `t(key)` helper (English only) so a future
   locale pack needs no source changes. (Optional for v1; may inline.)
 
-## 12. Testing
+## 11. Testing
 
 - Existing Vitest unit tests for dialog request bodies and `listRacks`
   envelope handling are **retained** (they pin the backend contract).
@@ -296,7 +286,7 @@ needed for the lean surface.
 
 ---
 
-## 13. View-Mode Restructure: Physical / Capacity / KV
+## 12. View-Mode Restructure: Physical / Capacity / KV
 
 The header view-toggle expanded from two modes (Physical | Logical) to
 three (Physical | Capacity / KV). This separation gives each view a
@@ -309,7 +299,7 @@ concerns. Splitting them into a dedicated Capacity view also lets the
 Capacity center panel render capacity visualization without competing
 with the topology canvas.
 
-### 13.1 Three view-modes
+### 12.1 Three view-modes
 
 - **Physical** — rack → node → server(s) → (KV: store → group;
   DiskDB: disk-group → disk). Infrastructure + service management
@@ -336,7 +326,7 @@ the active mode; the center panel mode set changes per mode (Physical
 → topology canvas; Capacity → capacity panel; KV → KV operator
 panel).
 
-### 13.2 Physical view: DiskDB Server sub-tree
+### 12.2 Physical view: DiskDB Server sub-tree
 
 The Physical view's `Server` tree node renders both server types
 under a Node:
@@ -374,7 +364,7 @@ Edge cases:
 - KV server stopped (pid cleared) but entry persisted → still renders
   in the tree; Restart available, health = Unknown.
 
-### 13.3 Capacity view sidebar + dialogs
+### 12.3 Capacity view sidebar + dialogs
 
 The Capacity view sidebar renders rack → node → disk-group → disk
 (no server nodes; infrastructure is visible in Physical). Disk
@@ -409,7 +399,7 @@ Dialogs (follow `AddNodeDialog`/`ConfirmDeleteDialog` patterns):
 - `SetDiskStatusDialog` — `HwStatus` enum dropdown. Calls
   `PUT /api/disks/:id/status` (§15).
 
-### 13.4 Batch Add Disk
+### 12.4 Batch Add Disk
 
 A batch endpoint for atomic all-or-nothing disk creation:
 
@@ -445,7 +435,7 @@ Edge cases:
 - Group-0 sysdata write fails for disk 3 of 5 → rollback all 5, 502.
 - Empty batch → 400.
 
-## 14. DiskDB Server Deploy / Restart / Stop
+## 13. DiskDB Server Deploy / Restart / Stop
 
 The Physical view's DiskDB Server node needs the same service-lifecycle
 ops as KV Server (Restart, Stop, Deploy). The deploy/restart/stop
@@ -509,7 +499,7 @@ Edge cases:
   as 502. The handler does not pre-check ports (best-effort, matches
   KV behavior).
 
-## 15. REST Proxy for DiskDB Runtime
+## 14. REST Proxy for DiskDB Runtime
 
 `crowdb-web` proxies diskdb runtime RPCs (`QueryCapacityStats` drill-down,
 scan, recalc, compact, rebuild) via REST endpoints under
@@ -566,7 +556,7 @@ Edge cases:
 - Scan already running → `trigger_scan` returns `scan_in_progress:
   true`; handler passes it through (no error).
 
-## 16. Capacity Panel (Canvas Visualization)
+## 15. Capacity Panel (Canvas Visualization)
 
 The Capacity view center panel renders capacity visualization that
 scales to thousands of zones per disk and tens of thousands of blocks
@@ -614,7 +604,7 @@ content depends on the selected entity (from `SelectionContext`):
   `GET /api/diskdb/usage?dg=<id>&disk=<disk_id>&zone=<zi>` (full
   bitmap, on-demand only).
 
-### 16.1 Rendering
+### 15.1 Rendering
 
 Canvas, not SVG/DOM, for all levels:
 - Offscreen canvas double-buffering: draw to an offscreen canvas,
@@ -627,7 +617,7 @@ Canvas, not SVG/DOM, for all levels:
 - No DOM reflow. The canvas is a single element; only its bitmap
   content changes.
 
-### 16.2 Color encoding
+### 15.2 Color encoding
 
 Green (free) → amber → red (busy):
 - Zone/disk boxes: gradient fill based on `busy_blocks /
@@ -637,7 +627,7 @@ Green (free) → amber → red (busy):
   hover (zone id + usage %) or inline so the information is not
   color-only (color-blind friendly).
 
-### 16.3 Polling
+### 15.3 Polling
 
 3 s refresh of the currently focused visualization:
 - The poll refetches only the data for the selected entity level
@@ -661,7 +651,7 @@ Edge cases:
 - Poll response slower than 3 s → keep previous frame; next poll
   catches up. No spinner overlay (would flicker).
 
-### 16.4 Scope dispatch and module structure
+### 15.4 Scope dispatch and module structure
 
 `CapacityPanel` derives a `CapacityScope` (`Cluster | Rack | Node |
 DiskGroup | Disk`) from the selected entity and renders one branch per
@@ -687,9 +677,9 @@ Shared color/format utilities live in `utils/capacity.ts`:
 when a zone is clicked and caches the last result; the 3 s poll
 refetches the focused zone via its `refresh` callback.
 
-## 17. Console-Shared DiskDB Client + CLI
+## 16. Console-Shared DiskDB Client + CLI
 
-### 17.1 Console-shared client
+### 16.1 Console-shared client
 
 `ConsoleClient` in `crowdb-console-shared` is the typed REST client used
 by both the web UI (via `api.ts` wrappers) and `crowdb-cli`. It has
@@ -714,7 +704,7 @@ Serde model types (mirrors of the flatbuffer responses):
 `DiskUsage`, `ZoneUsage`, `ScanSummary`, `RecalcResult`,
 `CompactionResult`, `RebuildResult`, `UsageResponse`.
 
-### 17.2 CLI subcommands
+### 16.2 CLI subcommands
 
 Runtime queries (usage/zones/scan/recalc/compact/rebuild) are
 reachable from the command line via `crowdb diskdb` subcommands.

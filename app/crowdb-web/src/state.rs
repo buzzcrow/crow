@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 
 use crowdb_console_shared::error::{Error, Result};
 use crowdb_console_shared::monitor::MonitorCache;
+use crowdb_console_shared::ops::OpContext;
 use crowdb_console_shared::{
     config::{ConsoleConfigEngine, ServerEntry, TomlFileEngine},
     ConsoleConfig,
@@ -300,11 +301,123 @@ impl AppState {
     pub async fn clear_kv_client(&self) {
         *self.kv_client.write().await = None;
     }
+
+    /// Build an [`OpContext`] for a single request, sharing the cached
+    /// `CrowdbKvClient` (topology cache + connection pool) and a
+    /// snapshot of the persisted [`ConsoleConfig`].
+    ///
+    /// The group-0 endpoint is resolved from the config's store-0
+    /// hosting nodes. If group 0 is not yet initialized, the first
+    /// deployed server's mgmt URL is used as a bootstrap seed (the
+    /// `cluster init` flow needs an endpoint to call `/system/init`).
+    /// Returns an error if no server is deployed.
+    ///
+    /// Mutations inside `ops::*` functions mutate the `OpContext`'s
+    /// own config snapshot; call [`Self::commit_op_context`] after a
+    /// successful `ops::*` call to write the changes back to
+    /// `AppState.config` + persist.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if no server is deployed (the
+    /// console cannot resolve any group-0 or bootstrap endpoint).
+    pub async fn op_context(&self) -> Result<OpContext> {
+        let kv = self.kv_client().await;
+
+        // Snapshot the current config.
+        let config_snapshot = {
+            let cfg = self
+                .config
+                .read()
+                .map_err(|e| Error::Config(format!("config read lock poisoned: {e}")))?;
+            cfg.clone()
+        };
+
+        // Resolve the group-0 endpoint: prefer a node hosting store 0
+        // with a known rpc_url; fall back to the first deployed
+        // server's mgmt URL (bootstrap case).
+        let (group0_endpoint, mgmt_seeds) = resolve_group0_endpoint(&config_snapshot);
+
+        let endpoint = group0_endpoint.ok_or_else(|| Error::NotFound {
+            kind: "server".into(),
+            id: "no deployed server — cannot build OpContext".into(),
+        })?;
+
+        Ok(OpContext::with_shared_client(
+            kv,
+            endpoint,
+            &mgmt_seeds,
+            config_snapshot,
+        ))
+    }
+
+    /// Write a mutated [`OpContext`]'s config back to `AppState.config`
+    /// and persist it. Called by handlers after a successful `ops::*`
+    /// call that mutated the config.
+    ///
+    /// The write-back is a short critical section with no `await`
+    /// inside the lock — the `OpContext`'s config is cloned in, the
+    /// old config is replaced, and the lock is released before
+    /// persistence (which may do file I/O).
+    ///
+    /// # Errors
+    /// Returns an error if the config lock is poisoned or persistence
+    /// fails.
+    pub fn commit_op_context(&self, ctx: &OpContext) -> Result<()> {
+        let new_config = ctx.config().clone();
+        {
+            let mut cfg = self
+                .config
+                .write()
+                .map_err(|e| Error::Config(format!("config write lock poisoned: {e}")))?;
+            *cfg = new_config;
+        }
+        self.persist()
+    }
 }
 
 /// Compile-time path to the vendored Swagger UI assets (committed under
 /// `crowdb-console/web/swagger-ui`).
 pub const SWAGGER_UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/swagger-ui");
+
+/// Resolve the group-0 endpoint + mgmt seeds from a [`ConsoleConfig`]
+/// snapshot.
+///
+/// Prefers a node hosting store 0 with a known `rpc_url`. Falls back
+/// to the first deployed server's mgmt URL (bootstrap case —
+/// `cluster init` needs an endpoint to call `/system/init` before
+/// group 0 exists). Returns `(None, seeds)` if no server is deployed;
+/// the seeds are all deployed servers' mgmt URLs.
+fn resolve_group0_endpoint(config: &ConsoleConfig) -> (Option<String>, Vec<String>) {
+    let mgmt_seeds: Vec<String> = config
+        .servers
+        .iter()
+        .filter(|s| s.node_id.is_some())
+        .map(|s| s.url.clone())
+        .filter(|u| !u.is_empty())
+        .collect();
+
+    // Prefer a node hosting store 0 with a known rpc_url.
+    if let Some(store0) = config.stores.iter().find(|s| s.store_id == 0) {
+        for node_id in &store0.nodes {
+            if let Some(server) = config.server_for_node(*node_id) {
+                if let Some(rpc_url) = &server.rpc_url {
+                    if !rpc_url.is_empty() {
+                        return (Some(rpc_url.clone()), mgmt_seeds);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to the first deployed server's mgmt URL (bootstrap).
+    let fallback = config
+        .servers
+        .iter()
+        .find(|s| s.node_id.is_some() && !s.url.is_empty())
+        .map(|s| s.url.clone());
+
+    (fallback, mgmt_seeds)
+}
 
 /// Compile-time path to the React SPA build output. The `ui/`
 /// project is within the `crowdb-web` crate; running
@@ -351,5 +464,145 @@ mod tests {
 
         std::env::set_current_dir(original_cwd).unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_group0_endpoint_no_servers_returns_none() {
+        let config = ConsoleConfig::default();
+        let (endpoint, seeds) = resolve_group0_endpoint(&config);
+        assert!(endpoint.is_none(), "no servers → no endpoint");
+        assert!(seeds.is_empty(), "no servers → no seeds");
+    }
+
+    #[test]
+    fn resolve_group0_endpoint_falls_back_to_first_server_mgmt_url() {
+        let mut config = ConsoleConfig::default();
+        let _ = config.add_server(ServerEntry {
+            id: "s1".into(),
+            url: "http://127.0.0.1:9910".into(),
+            node_id: Some(1),
+            rpc_url: None,
+            rest_port: Some(9910),
+            rpc_port: Some(28001),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: None,
+            service_type: crowdb_console_shared::config::ServiceType::default(),
+            rpc_workers: None,
+            no_fsync: false,
+        });
+        let (endpoint, seeds) = resolve_group0_endpoint(&config);
+        assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:9910"));
+        assert_eq!(seeds, vec!["http://127.0.0.1:9910"]);
+    }
+
+    #[test]
+    fn resolve_group0_endpoint_prefers_store0_rpc_url() {
+        let mut config = ConsoleConfig::default();
+        let _ = config.add_server(ServerEntry {
+            id: "s1".into(),
+            url: "http://127.0.0.1:9910".into(),
+            node_id: Some(1),
+            rpc_url: Some("http://127.0.0.1:28001".into()),
+            rest_port: Some(9910),
+            rpc_port: Some(28001),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: None,
+            service_type: crowdb_console_shared::config::ServiceType::default(),
+            rpc_workers: None,
+            no_fsync: false,
+        });
+        config.record_store(0, vec![1]);
+        let (endpoint, seeds) = resolve_group0_endpoint(&config);
+        assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:28001"));
+        assert_eq!(seeds, vec!["http://127.0.0.1:9910"]);
+    }
+
+    #[tokio::test]
+    async fn op_context_no_deployed_server_returns_error() {
+        let state = AppState::default();
+        let result = state.op_context().await;
+        assert!(result.is_err(), "no deployed server → error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::NotFound { ref kind, .. } if kind == "server"),
+            "expected NotFound(server), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn op_context_shares_cached_kv_client() {
+        let mut config = ConsoleConfig::default();
+        let _ = config.add_server(ServerEntry {
+            id: "s1".into(),
+            url: "http://127.0.0.1:9910".into(),
+            node_id: Some(1),
+            rpc_url: Some("http://127.0.0.1:28001".into()),
+            rest_port: Some(9910),
+            rpc_port: Some(28001),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: None,
+            service_type: crowdb_console_shared::config::ServiceType::default(),
+            rpc_workers: None,
+            no_fsync: false,
+        });
+        let state = AppState::with_config(config, None);
+
+        // Build the OpContext — it should share the cached kv_client.
+        let ctx = state.op_context().await.expect("op_context with server");
+
+        // The OpContext's kv Arc should be the same pointer as the
+        // AppState's cached kv_client (no duplicate connection pool).
+        let cached = state.kv_client().await;
+        assert!(
+            Arc::ptr_eq(ctx.kv_arc(), &cached),
+            "OpContext must share the cached CrowdbKvClient"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_op_context_writes_back_config() {
+        let mut config = ConsoleConfig::default();
+        let _ = config.add_server(ServerEntry {
+            id: "s1".into(),
+            url: "http://127.0.0.1:9910".into(),
+            node_id: Some(1),
+            rpc_url: Some("http://127.0.0.1:28001".into()),
+            rest_port: Some(9910),
+            rpc_port: Some(28001),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: None,
+            service_type: crowdb_console_shared::config::ServiceType::default(),
+            rpc_workers: None,
+            no_fsync: false,
+        });
+        let state = AppState::with_config(config, None);
+
+        let ctx = state.op_context().await.expect("op_context");
+        // Mutate the OpContext's config snapshot (simulating an
+        // ops::hardware::add_rack call).
+        {
+            let mut cfg = ctx.config_mut();
+            let _ = cfg.add_rack(crowdb_console_shared::config::RackEntry {
+                id: 42,
+                name: "test-rack".into(),
+            });
+        }
+        // Write back.
+        state.commit_op_context(&ctx).expect("commit");
+
+        // The AppState's config should now contain the rack.
+        let cfg = state.config.read().unwrap();
+        assert!(
+            cfg.racks.iter().any(|r| r.id == 42),
+            "commit_op_context must write the mutated config back"
+        );
     }
 }
