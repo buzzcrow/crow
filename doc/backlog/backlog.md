@@ -25,16 +25,6 @@ complexity, and dependency. Before implementation, follow the
   design — open questions on domain navigation, chunk/bench handling,
   and migration sequencing.
 
-- **[R126](R126-console-cli-command-restructure.md)** — ✅ Done — CLI
-  command restructure by function — Area: console / cli — Restructured
-  `crowdb-cli` into four top-level domains (`cluster`/`kv`/`chunk`/
-  `bench`) and shifted CLI communication from `crowdb-web` intermediary
-  to direct group-0 sysdata + kv-server mgmt API calls. Added `ops`
-  module in `crowdb-console-shared` holding the operation logic. New
-  commands: `cluster reset`, `cluster clean`, `kv server delete`
-  (require-empty check). Old console-web E2E tests ignored pending
-  rewrite.
-
 - **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
   test port prober — Area: cluster / protocol / server —
   `crowdb-protocol/src/ports.rs` already defines base ports + stride +

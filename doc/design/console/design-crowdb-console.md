@@ -36,7 +36,13 @@ design is detailed in the sub-design `design-crowdb-console-ui.md`.
   - [6.4 Resolution rules](#64-resolution-rules)
   - [6.5 Frontend contract](#65-frontend-contract)
 - [7. CLI Design](#7-cli-design)
-  - [7.1 Bench subcommand](#71-bench-subcommand)
+  - [7.1 Four-Domain Hierarchy](#71-four-domain-hierarchy)
+  - [7.2 Command Hierarchy](#72-command-hierarchy)
+  - [7.3 `cluster init` — bootstrap special case](#73-cluster-init--bootstrap-special-case)
+  - [7.4 `cluster clean` — data wipe boundary](#74-cluster-clean--data-wipe-boundary)
+  - [7.5 `kv server delete` — graceful + require-empty](#75-kv-server-delete--graceful--require-empty)
+  - [7.6 Bench subcommand](#76-bench-subcommand)
+  - [7.7 Bench lifecycle verbs (deploy / prepare / run / teardown)](#77-bench-lifecycle-verbs-deploy--prepare--run--teardown)
 - [8. Swagger UI Hosting](#8-swagger-ui-hosting)
 - [9. Error Model and Operation Logging](#9-error-model-and-operation-logging)
 - [10. Observability](#10-observability)
@@ -312,6 +318,24 @@ analog: CockroachDB system ranges).
 - Default host: `127.0.0.1` with the current OS user.
 - Pre-flight: every operation calls `ssh::probe(node)` which performs a real handshake before any side-effecting work. Failure surfaces as `NodeUnreachable { node_id, reason }`.
 
+**SSH credential storage lifecycle** — two phases:
+
+- **Bootstrap phase** (before group 0 exists) — SSH creds are stored
+  in the shared TOML config file `runtime-data/crowdb.temp.toml`
+  (via `TomlFileEngine::default_path()` in
+  `lib/crowdb-console-shared/src/config.rs`). This file stores
+  rack/node/server/store/group/disk-group/disk entries, with SSH creds
+  in `NodeEntry` (`ssh_user`, `ssh_key`, `ssh_password`). The CLI and
+  UI share the same `ConsoleConfig` + `TomlFileEngine` flow — `cluster
+  rack add` / `cluster node add` write to this file, `kv server deploy`
+  reads SSH creds from it. No separate CLI-only config file.
+- **Steady-state phase** (after group 0 exists) — SSH creds are moved
+  into group-0 sysdata, encrypted with a default key. Subsequent `kv
+  server deploy` calls read creds from group-0 sysdata via
+  `KVClusterMetaClient`. The TOML file is no longer the source of truth
+  for SSH creds; group 0 is. The TOML file remains as a local cache /
+  bootstrap fallback.
+
 
 ### 5.3 Process lifecycle (deploy / start / stop)
 
@@ -435,44 +459,178 @@ backend-facing contract here:
   seeded with `--sysmd-ip` / `--sysmd-port` (a group-0 mgmt endpoint)
   and talks directly to group-0 sysdata via `CrowdbSysmdClient` and to
   individual `crowdb-kv-server` mgmt APIs via `ServerClient`. There is
-  no `crowdb-web` intermediary.
-- **Four domains** — `cluster` (hardware topology + cluster-level ops),
-  `kv` (server lifecycle + logical concepts + data-plane), `chunk`
-  (diskdb/chunkdb/diskio — stubs), `bench` (load injection — stubs).
-- **Three layers max** — `crowdb-cli <domain> <subcommand> <verb>`
-  (e.g. `kv server deploy`, `kv store add`, `cluster rack list`).
-- Verb vocabulary stays consistent: `add / remove / list / inspect`.
-  Lifecycle verbs (`deploy / restart / stop / delete`) for `kv server`;
-  data verbs (`put / get / delete / scan`) for `kv data`.
-- **Logical entity addressing**: store/group/replica/KV commands use
-  `--store` / `--group`; the backend resolves placement. Server
-  lifecycle uses `--node`.
-- **Leaders are elected, not assigned.** `kv group add` takes no
-  `--leader` flag; leadership is decided by Paxos election.
+  no `crowdb-web` intermediary. The global connection flags are
+  `--sysmd-ip` (default `127.0.0.1`, env `CROWDB_SYSMD_IP`) and
+  `--sysmd-port` (default: group-0 REST port, env `CROWDB_SYSMD_PORT`).
 - **Short flag aliases.** Global args occupy `-I` (sysmd-ip), `-O`
   (sysmd-port), `-p` (config), `-j` (json) across all subcommands.
-- **`cluster init`** bootstraps group 0 on the listed nodes, wires
-  remotes, and writes the hardware + KV-cluster topology into group-0
-  sysdata. It is the only command that runs before group 0 exists.
-- **`cluster reset`** tears down the entire cluster (all groups, stores,
-  servers, sysdata) in dependency order.
-- **`cluster clean`** removes orphaned sysdata entries without stopping
-  running servers.
-- **`kv server delete`** checks that no replicas reference the node
-  before allowing deletion (require-empty check).
 - Output: human-readable by default; `--json` flag emits JSON for
   scripting.
 
 The full command hierarchy is defined in the `clap` derive structs;
 this section covers design rules only.
 
-### 7.1 Bench subcommand
+### 7.1 Four-Domain Hierarchy
+
+The CLI is split by service domain into four top-level groups, each
+cohesive and focused:
+
+- **`cluster`** (alias `cls`) — hardware topology (rack, node,
+  disk-group, disk, including runtime hardware state via
+  `set-status`) + cluster-level ops (init, reset, clean, status,
+  topology). `disk-group` and `disk` live here, not under `chunk`,
+  because they are hardware topology concepts — physical disks grouped
+  into disk-groups on nodes in racks. The `set-status` /
+  `set-dg-status` verbs are executed through the diskdb service API,
+  but the CLI verb belongs under `cluster` because it changes hardware
+  topology state, not chunk service state. `chunk diskdb` owns only the
+  diskdb service lifecycle and maintenance (scan/recalc/compact/
+  rebuild).
+- **`kv`** — KV layer: `kv server` (crowdb-kv-server lifecycle),
+  `kv store` / `kv group` / `kv replica` (logical concepts), `kv put`
+  / `get` / `delete` / `scan` / `snapshot` (data-plane). The verb
+  distinguishes management from data-plane; no `kv` prefix needed on
+  resource names.
+- **`chunk`** — chunk storage service cluster: `chunk diskdb` /
+  `chunk chunkdb` / `chunk diskio` (server lifecycle + maintenance) +
+  future chunk data-plane (`allocate` / `free` / `write` / `read` /
+  `gc`). diskdb (block allocator), chunkdb (chunk metadata), diskio
+  (disk I/O), and the chunk client lib compose the chunk storage
+  service cluster; the group name reflects the unified service, not
+  individual servers. Stubs pending implementation.
+- **`bench`** — load injection per layer.
+
+The four-domain hierarchy is the **standard concept** across the
+production system — not CLI-specific. The console UI (`crowdb-web`)
+uses the same domain grouping for its navigation and operation
+surfaces (see `design-crowdb-console-ui.md`). The operation logic
+behind each verb lives in `crowdb-console-shared`'s `ops` module
+(§2.2); both frontends call the same shared operations, so CLI and UI
+behave identically.
+
+### 7.2 Command Hierarchy
+
+```
+crowdb-cli
+│
+├── cluster  (alias: cls)           ← hardware topology + cluster-level ops
+│   ├── init                        (--nodes; bootstraps group 0 — §7.3)
+│   ├── reset                       (full teardown — §13)
+│   ├── clean                       (wipe user data, keep metadata + group-0 — §7.4)
+│   ├── status
+│   ├── topology
+│   ├── rack        { add, remove, list }
+│   ├── node        { add, remove, list, ping }
+│   ├── disk-group  { add, remove, list, set-status }
+│   └── disk        { add, remove, list, set-status }
+│
+├── kv                              ← KV layer: server + logical concepts + data-plane
+│   ├── server    { deploy, restart (alias start), stop, delete, list }   (delete — §7.5)
+│   ├── store     { add, remove, list, inspect }
+│   ├── group     { add, remove, list, inspect }
+│   ├── replica   { add, remove }
+│   ├── put / get / delete / scan
+│   └── snapshot  { create, list, scan, release }
+│
+├── chunk                           ← chunk storage service cluster (stubs)
+│   ├── diskdb    { deploy, restart, stop, delete, list, usage,
+│   │               scan-status, scan, recalc, compact, rebuild }
+│   ├── chunkdb   { deploy, restart, stop, delete, list }   (future)
+│   ├── diskio    { deploy, restart, stop, delete, list }   (future)
+│   └── allocate / free / write / read / gc                 (future data-plane)
+│
+└── bench                           ← load injection
+    ├── kv { read, write, scan, mix }
+    ├── rpc
+    ├── diskdb { allocate, mix }                            (future)
+    ├── chunkdb { allocate, mix }                           (future)
+    └── chunk { write, read, mix }                          (future)
+```
+
+**Three layers max** — `crowdb-cli <domain> <subcommand> <verb>`
+(e.g. `kv server deploy`, `kv store add`, `cluster rack list`).
+Direct data-plane verbs are two layers (`kv put`, `chunk allocate`).
+
+**Verb vocabulary:**
+- Resource CRUD: `add / remove / list / inspect`.
+- Server lifecycle: `deploy / restart / stop / delete` — consistent
+  across `kv server`, `chunk diskdb`, `chunk chunkdb`, `chunk diskio`.
+  `start` is an alias of `restart`. Servers are deployed one-per-node
+  by default; `list` enumerates instances across all nodes.
+- Data-plane: `put / get / delete / scan`. The API uses `scan` for
+  prefix-scan; `list` is management-only (enumerates resources, not
+  data), never data-plane.
+- Hardware state: `set-status` on `cluster disk` / `cluster disk-group`.
+
+**Logical entity addressing**: store/group/replica/KV commands use
+`--store` / `--group`; the backend resolves placement. Server
+lifecycle uses `--node`.
+
+**Leaders are elected, not assigned.** `kv group add` takes no
+`--leader` flag; leadership is decided by Paxos election.
+
+### 7.3 `cluster init` — bootstrap special case
+
+`cluster init` is the only command that runs before group 0 exists.
+It takes `--nodes <n1,n2,n3>` directly (not `--sysmd-ip` /
+`--sysmd-port`) and bootstraps group-0/store-0 on those nodes via
+direct node REST calls (the `POST /system/init` mechanism, §4.3),
+wires remotes, and writes the hardware + KV-cluster topology into
+group-0 sysdata. After `cluster init` completes, subsequent commands
+use `--sysmd-ip` / `--sysmd-port` to connect to the newly created
+group 0.
+
+### 7.4 `cluster clean` — data wipe boundary
+
+`cluster clean` wipes user-layer data across all storage services,
+keeping services running and group 0 intact:
+
+- **KV user data** — remove all user stores + groups via the existing
+  store/group removal flow (cascades to replicas and on-disk WAL/tree
+  cleanup). group-0/store-0 preserved.
+- **chunkdb metadata** — chunkdb stores metadata in CROWDB KV; cleaning
+  the chunkdb KV store (same as any KV store removal) wipes chunkdb
+  metadata.
+- **diskio data** — diskio writes at positions it points to; later
+  writes overwrite old data. No explicit clean needed — new writes
+  supersede old data.
+- **diskdb metadata + backing** — remove all diskdb metadata (clean the
+  diskdb group(s) in KV sysdata). For file-simulated disks, trim or
+  reset the backing file to reclaim space. For real devices, metadata
+  removal is sufficient (zones are reclaimed on next allocation).
+
+Services (`crowdb-kv-server`, `crowdb-diskdb`, `crowdb-chunkdb`,
+`crowdb-diskio`) stay running. group-0 leadership continues — leaders
+are elected, not assigned; as long as group-0 replicas survive, they
+elect a leader. Topology (racks/nodes/disk-groups/disks) is preserved.
+
+### 7.5 `kv server delete` — graceful + require-empty
+
+All operations use graceful Paxos reconfiguration — no force-kill
+path. `delete` requires the server to be **empty**: no replicas, no
+groups, no stores hosted. The operator must delete in bottom-up order
+— replicas → groups → stores → server → node — before the server or
+node can be removed. The CLI refuses `kv server delete` if the server
+still hosts replicas, with an error listing the replicas/groups/stores
+that must be removed first. Same policy applies to `cluster node
+remove` — the node must have no running servers/services before
+removal.
+
+Verb distinction:
+- `kv server stop` — graceful process stop (keeps server entry, can
+  restart later). No reconfiguration; replicas remain registered on
+  peers.
+- `kv server delete` — graceful removal (requires empty server).
+  Removes the server entry after confirming emptiness. No cascading
+  delete — the operator does the cascade manually in bottom-up order.
+
+### 7.6 Bench subcommand
 
 - `bench kv <read|write|scan|mix>` runs KV workloads against a target
   store/group. `bench rpc` measures raw RPC transport throughput.
 - Both are stubs pending re-wiring to the `ops` module.
 
-### 7.2 Bench lifecycle verbs (deploy / prepare / run / teardown)
+### 7.7 Bench lifecycle verbs (deploy / prepare / run / teardown)
 
 The all-in-one `bench kv` verb deploys a 3-node cluster, pre-populates
 keys, runs the workload, and tears down — all in one process. For
@@ -502,8 +660,8 @@ deploy metadata:
   pids via `stop_pid_with_timeout`, removes `handle.json`. Idempotent:
   a second teardown on the same name exits 0 with "already torn down".
 
-The legacy `bench kv` verb is preserved as the all-in-one path for
-quick one-shot benches. The regression scripts
+The all-in-one `bench kv` verb is preserved as the quick one-shot path.
+The regression scripts
 (`tools/bench-kv-read-regression.sh`,
 `tools/bench-kv-scan-regression.sh`) use the lifecycle flow: deploy
 once → prepare once → run N sub-tests → teardown once, amortizing
@@ -573,9 +731,28 @@ hierarchy on bootstrap.
 
 ## 13. Cluster reset
 
-`POST /internal/reset` tears down the cluster in dependency order:
-remove user groups → user stores → clean group-0 sysdata (rack
-cascade + store records + diskdb service unregister) → remove
-group-0/store-0 → SIGTERM all processes → clear config + caches +
-workspaces. When no KV servers are running, the RPC steps are
-skipped (fast path for E2E test fixtures).
+`cluster reset` is full teardown. It is implemented in
+`crowdb-console-shared`'s `ops::cluster::reset` as a hybrid operation
+— group-0 discovery + direct node teardown — so the CLI no longer
+depends on a `crowdb-web` endpoint. The flow:
+
+1. **Discovery** — connect to group 0 (via `--sysmd-ip` /
+   `--sysmd-port`) to enumerate all resources: user stores/groups/
+   replicas, diskdb/chunkdb/diskio instances, server entries, topology.
+2. **Teardown in dependency order** — erase resources one by one:
+   remove user groups → user stores → clean group-0 sysdata (rack
+   cascade + store records + diskdb service unregister) → SIGTERM each
+   node's processes.
+3. **Destroy group 0** — tear down group-0/store-0 itself (last, after
+   all user resources are gone).
+4. **Delete topology** — remove all nodes and racks from
+   `runtime-data/crowdb.temp.toml`.
+5. **Fast path** — if group 0 is not created (e.g. `cluster init`
+   failed or was never run), skip steps 1-3 and use the TOML config
+   info (rack/node entries) to clean up any stray processes and clear
+   the config.
+
+The `POST /internal/reset` endpoint on `crowdb-kv-server` remains for
+UI use; the CLI implements its own teardown via the shared `ops`
+module. When no KV servers are running, the RPC steps are skipped
+(fast path for E2E test fixtures).
