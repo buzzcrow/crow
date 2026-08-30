@@ -213,9 +213,34 @@ pub async fn delete(ctx: &OpContext, node_id: NodeId) -> Result<()> {
     let node = ctx.node_entry(node_id)?;
     let entry = ctx.server_for_node(node_id)?;
 
-    // Require-empty: check that no replicas in group-0 sysdata reference
-    // this node. Best-effort — if sysdata is unreachable, skip the check
-    // (the cluster may not be initialized).
+    check_require_empty(ctx, node_id).await?;
+
+    if let Some(pid) = entry.pid {
+        if node.ssh_enabled() {
+            let _ = crate::ssh::stop_via_ssh(&node, pid).await;
+        } else {
+            let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await;
+        }
+    }
+
+    {
+        let mut cfg = ctx.config_mut();
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.purge_node_topology(node_id);
+    }
+    Ok(())
+}
+
+/// Check that no replicas in group-0 sysdata reference the given node.
+/// Best-effort — if sysdata is unreachable, the check is skipped (the
+/// cluster may not be initialized). Used by [`delete`] and by the web
+/// handler's `DELETE /api/nodes/:id/server` to enforce the require-empty
+/// constraint before stopping the server process.
+///
+/// # Errors
+/// Returns [`Error::Conflict`] if the node still hosts replicas in
+/// group-0 sysdata.
+pub async fn check_require_empty(ctx: &OpContext, node_id: NodeId) -> Result<()> {
     if let Ok(stores) = ctx.sysmd().list_stores().await {
         for store in &stores {
             if let Ok(groups) = ctx.sysmd().list_groups_in_store(store.store_id).await {
@@ -240,20 +265,6 @@ pub async fn delete(ctx: &OpContext, node_id: NodeId) -> Result<()> {
                 }
             }
         }
-    }
-
-    if let Some(pid) = entry.pid {
-        if node.ssh_enabled() {
-            let _ = crate::ssh::stop_via_ssh(&node, pid).await;
-        } else {
-            let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await;
-        }
-    }
-
-    {
-        let mut cfg = ctx.config_mut();
-        let _ = cfg.remove_server_for_node(node_id);
-        cfg.purge_node_topology(node_id);
     }
     Ok(())
 }

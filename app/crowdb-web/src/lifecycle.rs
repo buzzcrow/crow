@@ -1016,6 +1016,12 @@ pub async fn http_delete_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    // Require-empty: refuse to delete if the node still hosts replicas.
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::kv_server::check_require_empty(&ctx, node_id)
+        .await
+        .map_err(map_config_err)?;
+
     if !stop_and_remove_server_for_node(&state, node_id).await {
         return Err((
             StatusCode::NOT_FOUND,
