@@ -19,8 +19,6 @@ use crowdb_console_shared::{
 /// behind a `RwLock`; mutations are persisted via `ConsoleConfig::save`
 /// to `config_path` when present.
 ///
-/// `openapi_cache` is a per-node TTL cache for the `OpenAPI` JSON proxy.
-///
 /// `diskdb_client` is lazily initialized on the first `/api/diskdb/*`
 /// request (the service registry may not be ready at console startup).
 #[derive(Clone)]
@@ -28,7 +26,6 @@ pub struct AppState {
     pub config: Arc<RwLock<ConsoleConfig>>,
     pub config_engine: Option<Arc<dyn ConsoleConfigEngine>>,
     pub runtime_root: Arc<PathBuf>,
-    pub openapi_cache: Arc<std::sync::Mutex<HashMap<u64, (serde_json::Value, std::time::Instant)>>>,
     pub monitor_cache: Arc<MonitorCache>,
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     pub diskdb_client: Arc<tokio::sync::RwLock<Option<crowdb_diskdb_client::DiskdbClient>>>,
@@ -88,7 +85,6 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             config_engine: engine,
             runtime_root: Arc::new(runtime_root),
-            openapi_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             monitor_cache: Arc::new(MonitorCache::new()),
             runtime_pids: Arc::new(std::sync::Mutex::new(HashMap::new())),
             diskdb_client: Arc::new(tokio::sync::RwLock::new(None)),
@@ -371,10 +367,6 @@ impl AppState {
         self.persist()
     }
 }
-
-/// Compile-time path to the vendored Swagger UI assets (committed under
-/// `crowdb-console/web/swagger-ui`).
-pub const SWAGGER_UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/swagger-ui");
 
 /// Resolve the group-0 endpoint + mgmt seeds from a [`ConsoleConfig`]
 /// snapshot.

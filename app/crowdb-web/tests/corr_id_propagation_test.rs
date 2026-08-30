@@ -8,16 +8,9 @@
 //!
 //! 1. Pass an inbound header straight through to the response.
 //! 2. Mint one when the client doesn't send one.
-//!
-//! The third invariant — the same id appearing on the outbound call
-//! `crowdb-web` makes to `crowdb-kv-server` — is exercised by the
-//! `ops_log` integration test (see same file) which spawns a stub
-//! upstream and asserts the header was forwarded.
 
 use std::net::SocketAddr;
 
-use axum::routing::get;
-use crowdb_console_shared::config::{NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crowdb_console_shared::corr_id;
 use crowdb_console_shared::ConsoleConfig;
 use crowdb_web::{router, AppState};
@@ -71,93 +64,5 @@ async fn missing_corr_id_is_minted_and_returned() {
     assert!(
         minted.chars().all(|c| c.is_ascii_hexdigit()),
         "non-hex in {minted:?}"
-    );
-}
-
-#[tokio::test]
-async fn corr_id_forwards_to_upstream_openapi_proxy() {
-    use axum::http::HeaderName;
-    use std::sync::{Arc, Mutex};
-
-    // Stub upstream that captures the `x-crowdb-kv-corr-id` header it
-    // receives and returns a minimal OpenAPI doc.
-    let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let captured_for_stub = Arc::clone(&captured);
-
-    let upstream_listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .unwrap();
-    let upstream_addr = upstream_listener.local_addr().unwrap();
-    let stub = axum::Router::new().route(
-        "/openapi.json",
-        get(move |headers: axum::http::HeaderMap| {
-            let captured = Arc::clone(&captured_for_stub);
-            async move {
-                let v = headers.get(HeaderName::from_static(corr_id::HEADER)).and_then(|v| v.to_str().ok()).map(ToString::to_string);
-                *captured.lock().unwrap() = v;
-                axum::Json(serde_json::json!({"openapi": "3.1.0", "info": {"title": "stub", "version": "test"}, "paths": {}}))
-            }
-        }),
-    );
-    tokio::spawn(async move {
-        axum::serve(upstream_listener, stub).await.unwrap();
-    });
-
-    // Web with the stub registered as node `n1`'s server.
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .unwrap();
-    let web_addr = listener.local_addr().unwrap();
-    let mut cfg = ConsoleConfig::default();
-    cfg.racks.push(RackEntry {
-        id: 1,
-        name: "r1".into(),
-    });
-    cfg.nodes.push(NodeEntry {
-        id: 1,
-        rack_id: 1,
-        host: "127.0.0.1".into(),
-        ssh_port: 22,
-        ssh_user: String::new(),
-        ssh_key: None,
-        ssh_password: None,
-    });
-    cfg.add_server(ServerEntry {
-        id: "n1".into(),
-        url: format!("http://{upstream_addr}"),
-        node_id: Some(1),
-        rpc_url: None,
-        rest_port: None,
-        rpc_port: None,
-        auto_start: false,
-        binary: None,
-        election_profile: None,
-        pid: None,
-        service_type: ServiceType::Kv,
-        rpc_workers: None,
-        no_fsync: false,
-    })
-    .unwrap();
-    let state = AppState::with_config(cfg, None);
-    tokio::spawn(async move {
-        axum::serve(listener, router(state)).await.unwrap();
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let supplied = "0123456789abcdef";
-    let http = reqwest::Client::new();
-    let resp = http
-        .get(format!("http://{web_addr}/api/nodes/1/openapi.json"))
-        .header(corr_id::HEADER, supplied)
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success(), "proxy must succeed");
-
-    let forwarded = captured.lock().unwrap().clone();
-    assert_eq!(
-        forwarded.as_deref(),
-        Some(supplied),
-        "the same corr-id the client sent must reach the upstream stub"
     );
 }

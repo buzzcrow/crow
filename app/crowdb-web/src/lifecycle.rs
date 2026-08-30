@@ -16,7 +16,6 @@ use crowdb_console_shared::expand::RecursiveDepth;
 use crowdb_console_shared::monitor::NodeRecord;
 use crowdb_console_shared::ops;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
     let health = rec.map_or(NodeHealth::Unknown, |node| node.health);
@@ -1034,88 +1033,20 @@ pub async fn http_delete_node_server(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── Per-node OpenAPI proxy ───────────────────────────────────────────
-
-const OPENAPI_CACHE_TTL: Duration = Duration::from_secs(300);
-
-/// `GET /api/nodes/:node_id/openapi.json`. Reverse-proxy the node's
-/// management API `/openapi.json` endpoint. Uses the same TTL cache as
-/// the old global proxy.
-///
-/// # Panics
-/// Panics if the `RwLock` or `Mutex` is poisoned.
+/// `POST /api/cluster/clean`. Remove orphaned sysdata entries
+/// (stores/groups/replicas that have no corresponding running server).
+/// Does not stop any running servers.
 ///
 /// # Errors
-/// Returns an error if no server is deployed or the upstream request fails.
-pub async fn http_node_openapi_proxy(
+/// Returns `502` if the sysdata scan fails.
+pub async fn http_cluster_clean(
     State(state): State<AppState>,
-    Path(node_id): Path<u64>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    let mgmt_url = {
-        let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(node_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
-        entry.url.clone()
-    };
-
-    // Check cache
-    {
-        let cache = state.openapi_cache.lock().unwrap();
-        if let Some((value, timestamp)) = cache.get(&node_id) {
-            if timestamp.elapsed() < OPENAPI_CACHE_TTL {
-                return Ok(Json(value.clone()));
-            }
-        }
-    }
-
-    let url = format!("{}/openapi.json", mgmt_url.trim_end_matches('/'));
-    let cid = crowdb_console_shared::corr_id::current_or_new();
-    let started = std::time::Instant::now();
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .header(crowdb_console_shared::corr_id::HEADER, &cid)
-        .send()
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::cluster::clean(&ctx)
         .await
-        .map_err(|e| {
-            crowdb_console_shared::ops_log::append_http(
-                &cid,
-                "GET",
-                &url,
-                0,
-                started.elapsed().as_millis(),
-                Some(&format!("transport error: {e}")),
-            );
-            err_502(format!("openapi proxy: {e}"))
-        })?;
-    let upstream_status = resp.status();
-    crowdb_console_shared::ops_log::append_http(
-        &cid,
-        "GET",
-        &url,
-        upstream_status.as_u16(),
-        started.elapsed().as_millis(),
-        None,
-    );
-    if !upstream_status.is_success() {
-        return Err(err_502(format!("openapi proxy: upstream {upstream_status}")));
-    }
-    let value = resp
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| err_502(format!("openapi proxy: parse: {e}")))?;
-
-    {
-        let mut cache = state.openapi_cache.lock().unwrap();
-        cache.insert(node_id, (value.clone(), std::time::Instant::now()));
-    }
-
-    Ok(Json(value))
+        .map_err(|e| err_502(format!("{e}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /internal/reset`. Tear down the entire cluster in dependency
@@ -1181,7 +1112,6 @@ pub async fn http_internal_reset(
     }
 
     // 8. Clear caches and workspace directories.
-    state.openapi_cache.lock().unwrap().clear();
     state.clear_kv_client().await;
     state
         .clear_workspaces()

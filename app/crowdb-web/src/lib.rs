@@ -29,21 +29,9 @@ pub use state::AppState;
 #[allow(clippy::too_many_lines)]
 pub fn router(state: AppState) -> axum::Router {
     use axum::routing::{delete, get, post};
-    use state::SWAGGER_UI_DIR;
 
     axum::Router::new()
         .route("/healthz", get(health::healthz))
-        // Swagger UI static bundle.
-        //
-        // Note: the legacy `/api/cluster/snapshot` aggregator was retired.
-        // The SPA reads per-resource live endpoints
-        // (`/api/racks`, `/api/nodes`, `/api/stores`, `/api/nodes/:id/stores`)
-        // which are all served from the monitor cache and compose into
-        // an equivalent topology view at lower latency.
-        .nest_service(
-            "/api/swagger",
-            tower_http::services::ServeDir::new(SWAGGER_UI_DIR),
-        )
         // ── Physical tree (A3): rack + node lifecycle ────────────────
         .route(
             "/api/racks",
@@ -152,10 +140,6 @@ pub fn router(state: AppState) -> axum::Router {
         // Cluster-wide server list (CLI `server list`), composed from the
         // config + monitor cache.
         .route("/api/servers", get(lifecycle::http_list_servers))
-        .route(
-            "/api/nodes/:id/openapi.json",
-            get(lifecycle::http_node_openapi_proxy),
-        )
         // ── Physical tree (A4): per-node store/group/remote primitives ─
         .route(
             "/api/nodes/:id/stores",
@@ -224,6 +208,7 @@ pub fn router(state: AppState) -> axum::Router {
         // ── Cluster init (R2): system group bootstrap ────────────────
         .route("/api/cluster/init", post(mgmt::http_cluster_init))
         .route("/api/cluster/reset", post(lifecycle::http_internal_reset))
+        .route("/api/cluster/clean", post(lifecycle::http_cluster_clean))
         // ── Internal: E2E test reset ─────────────────────────────────
         .route("/internal/reset", post(lifecycle::http_internal_reset))
         // React SPA fallback.

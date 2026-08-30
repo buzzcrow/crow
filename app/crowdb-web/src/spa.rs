@@ -101,7 +101,6 @@ make ui-build</pre>
     <p>The HTTP API is unaffected; you can still hit
         <a href="/healthz">/healthz</a>,
         <a href="/api/racks">/api/racks</a>,
-        <a href="/api/stores">/api/stores</a>,
-        <a href="/api/swagger/">/api/swagger/</a>.</p>
+        <a href="/api/stores">/api/stores</a>.</p>
 </body>
 </html>"#;
