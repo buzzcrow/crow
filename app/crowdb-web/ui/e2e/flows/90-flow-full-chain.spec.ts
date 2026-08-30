@@ -27,7 +27,7 @@ test.describe('flow · full chain', () => {
     await step('full-chain: goto', () => page.goto('/'));
 
     // --- Shell renders ---
-    await expect(page.getByRole('button', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByTestId('domain-cluster')).toBeVisible({ timeout: 3_000 });
     await expect(page.getByRole('button', { name: 'KV', exact: true })).toBeVisible();
     await expect(page.getByPlaceholder('Filter...')).toBeVisible();
 
@@ -36,7 +36,7 @@ test.describe('flow · full chain', () => {
     try {
     // --- Physical: add rack ---
     await step('full-chain: add rack UI', async () => {
-      await page.getByRole('button', { name: 'Cluster' }).click();
+      await page.getByTestId('domain-cluster').click();
       await page.getByRole('button', { name: 'Add Rack' }).click();
       await expect(page.getByRole('dialog')).toBeVisible();
       await page.getByLabel('Rack ID').fill('77');
@@ -85,7 +85,7 @@ test.describe('flow · full chain', () => {
     // --- Logical: add empty KV store on n1 ---
     await step('full-chain: clusterInit', () => clusterInit(baseURL!, [77]));
     await step('full-chain: add store UI', async () => {
-      await page.getByRole('button', { name: 'KV' }).click();
+      await page.getByTestId('domain-kv').click();
       await page.getByRole('button', { name: 'Add Store' }).click();
       await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
       await page.getByLabel('KV Store ID (numeric)').fill('7');
@@ -130,7 +130,8 @@ test.describe('flow · full chain', () => {
 
     // --- KV via KV Operator panel ---
     await step('full-chain: KV put UI', async () => {
-      await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
+      await page.getByTestId('domain-kv').click();
+  await page.getByTestId('kv-tab-kv').click();
 
       // Put
       await page.getByLabel('Put key').fill('smoke-key');
@@ -177,8 +178,8 @@ test.describe('flow · full chain', () => {
       await step('full-chain: resetAll', () => resetAll(baseURL!));
       await step('full-chain: goto (full)', async () => {
         await page.goto('/');
-        await expect(page.getByRole('button', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await expect(page.getByTestId('domain-cluster')).toBeVisible({ timeout: 3_000 });
+        await page.getByTestId('domain-cluster').click();
         await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
       });
 
@@ -259,7 +260,7 @@ test.describe('flow · full chain', () => {
       });
 
       // Switch to Cluster (Logical) view.
-      await page.getByRole('button', { name: 'KV' }).click();
+      await page.getByTestId('domain-kv').click();
       await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
 
       // 6. Create empty store 188 on n18a.

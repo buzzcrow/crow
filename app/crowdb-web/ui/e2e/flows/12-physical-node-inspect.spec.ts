@@ -39,7 +39,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump: logical→physical UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV' }).click();
+        await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('LR-6600')).toBeVisible({ timeout: 3_000 });
         await aside.getByText('LR-6600').click();
@@ -68,7 +68,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump: physical→logical UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
 
         const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-62' });
         await expect(nodeItem).toBeVisible({ timeout: 3_000 });
@@ -80,7 +80,7 @@ test.describe('physical · node inspect & cross-jump', () => {
         // Cross-jump button: physical Node -> logical Store.
         await inspector.getByRole('button', { name: /Show store 67 in cluster/i }).click();
 
-        await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
+        await expect(page.getByRole('heading', { name: 'KV' })).toBeVisible({ timeout: 3_000 });
         await expect(inspector.getByText('S-67', { exact: true }).first()).toBeVisible({ timeout: 3_000 });
       });
     } finally {
@@ -107,7 +107,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump: replicas UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         // Per-node store detail loads after the tree mounts, so rows added by
@@ -163,7 +163,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump2: cross-jump UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         // Select the physical node
@@ -181,7 +181,7 @@ test.describe('physical · node inspect & cross-jump', () => {
         await crossJumpButton.click();
 
         // View should switch to Logical
-        await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
+        await expect(page.getByRole('heading', { name: 'KV' })).toBeVisible({ timeout: 3_000 });
 
         // Store should be selected in the logical tree
         await expect(aside.getByText('S-330')).toBeVisible({ timeout: 3_000 });

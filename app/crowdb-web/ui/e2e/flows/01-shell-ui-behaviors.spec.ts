@@ -63,7 +63,7 @@ test.describe('shell · UI behaviors', () => {
       const expectedReplicaId = '1';
 
       await step('shell: goto', () => page.goto('/'));
-      await page.getByRole('button', { name: 'KV' }).click();
+      await page.getByTestId('domain-kv').click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       await step('shell: Add Store dialog', async () => {
@@ -143,7 +143,7 @@ test.describe('shell · UI behaviors', () => {
 
     // --- dialog cancel does not create entity ---
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Cluster' }).click();
+    await page.getByTestId('domain-cluster').click();
 
     await step('shell: Add Rack cancel', async () => {
       await page.getByRole('button', { name: 'Add Rack' }).click();
@@ -181,7 +181,7 @@ test.describe('shell · UI behaviors', () => {
     ]));
 
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Cluster' }).click();
+    await page.getByTestId('domain-cluster').click();
     const rack21a = page.getByRole('treeitem').filter({ hasText: 'R-211 (Rack Twenty One A)' });
     const node21c = page.getByRole('treeitem').filter({ hasText: 'N-213' });
     await expect(rack21a).toBeVisible({ timeout: 3_000 });
@@ -213,7 +213,7 @@ test.describe('shell · UI behaviors', () => {
     ]));
 
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Cluster' }).click();
+    await page.getByTestId('domain-cluster').click();
 
     const filterAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
     const rackA = page.getByRole('treeitem').filter({ hasText: 'R-341' });
@@ -242,7 +242,7 @@ test.describe('shell · UI behaviors', () => {
     await step('shell: create rack', () => createRack(baseURL!, { id: 351, name: 'r35a' }));
 
     await step('shell: goto', () => page.goto('/'));
-    await page.getByRole('button', { name: 'Cluster' }).click();
+    await page.getByTestId('domain-cluster').click();
     const refreshAside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
     // Verify initial rack

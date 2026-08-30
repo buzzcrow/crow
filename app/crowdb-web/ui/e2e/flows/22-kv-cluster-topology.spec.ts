@@ -148,7 +148,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       await step('multi-rack: goto + verify UI', async () => {
         // Navigate to Cluster view and verify all groups appear in UI.
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV' }).click();
+        await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         for (const gid of [1990, 1991, 1992]) {
@@ -254,7 +254,8 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       // Verify via UI: open KV panel, select store A, scan, see only A keys
       await step('iso-stores: scan UI', async () => {
         await page.goto('/');
-        await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
+        await page.getByTestId('domain-kv').click();
+        await page.getByTestId('kv-tab-kv').click();
         // Uncheck auto-scan: group selection triggers an auto-scan whose
         // response waitForResponse would race with the explicit Scan
         // click's response, causing the auto-scan's discarded result to
@@ -317,7 +318,8 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       // exercise the real UI path.
       await step('overlap: KV ops UI', async () => {
         await page.goto('/');
-        await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
+        await page.getByTestId('domain-kv').click();
+        await page.getByTestId('kv-tab-kv').click();
         await page.getByLabel('Store').selectOption('390');
 
         // Group A (3900): put + get g39a-key.

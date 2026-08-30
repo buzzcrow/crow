@@ -17,8 +17,8 @@ test.describe('physical · rack + node CRUD', () => {
 
     await step('shell: goto', () => page.goto('/'));
 
-    await expect(page.getByRole('button', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByRole('button', { name: 'KV' })).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByTestId('domain-cluster')).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByTestId('domain-kv')).toBeVisible({ timeout: 3_000 });
     await expect(page.getByPlaceholder('Filter...')).toBeVisible();
 
     const healthText = page.locator('header').getByText(/healthy|degraded|failed|unknown/i);
@@ -35,7 +35,7 @@ test.describe('physical · rack + node CRUD', () => {
       await step('rack-CRUD: goto', () => page.goto('/'));
 
       await step('rack-CRUD: add rack UI', async () => {
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
         await page.getByRole('button', { name: 'Add Rack' }).click();
 
         await expect(page.getByRole('dialog', { name: 'Add Rack' })).toBeVisible();
@@ -69,7 +69,7 @@ test.describe('physical · rack + node CRUD', () => {
 
       await step('rack-CRUD: add node UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('R-3 (Rack Three)')).toBeVisible({ timeout: 3_000 });
 
@@ -117,7 +117,7 @@ test.describe('physical · rack + node CRUD', () => {
 
       await step('rack-CRUD: add node+svc UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText(`R-${rackId} (Rack Thirty-One)`)).toBeVisible({ timeout: 3_000 });
 
@@ -247,7 +247,7 @@ test.describe('physical · rack + node CRUD', () => {
 
       // ── Store (logical) ──────────────────────────────────────────
       await step('del-gate: delete store UI', async () => {
-        await page.getByRole('button', { name: 'KV' }).click();
+        await page.getByTestId('domain-kv').click();
         await expect(aside.getByText('S-255', { exact: true })).toBeVisible({ timeout: 3_000 });
 
         // Cancel first.
@@ -273,7 +273,7 @@ test.describe('physical · rack + node CRUD', () => {
 
       // ── Node (physical, serverless n25x) ─────────────────────────
       await step('del-gate: delete node UI', async () => {
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
         const node25x = page.getByRole('treeitem').filter({ hasText: 'N-274' });
         await expect(node25x).toBeVisible({ timeout: 3_000 });
 
@@ -324,7 +324,7 @@ test.describe('physical · rack + node CRUD', () => {
 
     await step('dc-root: goto', () => page.goto('/'));
     await step('dc-root: add rack from DC UI', async () => {
-      await page.getByRole('button', { name: 'Cluster' }).click();
+      await page.getByTestId('domain-cluster').click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       // The datacenter root is the top treeitem, above the rack.
@@ -378,7 +378,7 @@ test.describe('physical · rack + node CRUD', () => {
 
       await step('dup-id: dup rack UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         // Click Add Rack
@@ -405,7 +405,7 @@ test.describe('physical · rack + node CRUD', () => {
 
       await step('dup-id: dup node UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Cluster' }).click();
+        await page.getByTestId('domain-cluster').click();
 
         // Right-click rack to get Add Node
         const rackItem = page.getByRole('treeitem').filter({ hasText: 'R-372' });

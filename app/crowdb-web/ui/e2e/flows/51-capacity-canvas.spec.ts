@@ -59,7 +59,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await deployDiskdb(baseURL!, nodeId, rpcPort);
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Chunk' }).click();
+      await page.getByTestId('domain-chunk').click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
       await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 10_000 });
@@ -108,7 +108,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       }
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Chunk' }).click();
+      await page.getByTestId('domain-chunk').click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
       await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 10_000 });
@@ -141,7 +141,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await addDisksBatch(baseURL!, nodeId, dgId, [{ disk_id: diskId }]);
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Chunk' }).click();
+      await page.getByTestId('domain-chunk').click();
 
       const panel = page.locator('.tw-h-full.tw-overflow-auto');
       await expect(panel.getByText(/Capacity —/)).toBeVisible({ timeout: 10_000 });
@@ -225,7 +225,7 @@ test.describe('capacity · canvas + scanner/recalc', () => {
 
       await stepTime('dc: page.goto+Capacity click', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Chunk' }).click();
+        await page.getByTestId('domain-chunk').click();
       });
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });

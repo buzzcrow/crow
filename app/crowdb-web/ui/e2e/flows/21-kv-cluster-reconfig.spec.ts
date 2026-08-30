@@ -74,7 +74,7 @@ async function openCluster(page: import('@playwright/test').Page) {
   if (!url.includes('127.0.0.1') && !url.includes('localhost')) {
     await page.goto('/');
   }
-  await page.getByRole('button', { name: 'Cluster' }).click();
+  await page.getByTestId('domain-cluster').click();
 }
 
 async function openKvCluster(page: import('@playwright/test').Page) {
@@ -82,7 +82,7 @@ async function openKvCluster(page: import('@playwright/test').Page) {
   if (!url.includes('127.0.0.1') && !url.includes('localhost')) {
     await page.goto('/');
   }
-  await page.getByRole('button', { name: 'KV' }).click();
+  await page.getByTestId('domain-kv').click();
 }
 
 async function openKvPanel(page: import('@playwright/test').Page, storeId: number, groupId: number) {
@@ -91,7 +91,8 @@ async function openKvPanel(page: import('@playwright/test').Page, storeId: numbe
   // a fresh page load, selectOption can hang for 30s+ waiting for stale
   // options to reappear.
   await page.goto('/');
-  await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
+  await page.getByTestId('domain-kv').click();
+  await page.getByTestId('kv-tab-kv').click();
   await page.getByLabel('Store').selectOption(String(storeId));
   await page.getByLabel('Group').selectOption(String(groupId));
 }

@@ -19,7 +19,8 @@ import { step } from '../fixtures/stepTimer';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await step('inspector: goto', () => page.goto('/'));
-  await page.locator('header').getByRole('button', { name: 'KV', exact: true }).click();
+  await page.getByTestId('domain-kv').click();
+  await page.getByTestId('kv-tab-kv').click();
   await page.getByLabel('Store').selectOption(storeId);
   await page.getByLabel('Group').selectOption(groupId);
 }
@@ -54,7 +55,7 @@ test.describe('inspector · activity log', () => {
       await putKey(page, 'activity-key', 'activity-val');
 
       // Select a node in the tree to make the inspector visible
-      await page.getByRole('button', { name: 'Cluster' }).click();
+      await page.getByTestId('domain-cluster').click();
 
       // Try to find and click the node — rack may already be expanded
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-32' });
@@ -97,7 +98,7 @@ test.describe('inspector · activity log', () => {
 
     try {
       await step('inspector: goto', () => page.goto('/'));
-      await page.getByRole('button', { name: 'Cluster' }).click();
+      await page.getByTestId('domain-cluster').click();
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-47' });
       await expect(nodeItem).toBeVisible({ timeout: 10_000 });
 

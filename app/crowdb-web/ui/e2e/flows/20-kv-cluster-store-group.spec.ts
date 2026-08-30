@@ -18,7 +18,7 @@ test.describe('kv cluster · store + group CRUD', () => {
     try {
       await step('store-group: create store+group UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV' }).click();
+        await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         await clusterInit(baseURL!, [5]);
@@ -102,7 +102,7 @@ test.describe('kv cluster · store + group CRUD', () => {
     try {
       await step('store-group: add replica UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV' }).click();
+        await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('G-1770')).toBeVisible({ timeout: 3_000 });
 
@@ -153,7 +153,7 @@ test.describe('kv cluster · store + group CRUD', () => {
     try {
       await step('del-replica-group: delete replica UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV' }).click();
+        await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('LR-7700')).toBeVisible({ timeout: 3_000 });
 
@@ -191,7 +191,7 @@ test.describe('kv cluster · store + group CRUD', () => {
     try {
       await step('del-replica-group: delete group UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV' }).click();
+        await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('G-880')).toBeVisible({ timeout: 3_000 });
 
