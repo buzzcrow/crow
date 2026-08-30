@@ -302,7 +302,7 @@ async fn deploy_local_in_workspace(
     // this function returns. The pid is the user's tracking handle.
     std::mem::forget(child);
 
-    wait_for_ready(&mgmt_url, Duration::from_secs(10)).await?;
+    wait_for_ready(&mgmt_url, Duration::from_secs(30)).await?;
 
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
