@@ -28,5 +28,8 @@ async fn init_dedup_nodes() {
     let ctx = ctx();
     let err = ops::cluster::init(&ctx, &[1, 1, 2]).await.unwrap_err();
     // Should fail on node 1 (first unique node) being unreachable.
-    assert!(matches!(err, Error::NodeUnreachable { .. } | Error::NotFound { .. }));
+    assert!(matches!(
+        err,
+        Error::NodeUnreachable { .. } | Error::NotFound { .. }
+    ));
 }

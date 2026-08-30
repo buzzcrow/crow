@@ -1,56 +1,52 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `crowdb-cli` CLI entrypoint.
+//! `crowdb-cli` CLI entrypoint (R126 restructure).
 //!
-//! Every verb routes through `ConsoleClient` against a `crowdb-web`
-//! service (`--ip` / `--port`, default `127.0.0.1:9920`): the CLI is a
-//! thin clap argument-parsing layer over the same `shared` core the Web
-//! UI uses, and the service resolves upstream `crowdb-kv-server` nodes from
-//! its config and monitor cache. There is no direct `crowdb-kv-server` /
-//! registry path; even `bench` resolves its crowdb-rpc target via the service.
+//! Four top-level domains: `cluster`, `kv`, `chunk`, `bench`. The CLI
+//! talks directly to group-0 system metadata via `CrowdbSysmdClient`
+//! and to individual `crowdb-kv-server` management APIs — no
+//! `crowdb-web` intermediary. The connection target is
+//! `--sysmd-ip`/`--sysmd-port` (a group-0 leader's crowdb-rpc endpoint).
 
-mod bench;
 mod commands;
-mod utils;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use crowdb_protocol::WEB_BASE;
 
 use commands::{
-    run_bench_verb, run_cluster_init, run_cluster_inspect, run_cluster_status, run_cluster_topology,
-    run_disk_group_verb, run_disk_verb, run_diskdb_verb, run_group_verb, run_kv_verb, run_node_verb,
-    run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
-};
-use commands::{
-    BenchArgs, ClusterVerb, DiskGroupVerb, DiskVerb, DiskdbVerb, GroupVerb, KvVerb, NodeVerb, RackVerb,
-    ReplicaVerb, ServerVerb, StoreVerb,
+    run_bench_verb, run_chunk_diskdb_verb, run_chunk_stub_verb, run_cluster_verb, run_group_verb,
+    run_kv_data_verb, run_kv_server_verb, run_replica_verb, run_store_verb, BenchVerb, ChunkDiskdbVerb,
+    ChunkStubVerb, ClusterVerb, GroupVerb, KvDataVerb, KvServerVerb, ReplicaVerb, StoreVerb,
 };
 
 #[derive(Parser, Debug)]
 #[command(name = "crowdb-cli", version, about = "CrowDB cluster console (CLI)")]
 struct Cli {
-    /// Service IP address of the `crowdb-web` instance. The CLI talks
-    /// to the service, not directly to a `crowdb-kv-server`; the service
-    /// resolves upstream nodes from its config and the monitor cache.
+    /// Group-0 leader's IP address (the sysmd endpoint).
     #[arg(
-        short = 'i',
+        short = 'I',
         long,
         global = true,
-        env = "CROWDB_KV_IP",
+        env = "CROWDB_SYSMD_IP",
         default_value = "127.0.0.1"
     )]
-    ip: String,
+    sysmd_ip: String,
 
-    /// Service port of the `crowdb-web` instance.
-    #[arg(short = 'o', long, global = true, env = "CROWDB_KV_PORT", default_value_t = WEB_BASE)]
-    port: u16,
+    /// Group-0 leader's port (the sysmd endpoint's crowdb-rpc port).
+    #[arg(
+        short = 'O',
+        long,
+        global = true,
+        env = "CROWDB_SYSMD_PORT",
+        default_value_t = 28001
+    )]
+    sysmd_port: u16,
 
     /// Path to the console config file. Defaults to
-    /// `$CROWDB_CONSOLE_CONFIG` or `~/.crowdb-kv/console.toml`.
+    /// `$CROWDB_CONSOLE_CONFIG` or `~/.config/crowdb-kv/console.toml`.
     #[arg(short = 'p', long, global = true, env = "CROWDB_CONSOLE_CONFIG")]
     config: Option<PathBuf>,
 
@@ -59,83 +55,59 @@ struct Cli {
     json: bool,
 
     #[command(subcommand)]
-    command: Group,
+    command: Domain,
 }
 
 #[derive(Subcommand, Debug)]
-#[allow(clippy::enum_variant_names)]
-enum Group {
-    /// Cluster observation commands.
+enum Domain {
+    /// Hardware topology + cluster-level ops.
+    #[command(alias = "cls")]
     Cluster {
         #[command(subcommand)]
         verb: ClusterVerb,
     },
-    /// Simulated hardware: racks.
-    Rack {
-        #[command(subcommand)]
-        verb: RackVerb,
-    },
-    /// Simulated hardware: nodes (host + ssh creds).
-    Node {
-        #[command(subcommand)]
-        verb: NodeVerb,
-    },
-    /// crowdb-kv-server lifecycle on a node.
-    Server {
-        #[command(subcommand)]
-        verb: ServerVerb,
-    },
-    /// Store management within a server.
-    Store {
-        #[command(subcommand)]
-        verb: StoreVerb,
-    },
-    /// Paxos group management.
-    #[command(name = "group", alias = "paxos")]
-    Paxos {
-        #[command(subcommand)]
-        verb: GroupVerb,
-    },
-    /// Replica add/remove.
-    Replica {
-        #[command(subcommand)]
-        verb: ReplicaVerb,
-    },
-    /// Disk-group management (R81).
-    DiskGroup {
-        #[command(subcommand)]
-        verb: DiskGroupVerb,
-    },
-    /// Disk management + move (R81).
-    Disk {
-        #[command(subcommand)]
-        verb: DiskVerb,
-    },
-    /// Diskdb runtime management (R77).
-    Diskdb {
-        #[command(subcommand)]
-        verb: DiskdbVerb,
-    },
-    /// Data-plane KV operations.
+    /// KV layer: server lifecycle + logical concepts + data-plane.
     Kv {
         #[command(subcommand)]
         verb: KvVerb,
     },
-    /// Load testing (CLI-only).
-    Bench {
-        #[command(flatten)]
-        bench: BenchArgs,
+    /// Chunk storage service cluster.
+    Chunk {
+        #[command(subcommand)]
+        verb: ChunkVerb,
     },
+    /// Load injection only.
+    Bench {
+        #[command(subcommand)]
+        verb: BenchVerb,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum KvVerb {
+    #[command(subcommand)]
+    Server(KvServerVerb),
+    #[command(subcommand)]
+    Store(StoreVerb),
+    #[command(subcommand)]
+    Group(GroupVerb),
+    #[command(subcommand)]
+    Replica(ReplicaVerb),
+    #[command(subcommand)]
+    Data(KvDataVerb),
+}
+
+#[derive(Subcommand, Debug)]
+enum ChunkVerb {
+    #[command(subcommand)]
+    Diskdb(ChunkDiskdbVerb),
+    #[command(subcommand)]
+    Stub(ChunkStubVerb),
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    // Open one per-invocation operation log file. Outbound calls from
-    // `ConsoleClient` / `ServerClient` append a JSON-Lines record each
-    // so a failed run can be replayed by copying the recorded curl
-    // command. Best-effort: errors are logged via `tracing` and we keep
-    // going.
     crowdb_console_shared::ops_log::init_default("cli");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -143,9 +115,6 @@ fn main() -> ExitCode {
         .build()
         .expect("tokio runtime");
 
-    // Bind a fresh correlation id for the whole invocation. Every
-    // client call inside `dispatch` will attach it as
-    // `x-crowdb-kv-corr-id` and stamp it on every ops-log record.
     let cid = crowdb_console_shared::corr_id::generate();
     runtime.block_on(async move { Box::pin(crowdb_console_shared::corr_id::scope(cid, dispatch(cli))).await })
 }
@@ -153,27 +122,23 @@ fn main() -> ExitCode {
 async fn dispatch(mut cli: Cli) -> ExitCode {
     let command = std::mem::replace(
         &mut cli.command,
-        Group::Cluster {
+        Domain::Cluster {
             verb: ClusterVerb::Status,
         },
     );
     match command {
-        Group::Cluster { verb } => match verb {
-            ClusterVerb::Status => run_cluster_status(&cli).await,
-            ClusterVerb::Topology => run_cluster_topology(&cli).await,
-            ClusterVerb::Inspect { id } => run_cluster_inspect(&cli, &id).await,
-            ClusterVerb::Init { nodes } => run_cluster_init(&cli, &nodes).await,
+        Domain::Cluster { verb } => run_cluster_verb(&cli, verb).await,
+        Domain::Kv { verb } => match verb {
+            KvVerb::Server(sv) => run_kv_server_verb(&cli, sv).await,
+            KvVerb::Store(sv) => run_store_verb(&cli, sv).await,
+            KvVerb::Group(gv) => run_group_verb(&cli, gv).await,
+            KvVerb::Replica(rv) => run_replica_verb(&cli, rv).await,
+            KvVerb::Data(dv) => run_kv_data_verb(&cli, dv).await,
         },
-        Group::Rack { verb } => run_rack_verb(&cli, verb).await,
-        Group::Node { verb } => run_node_verb(&cli, verb).await,
-        Group::Server { verb } => run_server_verb(&cli, verb).await,
-        Group::Store { verb } => run_store_verb(&cli, verb).await,
-        Group::Paxos { verb } => run_group_verb(&cli, verb).await,
-        Group::Replica { verb } => run_replica_verb(&cli, verb).await,
-        Group::DiskGroup { verb } => run_disk_group_verb(&cli, verb).await,
-        Group::Disk { verb } => run_disk_verb(&cli, verb).await,
-        Group::Diskdb { verb } => run_diskdb_verb(&cli, verb).await,
-        Group::Kv { verb } => run_kv_verb(&cli, verb).await,
-        Group::Bench { bench } => run_bench_verb(&cli, bench).await,
+        Domain::Chunk { verb } => match verb {
+            ChunkVerb::Diskdb(dv) => run_chunk_diskdb_verb(&cli, dv).await,
+            ChunkVerb::Stub(sv) => run_chunk_stub_verb(&cli, sv).await,
+        },
+        Domain::Bench { verb } => run_bench_verb(&cli, verb).await,
     }
 }

@@ -11,9 +11,26 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R126** — Bump this line in the same commit when adding a new item.
+**Next R number: R127** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
+
+- **[R126](R126-console-cli-command-restructure.md)** — CLI command
+  restructure by function — Area: console / cli — `crowdb-cli` has 12
+  top-level groups organized by resource type, each mixing create/
+  remove/list/inspect/lifecycle verbs. Read verbs are scattered (no
+  single `status` entry point), `bench` mixes cluster provisioning
+  with load injection (`bench kv` all-in-one, `bench deploy`/`teardown`
+  are lifecycle, `bench clean` is a reset), `diskdb` mixes deploy +
+  status + maintenance in 13 sub-verbs, and there is no CLI verb for
+  `POST /internal/reset` (§13). R126 regroups commands into 3
+  function-typed top-level groups: `deploy` (provisioning + hardware/
+  server management + reset), `status` (query/topology/monitor), `bench`
+  (load injection only). Open questions: layer-depth conflict with §7
+  ("Two layers max" vs `deploy rack add`), data-plane KV ops placement
+  (not deploy/status/bench), diskdb maintenance ops placement,
+  backward compatibility strategy (hard cut-over vs aliases), and
+  `bench deploy`/`teardown` handle migration.
 
 - **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
   test port prober — Area: cluster / protocol / server —

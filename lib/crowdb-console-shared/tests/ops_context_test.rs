@@ -22,11 +22,7 @@ fn op_context_shares_arc_between_sysmd_and_kv() {
 
 #[test]
 fn op_context_config_rw_lock_roundtrip() {
-    let ctx = OpContext::new(
-        "127.0.0.1:28001".into(),
-        vec![],
-        ConsoleConfig::default(),
-    );
+    let ctx = OpContext::new("127.0.0.1:28001".into(), vec![], ConsoleConfig::default());
     // Write a rack into the config.
     {
         let mut cfg = ctx.config_mut();
@@ -43,11 +39,7 @@ fn op_context_config_rw_lock_roundtrip() {
 
 #[test]
 fn op_context_node_entry_not_found() {
-    let ctx = OpContext::new(
-        "127.0.0.1:28001".into(),
-        vec![],
-        ConsoleConfig::default(),
-    );
+    let ctx = OpContext::new("127.0.0.1:28001".into(), vec![], ConsoleConfig::default());
     let err = ctx.node_entry(42).unwrap_err();
     assert!(matches!(
         err,
@@ -58,11 +50,7 @@ fn op_context_node_entry_not_found() {
 
 #[test]
 fn op_context_server_for_node_not_found() {
-    let ctx = OpContext::new(
-        "127.0.0.1:28001".into(),
-        vec![],
-        ConsoleConfig::default(),
-    );
+    let ctx = OpContext::new("127.0.0.1:28001".into(), vec![], ConsoleConfig::default());
     let err = ctx.server_for_node(42).unwrap_err();
     assert!(matches!(
         err,

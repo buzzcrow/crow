@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::ops::OpContext;
 
 /// Summary of a completed cluster init.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct InitSummary {
     pub store_id: u64,
     pub group_id: u64,
