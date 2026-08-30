@@ -59,20 +59,60 @@ pub(crate) fn print_json<T: serde::Serialize>(cli: &Cli, value: &T) -> ExitCode 
 /// Build an [`OpContext`] from the CLI global flags. The sysmd endpoint
 /// is `http://{sysmd_ip}:{sysmd_port}` (a group-0 mgmt URL) and the
 /// config is loaded from the configured path (or the default).
+///
+/// When the config has server entries, their mgmt URLs are added as
+/// additional seeds so the client can discover the group-0 leader even
+/// if `--sysmd-port` doesn't point at a running server (e.g. after
+/// `local-deploy` which allocates dynamic ports).
 pub(crate) fn op_context(cli: &Cli) -> Result<OpContext, ExitCode> {
     let config = load_config(cli)?;
     let mgmt_url = format!("http://{}:{}", cli.sysmd_ip, cli.sysmd_port);
-    // The group0_endpoint is a crowdb-rpc hint — the client discovers
-    // the actual leader from the mgmt seeds via topology discovery.
     let group0_endpoint = format!("{}:{}", cli.sysmd_ip, cli.sysmd_port);
-    Ok(OpContext::new(group0_endpoint, vec![mgmt_url], config))
+
+    // Collect mgmt seeds: the explicit --sysmd-port endpoint plus all
+    // server URLs from the config (so local-deploy'd servers are found).
+    let mut seeds = vec![mgmt_url];
+    for server in &config.servers {
+        if !seeds.contains(&server.url) {
+            seeds.push(server.url.clone());
+        }
+    }
+
+    // Use the first config server's RPC URL as the group0 endpoint hint
+    // if available (more accurate than the default port). Strip the
+    // `http://` prefix since the crowdb-rpc endpoint format is `ip:port`.
+    let effective_g0 = config
+        .servers
+        .first()
+        .and_then(|s| s.rpc_url.as_ref())
+        .map_or(group0_endpoint, |url| {
+            url.strip_prefix("http://")
+                .or_else(|| url.strip_prefix("https://"))
+                .unwrap_or(url)
+                .to_string()
+        });
+
+    Ok(OpContext::new(effective_g0, seeds, config))
 }
 
 /// Load the console config from the CLI's `--config` path or the
 /// default location.
 fn load_config(cli: &Cli) -> Result<crowdb_console_shared::ConsoleConfig, ExitCode> {
-    let path = cli
-        .config
+    let path = config_path(cli);
+    if !path.exists() {
+        return Ok(crowdb_console_shared::ConsoleConfig::default());
+    }
+    let engine = crowdb_console_shared::TomlFileEngine::new(path);
+    engine.load().map_err(|e| {
+        eprintln!("error: load config: {e}");
+        ExitCode::from(2)
+    })
+}
+
+/// Resolve the config file path from the CLI's `--config` flag or the
+/// default location.
+fn config_path(cli: &Cli) -> std::path::PathBuf {
+    cli.config
         .clone()
         .or_else(|| {
             std::env::var("CROWDB_CONSOLE_CONFIG")
@@ -84,13 +124,22 @@ fn load_config(cli: &Cli) -> Result<crowdb_console_shared::ConsoleConfig, ExitCo
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("crowdb-kv")
                 .join("console.toml")
-        });
-    if !path.exists() {
-        return Ok(crowdb_console_shared::ConsoleConfig::default());
+        })
+}
+
+/// Persist the config from an [`OpContext`] back to the config file.
+pub(crate) fn commit_config(cli: &Cli, ctx: &OpContext) -> Result<(), ExitCode> {
+    let path = config_path(cli);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            eprintln!("error: create config dir {}: {e}", parent.display());
+            ExitCode::from(2)
+        })?;
     }
-    let engine = crowdb_console_shared::TomlFileEngine::new(path);
-    engine.load().map_err(|e| {
-        eprintln!("error: load config: {e}");
+    let engine = crowdb_console_shared::TomlFileEngine::new(path.clone());
+    let cfg = ctx.config().clone();
+    engine.save(&cfg).map_err(|e| {
+        eprintln!("error: save config {}: {e}", path.display());
         ExitCode::from(2)
     })
 }

@@ -101,6 +101,13 @@ impl OpContext {
         &self.kv
     }
 
+    /// Re-seed the group-0 leader hint. Called after deploying servers
+    /// (e.g. `local_deploy`) so subsequent sysdata writes target the
+    /// correct endpoint.
+    pub fn seed_group0_leader(&self, endpoint: String) {
+        self.kv.seed_leader(0, 0, endpoint);
+    }
+
     /// Access the shared [`Arc<CrowdbKvClient>`] for the KV data-plane.
     /// Used by the web backend to verify the client is shared (not
     /// duplicated) between `AppState` and `OpContext`.

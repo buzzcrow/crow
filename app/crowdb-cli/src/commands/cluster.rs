@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use clap::Subcommand;
 
 use crate::commands::{
-    op_context, print_json, run_disk_group_verb, run_disk_verb, run_node_verb, run_rack_verb, DiskGroupVerb,
-    DiskVerb, NodeVerb, RackVerb,
+    commit_config, op_context, print_json, run_disk_group_verb, run_disk_verb, run_node_verb, run_rack_verb,
+    DiskGroupVerb, DiskVerb, NodeVerb, RackVerb,
 };
 use crate::Cli;
 
@@ -20,6 +20,16 @@ pub enum ClusterVerb {
     Init {
         #[arg(short = 'n', long, value_delimiter = ',')]
         nodes: Vec<String>,
+    },
+    /// Deploy a local N-node KV cluster on 127.0.0.1 (forks
+    /// `crowdb-kv-server` on each node, bootstraps group 0).
+    #[command(name = "local-deploy")]
+    LocalDeploy {
+        #[arg(short = 'n', long, default_value_t = 3)]
+        nodes: usize,
+        /// Service type: `kv` (default) or `diskdb`.
+        #[arg(short = 't', long, default_value = "kv")]
+        service_type: String,
     },
     /// Tear down the entire cluster (all groups, stores, servers, sysdata).
     Reset,
@@ -85,6 +95,44 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("error: cluster init: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        ClusterVerb::LocalDeploy { nodes, service_type } => {
+            if service_type != "kv" {
+                eprintln!("error: local-deploy currently supports only `kv` service type");
+                return ExitCode::from(1);
+            }
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            match crowdb_console_shared::ops::cluster::local_deploy(&ctx, nodes, None).await {
+                Ok(summary) => {
+                    // Persist the config so subsequent CLI invocations
+                    // can find the deployed servers.
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
+                    if cli.json {
+                        return print_json(cli, &summary);
+                    }
+                    println!(
+                        "local-deploy complete: {} nodes (rack {}, nodes [{}]), group 0 bootstrapped",
+                        summary.node_count,
+                        summary.rack_id,
+                        summary
+                            .node_ids
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: local-deploy: {e}");
                     ExitCode::from(2)
                 }
             }

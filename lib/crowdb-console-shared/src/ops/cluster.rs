@@ -15,9 +15,11 @@ use crowdb_protocol::common::{HwStatus, NodeValue, RackValue, ReplicaValue};
 use crowdb_protocol::mgmt::{RemoteReplicaInfo, SystemInitRequest};
 
 use crate::clients::http::ServerClient;
-use crate::config::ReplicaEntry;
+use crate::config::{NodeEntry, RackEntry, ReplicaEntry, ServerEntry, ServiceType};
 use crate::error::{Error, Result};
+use crate::lifecycle::{self, crowdb_kv_server_bin, DeployRequest};
 use crate::ops::OpContext;
+use crate::test_ports;
 
 /// Summary of a completed cluster init.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -314,5 +316,180 @@ pub async fn clean(ctx: &OpContext) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Summary of a completed local deploy.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalDeploySummary {
+    pub node_count: usize,
+    pub rack_id: u64,
+    pub node_ids: Vec<u64>,
+    pub init_summary: InitSummary,
+}
+
+/// Deploy a local N-node KV cluster on `127.0.0.1`: creates rack 1,
+/// nodes 1..=N in the config, forks a `crowdb-kv-server` on each node
+/// with auto-allocated ports, then bootstraps group 0 via [`init`].
+///
+/// The `workspace_dir` is used as the runtime root for the spawned
+/// servers (logs, data). If `None`, a temp directory is used.
+///
+/// # Errors
+/// Returns [`Error::NotFound`] if the `crowdb-kv-server` binary cannot
+/// be located. Returns [`Error::Io`] on spawn/readiness failures.
+pub async fn local_deploy(
+    ctx: &OpContext,
+    node_count: usize,
+    workspace_dir: Option<&std::path::Path>,
+) -> Result<LocalDeploySummary> {
+    if node_count == 0 {
+        return Err(Error::Validation {
+            field: "node_count".into(),
+            message: "node_count must be >= 1".into(),
+        });
+    }
+
+    let bin = crowdb_kv_server_bin().ok_or_else(|| Error::NotFound {
+        kind: "binary".into(),
+        id: "crowdb-kv-server".into(),
+    })?;
+    if !bin.exists() {
+        return Err(Error::NotFound {
+            kind: "binary".into(),
+            id: bin.display().to_string(),
+        });
+    }
+
+    let workspace = workspace_dir.map_or_else(default_workspace, std::path::PathBuf::from);
+    std::fs::create_dir_all(&workspace)?;
+    std::fs::create_dir_all(workspace.join("bin"))?;
+    std::fs::create_dir_all(workspace.join("log"))?;
+
+    let rack_id: u64 = 1;
+    let node_ids: Vec<u64> = (1..=u64::try_from(node_count).unwrap_or(u64::MAX)).collect();
+
+    write_rack_and_nodes(ctx, rack_id, &node_ids);
+    deploy_servers(ctx, &bin, &workspace, rack_id, &node_ids).await?;
+
+    // Re-seed the group-0 leader hint to the first deployed server's
+    // RPC endpoint so sysdata writes during `init` target the right node.
+    if let Some(first) = ctx.config().servers.first() {
+        if let Some(rpc_url) = &first.rpc_url {
+            let endpoint = rpc_url
+                .strip_prefix("http://")
+                .or_else(|| rpc_url.strip_prefix("https://"))
+                .unwrap_or(rpc_url)
+                .to_string();
+            ctx.seed_group0_leader(endpoint);
+        }
+    }
+
+    let init_summary = init(ctx, &node_ids).await?;
+
+    Ok(LocalDeploySummary {
+        node_count,
+        rack_id,
+        node_ids,
+        init_summary,
+    })
+}
+
+/// Default temp workspace path for `local_deploy` when no explicit
+/// `workspace_dir` is provided.
+fn default_workspace() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "crowdb-local-deploy-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ))
+}
+
+/// Phase 1: write rack 1 + nodes 1..=N into the config (idempotent).
+fn write_rack_and_nodes(ctx: &OpContext, rack_id: u64, node_ids: &[u64]) {
+    let mut cfg = ctx.config_mut();
+    if cfg.racks.iter().all(|r| r.id != rack_id) {
+        let _ = cfg.add_rack(RackEntry {
+            id: rack_id,
+            name: format!("rack-{rack_id}"),
+        });
+    }
+    for nid in node_ids {
+        if cfg.nodes.iter().all(|n| n.id != *nid) {
+            let _ = cfg.add_node(NodeEntry {
+                id: *nid,
+                rack_id,
+                host: "127.0.0.1".into(),
+                ssh_port: 22,
+                ssh_user: String::new(),
+                ssh_key: None,
+                ssh_password: None,
+            });
+        }
+    }
+}
+
+/// Phase 2: fork a `crowdb-kv-server` on each node (skips nodes that
+/// already have a deployed server).
+///
+/// # Errors
+/// Returns [`Error::Io`] on spawn/readiness failures.
+async fn deploy_servers(
+    ctx: &OpContext,
+    bin: &std::path::Path,
+    workspace: &std::path::Path,
+    rack_id: u64,
+    node_ids: &[u64],
+) -> Result<()> {
+    let port_base = test_ports::unique_test_port_range(u16::try_from(node_ids.len() * 2).unwrap_or(u16::MAX));
+    for (i, nid) in node_ids.iter().enumerate() {
+        let offset = u16::try_from(i * 2).unwrap_or(u16::MAX);
+        let rest_port = port_base + offset;
+        let rpc_port = port_base + offset + 1;
+
+        // Skip if a server is already deployed on this node.
+        if ctx.config().server_for_node(*nid).is_some() {
+            continue;
+        }
+
+        let req = DeployRequest {
+            server_id: nid.to_string(),
+            rest_port,
+            rpc_port,
+            election_profile: Some("e2e".into()),
+            binary: Some(bin.to_path_buf()),
+            ..Default::default()
+        };
+        let node_entry = NodeEntry {
+            id: *nid,
+            rack_id,
+            host: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_key: None,
+            ssh_password: None,
+        };
+        let deployed = lifecycle::deploy_local_in_dir(&req, &node_entry, workspace).await?;
+
+        let mut cfg = ctx.config_mut();
+        cfg.add_server(ServerEntry {
+            id: nid.to_string(),
+            url: deployed.mgmt_url.clone(),
+            node_id: Some(*nid),
+            rpc_url: Some(deployed.rpc_url.clone()),
+            rest_port: Some(rest_port),
+            rpc_port: Some(rpc_port),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: Some(deployed.pid),
+            service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
+        })?;
+    }
     Ok(())
 }
