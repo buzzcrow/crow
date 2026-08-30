@@ -61,9 +61,8 @@ run_subtest() {
     fi
     echo ">>> $label (${threads}T:${connections}C) ..."
     local output
-    output=$(pixi run -- cargo run --release -p crowdb-cli -- bench run \
-        --target "$DEPLOY_NAME" \
-        --workload list --duration-secs "$DURATION" \
+    output=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+        bench kv scan --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
@@ -118,15 +117,18 @@ run_subtest() {
 
 echo -e "label\tlimit\tprefix\tstart_after\tvalue_size\tread_mode\tT:C\tscans_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 
-# Phase 1: deploy the cluster once.
-echo "=== Deploying cluster '$DEPLOY_NAME' (mem mode, 3 nodes) ==="
-pixi run -- cargo run --release -p crowdb-cli -- bench deploy \
-    --name "$DEPLOY_NAME" --kind kv --mode mem --metrics-interval 1
+# Phase 1: deploy the cluster once via `cluster local-deploy`.
+echo "=== Deploying 3-node KV cluster via local-deploy ==="
+CONFIG_FILE="/tmp/bench-scan-regression-$$.toml"
+rm -f "$CONFIG_FILE"
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    cluster local-deploy -n 3 -t kv
 
-# Phase 2: pre-populate keys once (100k × 64B for standard scan tests).
-echo "=== Pre-populating $KEYSPACE keys (64B) ==="
-pixi run -- cargo run --release -p crowdb-cli -- bench prepare \
-    --target "$DEPLOY_NAME" --keys "$KEYSPACE" --value-size 64
+# Phase 2: pre-populate keys once (Phase 3: bench prepare not yet wired).
+echo "=== Pre-populating $KEYSPACE keys (Phase 3: bench prepare stub) ==="
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    bench kv prepare --keys "$KEYSPACE" --value-size 64 2>&1 || \
+    echo "WARNING: bench prepare is a Phase 3 stub — skipping pre-pop"
 
 # Phase 3: run all sub-tests against the same cluster.
 echo "=== Single-thread (1T:1C) — per-scan engine cost ==="
@@ -157,10 +159,11 @@ run_subtest "minslot_16t"     1000   "" ""                        64    minslot 
 run_subtest "lin_32t"         1000   "" ""                        64    linearizable auto 32 32
 run_subtest "minslot_32t"     1000   "" ""                        64    minslot      zero 32 32
 
-# Phase 4: teardown.
-echo "=== Tearing down cluster '$DEPLOY_NAME' ==="
-pixi run -- cargo run --release -p crowdb-cli -- bench teardown \
-    --target "$DEPLOY_NAME"
+# Phase 4: teardown via `cluster reset`.
+echo "=== Tearing down cluster ==="
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    cluster reset
+rm -f "$CONFIG_FILE"
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

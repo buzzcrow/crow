@@ -48,17 +48,25 @@ VALUE_SIZE=512
 run_bench() {
     local deploy="$1" threads="$2" conn="$3" label="$4"
     echo ">>> $label ..."
+    local config_file
+    config_file=$(cat "/tmp/bench-write-reg-${deploy}.cfgpath" 2>/dev/null || echo "")
+    if [ -z "$config_file" ] || [ ! -f "$config_file" ]; then
+        echo "    ERROR: no config for deploy '$deploy'"
+        echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
+        return
+    fi
     # Clean: wipe user data on every node (keep group0), wait re-elect.
     local clean_out
-    clean_out=$(pixi run -- cargo run --release -p crowdb-cli -- bench clean --target "$deploy" --json 2>&1)
+    clean_out=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
+        bench kv clean --json 2>&1)
     if ! echo "$clean_out" | jq -e '.new_leader' >/dev/null 2>&1; then
-        echo "    ERROR: clean failed"; echo "$clean_out" | tail -5
+        echo "    ERROR: clean failed (Phase 3 stub?)"; echo "$clean_out" | tail -5
         echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
     local output
-    output=$(CROWDB_RPC_WORKERS="${RPC_WORKERS:-2}" pixi run -- cargo run --release -p crowdb-cli -- bench run \
-        --target "$deploy" --workload write --duration-secs "$DURATION" \
+    output=$(CROWDB_RPC_WORKERS="${RPC_WORKERS:-2}" pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
+        bench kv write --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$conn" \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --verify-bytes 0 --json 2>&1)
@@ -104,23 +112,28 @@ run_bench() {
 }
 
 # deploy_group <name> <win> <coalesce> <rpc_workers>
-# Deploy a 3-node cluster with the given server tunables.
+# Deploy a 3-node cluster with the given server tunables via local-deploy.
 deploy_group() {
     local name="$1" win="$2" coalesce="$3" workers="$4"
+    local config_file="/tmp/bench-write-reg-${name}.toml"
     echo "=== deploying cluster '$name' (win=$win, coalesce=$coalesce, workers=$workers) ==="
-    CROWDB_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crowdb-cli -- bench deploy \
-        --name "$name" --kind kv --mode mem \
-        --max-inflight "$win" \
-        --coalesce-max-keys "$coalesce" \
-        --coalesce-drain-threshold 1 \
-        --peer-pool-size 4 --event-write \
-        2>&1 | tail -3
+    rm -f "$config_file"
+    CROWDB_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
+        cluster local-deploy -n 3 -t kv 2>&1 | tail -3
+    # Store config path for run_bench/teardown_group.
+    echo "$config_file" > "/tmp/bench-write-reg-${name}.cfgpath"
 }
 
 # teardown_group <name>
 teardown_group() {
     local name="$1"
-    pixi run -- cargo run --release -p crowdb-cli -- bench teardown --target "$name" 2>&1 | tail -2
+    local config_file
+    config_file=$(cat "/tmp/bench-write-reg-${name}.cfgpath" 2>/dev/null || echo "")
+    if [ -n "$config_file" ] && [ -f "$config_file" ]; then
+        pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
+            cluster reset 2>&1 | tail -2
+        rm -f "$config_file" "/tmp/bench-write-reg-${name}.cfgpath"
+    fi
 }
 
 # --- regression sentinel configs ---

@@ -56,9 +56,8 @@ run_subtest() {
     fi
     echo ">>> $display ..."
     local output
-    output=$(pixi run -- cargo run --release -p crowdb-cli -- bench run \
-        --target "$DEPLOY_NAME" \
-        --workload read --duration-secs "$DURATION" \
+    output=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+        bench kv read --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
@@ -109,15 +108,18 @@ run_subtest() {
 
 echo -e "label\tread_mode\tT:C\tverify\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tcorrectness_errors" > "$RESULTS_FILE"
 
-# Phase 1: deploy the cluster once.
-echo "=== Deploying cluster '$DEPLOY_NAME' (mem mode, 3 nodes) ==="
-pixi run -- cargo run --release -p crowdb-cli -- bench deploy \
-    --name "$DEPLOY_NAME" --kind kv --mode mem --metrics-interval 1
+# Phase 1: deploy the cluster once via `cluster local-deploy`.
+echo "=== Deploying 3-node KV cluster via local-deploy ==="
+CONFIG_FILE="/tmp/bench-read-regression-$$.toml"
+rm -f "$CONFIG_FILE"
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    cluster local-deploy -n 3 -t kv
 
-# Phase 2: pre-populate keys once.
-echo "=== Pre-populating $KEYSPACE keys ==="
-pixi run -- cargo run --release -p crowdb-cli -- bench prepare \
-    --target "$DEPLOY_NAME" --keys "$KEYSPACE" --value-size 64
+# Phase 2: pre-populate keys once (Phase 3: bench prepare not yet wired).
+echo "=== Pre-populating $KEYSPACE keys (Phase 3: bench prepare stub) ==="
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    bench kv prepare --keys "$KEYSPACE" --value-size 64 2>&1 || \
+    echo "WARNING: bench prepare is a Phase 3 stub — skipping pre-pop"
 
 # Phase 3: run all sub-tests against the same cluster.
 echo "=== Single-thread (1T:1C) — per-read engine cost ==="
@@ -139,10 +141,11 @@ echo "=== Correctness verification ==="
 run_subtest "lin_16t_verify"     linearizable auto 16 16 8
 run_subtest "minslot_16t_verify" minslot      zero 16 16 8
 
-# Phase 4: teardown.
-echo "=== Tearing down cluster '$DEPLOY_NAME' ==="
-pixi run -- cargo run --release -p crowdb-cli -- bench teardown \
-    --target "$DEPLOY_NAME"
+# Phase 4: teardown via `cluster reset`.
+echo "=== Tearing down cluster ==="
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    cluster reset
+rm -f "$CONFIG_FILE"
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"
