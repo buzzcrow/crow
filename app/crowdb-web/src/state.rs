@@ -308,9 +308,10 @@ impl AppState {
     ///
     /// The group-0 endpoint is resolved from the config's store-0
     /// hosting nodes. If group 0 is not yet initialized, the first
-    /// deployed server's mgmt URL is used as a bootstrap seed (the
-    /// `cluster init` flow needs an endpoint to call `/system/init`).
-    /// Returns an error if no server is deployed.
+    /// deployed server's mgmt URL is used as a bootstrap seed. If no
+    /// server is deployed at all (the rack/node add bootstrap path),
+    /// a dummy endpoint is used — sysdata syncs silently fail, which
+    /// is correct since there is no group-0 to sync to.
     ///
     /// Mutations inside `ops::*` functions mutate the `OpContext`'s
     /// own config snapshot; call [`Self::commit_op_context`] after a
@@ -318,8 +319,7 @@ impl AppState {
     /// `AppState.config` + persist.
     ///
     /// # Errors
-    /// Returns [`Error::NotFound`] if no server is deployed (the
-    /// console cannot resolve any group-0 or bootstrap endpoint).
+    /// Returns [`Error::Config`] if the config read lock is poisoned.
     pub async fn op_context(&self) -> Result<OpContext> {
         let kv = self.kv_client().await;
 
@@ -334,13 +334,10 @@ impl AppState {
 
         // Resolve the group-0 endpoint: prefer a node hosting store 0
         // with a known rpc_url; fall back to the first deployed
-        // server's mgmt URL (bootstrap case).
+        // server's mgmt URL (bootstrap case). If no server is
+        // deployed, use a dummy endpoint — sysdata syncs silently fail.
         let (group0_endpoint, mgmt_seeds) = resolve_group0_endpoint(&config_snapshot);
-
-        let endpoint = group0_endpoint.ok_or_else(|| Error::NotFound {
-            kind: "server".into(),
-            id: "no deployed server — cannot build OpContext".into(),
-        })?;
+        let endpoint = group0_endpoint.unwrap_or_else(|| "127.0.0.1:1".to_string());
 
         Ok(OpContext::with_shared_client(
             kv,
@@ -522,15 +519,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn op_context_no_deployed_server_returns_error() {
+    async fn op_context_no_deployed_server_succeeds_with_dummy_endpoint() {
         let state = AppState::default();
-        let result = state.op_context().await;
-        assert!(result.is_err(), "no deployed server → error");
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, Error::NotFound { ref kind, .. } if kind == "server"),
-            "expected NotFound(server), got {err:?}"
-        );
+        let ctx = state.op_context().await.expect("op_context with no servers");
+        // The OpContext should still be usable for config-only operations.
+        // Sysdata syncs will silently fail (best-effort).
+        let racks = ctx.config().racks.clone();
+        assert!(racks.is_empty(), "default config has no racks");
     }
 
     #[tokio::test]

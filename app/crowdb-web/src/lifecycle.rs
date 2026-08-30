@@ -14,8 +14,8 @@ use crowdb_console_shared::config::{
 };
 use crowdb_console_shared::expand::RecursiveDepth;
 use crowdb_console_shared::monitor::NodeRecord;
+use crowdb_console_shared::ops;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::time::Duration;
 
 fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
@@ -119,28 +119,11 @@ pub async fn http_add_rack(
     State(state): State<AppState>,
     Json(body): Json<AddRackBody>,
 ) -> Result<(StatusCode, Json<RackEntry>), (StatusCode, Json<ErrorBody>)> {
-    let entry = RackEntry {
-        id: body.id,
-        name: body.name,
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_rack(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Sync group-0 sysdata. Best-effort: config TOML is the source of
-    // truth; sysdata is derived. A later cluster_init re-run reconciles.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let value = crowdb_protocol::common::RackValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            node_ids: Vec::new(),
-        };
-        if let Err(e) = hw.add_rack(entry.id, &value).await {
-            tracing::warn!(rack_id = entry.id, error = %e, "sysdata sync: add_rack failed");
-        }
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let entry = ops::hardware::add_rack(&ctx, body.id, &body.name)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -155,19 +138,11 @@ pub async fn http_remove_rack(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_rack(id).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata (rack + child nodes + their disk-groups).
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        if let Err(e) = hw.remove_rack_cascade(id).await {
-            tracing::warn!(rack_id = id, error = %e, "sysdata sync: remove_rack_cascade failed");
-        }
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_rack(&ctx, id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -204,29 +179,14 @@ pub async fn http_add_node(
     State(state): State<AppState>,
     Json(entry): Json<NodeEntry>,
 ) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_node(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let entry = ops::hardware::add_node(&ctx, entry.clone())
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
-
-    // Sync group-0 sysdata. Best-effort.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let value = crowdb_protocol::common::NodeValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            last_used_dg_id: 0,
-            disk_group_ids: Vec::new(),
-            status_changed_at_ms: 0,
-            temp_failure_since_ms: None,
-        };
-        if let Err(e) = hw.add_node(entry.rack_id, entry.id, &value).await {
-            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
-        }
-    }
-
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -241,30 +201,17 @@ pub async fn http_remove_node(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Capture rack_id before removing from config (needed for sysdata cascade).
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.node(id).map(|n| n.rack_id)
-    };
     // Cascade-stop the server process and drop its deployment record +
     // topology before removing the node, so a direct DELETE /api/nodes/:id
     // does not orphan a running crowdb-kv-server. No-op when no server is
     // deployed (e.g. the UI already called DELETE .../server first).
     stop_and_remove_server_for_node(&state, id).await;
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_node(id).map_err(map_config_err)?;
-    }
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_node(&ctx, id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     state.monitor_cache.drop_node(&id).await;
-    state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata (node + child disk-groups + disks).
-    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
-        if let Err(e) = hw.remove_node_cascade(rack_id, id).await {
-            tracing::warn!(node_id = id, error = %e, "sysdata sync: remove_node_cascade failed");
-        }
-    }
-
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1594,49 +1541,18 @@ pub async fn http_add_node_disk_group(
     Path(node_id): Path<NodeId>,
     Json(body): Json<AddDiskGroupBody>,
 ) -> Result<(StatusCode, Json<DiskGroupEntry>), (StatusCode, Json<ErrorBody>)> {
-    // Resolve rack_id from the node.
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.node(node_id).map(|n| n.rack_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("node {node_id} not found"),
-                }),
-            )
-        })?
-    };
-    let entry = DiskGroupEntry {
-        id: body.id,
-        rack_id,
-        node_id,
-        name: body.name,
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_disk_group(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let entry = ops::hardware::add_disk_group(&ctx, node_id, body.id, &body.name)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
-    // Sync group-0 sysdata. Best-effort.
+    // Auto-assign ownership: pick the diskdb instance with the
+    // fewest owned DGs and write the ownership entry to group-0.
     if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let value = crowdb_protocol::diskdb::rpc::DiskGroupValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            disk_ids: Vec::new(),
-        };
-        if let Err(e) = hw.add_disk_group(rack_id, node_id, entry.id, &value).await {
-            tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: add_disk_group failed");
-        }
-
-        // Auto-assign ownership: pick the diskdb instance with the
-        // fewest owned DGs and write the ownership entry to group-0.
-        // This ensures new DGs are immediately visible to a diskdb
-        // keepalive sync without manual assignment via the UI.
-        if let Err(e) = auto_assign_owner(&hw, rack_id, node_id, entry.id).await {
+        if let Err(e) = auto_assign_owner(&hw, entry.rack_id, node_id, entry.id).await {
             tracing::warn!(disk_group_id = entry.id, error = %e, "sysdata sync: auto-assign owner failed");
         }
-    } else {
-        tracing::warn!(disk_group_id = entry.id, "sysdata sync skipped: group-0 endpoint not in monitor cache yet; DG is in config only and will sync on next add");
     }
 
     Ok((StatusCode::CREATED, Json(entry)))
@@ -1716,38 +1632,11 @@ pub async fn http_remove_node_disk_group(
     State(state): State<AppState>,
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Capture rack_id + child disk ids before removing.
-    let (rack_id, disk_ids): (Option<RackId>, Vec<String>) = {
-        let cfg = state.config.read().unwrap();
-        let rack_id = cfg
-            .disk_groups
-            .iter()
-            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
-            .map(|dg| dg.rack_id);
-        let disk_ids = cfg
-            .disks_in_group(dg_id)
-            .iter()
-            .map(|d| d.disk_id.clone())
-            .collect();
-        (rack_id, disk_ids)
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        // Cascade-remove child disks first, then the disk-group.
-        for disk_id in &disk_ids {
-            cfg.remove_disk(disk_id).map_err(map_config_err)?;
-        }
-        cfg.remove_disk_group(dg_id).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata (handles child disks + DG).
-    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
-        if let Err(e) = hw.remove_disk_group_cascade(rack_id, node_id, dg_id).await {
-            tracing::warn!(disk_group_id = dg_id, error = %e, "sysdata sync: remove_disk_group_cascade failed");
-        }
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_disk_group(&ctx, node_id, dg_id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1762,106 +1651,6 @@ pub struct AddDiskBody {
     unit_size_bytes: u32,
     #[serde(default)]
     device_path: String,
-}
-
-/// Validate a single disk-add input, producing the `DiskEntry`, proto
-/// `DiskId`, and `DiskValue` for group-0 sysdata sync. Shared by
-/// `http_add_disk` and `http_add_disks_batch` so both paths reject
-/// bad inputs before any config mutation or persist.
-fn validate_disk_input(
-    body: &AddDiskBody,
-    dg_id: DiskGroupId,
-    rack_id: RackId,
-    node_id: NodeId,
-) -> Result<
-    (
-        DiskEntry,
-        crowdb_protocol::common::DiskId,
-        crowdb_protocol::diskdb::rpc::DiskValue,
-    ),
-    (StatusCode, Json<ErrorBody>),
-> {
-    let disk_id_proto =
-        match <crowdb_protocol::common::DiskId as crowdb_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&body.disk_id) {
-            Ok(id) => id,
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorBody {
-                        error: format!("invalid disk_id format for {}: {e}", body.disk_id),
-                    }),
-                ));
-            }
-        };
-    if body.unit_size_bytes == 0 || body.zone_size_bytes == 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!(
-                    "disk {}: unit_size_bytes and zone_size_bytes must be non-zero",
-                    body.disk_id
-                ),
-            }),
-        ));
-    }
-    if body.zone_size_bytes % u64::from(body.unit_size_bytes) != 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!(
-                    "disk {}: zone_size_bytes must be a multiple of unit_size_bytes",
-                    body.disk_id
-                ),
-            }),
-        ));
-    }
-    if body.capacity_bytes < body.zone_size_bytes {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!("disk {}: capacity_bytes must be >= zone_size_bytes", body.disk_id),
-            }),
-        ));
-    }
-    let unit_size = u64::from(body.unit_size_bytes);
-    let capacity_units = body.capacity_bytes / unit_size;
-    let zone_size_units = body.zone_size_bytes / unit_size;
-    let zone_count = u32::try_from(capacity_units / zone_size_units).unwrap_or(u32::MAX);
-    let disk_type_proto = match body.disk_type.as_str() {
-        "Hdd" | "BLOCK_HDD" => crowdb_protocol::diskdb::rpc::DiskType::BlockHdd as i32,
-        "Ssd" | "BLOCK_SSD" => crowdb_protocol::diskdb::rpc::DiskType::BlockSsd as i32,
-        "ZONE_SSD" => crowdb_protocol::diskdb::rpc::DiskType::ZoneSsd as i32,
-        "SMR_HDD" => crowdb_protocol::diskdb::rpc::DiskType::SmrHdd as i32,
-        other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("disk {}: unknown disk_type: {other}", body.disk_id),
-                }),
-            ));
-        }
-    };
-    let entry = DiskEntry {
-        disk_id: body.disk_id.clone(),
-        disk_group_id: dg_id,
-        rack_id,
-        node_id,
-        disk_type: body.disk_type.clone(),
-        capacity_bytes: body.capacity_bytes,
-        zone_size_bytes: body.zone_size_bytes,
-        unit_size_bytes: body.unit_size_bytes,
-        device_path: body.device_path.clone(),
-    };
-    let value = crowdb_protocol::diskdb::rpc::DiskValue {
-        status: crowdb_protocol::common::HwStatus::Up as i32,
-        disk_type: disk_type_proto,
-        capacity_units,
-        zone_size_units,
-        unit_size_bytes: body.unit_size_bytes,
-        zone_count,
-        device_path: body.device_path.clone(),
-    };
-    Ok((entry, disk_id_proto, value))
 }
 
 /// `GET /api/nodes/:node_id/disk-groups/:dg_id/disks`.
@@ -2047,39 +1836,19 @@ pub async fn http_add_disk(
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
     Json(body): Json<AddDiskBody>,
 ) -> Result<(StatusCode, Json<DiskEntry>), (StatusCode, Json<ErrorBody>)> {
-    // Resolve rack_id from the disk-group.
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.disk_groups
-            .iter()
-            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
-            .map(|dg| dg.rack_id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("disk-group {dg_id} not found on node {node_id}"),
-                    }),
-                )
-            })?
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let input = ops::hardware::AddDiskInput {
+        disk_id: body.disk_id,
+        disk_type: body.disk_type,
+        capacity_bytes: body.capacity_bytes,
+        zone_size_bytes: body.zone_size_bytes,
+        unit_size_bytes: body.unit_size_bytes,
+        device_path: body.device_path,
     };
-    // Validate all inputs before mutating config or syncing group 0.
-    let (entry, disk_id_proto, value) = validate_disk_input(&body, dg_id, rack_id, node_id)?;
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_disk(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Sync group-0 sysdata. Best-effort.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, &disk_id_proto, &value).await {
-            tracing::warn!(disk_id = %entry.disk_id, error = %e, "sysdata sync: add_disk failed");
-        }
-    } else {
-        tracing::warn!(disk_id = %entry.disk_id, "sysdata sync skipped: group-0 endpoint not in monitor cache yet; disk is in config only");
-    }
-
+    let entry = ops::hardware::add_disk(&ctx, node_id, dg_id, &input)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -2102,82 +1871,28 @@ pub async fn http_add_disks_batch(
     Path((node_id, dg_id)): Path<(NodeId, DiskGroupId)>,
     Json(body): Json<AddDisksBatchBody>,
 ) -> Result<(StatusCode, Json<AddDisksBatchResult>), (StatusCode, Json<ErrorBody>)> {
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.disk_groups
-            .iter()
-            .find(|dg| dg.node_id == node_id && dg.id == dg_id)
-            .map(|dg| dg.rack_id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("disk-group {dg_id} not found on node {node_id}"),
-                    }),
-                )
-            })?
-    };
-
-    // Validate all inputs and check for duplicates before any mutation.
-    let mut validated: Vec<(
-        DiskEntry,
-        crowdb_protocol::common::DiskId,
-        crowdb_protocol::diskdb::rpc::DiskValue,
-    )> = Vec::with_capacity(body.disks.len());
-    let mut seen_ids: HashSet<String> = HashSet::with_capacity(body.disks.len());
-    for d in &body.disks {
-        if !seen_ids.insert(d.disk_id.clone()) {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorBody {
-                    error: format!("duplicate disk_id within batch: {}", d.disk_id),
-                }),
-            ));
-        }
-        validated.push(validate_disk_input(d, dg_id, rack_id, node_id)?);
-    }
-
-    // Mutate config: add all disks. Roll back on any failure so the
-    // in-memory config stays consistent with the (un-persisted) state.
-    let mut added: Vec<DiskEntry> = Vec::with_capacity(validated.len());
-    {
-        let mut cfg = state.config.write().unwrap();
-        for (entry, _, _) in &validated {
-            if let Err(e) = cfg.add_disk(entry.clone()).map_err(map_config_err) {
-                // Roll back already-added disks.
-                for a in &added {
-                    let _ = cfg.remove_disk(&a.disk_id);
-                }
-                return Err(e);
-            }
-            added.push(entry.clone());
-        }
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Best-effort sysdata sync per disk.
-    let mut sysdata_errors: Vec<String> = Vec::new();
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        for (entry, disk_id_proto, value) in &validated {
-            if let Err(e) = hw.add_disk(rack_id, node_id, dg_id, disk_id_proto, value).await {
-                let msg = format!("disk {}: sysdata sync failed: {e}", entry.disk_id);
-                tracing::warn!(disk_id = %entry.disk_id, error = %e, "batch sysdata sync: add_disk failed");
-                sysdata_errors.push(msg);
-            }
-        }
-    } else {
-        tracing::warn!(
-            dg_id,
-            disk_count = validated.len(),
-            "batch sysdata sync skipped: group-0 endpoint not in monitor cache yet; disks are in config only"
-        );
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let inputs: Vec<ops::hardware::AddDiskInput> = body
+        .disks
+        .into_iter()
+        .map(|d| ops::hardware::AddDiskInput {
+            disk_id: d.disk_id,
+            disk_type: d.disk_type,
+            capacity_bytes: d.capacity_bytes,
+            zone_size_bytes: d.zone_size_bytes,
+            unit_size_bytes: d.unit_size_bytes,
+            device_path: d.device_path,
+        })
+        .collect();
+    let added = ops::hardware::add_disks_batch(&ctx, node_id, dg_id, &inputs)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok((
         StatusCode::CREATED,
         Json(AddDisksBatchResult {
             added,
-            sysdata_errors,
+            sysdata_errors: Vec::new(),
         }),
     ))
 }
@@ -2204,34 +1919,11 @@ pub async fn http_remove_disk(
     State(state): State<AppState>,
     Path((node_id, dg_id, disk_id)): Path<(NodeId, DiskGroupId, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Capture rack_id before removing.
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.disks
-            .iter()
-            .find(|d| d.node_id == node_id && d.disk_group_id == dg_id && d.disk_id == disk_id)
-            .map(|d| d.rack_id)
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_disk(&disk_id).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-
-    // Cascade-remove group-0 sysdata.
-    if let (Some(hw), Some(rack_id)) = (crate::mgmt::build_hardware_client(&state).await, rack_id) {
-        match <crowdb_protocol::common::DiskId as crowdb_protocol::diskdb_type_util::DiskIdExt>::from_display_string(&disk_id) {
-            Ok(disk_id_proto) => {
-                if let Err(e) = hw.remove_disk_cascade(rack_id, node_id, dg_id, &disk_id_proto).await {
-                    tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: remove_disk_cascade failed");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(disk_id = %disk_id, error = %e, "sysdata sync: invalid disk_id format, skipping cascade");
-            }
-        }
-    }
-
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_disk(&ctx, node_id, dg_id, &disk_id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
