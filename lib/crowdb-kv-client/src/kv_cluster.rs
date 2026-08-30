@@ -124,6 +124,7 @@ async fn scan_prefix<T: serde::de::DeserializeOwned>(
 ///
 /// All methods target store 0, group 0. The wrapped `CrowdbKvClient`
 /// must have its topology seeded with a group-0 leader endpoint.
+#[derive(Clone)]
 pub struct KVClusterMetaClient {
     kv: Arc<CrowdbKvClient>,
 }

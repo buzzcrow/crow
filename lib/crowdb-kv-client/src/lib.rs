@@ -31,6 +31,7 @@ mod metrics;
 mod range_binding;
 mod service_registry;
 mod space_usage;
+mod sysmd;
 mod topology;
 mod watch_notify;
 
@@ -59,6 +60,7 @@ pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, Win
 pub use range_binding::{ChunkdbRangeBinding, RangeBindingClient, RangeRouteError, RouteWithFallback};
 pub use service_registry::ServiceRegistryClient;
 pub use space_usage::{ClusterUsage, NodeUsage, RackUsage, SpaceUsageClient};
+pub use sysmd::CrowdbSysmdClient;
 pub use watch_notify::{WatchNotify, WatchNotifyClient, WatchSubscription};
 
 /// Re-exported so callers don't need a direct `crowdb_kv` dependency just to
