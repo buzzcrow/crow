@@ -202,13 +202,45 @@ pub async fn restart(ctx: &OpContext, node_id: NodeId) -> Result<DeployedServer>
 }
 
 /// Delete the server deployment on a node: stop the process and remove
-/// the [`ServerEntry`] from the config.
+/// the [`ServerEntry`] from the config. Refuses to delete if the node
+/// still hosts replicas (require-empty check).
 ///
 /// # Errors
-/// Returns [`Error::NotFound`] if no server is deployed on the node.
+/// Returns [`Error::NotFound`] if no server is deployed on the node;
+/// [`Error::Conflict`] if the node still hosts replicas in group-0
+/// sysdata (require-empty check).
 pub async fn delete(ctx: &OpContext, node_id: NodeId) -> Result<()> {
     let node = ctx.node_entry(node_id)?;
     let entry = ctx.server_for_node(node_id)?;
+
+    // Require-empty: check that no replicas in group-0 sysdata reference
+    // this node. Best-effort — if sysdata is unreachable, skip the check
+    // (the cluster may not be initialized).
+    if let Ok(stores) = ctx.sysmd().list_stores().await {
+        for store in &stores {
+            if let Ok(groups) = ctx.sysmd().list_groups_in_store(store.store_id).await {
+                for group in &groups {
+                    if let Ok(replicas) = ctx
+                        .sysmd()
+                        .list_replicas_in_group(store.store_id, group.group_id)
+                        .await
+                    {
+                        for replica in &replicas {
+                            if replica.node_id == node_id {
+                                return Err(Error::Conflict {
+                                    kind: "server".into(),
+                                    id: format!(
+                                        "node {node_id} still hosts replica {} in store {}/group {}",
+                                        replica.replica_id, store.store_id, group.group_id
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if let Some(pid) = entry.pid {
         if node.ssh_enabled() {

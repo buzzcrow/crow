@@ -105,3 +105,32 @@ async fn delete_no_server_not_found() {
     let err = ops::kv_server::delete(&ctx, 10).await.unwrap_err();
     assert!(matches!(err, Error::NotFound { kind, .. } if kind == "server"));
 }
+
+#[tokio::test]
+async fn delete_with_server_succeeds_when_no_replicas() {
+    let ctx = ctx_with_node();
+    // Insert a server entry with no PID (so no process to stop).
+    {
+        let mut cfg = ctx.config_mut();
+        cfg.add_server(ServerEntry {
+            id: "10".into(),
+            url: "http://127.0.0.1:9910".into(),
+            node_id: Some(10),
+            rpc_url: None,
+            rest_port: Some(9910),
+            rpc_port: Some(28001),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: None,
+            service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
+        })
+        .unwrap();
+    }
+    // Delete should succeed — no replicas in sysdata (cluster not init'd).
+    ops::kv_server::delete(&ctx, 10).await.unwrap();
+    // Server entry should be gone.
+    assert!(ctx.config().server_for_node(10).is_none());
+}
