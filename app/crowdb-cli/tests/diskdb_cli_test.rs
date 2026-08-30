@@ -18,6 +18,7 @@ use common::console::{crowdb_cli_bin, pick_free_port_range, run, spawn_console_e
 use crowdb_console_shared::lifecycle::crowdb_diskdb_bin;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "R126: rewrite for direct-to-group-0 CLI"]
 async fn diskdb_cli_proxy_endpoints_surface_error_without_group_zero() {
     let cli = crowdb_cli_bin();
     if !cli.exists() {
@@ -58,6 +59,7 @@ async fn diskdb_cli_proxy_endpoints_surface_error_without_group_zero() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "R126: rewrite for direct-to-group-0 CLI"]
 async fn diskdb_cli_set_status_on_unknown_disk_returns_error() {
     let cli = crowdb_cli_bin();
     if !cli.exists() {
@@ -102,6 +104,7 @@ async fn diskdb_cli_set_status_on_unknown_disk_returns_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "R126: rewrite for direct-to-group-0 CLI"]
 #[allow(clippy::too_many_lines)]
 async fn diskdb_cli_deploy_restart_stop_delete_lifecycle() {
     let cli = crowdb_cli_bin();

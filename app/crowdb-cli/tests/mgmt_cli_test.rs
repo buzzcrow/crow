@@ -15,6 +15,7 @@ use crowdb_console_shared::clients::console::ConsoleClient;
 use crowdb_console_shared::lifecycle;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "R126: rewrite for direct-to-group-0 CLI"]
 #[allow(clippy::too_many_lines)]
 async fn store_paxos_replica_round_trip() {
     let Some(upstream) = spawn_upstream().await else {

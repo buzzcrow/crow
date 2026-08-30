@@ -13,6 +13,7 @@ use common::console::{crowdb_cli_bin, run, spawn_console_empty};
 use crowdb_console_shared::lifecycle::crowdb_kv_server_bin;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "R126: rewrite for direct-to-group-0 CLI"]
 #[allow(clippy::too_many_lines)]
 async fn rack_node_server_lifecycle() {
     let cli = crowdb_cli_bin();

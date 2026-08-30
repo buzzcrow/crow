@@ -57,13 +57,15 @@ pub(crate) fn print_json<T: serde::Serialize>(cli: &Cli, value: &T) -> ExitCode 
 }
 
 /// Build an [`OpContext`] from the CLI global flags. The sysmd endpoint
-/// is `http://{sysmd_ip}:{sysmd_port}` and the config is loaded from
-/// the configured path (or the default).
+/// is `http://{sysmd_ip}:{sysmd_port}` (a group-0 mgmt URL) and the
+/// config is loaded from the configured path (or the default).
 pub(crate) fn op_context(cli: &Cli) -> Result<OpContext, ExitCode> {
     let config = load_config(cli)?;
+    let mgmt_url = format!("http://{}:{}", cli.sysmd_ip, cli.sysmd_port);
+    // The group0_endpoint is a crowdb-rpc hint — the client discovers
+    // the actual leader from the mgmt seeds via topology discovery.
     let group0_endpoint = format!("{}:{}", cli.sysmd_ip, cli.sysmd_port);
-    let mgmt_seeds = vec![format!("http://{}", group0_endpoint)];
-    Ok(OpContext::new(group0_endpoint, mgmt_seeds, config))
+    Ok(OpContext::new(group0_endpoint, vec![mgmt_url], config))
 }
 
 /// Load the console config from the CLI's `--config` path or the

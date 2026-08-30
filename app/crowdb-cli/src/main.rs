@@ -35,13 +35,13 @@ struct Cli {
     )]
     sysmd_ip: String,
 
-    /// Group-0 leader's port (the sysmd endpoint's crowdb-rpc port).
+    /// Group-0 leader's port (the sysmd endpoint's mgmt port).
     #[arg(
         short = 'O',
         long,
         global = true,
         env = "CROWDB_SYSMD_PORT",
-        default_value_t = 28001
+        default_value_t = 9910
     )]
     sysmd_port: u16,
 
