@@ -81,14 +81,21 @@ Targets:
 
 ### 2.1 Call Path
 
-Every console operation follows the same path. The frontend (web SPA
-backed by Axum, **or** the `crowdb-cli` CLI binary) is a thin presentation
-layer; it always calls into `shared`, and `shared` is the only place
-that talks to `crowdb-kv-server` over HTTP / crowdb-rpc / SSH.
+The web frontend (SPA backed by Axum) and the CLI follow different
+paths:
+
+- **Web**: `user → crowdb-web (Axum) → shared → crowdb-kv-server`
+- **CLI**: `user → crowdb-cli → shared (ops module) → group-0 sysdata + crowdb-kv-server mgmt`
+
+The CLI talks directly to group-0 system metadata via
+`CrowdbSysmdClient` and to individual `crowdb-kv-server` management
+APIs via `ServerClient` — no `crowdb-web` intermediary. The `ops`
+module in `shared` holds the operation logic that both the CLI and
+(later) the web UI can call.
 
 ```
                 ┌──────────────┐        ┌──────────────┐
-   user ───►    │  crowdb-web  │   or   │ crowdb-kv (CLI) │     (frontend)
+   user ───►    │  crowdb-web  │   or   │  crowdb-cli  │     (frontend)
                 └──────┬───────┘        └──────┬───────┘
                        │   parse input,        │
                        │   render output       │
@@ -96,8 +103,8 @@ that talks to `crowdb-kv-server` over HTTP / crowdb-rpc / SSH.
                                   ▼
                           ┌───────────────┐
                           │    shared     │              (business logic:
-                          │  (lib crate)  │               monitor cache,
-                          └──────┬────────┘               orchestration,
+                          │  (lib crate)  │               ops module,
+                          └──────┬────────┘               monitor cache,
                                  │                        leader resolution,
                   ┌──────────────┼──────────────┐         SSH session pool)
                   ▼              ▼              ▼
@@ -111,11 +118,13 @@ that talks to `crowdb-kv-server` over HTTP / crowdb-rpc / SSH.
 
 ### 2.2 Reuse Boundary
 
-- All "what to do" lives in `shared` (e.g. `add_group`,
-  `deploy_server`, `kv_put`, `refresh_node`).
+- All "what to do" lives in `shared` (e.g. `ops::kv_logical::add_group`,
+  `ops::kv_server::deploy`, `ops::kv_data::put`, `ops::hardware::add_rack`).
 - `web` (Axum) and `cli` (clap) only parse input and render output.
 - The web SPA **does not** reimplement business logic; it calls
   `shared` via the Axum backend, never `crowdb-kv-server` directly.
+- The CLI calls `shared`'s `ops` module directly, building an
+  `OpContext` from `--sysmd-ip` / `--sysmd-port` global flags.
 - Both frontends share the same `shared` entry points, so any feature
   is reachable from both surfaces by construction.
 
@@ -420,54 +429,48 @@ backend-facing contract here:
 
 ## 7. CLI Design
 
-- Binary: `crowdb-kv` (noun-verb structure: `crowdb-kv <group> <verb>`).
-- Parser: `clap` derive; one module per top-level group.
-- **One call path.** Every verb routes through `ConsoleClient` against
-  `crowdb-web`. The CLI never talks to a `crowdb-kv-server` directly; there
-  is no `--server` flag.
-- **Two layers max** — `crowdb-kv <group> <verb>`. No three-level chains.
+- Binary: `crowdb-cli` (four-domain structure: `crowdb-cli <domain> <verb>`).
+- Parser: `clap` derive; one module per domain under `commands/`.
+- **Direct-to-group-0 call path.** Every verb builds an `OpContext`
+  seeded with `--sysmd-ip` / `--sysmd-port` (a group-0 mgmt endpoint)
+  and talks directly to group-0 sysdata via `CrowdbSysmdClient` and to
+  individual `crowdb-kv-server` mgmt APIs via `ServerClient`. There is
+  no `crowdb-web` intermediary.
+- **Four domains** — `cluster` (hardware topology + cluster-level ops),
+  `kv` (server lifecycle + logical concepts + data-plane), `chunk`
+  (diskdb/chunkdb/diskio — stubs), `bench` (load injection — stubs).
+- **Three layers max** — `crowdb-cli <domain> <subcommand> <verb>`
+  (e.g. `kv server deploy`, `kv store add`, `cluster rack list`).
 - Verb vocabulary stays consistent: `add / remove / list / inspect`.
-  Lifecycle verbs (`deploy / start / stop`) for `server`; data verbs
-  (`put / get / delete / scan / list`) for `kv`.
+  Lifecycle verbs (`deploy / restart / stop / delete`) for `kv server`;
+  data verbs (`put / get / delete / scan`) for `kv data`.
 - **Logical entity addressing**: store/group/replica/KV commands use
-  `--store-id` / `--group-id`; the backend resolves placement. Server
-  lifecycle uses `--node-id`.
-- **Leaders are elected, not assigned.** `group add` takes no `--leader`
-  flag; leadership is decided by Paxos election.
-- `cluster inspect <id>` uses a compact id grammar: `s<store_id>`,
-  `s<store_id>/g<group_id>`, `s<store_id>/g<group_id>/r<replica_id>`,
-  or a bare node id string.
-- **Short flag aliases.** Every `#[arg]` gets a `short = '<char>'`
-  using the natural mnemonic (first letter of the long name, or an
-  established convention: `-s` store, `-g` group, `-n` node, `-r`
-  rack/replica, `-k` key, `-d` duration/disk, `-c` connections,
-  `-L` loaders, `-m` metrics, `-j` json). Global args occupy `-i`
-  (ip), `-o` (port), `-p` (config), `-j` (json) across all
-  subcommands. **Conflict rule:** if the natural mnemonic char is
-  already taken (by a global arg or a sibling in the same
-  subcommand), the arg stays long-only — no reshuffling, no awkward
-  uppercase fallback. Established non-conflicting uppercase shorts
-  (e.g. `-P` for `--server-port`, `-I` for `--id` to avoid `-i`)
-  are kept as-is.
-- Output: JSON by default for scripting; `--json` flag is a no-op.
-  Human-readable table formatting is a future enhancement.
+  `--store` / `--group`; the backend resolves placement. Server
+  lifecycle uses `--node`.
+- **Leaders are elected, not assigned.** `kv group add` takes no
+  `--leader` flag; leadership is decided by Paxos election.
+- **Short flag aliases.** Global args occupy `-I` (sysmd-ip), `-O`
+  (sysmd-port), `-p` (config), `-j` (json) across all subcommands.
+- **`cluster init`** bootstraps group 0 on the listed nodes, wires
+  remotes, and writes the hardware + KV-cluster topology into group-0
+  sysdata. It is the only command that runs before group 0 exists.
+- **`cluster reset`** tears down the entire cluster (all groups, stores,
+  servers, sysdata) in dependency order.
+- **`cluster clean`** removes orphaned sysdata entries without stopping
+  running servers.
+- **`kv server delete`** checks that no replicas reference the node
+  before allowing deletion (require-empty check).
+- Output: human-readable by default; `--json` flag emits JSON for
+  scripting.
 
 The full command hierarchy is defined in the `clap` derive structs;
 this section covers design rules only.
 
 ### 7.1 Bench subcommand
 
-- `shared` exposes a `Workload` trait with built-in read/write/list/mix
-  implementations.
-- Connection model: user picks `--connections N` (separate TCP/HTTP2
-  channels) and `--threads M` (blocking issue→await loops, mapped
-  round-robin onto the connection pool). This is the lowest-latency
-  model and is easy to reason about.
-- Performance discipline: hot paths avoid per-op allocations, logging,
-  and lock contention (HDR histogram, atomic counters, ring-buffer
-  snapshots).
-- `bench stress` invokes predesigned scenarios baked into the binary;
-  `bench report` re-renders saved JSON.
+- `bench kv <read|write|scan|mix>` runs KV workloads against a target
+  store/group. `bench rpc` measures raw RPC transport throughput.
+- Both are stubs pending re-wiring to the `ops` module.
 
 ### 7.2 Bench lifecycle verbs (deploy / prepare / run / teardown)
 
