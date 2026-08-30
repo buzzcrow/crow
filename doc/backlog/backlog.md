@@ -11,9 +11,19 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R127** — Bump this line in the same commit when adding a new item.
+**Next R number: R128** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
+
+- **[R127](R127-console-web-ui-ops-migration.md)** — Web UI migrate to
+  shared ops + layout rework — Area: console / web — Migrate `crowdb-web`
+  Axum handlers to call `crowdb_console_shared::ops::*` (same as CLI
+  post-R126), eliminating ~2000 lines of duplicated orchestration. Add
+  missing web endpoints (`cluster reset`, `cluster clean`, `kv server
+  delete` with require-empty). Rework UI information architecture to
+  align with the CLI's four-domain structure. UI layout is deferred to
+  design — open questions on domain navigation, chunk/bench handling,
+  and migration sequencing.
 
 - **[R126](R126-console-cli-command-restructure.md)** — ✅ Done — CLI
   command restructure by function — Area: console / cli — Restructured
