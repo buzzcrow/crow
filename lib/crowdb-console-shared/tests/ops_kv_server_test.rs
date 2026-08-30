@@ -1,0 +1,107 @@
+// Copyright 2026-present Gian <crow.db@outlook.com>
+// Licensed under the Apache License, Version 2.0.
+
+//! Tests for [`ops::kv_server`] validation paths. The actual deploy /
+//! stop requires a real `crowdb-kv-server` binary and is covered by E2E
+//! tests in Phase 4; here we verify the guard clauses.
+
+use crowdb_console_shared::config::{ConsoleConfig, NodeEntry, ServerEntry, ServiceType};
+use crowdb_console_shared::error::Error;
+use crowdb_console_shared::ops::{self, OpContext};
+
+fn ctx_with_node() -> OpContext {
+    let mut cfg = ConsoleConfig::default();
+    cfg.add_rack(crowdb_console_shared::config::RackEntry {
+        id: 1,
+        name: "r1".into(),
+    })
+    .unwrap();
+    cfg.add_node(NodeEntry {
+        id: 10,
+        rack_id: 1,
+        host: "127.0.0.1".into(),
+        ssh_port: 22,
+        ssh_user: String::new(),
+        ssh_key: None,
+        ssh_password: None,
+    })
+    .unwrap();
+    OpContext::new("127.0.0.1:1".into(), vec![], cfg)
+}
+
+#[tokio::test]
+async fn deploy_unknown_node_not_found() {
+    let ctx = ctx_with_node();
+    let err = ops::kv_server::deploy(&ctx, 99, 9910, 28001, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::NotFound { kind, .. } if kind == "node"));
+}
+
+#[tokio::test]
+async fn stop_no_server_not_found() {
+    let ctx = ctx_with_node();
+    let err = ops::kv_server::stop(&ctx, 10).await.unwrap_err();
+    assert!(matches!(err, Error::NotFound { kind, .. } if kind == "server"));
+}
+
+#[tokio::test]
+async fn stop_no_pid_not_found() {
+    let ctx = ctx_with_node();
+    // Manually insert a server entry without a PID.
+    {
+        let mut cfg = ctx.config_mut();
+        cfg.add_server(ServerEntry {
+            id: "10".into(),
+            url: "http://127.0.0.1:9910".into(),
+            node_id: Some(10),
+            rpc_url: None,
+            rest_port: Some(9910),
+            rpc_port: Some(28001),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: None,
+            service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
+        })
+        .unwrap();
+    }
+    let err = ops::kv_server::stop(&ctx, 10).await.unwrap_err();
+    assert!(matches!(err, Error::NotFound { kind, .. } if kind == "server"));
+}
+
+#[tokio::test]
+async fn list_returns_all_servers() {
+    let ctx = ctx_with_node();
+    {
+        let mut cfg = ctx.config_mut();
+        cfg.add_server(ServerEntry {
+            id: "10".into(),
+            url: "http://127.0.0.1:9910".into(),
+            node_id: Some(10),
+            rpc_url: None,
+            rest_port: Some(9910),
+            rpc_port: Some(28001),
+            auto_start: true,
+            binary: None,
+            election_profile: None,
+            pid: None,
+            service_type: ServiceType::Kv,
+            rpc_workers: None,
+            no_fsync: false,
+        })
+        .unwrap();
+    }
+    let servers = ops::kv_server::list(&ctx);
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0].node_id, Some(10));
+}
+
+#[tokio::test]
+async fn delete_no_server_not_found() {
+    let ctx = ctx_with_node();
+    let err = ops::kv_server::delete(&ctx, 10).await.unwrap_err();
+    assert!(matches!(err, Error::NotFound { kind, .. } if kind == "server"));
+}

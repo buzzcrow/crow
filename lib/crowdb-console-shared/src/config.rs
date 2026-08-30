@@ -763,6 +763,13 @@ impl ConsoleConfig {
             .find(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
     }
 
+    /// Look up the server deployed on a given node (mutable).
+    pub fn server_for_node_mut(&mut self, node_id: NodeId) -> Option<&mut ServerEntry> {
+        self.servers
+            .iter_mut()
+            .find(|s| s.node_id == Some(node_id) && s.service_type == ServiceType::Kv)
+    }
+
     /// Remove the KV server entry deployed on a given node.
     ///
     /// # Errors
