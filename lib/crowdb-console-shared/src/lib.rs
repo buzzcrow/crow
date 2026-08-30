@@ -23,6 +23,7 @@ pub mod expand;
 pub mod lifecycle;
 pub mod mgmt;
 pub mod monitor;
+pub mod ops;
 pub mod ops_log;
 pub mod snapshot;
 pub mod ssh;

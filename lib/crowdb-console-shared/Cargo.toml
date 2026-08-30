@@ -24,6 +24,7 @@ dirs = "5"
 russh = "0.45"
 async-trait = "0.1"
 crowdb-protocol = { path = "../crowdb-protocol" }
+crowdb-kv-client = { path = "../crowdb-kv-client" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
