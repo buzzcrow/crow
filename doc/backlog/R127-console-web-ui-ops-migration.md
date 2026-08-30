@@ -113,47 +113,146 @@ request.
 
 **UI layout (needs agreement):**
 
-One-line summary: rework the UI information architecture to align with
-the four-domain CLI structure, replacing the current three view-modes.
+One-line summary: replace the current three view-modes (Physical /
+Capacity / KV) with three domains (Cluster / KV / Chunk) that map to
+the CLI's domain structure, each with a distinct sidebar tree, center
+panel layout, and shared right inspector.
 
-Open questions for the UI layout (to be resolved in design before
-implementation):
+The shell keeps the same three-pane structure (sidebar / center /
+inspector) but the header's view-mode toggle switches between three
+domains instead of three view-modes. The `bench` domain is omitted from
+the UI (CLI-only — load injection is not a UI workflow).
 
-- **Domain navigation**: Should the UI adopt the CLI's four domains
-  (`cluster` / `kv` / `chunk` / `bench`) as top-level navigation, or
-  keep a single canvas with domain-scoped panels? The CLI uses a flat
-  `<domain> <verb>` hierarchy; the UI could use a domain switcher in
-  the header (like the current Physical/Capacity/KV toggle) or a
-  left-rail icon nav.
-- **Cluster domain layout**: The `cluster` domain covers hardware
-  topology (racks/nodes/disk-groups/disks) + cluster-level ops
-  (init/reset/clean/status/topology). Should the topology canvas live
-  here, with hardware CRUD in the sidebar? Or should hardware be a
-  sub-navigation under cluster?
-- **KV domain layout**: The `kv` domain covers server lifecycle +
-  logical concepts (store/group/replica) + data-plane (put/get/scan).
-  The current UI splits these across Physical and KV view-modes.
-  Should the KV domain have sub-tabs (Server / Logical / Data), or
-  should the topology canvas show the logical tree with data-plane
-  ops in the center panel?
-- **Chunk domain**: Currently the UI has a Capacity view for DiskDB.
-  Should this become the `chunk` domain? The chunk domain in the CLI
-  is mostly stubs — should the UI show stubs too, or keep the existing
-  DiskDB capacity visualization?
-- **Bench domain**: The CLI has `bench` as a domain, but bench is
-  CLI-only by design (load injection). Should the UI have a bench
-  section at all, or omit it?
-- **Sidebar tree structure**: The current sidebar shows a hierarchy
-  tree per view-mode. Should the domain switcher change the tree
-  structure, or should there be a single unified tree with domain
-  filters?
-- **Inspector scope**: The current inspector shows details + activity
-  for the selected resource. Should this stay domain-scoped, or become
-  a global activity feed?
-- **Embedding impact**: The current embedding contract
-  (`design-crowdb-console-ui.md` §8) supports `initialViewMode` and
-  module opt-out. How does the domain structure map to embedding
-  modules? Does `initialViewMode` become `initialDomain`?
+```
+┌─ Header ───────────────────────────────────────────────────────────┐
+│ brand · health pill · domain toggle (Cluster/KV/Chunk) · refresh   │
+├─ Sidebar ─────┬─ Center panel ─────────────┬─ Inspector ────────────┤
+│ (per-domain   │ (per-domain layout,        │ Details (key/value)    │
+│  tree, see    │  see below)                │ Activity (recent ops)  │
+│  below)       │                            │                        │
+│               │                            │ (unchanged — scoped    │
+│               │                            │  to current selection) │
+└───────────────┴────────────────────────────┴────────────────────────┘
+```
+
+The right inspector panel is unchanged across all three domains: it
+shows Details + Activity tabs scoped to the currently selected item
+(rack, node, disk-group, disk, server, store, group, replica, chunkdb,
+diskdb, diskio — whichever the operator clicked in the sidebar or
+canvas).
+
+**Domain 1 — Cluster (hardware topology)**
+
+Sidebar shows the full hardware hierarchy: rack → node → disk-group →
+disk. Right-click on each layer opens the CRUD context menu (add rack,
+add node, add disk-group, add disk, remove, etc.). Cluster-level ops
+(init / reset / clean / status) are triggered from the header or a
+toolbar above the canvas.
+
+Center panel shows a hierarchy chart of the hardware topology. Rack and
+node render as standard tree/canvas nodes. Disk-groups and disks use
+special visual elements:
+
+- A **disk-group** renders as a box containing an array of disk
+  elements.
+- Each **disk** renders as a disk-style element (cylinder icon) showing
+  a short UUID prefix.
+
+```
+┌─ Sidebar ─────┐┌─ Center: hierarchy chart ─────────────────────────┐
+│ ▾ Rack 1      ││  Rack 1                                           │
+│   ▾ Node 1    ││   ├─ Node 1                                       │
+│     ▾ DG-0    ││   │   └─ ┌─────────────────────────────┐          │
+│       • disk0 ││   │       │ DG-0                       │          │
+│       • disk1 ││   │       │  ⬢ a3f1  ⬢ b7c2  ⬢ e9d4   │          │
+│   ▸ Node 2    ││   │       └─────────────────────────────┘          │
+│ ▾ Rack 2      ││   └─ Node 2 ...                                   │
+│   ▸ Node 3    ││  Rack 2 ...                                       │
+└───────────────┘└───────────────────────────────────────────────────┘
+```
+
+**Domain 2 — KV (server lifecycle + logical + data-plane)**
+
+Sidebar shows rack → node only (disk-groups and disks are hidden — not
+relevant to KV management). Right-click on a node opens the KV-server
+context menu (deploy / restart / stop / delete). Right-click on a
+deployed KV-server opens the logical context menu (add store, add
+group, add replica).
+
+Center panel is split vertically into two resizable halves:
+
+- **Top half**: logical view — the cluster's store → group → replica
+  hierarchy rendered as a topology canvas (React Flow). This is the
+  same logical tree the current KV view-mode shows.
+- **Bottom half**: KV operation panel — put / get / delete / scan
+  controls targeting the selected store/group. This is the current KV
+  Operator panel, moved into the bottom half of the center panel.
+
+The top/bottom split is draggable (resize handle). The operator can
+collapse the bottom half to give the topology canvas full height, or
+collapse the top half to focus on KV operations.
+
+```
+┌─ Sidebar ─────┐┌─ Center: logical view (top) ──────────────────────┐
+│ ▾ Rack 1      ││  Store 1                                          │
+│   ▾ Node 1    ││   ├─ Group 1                                      │
+│     ▸ kv-srv  ││   │   ├─ Replica 0 (node 1)                       │
+│   ▸ Node 2    ││   │   └─ Replica 1 (node 2)                       │
+│ ▾ Rack 2      ││   └─ Group 2 ...                                  │
+│   ▸ Node 3    ││  Store 2 ...                                      │
+│               │├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤
+│               ││  KV Operator: [store ▾] [group ▾]                 │
+│               ││  key: [_______]  value: [_______]  [Put]          │
+│               ││  key: [_______]  [Get]  [Delete]                  │
+│               ││  scan: [prefix___] [Scan]  results: ...           │
+└───────────────┘└───────────────────────────────────────────────────┘
+```
+
+**Domain 3 — Chunk (chunkdb / diskdb / diskio management)**
+
+Sidebar shows rack → node only (disk-groups and disks hidden at the
+top level). Under each node, the sidebar shows the deployed chunkdb,
+diskdb, and diskio server instances. Under a diskdb server, the sidebar
+expands to show the owned disk-group and its disks (read-only — managed
+from the Cluster domain).
+
+Center panel has a button toggle with two sub-views:
+
+- **Capacity** — the capacity canvas visualization (same as the current
+  Capacity view-mode). Shows disk-group usage, disk health, and
+  allocation heatmaps.
+- **Chunk** — chunk-level view showing chunkdb instances, their bound
+  ranges, and chunk metadata. (This sub-view is a stub initially,
+  matching the CLI's `chunk` domain stubs — it will be filled in when
+  `ops::chunk` is implemented.)
+
+```
+┌─ Sidebar ─────┐┌─ Center: [Capacity] [Chunk] ──────────────────────┐
+│ ▾ Rack 1      ││  (Capacity sub-view shown by default)              │
+│   ▾ Node 1    ││                                                   │
+│     ▸ chunkdb ││  Rack 1 / Node 1 / DG-0                           │
+│     ▸ diskdb  ││   ┌─────────────────────────────────────┐         │
+│       ▸ DG-0  ││   │ ▓▓▓▓▓░░░░  ▓▓▓░░░░░░  ▓▓▓▓▓▓░░    │         │
+│         • d0  ││   │ disk a3f1   disk b7c2   disk e9d4   │         │
+│         • d1  ││   │ 78% used    42% used    88% used    │         │
+│     ▸ diskio  ││   └─────────────────────────────────────┘         │
+│   ▸ Node 2    ││                                                   │
+│ ▾ Rack 2      ││  Rack 1 / Node 2 / DG-1 ...                       │
+│   ▸ Node 3    ││                                                   │
+└───────────────┘└───────────────────────────────────────────────────┘
+```
+
+**Cross-domain behaviors**
+
+- Selection is shared across all three domains via the same
+  `SelectionContext`. Clicking a node in the Cluster domain, switching
+  to the KV domain, and right-clicking that node shows the KV-server
+  context menu for the same node.
+- The inspector (right panel) is domain-agnostic — it renders details
+  for whatever is selected, regardless of which domain is active.
+- The header domain toggle replaces the current Physical/Capacity/KV
+  toggle. The embedding contract's `initialViewMode` becomes
+  `initialDomain` with values `cluster` / `kv` / `chunk`.
 
 **Edge cases at a glance**
 
@@ -176,9 +275,10 @@ implementation):
   `crowdb-console-shared` must exist with `OpContext`,
   `ops::hardware`, `ops::kv_server`, `ops::kv_logical`, `ops::kv_data`,
   `ops::cluster`.
-- **Depends on UI layout agreement** — the UI layout questions above
-  must be resolved before implementation begins. The backend migration
-  can proceed independently of the UI layout decision.
+- **Depends on UI layout agreement** — the UI layout is defined in
+  the Solution section above; implementation can proceed once the
+  layout is reviewed and confirmed. The backend migration can proceed
+  independently of the UI layout implementation.
 - **Blocks future chunk/diskdb UI work** — the `ops::chunk` module is
   currently stubs; a full chunk/diskdb UI depends on implementing
   `ops::chunk` first.
@@ -214,17 +314,29 @@ implementation):
 - `AppState` builds `OpContext` sharing the cached `CrowdbKvClient`
   → verify no duplicate connection pool via unit test. Unit test.
 
-**UI layout (pending design agreement):**
+**UI layout:**
 
-- UI layout reflects the agreed domain structure → verify via Playwright
-  E2E test that the domain navigation renders correctly. E2E test.
-  `pending design`
+- Header domain toggle switches between Cluster / KV / Chunk → verify
+  via Playwright E2E that all three domains render. E2E test.
+- Cluster domain: sidebar shows rack → node → disk-group → disk tree;
+  center panel shows hierarchy chart with disk-group boxes containing
+  disk elements with short UUIDs → verify via Playwright E2E. E2E test.
+- KV domain: sidebar shows rack → node (no disk-groups/disks);
+  right-click node shows KV-server context menu; center panel is
+  split top (logical topology) / bottom (KV operator) with resize
+  handle → verify via Playwright E2E. E2E test.
+- Chunk domain: sidebar shows rack → node → chunkdb/diskdb/diskio
+  servers; center panel has Capacity / Chunk button toggle; Capacity
+  sub-view shows disk-group usage canvas → verify via Playwright E2E.
+  E2E test.
+- Inspector panel shows Details + Activity for the selected item
+  across all three domains → verify via Playwright E2E. E2E test.
 - All existing CRUD dialogs (AddRack, AddNode, DeployServer, AddStore,
   AddGroup, AddReplica, etc.) work under the new layout → verify via
-  Playwright E2E. E2E test. `pending design`
-- Embedding contract (`apiPrefix`, `basePath`, `readonly`, `modules`)
-  still works under the new layout → verify via Playwright E2E with
-  embedded mode. E2E test. `pending design`
+  Playwright E2E. E2E test.
+- Embedding contract (`apiPrefix`, `basePath`, `readonly`, `modules`,
+  `initialDomain`) works under the new layout → verify via Playwright
+  E2E with embedded mode. E2E test.
 
 **Test commands:**
 
@@ -237,42 +349,16 @@ implementation):
 
 **Open Questions**
 
-1. **UI layout structure** — the most important open question. Should
-   the UI adopt the CLI's four-domain structure (`cluster`/`kv`/
-   `chunk`/`bench`) as top-level navigation, replacing the current
-   Physical/Capacity/KV view-modes? Alternatives:
-   - **A: Domain switcher in header** — replace the Physical/Capacity/
-     KV toggle with a Cluster/KV/Chunk toggle. Minimal layout change;
-     the sidebar tree + canvas + inspector stay. Each domain maps to a
-     tree structure + canvas layout + center panel.
-   - **B: Left-rail icon navigation** — add a vertical icon rail
-     (Cluster / KV / Chunk / Bench) on the far left, with the existing
-     three-pane shell to its right. More explicit domain separation;
-     more layout work.
-   - **C: Single unified tree with domain filters** — keep one tree,
-     add filter chips for cluster/kv/chunk. Least layout change; but
-     may not provide enough visual separation between domains.
-   - Trade-offs: A is the smallest change and maps directly to the CLI
-     structure. B is more explicit but adds a fourth pane. C is the
-     least disruptive but may not feel like distinct domains.
-   - This cannot be resolved automatically — it's a UX design decision
-     that needs human input.
+1. **Chunk sub-view stub** — the Chunk domain's "Chunk" sub-view (the
+   second button after "Capacity") is a stub initially because
+   `ops::chunk` is not yet implemented. Should the stub show a
+   placeholder ("chunk management coming soon") or be hidden entirely
+   until `ops::chunk` is ready? The Capacity sub-view is fully
+   functional regardless. Needs human input.
 
-2. **Bench domain in UI** — should the web UI have a bench section?
-   The CLI has `bench` as a domain, but bench is load injection
-   (typically run from CLI, not UI). Alternatives: omit bench from UI
-   entirely, or include a read-only bench results viewer. Needs human
-   input.
-
-3. **DiskDB/chunk handling** — the `ops::chunk` module is stubs. Should
-   the UI keep the existing DiskDB capacity visualization + runtime
-   proxy as-is until `ops::chunk` is implemented, or should the UI
-   hide chunk-related features until the backend is ready? Needs human
-   input.
-
-4. **Migration strategy** — should the backend migration and UI layout
+2. **Migration strategy** — should the backend migration and UI layout
    rework be done in one R-item or split into two? The backend
-   migration is clear; the UI layout needs design. Alternatives: do
-   backend first (thin wrappers around `ops`, keep current UI), then
-   UI rework in a follow-up; or do both together. Needs human input
-   on preferred sequencing.
+   migration is clear; the UI layout is now defined but needs
+   implementation. Alternatives: do backend first (thin wrappers
+   around `ops`, keep current UI), then UI rework in a follow-up; or
+   do both together. Needs human input on preferred sequencing.
