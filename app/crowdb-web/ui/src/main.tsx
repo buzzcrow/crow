@@ -5,14 +5,14 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App, { type CrowdbConsoleProps } from "./App";
 import { setApiBase } from "./api";
-import { ViewMode } from "./types";
+import { Domain } from "./types";
 import "./index.css";
 
 /**
  * Parse embedding props from the URL query string for the standalone mount.
  * This mirrors `CrowdbConsoleProps` so a reverse-proxied or embedded
  * deployment can be configured without a rebuild:
- *   ?apiPrefix=/proxy/api&readonly=1&disableModules=kv,swagger&view=Physical
+ *   ?apiPrefix=/proxy/api&readonly=1&disableModules=kv&domain=Cluster
  */
 function propsFromQuery(search: string): CrowdbConsoleProps {
   const q = new URLSearchParams(search);
@@ -31,12 +31,10 @@ function propsFromQuery(search: string): CrowdbConsoleProps {
     props.modules = Object.fromEntries(disabled.map((m) => [m, false]));
   }
 
-  const view = q.get("view");
-  if (view === "Physical") props.initialViewMode = ViewMode.Physical;
-  else if (view === "Logical") props.initialViewMode = ViewMode.Logical;
-
-  const nodeId = q.get("nodeId");
-  if (nodeId) props.initialNodeId = nodeId;
+  const d = q.get("domain");
+  if (d === "Cluster") props.initialDomain = Domain.Cluster;
+  else if (d === "KV") props.initialDomain = Domain.KV;
+  else if (d === "Chunk") props.initialDomain = Domain.Chunk;
 
   return props;
 }

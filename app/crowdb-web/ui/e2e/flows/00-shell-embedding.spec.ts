@@ -17,13 +17,12 @@ import { step } from '../fixtures/stepTimer';
 
 /**
  * Shell-level surfaces that need no shared cluster: backend-unreachable
- * alert, the embedded Swagger panel (Req §3.5), and the embedding contract
- * read from the URL query string (Req §4, design §8).
+ * alert and the embedding contract read from the URL query string.
  *
  * Each test needs its own page state (aborted routes / proxied routes /
  * a different mount URL), so they stay separate `test()`s.
  */
-test.describe('shell · embedding + swagger', () => {
+test.describe('shell · embedding', () => {
   test('shows an alert when backend API requests fail', async ({ page }) => {
     await step('shell: route abort', () => page.route('**/api/**', route => route.abort('failed')));
 
@@ -32,47 +31,6 @@ test.describe('shell · embedding + swagger', () => {
     // Scope to the banner alert — a toast (also role=alert) may appear
     // concurrently with "Failed to load server list:" text.
     await expect(page.getByRole('alert').filter({ hasText: 'Backend unreachable' })).toBeVisible({ timeout: 3_000 });
-  });
-
-  test('swagger panel renders inline and re-targets the node selection', async ({ page, baseURL }) => {
-    await step('shell: create rack/node', () => Promise.all([
-      createRack(baseURL!, { id: 22, name: 'Rack TwentyTwo' }),
-      createNode(baseURL!, { id: 221, rack_id: 22 }),
-      createNode(baseURL!, { id: 222, rack_id: 22 }),
-    ]));
-    await step('shell: deploy servers', () => Promise.all([
-      deployNodeServer(baseURL!, 221, freePort(), freePort()),
-      deployNodeServer(baseURL!, 222, freePort(), freePort()),
-    ]));
-
-    try {
-      await step('shell: goto', () => page.goto('/'));
-      await page.getByRole('button', { name: 'Physical' }).click();
-      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-
-      // Target n22a, then open the API panel.
-      await expect(aside.getByText('N-221', { exact: true })).toBeVisible({ timeout: 3_000 });
-      await aside.getByRole('button', { name: 'N-221' }).click();
-      await page.getByRole('button', { name: 'API' }).click();
-
-      const frameA = page.locator('iframe[title="Swagger UI for 221"]');
-      await expect(frameA).toBeVisible({ timeout: 3_000 });
-      expect(decodeURIComponent((await frameA.getAttribute('src')) ?? '')).toContain('/nodes/221/openapi.json');
-      // Shell stays mounted (no full-page navigation).
-      await expect(page.locator('header').getByText('CrowDB Storage Console')).toBeVisible();
-
-      // Switch the selection to n22b -> the iframe re-targets inline.
-      await aside.getByRole('button', { name: 'N-222' }).click();
-      const frameB = page.locator('iframe[title="Swagger UI for 222"]');
-      await expect(frameB).toBeVisible({ timeout: 3_000 });
-      expect(decodeURIComponent((await frameB.getAttribute('src')) ?? '')).toContain('/nodes/222/openapi.json');
-      await expect(page.locator('header').getByText('CrowDB Storage Console')).toBeVisible();
-    } finally {
-      await step('shell: stop servers', () => Promise.all([
-        stopNodeServer(baseURL!, 221),
-        stopNodeServer(baseURL!, 222),
-      ]));
-    }
   });
 
   test('embedding honors apiPrefix, readonly, and module opt-out', async ({ page, baseURL }) => {
@@ -95,7 +53,7 @@ test.describe('shell · embedding + swagger', () => {
     try {
       const apiPrefix = encodeURIComponent('/proxy/api');
       const proxyRequest = page.waitForRequest('**/proxy/api/**', { timeout: 3_000 });
-      await step('shell: goto embed', () => page.goto(`/?view=Logical&readonly=1&disableModules=${encodeURIComponent('kv,swagger')}&apiPrefix=${apiPrefix}`));
+      await step('shell: goto embed', () => page.goto(`/?domain=KV&readonly=1&disableModules=${encodeURIComponent('kv')}&apiPrefix=${apiPrefix}`));
 
       // apiPrefix: the SPA re-roots every data-plane call under /proxy/api.
       await step('shell: wait proxy request', () => proxyRequest);
@@ -108,9 +66,6 @@ test.describe('shell · embedding + swagger', () => {
       // readonly: no Add control in the sidebar.
       await expect(aside.getByRole('button', { name: 'Add Store' })).toHaveCount(0);
 
-      // modules: Swagger (API) button is absent from the header.
-      await expect(page.getByRole('button', { name: 'API' })).toHaveCount(0);
-
       // modules: selecting the group exposes Details/Activity but no KV tab.
       const group233 = page.getByRole('treeitem').filter({ hasText: 'G-2330' });
       const expandStore = page.getByRole('treeitem').filter({ hasText: 'S-233' }).getByRole('button', { name: 'Expand' });
@@ -122,5 +77,29 @@ test.describe('shell · embedding + swagger', () => {
     } finally {
       await step('shell: stop server', () => stopNodeServer(baseURL!, 23));
     }
+  });
+
+  test('domain toggle switches between Cluster, KV, and Chunk', async ({ page }) => {
+    await step('shell: goto', () => page.goto('/'));
+
+    // Domain toggle buttons are visible.
+    await expect(page.getByTestId('domain-cluster')).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByTestId('domain-kv')).toBeVisible();
+    await expect(page.getByTestId('domain-chunk')).toBeVisible();
+
+    // Default domain is Cluster.
+    await expect(page.getByTestId('domain-cluster')).toHaveAttribute('aria-pressed', 'true');
+
+    // Switch to KV.
+    await page.getByTestId('domain-kv').click();
+    await expect(page.getByTestId('domain-kv')).toHaveAttribute('aria-pressed', 'true');
+
+    // Switch to Chunk.
+    await page.getByTestId('domain-chunk').click();
+    await expect(page.getByTestId('domain-chunk')).toHaveAttribute('aria-pressed', 'true');
+
+    // Switch back to Cluster.
+    await page.getByTestId('domain-cluster').click();
+    await expect(page.getByTestId('domain-cluster')).toHaveAttribute('aria-pressed', 'true');
   });
 });

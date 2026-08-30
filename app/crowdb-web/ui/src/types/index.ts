@@ -188,10 +188,10 @@ export enum GroupHealth {
   Unknown = 'unknown'
 }
 
-export enum ViewMode {
-  Physical = 'Physical',
-  Logical = 'Logical',
-  Capacity = 'Capacity'
+export enum Domain {
+  Cluster = 'Cluster',
+  KV = 'KV',
+  Chunk = 'Chunk'
 }
 
 export enum ThemeMode {

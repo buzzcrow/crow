@@ -3,10 +3,10 @@
 
 import { useState, useMemo } from 'react';
 import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus, Rocket, Building2 } from 'lucide-react';
-import { useViewMode } from '../contexts/ViewModeContext';
+import { useDomain } from '../contexts/DomainContext';
 import { Tree, TreeNode } from '../components/Tree';
 import { Button } from '../components/ui/Button';
-import { ViewMode, Rack, EnrichedStoreView, NodeStore, CrowdbKVServerView, NodeHealth, DiskdbInstanceInfo, CapacityUsageResponse, HardwareCapacitySummary } from '../types';
+import { Domain, Rack, EnrichedStoreView, NodeStore, CrowdbKVServerView, NodeHealth, DiskdbInstanceInfo, CapacityUsageResponse, HardwareCapacitySummary } from '../types';
 import { crowdbKvServerByNodeId } from '../data/crowdbKvServers';
 import { DEFAULT_DC_ID, DEFAULT_DC_NAME } from '../data/defaultDatacenter';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole } from '../utils/entityDisplay';
@@ -66,7 +66,7 @@ export function Sidebar({
   diskdbNodeIds,
   diskdbHealthById,
 }: SidebarProps) {
-  const { viewMode } = useViewMode();
+  const { domain } = useDomain();
   const [filterQuery, setFilterQuery] = useState('');
   const serverByNodeId = useMemo(() => crowdbKvServerByNodeId(servers), [servers]);
 
@@ -79,7 +79,7 @@ export function Sidebar({
   };
 
   const treeNodes = useMemo<TreeNode[]>(() => {
-    if (viewMode === ViewMode.Physical) {
+    if (domain === Domain.Cluster) {
       if (racks.length === 0) return [];
       return [datacenterRoot(racks.map((rack) => ({
         id: `R-${rack.id}`,
@@ -232,7 +232,7 @@ export function Sidebar({
       })))];
     }
 
-    if (viewMode === ViewMode.Capacity) {
+    if (domain === Domain.Chunk) {
       // Capacity tree: rack → node → disk-group → disk.
       if (racks.length === 0) return [];
 
@@ -356,7 +356,7 @@ export function Sidebar({
         }),
       };
     }))];
-  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks, diskdbInstances, capacityUsage, hardwareCapacity, nodeDiskGroups, diskdbNodeIds, diskdbHealthById]);
+  }, [nodeHealthById, nodeStores, serverByNodeId, stores, domain, racks, diskdbInstances, capacityUsage, hardwareCapacity, nodeDiskGroups, diskdbNodeIds, diskdbHealthById]);
 
   const filtered = useMemo(() => {
     if (!filterQuery.trim()) return treeNodes;
@@ -399,10 +399,10 @@ export function Sidebar({
 
       <div className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-border-b tw-border-border">
         <h3 className="tw-text-xs tw-font-semibold tw-text-muted tw-uppercase tw-tracking-wider">
-          {viewMode === ViewMode.Physical ? 'Infrastructure' : viewMode === ViewMode.Logical ? 'KV Cluster' : 'Capacity'}
+          {domain === Domain.Cluster ? 'Cluster' : domain === Domain.KV ? 'KV' : 'Chunk'}
         </h3>
-        {!readonly && onAdd && viewMode !== ViewMode.Capacity && (
-          viewMode === ViewMode.Logical && !clusterInitialized ? (
+        {!readonly && onAdd && domain !== Domain.Chunk && (
+          domain === Domain.KV && !clusterInitialized ? (
             <Button
               variant="secondary"
               size="sm"
@@ -418,7 +418,7 @@ export function Sidebar({
               variant="ghost"
               size="sm"
               onClick={onAdd}
-              aria-label={viewMode === ViewMode.Logical ? 'Add Store' : 'Add Rack'}
+              aria-label={domain === Domain.KV ? 'Add Store' : 'Add Rack'}
               className="tw-h-7 tw-px-2"
             >
               <Plus className="tw-h-3.5 tw-w-3.5" />
@@ -435,7 +435,7 @@ export function Sidebar({
         </div>
       ) : filtered.length > 0 ? (
         <Tree
-          key={viewMode}
+          key={domain}
           nodes={filtered}
           defaultExpandedIds={expandedIds}
           onNodeClick={onNodeClick}
@@ -445,9 +445,9 @@ export function Sidebar({
         <div className="tw-flex tw-items-center tw-justify-center tw-flex-1 tw-text-sm tw-text-muted tw-px-4 tw-text-center">
           {filterQuery
             ? 'No matching items'
-            : viewMode === ViewMode.Physical
+            : domain === Domain.Cluster
               ? 'No racks registered'
-              : viewMode === ViewMode.Capacity
+              : domain === Domain.Chunk
                 ? 'No racks registered'
                 : clusterInitialized
                   ? 'No stores yet'

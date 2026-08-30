@@ -39,7 +39,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump: logical→physical UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV Cluster' }).click();
+        await page.getByRole('button', { name: 'KV' }).click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('LR-6600')).toBeVisible({ timeout: 3_000 });
         await aside.getByText('LR-6600').click();
@@ -50,7 +50,7 @@ test.describe('physical · node inspect & cross-jump', () => {
         // Single cross-jump button: logical Replica -> hosting physical Node.
         await inspector.getByRole('button', { name: /Show on node 6\b/ }).click();
 
-        await expect(page.getByRole('heading', { name: 'Infrastructure' })).toBeVisible({ timeout: 3_000 });
+        await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
         await expect(inspector.getByText('N-6', { exact: true })).toBeVisible({ timeout: 3_000 });
       });
     } finally {
@@ -68,7 +68,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump: physical→logical UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
 
         const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-62' });
         await expect(nodeItem).toBeVisible({ timeout: 3_000 });
@@ -107,7 +107,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump: replicas UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         // Per-node store detail loads after the tree mounts, so rows added by
@@ -163,7 +163,7 @@ test.describe('physical · node inspect & cross-jump', () => {
     try {
       await step('xjump2: cross-jump UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         // Select the physical node

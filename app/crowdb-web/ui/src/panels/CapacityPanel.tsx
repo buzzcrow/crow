@@ -14,7 +14,7 @@ import type {
   HardwareCapacitySummary,
   ScanStatusResponse,
 } from '../types';
-import { ViewMode } from '../types';
+import { Domain } from '../types';
 import { busyPct, formatBytes } from '../utils/capacity';
 import { ScannerPanel } from './ScannerPanel';
 import { ClusterView } from './capacity/ClusterView';
@@ -156,15 +156,15 @@ export function CapacityPanel({
   }, [readonly, success, error, log, onRefresh]);
 
   const selectRack = useCallback((id: number) => {
-    selectEntity({ type: 'Rack', id: String(id), viewMode: ViewMode.Capacity });
+    selectEntity({ type: 'Rack', id: String(id), domain: Domain.Chunk });
   }, [selectEntity]);
 
   const selectNode = useCallback((id: number) => {
-    selectEntity({ type: 'Node', id: String(id), viewMode: ViewMode.Capacity });
+    selectEntity({ type: 'Node', id: String(id), domain: Domain.Chunk });
   }, [selectEntity]);
 
   const selectDg = useCallback((id: number) => {
-    selectEntity({ type: 'DiskGroup', id: String(id), parentIds: { disk_group_id: id }, viewMode: ViewMode.Capacity });
+    selectEntity({ type: 'DiskGroup', id: String(id), parentIds: { disk_group_id: id }, domain: Domain.Chunk });
   }, [selectEntity]);
 
   const selectDisk = useCallback((dId: string, dgIdVal: number, rackIdVal: number, nodeIdVal: number) => {
@@ -172,7 +172,7 @@ export function CapacityPanel({
       type: 'Disk',
       id: dId,
       parentIds: { rack_id: rackIdVal, node_id: nodeIdVal, disk_group_id: dgIdVal, disk_id: dId },
-      viewMode: ViewMode.Capacity,
+      domain: Domain.Chunk,
     });
   }, [selectEntity]);
 

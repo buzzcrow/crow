@@ -4,7 +4,7 @@
 import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef, type ReactNode } from 'react';
 import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
-import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
+import { DomainProvider, useDomain } from './contexts/DomainContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { ActivityProvider, useActivity } from './contexts/ActivityContext';
@@ -16,6 +16,7 @@ import { Sidebar } from './shell/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 import { TreeNode } from './components/Tree';
 import { ContextMenu, useContextMenu, MenuItemOrSeparator } from './components/ContextMenu';
+import { cn } from './utils/cn';
 import type { MenuTarget } from './topology/TopologyCanvas';
 import {
   AddRackDialog,
@@ -32,7 +33,7 @@ import {
   InitClusterDialog,
   ZoneSelectDialog,
 } from './components/dialogs';
-import { ViewMode } from './types';
+import { Domain } from './types';
 import {
   removeRack,
   removeNode,
@@ -67,7 +68,6 @@ const TopologyCanvas = lazy(() =>
   import('./topology/TopologyCanvas').then((m) => ({ default: m.TopologyCanvas })),
 );
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
-const SwaggerPanel = lazy(() => import('./panels/SwaggerPanel').then((m) => ({ default: m.SwaggerPanel })));
 const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
 const CapacityPanel = lazy(() => import('./panels/CapacityPanel').then((m) => ({ default: m.CapacityPanel })));
 
@@ -79,17 +79,15 @@ export interface CrowdbConsoleProps {
   /** Hide all mutating controls. */
   readonly?: boolean;
   /** Opt feature areas in/out. */
-  modules?: Partial<Record<'racks' | 'nodes' | 'stores' | 'groups' | 'replicas' | 'kv' | 'swagger' | 'activity', boolean>>;
-  /** Initial view mode (default Physical). */
-  initialViewMode?: ViewMode;
-  /** Pre-select a node for the Swagger panel. */
-  initialNodeId?: string;
+  modules?: Partial<Record<'racks' | 'nodes' | 'stores' | 'groups' | 'replicas' | 'kv' | 'activity', boolean>>;
+  /** Initial domain (default Cluster). */
+  initialDomain?: Domain;
   /** Structured event callback for host integration. */
   onEvent?: (event: { type: string; payload?: unknown }) => void;
 }
 
-function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNodeId = '', onEvent }: CrowdbConsoleProps) {
-  const { viewMode } = useViewMode();
+function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: CrowdbConsoleProps) {
+  const { domain } = useDomain();
   const { selectedEntity } = useSelection();
   const { success, error } = useToast();
   const { log } = useActivity();
@@ -130,8 +128,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const { menuState, openMenu, closeMenu } = useContextMenu();
 
-  const physicalActive = viewMode === ViewMode.Physical;
-  const capacityActive = viewMode === ViewMode.Capacity;
+  const physicalActive = domain === Domain.Cluster;
+  const capacityActive = domain === Domain.Chunk;
   const { racks, nodes, nodeStores, nodeHealthById, loading: physLoading, error: physError, refresh: refreshPhysical } = usePhysicalTree({
     enabled: true,
     recursive: 2,
@@ -145,7 +143,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     pollIntervalInactive: 30000,
   });
   const { instances: diskdbInstances, usage: capacityUsage, hardwareCapacity, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
-    enabled: viewMode === ViewMode.Capacity || viewMode === ViewMode.Physical,
+    enabled: domain === Domain.Chunk || domain === Domain.Cluster,
     pollIntervalActive: 5000,
     pollIntervalInactive: 30000,
   });
@@ -675,19 +673,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const closeDialogs = useCallback(() => setDialog({}), []);
 
-  const swaggerEnabled = modules?.swagger !== false;
   const kvEnabled = modules?.kv !== false;
 
   const rackIds = useMemo(() => racks.map((r) => r.id), [racks]);
   const nodeIds = useMemo(() => nodes.map((n) => n.id), [nodes]);
-  const serverBackedNodeIds = useMemo(() => new Set(serverNodeIds), [serverNodeIds]);
-  const apiTargetNodeId = useMemo(() => {
-    if (selectedEntity?.type === 'Node' && serverBackedNodeIds.has(Number(selectedEntity.id))) return Number(selectedEntity.id);
-    const selectedParentNodeId = selectedEntity?.parentIds?.node_id;
-    if (selectedParentNodeId != null && serverBackedNodeIds.has(Number(selectedParentNodeId))) return Number(selectedParentNodeId);
-    if (initialNodeId && serverBackedNodeIds.has(Number(initialNodeId))) return Number(initialNodeId);
-    return servers[0]?.node_id ?? 0;
-  }, [initialNodeId, selectedEntity, serverBackedNodeIds, servers]);
 
   const defaultAddNodeRackId = useMemo(() => {
     if (dialog.addNode?.rackId) return dialog.addNode.rackId;
@@ -816,14 +805,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         clusterHealth={clusterHealth}
         onRefresh={handleRefresh}
         refreshing={refreshing}
-        apiTargetNodeId={String(apiTargetNodeId)}
-        showSwagger={swaggerEnabled}
-        swaggerActive={centerPanel === 'swagger'}
-        onToggleSwagger={() => setCenterPanel((p) => (p === 'swagger' ? 'topology' : 'swagger'))}
-        showKV={kvEnabled}
-        kvActive={centerPanel === 'kv'}
-        onToggleKV={() => setCenterPanel((p) => (p === 'kv' ? 'topology' : 'kv'))}
-        centerPanel={centerPanel}
         onShowTopology={() => setCenterPanel('topology')}
         onResetCluster={readonly ? undefined : handleResetCluster}
       />
@@ -872,12 +853,61 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           marginRight: selectedEntity ? inspectorWidth : 0,
         }}
       >
+        {/* Per-domain center-panel tab bar / toggle */}
+        {domain === Domain.KV && kvEnabled && (
+          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
+            <button
+              data-testid="kv-tab-cluster"
+              onClick={() => setCenterPanel('topology')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'topology'}
+            >
+              Cluster
+            </button>
+            <button
+              data-testid="kv-tab-kv"
+              onClick={() => setCenterPanel('kv')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'kv' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'kv'}
+            >
+              KV
+            </button>
+          </div>
+        )}
+        {domain === Domain.Chunk && (
+          <div className="tw-flex tw-items-center tw-gap-1 tw-px-4 tw-py-1.5 tw-border-b tw-border-border tw-bg-panel">
+            <button
+              data-testid="chunk-tab-capacity"
+              onClick={() => setCenterPanel('capacity')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'capacity' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'capacity'}
+            >
+              Capacity
+            </button>
+            <button
+              data-testid="chunk-tab-chunk"
+              onClick={() => setCenterPanel('chunk')}
+              className={cn(
+                'tw-px-3 tw-py-1 tw-text-xs tw-rounded-md tw-transition-colors',
+                centerPanel === 'chunk' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+              )}
+              aria-pressed={centerPanel === 'chunk'}
+            >
+              Chunk
+            </button>
+          </div>
+        )}
         <Suspense fallback={<BodyFallback />}>
-          {centerPanel === 'swagger' && swaggerEnabled ? (
-            <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
-          ) : centerPanel === 'kv' && kvEnabled ? (
-            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
-          ) : capacityActive ? (
+          {domain === Domain.Chunk && centerPanel === 'capacity' ? (
             <CapacityPanel
               instances={diskdbInstances}
               usage={capacityUsage}
@@ -888,6 +918,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               onRefresh={refreshCapacity}
               selectedEntity={selectedEntity}
             />
+          ) : domain === Domain.KV && centerPanel === 'kv' && kvEnabled ? (
+            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
           ) : (
             <TopologyCanvas
               racks={racks}
@@ -1111,7 +1143,7 @@ function BodyFallback() {
 
 export default function App(props: CrowdbConsoleProps = {}) {
   return (
-    <ViewModeProvider initialViewMode={props.initialViewMode}>
+    <DomainProvider initialDomain={props.initialDomain}>
       <SelectionProvider>
         <ToastProvider>
           <ActivityProvider>
@@ -1119,6 +1151,6 @@ export default function App(props: CrowdbConsoleProps = {}) {
           </ActivityProvider>
         </ToastProvider>
       </SelectionProvider>
-    </ViewModeProvider>
+    </DomainProvider>
   );
 }

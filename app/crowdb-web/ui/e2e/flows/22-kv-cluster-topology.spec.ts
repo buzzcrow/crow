@@ -148,7 +148,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
       await step('multi-rack: goto + verify UI', async () => {
         // Navigate to Cluster view and verify all groups appear in UI.
         await page.goto('/');
-        await page.getByRole('button', { name: 'KV Cluster' }).click();
+        await page.getByRole('button', { name: 'KV' }).click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         for (const gid of [1990, 1991, 1992]) {

@@ -120,7 +120,7 @@ test.describe('capacity · diskdb', () => {
 
   test('capacity tree, node context menu, and Deploy DiskDB dialog', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('button', { name: 'Capacity' }).click();
+    await page.getByRole('button', { name: 'Chunk' }).click();
 
     const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
@@ -207,7 +207,7 @@ test.describe('capacity · diskdb', () => {
 
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${DISKDB_RACK}` }).locator('button[aria-label="Expand"]');
@@ -486,7 +486,7 @@ test.describe('capacity · diskdb', () => {
 
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
@@ -770,7 +770,7 @@ test.describe('capacity · diskdb', () => {
       });
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
 
       const expandRackAgain = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
       if (await expandRackAgain.count() > 0) await expandRackAgain.click();
@@ -962,7 +962,7 @@ test.describe('capacity · diskdb', () => {
       });
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
@@ -1237,7 +1237,7 @@ test.describe('capacity · diskdb', () => {
       });
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
@@ -1336,7 +1336,7 @@ test.describe('capacity · diskdb', () => {
       // the API response before asserting DG visibility.
       const dgResponse = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
       await dgResponse;
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
@@ -1411,7 +1411,7 @@ test.describe('capacity · diskdb', () => {
           // --- Verify the capacity panel shows non-zero ---
           const dgResponse2 = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
           await page.goto('/');
-          await page.getByRole('button', { name: 'Capacity' }).click();
+          await page.getByRole('button', { name: 'Chunk' }).click();
           await dgResponse2;
           await expect(aside.getByText(/DG-590/, { exact: true })).toBeVisible({ timeout: 10_000 });
           // The Total Capacity card should show a non-zero value (not "0 B").
@@ -1460,7 +1460,7 @@ test.describe('capacity · diskdb', () => {
       }
 
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${DISKDB_RACK}` }).locator('button[aria-label="Expand"]');
@@ -1502,7 +1502,7 @@ test.describe('capacity · diskdb', () => {
       // the node context menu — those are Physical-view operations on
       // the DDB-{nodeId} server item.
       await page.goto('/');
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByRole('button', { name: 'Cluster' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForMenu = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForMenu.count() > 0) await expandNodeForMenu.first().click();
@@ -1570,7 +1570,7 @@ test.describe('capacity · diskdb', () => {
       // Note: HealthBadge renders in compact mode (icon only, no text),
       // so we assert on the title attribute, not text content.
       await page.goto('/');
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByRole('button', { name: 'Cluster' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForDdb = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForDdb.count() > 0) await expandNodeForDdb.first().click();
@@ -1590,7 +1590,7 @@ test.describe('capacity · diskdb', () => {
       // --- restart DDB after stop (verifies entry was preserved) ---
       // Physical view: right-click DDB-{nodeId} → Restart DiskDB.
       await page.goto('/');
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByRole('button', { name: 'Cluster' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNodeForRestart = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNodeForRestart.count() > 0) await expandNodeForRestart.first().click();
@@ -1619,7 +1619,7 @@ test.describe('capacity · diskdb', () => {
       // Regression: http_stop_node_server dropped the shared monitor_cache
       // entry, making DDB health go Unknown. Also, server_for_node could
       // find DDB instead of KV.
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByRole('button', { name: 'Cluster' }).click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
       if (await expandNode.count() > 0) await expandNode.first().click();
@@ -1813,7 +1813,7 @@ test.describe('capacity · diskdb', () => {
 
       // --- Verify the Inspector shows disk list when DG is selected ---
       await page.goto('/');
-      await page.getByRole('button', { name: 'Capacity' }).click();
+      await page.getByRole('button', { name: 'Chunk' }).click();
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const expandRack = aside.getByRole('treeitem').filter({ hasText: `R-${rackId}` }).locator('button[aria-label="Expand"]');
@@ -1895,7 +1895,7 @@ test.describe('capacity · diskdb', () => {
       // slow CI runners. Wait for the disk-groups response for this
       // node before asserting, rather than relying on the 5 s poll.
       const dgResponse = page.waitForResponse((r: { url(): string }) => r.url().includes(`/nodes/${nodeId}/disk-groups`));
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByRole('button', { name: 'Cluster' }).click();
       await dgResponse;
 
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });

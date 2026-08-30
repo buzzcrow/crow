@@ -1,27 +1,18 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
-// Licensed under the Apache License, Version 2.0.
 
-import { RefreshCw, Layers, Network, FileJson, Database, RotateCcw, HardDrive } from 'lucide-react';
-import { useViewMode } from '../contexts/ViewModeContext';
-import { ViewMode } from '../types';
+import { RefreshCw, Network, Database, RotateCcw, HardDrive } from 'lucide-react';
+import { useDomain } from '../contexts/DomainContext';
+import { Domain } from '../types';
 import { cn } from '../utils/cn';
 
 export type ClusterHealth = 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
 
-export type CenterPanelMode = 'topology' | 'swagger' | 'kv';
+export type CenterPanelMode = 'topology' | 'kv' | 'capacity' | 'chunk';
 
 interface HeaderProps {
   clusterHealth: ClusterHealth;
   onRefresh: () => void;
   refreshing?: boolean;
-  apiTargetNodeId: string;
-  swaggerActive?: boolean;
-  onToggleSwagger?: () => void;
-  showSwagger?: boolean;
-  showKV?: boolean;
-  kvActive?: boolean;
-  onToggleKV?: () => void;
-  centerPanel?: CenterPanelMode;
   onShowTopology?: () => void;
   onResetCluster?: () => void;
 }
@@ -44,18 +35,10 @@ export function Header({
   clusterHealth,
   onRefresh,
   refreshing,
-  apiTargetNodeId,
-  swaggerActive,
-  onToggleSwagger,
-  showSwagger = true,
-  showKV = false,
-  kvActive = false,
-  onToggleKV,
-  centerPanel = 'topology',
   onShowTopology,
   onResetCluster,
 }: HeaderProps) {
-  const { viewMode, setViewMode } = useViewMode();
+  const { domain, setDomain } = useDomain();
 
   return (
     <header className="tw-fixed tw-top-0 tw-left-0 tw-right-0 tw-z-40 tw-h-14 tw-bg-panel tw-border-b tw-border-border tw-flex tw-items-center tw-gap-4 tw-px-4">
@@ -76,77 +59,44 @@ export function Header({
         {clusterHealth}
       </span>
 
-      {/* View-mode toggle */}
+      {/* Domain toggle */}
       <div className="tw-flex tw-items-center tw-rounded-md tw-border tw-border-border tw-overflow-hidden">
         <button
-          onClick={() => { setViewMode(ViewMode.Physical); onShowTopology?.(); }}
+          data-testid="domain-cluster"
+          onClick={() => { setDomain(Domain.Cluster); onShowTopology?.(); }}
           className={cn(
             'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
-            viewMode === ViewMode.Physical && centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+            domain === Domain.Cluster ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
           )}
-          aria-pressed={viewMode === ViewMode.Physical && centerPanel === 'topology'}
+          aria-pressed={domain === Domain.Cluster}
         >
-          <Network className="tw-h-3.5 tw-w-3.5" /> Physical
+          <Network className="tw-h-3.5 tw-w-3.5" /> Cluster
         </button>
         <button
-          onClick={() => { setViewMode(ViewMode.Logical); onShowTopology?.(); }}
+          data-testid="domain-kv"
+          onClick={() => { setDomain(Domain.KV); onShowTopology?.(); }}
           className={cn(
             'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
-            viewMode === ViewMode.Logical && centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+            domain === Domain.KV ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
           )}
-          aria-pressed={viewMode === ViewMode.Logical && centerPanel === 'topology'}
-        >
-          <Layers className="tw-h-3.5 tw-w-3.5" /> KV Cluster
-        </button>
-        <button
-          onClick={() => { setViewMode(ViewMode.Capacity); onShowTopology?.(); }}
-          className={cn(
-            'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
-            viewMode === ViewMode.Capacity ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
-          )}
-          aria-pressed={viewMode === ViewMode.Capacity}
-        >
-          <HardDrive className="tw-h-3.5 tw-w-3.5" /> Capacity
-        </button>
-      </div>
-
-      {/* KV operator toggle */}
-      {showKV && onToggleKV && (
-        <button
-          onClick={onToggleKV}
-          className={cn(
-            'tw-flex tw-items-center tw-gap-1.5 tw-px-2.5 tw-py-1.5 tw-rounded-md tw-text-xs tw-border tw-transition-colors',
-            kvActive
-              ? 'tw-bg-accent/15 tw-text-accent tw-border-accent/30'
-              : 'tw-text-muted tw-border-border hover:tw-bg-bg',
-          )}
-          aria-pressed={kvActive}
-          title="KV operator panel"
+          aria-pressed={domain === Domain.KV}
         >
           <Database className="tw-h-3.5 tw-w-3.5" /> KV
         </button>
-      )}
+        <button
+          data-testid="domain-chunk"
+          onClick={() => { setDomain(Domain.Chunk); onShowTopology?.(); }}
+          className={cn(
+            'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
+            domain === Domain.Chunk ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+          )}
+          aria-pressed={domain === Domain.Chunk}
+        >
+          <HardDrive className="tw-h-3.5 tw-w-3.5" /> Chunk
+        </button>
+      </div>
 
       <div className="tw-flex-1" />
-
-      {/* Swagger / API docs toggle */}
-      {showSwagger && onToggleSwagger && (
-        <button
-          onClick={onToggleSwagger}
-          disabled={!apiTargetNodeId}
-          className={cn(
-            'tw-flex tw-items-center tw-gap-1.5 tw-px-2.5 tw-py-1.5 tw-rounded-md tw-text-xs tw-border tw-transition-colors',
-            swaggerActive
-              ? 'tw-bg-accent/15 tw-text-accent tw-border-accent/30'
-              : 'tw-text-muted tw-border-border hover:tw-bg-bg',
-            !apiTargetNodeId && 'tw-opacity-50 tw-cursor-not-allowed hover:tw-bg-transparent',
-          )}
-          aria-pressed={swaggerActive}
-          title={apiTargetNodeId ? `Show API for ${apiTargetNodeId}` : 'No node available for API'}
-        >
-          <FileJson className="tw-h-3.5 tw-w-3.5" /> API
-        </button>
-      )}
 
       {onResetCluster && (
         <button

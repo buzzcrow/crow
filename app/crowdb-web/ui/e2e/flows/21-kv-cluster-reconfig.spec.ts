@@ -67,14 +67,14 @@ async function waitForReplicaRunning(baseURL: string, storeId: number, groupId: 
 
 // ── UI helpers ───────────────────────────────────────────────────────
 
-async function openPhysical(page: import('@playwright/test').Page) {
+async function openCluster(page: import('@playwright/test').Page) {
   // Navigate to root first only if we're not already on the app page.
   // Avoid full page.goto when switching views — the app is a SPA.
   const url = page.url();
   if (!url.includes('127.0.0.1') && !url.includes('localhost')) {
     await page.goto('/');
   }
-  await page.getByRole('button', { name: 'Physical' }).click();
+  await page.getByRole('button', { name: 'Cluster' }).click();
 }
 
 async function openKvCluster(page: import('@playwright/test').Page) {
@@ -82,7 +82,7 @@ async function openKvCluster(page: import('@playwright/test').Page) {
   if (!url.includes('127.0.0.1') && !url.includes('localhost')) {
     await page.goto('/');
   }
-  await page.getByRole('button', { name: 'KV Cluster' }).click();
+  await page.getByRole('button', { name: 'KV' }).click();
 }
 
 async function openKvPanel(page: import('@playwright/test').Page, storeId: number, groupId: number) {
@@ -199,7 +199,7 @@ test.describe('kv cluster · reconfiguration', () => {
       const stopNode = [421, 422, 423].find((n) => n !== leaderNode)!;
 
       // Stop the non-leader server via the Physical-view context menu.
-      await stepTime('420: openPhysical', () => openPhysical(page));
+      await stepTime('420: openCluster', () => openCluster(page));
       await stepTime('420: stopServerViaMenu', () => stopServerViaMenu(page, stopNode));
 
       // Tree health: the stopped server's badge drops from Healthy.
@@ -215,7 +215,7 @@ test.describe('kv cluster · reconfiguration', () => {
       });
 
       // Restart via the context menu; poll the API until the node rejoins.
-      await stepTime('420: openPhysical(2)', () => openPhysical(page));
+      await stepTime('420: openCluster(2)', () => openCluster(page));
       await stepTime('420: restartServerViaMenu', () => restartServerViaMenu(page, stopNode));
       await stepTime('420: waitForReachableReplicas', () => waitForReachableReplicas(baseURL!, 420, 4200, 3));
     } finally {
@@ -249,7 +249,7 @@ test.describe('kv cluster · reconfiguration', () => {
       expect(leaderNode, 'leader should be elected').not.toBeNull();
 
       // Stop the leader via the context menu.
-      await stepTime('430: openPhysical', () => openPhysical(page));
+      await stepTime('430: openCluster', () => openCluster(page));
       await stepTime('430: stopServerViaMenu', () => stopServerViaMenu(page, leaderNode!));
       await stepTime('430: healthBadgeCheck', () =>
         expect(serverHealthBadge(page, leaderNode!).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 }));
@@ -264,7 +264,7 @@ test.describe('kv cluster · reconfiguration', () => {
       });
 
       // Restart the old leader; poll the API until all 3 replicas rejoin.
-      await stepTime('430: openPhysical(2)', () => openPhysical(page));
+      await stepTime('430: openCluster(2)', () => openCluster(page));
       await stepTime('430: restartServerViaMenu', () => restartServerViaMenu(page, leaderNode!));
       await stepTime('430: waitForReachableReplicas', () => waitForReachableReplicas(baseURL!, 430, 4300, 3));
     } finally {
@@ -302,7 +302,7 @@ test.describe('kv cluster · reconfiguration', () => {
       const nonLeader1 = [441, 442, 443, 444, 445].find((n) => n !== leaderNode)!;
 
       // Delete the first non-leader node via the context menu + confirm dialog.
-      await stepTime('440: openPhysical', () => openPhysical(page));
+      await stepTime('440: openCluster', () => openCluster(page));
       await stepTime('440: deleteNodeViaMenu(1)', () => deleteNodeViaMenu(page, nonLeader1));
 
       // Quorum intact (4-of-5): KV ops through the UI still succeed.
@@ -314,7 +314,7 @@ test.describe('kv cluster · reconfiguration', () => {
 
       // Delete a second non-leader node (down to 3 replicas — exactly majority).
       const nonLeader2 = [441, 442, 443, 444, 445].find((n) => n !== leaderNode && n !== nonLeader1)!;
-      await stepTime('440: openPhysical(2)', () => openPhysical(page));
+      await stepTime('440: openCluster(2)', () => openCluster(page));
       await stepTime('440: deleteNodeViaMenu(2)', () => deleteNodeViaMenu(page, nonLeader2));
 
       await stepTime('440: openKvPanel(2)', () => openKvPanel(page, 440, 4400));
@@ -413,7 +413,7 @@ test.describe('kv cluster · reconfiguration', () => {
       const stopNode = leaderA !== 463 && leaderB !== 463 ? 463 : leaderA === 461 ? 462 : 461;
 
       // Stop via the Physical-view context menu.
-      await openPhysical(page);
+      await openCluster(page);
       await stopServerViaMenu(page, stopNode);
       await expect(serverHealthBadge(page, stopNode).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 });
 
@@ -431,7 +431,7 @@ test.describe('kv cluster · reconfiguration', () => {
       }
 
       // Restart; poll the API until store A has all replicas reachable.
-      await openPhysical(page);
+      await openCluster(page);
       await restartServerViaMenu(page, stopNode);
       await waitForReachableReplicas(baseURL!, 460, 4600, 3);
 

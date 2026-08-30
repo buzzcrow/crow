@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Node, Edge, MarkerType } from 'reactflow';
-import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, ViewMode, CrowdbKVServerView, NodeHealth, ReplicaState } from '../types';
+import { Rack, Node as NodeEntity, EnrichedStoreView, NodeStore, Domain, CrowdbKVServerView, NodeHealth, ReplicaState } from '../types';
 import type { SelectedEntity } from '../contexts/SelectionContext';
 import { crowdbKvServerByNodeId } from '../data/crowdbKvServers';
 import { DEFAULT_DC_ID, DEFAULT_DC_NAME } from '../data/defaultDatacenter';
@@ -10,7 +10,7 @@ import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel
 
 /**
  * React Flow node data shared by both views. `entity` is the selectable
- * identity (without `viewMode`, which the canvas stamps on click). `layer`
+ * identity (without `domain`, which the canvas stamps on click). `layer`
  * drives the deterministic layout in `layout.ts`.
  */
 export interface FlowNodeData {
@@ -24,7 +24,7 @@ export interface FlowNodeData {
   /** Whether this replica is the group leader. */
   leader?: boolean;
   layer: number;
-  entity?: Omit<SelectedEntity, 'viewMode'>;
+  entity?: Omit<SelectedEntity, 'domain'>;
   isSelected?: boolean;
 }
 
@@ -392,8 +392,8 @@ export function buildCapacityFlow(
   return { nodes: flowNodes, edges: flowEdges };
 }
 
-export function buildFlowForViewMode(
-  viewMode: ViewMode,
+export function buildFlowForDomain(
+  domain: Domain,
   racks: Rack[],
   nodes: NodeEntity[],
   servers: CrowdbKVServerView[],
@@ -403,10 +403,10 @@ export function buildFlowForViewMode(
   diskdbNodeIds: Set<number> = new Set(),
   diskdbInstances: { instance_id: number; owned_dg_ids: number[] }[] = [],
 ): { nodes: Node[]; edges: Edge[] } {
-  switch (viewMode) {
-    case ViewMode.Physical:
+  switch (domain) {
+    case Domain.Cluster:
       return buildPhysicalFlow(racks, nodes, servers, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances);
-    case ViewMode.Capacity:
+    case Domain.Chunk:
       return buildCapacityFlow(racks, nodes, diskdbNodeIds, nodeHealthById);
     default:
       return buildLogicalFlow(stores);

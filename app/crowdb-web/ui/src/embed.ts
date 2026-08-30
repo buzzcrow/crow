@@ -9,6 +9,6 @@
  *   <CrowdbConsole apiPrefix="/storage/crowdb-kv/api" readonly />
  */
 export { default as CrowdbConsole, type CrowdbConsoleProps } from './App';
-export { ViewMode } from './types';
+export { Domain } from './types';
 export type { ActivityLogEntry } from './types';
 export type { SelectedEntity } from './contexts/SelectionContext';

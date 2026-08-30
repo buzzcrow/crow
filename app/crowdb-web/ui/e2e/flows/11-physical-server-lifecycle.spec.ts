@@ -17,7 +17,7 @@ test.describe('physical · server lifecycle', () => {
 
       await step('ctx-menu: no-server UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         const expandRack = aside.getByRole('treeitem').filter({ hasText: 'R-490' }).locator('button[aria-label="Expand"]');
@@ -49,7 +49,7 @@ test.describe('physical · server lifecycle', () => {
 
       await step('ctx-menu: with-server UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         // Wait for the server to appear in the tree (polling takes a moment).
@@ -82,7 +82,7 @@ test.describe('physical · server lifecycle', () => {
 
       await step('ctx-menu: server-node UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         // Wait for the server node to appear.
@@ -114,7 +114,7 @@ test.describe('physical · server lifecycle', () => {
     try {
       await step('deploy-ui: deploy dialog', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('N-4', { exact: true })).toBeVisible({ timeout: 3_000 });
 
@@ -157,7 +157,7 @@ test.describe('physical · server lifecycle', () => {
     try {
       await step('ping-restart-stop: ping', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
         const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-27' });
         await expect(nodeItem).toBeVisible({ timeout: 3_000 });
 
@@ -190,7 +190,7 @@ test.describe('physical · server lifecycle', () => {
       });
 
       // Health pill: the server badge should drop from Healthy after stop
-      // (usePhysicalTree polls every 1s; monitor_cache is dropped on stop).
+      // (useClusterTree polls every 1s; monitor_cache is dropped on stop).
       await step('ping-restart-stop: health badge', async () => {
         const healthBadge = serverItem.locator('[title]').filter({ hasText: /^(Healthy|Failed|Unknown|Degraded)$/ });
         await expect(healthBadge.filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 });
@@ -227,7 +227,7 @@ test.describe('physical · server lifecycle', () => {
       try {
         await step('cascade: delete node UI', async () => {
           await page.goto('/');
-          await page.getByRole('button', { name: 'Physical' }).click();
+          await page.getByRole('button', { name: 'Cluster' }).click();
 
           const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
           // Wait for server to appear so the cascade knows to remove it.
@@ -268,7 +268,7 @@ test.describe('physical · server lifecycle', () => {
 
       await step('cascade: delete svc UI', async () => {
         await page.goto('/');
-        await page.getByRole('button', { name: 'Physical' }).click();
+        await page.getByRole('button', { name: 'Cluster' }).click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('KV-494')).toBeVisible({ timeout: 10_000 });

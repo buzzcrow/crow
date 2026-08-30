@@ -97,7 +97,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
   }, [groupIdsInStore, groupId, storeId]);
 
   useEffect(() => {
-    if (selectedEntity?.type === 'Group' && selectedEntity.viewMode === 'Logical') {
+    if (selectedEntity?.type === 'Group' && selectedEntity.domain === 'KV') {
       const sid = selectedEntity.parentIds?.store_id;
       const gid = selectedEntity.id;
       if (sid && stores.some((s) => String(s.store_id) === sid)) {

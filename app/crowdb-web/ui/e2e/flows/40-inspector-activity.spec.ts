@@ -54,7 +54,7 @@ test.describe('inspector · activity log', () => {
       await putKey(page, 'activity-key', 'activity-val');
 
       // Select a node in the tree to make the inspector visible
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByRole('button', { name: 'Cluster' }).click();
 
       // Try to find and click the node — rack may already be expanded
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-32' });
@@ -97,7 +97,7 @@ test.describe('inspector · activity log', () => {
 
     try {
       await step('inspector: goto', () => page.goto('/'));
-      await page.getByRole('button', { name: 'Physical' }).click();
+      await page.getByRole('button', { name: 'Cluster' }).click();
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-47' });
       await expect(nodeItem).toBeVisible({ timeout: 10_000 });
 

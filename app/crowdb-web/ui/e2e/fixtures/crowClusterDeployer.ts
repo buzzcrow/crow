@@ -315,6 +315,16 @@ export async function resetAll(baseURL: string) {
   }
 }
 
+export async function clusterClean(baseURL: string) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post('/api/cluster/clean');
+    expect(response.status(), await response.text()).toBe(204);
+  } finally {
+    await api.dispose();
+  }
+}
+
 // ── DiskDB helpers ───────────────────────────────────────────────────
 
 export const DEFAULT_DISKDB_BINARY =
