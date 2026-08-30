@@ -64,5 +64,8 @@ pub use sysmd::CrowdbSysmdClient;
 pub use watch_notify::{WatchNotify, WatchNotifyClient, WatchSubscription};
 
 /// Re-exported so callers don't need a direct `crowdb_kv` dependency just to
-/// pick a read mode.
+/// pick a read mode or use snapshot DTOs.
 pub use crowdb_kv::rpc::ReadMode;
+pub use crowdb_kv::rpc::{
+    CreateSnapshotResponse, ReleaseSnapshotResponse, SnapshotInfo, SnapshotScanResponse,
+};
