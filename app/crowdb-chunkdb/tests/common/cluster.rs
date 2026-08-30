@@ -32,7 +32,7 @@ use crowdb_diskdb::recovery::ZoneLoader;
 use crowdb_diskdb::scanner::ScanState;
 use crowdb_diskdb::service::DiskdbRpcService;
 use crowdb_diskdb_client::DiskdbRpcTransport;
-use crowdb_kv_client::{ClientConfig, CrowdbClient, HardwareClient, RetryConfig, ServiceRegistryClient};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
 use crowdb_protocol::common::{DiskId, HwStatus, NodeValue, RackValue};
 use crowdb_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
 use serde_json::Value;
@@ -271,8 +271,8 @@ impl KvCluster {
         }
     }
 
-    pub fn make_crowdb_client(&self) -> Arc<CrowdbClient> {
-        let kv = CrowdbClient::new(test_client_config(self.mgmt_endpoints.clone()));
+    pub fn make_crowdb_client(&self) -> Arc<CrowdbKvClient> {
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         kv.seed_leader(0, 1, self.group1_leader_endpoint.clone());
         Arc::new(kv)

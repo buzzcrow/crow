@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
 use crate::Cli;
-use crowdb_kv_client::{ClientConfig, CrowdbClient, GetOutcome, ReadMode};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, GetOutcome, ReadMode};
 
 #[derive(Subcommand, Debug)]
 pub enum KvVerb {
@@ -196,14 +196,14 @@ struct KvPutArgs<'a> {
 /// Resolve the group's current leader endpoint via the console (the CLI
 /// never talks to a `crowdb-kv-server` mgmt API directly -- see
 /// `crate::utils::client::console_client`), then hand it to a fresh
-/// [`CrowdbClient`] pre-seeded with that endpoint via `seed_leader`. This
+/// [`CrowdbKvClient`] pre-seeded with that endpoint via `seed_leader`. This
 /// keeps the CLI's existing console-routed discovery unchanged while
-/// gaining `CrowdbClient`'s retry/backoff and connection pooling on the
+/// gaining `CrowdbKvClient`'s retry/backoff and connection pooling on the
 /// actual RPC call (C1-C3). An empty mgmt-seed list
 /// is fine here: the CLI is a one-shot process that already knows the
-/// leader; `CrowdbClient` only falls back to polling `/topology` if that
+/// leader; `CrowdbKvClient` only falls back to polling `/topology` if that
 /// seeded endpoint later returns `NotLeaderHint` or a transport error.
-async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<CrowdbClient, ExitCode> {
+async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<CrowdbKvClient, ExitCode> {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return Err(c),
@@ -215,7 +215,7 @@ async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<Cr
             return Err(ExitCode::from(2));
         }
     };
-    let kv = CrowdbClient::new(ClientConfig::new(Vec::new()));
+    let kv = CrowdbKvClient::new(ClientConfig::new(Vec::new()));
     kv.seed_leader(store_id, group_id, endpoint);
     Ok(kv)
 }

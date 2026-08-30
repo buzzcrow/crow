@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crowdb_diskdb::ddb_kv_client::DdbKvClient;
-use crowdb_kv_client::{ClientConfig, CrowdbClient, HardwareClient, RetryConfig, ServiceRegistryClient};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
 use serde_json::Value;
 
 // ── process management ──────────────────────────────────────────
@@ -268,7 +268,7 @@ impl KvCluster {
     /// recover if the leader changes.
     #[must_use]
     pub fn make_ddb_kv_client(&self) -> DdbKvClient {
-        let kv = CrowdbClient::new(test_client_config(self.mgmt_endpoints.clone()));
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 1, self.group1_leader_endpoint.clone());
         DdbKvClient::new(kv)
     }
@@ -276,7 +276,7 @@ impl KvCluster {
     /// Build a `HardwareClient` seeded with the group-0 leader endpoint.
     #[must_use]
     pub fn make_hardware_client(&self) -> HardwareClient {
-        let kv = CrowdbClient::new(test_client_config(self.mgmt_endpoints.clone()));
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         HardwareClient::new(kv)
     }
@@ -284,7 +284,7 @@ impl KvCluster {
     /// Build a `ServiceRegistryClient` seeded with the group-0 leader.
     #[must_use]
     pub fn make_service_registry_client(&self) -> ServiceRegistryClient {
-        let kv = CrowdbClient::new(test_client_config(self.mgmt_endpoints.clone()));
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         ServiceRegistryClient::new(kv)
     }

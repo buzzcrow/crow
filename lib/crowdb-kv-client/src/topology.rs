@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 
 /// Eviction hook: called with the set of `(store_id, group_id)` keys
 /// that disappeared from the fresh `/topology` body. Used by
-/// `CrowdbClient` to evict stale `write_slot_highwater` entries.
+/// `CrowdbKvClient` to evict stale `write_slot_highwater` entries.
 pub type EvictionHook = Arc<dyn Fn(&HashSet<(u64, u64)>) + Send + Sync>;
 
 pub struct TopologyCache {
@@ -39,7 +39,7 @@ pub struct TopologyCache {
     /// request (: "not a storm").
     refresh_gate: AsyncMutex<Instant>,
     /// Optional eviction hook called with groups that disappeared from
-    /// a fresh `/topology` body. Set by `CrowdbClient::new` to evict
+    /// a fresh `/topology` body. Set by `CrowdbKvClient::new` to evict
     /// stale `write_slot_highwater` entries.
     eviction_hook: Option<EvictionHook>,
 }
@@ -209,7 +209,7 @@ impl TopologyCache {
         // Evict stale entries: groups present in the cache but absent
         // from the fresh body. A removed group's stale leader endpoint
         // self-heals via `NotLeaderHint`, but evicting keeps the cache
-        // clean. The eviction hook lets `CrowdbClient` evict stale
+        // clean. The eviction hook lets `CrowdbKvClient` evict stale
         // `write_slot_highwater` entries — a stale `min_slot`
         // high-watermark does NOT self-heal (silent empty reads forever).
         let evicted: Vec<(u64, u64)> = self

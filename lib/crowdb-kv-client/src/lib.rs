@@ -44,7 +44,7 @@ pub use chunkdb_binding_strategy::{
     compute_sub_range_assignment, ChunkdbRangeStrategy, DEFAULT_SUB_RANGE_COUNT,
 };
 pub use client::{
-    new_client_id, BatchOp, CrowdbClient, GetOutcome, JournalOp, JournalScanOutcome, ScanOutcome,
+    new_client_id, BatchOp, CrowdbKvClient, GetOutcome, JournalOp, JournalScanOutcome, ScanOutcome,
     WriteOutcome,
 };
 pub use config::{ClientConfig, ReadEndpointPolicy, RetryConfig};

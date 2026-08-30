@@ -45,7 +45,7 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
             continue;
         }
         if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
-            let kv = crowdb_kv_client::CrowdbClient::new(crowdb_kv_client::ClientConfig::new(Vec::new()));
+            let kv = crowdb_kv_client::CrowdbKvClient::new(crowdb_kv_client::ClientConfig::new(Vec::new()));
             kv.seed_leader(0, 0, ep);
             let svc = ServiceRegistryClient::new(kv);
             let transport = std::sync::Arc::new(DiskdbRpcTransport::new());

@@ -102,10 +102,10 @@ async fn wipe_one_node(
     store_id: u64,
     group_id: u64,
 ) -> Result<crowdb_protocol::WipeResult, String> {
-    use crowdb_kv_client::{ClientConfig, CrowdbClient, KVClusterAdmin, KVClusterMetaClient};
+    use crowdb_kv_client::{ClientConfig, CrowdbKvClient, KVClusterAdmin, KVClusterMetaClient};
     // The wipe does not touch group0 meta, so the meta client is a
     // throwaway — KVClusterAdmin requires it by construction.
-    let client = CrowdbClient::new(ClientConfig::new(Vec::new()));
+    let client = CrowdbKvClient::new(ClientConfig::new(Vec::new()));
     let meta = KVClusterMetaClient::new(client);
     let admin = KVClusterAdmin::new(meta, mgmt_url);
     admin
@@ -119,10 +119,10 @@ async fn wipe_one_node(
 /// the cluster is idle (the put is deleted immediately); if it times
 /// out or fails with no-leader, the cluster is busy or mid-election.
 async fn cluster_busy_probe(handle: &ClusterHandle) -> Result<(), String> {
-    use crowdb_kv_client::{ClientConfig, CrowdbClient};
+    use crowdb_kv_client::{ClientConfig, CrowdbKvClient};
     let mut cfg = ClientConfig::new(Vec::new());
     cfg.retry.max_retries = 1;
-    let client = CrowdbClient::new(cfg);
+    let client = CrowdbKvClient::new(cfg);
     client.seed_leader(handle.store_id, handle.group_id, handle.leader_endpoint.clone());
     let probe_key = b"__bench_clean_probe__";
     let put = tokio::time::timeout(

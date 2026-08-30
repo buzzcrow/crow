@@ -287,7 +287,7 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crowdb_kv_
             return None;
         }
     }
-    let kv = crowdb_kv_client::CrowdbClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds));
+    let kv = crowdb_kv_client::CrowdbKvClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds));
     kv.seed_leader(0, 0, rpc_eps[0].clone());
     Some(crowdb_kv_client::HardwareClient::new(kv))
 }

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crowdb_kv_client::{ClientConfig, CrowdbClient, ServiceRegistryClient};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, ServiceRegistryClient};
 use crowdb_protocol::common::HostedGroup;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -40,7 +40,7 @@ impl KeepAliveLoop {
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
         let ep = group0_endpoint.to_string();
         let handle = tokio::spawn(async move {
-            let kv_client = CrowdbClient::new(ClientConfig::new(vec![ep.clone()]));
+            let kv_client = CrowdbKvClient::new(ClientConfig::new(vec![ep.clone()]));
             kv_client.seed_leader(0, 0, ep);
             let svc = ServiceRegistryClient::new(kv_client);
 

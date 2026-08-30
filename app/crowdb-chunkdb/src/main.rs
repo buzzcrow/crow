@@ -18,7 +18,8 @@ use crowdb_chunkdb::service::ChunkdbRpcService;
 use crowdb_chunkdb::storage::ChunkStore;
 use crowdb_chunkdb::topology::{notify::NotifyHandler, refresh::run_refresh_loop, TopologyCache};
 use crowdb_kv_client::{
-    ClientConfig, CrowdbClient, HardwareClient, RangeBindingClient, ServiceRegistryClient, WatchNotifyClient,
+    ClientConfig, CrowdbKvClient, HardwareClient, RangeBindingClient, ServiceRegistryClient,
+    WatchNotifyClient,
 };
 use tracing::{info, warn};
 
@@ -75,7 +76,7 @@ async fn main() {
         .expect("valid rpc_listen_addr");
 
     // Build KV client for group-0 topology access.
-    let kv = Arc::new(CrowdbClient::new(ClientConfig::new(
+    let kv = Arc::new(CrowdbKvClient::new(ClientConfig::new(
         config.server.kv_server_mgmt_seeds.clone(),
     )));
     let hw = HardwareClient::from_shared(Arc::clone(&kv));

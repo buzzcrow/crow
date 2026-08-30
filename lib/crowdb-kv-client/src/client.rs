@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! [`CrowdbClient`]: the C1-C3 client library (—
+//! [`CrowdbKvClient`]: the C1-C3 client library (—
 //! topology cache, retry/idempotency, and `ReadMode` routing on top of
 //! `crowdb_kv`'s generated `KvService` client.
 
@@ -156,7 +156,7 @@ impl Drop for InFlightGuard {
 /// API, per-group leader cache, retry loop reusing `(client_id, seq)` across
 /// retries of one logical write, and `ReadMode` routing including
 /// `MinSlot` client-side slot tracking.
-pub struct CrowdbClient {
+pub struct CrowdbKvClient {
     pub(crate) topology: TopologyCache,
     pub(crate) retry: RetryConfig,
     client_id: u64,
@@ -195,7 +195,7 @@ pub struct CrowdbClient {
     rpc_transport: Option<Arc<crate::kv_rpc_transport::KvRpcTransport>>,
 }
 
-impl CrowdbClient {
+impl CrowdbKvClient {
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
         Self::build(config, None)
@@ -331,7 +331,7 @@ impl CrowdbClient {
     /// group, bypassing `/topology` discovery entirely. For callers that
     /// already resolved an endpoint through some other discovery path
     /// (e.g. `crowdb-console`'s own management API) and just want
-    /// `CrowdbClient`'s retry/pool machinery on top of it.
+    /// `CrowdbKvClient`'s retry/pool machinery on top of it.
     pub fn seed_leader(&self, store_id: u64, group_id: u64, endpoint: String) {
         self.topology.set_leader(store_id, group_id, endpoint);
     }

@@ -6,11 +6,11 @@
 //!
 //! Standing up a live election (kill leader, wait for re-vote) inside a
 //! deterministic e2e test is flaky by nature (real timers, real crowdb-rpc).
-//! What actually matters for C2 is that [`crowdb_kv_client::CrowdbClient`]
+//! What actually matters for C2 is that [`crowdb_kv_client::CrowdbKvClient`]
 //! correctly follows a live `NotLeaderHint` end-to-end against a real
 //! `KvService` and completes the write at the real leader — that is
 //! exactly the code path a real step-down exercises
-//! (`CrowdbClient::follow_not_leader` in `src/client.rs`), and it can be
+//! (`CrowdbKvClient::follow_not_leader` in `src/client.rs`), and it can be
 //! triggered deterministically by seeding the client at a real follower
 //! instead of the real leader.
 //!
@@ -28,7 +28,7 @@ use crowdb_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowdb_kv::cluster::px_kv_store::PxKvStore;
 use crowdb_kv::cluster::remote_replica::PxRemoteReplica;
 
-use crowdb_kv_client::{ClientConfig, CrowdbClient, KvRpcTransport};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, KvRpcTransport};
 
 const STORE_ID: u64 = 1;
 const GROUP_ID: u64 = 1;
@@ -131,11 +131,11 @@ async fn client_follows_not_leader_hint_to_real_leader() {
         "follower's not_leader_hint must point at the real leader"
     );
 
-    // `CrowdbClient` is seeded (deliberately, out-of-band from `/topology`)
+    // `CrowdbKvClient` is seeded (deliberately, out-of-band from `/topology`)
     // at the follower, simulating a client whose cached leader just
     // stepped down. `put` must transparently follow the hint and complete
     // at the real leader (transparent NotLeaderHint follow + retry).
-    let client = CrowdbClient::new(ClientConfig::new(Vec::new()));
+    let client = CrowdbKvClient::new(ClientConfig::new(Vec::new()));
     client.seed_leader(STORE_ID, GROUP_ID, follower_addr);
 
     let outcome = client

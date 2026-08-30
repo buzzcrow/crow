@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Error type for [`crate::CrowdbClient`].
+//! Error type for [`crate::CrowdbKvClient`].
 
 /// Errors surfaced by the client library. Transport/server errors that the
 /// retry loop can recover from are handled internally and never reach the

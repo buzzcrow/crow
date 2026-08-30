@@ -15,7 +15,7 @@ use std::time::Duration;
 use flatbuffers::FlatBufferBuilder;
 use tokio::sync::mpsc;
 
-use crate::client::CrowdbClient;
+use crate::client::CrowdbKvClient;
 use crate::error::Result;
 use crowdb_protocol::fb::FBMsgType;
 use crowdb_protocol::fb_wrappers::kv_client::FBWatchNotifyRef;
@@ -49,14 +49,14 @@ impl Drop for WatchSubscription {
 
 /// Client for the crowdb-kv `WatchNotify` push.
 pub struct WatchNotifyClient {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
 }
 
 impl WatchNotifyClient {
-    /// Create from a shared `CrowdbClient`. Reuses the client's
+    /// Create from a shared `CrowdbKvClient`. Reuses the client's
     /// `ConnectionPool` + `TopologyCache`.
     #[must_use]
-    pub fn from_shared(kv: Arc<CrowdbClient>) -> Self {
+    pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
         Self { kv }
     }
 
@@ -107,7 +107,7 @@ const CROWDB_RPC_LIVENESS_CHECK: Duration = Duration::from_secs(5);
 /// `not_leader_hint` or liveness-check failure, reconnect.
 #[allow(clippy::too_many_lines)]
 async fn crowdb_rpc_reader_loop(
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
     store_id: u64,
     group_id: u64,
     prefix: Vec<u8>,
@@ -256,7 +256,7 @@ fn register_crowdb_rpc_handlers(
     _server: &Arc<RpcServer>,
     notify_tx: &Arc<mpsc::Sender<WatchNotify>>,
     reconnect_tx: tokio::sync::mpsc::Sender<()>,
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
     store_id: u64,
 ) {
     // Handler for `FBWatchNotify` push frames.

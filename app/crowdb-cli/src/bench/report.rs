@@ -153,14 +153,14 @@ pub(crate) struct BenchReport {
     /// field existed still deserialize.
     #[serde(default)]
     pub(crate) server_metrics: ServerMetrics,
-    /// Client-side metrics from `CrowdbClient`'s internal counters
+    /// Client-side metrics from `CrowdbKvClient`'s internal counters
     /// (per-op counts, leader-related retry events, topology refreshes).
     /// `#[serde(default)]` so historical reports written before this
     /// field existed still deserialize.
     #[serde(default)]
     pub(crate) client_metrics: ClientMetricsSnapshot,
     /// Client-side crowdb-rpc transport stats (end-of-run cumulative
-    /// snapshot from the bench process's `CrowdbClient`).
+    /// snapshot from the bench process's `CrowdbKvClient`).
     #[serde(default)]
     pub(crate) client_transport_stats: TransportStatsSnapshot,
 }

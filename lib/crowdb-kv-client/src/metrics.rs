@@ -138,7 +138,7 @@ impl Default for WindowLatency {
     }
 }
 
-/// Metrics embedded in [`crate::CrowdbClient`]. Hot-path error counters
+/// Metrics embedded in [`crate::CrowdbKvClient`]. Hot-path error counters
 /// are lock-free atomics; per-op latency histograms are `Mutex<Histogram>`;
 /// leader-change tracking uses a `Mutex` (rare event, not hot path).
 #[derive(Debug, Default)]

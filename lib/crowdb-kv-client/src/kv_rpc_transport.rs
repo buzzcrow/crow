@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #![allow(clippy::missing_errors_doc)]
-#![allow(dead_code)] // Wired in Phase 7 (CrowdbClient transport selection)
+#![allow(dead_code)] // Wired in Phase 7 (CrowdbKvClient transport selection)
 
 //! crowdb-rpc client transport for the KV client-facing service (R117
 //! migration). Mirrors `px_rpc_transport.rs` (consensus side): builds
@@ -13,7 +13,7 @@
 //! retry/topology/`NotLeaderHint` logic in `client.rs` is unchanged.
 //!
 //! The only transport path (the former transport `ConnectionPool` was removed).
-//! window; `CrowdbClient` selects the transport via
+//! window; `CrowdbKvClient` selects the transport via
 //! `with_rpc_transport`.
 
 use std::sync::atomic::{AtomicU64, Ordering};

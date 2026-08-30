@@ -234,10 +234,10 @@ async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
 
 /// `crowdb-kv-server` management-API base URLs (`ServerEntry::url`, e.g.
 /// `http://host:rest_port`) for every node hosting a replica of `(sid,
-/// gid)`. This is [`CrowdbClient`]'s discovery input (`GET /topology` on
+/// gid)`. This is [`CrowdbKvClient`]'s discovery input (`GET /topology` on
 /// each seed): any one reachable replica's own `/topology` response
 /// carries the real leader's endpoint via its `remotes` list, so seeding
-/// with every known replica's mgmt URL is enough for `CrowdbClient` to
+/// with every known replica's mgmt URL is enough for `CrowdbKvClient` to
 /// self-heal a stale/dead leader without this module doing any endpoint
 /// bookkeeping itself (C1-C2).
 ///
@@ -290,7 +290,7 @@ async fn mgmt_seeds_for_group(
 /// exhaustion, which mirrors the old `with_leader_retry`'s uniform "give up
 /// and surface 502" outcome once its own candidate-endpoint queue was
 /// drained -- there is no 4xx case since `mgmt_seeds_for_group` already
-/// rejected an unknown group before a [`CrowdbClient`] is even constructed.
+/// rejected an unknown group before a [`CrowdbKvClient`] is even constructed.
 #[allow(clippy::needless_pass_by_value)]
 fn map_kv_client_err(e: crowdb_kv_client::Error) -> (StatusCode, Json<ErrorBody>) {
     err_502(format!("{e}"))

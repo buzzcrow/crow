@@ -127,13 +127,13 @@ pub(crate) trait BenchTarget: Send {
     }
 
     /// Final client-side metrics snapshot for the report. KV returns
-    /// the `CrowdbClient`'s counters; RPC returns default (empty).
+    /// the `CrowdbKvClient`'s counters; RPC returns default (empty).
     fn client_metrics_snapshot(&self) -> ClientMetricsSnapshot {
         ClientMetricsSnapshot::default()
     }
 
     /// Client-side crowdb-rpc transport stats (end-of-run cumulative
-    /// snapshot). KV samples from `CrowdbClient`; RPC and others
+    /// snapshot). KV samples from `CrowdbKvClient`; RPC and others
     /// return default (empty).
     fn client_transport_stats(&self) -> super::report::TransportStatsSnapshot {
         super::report::TransportStatsSnapshot::default()

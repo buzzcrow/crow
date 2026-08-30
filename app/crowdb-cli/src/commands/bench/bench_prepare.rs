@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use crate::bench::handle::{ClusterHandle, DeployKind};
 use crate::bench::workload::{format_key, value_for};
-use crowdb_kv_client::{ClientConfig, CrowdbClient};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient};
 
 /// `bench prepare` — pre-populate keys into a deployed cluster.
 pub(crate) async fn bench_prepare(args: super::PrepareArgs, json: bool) -> ExitCode {
@@ -40,7 +40,7 @@ pub(crate) async fn bench_prepare(args: super::PrepareArgs, json: bool) -> ExitC
     client_cfg.quickack = handle.tunables.quickack;
     client_cfg.event_write = handle.tunables.event_write;
     client_cfg.send_queue_capacity = handle.tunables.send_queue_capacity;
-    let client = CrowdbClient::new(client_cfg);
+    let client = CrowdbKvClient::new(client_cfg);
     client.seed_leader(handle.store_id, handle.group_id, handle.leader_endpoint.clone());
 
     // Optional value-size mix.

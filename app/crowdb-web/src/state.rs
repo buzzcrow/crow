@@ -34,10 +34,10 @@ pub struct AppState {
     /// Cached crowdb-rpc transport reused across KV requests to avoid
     /// spawning 6+ threads per request. Shared by the cached `kv_client`.
     pub kv_rpc_transport: Arc<tokio::sync::RwLock<Option<Arc<crowdb_kv_client::KvRpcTransport>>>>,
-    /// Cached `CrowdbClient` reused across KV requests so the topology
+    /// Cached `CrowdbKvClient` reused across KV requests so the topology
     /// cache persists — avoids re-discovering the leader from seeds on
     /// every put/get/delete. Invalidated on `/internal/reset`.
-    pub kv_client: Arc<tokio::sync::RwLock<Option<Arc<crowdb_kv_client::CrowdbClient>>>>,
+    pub kv_client: Arc<tokio::sync::RwLock<Option<Arc<crowdb_kv_client::CrowdbKvClient>>>>,
     /// Rate-limiter for repeated crowdb-rpc failure warnings: maps
     /// `endpoint` → last-warned timestamp. Prevents flooding the
     /// console with identical "instance query failed" warnings every
@@ -274,11 +274,11 @@ impl AppState {
         t
     }
 
-    /// Get or create a cached `CrowdbClient` sharing the cached RPC
+    /// Get or create a cached `CrowdbKvClient` sharing the cached RPC
     /// transport. The topology cache persists across requests so the
     /// leader endpoint is not re-discovered from seeds on every call.
     /// Call `seed_leader` before each use to keep the hint fresh.
-    pub async fn kv_client(&self) -> Arc<crowdb_kv_client::CrowdbClient> {
+    pub async fn kv_client(&self) -> Arc<crowdb_kv_client::CrowdbKvClient> {
         if let Some(c) = self.kv_client.read().await.as_ref() {
             return Arc::clone(c);
         }
@@ -287,7 +287,7 @@ impl AppState {
             return Arc::clone(c);
         }
         let transport = self.kv_rpc_transport().await;
-        let c = Arc::new(crowdb_kv_client::CrowdbClient::new_with_rpc_transport(
+        let c = Arc::new(crowdb_kv_client::CrowdbKvClient::new_with_rpc_transport(
             crowdb_kv_client::ClientConfig::new(Vec::new()),
             transport,
         ));
@@ -295,7 +295,7 @@ impl AppState {
         c
     }
 
-    /// Drop the cached `CrowdbClient` so the next KV request rebuilds
+    /// Drop the cached `CrowdbKvClient` so the next KV request rebuilds
     /// the topology cache from scratch. Called on `/internal/reset`.
     pub async fn clear_kv_client(&self) {
         *self.kv_client.write().await = None;

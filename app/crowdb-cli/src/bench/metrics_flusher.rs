@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crowdb_common::metrics::PreciseHistogram;
-use crowdb_kv_client::{CrowdbClient, WindowLatencySnapshot};
+use crowdb_kv_client::{CrowdbKvClient, WindowLatencySnapshot};
 
 use super::report::percentiles_from_histogram;
 use super::worker::WorkerCounters;
@@ -37,7 +37,7 @@ pub(crate) fn spawn_progress_snapshotter(
     started: Instant,
     deadline: Instant,
     counters: Vec<Arc<WorkerCounters>>,
-    client: Arc<CrowdbClient>,
+    client: Arc<CrowdbKvClient>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_ops: u64 = 0;
@@ -146,7 +146,7 @@ pub(crate) fn spawn_metrics_flusher(
     started: Instant,
     deadline: Instant,
     counters: Vec<Arc<WorkerCounters>>,
-    client: Arc<CrowdbClient>,
+    client: Arc<CrowdbKvClient>,
     path: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

@@ -22,7 +22,7 @@ use crowdb_diskdb::recovery::ZoneLoader;
 use crowdb_diskdb::scanner::{ScanState, ScannerTask};
 use crowdb_diskdb::service::DiskdbRpcService;
 use crowdb_kv_client::{
-    ClientConfig, CrowdbClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient,
+    ClientConfig, CrowdbKvClient, HardwareClient, ServiceRegistryClient, WatchNotifyClient,
 };
 use tracing::info;
 
@@ -107,9 +107,9 @@ async fn main() {
     // leader and data-group leaders are discovered lazily via the
     // kv-server HTTP management API seeds from config — no pre-seeding.
     // One client is shared across all service classes (hardware,
-    // service-registry, data-group) since `CrowdbClient` is fully
+    // service-registry, data-group) since `CrowdbKvClient` is fully
     // interior-mutable; each service class takes it via `from_shared`.
-    let kv_client = Arc::new(CrowdbClient::new(ClientConfig::new(
+    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(
         config.load().server.kv_server_mgmt_seeds.clone(),
     )));
     let (sys_store, sys_group) = kv_client.system_group();

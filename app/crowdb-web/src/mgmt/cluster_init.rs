@@ -160,7 +160,7 @@ pub(crate) async fn http_cluster_init(
 
     // Phase 5: write hardware hierarchy + KV-cluster topology into
     // group 0 via HardwareClient + KVClusterMetaClient. Build a
-    // CrowdbClient seeded with all group-0 mgmt URLs as topology
+    // CrowdbKvClient seeded with all group-0 mgmt URLs as topology
     // discovery seeds, plus the first crowdb-rpc endpoint as the initial
     // leader hint.
     let cfg_snapshot = state.config.read().unwrap().clone();
@@ -174,10 +174,10 @@ pub(crate) async fn http_cluster_init(
             continue;
         };
         let kv_client =
-            crowdb_kv_client::CrowdbClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds.clone()));
+            crowdb_kv_client::CrowdbKvClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds.clone()));
         kv_client.seed_leader(0, 0, rpc_ep.clone());
         let kv_client2 =
-            crowdb_kv_client::CrowdbClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds.clone()));
+            crowdb_kv_client::CrowdbKvClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds.clone()));
         kv_client2.seed_leader(0, 0, rpc_ep.clone());
         let hw = crowdb_kv_client::HardwareClient::new(kv_client);
         let meta = crowdb_kv_client::KVClusterMetaClient::new(kv_client2);

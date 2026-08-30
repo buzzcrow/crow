@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! C6 end-to-end: spawn `crowdb-kv-server`, create a store/group through the
-//! management API, then via `crowdb-kv-client`'s `CrowdbClient` exercise
+//! management API, then via `crowdb-kv-client`'s `CrowdbKvClient` exercise
 //! put → get → delete → get-not-found → scan. (C6's own crowdb-rpc `KvClient`
 //! wrapper is gone -- see -- so this
 //! now exercises the real client library `crowdb-web`/`crowdb-cli` use.)
@@ -13,7 +13,7 @@ use crowdb_console_shared::clients::http::ServerClient;
 use crowdb_console_shared::config::NodeEntry;
 use crowdb_console_shared::lifecycle::{self, crowdb_kv_server_bin, DeployRequest};
 use crowdb_console_shared::mgmt::{AddGroupRequest, AddStoreRequest};
-use crowdb_kv_client::{ClientConfig, CrowdbClient, GetOutcome, ReadMode};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, GetOutcome, ReadMode};
 
 fn pick_free_port() -> u16 {
     crowdb_console_shared::test_ports::unique_test_port()
@@ -84,11 +84,11 @@ async fn put_get_delete_cycle() {
         .expect("wait_for_leader");
 
     let endpoint = store_rpc_endpoint(&mgmt_url, store_id).await;
-    // `CrowdbClient` normally discovers leaders via `/topology`; here we
+    // `CrowdbKvClient` normally discovers leaders via `/topology`; here we
     // already know the endpoint (just resolved it above), so seed it
     // directly rather than standing up topology discovery for a
     // single-node test.
-    let kv = CrowdbClient::new(ClientConfig::new(Vec::new()));
+    let kv = CrowdbKvClient::new(ClientConfig::new(Vec::new()));
     kv.seed_leader(store_id, group_id, endpoint.clone());
 
     // Put.
@@ -218,11 +218,11 @@ async fn put_get_delete_cycle() {
         .expect_err("scan missing group");
     assert!(format!("{err}").contains("not found"), "got: {err}");
 
-    // A second, independently-constructed `CrowdbClient` seeded at the
+    // A second, independently-constructed `CrowdbKvClient` seeded at the
     // same endpoint must also work end-to-end (no shared process-wide
     // state to warm up -- `crowdb-kv-client`'s connection pool is
     // per-instance and lazily connected).
-    let kv2 = CrowdbClient::new(ClientConfig::new(Vec::new()));
+    let kv2 = CrowdbKvClient::new(ClientConfig::new(Vec::new()));
     kv2.seed_leader(store_id, group_id, endpoint.clone());
     let _ = kv2
         .put(store_id, group_id, b"cached", b"hit", None)

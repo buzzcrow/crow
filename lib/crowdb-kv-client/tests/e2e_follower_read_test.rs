@@ -49,7 +49,7 @@ use crowdb_kv::cluster::px_kv_store::PxKvStore;
 use crowdb_kv::cluster::remote_replica::PxRemoteReplica;
 use crowdb_kv::cluster::status::RemoteStatus;
 
-use crowdb_kv_client::{ClientConfig, CrowdbClient, GetOutcome, ReadEndpointPolicy, ReadMode};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, GetOutcome, ReadEndpointPolicy, ReadMode};
 
 const STORE_ID: u64 = 1;
 const GROUP_ID: u64 = 1;
@@ -245,7 +245,7 @@ async fn any_replica_distributes_minslot_reads_with_lagging_follower() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(any_replica_config(seed));
+    let client = CrowdbKvClient::new(any_replica_config(seed));
 
     let write = client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -297,7 +297,7 @@ async fn any_replica_falls_back_to_leader_when_follower_lags() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(any_replica_config(seed));
+    let client = CrowdbKvClient::new(any_replica_config(seed));
 
     let write = client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -340,7 +340,7 @@ async fn any_replica_linearizable_still_targets_leader() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(any_replica_config(seed));
+    let client = CrowdbKvClient::new(any_replica_config(seed));
 
     client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -379,7 +379,7 @@ async fn leader_policy_unchanged_for_minslot() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(ClientConfig::new(vec![seed]));
+    let client = CrowdbKvClient::new(ClientConfig::new(vec![seed]));
 
     client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -416,7 +416,7 @@ async fn any_replica_scan_distributes_with_lagging_follower() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(any_replica_config(seed));
+    let client = CrowdbKvClient::new(any_replica_config(seed));
 
     client
         .put(STORE_ID, GROUP_ID, b"prefix_k1", b"v1", None)
@@ -478,7 +478,7 @@ async fn any_replica_scan_falls_back_when_follower_lags() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(any_replica_config(seed));
+    let client = CrowdbKvClient::new(any_replica_config(seed));
 
     let write = client
         .put(STORE_ID, GROUP_ID, b"prefix_k1", b"v1", None)
@@ -530,13 +530,13 @@ async fn any_replica_scan_falls_back_when_follower_lags() {
 /// error, exact prefix boundary.
 #[tokio::test]
 async fn follow_scan_not_leader_parser_extracts_endpoint() {
-    use crowdb_kv_client::CrowdbClient;
+    use crowdb_kv_client::CrowdbKvClient;
 
     // The parser is a private associated function; reach it through the
-    // public `ClientConfig` -> `CrowdbClient` constructor (no I/O needed
+    // public `ClientConfig` -> `CrowdbKvClient` constructor (no I/O needed
     // since we call a pure function).
     let cfg = ClientConfig::new(Vec::new());
-    let _client = CrowdbClient::new(cfg); // construct to satisfy borrow
+    let _client = CrowdbKvClient::new(cfg); // construct to satisfy borrow
 
     // Direct parser checks via the associated function path. The
     // function is private, so we exercise the same logic inline to
@@ -585,7 +585,7 @@ async fn least_connections_distributes_minslot_reads() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(least_connections_config(seed));
+    let client = CrowdbKvClient::new(least_connections_config(seed));
 
     let write = client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -631,7 +631,7 @@ async fn latency_distributes_minslot_reads() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(latency_config(seed));
+    let client = CrowdbKvClient::new(latency_config(seed));
 
     client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -681,7 +681,7 @@ async fn least_connections_routes_away_from_slow_replica() {
     lagging.set_get_delay_for_tests(Duration::from_millis(50));
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = Arc::new(CrowdbClient::new(least_connections_config(seed)));
+    let client = Arc::new(CrowdbKvClient::new(least_connections_config(seed)));
 
     client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -746,7 +746,7 @@ async fn latency_routes_away_from_slow_replica() {
     lagging.set_get_delay_for_tests(Duration::from_millis(50));
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(latency_config(seed));
+    let client = CrowdbKvClient::new(latency_config(seed));
 
     client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -785,7 +785,7 @@ async fn least_connections_falls_back_to_leader() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(least_connections_config(seed));
+    let client = CrowdbKvClient::new(least_connections_config(seed));
 
     let write = client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -828,7 +828,7 @@ async fn latency_falls_back_to_leader() {
     let (leader, follower, lagging) = start_three_node_cluster().await;
     let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
     let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
-    let client = CrowdbClient::new(latency_config(seed));
+    let client = CrowdbKvClient::new(latency_config(seed));
 
     let write = client
         .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
@@ -874,7 +874,7 @@ async fn new_policies_linearizable_still_targets_leader() {
     for policy in [ReadEndpointPolicy::LeastConnections, ReadEndpointPolicy::Latency] {
         let mut cfg = ClientConfig::new(vec![seed.clone()]);
         cfg.read_endpoint_policy = policy;
-        let client = CrowdbClient::new(cfg);
+        let client = CrowdbKvClient::new(cfg);
 
         client
             .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)

@@ -17,7 +17,7 @@ use crowdb_diskdb::liveness::keepalive::KeepAlive;
 use crowdb_diskdb::metrics::DiskdbMetrics;
 use crowdb_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crowdb_diskdb::recovery::compaction::CompactionEngine;
-use crowdb_kv_client::{ClientConfig, CrowdbClient, HardwareClient, ServiceRegistryClient};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, HardwareClient, ServiceRegistryClient};
 
 fn make_config_handle(interval_secs: u32) -> Arc<ArcSwap<DdbConfig>> {
     let mut config = DdbConfig::default();
@@ -28,7 +28,7 @@ fn make_config_handle(interval_secs: u32) -> Arc<ArcSwap<DdbConfig>> {
 }
 
 fn make_keepalive(handle: &Arc<ArcSwap<DdbConfig>>) -> KeepAlive {
-    let kv_client = Arc::new(CrowdbClient::new(ClientConfig::new(vec![
+    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(vec![
         "127.0.0.1:0".to_string()
     ])));
     let hw = HardwareClient::from_shared(Arc::clone(&kv_client));
@@ -66,7 +66,7 @@ fn keepalive_trigger_uses_timer_fn_when_config_handle_set() {
 
 #[test]
 fn keepalive_trigger_uses_fixed_timer_without_config_handle() {
-    let kv_client = Arc::new(CrowdbClient::new(ClientConfig::new(vec![
+    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(vec![
         "127.0.0.1:0".to_string()
     ])));
     let hw = HardwareClient::from_shared(Arc::clone(&kv_client));
@@ -89,7 +89,7 @@ fn keepalive_trigger_uses_fixed_timer_without_config_handle() {
 #[test]
 fn compaction_engine_trigger_uses_timer_fn_when_config_handle_set() {
     let handle = make_config_handle(30);
-    let kv_client = Arc::new(CrowdbClient::new(ClientConfig::new(vec![
+    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(vec![
         "127.0.0.1:0".to_string()
     ])));
     let ddb_kv = Arc::new(DdbKvClient::from_shared(kv_client));
@@ -113,7 +113,7 @@ fn compaction_engine_trigger_uses_timer_fn_when_config_handle_set() {
 
 #[test]
 fn compaction_engine_trigger_uses_fixed_timer_without_config_handle() {
-    let kv_client = Arc::new(CrowdbClient::new(ClientConfig::new(vec![
+    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(vec![
         "127.0.0.1:0".to_string()
     ])));
     let ddb_kv = Arc::new(DdbKvClient::from_shared(kv_client));
@@ -136,7 +136,7 @@ async fn compaction_engine_run_cycle_reads_threshold_from_ctx_config() {
     config.persistence.snapshot_compaction_threshold = 7777;
     handle.store(Arc::new(config));
 
-    let kv_client = Arc::new(CrowdbClient::new(ClientConfig::new(vec![
+    let kv_client = Arc::new(CrowdbKvClient::new(ClientConfig::new(vec![
         "127.0.0.1:0".to_string()
     ])));
     let ddb_kv = Arc::new(DdbKvClient::from_shared(kv_client));

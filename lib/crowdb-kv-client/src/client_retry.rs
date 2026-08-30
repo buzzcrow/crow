@@ -2,17 +2,17 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Retry logic, topology cache refresh, and `NotLeaderHint` handling
-//! for [`CrowdbClient`].
+//! for [`CrowdbKvClient`].
 
 use std::time::Duration;
 
 use crowdb_kv::rpc::{KvErrorCode, KvResponse};
 use tracing::warn;
 
-use crate::client::CrowdbClient;
+use crate::client::CrowdbKvClient;
 use crate::error::{Error, Result};
 
-impl CrowdbClient {
+impl CrowdbKvClient {
     /// If `resp` carries a `NotLeaderHint`, follow it immediately (uncounted
     /// retry — forward progress toward the real leader) and update the
     /// topology cache. Returns `None` if `resp` did not indicate not-leader

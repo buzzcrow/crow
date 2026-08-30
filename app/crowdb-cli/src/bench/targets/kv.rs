@@ -479,12 +479,12 @@ async fn wait_for_leader_endpoint(client: &ConsoleClient, timeout: Duration) -> 
 /// start of the benchmark.
 async fn wait_for_healthy_cluster(mgmt_urls: &[String], leader_endpoint: &str) -> Result<()> {
     use crowdb_console_shared::clients::http::ServerClient;
-    use crowdb_kv_client::{ClientConfig, CrowdbClient};
+    use crowdb_kv_client::{ClientConfig, CrowdbKvClient};
 
     // Phase 1: verify the leader can serve a test put.
     let mut cfg = ClientConfig::new(Vec::new());
     cfg.retry.max_retries = 2;
-    let client = CrowdbClient::new(cfg);
+    let client = CrowdbKvClient::new(cfg);
     client.seed_leader(STORE_ID, GROUP_ID, leader_endpoint.to_string());
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -618,7 +618,7 @@ fn upstream_err(id: &str, op: &str, e: &Error) -> Error {
 use std::sync::Arc;
 
 use crowdb_kv_client::Error as ClientError;
-use crowdb_kv_client::{ClientConfig, CrowdbClient, GetOutcome, WriteOutcome};
+use crowdb_kv_client::{ClientConfig, CrowdbKvClient, GetOutcome, WriteOutcome};
 use tokio::task::JoinHandle;
 
 use super::super::metrics_flusher::{spawn_metrics_flusher, spawn_progress_snapshotter};
@@ -629,7 +629,7 @@ use super::super::workload::{format_key, value_for, OpGen, OpKind};
 use super::{BenchClient, BenchTarget};
 
 /// KV bench target: provisions a 3-node cluster via `BenchFixture`,
-/// builds `CrowdbClient`-backed workers, and wires progress/metrics.
+/// builds `CrowdbKvClient`-backed workers, and wires progress/metrics.
 pub(crate) struct KvTarget {
     mode: BenchMode,
     workspace_dir: PathBuf,
@@ -645,7 +645,7 @@ pub(crate) struct KvTarget {
     send_queue_capacity: u32,
     fixture: Option<BenchFixture>,
     /// The shared client used by all workers + progress/metrics tasks.
-    client: Option<Arc<CrowdbClient>>,
+    client: Option<Arc<CrowdbKvClient>>,
 }
 
 impl KvTarget {
@@ -724,7 +724,7 @@ impl BenchTarget for KvTarget {
         client_config.quickack = self.quickack;
         client_config.event_write = self.event_write;
         client_config.send_queue_capacity = self.send_queue_capacity;
-        let client = CrowdbClient::new(client_config);
+        let client = CrowdbKvClient::new(client_config);
         client.seed_leader(cfg.store_id, cfg.group_id, fixture.leader_endpoint().to_string());
         self.client = Some(Arc::new(client));
         self.fixture = Some(fixture);
@@ -880,11 +880,11 @@ impl KvTarget {
     }
 }
 
-/// KV bench client: wraps a shared `CrowdbClient` and dispatches ops.
+/// KV bench client: wraps a shared `CrowdbKvClient` and dispatches ops.
 /// Cheaply cloneable (Arc handle).
 #[derive(Clone)]
 pub(crate) struct KvBenchClient {
-    client: Arc<CrowdbClient>,
+    client: Arc<CrowdbKvClient>,
 }
 
 impl BenchClient for KvBenchClient {
@@ -1028,7 +1028,7 @@ use crate::bench::handle::ClusterHandle;
 /// built from the handle's leader endpoint + tunables.
 pub(crate) struct AttachedKvTarget {
     handle: ClusterHandle,
-    client: Option<Arc<CrowdbClient>>,
+    client: Option<Arc<CrowdbKvClient>>,
 }
 
 impl AttachedKvTarget {
@@ -1109,7 +1109,7 @@ impl BenchTarget for AttachedKvTarget {
         client_config.quickack = self.handle.tunables.quickack;
         client_config.event_write = self.handle.tunables.event_write;
         client_config.send_queue_capacity = self.handle.tunables.send_queue_capacity;
-        let client = CrowdbClient::new(client_config);
+        let client = CrowdbKvClient::new(client_config);
         client.seed_leader(cfg.store_id, cfg.group_id, self.handle.leader_endpoint.clone());
         self.client = Some(Arc::new(client));
         Ok(())

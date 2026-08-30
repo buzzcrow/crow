@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! [`DdbKvClient`] — wraps [`CrowdbClient`] for put/delete/scan on
+//! [`DdbKvClient`] — wraps [`CrowdbKvClient`] for put/delete/scan on
 //! the disk-group's bound paxos data group.
 //!
 //! Uses `(store_id, group_id)` from `DdbDiskGroup.bind` (set by the
@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crowdb_kv_client::{BatchOp, CrowdbClient, GetOutcome, JournalOp, ReadMode, Result};
+use crowdb_kv_client::{BatchOp, CrowdbKvClient, GetOutcome, JournalOp, ReadMode, Result};
 use crowdb_protocol::common::DiskId;
 use crowdb_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue, RecoveryScanProgressValue, ZoneValue};
 use crowdb_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, RecoveryScanProgressKey, ZoneKey};
@@ -27,29 +27,29 @@ pub type Bind = (u64, u64);
 /// Client for the disk-group's bound paxos data group.
 ///
 /// All methods take `(store_id, group_id)` from `DdbDiskGroup.bind`. The
-/// wrapped `CrowdbClient` must have its topology seeded with the
+/// wrapped `CrowdbKvClient` must have its topology seeded with the
 /// data-group leader endpoint.
 #[derive(Clone)]
 pub struct DdbKvClient {
-    kv: Arc<CrowdbClient>,
+    kv: Arc<CrowdbKvClient>,
 }
 
 impl DdbKvClient {
-    /// Wrap a `CrowdbClient` for data-group access.
+    /// Wrap a `CrowdbKvClient` for data-group access.
     #[must_use]
-    pub fn new(kv: CrowdbClient) -> Self {
+    pub fn new(kv: CrowdbKvClient) -> Self {
         Self { kv: Arc::new(kv) }
     }
 
-    /// Wrap an already-shared `CrowdbClient`.
+    /// Wrap an already-shared `CrowdbKvClient`.
     #[must_use]
-    pub fn from_shared(kv: Arc<CrowdbClient>) -> Self {
+    pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
         Self { kv }
     }
 
-    /// Access the underlying `CrowdbClient`.
+    /// Access the underlying `CrowdbKvClient`.
     #[must_use]
-    pub fn kv(&self) -> &CrowdbClient {
+    pub fn kv(&self) -> &CrowdbKvClient {
         &self.kv
     }
 
@@ -432,7 +432,7 @@ impl DdbKvClient {
 
     /// Slot-ordered journal scan over `BusyBlockKey` ops for one zone
     /// (R73 recovery strategy 2 step c, scan 1). Wraps
-    /// `CrowdbClient::journal_scan` with `BusyBlockKey::prefix_for_zone`.
+    /// `CrowdbKvClient::journal_scan` with `BusyBlockKey::prefix_for_zone`.
     /// Returns ops in slot order; the caller replays them to rebuild
     /// the bitmap.
     pub async fn journal_scan_busy(
@@ -464,7 +464,7 @@ impl DdbKvClient {
 
     /// Slot-ordered journal scan over `FreeBlockKey` ops for one zone
     /// (R73 recovery strategy 2 step c, scan 2). Wraps
-    /// `CrowdbClient::journal_scan` with `FreeBlockKey::prefix_for_zone`.
+    /// `CrowdbKvClient::journal_scan` with `FreeBlockKey::prefix_for_zone`.
     pub async fn journal_scan_free(
         &self,
         bind: Bind,

@@ -12,7 +12,7 @@
 
 use crowdb_protocol::common::InstanceValue;
 
-use crate::{CrowdbClient, Result};
+use crate::{CrowdbKvClient, Result};
 
 /// A binding strategy — maps a key to an owning instance.
 pub trait BindingStrategy: Send + Sync {
@@ -24,14 +24,14 @@ pub trait BindingStrategy: Send + Sync {
     /// Write the assignment to group-0.
     fn write_bindings(
         &self,
-        kv: &CrowdbClient,
+        kv: &CrowdbKvClient,
         bindings: &[Self::Binding],
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Read the current assignment from group-0.
     fn read_bindings(
         &self,
-        kv: &CrowdbClient,
+        kv: &CrowdbKvClient,
     ) -> impl std::future::Future<Output = Result<Vec<Self::Binding>>> + Send;
 
     /// Compute an incremental assignment, preserving transition state
@@ -58,7 +58,7 @@ pub trait BindingStrategy: Send + Sync {
 /// writes it to group-0. Only the leader should write; followers
 /// compute but skip the write phase.
 pub struct BindingMonitor<S: BindingStrategy> {
-    kv: std::sync::Arc<CrowdbClient>,
+    kv: std::sync::Arc<CrowdbKvClient>,
     svc: crate::ServiceRegistryClient,
     strategy: S,
     interval: std::time::Duration,
@@ -69,7 +69,7 @@ impl<S: BindingStrategy> BindingMonitor<S> {
     /// Create a new binding monitor.
     #[must_use]
     pub fn new(
-        kv: std::sync::Arc<CrowdbClient>,
+        kv: std::sync::Arc<CrowdbKvClient>,
         svc: crate::ServiceRegistryClient,
         strategy: S,
         interval: std::time::Duration,
