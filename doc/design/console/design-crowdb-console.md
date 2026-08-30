@@ -41,6 +41,8 @@ design is detailed in the sub-design `design-crowdb-console-ui.md`.
 - [9. Error Model and Operation Logging](#9-error-model-and-operation-logging)
 - [10. Observability](#10-observability)
 - [11. Open Questions](#11-open-questions)
+- [12. Sysdata sync — rack/node/disk-group/disk handlers](#12-sysdata-sync--racknodedisk-groupdisk-handlers)
+- [13. Cluster reset](#13-cluster-reset)
 
 ## 1. Goals and Non-Goals
 
@@ -556,3 +558,21 @@ ever appears in the browser.
   sites.
 - **Multiple servers per node**: UI and console enforce one; lower
   layers remain unrestricted.
+
+## 12. Sysdata sync — rack/node/disk-group/disk handlers
+
+Console add/remove handlers for racks, nodes, disk-groups, and disks
+update the console config TOML then sync group-0 sysdata via
+`HardwareClient` (built by `build_hardware_client` in
+`app/crowdb-web/src/mgmt.rs`). If group 0 is not yet initialized, the
+sysdata sync is skipped — `cluster_init` Phase 5 writes the full
+hierarchy on bootstrap.
+
+## 13. Cluster reset
+
+`POST /internal/reset` tears down the cluster in dependency order:
+remove user groups → user stores → clean group-0 sysdata (rack
+cascade + store records + diskdb service unregister) → remove
+group-0/store-0 → SIGTERM all processes → clear config + caches +
+workspaces. When no KV servers are running, the RPC steps are
+skipped (fast path for E2E test fixtures).

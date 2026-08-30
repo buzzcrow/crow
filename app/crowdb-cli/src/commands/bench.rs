@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
+mod bench_clean;
 mod bench_deploy;
 mod bench_kv;
 mod bench_prepare;
@@ -9,6 +10,7 @@ mod bench_rpc;
 mod bench_run;
 mod bench_teardown;
 
+pub(crate) use bench_clean::bench_clean;
 pub(crate) use bench_deploy::bench_deploy;
 pub(crate) use bench_kv::bench_benchmark_kv;
 pub(crate) use bench_prepare::bench_prepare;
@@ -35,6 +37,8 @@ pub enum BenchSub {
     Prepare(Box<PrepareArgs>),
     /// Run a workload against a previously-deployed cluster.
     Run(Box<RunArgs>),
+    /// Wipe user data on every node of a deployed cluster (keep group0).
+    Clean(Box<CleanArgs>),
     /// Stop a previously-deployed cluster and remove its handle.
     Teardown(Box<TeardownArgs>),
     /// Re-render a previously-saved report.
@@ -451,6 +455,14 @@ pub struct TeardownArgs {
     pub target: String,
 }
 
+/// Arguments for `crowdb-cli bench clean`.
+#[derive(Args, Debug)]
+pub struct CleanArgs {
+    /// Deploy name (from `bench deploy --name`).
+    #[arg(long)]
+    pub target: String,
+}
+
 pub(crate) async fn run_bench_verb(cli: &Cli, args: BenchArgs) -> ExitCode {
     match args.sub {
         Some(BenchSub::Kv(args)) => bench_benchmark_kv(*args, cli.json).await,
@@ -458,16 +470,18 @@ pub(crate) async fn run_bench_verb(cli: &Cli, args: BenchArgs) -> ExitCode {
         Some(BenchSub::Deploy(args)) => bench_deploy(*args, cli.json).await,
         Some(BenchSub::Prepare(args)) => bench_prepare(*args, cli.json).await,
         Some(BenchSub::Run(args)) => bench_run(*args, cli.json).await,
+        Some(BenchSub::Clean(args)) => bench_clean(*args, cli.json).await,
         Some(BenchSub::Teardown(args)) => bench_teardown(*args, cli.json).await,
         Some(BenchSub::Report { run_id }) => bench_report(&run_id, cli.json),
         Some(BenchSub::Compare { run_id_1, run_id_2 }) => bench_compare(&run_id_1, &run_id_2, cli.json),
         None => {
-            eprintln!("usage: crowdb-cli bench <kv|rpc|deploy|prepare|run|teardown|report|compare>");
+            eprintln!("usage: crowdb-cli bench <kv|rpc|deploy|prepare|run|clean|teardown|report|compare>");
             eprintln!("  kv        Run a KV benchmark (3-node cluster, all-in-one)");
             eprintln!("  rpc       Run an RPC echo benchmark (transport throughput)");
             eprintln!("  deploy    Deploy a named cluster and leave it running");
             eprintln!("  prepare   Pre-populate keys into a deployed cluster");
             eprintln!("  run       Run a workload against a deployed cluster");
+            eprintln!("  clean     Wipe user data on a deployed cluster (keep group0)");
             eprintln!("  teardown  Stop a deployed cluster and remove its handle");
             eprintln!("  report    Re-render a previously-saved report");
             eprintln!("  compare   Compare two previously-saved reports");

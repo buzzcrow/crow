@@ -267,7 +267,7 @@ pub use mgmt::{
     GroupStatus, HealthResponse, InflightStatus, KvStoreStatus, MetricField, MetricPoint, MetricsResponse,
     MetricsSnapshot, ReadStateView, RemoteListResponse, RemoteReplicaInfo, RemoteStatus, ReplicaStatus,
     StatusLevel, StepDownRequest, StepDownResult, StoreDetail, StoreListResponse, StoreStatus, StoreSummary,
-    SystemInitRequest, SystemInitResponse, TopologyResponse,
+    SystemInitRequest, SystemInitResponse, TopologyResponse, WipeResult,
 };
 
 pub mod bitmap;

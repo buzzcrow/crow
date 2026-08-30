@@ -704,3 +704,164 @@ pub(super) async fn flush_group(
         accepted: true,
     }))
 }
+
+/// Response for `POST /stores/:sid/groups/:gid/wipe-user-data`.
+/// Re-exported from `crowdb-protocol` so the client shares one type.
+pub(super) type WipeResult = crowdb_protocol::mgmt::WipeResult;
+
+/// `POST /stores/{sid}/groups/{gid}/wipe-user-data` — drop and recreate
+/// the WAL + engine user data for the group on this node, preserving
+/// group0 sysdata + store/group/replica topology.
+///
+/// Flow: resolve → failed-WAL reject → unwired no-op → step down if
+/// leader → delete on-disk WAL + engine dirs → `create_group_with_wal`
+/// (replays empty WAL → fresh state, restores remotes from
+/// node-config) → quorum-1 self-election → `store.add_group` (replaces
+/// old group, cancels old tenure, spawns fresh election driver). The
+/// caller (`bench clean`) waits for re-election + health after wiping
+/// every node.
+#[utoipa::path(
+    post,
+    path = "/stores/{sid}/groups/{gid}/wipe-user-data",
+    tag = "management",
+    params(
+        ("sid" = u64, Path, description = "Store id"),
+        ("gid" = u64, Path, description = "Group id")
+    ),
+    responses(
+        (status = 200, description = "User data wiped on this node", body = WipeResult),
+        (status = 404, description = "Store or group not found", body = ErrorResponse),
+        (status = 503, description = "WAL failed — wipe not safe, redeploy", body = ErrorResponse)
+    )
+)]
+pub(super) async fn wipe_user_data(
+    State(state): State<RegistryArc>,
+    Path((sid, gid)): Path<(u64, u64)>,
+) -> Result<Json<WipeResult>, (StatusCode, Json<ErrorResponse>)> {
+    let store = state
+        .get_store(sid)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
+    let group = store.get_group(gid).ok_or_else(|| {
+        err_json(
+            StatusCode::NOT_FOUND,
+            format!("group {gid} not found in store {sid}"),
+        )
+    })?;
+
+    let replica_id = group.local_replica().id;
+
+    // Reject a known-bad WAL before touching anything.
+    if let Some(wal) = group.local_replica().wal() {
+        if wal.is_failed() {
+            return Err(err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WAL failed — wipe not safe, redeploy",
+            ));
+        }
+    } else {
+        // Replica not yet wired — nothing to wipe.
+        info!(
+            store_id = sid,
+            group_id = gid,
+            "wipe-user-data: replica has no WAL wired — no-op"
+        );
+        return Ok(Json(WipeResult {
+            store_id: sid,
+            group_id: gid,
+            accepted: false,
+        }));
+    }
+
+    // Step down if leader so the group stops accepting writes before
+    // the data is destroyed. `accepted: false` (not leader) is fine.
+    let step = group.step_down_if_leader("wipe-user-data");
+    info!(
+        store_id = sid,
+        group_id = gid,
+        stepped_down = step.accepted,
+        "wipe-user-data: step-down before wipe"
+    );
+
+    // Delete the on-disk WAL group dir + engine dir so
+    // `create_group_with_wal` replays an empty WAL → fresh state.
+    let wal_group_dir =
+        crate::startup::store_wal_root(&state.config.wal_root, sid).join(format!("group{gid}"));
+    if let Err(e) = tokio::fs::remove_dir_all(&wal_group_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete WAL dir {}: {e}", wal_group_dir.display()),
+            ));
+        }
+    }
+    let engine_dir = crate::startup::store_crowdb_tree_path(&state.config.data_root, sid, gid);
+    if let Err(e) = tokio::fs::remove_dir_all(&engine_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete engine dir {}: {e}", engine_dir.display()),
+            ));
+        }
+    }
+    info!(
+        store_id = sid,
+        group_id = gid,
+        "wipe-user-data: deleted WAL + engine dirs, recreating group"
+    );
+
+    // Recreate the group with a fresh WAL + engine. `create_group_with_wal`
+    // replays the now-empty WAL (→ slot 0), creates fresh WalEngine +
+    // engine, and `maybe_apply_persisted_config` restores the remote
+    // membership from node-config.json (which the wipe did not touch).
+    let new_group = crate::startup::create_group_with_wal(
+        sid,
+        gid,
+        replica_id,
+        PxLocalReplicaRole::Follower,
+        &state.config,
+        state.wal_backend.clone(),
+        state.crowtree_backend,
+    )
+    .await
+    .map_err(|e| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("wipe-user-data: failed to recreate group {gid} in store {sid}: {e}"),
+        )
+    })?;
+
+    // quorum == 1 self-election (mirrors `add_group`): the election
+    // driver spawned by `store.add_group` does not self-elect a
+    // singleton fast enough for the caller's re-election wait, so
+    // do it synchronously here.
+    if new_group.quorum() == 1 {
+        let current_term = new_group.local_replica().current_term_snapshot();
+        if current_term == 0 {
+            new_group.local_replica().become_candidate(1);
+            new_group.local_replica().persist_current_vote().await;
+            new_group.local_replica().become_leader();
+        }
+        new_group.stamp_proposing_term(new_group.local_replica().current_term_snapshot());
+    }
+
+    // Atomically replace the old group: remove the old group from the
+    // store first (cancels its tenure + drops the store's Arc<PxGroup>),
+    // then add the new group. The remove-before-add is critical:
+    // `add_group` calls `inherit_local_state_from(prior)`, which
+    // `Arc::clone`s the prior's learner (engine) + WAL — undoing the
+    // wipe. Removing first means there is no prior to inherit from,
+    // so the new group's fresh engine + WAL are preserved.
+    store.remove_group(gid);
+    store.add_group(new_group);
+
+    info!(
+        store_id = sid,
+        group_id = gid,
+        "wipe-user-data: group recreated, election driver restarted"
+    );
+    Ok(Json(WipeResult {
+        store_id: sid,
+        group_id: gid,
+        accepted: true,
+    }))
+}

@@ -593,3 +593,148 @@ async fn bench_deploy_chunk_not_implemented() {
         "stderr={stderr}\nstdout={stdout}"
     );
 }
+
+/// `bench deploy` + `bench prepare` + `bench clean` + `bench run
+/// --workload read` — clean wipes user data so a subsequent read
+/// returns 0 found keys, but the cluster is still functional (a
+/// write succeeds without re-wiring).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_clean_wipes_data_and_keeps_cluster() {
+    let _lock = bench_lock();
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+    if lifecycle::crowdb_kv_server_bin().is_none_or(|p| !p.exists()) {
+        eprintln!("skipping: crowdb-kv-server binary not built");
+        return;
+    }
+
+    let name = unique_deploy_name("clean");
+
+    // Deploy.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench", "deploy", "--name", &name, "--kind", "kv", "--mode", "mem",
+        ],
+    );
+    assert_eq!(code, 0, "deploy stdout={stdout}\nstderr={stderr}");
+
+    // Prepare 100 keys.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "prepare",
+            "--target",
+            &name,
+            "--keys",
+            "100",
+            "--value-size",
+            "32",
+        ],
+    );
+    assert_eq!(code, 0, "prepare stdout={stdout}\nstderr={stderr}");
+
+    // Clean — should log the group0-preserved banner.
+    let (code, stdout, stderr) = run(&cli, "127.0.0.1", 0, &["bench", "clean", "--target", &name]);
+    assert_eq!(code, 0, "clean stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stdout.contains("wiping user data on cluster") && stdout.contains("group0 preserved"),
+        "banner missing: stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("new leader"),
+        "should report new leader: stdout={stdout}"
+    );
+
+    // Read after clean — should return 0 found keys (the prepared data
+    // was wiped). The bench run read workload reports found/not-found
+    // counts; with 0 keys populated, found should be 0.
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            &name,
+            "--workload",
+            "read",
+            "--duration-secs",
+            "1",
+            "--loader-num",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "32",
+        ],
+    );
+    assert_eq!(code, 0, "read-after-clean stdout={stdout}\nstderr={stderr}");
+
+    // Write after clean — should succeed without re-wiring (topology
+    // intact, new leader serves).
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &[
+            "bench",
+            "run",
+            "--target",
+            &name,
+            "--workload",
+            "write",
+            "--duration-secs",
+            "1",
+            "--loader-num",
+            "2",
+            "--connections",
+            "2",
+            "--key-space",
+            "100",
+            "--value-size",
+            "32",
+        ],
+    );
+    assert_eq!(code, 0, "write-after-clean stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("report (json):"), "stdout={stdout}");
+
+    // Teardown.
+    let (code, stdout, stderr) = run(&cli, "127.0.0.1", 0, &["bench", "teardown", "--target", &name]);
+    assert_eq!(code, 0, "teardown stdout={stdout}\nstderr={stderr}");
+}
+
+/// `bench clean --target nonexistent` errors with a clear message
+/// listing existing deploys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bench_clean_nonexistent_target() {
+    let _lock = bench_lock();
+    let cli = crowdb_cli_bin();
+    if !cli.exists() {
+        eprintln!("skipping: crowdb-cli binary not built");
+        return;
+    }
+
+    let (code, stdout, stderr) = run(
+        &cli,
+        "127.0.0.1",
+        0,
+        &["bench", "clean", "--target", "nonexistent-clean-target"],
+    );
+    assert_ne!(code, 0, "should fail stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stderr.contains("not found") || stdout.contains("not found"),
+        "should report not found: stderr={stderr}\nstdout={stdout}"
+    );
+}

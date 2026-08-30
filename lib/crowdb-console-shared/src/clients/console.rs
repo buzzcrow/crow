@@ -72,13 +72,6 @@ pub struct AddDiskBody {
     pub device_path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct MoveDiskBody {
-    pub new_rack_id: RackId,
-    pub new_node_id: NodeId,
-    pub new_disk_group_id: DiskGroupId,
-}
-
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeployNodeServerBody {
     pub rest_port: u16,
@@ -398,14 +391,6 @@ impl ConsoleClient {
             "/api/nodes/{node_id}/disk-groups/{dg_id}/disks/{disk_id}"
         ))
         .await
-    }
-
-    /// `POST /api/disks/:disk_id/move`.
-    ///
-    /// # Errors
-    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn move_disk(&self, disk_id: &str, body: &MoveDiskBody) -> Result<crate::config::DiskEntry> {
-        self.post_json(&format!("/api/disks/{disk_id}/move"), body).await
     }
 
     // ── Physical: server lifecycle (one server per node) ──────────

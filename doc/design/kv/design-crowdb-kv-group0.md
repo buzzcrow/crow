@@ -39,6 +39,7 @@ Satisfies: [`design-crowdb-kv.md`](design-crowdb-kv.md) §3.3
   - [5.3 Greenfield migration](#53-greenfield-migration)
   - [5.4 Leader readiness before writing](#54-leader-readiness-before-writing)
 - [6. Relationship to Existing Design Docs](#6-relationship-to-existing-design-docs)
+- [7. Cascading cleanup](#7-cascading-cleanup)
 
 ---
 
@@ -469,3 +470,14 @@ existing flow doesn't already wait.
   primitive required.
 - **`design-crowdb-protocol-key.md` §5** — documents the unified key concept
   (one struct, two encoding traits: `BinaryKey` + `TextKey`).
+
+## 7. Cascading cleanup
+
+`HardwareClient` provides `remove_*_cascade` methods that delete an
+entity and all its children in group 0: `remove_rack_cascade` →
+nodes → disk-groups → disks + owner/bind/usage records. The
+single-record `remove_*` methods are kept for internal use.
+
+- **I1 — ID reuse safety**: After a rack/node/disk-group/disk is
+  removed, its ID can be safely reused. The group-0 sysdata deletion
+  is the fence against resurrection.

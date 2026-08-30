@@ -27,6 +27,7 @@ programmatic (`CrowdbClient::with_rpc_transport`).
 - [10. WatchNotifyClient](#10-watchnotifyclient)
 - [11. Zero-Copy Wrapper Classes](#11-zero-copy-wrapper-classes)
 - [12. Error Model](#12-error-model)
+- [13. Topology cache eviction](#13-topology-cache-eviction)
 
 ---
 
@@ -253,3 +254,15 @@ convention.
   convention).
 - [`design-crowdb-kv-watch-notify.md`](design-crowdb-kv-watch-notify.md) —
   WatchNotify design (trie, prefix matching, safety-net poller).
+
+## 13. Topology cache eviction
+
+`TopologyCache::merge` evicts entries from `leaders` and `replicas`
+that are absent from the fresh topology body. `CrowdbClient` wires an
+`eviction_hook` into `TopologyCache::new` so that evicted
+`(store_id, group_id)` keys are also removed from
+`write_slot_highwater` — a stale high-watermark does not self-heal
+and would cause silent empty results against a reused group ID.
+
+- **I1 — Cache eviction on topology change**: When a group disappears
+  from topology, its `write_slot_highwater` entry is evicted.

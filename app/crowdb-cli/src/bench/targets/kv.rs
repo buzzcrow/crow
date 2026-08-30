@@ -550,6 +550,62 @@ async fn wait_for_healthy_cluster(mgmt_urls: &[String], leader_endpoint: &str) -
     }
 }
 
+/// Poll every node's `/topology` until all report the same non-zero
+/// `leader_id` for `(store_id, group_id)`, or `timeout` elapses.
+/// Returns the agreed leader id. Used by `bench clean` to wait for
+/// re-election after a wipe (the wipe steps down + recreates the
+/// group, so a fresh election runs on every node).
+pub(crate) async fn wait_for_re_election(
+    mgmt_urls: &[String],
+    store_id: u64,
+    group_id: u64,
+    timeout: Duration,
+) -> Result<u64> {
+    use crowdb_console_shared::clients::http::ServerClient;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let mut all_agree = true;
+        let mut consensus_leader: Option<u64> = None;
+        for url in mgmt_urls {
+            let Ok(sc) = ServerClient::new(url) else {
+                all_agree = false;
+                break;
+            };
+            let Ok(stores) = sc.topology().await else {
+                all_agree = false;
+                break;
+            };
+            let leader_id = stores
+                .iter()
+                .find(|s| s.store_id == store_id)
+                .and_then(|s| s.groups.iter().find(|g| g.group_id == group_id))
+                .map_or(0, |g| g.leader_id);
+            if leader_id == 0 {
+                all_agree = false;
+                break;
+            }
+            match consensus_leader {
+                None => consensus_leader = Some(leader_id),
+                Some(l) if l != leader_id => {
+                    all_agree = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if all_agree {
+            return Ok(consensus_leader.unwrap_or(0));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::Config(format!(
+                "cluster did not re-elect a leader within {timeout:?}: replicas disagree or no leader"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 fn upstream_err(id: &str, op: &str, e: &Error) -> Error {
     Error::UpstreamRpc {
         node_id: id.to_string(),

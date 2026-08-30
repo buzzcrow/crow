@@ -708,3 +708,212 @@ async fn progressive_setup_multiple_stores_groups_replicas() {
         .unwrap();
     assert_eq!(list["stores"].as_array().unwrap().len(), 2);
 }
+
+// ── wipe-user-data ──────────────────────────────────────────────
+
+use bytes::Bytes;
+use common::test_client::TestKvClient;
+use crowdb_kv::rpc::{KvGetRequest, KvSetRequest};
+
+/// Normalize a `listen_addr` from topology (`0.0.0.0:port`) to a
+/// loopback URL the test client can dial.
+fn normalize_endpoint(endpoint: &str) -> String {
+    endpoint
+        .strip_prefix("0.0.0.0:")
+        .map_or_else(|| endpoint.to_string(), |port| format!("127.0.0.1:{port}"))
+}
+
+/// Extract the store-0 RPC endpoint from a `/topology` response.
+fn node_endpoint(topo: &Value) -> String {
+    normalize_endpoint(
+        topo["stores"][0]["listen_addr"]
+            .as_str()
+            .expect("store listen_addr"),
+    )
+}
+
+/// Poll `/topology` until the group's `leader_id` is non-zero.
+async fn wait_for_leader(base: &str, store_id: u64, group_id: u64) -> Value {
+    for _ in 0..80 {
+        let topo: Value = client()
+            .get(format!("{base}/topology"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let lid = topo["stores"]
+            .as_array()
+            .and_then(|s| s.iter().find(|s| s["store_id"].as_u64() == Some(store_id)))
+            .and_then(|s| s["groups"].as_array())
+            .and_then(|g| g.iter().find(|g| g["group_id"].as_u64() == Some(group_id)))
+            .and_then(|g| g["leader_id"].as_u64())
+            .unwrap_or(0);
+        if lid != 0 {
+            return topo;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no leader elected for store {store_id} group {group_id}");
+}
+
+/// `wipe-user-data` on a populated single-replica group wipes the WAL
+/// + engine user data; a subsequent get returns `not_found`, the
+/// topology is unchanged (group0 preserved), and a new put succeeds
+/// (the cluster re-elected a leader and is functional post-wipe).
+#[tokio::test]
+async fn wipe_user_data_clears_keys_and_preserves_group0() {
+    const STORE: u64 = 0;
+    const GROUP: u64 = 1;
+    let server = start_server().await;
+    let base = server.base_url();
+
+    // Wait for the single replica to self-elect.
+    let topo = wait_for_leader(base, STORE, GROUP).await;
+    let endpoint = format!("http://{}", node_endpoint(&topo));
+    let kv = TestKvClient::connect(endpoint).await;
+
+    // Write a key.
+    let resp = kv
+        .put(KvSetRequest {
+            version: 1,
+            key: Bytes::from_static(b"wipe-test-key"),
+            value: Bytes::from_static(b"wipe-test-value"),
+            seq: 1,
+            ttl_ms: 0,
+            client_id: 200,
+            request_id: 2001,
+            request_create_ms: 20001,
+            group_id: GROUP,
+        })
+        .await
+        .expect("put before wipe");
+    assert!(resp.into_inner().ok, "put should succeed");
+
+    // Verify the key is readable.
+    let resp = kv
+        .get(KvGetRequest {
+            version: 1,
+            key: Bytes::from_static(b"wipe-test-key"),
+            request_id: 2002,
+            request_create_ms: 20002,
+            group_id: GROUP,
+            read_mode: 0,
+            min_slot: 0,
+        })
+        .await
+        .expect("get before wipe");
+    let inner = resp.into_inner();
+    assert!(inner.ok, "key should be found before wipe");
+    assert_eq!(inner.value, Bytes::from_static(b"wipe-test-value"));
+
+    // Wipe user data.
+    let resp: Value = client()
+        .post(format!("{base}/stores/{STORE}/groups/{GROUP}/wipe-user-data"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["accepted"], true, "wipe should be accepted: {resp}");
+
+    // Wait for re-election (the wipe steps down + recreates the group).
+    let topo_after = wait_for_leader(base, STORE, GROUP).await;
+
+    // group0 preserved: store + group still present in topology.
+    assert!(
+        topo_after["stores"]
+            .as_array()
+            .and_then(|s| s.iter().find(|s| s["store_id"].as_u64() == Some(STORE)))
+            .and_then(|s| s["groups"].as_array())
+            .and_then(|g| g.iter().find(|g| g["group_id"].as_u64() == Some(GROUP)))
+            .is_some(),
+        "store/group should still be present after wipe (group0 preserved)"
+    );
+
+    // The key is gone — get returns not_found.
+    let endpoint_after = format!("http://{}", node_endpoint(&topo_after));
+    let kv_after = TestKvClient::connect(endpoint_after).await;
+    let resp = kv_after
+        .get(KvGetRequest {
+            version: 1,
+            key: Bytes::from_static(b"wipe-test-key"),
+            request_id: 2003,
+            request_create_ms: 20003,
+            group_id: GROUP,
+            read_mode: 0,
+            min_slot: 0,
+        })
+        .await
+        .expect("get after wipe");
+    let inner = resp.into_inner();
+    assert!(
+        inner.not_found,
+        "key should be gone after wipe: ok={} not_found={} value={:?}",
+        inner.ok, inner.not_found, inner.value
+    );
+
+    // The cluster is functional post-wipe: a new put succeeds.
+    let resp = kv_after
+        .put(KvSetRequest {
+            version: 1,
+            key: Bytes::from_static(b"wipe-post-key"),
+            value: Bytes::from_static(b"wipe-post-value"),
+            seq: 2,
+            ttl_ms: 0,
+            client_id: 200,
+            request_id: 2004,
+            request_create_ms: 20004,
+            group_id: GROUP,
+        })
+        .await
+        .expect("put after wipe");
+    assert!(resp.into_inner().ok, "put after wipe should succeed");
+}
+
+#[tokio::test]
+async fn wipe_user_data_store_not_found() {
+    let server = start_server().await;
+    let resp = client()
+        .post(format!("{}/stores/99/groups/1/wipe-user-data", server.base_url()))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn wipe_user_data_group_not_found() {
+    let server = start_server().await;
+    let resp = client()
+        .post(format!("{}/stores/0/groups/99/wipe-user-data", server.base_url()))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+/// The wipe-user-data path appears in the `OpenAPI` spec.
+#[tokio::test]
+async fn wipe_user_data_in_openapi() {
+    let server = start_server().await;
+    let resp: Value = client()
+        .get(format!("{}/openapi.json", server.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        resp["paths"]["/stores/{sid}/groups/{gid}/wipe-user-data"].is_object(),
+        "wipe-user-data path missing from OpenAPI"
+    );
+}

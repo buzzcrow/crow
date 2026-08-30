@@ -22,7 +22,7 @@ use crowdb_protocol::common_type::{GroupId, ReplicaId, StoreId};
 use crowdb_protocol::key::{KvGroupKey, KvReplicaKey, KvStoreKey, TextKey};
 use crowdb_protocol::mgmt::{
     AddGroupRequest, AddStoreRequest, GroupSummary, RemoteReplicaInfo, StepDownRequest, StepDownResult,
-    StoreDetail, StoreSummary, SystemInitRequest, SystemInitResponse,
+    StoreDetail, StoreSummary, SystemInitRequest, SystemInitResponse, WipeResult,
 };
 
 use crate::client::{GetOutcome, ScanOutcome};
@@ -397,6 +397,25 @@ impl KVClusterAdmin {
     ) -> Result<StepDownResult> {
         self.post_json(&format!("/stores/{store_id}/groups/{group_id}/step-down"), req)
             .await
+    }
+
+    // ── lifecycle: system init ──────────────────────────────────
+
+    // ── lifecycle: wipe user data ────────────────────────────────
+
+    /// `POST /stores/{sid}/groups/{gid}/wipe-user-data`.
+    ///
+    /// Drops and recreates the WAL + engine user data for the group
+    /// on the receiving node, preserving group0 sysdata + store/
+    /// group/replica topology. `accepted` is `false` when the
+    /// replica had no WAL wired (no-op). The caller is responsible
+    /// for waiting for re-election + health after wiping every node.
+    pub async fn wipe_user_data(&self, store_id: StoreId, group_id: GroupId) -> Result<WipeResult> {
+        self.post_json(
+            &format!("/stores/{store_id}/groups/{group_id}/wipe-user-data"),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     // ── lifecycle: system init ──────────────────────────────────

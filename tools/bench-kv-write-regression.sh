@@ -9,15 +9,23 @@
 # doc/design/kv/kv-write-flow-analysis.md. After a run, update that
 # section with the results and CPU model.
 #
+# Flow (R125): deploy once per server-tunable group, then
+# (clean → run) per sub-test, teardown once per group. The clean
+# verb wipes user data on every node (keep group0) so each write
+# sub-test starts from a data-empty cluster without a full redeploy.
+# Server tunables (max-inflight, coalesce) are deploy-time, so the
+# sweep groups sub-tests by shared tunables:
+#   Group A: win=32, coalesce=16  (5 sub-tests)
+#   Group B: win=64, coalesce=64  (2 sub-tests)
+# This cuts deploys from 7 to 2; clean is much cheaper than deploy.
+#
 # Configurations:
-#   - Scaling: 1T:1C → 1000T:16C, coalesce_max_keys=16,
-#     drain_threshold=1 (fixed), max_inflight=32 (64 for 512T+)
+#   - Scaling: 1T:1C → 1000T:16C, coalesce_max_keys=16/64,
+#     drain_threshold=1 (fixed), max_inflight=32/64
 #   - RPC tunables: --event-write --peer-pool-size 4
 #     (event-write coalesces frames via I/O worker; peer-pool=4 spreads
 #     consensus send pressure across 4 connections per peer. send-queue
 #     uses the default 4096)
-#
-# 7 runs × 20s ≈ 140s + deploy overhead.
 #
 # Reference platform: AMD Ryzen 9 5950X (16c/32t, x86_64, Linux).
 # Peak ~234K ops/s at 512T with zero-copy crowdb-rpc + event-write.
@@ -34,23 +42,30 @@ DURATION=20
 KEYSPACE=1000000
 VALUE_SIZE=512
 
+# run_bench <deploy_name> <threads> <conn> <label>
+# Assumes the deploy was already created with the right server tunables.
+# Cleans user data, then runs the write workload, parses JSON output.
 run_bench() {
-    local threads="$1" conn="$2" win="$3" coalesce="$4" workers="$5" label="$6"
+    local deploy="$1" threads="$2" conn="$3" label="$4"
     echo ">>> $label ..."
+    # Clean: wipe user data on every node (keep group0), wait re-elect.
+    local clean_out
+    clean_out=$(pixi run -- cargo run --release -p crowdb-cli -- bench clean --target "$deploy" --json 2>&1)
+    if ! echo "$clean_out" | jq -e '.new_leader' >/dev/null 2>&1; then
+        echo "    ERROR: clean failed"; echo "$clean_out" | tail -5
+        echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
+        return
+    fi
     local output
-    output=$(CROWDB_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crowdb-cli -- bench kv \
-        --mode mem --workload write --duration-secs "$DURATION" \
+    output=$(CROWDB_RPC_WORKERS="${RPC_WORKERS:-2}" pixi run -- cargo run --release -p crowdb-cli -- bench run \
+        --target "$deploy" --workload write --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$conn" \
-        --max-inflight "$win" \
-        --coalesce-max-keys "$coalesce" \
-        --coalesce-drain-threshold 1 \
-        --peer-pool-size 4 --event-write \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --verify-bytes 0 --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$label\t$win\t$coalesce\t$workers\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
+        echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
     local ops_s p50_us p99_us errors wal
@@ -81,11 +96,31 @@ run_bench() {
     inflight_wait=$(echo "$json" | jq -r '.server_metrics.inflight_wait_avg_us // 0')
     local co_factor
     co_factor=$(awk "BEGIN { if ($wal_per_node > 0) printf \"%.1f\", $ops_s * 10 / $wal_per_node }")
-    echo "    ops/s=$ops_s wal/node=$wal_per_node co=${co_factor}/${coalesce} p50=${p50_us}us p99=${p99_us}us err=$errors"
+    echo "    ops/s=$ops_s wal/node=$wal_per_node co=${co_factor}/${COALESCE} p50=${p50_us}us p99=${p99_us}us err=$errors"
     echo "    rpc_agg: srv sagg=${srv_sa} ragg=${srv_ra} s2w=${srv_s2w}us | cli sagg=${cli_sa} ragg=${cli_ra} s2w=${cli_s2w}us"
     echo "    replica: r2=${r2_avg}us/${r2_tps}tps r3=${r3_avg}us/${r3_tps}tps"
     echo "    inflight: enq=${inflight_enq} wait_avg=${inflight_wait}us"
-    echo -e "$label\t$win\t$coalesce\t$workers\t$ops_s\t$wal_per_node\t$p50_us\t$p99_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra\t$r2_avg\t$r2_tps\t$r3_avg\t$r3_tps\t$inflight_enq\t$inflight_wait" >> "$RESULTS_FILE"
+    echo -e "$label\t$WIN\t$COALESCE\t${RPC_WORKERS:-2}\t$ops_s\t$wal_per_node\t$p50_us\t$p99_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra\t$r2_avg\t$r2_tps\t$r3_avg\t$r3_tps\t$inflight_enq\t$inflight_wait" >> "$RESULTS_FILE"
+}
+
+# deploy_group <name> <win> <coalesce> <rpc_workers>
+# Deploy a 3-node cluster with the given server tunables.
+deploy_group() {
+    local name="$1" win="$2" coalesce="$3" workers="$4"
+    echo "=== deploying cluster '$name' (win=$win, coalesce=$coalesce, workers=$workers) ==="
+    CROWDB_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crowdb-cli -- bench deploy \
+        --name "$name" --kind kv --mode mem \
+        --max-inflight "$win" \
+        --coalesce-max-keys "$coalesce" \
+        --coalesce-drain-threshold 1 \
+        --peer-pool-size 4 --event-write \
+        2>&1 | tail -3
+}
+
+# teardown_group <name>
+teardown_group() {
+    local name="$1"
+    pixi run -- cargo run --release -p crowdb-cli -- bench teardown --target "$name" 2>&1 | tail -2
 }
 
 # --- regression sentinel configs ---
@@ -99,8 +134,9 @@ run_bench() {
 #   Zero-copy crowdb-rpc + event-write + peer-pool=4. Event-write coalesces
 #   frames via I/O worker (one writev for N queued frames). Peer-pool=4
 #   spreads consensus send pressure across 4 connections per peer.
-#   win=32 (64 for 512T+), coalesce=16, 10s mem mode, 3-node cluster,
+#   win=32 (64 for 512T+), coalesce=16/64, 20s mem mode, 3-node cluster,
 #   512B values, 1M keys. CROWDB_RPC_WORKERS tuned per config.
+#   Flow: deploy once per tunable group → (clean → run) × N → teardown.
 #
 #   T    C    W    win  co        ops/s     WAL/node  p50    p99    err  sagg  ragg  r2    r2tps    r3    r3tps    enq   wait
 #   1    1    2    32   0.5/16    4,019     80,396    256    348    0    1     0.9   0     4,119    0     4,119    0     0
@@ -138,16 +174,24 @@ run_bench() {
 
 echo -e "label\twin\tcoalesce\tworkers\tops_s\twal_per_node\tp50_us\tp99_us\terrors\tsrv_sagg\tsrv_ragg\tcli_sagg\tcli_ragg\tr2_avg\tr2_tps\tr3_avg\tr3_tps\tinflight_enq\tinflight_wait_us" > "$RESULTS_FILE"
 
+# Group A: win=32, coalesce=16 (5 sub-tests, workers=2 except 128T+)
+DEPLOY_A="write-reg-A-$$-$(date +%s)"
+WIN=32 COALESCE=16 RPC_WORKERS=2 deploy_group "$DEPLOY_A" 32 16 2
 echo "=== write (win=32, coalesce=16) ==="
-run_bench 1 1 32 16 2 "write_1t_1c_win32_coales16"           # ref: 4,019 ops/s
-run_bench 16 2 32 16 2 "write_16t_2c_win32_coales16"         # ref: 63,668 ops/s
-run_bench 64 4 32 16 2 "write_64t_4c_win32_coales16"         # ref: 157,310 ops/s
-run_bench 128 4 32 16 4 "write_128t_4c_win32_coales16"       # ref: 189,585 ops/s
-run_bench 256 8 32 16 4 "write_256t_8c_win32_coales16"       # ref: 187,452 ops/s
+WIN=32 COALESCE=16 RPC_WORKERS=2 run_bench "$DEPLOY_A" 1 1 "write_1t_1c_win32_coales16"           # ref: 4,019 ops/s
+WIN=32 COALESCE=16 RPC_WORKERS=2 run_bench "$DEPLOY_A" 16 2 "write_16t_2c_win32_coales16"         # ref: 63,668 ops/s
+WIN=32 COALESCE=16 RPC_WORKERS=2 run_bench "$DEPLOY_A" 64 4 "write_64t_4c_win32_coales16"         # ref: 157,310 ops/s
+WIN=32 COALESCE=16 RPC_WORKERS=4 run_bench "$DEPLOY_A" 128 4 "write_128t_4c_win32_coales16"       # ref: 189,585 ops/s
+WIN=32 COALESCE=16 RPC_WORKERS=4 run_bench "$DEPLOY_A" 256 8 "write_256t_8c_win32_coales16"       # ref: 187,452 ops/s
+teardown_group "$DEPLOY_A"
+
+# Group B: win=64, coalesce=64 (2 sub-tests, workers=4)
+DEPLOY_B="write-reg-B-$$-$(date +%s)"
+WIN=64 COALESCE=64 RPC_WORKERS=4 deploy_group "$DEPLOY_B" 64 64 4
 echo "=== write (win=64, coalesce=64) ==="
-run_bench 512 16 64 64 4 "write_512t_16c_win64_coales64"     # ref: 233,601 ops/s
-echo "=== write (win=64, coalesce=64) ==="
-run_bench 1000 16 64 64 4 "write_1000t_16c_win64_coales64"   # ref: 208,114 ops/s
+WIN=64 COALESCE=64 RPC_WORKERS=4 run_bench "$DEPLOY_B" 512 16 "write_512t_16c_win64_coales64"     # ref: 233,601 ops/s
+WIN=64 COALESCE=64 RPC_WORKERS=4 run_bench "$DEPLOY_B" 1000 16 "write_1000t_16c_win64_coales64"   # ref: 208,114 ops/s
+teardown_group "$DEPLOY_B"
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

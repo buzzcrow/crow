@@ -15,27 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R125](R125-server-wipe-user-data-endpoint.md)** — wipe-user-data
-  management endpoint + bench clean verb — Area: server / console /
-  cli / bench — phase 2 of R124. Adds `POST /stores/:sid/groups/:gid/
-  wipe-user-data` to `crowdb-kv-server` (wipes the group's WAL +
-  engine user data on the receiving node, keeps group0 sysdata +
-  store/group/replica topology intact), a new `WalEngine` wipe/reset
-  primitive + a coordinated `PxLocalReplica` wipe that reuses
-  `KVEngine::clear`, a `crowdb-kv-client` mgmt-client call, and the
-  deferred `bench clean --target <deploy>` CLI verb that invokes the
-  endpoint on every node hosting a replica of the target group then
-  waits for re-elect + healthy. Endpoint name/flow resolved:
-  `wipe-user-data` (single API, no `confirm` token, no two-step
-  challenge) — the deliberately non-trivial name (not a bare
-  `reset`/`wipe`/`clear`) plus per-group path scoping plus per-node
-  invocation is the friction layer against accidental triggering.
-  Completes R124's write-regression flow: `deploy` → (`clean` →
-  `run --workload write`) × N → `teardown`. Depends on R124's
-  `ClusterHandle` (mgmt URLs) + wait-leader/wait-healthy helpers.
-  Open questions: engine+WAL wipe coordination (drop-and-recreate vs.
-  in-place truncate-all); leader step-down before wipe vs. force
-  re-election.
 - **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
   test port prober — Area: cluster / protocol / server —
   `crowdb-protocol/src/ports.rs` already defines base ports + stride +

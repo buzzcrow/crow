@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Suspense, useState, useCallback, useMemo, lazy, useEffect, useRef, type ReactNode } from 'react';
-import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, Move, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
+import { Server, Database, Plus, Trash2, Activity, RotateCw, Square, HardDrive, Boxes, CheckCircle2, XCircle, PowerOff, Wrench, AlertTriangle, EyeOff, HelpCircle } from 'lucide-react';
 import type { CenterPanelMode } from './shell/Header';
 import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
@@ -25,7 +25,6 @@ import {
   AddReplicaDialog,
   AddDiskGroupDialog,
   AddDiskDialog,
-  MoveDiskDialog,
   AssignDiskGroupDialog,
   DeployServerDialog,
   DeployDiskdbDialog,
@@ -120,7 +119,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     addReplica?: { storeId: string; groupId: string };
     addDiskGroup?: { nodeId: number };
     addDisk?: { nodeId: number; dgId: number };
-    moveDisk?: { diskId: string; rackId: number; nodeId: number; dgId: number };
     assignDiskGroup?: { rackId: number; nodeId: number; dgId: number; dgName?: string };
     deployServer?: { nodeId: number };
     deployDiskdb?: { nodeId: number } | null;
@@ -626,12 +624,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         });
         items.push({ id: 's3', separator: true });
         items.push({
-          id: 'move-disk',
-          label: 'Move Disk',
-          icon: <Move className="tw-h-4 tw-w-4" />,
-          onSelect: () => setDialog((d) => ({ ...d, moveDisk: { diskId, rackId: Number(p.rack_id), nodeId: diskNodeId, dgId: diskDgId } })),
-        });
-        items.push({
           id: 'del-disk',
           label: 'Delete Disk',
           icon: <Trash2 className="tw-h-4 tw-w-4" />,
@@ -1039,21 +1031,6 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           onClose={closeDialogs}
           nodeId={dialog.addDisk.nodeId}
           dgId={dialog.addDisk.dgId}
-          onSuccess={handleRefresh}
-        />
-      )}
-      {dialog.moveDisk && (
-        <MoveDiskDialog
-          isOpen
-          onClose={closeDialogs}
-          diskId={dialog.moveDisk.diskId}
-          currentRackId={dialog.moveDisk.rackId}
-          currentNodeId={dialog.moveDisk.nodeId}
-          currentDgId={dialog.moveDisk.dgId}
-          racks={racks}
-          diskGroupsByNode={Object.fromEntries(
-            Object.entries(nodeDiskGroups).map(([k, v]) => [Number(k), v.diskGroups])
-          )}
           onSuccess={handleRefresh}
         />
       )}

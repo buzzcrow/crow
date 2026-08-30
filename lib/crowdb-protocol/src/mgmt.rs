@@ -148,6 +148,23 @@ pub struct StepDownResult {
     pub current_leader_id: u64,
 }
 
+// ── Wipe user data ──────────────────────────────────────────────
+
+/// `POST /stores/{sid}/groups/{gid}/wipe-user-data` response.
+///
+/// `accepted` is `false` when the target replica had no WAL wired
+/// (not yet bootstrapped) — a no-op, not an error. `true` means the
+/// WAL + engine user data for the group was dropped and recreated on
+/// this node; group0 sysdata + store/group/replica topology are
+/// preserved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct WipeResult {
+    pub store_id: u64,
+    pub group_id: u64,
+    pub accepted: bool,
+}
+
 // ── System init ─────────────────────────────────────────────────
 
 /// `POST /system/init` body.

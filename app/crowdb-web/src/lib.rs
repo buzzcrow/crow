@@ -88,8 +88,6 @@ pub fn router(state: AppState) -> axum::Router {
             "/api/nodes/:id/disk-groups/:dg_id/disks/:disk_id",
             get(lifecycle::http_get_disk).delete(lifecycle::http_remove_disk),
         )
-        // Disk move (R81).
-        .route("/api/disks/:disk_id/move", post(lifecycle::http_move_disk))
         // Disk status set (R77).
         .route(
             "/api/disks/:disk_id/status",
