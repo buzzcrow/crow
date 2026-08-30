@@ -82,6 +82,9 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::cluster::init(&ctx, &node_ids).await {
                 Ok(summary) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if cli.json {
                         return print_json(cli, &summary);
                     }
@@ -144,6 +147,9 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::cluster::reset(&ctx).await {
                 Ok(()) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if !cli.json {
                         println!("cluster reset complete");
                     }

@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use clap::Subcommand;
 use crowdb_protocol::NodeId;
 
-use crate::commands::{op_context, print_json};
+use crate::commands::{commit_config, op_context, print_json};
 use crate::Cli;
 
 #[derive(Subcommand, Debug)]
@@ -63,6 +63,9 @@ pub async fn run_kv_server_verb(cli: &Cli, verb: KvServerVerb) -> ExitCode {
                 .await
             {
                 Ok(d) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if cli.json {
                         return print_json(
                             cli,
@@ -100,6 +103,9 @@ pub async fn run_kv_server_verb(cli: &Cli, verb: KvServerVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::kv_server::restart(&ctx, node_id).await {
                 Ok(d) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if cli.json {
                         return print_json(
                             cli,
@@ -137,6 +143,9 @@ pub async fn run_kv_server_verb(cli: &Cli, verb: KvServerVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::kv_server::stop(&ctx, node_id).await {
                 Ok(sent) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if cli.json {
                         return print_json(cli, &serde_json::json!({"sent": sent}));
                     }
@@ -167,6 +176,9 @@ pub async fn run_kv_server_verb(cli: &Cli, verb: KvServerVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::kv_server::delete(&ctx, node_id).await {
                 Ok(()) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if !cli.json {
                         println!("deleted server on node {node_id}");
                     }

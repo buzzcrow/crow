@@ -295,7 +295,7 @@ pub struct ServerEntry {
     pub binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub election_profile: Option<String>,
-    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     /// Service type discriminator (R77). Defaults to `Kv` for
     /// backward compatibility with pre-R77 persisted configs.
@@ -423,6 +423,8 @@ struct PersistedServerEntry {
     rpc_workers: Option<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     no_fsync: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -956,6 +958,7 @@ impl ConsoleConfig {
                         service_type: entry.service_type,
                         rpc_workers: entry.rpc_workers,
                         no_fsync: entry.no_fsync,
+                        pid: entry.pid,
                     },
                 )
             })
@@ -1068,7 +1071,7 @@ impl ConsoleConfig {
                 auto_start: entry.auto_start,
                 binary: entry.binary,
                 election_profile: entry.election_profile,
-                pid: None,
+                pid: entry.pid,
                 service_type: entry.service_type,
                 rpc_workers: entry.rpc_workers,
                 no_fsync: entry.no_fsync,

@@ -81,16 +81,17 @@ pub(crate) fn op_context(cli: &Cli) -> Result<OpContext, ExitCode> {
     // Use the first config server's RPC URL as the group0 endpoint hint
     // if available (more accurate than the default port). Strip the
     // `http://` prefix since the crowdb-rpc endpoint format is `ip:port`.
-    let effective_g0 = config
-        .servers
-        .first()
-        .and_then(|s| s.rpc_url.as_ref())
-        .map_or(group0_endpoint, |url| {
-            url.strip_prefix("http://")
-                .or_else(|| url.strip_prefix("https://"))
-                .unwrap_or(url)
-                .to_string()
-        });
+    let effective_g0 =
+        config
+            .servers
+            .first()
+            .and_then(|s| s.rpc_url.as_ref())
+            .map_or(group0_endpoint, |url| {
+                url.strip_prefix("http://")
+                    .or_else(|| url.strip_prefix("https://"))
+                    .unwrap_or(url)
+                    .to_string()
+            });
 
     Ok(OpContext::new(effective_g0, seeds, config))
 }

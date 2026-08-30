@@ -10,7 +10,7 @@ use clap::Subcommand;
 use crowdb_console_shared::config::NodeEntry;
 use crowdb_protocol::{NodeId, RackId};
 
-use crate::commands::{op_context, print_json};
+use crate::commands::{commit_config, op_context, print_json};
 use crate::Cli;
 
 // ── rack ─────────────────────────────────────────────────────────
@@ -46,6 +46,9 @@ pub async fn run_rack_verb(cli: &Cli, verb: RackVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::hardware::add_rack(&ctx, rack_id, &name).await {
                 Ok(entry) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if cli.json {
                         return print_json(cli, &entry);
                     }
@@ -72,6 +75,9 @@ pub async fn run_rack_verb(cli: &Cli, verb: RackVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::hardware::remove_rack(&ctx, rack_id).await {
                 Ok(()) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if !cli.json {
                         println!("removed rack {id}");
                     }
@@ -116,7 +122,7 @@ pub enum NodeVerb {
         rack: String,
         #[arg(short = 'H', long, default_value = "127.0.0.1")]
         host: String,
-        #[arg(short = 'p', long, default_value_t = 22)]
+        #[arg(short = 'P', long, default_value_t = 22)]
         ssh_port: u16,
         #[arg(short = 'u', long, default_value = "")]
         ssh_user: String,
@@ -175,6 +181,9 @@ pub async fn run_node_verb(cli: &Cli, verb: NodeVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::hardware::add_node(&ctx, entry.clone()).await {
                 Ok(e) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if cli.json {
                         return print_json(cli, &e);
                     }
@@ -201,6 +210,9 @@ pub async fn run_node_verb(cli: &Cli, verb: NodeVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::hardware::remove_node(&ctx, node_id).await {
                 Ok(()) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
                     if !cli.json {
                         println!("removed node {id}");
                     }

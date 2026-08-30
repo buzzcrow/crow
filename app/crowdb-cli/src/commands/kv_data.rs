@@ -44,7 +44,7 @@ pub enum KvDataVerb {
         store: String,
         #[arg(short = 'g', long)]
         group: String,
-        #[arg(short = 'p', long, default_value = "")]
+        #[arg(short = 'P', long, default_value = "")]
         prefix: String,
         #[arg(short = 'l', long, default_value_t = 100)]
         limit: u32,

@@ -1,100 +1,64 @@
-// Copyright 2026-present Gian <crow.db@outlook.com>
-// Licensed under the Apache License, Version 2.0.
+// Copyright 2026-present Gian <crow.db@outlook.com>.
 
-//! CLI e2e for cluster observation: `cluster status / topology /
-//! inspect` route entirely through `--ip` / `--port` (no `--server`),
-//! against a web-managed cluster with no persisted registry.
+//! CLI e2e for cluster observation: `cluster status` and `cluster
+//! topology` through `--sysmd-ip` / `--sysmd-port` / `--config` against
+//! a real `crowdb-kv-server` with group 0 initialized.
 
 mod common;
 
 use std::time::Duration;
 
-use common::console::{crowdb_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
-use crowdb_console_shared::clients::console::ConsoleClient;
-use crowdb_console_shared::lifecycle;
+use common::direct::{crowdb_cli_bin, run, spawn_group0};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R126: rewrite for direct-to-group-0 CLI"]
 #[allow(clippy::too_many_lines)]
-async fn cluster_status_topology_inspect_via_console() {
-    let Some(upstream) = spawn_upstream().await else {
+async fn cluster_status_topology_via_direct_group0() {
+    let Some(g0) = spawn_group0().await else {
         eprintln!("skipping: crowdb-kv-server binary not built");
         return;
     };
     let cli = crowdb_cli_bin();
     if !cli.exists() {
-        eprintln!("skipping: crowdb_kv CLI binary not built ({})", cli.display());
-        let _ = lifecycle::stop_pid(upstream.pid);
+        eprintln!("skipping: crowdb-cli binary not built ({})", cli.display());
         return;
     }
 
-    let console = spawn_console(&upstream).await;
-    let ip = console.ip().to_string();
-    let port = console.port();
-
-    // Initialize the system group so non-zero stores can be created.
-    let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
-    console_client.cluster_init(&[1]).await.expect("cluster_init");
-
-    // Seed a store + group through the CLI so the logical tree is non-empty.
-    let (code, _, stderr) = run(&cli, &ip, port, &["store", "add", "--store-id", "9"]);
-    assert_eq!(code, 0, "store add stderr={stderr}");
+    // cluster init — writes store/group/replica topology into group-0
+    // sysdata (idempotent: group 0 already exists from spawn_group0,
+    // init handles the 409 conflict and still writes topology).
     let (code, _, stderr) = run(
         &cli,
-        &ip,
-        port,
-        &[
-            "paxos",
-            "add",
-            "--store-id",
-            "9",
-            "--group-id",
-            "90",
-            "--replica-id",
-            "900",
-            "--nodes",
-            "1",
-        ],
+        g0.mgmt_port,
+        &g0.config_path,
+        &["cluster", "init", "-n", "1"],
     );
-    assert_eq!(code, 0, "paxos add stderr={stderr}");
-    let _ = wait_for_leader(&ip, port, 9, 90, Duration::from_secs(15)).await;
+    assert_eq!(code, 0, "cluster init stderr={stderr}");
 
-    // status — summarises servers + store/group counts.
-    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "status"]);
+    // status — lists stores from group-0 sysdata.
+    let (code, stdout, stderr) = run(&cli, g0.mgmt_port, &g0.config_path, &["cluster", "status"]);
     assert_eq!(code, 0, "status stderr={stderr}");
-    assert!(stdout.contains("servers:"), "stdout={stdout}");
-    assert!(stdout.contains('1'), "stdout={stdout}");
-    assert!(stdout.contains("stores: 2"), "stdout={stdout}");
+    assert!(stdout.contains('0'), "stdout={stdout}");
 
-    // topology — logical + physical sections.
-    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "topology"]);
+    // topology — from a node's /topology endpoint.
+    let (code, stdout, stderr) = run(
+        &cli,
+        g0.mgmt_port,
+        &g0.config_path,
+        &["cluster", "topology", "-n", "1"],
+    );
     assert_eq!(code, 0, "topology stderr={stderr}");
-    assert!(stdout.contains("logical:"), "stdout={stdout}");
-    assert!(stdout.contains("store 9"), "stdout={stdout}");
-    assert!(stdout.contains("group 90"), "stdout={stdout}");
-    assert!(stdout.contains("physical:"), "stdout={stdout}");
-    assert!(stdout.contains("node 1"), "stdout={stdout}");
+    assert!(stdout.contains("store"), "stdout={stdout}");
 
-    // inspect node (bare token → node id).
-    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "1"]);
-    assert_eq!(code, 0, "inspect node stderr={stderr}");
-    assert!(stdout.contains("mgmt_url:"), "stdout={stdout}");
-
-    // inspect store / group via the s.../g... id grammar.
-    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "s9"]);
-    assert_eq!(code, 0, "inspect store stderr={stderr}");
-    assert!(stdout.contains("store 9"), "stdout={stdout}");
-
-    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "s9/g90"]);
-    assert_eq!(code, 0, "inspect group stderr={stderr}");
-    assert!(stdout.contains("group 90"), "stdout={stdout}");
-
-    // --json status decodes as an object with a servers array.
-    let (code, stdout, _) = run(&cli, &ip, port, &["--json", "cluster", "status"]);
+    // --json status decodes as an array of stores.
+    let (code, stdout, _) = run(
+        &cli,
+        g0.mgmt_port,
+        &g0.config_path,
+        &["--json", "cluster", "status"],
+    );
     assert_eq!(code, 0);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("json status");
-    assert!(parsed["servers"].is_array(), "json={stdout}");
+    assert!(parsed.is_array(), "json={stdout}");
 
-    let _ = lifecycle::stop_pid(upstream.pid);
     tokio::time::sleep(Duration::from_millis(50)).await;
 }

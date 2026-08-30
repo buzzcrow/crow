@@ -26,23 +26,11 @@ use commands::{
 #[command(name = "crowdb-cli", version, about = "CrowDB cluster console (CLI)")]
 struct Cli {
     /// Group-0 leader's IP address (the sysmd endpoint).
-    #[arg(
-        short = 'I',
-        long,
-        global = true,
-        env = "CROWDB_SYSMD_IP",
-        default_value = "127.0.0.1"
-    )]
+    #[arg(long, global = true, env = "CROWDB_SYSMD_IP", default_value = "127.0.0.1")]
     sysmd_ip: String,
 
     /// Group-0 leader's port (the sysmd endpoint's mgmt port).
-    #[arg(
-        short = 'O',
-        long,
-        global = true,
-        env = "CROWDB_SYSMD_PORT",
-        default_value_t = 9910
-    )]
+    #[arg(long, global = true, env = "CROWDB_SYSMD_PORT", default_value_t = 9910)]
     sysmd_port: u16,
 
     /// Path to the console config file. Defaults to
