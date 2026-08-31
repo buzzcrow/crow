@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-use crate::error::{err_400, err_500, err_502, map_config_err, map_persist_err, ErrorBody};
+use crate::error::{err_500, err_502, map_config_err, map_persist_err, ErrorBody};
 use crate::expand::Recursive;
 use crate::physical_view::PhysicalBuilder;
 use crate::state::AppState;
@@ -118,23 +118,11 @@ pub async fn http_add_rack(
     State(state): State<AppState>,
     Json(body): Json<AddRackBody>,
 ) -> Result<(StatusCode, Json<RackEntry>), (StatusCode, Json<ErrorBody>)> {
-    let entry = RackEntry {
-        id: body.id,
-        name: body.name,
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_rack(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-    // Best-effort sysdata sync (non-blocking — config already committed).
-    if let Ok(ctx) = state.op_context().await {
-        let value = crowdb_protocol::common::RackValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            node_ids: Vec::new(),
-        };
-        let _ = ctx.sysmd().add_rack(body.id, &value).await;
-    }
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let entry = ops::hardware::add_rack(&ctx, body.id, &body.name)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -149,15 +137,11 @@ pub async fn http_remove_rack(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_rack(id).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-    // Best-effort sysdata sync (non-blocking — config already committed).
-    if let Ok(ctx) = state.op_context().await {
-        let _ = ctx.sysmd().remove_rack_cascade(id).await;
-    }
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_rack(&ctx, id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -221,19 +205,11 @@ pub async fn http_remove_node(
     // does not orphan a running crowdb-kv-server. No-op when no server is
     // deployed (e.g. the UI already called DELETE .../server first).
     stop_and_remove_server_for_node(&state, id).await;
-    let rack_id = {
-        let cfg = state.config.read().unwrap();
-        cfg.nodes.iter().find(|n| n.id == id).map(|n| n.rack_id)
-    };
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_node(id).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
-    // Best-effort sysdata sync (non-blocking — config already committed).
-    if let (Some(rack_id), Ok(ctx)) = (rack_id, state.op_context().await) {
-        let _ = ctx.sysmd().remove_node_cascade(rack_id, id).await;
-    }
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::hardware::remove_node(&ctx, id)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     state.monitor_cache.drop_node(&id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -430,29 +406,14 @@ pub async fn http_add_rack_node(
     Json(mut entry): Json<NodeEntry>,
 ) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
     entry.rack_id = rack_id;
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_node(entry.clone()).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let entry = ops::hardware::add_node(&ctx, entry)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
-
-    // Sync group-0 sysdata. Best-effort.
-    if let Some(hw) = crate::mgmt::build_hardware_client(&state).await {
-        let value = crowdb_protocol::common::NodeValue {
-            status: crowdb_protocol::common::HwStatus::Up as i32,
-            last_used_dg_id: 0,
-            disk_group_ids: Vec::new(),
-            status_changed_at_ms: 0,
-            temp_failure_since_ms: None,
-        };
-        if let Err(e) = hw.add_node(rack_id, entry.id, &value).await {
-            tracing::warn!(node_id = entry.id, error = %e, "sysdata sync: add_node failed");
-        }
-    }
-
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -672,28 +633,11 @@ pub async fn http_deploy_node_server(
     Path(node_id): Path<u64>,
     Json(body): Json<DeployNodeServerBody>,
 ) -> Result<(StatusCode, Json<DeployResult>), (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::lifecycle::{self, DeployRequest};
+    use crowdb_console_shared::lifecycle::DeployRequest;
 
-    let node = {
-        let cfg = state.config.read().unwrap();
-        if cfg.server_for_node(node_id).is_some() {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorBody {
-                    error: format!("node {node_id} already hosts a deployed server"),
-                }),
-            ));
-        }
-        cfg.node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("node {node_id} not found"),
-                }),
-            )
-        })?
-    };
-
+    let workspace_dir = state
+        .prepare_node_workspace(node_id)
+        .map_err(|e| err_500(e.to_string()))?;
     let req = DeployRequest {
         server_id: node_id.to_string(),
         rest_port: body.rest_port,
@@ -719,46 +663,12 @@ pub async fn http_deploy_node_server(
         rpc_workers: body.rpc_workers,
     };
 
-    let deployed = if node.ssh_enabled() {
-        let server_bin = body.binary.clone().unwrap_or_else(|| {
-            std::env::var("CROWDB_KV_SERVER_BIN").unwrap_or_else(|_| "crowdb-kv-server".to_string())
-        });
-        crowdb_console_shared::ssh::deploy_via_ssh(&req, &node, &server_bin)
-            .await
-            .map_err(|e| err_502(format!("ssh deploy: {e}")))?
-    } else {
-        let workspace_dir = state
-            .prepare_node_workspace(node_id)
-            .map_err(|e| err_500(e.to_string()))?;
-        lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
-            .await
-            .map_err(|e| err_502(format!("local deploy: {e}")))?
-    };
-
-    let entry = ServerEntry {
-        id: node_id.to_string(),
-        url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id),
-        rpc_url: Some(deployed.rpc_url.clone()),
-        rest_port: Some(body.rest_port),
-        rpc_port: Some(body.rpc_port),
-        auto_start: true,
-        binary: body.binary.clone(),
-        election_profile: body
-            .election_profile
-            .clone()
-            .or_else(|| std::env::var("CROWDB_KV_SERVER_ELECTION_PROFILE").ok()),
-        pid: None,
-        service_type: ServiceType::Kv,
-        rpc_workers: body.rpc_workers,
-        no_fsync: body.no_fsync,
-    };
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let deployed = ops::kv_server::deploy(&ctx, &req, Some(&workspace_dir))
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     state.set_runtime_pid(node_id, deployed.pid);
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.add_server(entry).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
     crate::mgmt::refresh_node_cache(&state, node_id).await;
     Ok((
         StatusCode::CREATED,
@@ -788,48 +698,22 @@ pub async fn http_deploy_node_server(
 /// # Errors
 /// Returns `404` if no server is registered for this node, `502` if
 /// the SSH/local restart cycle fails.
-#[allow(clippy::too_many_lines)]
 pub async fn http_restart_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<Json<DeployResult>, (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::lifecycle::{self, DeployRequest};
+    use crowdb_console_shared::lifecycle;
 
-    let (entry, node) = {
-        let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server registered on node {node_id}"),
-                }),
-            )
-        })?;
-        let node = cfg.node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("node {node_id} not found"),
-                }),
-            )
-        })?;
-        (entry, node)
-    };
-
-    // Extract ports from the persisted URLs. The deploy path stamped
-    // them in originally as host:port; if either fails to parse we
-    // surface a 500 since that's a console-state-corruption case.
-    let rest_port = crate::mgmt::port_of(&entry.url)
-        .ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
-    let rpc_port = entry
-        .rpc_url
-        .as_deref()
-        .and_then(crate::mgmt::port_of)
-        .ok_or_else(|| err_500(format!("server entry has malformed rpc_url: {:?}", entry.rpc_url)))?;
-
+    // Stop the running process first (using the in-memory runtime PID).
+    // ops::kv_server::restart also tries to stop via entry.pid, but the
+    // runtime PID is authoritative for web-deployed servers.
     if let Some(pid) = state.runtime_pid(node_id) {
-        let _sent = match &node {
-            n if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(n, pid)
+        let node = {
+            let cfg = state.config.read().unwrap();
+            cfg.node(node_id).cloned()
+        };
+        let _sent = match node {
+            Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
                 .await
                 .map_err(|e| err_502(format!("ssh stop (restart): {e}")))?,
             _ => tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
@@ -839,62 +723,20 @@ pub async fn http_restart_node_server(
         };
     }
 
-    let req = DeployRequest {
-        server_id: node_id.to_string(),
-        rest_port,
-        rpc_port,
-        election_profile: entry
-            .election_profile
-            .clone()
-            .or_else(|| std::env::var("CROWDB_KV_SERVER_ELECTION_PROFILE").ok()),
-        binary: None,
-        rpc_workers: entry.rpc_workers,
-        no_fsync: entry.no_fsync,
-        ..Default::default()
-    };
-    let deployed = if node.ssh_enabled() {
-        let server_bin =
-            std::env::var("CROWDB_KV_SERVER_BIN").unwrap_or_else(|_| "crowdb-kv-server".to_string());
-        crowdb_console_shared::ssh::deploy_via_ssh(&req, &node, &server_bin)
-            .await
-            .map_err(|e| err_502(format!("ssh redeploy (restart): {e}")))?
-    } else {
-        let workspace_dir = state
-            .prepare_node_workspace(node_id)
-            .map_err(|e| err_500(e.to_string()))?;
-        lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
-            .await
-            .map_err(|e| err_502(format!("local redeploy (restart): {e}")))?
-    };
-
-    let new_entry = ServerEntry {
-        id: node_id.to_string(),
-        url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id),
-        rpc_url: Some(deployed.rpc_url.clone()),
-        rest_port: entry.rest_port,
-        rpc_port: entry.rpc_port,
-        auto_start: entry.auto_start,
-        binary: entry.binary.clone(),
-        election_profile: entry.election_profile.clone(),
-        pid: None,
-        service_type: entry.service_type,
-        rpc_workers: entry.rpc_workers,
-        no_fsync: entry.no_fsync,
-    };
+    let workspace_dir = state
+        .prepare_node_workspace(node_id)
+        .map_err(|e| err_500(e.to_string()))?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let deployed = ops::kv_server::restart(&ctx, node_id, Some(&workspace_dir))
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     state.set_runtime_pid(node_id, deployed.pid);
     // Clear cached KV RPC connections so the next KV request reconnects
     // to the restarted server instead of reusing a stale TCP connection.
     if let Some(t) = state.kv_rpc_transport.read().await.as_ref() {
         t.clear_connections();
     }
-    {
-        let mut cfg = state.config.write().unwrap();
-        // The old entry is still keyed by node_id; replace it.
-        let _ = cfg.remove_server_for_node(node_id);
-        cfg.add_server(new_entry).map_err(map_config_err)?;
-    }
-    state.persist().map_err(map_persist_err)?;
     crate::mgmt::restore_persisted_topology_for_node(&state, node_id)
         .await
         .map_err(|e| err_502(format!("restore topology after restart: {e}")))?;
@@ -941,32 +783,12 @@ pub async fn http_stop_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
-    use crowdb_console_shared::lifecycle;
-
-    let node = {
-        let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
-        cfg.node(node_id).cloned()
-    };
-    let Some(pid) = state.runtime_pid(node_id) else {
-        return Err(err_400(format!("server on node {node_id} has no tracked pid")));
-    };
-    let sent = match node {
-        Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
-            .await
-            .map_err(|e| err_502(format!("ssh stop: {e}")))?,
-        _ => tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
-            .await
-            .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
-            .map_err(|e| err_500(format!("stop_pid: {e}")))?,
-    };
+    let pid = state.runtime_pid(node_id);
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let sent = ops::kv_server::stop(&ctx, node_id, pid)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
     state.clear_runtime_pid(node_id);
     // Clear cached KV RPC connections — the server is stopping, so any
     // cached TCP connection is now dead. The next KV request (after a
@@ -1036,44 +858,26 @@ async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool
 }
 
 /// `DELETE /api/nodes/:node_id/server`. Stop and remove the deployment
-/// record. Returns 204 on success, 404 if no server is deployed.
+/// record. Returns 204 on success, 404 if no server is deployed, 409
+/// if the node still hosts replicas in group-0 sysdata (require-empty).
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
 ///
 /// # Errors
-/// Returns `404` if no server is deployed on this node.
+/// Returns `404` if no server is deployed on this node; `409` if the
+/// node still hosts replicas.
 pub async fn http_delete_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Cascade-clean: remove any KV replicas hosted on this node from
-    // group-0 sysdata before stopping the server. This avoids leaving
-    // orphaned replica records that would block future redeploys.
     let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    if let Ok(stores) = ctx.sysmd().list_stores().await {
-        for store in &stores {
-            if let Ok(groups) = ctx.sysmd().list_groups_in_store(store.store_id).await {
-                for group in &groups {
-                    if let Ok(replicas) = ctx
-                        .sysmd()
-                        .list_replicas_in_group(store.store_id, group.group_id)
-                        .await
-                    {
-                        for replica in &replicas {
-                            if replica.node_id == node_id {
-                                let _ = ctx
-                                    .sysmd()
-                                    .remove_replica(store.store_id, group.group_id, replica.replica_id)
-                                    .await;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    // Require-empty: refuse if the node still hosts replicas in
+    // group-0 sysdata. Best-effort — if sysdata is unreachable, the
+    // check is skipped (cluster may not be initialized).
+    ops::kv_server::check_require_empty(&ctx, node_id)
+        .await
+        .map_err(map_config_err)?;
     if !stop_and_remove_server_for_node(&state, node_id).await {
         return Err((
             StatusCode::NOT_FOUND,

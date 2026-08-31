@@ -7,6 +7,7 @@
 
 use crowdb_console_shared::config::{ConsoleConfig, NodeEntry, ServerEntry, ServiceType};
 use crowdb_console_shared::error::Error;
+use crowdb_console_shared::lifecycle::DeployRequest;
 use crowdb_console_shared::ops::{self, OpContext};
 
 fn ctx_with_node() -> OpContext {
@@ -32,16 +33,20 @@ fn ctx_with_node() -> OpContext {
 #[tokio::test]
 async fn deploy_unknown_node_not_found() {
     let ctx = ctx_with_node();
-    let err = ops::kv_server::deploy(&ctx, 99, 9910, 28001, None)
-        .await
-        .unwrap_err();
+    let req = DeployRequest {
+        server_id: "99".into(),
+        rest_port: 9910,
+        rpc_port: 28001,
+        ..Default::default()
+    };
+    let err = ops::kv_server::deploy(&ctx, &req, None).await.unwrap_err();
     assert!(matches!(err, Error::NotFound { kind, .. } if kind == "node"));
 }
 
 #[tokio::test]
 async fn stop_no_server_not_found() {
     let ctx = ctx_with_node();
-    let err = ops::kv_server::stop(&ctx, 10).await.unwrap_err();
+    let err = ops::kv_server::stop(&ctx, 10, None).await.unwrap_err();
     assert!(matches!(err, Error::NotFound { kind, .. } if kind == "server"));
 }
 
@@ -68,7 +73,7 @@ async fn stop_no_pid_not_found() {
         })
         .unwrap();
     }
-    let err = ops::kv_server::stop(&ctx, 10).await.unwrap_err();
+    let err = ops::kv_server::stop(&ctx, 10, None).await.unwrap_err();
     assert!(matches!(err, Error::NotFound { kind, .. } if kind == "server"));
 }
 

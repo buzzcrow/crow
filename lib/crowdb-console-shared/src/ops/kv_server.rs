@@ -18,17 +18,19 @@ use crate::ops::OpContext;
 
 /// Deploy a `crowdb-kv-server` on a node.
 ///
+/// `workspace_dir` is used for local-fork deploys (the server's data
+/// directory); `None` uses the current directory. SSH deploys ignore it.
+///
 /// # Errors
 /// Returns [`Error::NotFound`] if the node does not exist;
 /// [`Error::Conflict`] if a server is already deployed on the node;
 /// [`Error::NodeUnreachable`] if the deploy fails.
 pub async fn deploy(
     ctx: &OpContext,
-    node_id: NodeId,
-    rest_port: u16,
-    rpc_port: u16,
-    binary: Option<String>,
+    req: &DeployRequest,
+    workspace_dir: Option<&std::path::Path>,
 ) -> Result<DeployedServer> {
+    let node_id: NodeId = req.server_id.parse().unwrap_or(0);
     let node = ctx.node_entry(node_id)?;
 
     // Check for existing deployment.
@@ -39,31 +41,26 @@ pub async fn deploy(
         });
     }
 
-    let req = DeployRequest {
-        server_id: node_id.to_string(),
-        rest_port,
-        rpc_port,
-        binary: binary.as_ref().map(PathBuf::from),
-        ..Default::default()
-    };
-
+    let binary = req.binary.as_ref().map(|p| p.to_string_lossy().to_string());
     let deployed = if node.ssh_enabled() {
         let server_bin = binary.clone().unwrap_or_else(|| {
             std::env::var("CROWDB_KV_SERVER_BIN").unwrap_or_else(|_| "crowdb-kv-server".into())
         });
-        crate::ssh::deploy_via_ssh(&req, &node, &server_bin)
+        crate::ssh::deploy_via_ssh(req, &node, &server_bin)
             .await
             .map_err(|e| Error::NodeUnreachable {
                 node_id: node_id.to_string(),
                 reason: format!("ssh deploy: {e}"),
             })?
     } else {
-        lifecycle::deploy_local(&req, &node)
-            .await
-            .map_err(|e| Error::NodeUnreachable {
-                node_id: node_id.to_string(),
-                reason: format!("local deploy: {e}"),
-            })?
+        let result = match workspace_dir {
+            Some(dir) => lifecycle::deploy_local_in_dir(req, &node, dir).await,
+            None => lifecycle::deploy_local(req, &node).await,
+        };
+        result.map_err(|e| Error::NodeUnreachable {
+            node_id: node_id.to_string(),
+            reason: format!("local deploy: {e}"),
+        })?
     };
 
     let entry = ServerEntry {
@@ -71,15 +68,15 @@ pub async fn deploy(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id),
         rpc_url: Some(deployed.rpc_url.clone()),
-        rest_port: Some(rest_port),
-        rpc_port: Some(rpc_port),
+        rest_port: Some(req.rest_port),
+        rpc_port: Some(req.rpc_port),
         auto_start: true,
         binary,
-        election_profile: None,
+        election_profile: req.election_profile.clone(),
         pid: Some(deployed.pid),
         service_type: ServiceType::Kv,
-        rpc_workers: None,
-        no_fsync: false,
+        rpc_workers: req.rpc_workers,
+        no_fsync: req.no_fsync,
     };
     {
         let mut cfg = ctx.config_mut();
@@ -90,12 +87,16 @@ pub async fn deploy(
 
 /// Stop the `crowdb-kv-server` on a node (keep the deployment record).
 ///
+/// `pid_override` lets callers supply an in-memory PID (e.g. the web's
+/// `runtime_pid`) that takes precedence over the persisted `entry.pid`.
+///
 /// # Errors
-/// Returns [`Error::NotFound`] if no server is deployed on the node.
-pub async fn stop(ctx: &OpContext, node_id: NodeId) -> Result<bool> {
+/// Returns [`Error::NotFound`] if no server is deployed on the node or
+/// no PID is available (neither override nor `entry.pid`).
+pub async fn stop(ctx: &OpContext, node_id: NodeId, pid_override: Option<u32>) -> Result<bool> {
     let node = ctx.node_entry(node_id)?;
     let entry = ctx.server_for_node(node_id)?;
-    let pid = entry.pid.ok_or_else(|| Error::NotFound {
+    let pid = pid_override.or(entry.pid).ok_or_else(|| Error::NotFound {
         kind: "server".into(),
         id: format!("node {node_id} has no tracked pid"),
     })?;
@@ -126,9 +127,16 @@ pub async fn stop(ctx: &OpContext, node_id: NodeId) -> Result<bool> {
 /// Restart the `crowdb-kv-server` on a node: stop (if running) and
 /// re-deploy on the same recorded ports.
 ///
+/// `workspace_dir` is used for local-fork redeploys; `None` uses the
+/// current directory. SSH redeploys ignore it.
+///
 /// # Errors
 /// Returns [`Error::NotFound`] if no server is deployed on the node.
-pub async fn restart(ctx: &OpContext, node_id: NodeId) -> Result<DeployedServer> {
+pub async fn restart(
+    ctx: &OpContext,
+    node_id: NodeId,
+    workspace_dir: Option<&std::path::Path>,
+) -> Result<DeployedServer> {
     let node = ctx.node_entry(node_id)?;
     let entry = ctx.server_for_node(node_id)?;
 
@@ -168,12 +176,14 @@ pub async fn restart(ctx: &OpContext, node_id: NodeId) -> Result<DeployedServer>
                 reason: format!("ssh redeploy: {e}"),
             })?
     } else {
-        lifecycle::deploy_local(&req, &node)
-            .await
-            .map_err(|e| Error::NodeUnreachable {
-                node_id: node_id.to_string(),
-                reason: format!("local redeploy: {e}"),
-            })?
+        let result = match workspace_dir {
+            Some(dir) => lifecycle::deploy_local_in_dir(&req, &node, dir).await,
+            None => lifecycle::deploy_local(&req, &node).await,
+        };
+        result.map_err(|e| Error::NodeUnreachable {
+            node_id: node_id.to_string(),
+            reason: format!("local redeploy: {e}"),
+        })?
     };
 
     // Update the server entry with the new PID + URLs.

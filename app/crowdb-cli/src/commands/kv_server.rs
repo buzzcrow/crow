@@ -3,9 +3,11 @@
 
 //! `kv server` command handlers — deploy/restart/stop/delete/list.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Subcommand;
+use crowdb_console_shared::lifecycle::DeployRequest;
 use crowdb_protocol::NodeId;
 
 use crate::commands::{commit_config, op_context, print_json};
@@ -59,9 +61,14 @@ pub async fn run_kv_server_verb(cli: &Cli, verb: KvServerVerb) -> ExitCode {
                 Ok(c) => c,
                 Err(c) => return c,
             };
-            match crowdb_console_shared::ops::kv_server::deploy(&ctx, node_id, rest_port, rpc_port, binary)
-                .await
-            {
+            let req = DeployRequest {
+                server_id: node_id.to_string(),
+                rest_port,
+                rpc_port,
+                binary: binary.map(PathBuf::from),
+                ..Default::default()
+            };
+            match crowdb_console_shared::ops::kv_server::deploy(&ctx, &req, None).await {
                 Ok(d) => {
                     if let Err(c) = commit_config(cli, &ctx) {
                         return c;
@@ -101,7 +108,7 @@ pub async fn run_kv_server_verb(cli: &Cli, verb: KvServerVerb) -> ExitCode {
                 Ok(c) => c,
                 Err(c) => return c,
             };
-            match crowdb_console_shared::ops::kv_server::restart(&ctx, node_id).await {
+            match crowdb_console_shared::ops::kv_server::restart(&ctx, node_id, None).await {
                 Ok(d) => {
                     if let Err(c) = commit_config(cli, &ctx) {
                         return c;
@@ -141,7 +148,7 @@ pub async fn run_kv_server_verb(cli: &Cli, verb: KvServerVerb) -> ExitCode {
                 Ok(c) => c,
                 Err(c) => return c,
             };
-            match crowdb_console_shared::ops::kv_server::stop(&ctx, node_id).await {
+            match crowdb_console_shared::ops::kv_server::stop(&ctx, node_id, None).await {
                 Ok(sent) => {
                     if let Err(c) = commit_config(cli, &ctx) {
                         return c;

@@ -10,36 +10,43 @@ Goal: migrate `crowdb-web` Axum handlers to `ops::*`, rework the UI
 to three domains (`Cluster | KV | Chunk`), remove Swagger, and
 rewrite the E2E suite to be fast + stable.
 
-**Landed so far** (Phase A, B, C2/C5/C8, D1/D2/D5/D7/D8/D9/D10, E1,
-E15): `ops::hardware` disk-group/disk CRUD + 16 unit tests,
-`OpContext` provider + write-back helper, disk-group/disk handler
-migration, `cluster/reset` + `cluster/clean` routes, Swagger removal
-(backend + UI), `Domain` enum + `DomainContext`, Header domain
-toggle, App.tsx per-domain center panel, KV/Chunk tab toggles,
-embedding contract update, `clusterClean` E2E helper.
+**Landed so far** (Phase A, B, C1/C2/C3/C4/C5/C8, D1/D2/D5/D7/D8/D9/D10,
+E1, E15): `ops::hardware` disk-group/disk CRUD + 16 unit tests,
+`OpContext` provider + write-back helper, rack/node + disk-group/disk +
+server lifecycle + delete handler migration, `cluster/reset` +
+`cluster/clean` routes, Swagger removal (backend + UI), `Domain` enum +
+`DomainContext`, Header domain toggle, App.tsx per-domain center panel,
+KV/Chunk tab toggles, embedding contract update, `clusterClean` E2E
+helper. `ops::kv_server` API extended to accept `DeployRequest` +
+optional workspace dir + optional PID override.
 
 Remaining work below.
 
 ## Phase C — Backend handler migration (remaining)
 
-- [ ] **C1: Migrate lifecycle rack/node handlers** —
-  `http_add_rack`, `http_remove_rack`, `http_remove_node` still
-  write `AppState.config` directly (no `ops::` calls).
-  `app/crowdb-web/src/lifecycle/rack_node.rs` has rack/node CRUD
-  but **no `ops::` calls at all** — still writes `AppState.config`
-  directly. Rewrite all to call `ops::hardware::*`.
-  Files: `app/crowdb-web/src/lifecycle.rs`,
-  `app/crowdb-web/src/lifecycle/rack_node.rs`.
-- [ ] **C3: Migrate server lifecycle handlers** —
-  `http_deploy_node_server`, `http_restart_node_server`,
-  `http_stop_node_server` use `crowdb_console_shared::{lifecycle,
-  ssh}` directly, not `ops::kv_server::*`. Rewrite to call
-  `ops::kv_server::{deploy, restart, stop}`.
+- [x] **C1: Migrate lifecycle rack/node handlers** —
+  `http_add_rack`, `http_remove_rack`, `http_remove_node`,
+  `http_add_rack_node` now call `ops::hardware::*` via
+  `OpContext` + `commit_op_context`. Dead `lifecycle/rack_node.rs`
+  deleted (was never compiled — no `mod rack_node` declaration).
   Files: `app/crowdb-web/src/lifecycle.rs`.
-- [ ] **C4: Migrate `http_delete_node_server` + require-empty** —
-  currently manually scans sysdata, removes replicas, then stops
-  the server. Rewrite to call `ops::kv_server::delete` (adds
-  require-empty check, returns 409 Conflict when replicas exist).
+- [x] **C3: Migrate server lifecycle handlers** —
+  `http_deploy_node_server`, `http_restart_node_server`,
+  `http_stop_node_server` now call `ops::kv_server::{deploy, restart,
+  stop}`. `ops::kv_server` API extended: `deploy` accepts
+  `&DeployRequest` + `Option<&Path>` (workspace dir); `restart`
+  accepts `Option<&Path>`; `stop` accepts `Option<u32>` (PID
+  override for web's runtime PID). Web handlers retain web-specific
+  concerns (runtime PID tracking, monitor cache refresh, RPC
+  connection cache clearing).
+  Files: `app/crowdb-web/src/lifecycle.rs`,
+  `lib/crowdb-console-shared/src/ops/kv_server.rs`,
+  `app/crowdb-cli/src/commands/kv_server.rs`.
+- [x] **C4: Migrate `http_delete_node_server` + require-empty** —
+  now calls `ops::kv_server::check_require_empty` (returns 409
+  Conflict when replicas exist). Stops via
+  `stop_and_remove_server_for_node` (preserves runtime PID
+  handling).
   Files: `app/crowdb-web/src/lifecycle.rs`.
 - [ ] **C6: Migrate mgmt store/group/replica/init handlers** —
   `http_add_store`, `http_remove_store`, `http_list_stores`,
@@ -178,10 +185,6 @@ apply poll-not-sleep + shared-cluster-in-`beforeAll` principles.
 
 ## Remaining file list
 
-- `app/crowdb-web/src/lifecycle.rs` — migrate rack/node/server/delete
-  handlers to `ops::*` (C1, C3, C4).
-- `app/crowdb-web/src/lifecycle/rack_node.rs` — migrate to
-  `ops::hardware` (C1).
 - `app/crowdb-web/src/mgmt/store_ops.rs` — migrate to `ops::kv_logical`
   (C6).
 - `app/crowdb-web/src/mgmt/group_ops.rs` — migrate to `ops::kv_logical`
@@ -218,11 +221,16 @@ apply poll-not-sleep + shared-cluster-in-`beforeAll` principles.
 
 **Integration (Rust handler tests):**
 - [ ] `POST /api/cluster/init` → `ops::cluster::init`.
-- [ ] `POST /api/racks` → `ops::hardware::add_rack`.
-- [ ] `POST /api/nodes` → `ops::hardware::add_node`.
-- [ ] `POST /api/nodes/:id/server/deploy` → `ops::kv_server::deploy`.
+- [x] `POST /api/racks` → `ops::hardware::add_rack` (via
+  `lifecycle_routes_test::rack_node_crud_through_web_routes`).
+- [x] `POST /api/nodes` → `ops::hardware::add_node` (via
+  `lifecycle_routes_test::rack_node_crud_through_web_routes`).
+- [x] `POST /api/nodes/:id/server/deploy` → `ops::kv_server::deploy`
+  (via `lifecycle_routes_test::deploy_then_restart_local_server` +
+  `deploy_then_stop_local_server`).
 - [ ] `DELETE /api/nodes/:id/server` → `ops::kv_server::delete`
-  (409 + 204).
+  (409 + 204) — require-empty check added; 409 + 204 integration test
+  pending C9.
 - [ ] `POST /api/stores` → `ops::kv_logical::add_store`.
 - [ ] `GET /api/stores/:sid/groups/:gid/kv/get` → `ops::kv_data::get`.
 - [ ] `/api/swagger/` → 404.
