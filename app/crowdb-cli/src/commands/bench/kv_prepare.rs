@@ -21,7 +21,11 @@ const STORE_ID: u64 = 0;
 const GROUP_ID: u64 = 0;
 
 pub async fn run(cli: &Cli, args: PrepareArgs) -> ExitCode {
-    let client = match build_kv_client(cli, crowdb_kv_client::ReadEndpointPolicy::Leader, &KvClientTunables::default()) {
+    let client = match build_kv_client(
+        cli,
+        crowdb_kv_client::ReadEndpointPolicy::Leader,
+        &KvClientTunables::default(),
+    ) {
         Ok(c) => Arc::new(c),
         Err(c) => return c,
     };

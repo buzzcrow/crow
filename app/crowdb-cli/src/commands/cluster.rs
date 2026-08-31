@@ -56,7 +56,7 @@ pub enum ClusterVerb {
         /// [kv] `--coalesce-max-keys` for the spawned server. 0 = server default.
         #[arg(long, default_value_t = 0)]
         coalesce_max_keys: usize,
-        /// [kv] `--coalesce-drain-threshold` for the spawned server. 0 = server default (max_inflight/4).
+        /// [kv] `--coalesce-drain-threshold` for the spawned server. 0 = server default (`max_inflight/4`).
         #[arg(long, default_value_t = 0)]
         coalesce_drain_threshold: usize,
         /// [kv] Enable `--event-write` on the spawned server.
@@ -166,8 +166,14 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     event_write: if event_write { Some(true) } else { None },
                     send_queue_capacity: nonzero(send_queue_capacity),
                 };
-                match crowdb_console_shared::ops::cluster::local_deploy(&ctx, nodes, None, Some(&tunables))
-                    .await
+                let workspace = deploy_workspace(cli);
+                match crowdb_console_shared::ops::cluster::local_deploy(
+                    &ctx,
+                    nodes,
+                    workspace.as_deref(),
+                    Some(&tunables),
+                )
+                .await
                 {
                     Ok(summary) => {
                         if let Err(c) = commit_config(cli, &ctx) {
@@ -207,7 +213,14 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     enable_nagle,
                     ..Default::default()
                 };
-                match crowdb_console_shared::ops::cluster::local_deploy_rpc(&ctx, &rpc_cfg, None).await {
+                let workspace = deploy_workspace(cli);
+                match crowdb_console_shared::ops::cluster::local_deploy_rpc(
+                    &ctx,
+                    &rpc_cfg,
+                    workspace.as_deref(),
+                )
+                .await
+                {
                     Ok(summary) => {
                         if let Err(c) = commit_config(cli, &ctx) {
                             return c;
@@ -351,4 +364,16 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
 /// Convert 0 to `None` (use server default), pass through nonzero values.
 fn nonzero<T: Copy + PartialEq + Default>(v: T) -> Option<T> {
     (v != T::default()).then_some(v)
+}
+
+/// Resolve the `local-deploy` workspace from the CLI's per-invocation
+/// log dir. The workspace lands at `<log_dir>/deploy/` so server data
+/// dirs stay separate from the CLI's own log files. Returns `None`
+/// (falling back to the lib default) when `log_dir` is unset.
+fn deploy_workspace(cli: &Cli) -> Option<std::path::PathBuf> {
+    if cli.log_dir.as_os_str().is_empty() {
+        None
+    } else {
+        Some(cli.log_dir.join("deploy"))
+    }
 }

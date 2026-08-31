@@ -42,8 +42,74 @@ struct Cli {
     #[arg(short = 'j', long, global = true)]
     json: bool,
 
+    /// Root directory for this run's logs. Each invocation creates a
+    /// per-run subfolder `<root>/<command-chain>-<YYYYMMDD-HHMMSS>/`
+    /// holding the tracing log, crowdb-rpc transport log, and ops log.
+    /// Defaults to `cli-log/` (resolved from CWD). Regression scripts
+    /// typically pass a fixed root (e.g. `bench-log`) so runs accumulate
+    /// a reviewable history.
+    #[arg(long, global = true, env = "CROWDB_LOG_ROOT")]
+    log_root: Option<PathBuf>,
+
+    /// Per-invocation log directory, computed in `main()` after parse
+    /// (not a CLI flag). Read by command handlers (e.g. `local-deploy`
+    /// lands its workspace under here).
+    #[arg(skip)]
+    log_dir: PathBuf,
+
     #[command(subcommand)]
     command: Domain,
+}
+
+impl Cli {
+    /// Kebab-case command chain for the per-invocation log folder name
+    /// (e.g. `bench-kv`, `cluster-local-deploy`, `kv-server`). Two
+    /// levels deep — enough to distinguish the high-value commands
+    /// (bench-kv vs bench-rpc, cluster-local-deploy vs cluster-init)
+    /// without walking every leaf verb.
+    fn command_slug(&self) -> String {
+        match &self.command {
+            Domain::Cluster { verb } => {
+                let v = match verb {
+                    ClusterVerb::Init { .. } => "init",
+                    ClusterVerb::LocalDeploy { .. } => "local-deploy",
+                    ClusterVerb::Reset => "reset",
+                    ClusterVerb::Clean => "clean",
+                    ClusterVerb::Status => "status",
+                    ClusterVerb::Topology { .. } => "topology",
+                    ClusterVerb::Rack { .. } => "rack",
+                    ClusterVerb::Node { .. } => "node",
+                    ClusterVerb::DiskGroup { .. } => "disk-group",
+                    ClusterVerb::Disk { .. } => "disk",
+                };
+                format!("cluster-{v}")
+            }
+            Domain::Kv { verb } => {
+                let v = match verb {
+                    KvVerb::Server(_) => "server",
+                    KvVerb::Store(_) => "store",
+                    KvVerb::Group(_) => "group",
+                    KvVerb::Replica(_) => "replica",
+                    KvVerb::Data(_) => "data",
+                };
+                format!("kv-{v}")
+            }
+            Domain::Chunk { verb } => {
+                let v = match verb {
+                    ChunkVerb::Diskdb(_) => "diskdb",
+                    ChunkVerb::Stub(_) => "stub",
+                };
+                format!("chunk-{v}")
+            }
+            Domain::Bench { verb } => {
+                let v = match verb {
+                    BenchVerb::Kv(_) => "kv",
+                    BenchVerb::Rpc(_) => "rpc",
+                };
+                format!("bench-{v}")
+            }
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -94,30 +160,44 @@ enum ChunkVerb {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
-    // Initialize file logging to cli-log/ so tracing events (warnings,
-    // errors, transport failures) are captured for post-mortem analysis.
-    // The C++ crowdb-rpc transport also gets its own log file here.
-    let log_dir = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("cli-log");
-    let _ = crowdb_common::logging::init_file_logging(
-        &log_dir,
+    // Each CLI run gets its own log folder so logs from different
+    // invocations don't interleave. The folder is
+    // `<log_root>/<command-chain>-<YYYYMMDD-HHMMSS>/` and holds the
+    // tracing log, the C++ crowdb-rpc transport log, and the ops log.
+    // `--log-root` defaults to `cli-log/` (CWD-relative); regression
+    // scripts pass a fixed root (e.g. `bench-log`) to accumulate runs.
+    let log_root = cli.log_root.clone().unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("cli-log")
+    });
+    let invocation_dir = log_root.join(format!(
+        "{}-{}",
+        cli.command_slug(),
+        crowdb_common::logging::timestamp_secs()
+    ));
+    let _ = std::fs::create_dir_all(&invocation_dir);
+    cli.log_dir.clone_from(&invocation_dir);
+    eprintln!("log dir: {}", invocation_dir.display());
+
+    let _log_guards = crowdb_common::logging::init_file_logging(
+        &invocation_dir,
         "crowdb-cli",
         50,
         5,
         "warn,crowdb_cli=info,crowdb_console_shared=info,crowdb_kv_client=info",
     );
     crowdb_rpc_ffi::init_logging(
-        log_dir.to_str().unwrap_or("cli-log"),
+        invocation_dir.to_str().unwrap_or("cli-log"),
         "info",
         50,
         5,
         "crowdb-cli-rpc",
     );
 
-    crowdb_console_shared::ops_log::init_default("cli");
+    crowdb_console_shared::ops_log::init_in(&invocation_dir, "cli");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

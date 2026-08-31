@@ -33,7 +33,10 @@ pub(super) fn flush_counters<W: Write>(
         .iter()
         .filter_map(|e| {
             let snap = e.handle.flush();
-            (snap.count > 0).then_some((*e, snap))
+            // Show counters with window activity or a non-zero
+            // cumulative total; hide truly idle counters (count=0
+            // total=0) to keep the log concise.
+            (snap.count > 0 || snap.total > 0).then_some((*e, snap))
         })
         .collect();
     if active.is_empty() {

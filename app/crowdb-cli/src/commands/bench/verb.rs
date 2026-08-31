@@ -65,6 +65,9 @@ pub struct RpcArgs {
     /// Enable TCP Nagle (coalesce small frames per writev).
     #[arg(long, default_value_t = false)]
     pub enable_nagle: bool,
+    /// Metrics flush interval in seconds. 0 disables the metrics log.
+    #[arg(long, default_value_t = 1)]
+    pub metrics_interval: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -107,6 +110,9 @@ pub struct ReadArgs {
     /// (`0..N` mod 256). 0 disables verification.
     #[arg(long, default_value_t = 0)]
     pub verify_bytes: usize,
+    /// Metrics flush interval in seconds. 0 disables the metrics log.
+    #[arg(long, default_value_t = 1)]
+    pub metrics_interval: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -132,6 +138,9 @@ pub struct WriteArgs {
     /// Client transport: per-connection send queue capacity. 0 = default (4096).
     #[arg(long, default_value_t = 0)]
     pub send_queue_capacity: u32,
+    /// Metrics flush interval in seconds. 0 disables the metrics log.
+    #[arg(long, default_value_t = 1)]
+    pub metrics_interval: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -167,6 +176,9 @@ pub struct ScanArgs {
     /// (size:percent). When set, overrides `--value-size`.
     #[arg(long)]
     pub value_size_mix: Option<String>,
+    /// Metrics flush interval in seconds. 0 disables the metrics log.
+    #[arg(long, default_value_t = 1)]
+    pub metrics_interval: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

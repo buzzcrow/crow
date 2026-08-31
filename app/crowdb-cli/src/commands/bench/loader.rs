@@ -10,53 +10,66 @@
 //! The coroutine RPC path does not use this (the C++ `co_spawn` manages
 //! its own loop); it records into a `BenchRecorder` directly from the
 //! `on_response` callback.
+//!
+//! `BenchRecorder` wraps the project's `Counter` + `LatencyHistogram` +
+//! `Bandwidth` handles from `crowdb_common::metrics`, all registered on
+//! the `MetricsRunner`'s registry. The `LatencyHistogram` tracks both
+//! window state (flushed/reset each interval for the periodic metrics
+//! log) and cumulative state (never reset, for the final JSON report)
+//! in a single `observe()` call — no double recording. Its `count` is
+//! the success-ops count, so a separate success counter is not needed.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::histogram::BenchHistogram;
+use crowdb_common::metrics::{Bandwidth, Counter, HistogramSnapshot, LatencyHistogram, MetricsRegistry};
 
-/// Shared counters + histogram + running flag for one bench run.
-/// All fields are lock-free atomics — safe to update from many tokio
-/// tasks or C++ I/O worker threads concurrently.
+/// Shared error counters + latency histogram + bandwidth + running flag
+/// for one bench run. All fields are lock-free atomics — safe to update
+/// from many tokio tasks or C++ I/O worker threads concurrently.
 pub struct BenchRecorder {
-    ops: AtomicU64,
-    errors: AtomicU64,
-    #[allow(dead_code)]
-    correctness_errors: AtomicU64,
-    hist: BenchHistogram,
+    errors: Arc<Counter>,
+    correctness_errors: Arc<Counter>,
+    /// Latency histogram (registered → window flushed each interval,
+    /// cumulative preserved for final report via `snapshot_total()`).
+    /// Its `count` is the success-ops count (every `record_ok` observes).
+    latency: Arc<LatencyHistogram>,
+    /// Payload bandwidth (bytes/s, registered → flushed each interval).
+    bytes: Arc<Bandwidth>,
     running: AtomicBool,
 }
 
 impl BenchRecorder {
+    /// Build a recorder: all metrics registered on `reg` so the
+    /// `MetricsRunner` periodic flush writes them to the metrics log.
     #[must_use]
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            ops: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-            correctness_errors: AtomicU64::new(0),
-            hist: BenchHistogram::new(),
+    pub fn from_registry(reg: &mut MetricsRegistry) -> Self {
+        Self {
+            errors: reg.register_counter("bench.ops.error.c"),
+            correctness_errors: reg.register_counter("bench.ops.correctness_error.c"),
+            latency: reg.register_histogram("bench.latency.lh"),
+            bytes: reg.register_bandwidth("bench.bytes.bw"),
             running: AtomicBool::new(true),
-        })
+        }
     }
 
-    /// Record one successful op with its latency in microseconds.
-    pub fn record_ok(&self, us: u64) {
-        self.ops.fetch_add(1, Ordering::Relaxed);
-        self.hist.record_us(us);
+    /// Record one successful op with its latency (µs) and payload bytes.
+    pub fn record_ok(&self, us: u64, bytes: u64) {
+        self.latency.observe(us.saturating_mul(1000));
+        self.bytes.observe(bytes);
     }
 
     /// Record one failed op (transport / consensus error).
     pub fn record_err(&self) {
-        self.errors.fetch_add(1, Ordering::Relaxed);
+        self.errors.inc();
     }
 
     /// Record one correctness mismatch (value bytes differ from expected).
     #[allow(dead_code)]
     pub fn record_correctness_err(&self) {
-        self.correctness_errors.fetch_add(1, Ordering::Relaxed);
+        self.correctness_errors.inc();
     }
 
     /// Whether loader tasks should keep running.
@@ -69,34 +82,26 @@ impl BenchRecorder {
         self.running.store(false, Ordering::Relaxed);
     }
 
+    /// Total successful ops (cumulative count from the latency histogram).
     #[must_use]
     pub fn ops(&self) -> u64 {
-        self.ops.load(Ordering::Relaxed)
+        self.latency.snapshot_total().total_count
     }
     #[must_use]
     pub fn errors(&self) -> u64 {
-        self.errors.load(Ordering::Relaxed)
+        self.errors.snapshot().total
     }
     #[must_use]
     #[allow(dead_code)]
     pub fn correctness_errors(&self) -> u64 {
-        self.correctness_errors.load(Ordering::Relaxed)
+        self.correctness_errors.snapshot().total
     }
+    /// Cumulative latency snapshot (avg/p50/p99/max in ns) across all
+    /// observations — for the final JSON report. Window state may have
+    /// been reset by periodic flushes; cumulative state is preserved.
     #[must_use]
-    pub fn hist_snapshot(&self) -> super::histogram::BenchHistSnapshot {
-        self.hist.snapshot()
-    }
-}
-
-impl Default for BenchRecorder {
-    fn default() -> Self {
-        Self {
-            ops: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-            correctness_errors: AtomicU64::new(0),
-            hist: BenchHistogram::new(),
-            running: AtomicBool::new(true),
-        }
+    pub fn hist_snapshot(&self) -> HistogramSnapshot {
+        self.latency.snapshot_total()
     }
 }
 
@@ -112,12 +117,16 @@ pub struct WorkloadRun {
 /// shared recorder. Returns the recorder + the measured run duration.
 ///
 /// `num_loaders` is clamped to >= 1.
-pub async fn run_workload<F, Fut>(num_loaders: usize, duration: Duration, op: F) -> WorkloadRun
+pub async fn run_workload<F, Fut>(
+    recorder: Arc<BenchRecorder>,
+    num_loaders: usize,
+    duration: Duration,
+    op: F,
+) -> WorkloadRun
 where
     F: Fn(Arc<BenchRecorder>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let recorder = BenchRecorder::new();
     let loaders = num_loaders.max(1);
     let start = Instant::now();
     let op = Arc::new(op);

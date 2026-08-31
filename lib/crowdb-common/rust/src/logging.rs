@@ -158,6 +158,16 @@ fn gzip_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Format the current wall clock as `YYYYMMDD-HHMM.SS` (UTC). Used for
+/// per-invocation log directory names.
+#[must_use]
+pub fn timestamp_secs() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format_secs(secs)
+}
+
 /// Format epoch millis as `YYYYMMDD-HHMMSS.mmm` (UTC).
 fn format_timestamp(millis: u128) -> String {
     let secs = u64::try_from(millis / 1000).unwrap_or(u64::MAX);
@@ -167,8 +177,34 @@ fn format_timestamp(millis: u128) -> String {
     let hour = rem / 3600;
     let min = (rem % 3600) / 60;
     let sec = rem % 60;
+    let (year, m, d) = civil_from_days(days);
+    let date = format!("{year}{m:02}{d:02}");
+    let hms = format!("{hour:02}{min:02}{sec:02}");
+    format!("{date}-{hms}.{ms:03}")
+}
 
-    // Civil from days since 1970-01-01 (Howard Hinnant's algorithm).
+/// Split epoch seconds into `(YYYYMMDD, HHMM.SS)` (UTC).
+fn split_secs(secs: u64) -> (String, String) {
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+    let (year, m, d) = civil_from_days(days);
+    (
+        format!("{year}{m:02}{d:02}"),
+        format!("{hour:02}{min:02}.{sec:02}"),
+    )
+}
+
+/// Format epoch seconds as `YYYYMMDD-HHMM.SS` (UTC).
+fn format_secs(secs: u64) -> String {
+    let (date, hms) = split_secs(secs);
+    format!("{date}-{hms}")
+}
+
+/// Civil (year, month, day) from days since 1970-01-01 (Howard Hinnant's algorithm).
+fn civil_from_days(days: u64) -> (i64, i64, i64) {
     let z = i64::try_from(days).unwrap_or(i64::MAX) + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -179,8 +215,7 @@ fn format_timestamp(millis: u128) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = y + i64::from(m <= 2);
-
-    format!("{year}{m:02}{d:02}-{hour:02}{min:02}{sec:02}.{ms:03}")
+    (year, m, d)
 }
 
 /// Initializes file logging to the specified directory.
@@ -226,6 +261,28 @@ pub fn init_file_logging(
     Ok(LogGuards { _file: file_guard })
 }
 
+/// Opens a rotating log file with a caller-supplied prefix.
+/// File naming: `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
+///
+/// # Errors
+/// Returns `Err` if the log directory cannot be created.
+pub fn open_named_log(
+    log_dir: impl AsRef<Path>,
+    prefix: &str,
+    max_file_mb: usize,
+    max_files: usize,
+) -> Result<RotatingLogWriter, String> {
+    let pid = std::process::id();
+    RotatingLogWriter::new(
+        log_dir.as_ref().to_path_buf(),
+        prefix,
+        pid,
+        max_file_mb,
+        max_files,
+    )
+    .map_err(|e| format!("failed to open log file; next step: check path permissions: {e}"))
+}
+
 /// Opens a metrics log file in the specified directory with size-based
 /// rotation and gzip compression on rotated files.
 /// File naming: `{process_name}-metrics-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
@@ -238,16 +295,8 @@ pub fn open_metrics_log(
     max_file_mb: usize,
     max_files: usize,
 ) -> Result<RotatingLogWriter, String> {
-    let pid = std::process::id();
     let prefix = format!("{process_name}-metrics");
-    RotatingLogWriter::new(
-        log_dir.as_ref().to_path_buf(),
-        &prefix,
-        pid,
-        max_file_mb,
-        max_files,
-    )
-    .map_err(|e| format!("failed to open metrics log file; next step: check path permissions: {e}"))
+    open_named_log(log_dir, &prefix, max_file_mb, max_files)
 }
 
 /// Initializes file and console logging with **split** default filters:

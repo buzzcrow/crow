@@ -31,6 +31,7 @@ use crowdb_rpc_ffi::{Buffer, Connection, RpcClient, RpcError, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 
 use super::loader::{run_workload, BenchRecorder};
+use super::metrics::BenchMetrics;
 use super::result::{BenchOps, BenchResult};
 use super::verb::{BenchMode, RpcArgs};
 use crate::Cli;
@@ -75,11 +76,16 @@ pub async fn run(cli: &Cli, args: RpcArgs) -> ExitCode {
     client.set_completion_pool_size(next_pow2(loaders_u32));
     client.start_reaper(30_000_000_000, 1_000_000_000);
 
+    let mut metrics = BenchMetrics::new(&cli.log_dir, args.metrics_interval);
+    metrics.start();
+
     let duration = Duration::from_secs(args.duration_secs);
     let start = Instant::now();
+    let recorder = Arc::clone(&metrics.recorder);
     let recorder = match args.mode {
         BenchMode::Coroutine => {
             run_coroutine(
+                recorder,
                 Arc::clone(&client),
                 Arc::clone(&server),
                 conns,
@@ -91,6 +97,7 @@ pub async fn run(cli: &Cli, args: RpcArgs) -> ExitCode {
         }
         BenchMode::Tokio => {
             run_tokio(
+                recorder,
                 Arc::clone(&client),
                 Arc::clone(&server),
                 conns,
@@ -105,6 +112,8 @@ pub async fn run(cli: &Cli, args: RpcArgs) -> ExitCode {
 
     client.stop_reaper();
     server.stop();
+
+    metrics.stop().await;
 
     let snap = recorder.hist_snapshot();
     eprintln!(
@@ -127,6 +136,8 @@ pub async fn run(cli: &Cli, args: RpcArgs) -> ExitCode {
         client_transport_stats: None,
         server_metrics: None,
     };
+    let json = serde_json::to_value(&result).unwrap_or_default();
+    crowdb_console_shared::ops_log::append_custom("bench_report", &json);
     crate::commands::print_json(cli, &result)
 }
 
@@ -151,6 +162,7 @@ fn build_control(request_id: u64) -> Vec<u8> {
 /// thread. The C++ call blocks until all coroutines finish (deadline
 /// driven by the handler returning false).
 async fn run_coroutine(
+    recorder: Arc<BenchRecorder>,
     client: Arc<RpcClient>,
     server: Arc<RpcServer>,
     conns: Vec<Connection>,
@@ -158,7 +170,6 @@ async fn run_coroutine(
     duration: Duration,
     data_bytes: Vec<u8>,
 ) -> Arc<BenchRecorder> {
-    let recorder = BenchRecorder::new();
     let handler = Arc::new(EchoHandler::new(Arc::clone(&recorder), data_bytes, duration));
     let num_co = u32::try_from(loader_num.max(1)).unwrap_or(u32::MAX);
 
@@ -174,6 +185,7 @@ async fn run_coroutine(
 
 /// Tokio mode: one task per loader, each looping `RpcClient::call`.
 async fn run_tokio(
+    recorder: Arc<BenchRecorder>,
     client: Arc<RpcClient>,
     server: Arc<RpcServer>,
     conns: Vec<Connection>,
@@ -183,7 +195,7 @@ async fn run_tokio(
 ) -> Arc<BenchRecorder> {
     let conns = Arc::new(conns);
     let next_id = Arc::new(AtomicU64::new(1));
-    let run = run_workload(loader_num, duration, move |rec: Arc<BenchRecorder>| {
+    let run = run_workload(recorder, loader_num, duration, move |rec: Arc<BenchRecorder>| {
         let client = Arc::clone(&client);
         let server = Arc::clone(&server);
         let conns = Arc::clone(&conns);
@@ -199,7 +211,10 @@ async fn run_tokio(
             match client.call(&server, conn, id, ctrl, Some(data), ECHO_MSG_TYPE) {
                 Ok(fut) => match fut.await {
                     Ok(_) => {
-                        rec.record_ok(t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+                        rec.record_ok(
+                            t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+                            data_bytes.len() as u64,
+                        );
                     }
                     Err(_) => rec.record_err(),
                 },
@@ -246,7 +261,8 @@ impl CoBenchHandler for EchoHandler {
 
     fn on_response(&self, _request_id: u64, status: Result<(), RpcError>, latency_ns: u64) -> bool {
         if status.is_ok() {
-            self.recorder.record_ok(latency_ns / 1000);
+            self.recorder
+                .record_ok(latency_ns / 1000, self.data_bytes.len() as u64);
         } else {
             self.recorder.record_err();
         }

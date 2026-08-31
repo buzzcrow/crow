@@ -18,12 +18,14 @@ namespace crowdb::rpc
 using crowdb::common::metrics::Counter;
 using crowdb::common::metrics::MetricsRegistry;
 
-// 3 error counters (success path count is in the e2e histogram):
+// 4 error counters (success path count is in the e2e histogram):
 //   submit_fail    — send() submit failed
+//   submit_retry   — coroutine submit failed then retried (co_client)
 //   resp_missed    — on_response: late/dup/wrong_id/dropped
 //   reaped         — reaper timed out (slab or map)
 
 Counter &rpc_submit_fail();
+Counter &rpc_submit_retry();
 Counter &rpc_resp_missed();
 Counter &rpc_reaped();
 

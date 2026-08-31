@@ -309,6 +309,12 @@ pub struct PxElectionConfig {
     /// `persist_snapshot()` is called again, in milliseconds. Ensures a
     /// low-write-rate replica still checkpoints periodically.
     pub snapshot_time_threshold_ms: u64,
+    /// Maximum wall-clock interval between WAL durable flushes, in
+    /// milliseconds. The maintenance loop forces `wal.flush_all()`
+    /// (real `fsync`) when this interval elapses, so WAL data is
+    /// persisted even with `--no-fsync`. `0` disables periodic WAL
+    /// flush (WAL is still flushed on shutdown).
+    pub wal_flush_interval_ms: u64,
     /// Per-RPC deadline for unary `prepare`, the bidi `accept`
     /// learner-stream call, and the unary `heartbeat` RPC, in
     /// milliseconds. On expiry the caller gets a retryable
@@ -353,6 +359,7 @@ impl PxElectionConfig {
         maintenance_tick_ms: 10_000,
         snapshot_slot_threshold: 100_000,
         snapshot_time_threshold_ms: 600_000,
+        wal_flush_interval_ms: 60_000,
         learner_stream_rpc_timeout_ms: 2000,
     };
 
@@ -377,6 +384,7 @@ impl PxElectionConfig {
             maintenance_tick_ms: 500,
             snapshot_slot_threshold: 1000,
             snapshot_time_threshold_ms: 1_000,
+            wal_flush_interval_ms: 0,
             learner_stream_rpc_timeout_ms: 500,
         }
     }
@@ -410,6 +418,7 @@ impl PxElectionConfig {
             maintenance_tick_ms: 3_000,
             snapshot_slot_threshold: 1_000_000,
             snapshot_time_threshold_ms: 9_000,
+            wal_flush_interval_ms: 0,
             learner_stream_rpc_timeout_ms: 1000,
         }
     }

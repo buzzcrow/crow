@@ -54,6 +54,7 @@ pub struct CrowdbRpcTransportStats {
 #[derive(Default, Debug)]
 pub struct CrowdbRpcClientCounters {
     pub submit_fail: u64,
+    pub submit_retry: u64,
     pub resp_missed: u64,
     pub reaped: u64,
 }

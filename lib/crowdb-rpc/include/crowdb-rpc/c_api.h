@@ -107,9 +107,10 @@ void crowdb_rpc_server_transport_stats(crowdb_rpc_server_t server, crowdb_rpc_tr
 // ABI compatibility).
 typedef struct crowdb_rpc_client_counters
 {
-    uint64_t submit_fail; // send() submit failed
-    uint64_t resp_missed; // on_response: late/dup/wrong_id/dropped
-    uint64_t reaped;      // reaper timed out (slab or map)
+    uint64_t submit_fail;  // send() submit failed
+    uint64_t submit_retry; // coroutine submit failed then retried
+    uint64_t resp_missed;  // on_response: late/dup/wrong_id/dropped
+    uint64_t reaped;       // reaper timed out (slab or map)
 } crowdb_rpc_client_counters_t;
 
 void crowdb_rpc_client_get_counters(crowdb_rpc_client_t client, crowdb_rpc_client_counters_t *out);

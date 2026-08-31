@@ -19,6 +19,7 @@ use rand::{Rng, SeedableRng};
 
 use super::kv_client::{build_kv_client, KvClientTunables};
 use super::loader::{run_workload, BenchRecorder};
+use super::metrics::BenchMetrics;
 use super::result::{BenchOps, BenchResult, ReplicaStats, ServerMetrics, TransportStats};
 use super::verb::WriteArgs;
 use crate::commands::load_config;
@@ -50,30 +51,44 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
     let key_space = args.key_space.max(1);
     let value_size = args.value_size;
 
+    let mut metrics = BenchMetrics::new(&cli.log_dir, args.metrics_interval);
+    metrics.start();
+
     let duration = Duration::from_secs(args.duration_secs);
     let start = Instant::now();
-    let run = run_workload(args.loader_num, duration, move |rec: Arc<BenchRecorder>| {
-        let client = Arc::clone(&client);
-        let key_space = key_space;
-        let value_size = value_size;
-        async move {
-            let mut rng = SmallRng::from_entropy();
-            let id = rng.gen_range(0..key_space);
-            let key = format!("k{id:020}");
-            let value = build_value(id, value_size);
-            let t0 = Instant::now();
-            match client.put(STORE_ID, GROUP_ID, key.as_bytes(), &value, None).await {
-                Ok(_) => rec.record_ok(t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX)),
-                Err(_) => rec.record_err(),
+    let recorder = Arc::clone(&metrics.recorder);
+    let run = run_workload(
+        recorder,
+        args.loader_num,
+        duration,
+        move |rec: Arc<BenchRecorder>| {
+            let client = Arc::clone(&client);
+            let key_space = key_space;
+            let value_size = value_size;
+            async move {
+                let mut rng = SmallRng::from_entropy();
+                let id = rng.gen_range(0..key_space);
+                let key = format!("k{id:020}");
+                let value = build_value(id, value_size);
+                let t0 = Instant::now();
+                match client.put(STORE_ID, GROUP_ID, key.as_bytes(), &value, None).await {
+                    Ok(_) => rec.record_ok(
+                        t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+                        value.len() as u64,
+                    ),
+                    Err(_) => rec.record_err(),
+                }
             }
-        }
-    })
+        },
+    )
     .await;
 
     let duration_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
     // Fetch server-side metrics from every node.
     let server_metrics = fetch_server_metrics(cli, STORE_ID, GROUP_ID).await;
+
+    metrics.stop().await;
 
     let snap = run.recorder.hist_snapshot();
     eprintln!(
@@ -96,6 +111,8 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
         client_transport_stats,
         server_metrics,
     };
+    let json = serde_json::to_value(&result).unwrap_or_default();
+    crowdb_console_shared::ops_log::append_custom("bench_report", &json);
     crate::commands::print_json(cli, &result)
 }
 

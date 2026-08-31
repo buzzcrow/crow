@@ -27,6 +27,7 @@
 //   rpc.transport.write_error.c     — hard writev errors
 //   rpc.transport.send_queue_reject.c — enqueue_send rejected (queue full/closed)
 //   rpc.request.submit_fail.c       — submit failed
+//   rpc.request.submit_retry.c      — coroutine submit failed then retried
 //   rpc.request.resp_missed.c       — late/dup/wrong_id response
 //   rpc.request.reaped.c            — timeout reaped
 //   rpc.response.ping.c             — ping message processed

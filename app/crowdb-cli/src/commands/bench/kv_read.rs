@@ -18,6 +18,7 @@ use rand::{Rng, SeedableRng};
 
 use super::kv_client::{build_kv_client, KvClientTunables};
 use super::loader::{run_workload, BenchRecorder};
+use super::metrics::BenchMetrics;
 use super::result::{BenchOps, BenchResult};
 use super::verb::{BenchMinSlot, BenchReadEndpoint, BenchReadMode, ReadArgs};
 use crate::Cli;
@@ -52,50 +53,64 @@ pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
     let value_size = args.value_size;
     let min_slot_arg = args.min_slot;
 
+    let mut metrics = BenchMetrics::new(&cli.log_dir, args.metrics_interval);
+    metrics.start();
+
     let duration = Duration::from_secs(args.duration_secs);
     let start = Instant::now();
-    let run = run_workload(args.loader_num, duration, move |rec: Arc<BenchRecorder>| {
-        let client = Arc::clone(&client);
-        let key_space = key_space;
-        let verify_bytes = verify_bytes;
-        let value_size = value_size;
-        let read_mode = read_mode;
-        let min_slot_arg = min_slot_arg;
-        async move {
-            let mut rng = SmallRng::from_entropy();
-            let id = rng.gen_range(0..key_space);
-            let key = format!("k{id:020}");
-            let min_slot = match min_slot_arg {
-                BenchMinSlot::Auto => None,
-                BenchMinSlot::Zero => Some(0),
-            };
-            let t0 = Instant::now();
-            match client
-                .get(STORE_ID, GROUP_ID, key.as_bytes(), read_mode, min_slot)
-                .await
-            {
-                Ok(GetOutcome::Found { value, .. }) => {
-                    rec.record_ok(t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
-                    if verify_bytes > 0 {
-                        let expected = expected_value(id, value_size, verify_bytes);
-                        if value.len() < verify_bytes || value[..verify_bytes] != expected[..] {
+    let recorder = Arc::clone(&metrics.recorder);
+    let run = run_workload(
+        recorder,
+        args.loader_num,
+        duration,
+        move |rec: Arc<BenchRecorder>| {
+            let client = Arc::clone(&client);
+            let key_space = key_space;
+            let verify_bytes = verify_bytes;
+            let value_size = value_size;
+            let read_mode = read_mode;
+            let min_slot_arg = min_slot_arg;
+            async move {
+                let mut rng = SmallRng::from_entropy();
+                let id = rng.gen_range(0..key_space);
+                let key = format!("k{id:020}");
+                let min_slot = match min_slot_arg {
+                    BenchMinSlot::Auto => None,
+                    BenchMinSlot::Zero => Some(0),
+                };
+                let t0 = Instant::now();
+                match client
+                    .get(STORE_ID, GROUP_ID, key.as_bytes(), read_mode, min_slot)
+                    .await
+                {
+                    Ok(GetOutcome::Found { value, .. }) => {
+                        rec.record_ok(
+                            t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+                            value.len() as u64,
+                        );
+                        if verify_bytes > 0 {
+                            let expected = expected_value(id, value_size, verify_bytes);
+                            if value.len() < verify_bytes || value[..verify_bytes] != expected[..] {
+                                rec.record_correctness_err();
+                            }
+                        }
+                    }
+                    Ok(GetOutcome::NotFound) => {
+                        rec.record_err();
+                        if verify_bytes > 0 {
                             rec.record_correctness_err();
                         }
                     }
+                    Err(_) => rec.record_err(),
                 }
-                Ok(GetOutcome::NotFound) => {
-                    rec.record_err();
-                    if verify_bytes > 0 {
-                        rec.record_correctness_err();
-                    }
-                }
-                Err(_) => rec.record_err(),
             }
-        }
-    })
+        },
+    )
     .await;
 
     let duration_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    metrics.stop().await;
+
     let snap = run.recorder.hist_snapshot();
     eprintln!(
         "bench kv read: {} ops, {} errors, {} corr errors, {}ms",
@@ -114,6 +129,8 @@ pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
         client_transport_stats: None,
         server_metrics: None,
     };
+    let json = serde_json::to_value(&result).unwrap_or_default();
+    crowdb_console_shared::ops_log::append_custom("bench_report", &json);
     crate::commands::print_json(cli, &result)
 }
 

@@ -204,6 +204,10 @@ pub struct PxGroup {
     /// `run_pass` to gate expensive disk snapshots on a time threshold
     /// (`snapshot_time_threshold_ms`).
     pub(crate) last_snapshot_time: parking_lot::Mutex<std::time::Instant>,
+    /// Wall-clock time of the last `wal.flush_all()` call. Used by
+    /// `run_pass` to gate periodic WAL durable flushes on
+    /// `wal_flush_interval_ms`.
+    pub(crate) last_wal_flush_time: parking_lot::Mutex<std::time::Instant>,
     /// Optional registry handles for read-path metrics. Set via
     /// [`Self::set_metrics_registry`] when a registry is wired.
     /// `None` in tests / no-registry mode.
@@ -350,6 +354,7 @@ impl PxGroup {
             membership_epoch: AtomicU64::new(0),
             last_snapshot_slot: AtomicU64::new(0),
             last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
+            last_wal_flush_time: parking_lot::Mutex::new(std::time::Instant::now()),
             read_handles: OnceLock::new(),
             write_handles: OnceLock::new(),
             pending_read_barrier: parking_lot::Mutex::new(None),

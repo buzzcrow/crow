@@ -16,7 +16,12 @@
 //!    makes [`KVEngine::resume_from_slot`](crate::kv::KVEngine::resume_from_slot)
 //!    non-zero on a real restart. Purely local: every replica (leader or
 //!    follower) does this independently of group-wide agreement.
-//! 3. Advances the engine's GC retention watermark and sweeps it
+//! 3. Conditionally forces a durable WAL flush via
+//!    [`WalEngine::flush_all`] — only when
+//!    `time-since-last-wal-flush >= wal_flush_interval_ms`, so WAL data
+//!    is persisted even with `--no-fsync`. `0` disables (WAL is still
+//!    flushed on shutdown).
+//! 4. Advances the engine's GC retention watermark and sweeps it
 //!    ([`KVEngine::set_gc_watermark`](crate::kv::KVEngine::set_gc_watermark)/
 //!    [`collect_garbage`](crate::kv::KVEngine::collect_garbage)), and runs a
 //!    WAL segment GC pass ([`crate::wal::gc::run_gc_with_watermark`]) --
@@ -192,7 +197,42 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         0
     };
 
-    // 3. GC: set watermark + sweep every tick. The B-tree's own
+    // 3. Conditionally force a durable WAL flush (real fsync, even with
+    //    --no-fsync). Gated on wal_flush_interval_ms so we don't fsync
+    //    every tick. The WAL writer's own pipeline mutex serializes
+    //    flush commands against appends — no extra lock needed here.
+    let wal_interval = group.config.election.wal_flush_interval_ms;
+    if wal_interval > 0 {
+        let elapsed = {
+            let prev = *group.last_wal_flush_time.lock();
+            std::time::Instant::now().duration_since(prev)
+        };
+        if elapsed >= Duration::from_millis(wal_interval) {
+            if let Some(wal) = group.local_replica().wal() {
+                match wal.flush_all().await {
+                    Ok(()) => {
+                        *group.last_wal_flush_time.lock() = std::time::Instant::now();
+                        debug!(
+                            group_id = group.group_id(),
+                            replica_id = group.local_replica().id,
+                            elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                            "maintenance: WAL flush_all completed"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            group_id = group.group_id(),
+                            replica_id = group.local_replica().id,
+                            error = %e,
+                            "maintenance: WAL flush_all failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. GC: set watermark + sweep every tick. The B-tree's own
     //    dropped-count check makes a no-op tick cheap.
     // `set_gc_watermark` is a cheap atomic store and stays inline;
     // `collect_garbage` holds the C++ write_mutex_ and runs on a blocking thread.
@@ -210,7 +250,7 @@ pub(crate) async fn run_pass(group: &PxGroup) {
             );
         });
 
-    // 4. WAL GC: only advance snapshot_slot when we actually persisted.
+    // 5. WAL GC: only advance snapshot_slot when we actually persisted.
     let Some(wal) = group.local_replica().wal() else {
         return;
     };
