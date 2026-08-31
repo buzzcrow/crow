@@ -141,10 +141,10 @@ echo "=== Correctness verification ==="
 run_subtest "lin_16t_verify"     linearizable auto 16 16 8
 run_subtest "minslot_16t_verify" minslot      zero 16 16 8
 
-# Phase 4: teardown via `cluster reset`.
+# Phase 4: teardown via `cluster destroy`.
 echo "=== Tearing down cluster ==="
 pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-    cluster reset
+    cluster destroy
 rm -f "$CONFIG_FILE"
 
 echo "=== DONE ==="

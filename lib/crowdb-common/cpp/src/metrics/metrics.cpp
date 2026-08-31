@@ -35,8 +35,14 @@ MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)
 Counter *MetricsRegistry::register_counter(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<Counter>(name);
-    Counter         *raw = h.get();
+    auto             it = std::find_if(counters_.begin(), counters_.end(),
+                                       [&](const std::unique_ptr<Counter> &e) { return e->name() == name; });
+    if (it != counters_.end()) {
+        *it = std::make_unique<Counter>(name);
+        return it->get();
+    }
+    auto     h   = std::make_unique<Counter>(name);
+    Counter *raw = h.get();
     counters_.push_back(std::move(h));
     return raw;
 }
@@ -44,8 +50,14 @@ Counter *MetricsRegistry::register_counter(const std::string &name)
 Gauge *MetricsRegistry::register_gauge(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<Gauge>(name);
-    Gauge           *raw = h.get();
+    auto             it = std::find_if(gauges_.begin(), gauges_.end(),
+                                       [&](const std::unique_ptr<Gauge> &e) { return e->name() == name; });
+    if (it != gauges_.end()) {
+        *it = std::make_unique<Gauge>(name);
+        return it->get();
+    }
+    auto   h   = std::make_unique<Gauge>(name);
+    Gauge *raw = h.get();
     gauges_.push_back(std::move(h));
     return raw;
 }
@@ -53,8 +65,14 @@ Gauge *MetricsRegistry::register_gauge(const std::string &name)
 CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name, CallbackGauge::Callback cb)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<CallbackGauge>(name, std::move(cb));
-    CallbackGauge   *raw = h.get();
+    auto             it = std::find_if(callback_gauges_.begin(), callback_gauges_.end(),
+                                       [&](const std::unique_ptr<CallbackGauge> &e) { return e->name() == name; });
+    if (it != callback_gauges_.end()) {
+        *it = std::make_unique<CallbackGauge>(name, std::move(cb));
+        return it->get();
+    }
+    auto           h   = std::make_unique<CallbackGauge>(name, std::move(cb));
+    CallbackGauge *raw = h.get();
     callback_gauges_.push_back(std::move(h));
     return raw;
 }
@@ -62,15 +80,27 @@ CallbackGauge *MetricsRegistry::register_callback_gauge(const std::string &name,
 Bandwidth *MetricsRegistry::register_bandwidth(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<Bandwidth>(name);
-    Bandwidth       *raw = h.get();
+    auto             it = std::find_if(bandwidths_.begin(), bandwidths_.end(),
+                                       [&](const std::unique_ptr<Bandwidth> &e) { return e->name() == name; });
+    if (it != bandwidths_.end()) {
+        *it = std::make_unique<Bandwidth>(name);
+        return it->get();
+    }
+    auto       h   = std::make_unique<Bandwidth>(name);
+    Bandwidth *raw = h.get();
     bandwidths_.push_back(std::move(h));
     return raw;
 }
 
 LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 {
-    std::scoped_lock  lock(flush_mutex_);
+    std::scoped_lock lock(flush_mutex_);
+    auto             it = std::find_if(histograms_.begin(), histograms_.end(),
+                                       [&](const std::unique_ptr<LatencyHistogram> &e) { return e->name() == name; });
+    if (it != histograms_.end()) {
+        *it = std::make_unique<LatencyHistogram>(name);
+        return it->get();
+    }
     auto              h   = std::make_unique<LatencyHistogram>(name);
     LatencyHistogram *raw = h.get();
     histograms_.push_back(std::move(h));
@@ -80,8 +110,14 @@ LatencyHistogram *MetricsRegistry::register_histogram(const std::string &name)
 LatencySummary *MetricsRegistry::register_summary(const std::string &name)
 {
     std::scoped_lock lock(flush_mutex_);
-    auto             h   = std::make_unique<LatencySummary>(name);
-    LatencySummary  *raw = h.get();
+    auto             it = std::find_if(summaries_.begin(), summaries_.end(),
+                                       [&](const std::unique_ptr<LatencySummary> &e) { return e->name() == name; });
+    if (it != summaries_.end()) {
+        *it = std::make_unique<LatencySummary>(name);
+        return it->get();
+    }
+    auto            h   = std::make_unique<LatencySummary>(name);
+    LatencySummary *raw = h.get();
     summaries_.push_back(std::move(h));
     return raw;
 }

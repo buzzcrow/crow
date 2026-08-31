@@ -58,7 +58,7 @@ run_bench() {
     # Clean: wipe user data on every node (keep group0), wait re-elect.
     local clean_out
     clean_out=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
-        bench kv clean --json 2>&1)
+        cluster clean --json 2>&1)
     local clean_json; clean_json=$(echo "$clean_out" | sed -n '/^{/,/^}/p')
     if [ -z "$clean_json" ] || ! echo "$clean_json" | jq -e '.new_leader' >/dev/null 2>&1; then
         echo "    ERROR: clean failed"; echo "$clean_out" | tail -5
@@ -138,7 +138,7 @@ teardown_group() {
     config_file=$(cat "/tmp/bench-write-reg-${name}.cfgpath" 2>/dev/null || echo "")
     if [ -n "$config_file" ] && [ -f "$config_file" ]; then
         pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
-            cluster reset 2>&1 | tail -2
+            cluster destroy 2>&1 | tail -2
         rm -f "$config_file" "/tmp/bench-write-reg-${name}.cfgpath"
     fi
 }

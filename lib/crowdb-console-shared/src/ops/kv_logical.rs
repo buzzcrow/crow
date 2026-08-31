@@ -127,7 +127,7 @@ pub async fn remove_store(ctx: &OpContext, store_id: u64) -> Result<()> {
     if store_id == 0 {
         return Err(Error::Validation {
             field: "store_id".into(),
-            message: "store 0 is the system store; use cluster reset".into(),
+            message: "store 0 is the system store; use cluster destroy".into(),
         });
     }
     // Find hosting nodes from group-0 sysdata.
@@ -260,7 +260,7 @@ pub async fn remove_group(ctx: &OpContext, store_id: u64, group_id: u64) -> Resu
     if store_id == 0 && group_id == 0 {
         return Err(Error::Validation {
             field: "group_id".into(),
-            message: "group 0 in store 0 is the system group; use cluster reset".into(),
+            message: "group 0 in store 0 is the system group; use cluster destroy".into(),
         });
     }
     // Find hosting nodes from group-0 sysdata.

@@ -30,10 +30,6 @@ pub enum KvBenchVerb {
     Write(WriteArgs),
     /// Scan (list) workload.
     Scan(ScanArgs),
-    /// Wipe user data on every node + wait for re-election. Returns
-    /// `{ new_leader, wiped_nodes }` so write-regression sub-tests start
-    /// from a data-empty cluster without a full redeploy.
-    Clean,
 }
 
 #[derive(clap::Args, Debug)]
@@ -213,7 +209,6 @@ pub async fn run_bench_verb(cli: &Cli, verb: BenchVerb) -> ExitCode {
             KvBenchVerb::Read(args) => super::kv_read::run(cli, args).await,
             KvBenchVerb::Write(args) => super::kv_write::run(cli, args).await,
             KvBenchVerb::Scan(args) => super::kv_scan::run(cli, args).await,
-            KvBenchVerb::Clean => super::kv_clean::run(cli).await,
         },
     }
 }

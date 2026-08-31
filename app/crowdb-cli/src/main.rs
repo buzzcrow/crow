@@ -73,6 +73,7 @@ impl Cli {
                 let v = match verb {
                     ClusterVerb::Init { .. } => "init",
                     ClusterVerb::LocalDeploy { .. } => "local-deploy",
+                    ClusterVerb::Destroy => "destroy",
                     ClusterVerb::Reset => "reset",
                     ClusterVerb::Clean => "clean",
                     ClusterVerb::Status => "status",

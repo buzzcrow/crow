@@ -159,10 +159,10 @@ run_subtest "minslot_16t"     1000   "" ""                        64    minslot 
 run_subtest "lin_32t"         1000   "" ""                        64    linearizable auto 32 32
 run_subtest "minslot_32t"     1000   "" ""                        64    minslot      zero 32 32
 
-# Phase 4: teardown via `cluster reset`.
+# Phase 4: teardown via `cluster destroy`.
 echo "=== Tearing down cluster ==="
 pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-    cluster reset
+    cluster destroy
 rm -f "$CONFIG_FILE"
 
 echo "=== DONE ==="

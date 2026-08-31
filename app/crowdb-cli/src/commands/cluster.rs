@@ -65,10 +65,16 @@ pub enum ClusterVerb {
         /// [kv] `--send-queue-capacity` for the spawned server. 0 = server default (4096).
         #[arg(long, default_value_t = 0)]
         send_queue_capacity: u32,
+        /// [kv] `--metrics-interval` for the spawned server (seconds). 0 = server default (5).
+        #[arg(long, default_value_t = 0)]
+        metrics_interval: u64,
     },
     /// Tear down the entire cluster (all groups, stores, servers, sysdata).
-    Reset,
+    Destroy,
     /// Remove orphaned sysdata entries without stopping running servers.
+    Reset,
+    /// Wipe user data on every node + wait for re-election. Preserves
+    /// group-0 sysdata + topology — servers stay running.
     Clean,
     /// Show cluster status (list all stores from group-0 sysdata).
     Status,
@@ -151,6 +157,7 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             coalesce_drain_threshold,
             event_write,
             send_queue_capacity,
+            metrics_interval,
         } => match service_type.as_str() {
             "kv" => {
                 let ctx = match op_context(cli) {
@@ -165,6 +172,7 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     coalesce_drain_threshold: nonzero(coalesce_drain_threshold),
                     event_write: if event_write { Some(true) } else { None },
                     send_queue_capacity: nonzero(send_queue_capacity),
+                    metrics_interval: nonzero(metrics_interval),
                 };
                 let workspace = deploy_workspace(cli);
                 match crowdb_console_shared::ops::cluster::local_deploy(
@@ -245,6 +253,27 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        ClusterVerb::Destroy => {
+            let ctx = match op_context(cli) {
+                Ok(c) => c,
+                Err(c) => return c,
+            };
+            match crowdb_console_shared::ops::cluster::destroy(&ctx).await {
+                Ok(()) => {
+                    if let Err(c) = commit_config(cli, &ctx) {
+                        return c;
+                    }
+                    if !cli.json {
+                        println!("cluster destroy complete");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cluster destroy: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
         ClusterVerb::Reset => {
             let ctx = match op_context(cli) {
                 Ok(c) => c,
@@ -252,9 +281,6 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             };
             match crowdb_console_shared::ops::cluster::reset(&ctx).await {
                 Ok(()) => {
-                    if let Err(c) = commit_config(cli, &ctx) {
-                        return c;
-                    }
                     if !cli.json {
                         println!("cluster reset complete");
                     }
@@ -272,10 +298,14 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                 Err(c) => return c,
             };
             match crowdb_console_shared::ops::cluster::clean(&ctx).await {
-                Ok(()) => {
-                    if !cli.json {
-                        println!("cluster clean complete");
+                Ok(result) => {
+                    if cli.json {
+                        return print_json(cli, &result);
                     }
+                    println!(
+                        "cluster clean: wiped {} nodes, leader = {}",
+                        result.wiped_nodes, result.new_leader
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

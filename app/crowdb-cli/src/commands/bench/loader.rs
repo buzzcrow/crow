@@ -146,16 +146,32 @@ where
     let timer_rec = Arc::clone(&recorder);
     let timer = tokio::spawn(async move {
         tokio::time::sleep(duration).await;
+        let ops_at_deadline = timer_rec.ops();
         timer_rec.stop();
+        tracing::info!(
+            deadline_secs = duration.as_secs(),
+            ops_at_deadline,
+            "bench: stop signaled — loaders draining in-flight ops"
+        );
     });
 
-    for t in tasks {
+    for (i, t) in tasks.into_iter().enumerate() {
         let _ = t.await;
+        if i == 0 {
+            tracing::info!(task = i, elapsed_ms = start.elapsed().as_millis(), "bench: first loader exited");
+        }
     }
+    let elapsed_ms = start.elapsed().as_millis();
+    tracing::info!(
+        elapsed_ms,
+        ops = recorder.ops(),
+        errors = recorder.errors(),
+        "bench: all loaders joined"
+    );
     let _ = timer.await;
 
     WorkloadRun {
         recorder,
-        duration_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        duration_ms: elapsed_ms.try_into().unwrap_or(u64::MAX),
     }
 }

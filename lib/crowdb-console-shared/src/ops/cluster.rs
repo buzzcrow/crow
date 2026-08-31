@@ -236,7 +236,7 @@ pub async fn topology(ctx: &OpContext, node_id: u64) -> Result<Vec<crate::snapsh
 /// # Errors
 /// Returns an error if any teardown step fails (best-effort: continues
 /// on partial failures and returns the first error).
-pub async fn reset(ctx: &OpContext) -> Result<()> {
+pub async fn destroy(ctx: &OpContext) -> Result<()> {
     let cfg = ctx.config().clone();
 
     // Phase 1: stop all running servers (Kv, Diskdb, Rpc).
@@ -285,12 +285,13 @@ pub async fn reset(ctx: &OpContext) -> Result<()> {
     Ok(())
 }
 
-/// Clean orphaned sysdata entries (stores/groups/replicas that have no
-/// corresponding running server). Does not stop any running servers.
+/// Remove orphaned sysdata entries (stores/groups/replicas that have
+/// no corresponding running server). Does not stop any running
+/// servers.
 ///
 /// # Errors
 /// Returns an error if the sysdata scan fails.
-pub async fn clean(ctx: &OpContext) -> Result<()> {
+pub async fn reset(ctx: &OpContext) -> Result<()> {
     let sysmd = ctx.sysmd();
     let stores = sysmd.list_stores().await?;
 
@@ -314,6 +315,91 @@ pub async fn clean(ctx: &OpContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Result of [`clean`] — wipe user data + wait for re-election.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CleanResult {
+    pub new_leader: String,
+    pub wiped_nodes: u64,
+}
+
+/// Wipe user data on every node (drop + recreate WAL + engine for
+/// store 0 / group 0) and wait for re-election. Preserves group-0
+/// sysdata + topology — servers stay running, only user data is
+/// cleared. Used by regression benchmarks to start each sub-test
+/// from a data-empty cluster without a full redeploy.
+///
+/// # Errors
+/// Returns an error if no servers are configured.
+pub async fn clean(ctx: &OpContext) -> Result<CleanResult> {
+    let cfg = ctx.config().clone();
+    let mut mgmt_urls: Vec<String> = cfg.servers.iter().map(|s| s.url.clone()).collect();
+    mgmt_urls.sort();
+    mgmt_urls.dedup();
+    if mgmt_urls.is_empty() {
+        return Err(Error::Validation {
+            field: "servers".into(),
+            message: "no servers in config".into(),
+        });
+    }
+
+    // Wipe user data on every node concurrently.
+    let mut wiped = 0u64;
+    let mut handles = Vec::with_capacity(mgmt_urls.len());
+    for url in &mgmt_urls {
+        let url = url.clone();
+        handles.push(tokio::spawn(async move {
+            let Ok(sc) = ServerClient::new(&url) else { return false };
+            sc.wipe_user_data(0, 0).await.is_ok_and(|r| r.accepted)
+        }));
+    }
+    for h in handles {
+        if let Ok(true) = h.await {
+            wiped += 1;
+        }
+    }
+
+    // Wait for re-election: poll topology until a leader is found.
+    let leader = wait_for_leader(&mgmt_urls, std::time::Duration::from_secs(10)).await;
+    Ok(CleanResult {
+        new_leader: leader.unwrap_or_default(),
+        wiped_nodes: wiped,
+    })
+}
+
+/// Poll `/topology` on every server until a leader for store 0 /
+/// group 0 is elected (`leader_id` > 0), or `timeout` elapses.
+async fn wait_for_leader(mgmt_urls: &[String], timeout: std::time::Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        for url in mgmt_urls {
+            let Ok(sc) = ServerClient::new(url) else { continue };
+            if let Ok(stores) = sc.topology().await {
+                for store in &stores {
+                    if store.store_id != 0 {
+                        continue;
+                    }
+                    for group in &store.groups {
+                        if group.group_id == 0 && group.leader_id > 0 {
+                            if group.leader_id == group.local_replica_id {
+                                return Some(url.clone());
+                            }
+                            for remote in &group.remotes {
+                                if remote.id == group.leader_id {
+                                    return Some(remote.endpoint.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// Summary of a completed local deploy.
@@ -351,6 +437,9 @@ pub struct KvDeployTunables {
     pub event_write: Option<bool>,
     /// `--send-queue-capacity` value.
     pub send_queue_capacity: Option<u32>,
+    /// `--metrics-interval` value in seconds. `None` leaves the
+    /// spawned server's own default (5s) in effect.
+    pub metrics_interval: Option<u64>,
 }
 
 /// Deploy a local N-node KV cluster on `127.0.0.1`: creates rack 1,
@@ -499,6 +588,7 @@ async fn deploy_servers(
             coalesce_drain_threshold: tunables.and_then(|t| t.coalesce_drain_threshold),
             event_write: tunables.and_then(|t| t.event_write),
             send_queue_capacity: tunables.and_then(|t| t.send_queue_capacity),
+            metrics_interval: tunables.and_then(|t| t.metrics_interval),
             ..Default::default()
         };
         let node_entry = NodeEntry {
@@ -577,7 +667,7 @@ impl Default for RpcDeployConfig {
 /// Deploy a standalone `crowdb-rpc-fb-server` (C++ echo server) on
 /// `127.0.0.1`. Spawns the process, waits for the `listening port=`
 /// readiness line on stdout, and records the PID + port in the config
-/// so `cluster reset` can stop it.
+/// so `cluster destroy` can stop it.
 ///
 /// Unlike [`local_deploy`], this does not create rack/node entries or
 /// bootstrap group 0 — the fb-server is a raw RPC echo endpoint with

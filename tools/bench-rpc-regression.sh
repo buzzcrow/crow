@@ -100,11 +100,11 @@ start_server() {
     echo "$port"
 }
 
-# Stop the fb-server via `cluster reset`.
+# Stop the fb-server via `cluster destroy`.
 stop_server() {
     if [ -f "$CONFIG_FILE" ]; then
         pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-            cluster reset >&2 2>&1 || true
+            cluster destroy >&2 2>&1 || true
     fi
 }
 

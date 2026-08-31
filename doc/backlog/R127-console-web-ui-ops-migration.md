@@ -14,7 +14,7 @@ manually wires `AppState` + `ServerClient` + `crowdb_kv_client` +
 `ops::hardware`, `ops::kv_server`, `ops::kv_logical`, `ops::kv_data`,
 and `ops::cluster` already implement. This divergence means every
 feature must be implemented twice, and the two surfaces drift (R126
-already added `cluster reset`, `cluster clean`, and `kv server delete`
+already added `cluster destroy`, `cluster reset`, `cluster clean`, and `kv server delete`
 require-empty to the CLI — none are in the web backend).
 
 Beyond the backend duplication, the current UI layout (three-pane shell
@@ -33,7 +33,7 @@ resource-type browsing, not domain-oriented workflows.
   `mgmt/store_ops.rs`, `mgmt/group_ops.rs`, `mgmt/replica_ops.rs`,
   `mgmt/cluster_init.rs`, `kv.rs`, `diskdb.rs`, `diskdb_lifecycle.rs`
   contain ~2000 lines of orchestration logic that duplicates `ops::*`.
-- `cluster reset` and `cluster clean` exist only in the CLI — the web
+- `cluster destroy`, `cluster reset`, and `cluster clean` exist only in the CLI — the web
   UI has no equivalent (`POST /internal/reset` is a different, older
   teardown path).
 - `kv server delete` with require-empty check exists only in the CLI.

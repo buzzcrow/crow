@@ -179,7 +179,7 @@ same `(store_id, group_id)`.
 
 `POST /stores/{sid}/groups/{gid}/wipe-user-data` drops and recreates
 WAL + engine user data for a group, preserving group0 sysdata +
-topology. Used by `bench clean` to reset a cluster between
+topology. Used by `cluster clean` to reset a cluster between
 write-regression sub-tests without a full redeploy. The handler
 steps down if leader, deletes the WAL + engine dirs, recreates the
 group via `create_group_with_wal` (replays empty WAL → fresh state),

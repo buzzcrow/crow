@@ -711,7 +711,7 @@ hierarchy on bootstrap.
 
 ## 12. Cluster reset
 
-`cluster reset` is full teardown. It is implemented in
+`cluster destroy` is full teardown. It is implemented in
 `crowdb-console-shared`'s `ops::cluster::reset` as a hybrid operation
 — group-0 discovery + direct node teardown — so the CLI no longer
 depends on a `crowdb-web` endpoint. The flow:

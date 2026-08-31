@@ -271,7 +271,7 @@ pub enum ServiceType {
     Diskdb,
     /// Standalone crowdb-rpc-fb-server (C++ echo server for RPC bench).
     /// Not a full KV server — no management port, no sysdata. Tracked
-    /// in config only for PID/port lifecycle via `cluster reset`.
+    /// in config only for PID/port lifecycle via `cluster destroy`.
     Rpc,
 }
 

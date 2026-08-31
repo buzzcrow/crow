@@ -1086,26 +1086,40 @@ pub async fn http_delete_node_server(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /api/cluster/clean`. Remove orphaned sysdata entries
+/// `POST /api/cluster/clean`. Wipe user data on every node + wait for
+/// re-election. Preserves group-0 sysdata + topology.
+///
+/// # Errors
+/// Returns `502` if the wipe or re-election wait fails.
+pub async fn http_cluster_clean(
+    State(state): State<AppState>,
+) -> Result<Json<ops::cluster::CleanResult>, (StatusCode, Json<ErrorBody>)> {
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ops::cluster::clean(&ctx)
+        .await
+        .map(Json)
+        .map_err(|e| err_502(format!("{e}")))
+}
+
+/// `POST /api/cluster/reset`. Remove orphaned sysdata entries
 /// (stores/groups/replicas that have no corresponding running server).
 /// Does not stop any running servers.
 ///
 /// # Errors
 /// Returns `502` if the sysdata scan fails.
-pub async fn http_cluster_clean(
+pub async fn http_cluster_reset(
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    ops::cluster::clean(&ctx)
+    ops::cluster::reset(&ctx)
         .await
         .map_err(|e| err_502(format!("{e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /internal/reset`. Tear down the entire cluster in dependency
-/// order: groups → stores → server processes → nodes → racks, then
-/// clear workspace dirs and caches. Intended for E2E test fixtures;
-/// never exposed in the public API surface.
+/// `POST /api/cluster/destroy` (alias: `/internal/reset`). Tear down
+/// the entire cluster in dependency order: groups → stores → server
+/// processes → nodes → racks, then clear workspace dirs and caches.
 ///
 /// # Panics
 /// Panics if the `RwLock` or `Mutex` is poisoned.

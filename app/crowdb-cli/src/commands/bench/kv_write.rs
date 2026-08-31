@@ -53,10 +53,20 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
 
     let mut metrics = BenchMetrics::new(&cli.log_dir, args.metrics_interval);
     metrics.start();
+    metrics.start_rpc_metrics(&cli.log_dir, args.metrics_interval);
 
     let duration = Duration::from_secs(args.duration_secs);
+    tracing::info!(
+        duration_secs = duration.as_secs(),
+        loaders = args.loader_num,
+        connections = args.connections,
+        key_space,
+        value_size,
+        "bench kv write: workload starting"
+    );
     let start = Instant::now();
     let recorder = Arc::clone(&metrics.recorder);
+    let stats_client = Arc::clone(&client);
     let run = run_workload(
         recorder,
         args.loader_num,
@@ -84,11 +94,15 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
     .await;
 
     let duration_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-
-    // Fetch server-side metrics from every node.
-    let server_metrics = fetch_server_metrics(cli, STORE_ID, GROUP_ID).await;
+    tracing::info!(duration_ms, "bench kv write: workload ended — stopping metrics");
 
     metrics.stop().await;
+    metrics.stop_rpc_metrics();
+
+    // Fetch server-side metrics from every node.
+    tracing::info!("bench kv write: fetching server metrics");
+    let server_metrics = fetch_server_metrics(cli, STORE_ID, GROUP_ID).await;
+    tracing::info!(elapsed_ms = start.elapsed().as_millis(), "bench kv write: server metrics fetched");
 
     let snap = run.recorder.hist_snapshot();
     eprintln!(
@@ -98,9 +112,13 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
         duration_ms,
     );
 
-    // Client transport stats — not yet wired (requires FFI transport
-    // stats export from crowdb-rpc). Reported as zeros.
-    let client_transport_stats = Some(TransportStats::default());
+    // Client-side crowdb-rpc transport stats (submit_to_writev latency).
+    let client_transport_stats = stats_client.transport_stats().map(|s| TransportStats {
+        submit_to_writev_avg_us: (s.submit_to_writev.sum_ns / 1000)
+            .checked_div(s.submit_to_writev.count)
+            .unwrap_or(0),
+        ..Default::default()
+    });
 
     let result = BenchResult {
         total_ops: run.recorder.ops(),
@@ -112,7 +130,7 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
         server_metrics,
     };
     let json = serde_json::to_value(&result).unwrap_or_default();
-    crowdb_console_shared::ops_log::append_custom("bench_report", &json);
+    metrics.write_report(&json);
     crate::commands::print_json(cli, &result)
 }
 

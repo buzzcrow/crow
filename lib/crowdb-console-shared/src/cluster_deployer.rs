@@ -206,7 +206,7 @@ impl CrowdbClusterDeployer {
         self.info.as_ref()
     }
 
-    /// `POST /internal/reset` — full cluster reset. Fast when no
+    /// `POST /internal/reset` — full cluster destroy. Fast when no
     /// servers are running (<0.1s); graceful shutdown when they are.
     ///
     /// # Errors

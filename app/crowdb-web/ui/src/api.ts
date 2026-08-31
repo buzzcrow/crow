@@ -585,12 +585,12 @@ export async function initCluster(
 }
 
 /**
- * Reset the entire cluster: tear down all groups, stores, server
+ * Destroy the entire cluster: tear down all groups, stores, server
  * processes, nodes, and racks in dependency order. The system group
  * (store 0, group 0) is included. Console config is cleared.
  */
 export async function resetCluster(options?: RequestOptions): Promise<unknown> {
-  const url = `/api/cluster/reset`;
+  const url = `/api/cluster/destroy`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
       ...options,

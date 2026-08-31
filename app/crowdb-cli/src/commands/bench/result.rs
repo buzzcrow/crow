@@ -128,14 +128,6 @@ pub struct ReplicaStats {
     pub r3_tps: u64,
 }
 
-/// Result of `bench kv clean` — wipe user data + wait for re-election.
-#[derive(Debug, Serialize)]
-#[allow(dead_code)]
-pub struct CleanResult {
-    pub new_leader: String,
-    pub wiped_nodes: u64,
-}
-
 impl fmt::Display for BenchResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ops_s = (self.total_ops * 1000).checked_div(self.duration_ms).unwrap_or(0);

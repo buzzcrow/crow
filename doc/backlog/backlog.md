@@ -19,7 +19,7 @@ complexity, and dependency. Before implementation, follow the
   shared ops + layout rework — Area: console / web — Migrate `crowdb-web`
   Axum handlers to call `crowdb_console_shared::ops::*` (same as CLI
   post-R126), eliminating ~2000 lines of duplicated orchestration. Add
-  missing web endpoints (`cluster reset`, `cluster clean`, `kv server
+  missing web endpoints (`cluster destroy`, `cluster reset`, `cluster clean`, `kv server
   delete` with require-empty). Rework UI information architecture to
   align with the CLI's four-domain structure. UI layout is deferred to
   design — open questions on domain navigation, chunk/bench handling,

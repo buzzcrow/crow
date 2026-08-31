@@ -53,6 +53,15 @@ impl MetricsRunner {
         &self.registry
     }
 
+    /// Write a raw line to the metrics log file. Used by bench commands
+    /// to append the final JSON report alongside the periodic flush blocks.
+    pub fn write_raw(&self, line: &str) {
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = writeln!(w, "{line}");
+            let _ = w.flush();
+        }
+    }
+
     /// Set a pre-flush collector callback. Called before each flush
     /// tick so the caller can poll external stats (e.g. C++ engine
     /// counters) and update registered metrics via the registry.

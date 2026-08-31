@@ -636,9 +636,9 @@ impl ConsoleClient {
         .await
     }
 
-    // ── Cluster reset ──────────────────────────────────────────────
+    // ── Cluster destroy ──────────────────────────────────────────────
 
-    /// `POST /internal/reset` — full cluster reset (stops all servers,
+    /// `POST /internal/reset` — full cluster destroy (stops all servers,
     /// removes all racks/nodes/stores/groups, clears workspaces).
     ///
     /// # Errors
