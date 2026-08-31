@@ -122,7 +122,8 @@ echo "=== Deploying 3-node KV cluster via local-deploy ==="
 CONFIG_FILE="/tmp/bench-scan-regression-$$.toml"
 rm -f "$CONFIG_FILE"
 pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-    cluster local-deploy -n 3 -t kv
+    cluster local-deploy -n 3 -t kv \
+    --kv-backend mem-block --wal-backend mem-block
 
 # Phase 2: pre-populate keys once (Phase 3: bench prepare not yet wired).
 echo "=== Pre-populating $KEYSPACE keys (Phase 3: bench prepare stub) ==="

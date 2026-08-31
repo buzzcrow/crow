@@ -89,8 +89,11 @@ struct Options
     // an explicit flush() is expected to catch up and free a slot. See
     // Crowdbtree's active_/frozen_ member comment for the full design,
     // including how non-contiguous (slot > the current contiguous frontier)
-    // leftovers are handled when a frozen buffer is drained.
-    uint32_t max_memtable_count = 2;
+    // leftovers are handled when a frozen buffer is drained. Default 5
+    // (1 active + 4 frozen) gives the maintenance loop enough headroom to
+    // absorb writes during a multi-second flush/snapshot without active_
+    // growing unbounded.
+    uint32_t max_memtable_count = 5;
 
     // ── Mapping table redesign (plan-tree #14) ──
     // Packed slot words per segment.

@@ -317,8 +317,23 @@ impl KVEngine for CrowdbTreeEngine {
         // after a burst of `apply` calls captures them, instead of
         // silently persisting only whatever an earlier `flush` already
         // moved into L1.
+        let flush_t0 = std::time::Instant::now();
         let _ = self.inner.handle().flush();
-        self.inner.handle().snapshot().unwrap_or(0)
+        let flush_ms = flush_t0.elapsed().as_millis();
+        let snap_t0 = std::time::Instant::now();
+        let snap_result = self.inner.handle().snapshot();
+        let snap_ms = snap_t0.elapsed().as_millis();
+        match &snap_result {
+            Ok(slot) => tracing::info!(
+                "persist_snapshot: flush_ms={} snapshot_ms={} snapshot_slot={}",
+                flush_ms, snap_ms, slot
+            ),
+            Err(e) => tracing::error!(
+                "persist_snapshot FAILED: flush_ms={} snapshot_ms={} err={:?}",
+                flush_ms, snap_ms, e
+            ),
+        }
+        snap_result.unwrap_or(0)
     }
 
     fn set_gc_watermark(&self, snapshot_slot: u64, safe_slot: u64) {

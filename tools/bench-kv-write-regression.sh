@@ -126,7 +126,8 @@ deploy_group() {
         --event-write --peer-pool-size 4 \
         --max-inflight "$win" --coalesce-max-keys "$coalesce" \
         --coalesce-drain-threshold "$drain" \
-        --rpc-workers "$workers" 2>&1 | tail -3
+        --rpc-workers "$workers" \
+        --kv-backend mem-block --wal-backend mem-block 2>&1 | tail -3
     # Store config path for run_bench/teardown_group.
     echo "$config_file" > "/tmp/bench-write-reg-${name}.cfgpath"
 }

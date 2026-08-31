@@ -68,6 +68,17 @@ pub enum ClusterVerb {
         /// [kv] `--metrics-interval` for the spawned server (seconds). 0 = server default (5).
         #[arg(long, default_value_t = 0)]
         metrics_interval: u64,
+        /// [kv] `--kv-backend` for the spawned server (file|block|mem-block).
+        /// Empty = server default (file).
+        #[arg(long, default_value = "")]
+        kv_backend: String,
+        /// [kv] `--wal-backend` for the spawned server (file|mem-block|block-device).
+        /// Empty = server default.
+        #[arg(long, default_value = "")]
+        wal_backend: String,
+        /// [kv] Enable `--no-fsync` on the spawned server.
+        #[arg(long, default_value_t = false)]
+        no_fsync: bool,
     },
     /// Tear down the entire cluster (all groups, stores, servers, sysdata).
     Destroy,
@@ -158,6 +169,9 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
             event_write,
             send_queue_capacity,
             metrics_interval,
+            kv_backend,
+            wal_backend,
+            no_fsync,
         } => match service_type.as_str() {
             "kv" => {
                 let ctx = match op_context(cli) {
@@ -173,6 +187,9 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     event_write: if event_write { Some(true) } else { None },
                     send_queue_capacity: nonzero(send_queue_capacity),
                     metrics_interval: nonzero(metrics_interval),
+                    kv_backend: if kv_backend.is_empty() { None } else { Some(kv_backend) },
+                    wal_backend: if wal_backend.is_empty() { None } else { Some(wal_backend) },
+                    no_fsync: if no_fsync { Some(true) } else { None },
                 };
                 let workspace = deploy_workspace(cli);
                 match crowdb_console_shared::ops::cluster::local_deploy(

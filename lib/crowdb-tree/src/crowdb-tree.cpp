@@ -1018,6 +1018,17 @@ bool Crowdbtree::maybe_freeze_active(bool force)
             // its threshold rather than stall the writer -- an explicit
             // flush()/the background thread is expected to drain a slot free
             // (documented in Options::max_memtable_count).
+            size_t frozen_entries = 0;
+            size_t frozen_bytes   = 0;
+            for (const auto &mt : frozen_) {
+                frozen_entries += mt->count();
+                frozen_bytes += mt->approx_bytes();
+            }
+            CRB_LOG_ERROR("[{}] maybe_freeze_active: frozen queue full ({}), active_ growing past threshold "
+                          "(entries={} bytes={}); frozen total: entries={} bytes={}; "
+                          "next step: flush() must catch up or OOM risk -- increase max_memtable_count",
+                          name_, frozen_.size(), active_->count(), active_->approx_bytes(), frozen_entries,
+                          frozen_bytes);
             return false;
         }
     }

@@ -727,6 +727,7 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
         }
     }
     if (!ps.ok()) {
+        CRB_LOG_ERROR("[{}] snapshot: prepare_snapshot_locked failed: {}", name_, ps.to_string());
         release_snapshot_slot();
         return ps;
     }

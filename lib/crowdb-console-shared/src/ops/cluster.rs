@@ -440,6 +440,14 @@ pub struct KvDeployTunables {
     /// `--metrics-interval` value in seconds. `None` leaves the
     /// spawned server's own default (5s) in effect.
     pub metrics_interval: Option<u64>,
+    /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`).
+    /// `None` leaves the spawned server's own default (`file`) in effect.
+    pub kv_backend: Option<String>,
+    /// `--wal-backend` value (e.g. `"file"`, `"mem-block"`, `"block-device"`).
+    /// `None` leaves the spawned server's own default in effect.
+    pub wal_backend: Option<String>,
+    /// `--no-fsync` flag. `None` leaves the spawned server's default (fsync on).
+    pub no_fsync: Option<bool>,
 }
 
 /// Deploy a local N-node KV cluster on `127.0.0.1`: creates rack 1,
@@ -589,6 +597,9 @@ async fn deploy_servers(
             event_write: tunables.and_then(|t| t.event_write),
             send_queue_capacity: tunables.and_then(|t| t.send_queue_capacity),
             metrics_interval: tunables.and_then(|t| t.metrics_interval),
+            kv_backend: tunables.and_then(|t| t.kv_backend.clone()),
+            wal_backend: tunables.and_then(|t| t.wal_backend.clone()),
+            no_fsync: tunables.and_then(|t| t.no_fsync).unwrap_or(false),
             ..Default::default()
         };
         let node_entry = NodeEntry {
