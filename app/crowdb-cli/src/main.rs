@@ -198,8 +198,6 @@ fn main() -> ExitCode {
         "crowdb-cli-rpc",
     );
 
-    crowdb_console_shared::ops_log::init_in(&invocation_dir, "cli");
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

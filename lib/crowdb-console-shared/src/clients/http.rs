@@ -110,7 +110,7 @@ impl ServerClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "POST",
                     &url,
@@ -124,7 +124,7 @@ impl ServerClient {
                 }
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "POST",
             &url,
@@ -161,7 +161,7 @@ impl ServerClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "POST",
                     &url,
@@ -175,7 +175,7 @@ impl ServerClient {
                 }
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "POST",
             &url,
@@ -206,7 +206,7 @@ impl ServerClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "GET",
                     &url,
@@ -220,7 +220,7 @@ impl ServerClient {
                 }
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "GET",
             &url,

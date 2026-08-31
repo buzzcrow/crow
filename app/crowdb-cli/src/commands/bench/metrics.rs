@@ -4,12 +4,14 @@
 //! Bench metrics wiring — creates the project `MetricsRunner` and
 //! registers the bench counters + latency histogram on its registry.
 //!
-//! The runner writes periodic `[rust-metrics ...]` blocks to a metrics log
-//! file (`crowdb-cli-bench-metrics-*.log`) in the CLI's per-invocation log
-//! dir. The C++ crowdb-rpc metrics are flushed to a separate file
-//! (`crowdb-cli-bench-rpc-metrics-*.log`) via `crowdb_rpc_metrics_start`.
-//! After the workload, the final JSON report is appended to the metrics
-//! log via `write_raw`.
+//! The runner writes periodic `[rust-metrics ...]` + `[cpp-rpc ...]`
+//! blocks to a single metrics log file (`crowdb-cli-metrics-*.log`) in
+//! the CLI's per-invocation log dir. The C++ crowdb-rpc process-level
+//! counters (e.g. `rpc.client.*`) are flushed into the same file via a
+//! `set_cpp_flush` callback that calls
+//! `crowdb_rpc_ffi::flush_cpp_global_metrics` — the same pattern
+//! `crowdb-kv-server` uses. After the workload, the final JSON report
+//! is appended to the metrics log via `write_raw`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,11 +22,12 @@ use crowdb_common::metrics::{MetricsRegistry, MetricsRunner};
 use super::loader::BenchRecorder;
 
 /// Owns the metrics runner (if enabled) + the recorder built from its
-/// registry handles. Drop stops the runner's flush task.
+/// registry handles. Drop stops the runner's flush task. C++ crowdb-rpc
+/// process-level metrics are merged into the same log file via a
+/// `set_cpp_flush` callback installed at construction time.
 pub struct BenchMetrics {
     pub recorder: Arc<BenchRecorder>,
     runner: Option<MetricsRunner>,
-    rpc_metrics_started: bool,
 }
 
 impl BenchMetrics {
@@ -33,6 +36,11 @@ impl BenchMetrics {
     /// `metrics_interval == 0` disables the runner (no metrics log
     /// file); the recorder still works with a standalone registry.
     /// `log_dir` is the per-invocation dir from `cli.log_dir`.
+    ///
+    /// When enabled, a `set_cpp_flush` callback is installed so the
+    /// C++ crowdb-rpc global registry (`rpc.client.*`) is flushed into
+    /// the same `crowdb-cli-metrics-*.log` alongside the Rust metrics.
+    /// Must be called before `start()`.
     ///
     /// # Errors
     /// Returns `None` if the metrics log file cannot be opened (logged
@@ -46,11 +54,10 @@ impl BenchMetrics {
             return Self {
                 recorder,
                 runner: None,
-                rpc_metrics_started: false,
             };
         }
 
-        let file = match open_named_log(log_dir, "crowdb-cli-bench-metrics", 50, 5) {
+        let file = match open_named_log(log_dir, "crowdb-cli-metrics", 50, 5) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("warn: failed to open metrics log: {e}");
@@ -59,12 +66,27 @@ impl BenchMetrics {
                 return Self {
                     recorder,
                     runner: None,
-                    rpc_metrics_started: false,
                 };
             }
         };
 
-        let runner = MetricsRunner::new(file, metrics_interval);
+        let mut runner = MetricsRunner::new(file, metrics_interval);
+        // Merge C++ crowdb-rpc process-level metrics (rpc.client.*) into
+        // the same log file. Mirrors crowdb-kv-server's engine_collector.
+        runner.set_cpp_flush(|writer, window_secs, timestamp, rust_width, count_w, tps_w| {
+            let cpp_max = crowdb_rpc_ffi::cpp_global_metrics_max_name_len();
+            let shared_width = rust_width.max(cpp_max);
+            if let Some(str) = crowdb_rpc_ffi::flush_cpp_global_metrics(
+                window_secs,
+                timestamp,
+                "cpp-rpc",
+                shared_width,
+                count_w,
+                tps_w,
+            ) {
+                let _ = std::io::Write::write_all(writer, str.as_bytes());
+            }
+        });
         let reg = runner.registry().clone();
         let recorder = Arc::new(BenchRecorder::from_registry(
             &mut reg.lock().expect("metrics registry poisoned"),
@@ -72,7 +94,6 @@ impl BenchMetrics {
         Self {
             recorder,
             runner: Some(runner),
-            rpc_metrics_started: false,
         }
     }
 
@@ -83,40 +104,11 @@ impl BenchMetrics {
         }
     }
 
-    /// Stop the flush task + final flush. No-op if the runner is
-    /// disabled.
+    /// Stop the flush task + final flush (includes the C++ cpp-rpc
+    /// block). No-op if the runner is disabled.
     pub async fn stop(&mut self) {
         if let Some(ref mut r) = self.runner {
             r.stop().await;
-        }
-    }
-
-    /// Start C++ crowdb-rpc metrics flush to a separate log file in
-    /// `log_dir`. Writes writev/frame/read counters to
-    /// `crowdb-cli-bench-rpc-metrics-*.log`. No-op if `interval == 0`.
-    pub fn start_rpc_metrics(&mut self, log_dir: &Path, interval: u64) {
-        if interval == 0 || self.rpc_metrics_started {
-            return;
-        }
-        let pid = std::process::id();
-        let path = log_dir.join(format!("crowdb-cli-bench-rpc-metrics-{pid}.log"));
-        #[allow(clippy::cast_precision_loss)]
-        let interval_secs = interval as f64;
-        crowdb_rpc_ffi::metrics_start(
-            path.to_str().unwrap_or("crowdb-rpc-metrics.log"),
-            interval_secs,
-            50,
-            5,
-            false,
-        );
-        self.rpc_metrics_started = true;
-    }
-
-    /// Stop C++ crowdb-rpc metrics flush + final flush.
-    pub fn stop_rpc_metrics(&mut self) {
-        if self.rpc_metrics_started {
-            crowdb_rpc_ffi::metrics_stop();
-            self.rpc_metrics_started = false;
         }
     }
 

@@ -53,7 +53,6 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
 
     let mut metrics = BenchMetrics::new(&cli.log_dir, args.metrics_interval);
     metrics.start();
-    metrics.start_rpc_metrics(&cli.log_dir, args.metrics_interval);
 
     let duration = Duration::from_secs(args.duration_secs);
     tracing::info!(
@@ -97,12 +96,14 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
     tracing::info!(duration_ms, "bench kv write: workload ended — stopping metrics");
 
     metrics.stop().await;
-    metrics.stop_rpc_metrics();
 
     // Fetch server-side metrics from every node.
     tracing::info!("bench kv write: fetching server metrics");
     let server_metrics = fetch_server_metrics(cli, STORE_ID, GROUP_ID).await;
-    tracing::info!(elapsed_ms = start.elapsed().as_millis(), "bench kv write: server metrics fetched");
+    tracing::info!(
+        elapsed_ms = start.elapsed().as_millis(),
+        "bench kv write: server metrics fetched"
+    );
 
     let snap = run.recorder.hist_snapshot();
     eprintln!(

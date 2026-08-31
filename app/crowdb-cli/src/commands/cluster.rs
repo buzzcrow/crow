@@ -187,8 +187,16 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                     event_write: if event_write { Some(true) } else { None },
                     send_queue_capacity: nonzero(send_queue_capacity),
                     metrics_interval: nonzero(metrics_interval),
-                    kv_backend: if kv_backend.is_empty() { None } else { Some(kv_backend) },
-                    wal_backend: if wal_backend.is_empty() { None } else { Some(wal_backend) },
+                    kv_backend: if kv_backend.is_empty() {
+                        None
+                    } else {
+                        Some(kv_backend)
+                    },
+                    wal_backend: if wal_backend.is_empty() {
+                        None
+                    } else {
+                        Some(wal_backend)
+                    },
                     no_fsync: if no_fsync { Some(true) } else { None },
                 };
                 let workspace = deploy_workspace(cli);

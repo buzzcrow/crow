@@ -350,7 +350,9 @@ pub async fn clean(ctx: &OpContext) -> Result<CleanResult> {
     for url in &mgmt_urls {
         let url = url.clone();
         handles.push(tokio::spawn(async move {
-            let Ok(sc) = ServerClient::new(&url) else { return false };
+            let Ok(sc) = ServerClient::new(&url) else {
+                return false;
+            };
             sc.wipe_user_data(0, 0).await.is_ok_and(|r| r.accepted)
         }));
     }

@@ -725,7 +725,7 @@ impl ConsoleClient {
     // ── HTTP plumbing ──────────────────────────────────────────────
     //
     // Every helper attaches the current `x-crowdb-kv-corr-id` header (see
-    // `crate::corr_id`) and emits one `ops_log::append_http` record on
+    // `crate::corr_id`) and emits one `log_ops_http` tracing record on
     // completion. The id comes from the task-local if a `corr_id::scope`
     // wraps the call (web handler / CLI main), otherwise we generate
     // one inline so unit tests still produce well-formed log records.
@@ -741,7 +741,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "GET",
                     &url,
@@ -752,7 +752,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("GET {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "GET",
             &url,
@@ -779,7 +779,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "POST",
                     &url,
@@ -790,7 +790,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("POST {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "POST",
             &url,
@@ -812,7 +812,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "DELETE",
                     &url,
@@ -823,7 +823,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("DELETE {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "DELETE",
             &url,
@@ -852,7 +852,7 @@ impl ConsoleClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                super::log_ops_http(
                     &cid,
                     "PUT",
                     &url,
@@ -863,7 +863,7 @@ impl ConsoleClient {
                 self.rpc_err(format!("PUT {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        super::log_ops_http(
             &cid,
             "PUT",
             &url,

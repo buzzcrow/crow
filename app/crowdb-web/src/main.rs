@@ -58,15 +58,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     crowdb_rpc_ffi::init_logging("log", "info", 30, 5, "crowdb-web-rpc");
     crowdb_rpc_ffi::add_log_stderr("warn");
 
-    // Open the per-session operation log file. Outbound HTTP/crowdb-rpc/SSH
-    // calls append a JSON-Lines record carrying the correlation id and
-    // a curl-reproducible summary. Best-effort: a filesystem failure
-    // here drops logging but does not abort startup.
-    crowdb_console_shared::ops_log::init_default("web");
-    if let Some(log) = crowdb_console_shared::ops_log::current() {
-        info!(path = %log.path().display(), "ops log initialised");
-    }
-
     let addr: SocketAddr = format!("{}:{}", args.bind, args.port).parse()?;
     info!(%addr, "crowdb-web starting");
 

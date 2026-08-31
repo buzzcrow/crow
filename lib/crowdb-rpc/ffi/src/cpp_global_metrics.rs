@@ -3,7 +3,8 @@
 
 //! Safe wrappers for the C++ global MetricsRegistry flush. Used by
 //! the Rust `MetricsRunner` to include process-level C++ metrics
-//! (e.g. `rpc.client.*`) in the periodic metrics log.
+//! (e.g. `rpc.client.*`) in the periodic metrics log. Mirrors
+//! `crowdb_tree_ffi::cpp_global_metrics`.
 
 use std::ffi::{CStr, CString};
 
@@ -11,10 +12,6 @@ use crate::sys;
 
 /// Flush the C++ global MetricsRegistry to a String.
 /// Returns `None` if no metrics are registered or the flush is empty.
-///
-/// # Safety
-/// Calls FFI functions that return a malloc'd string. The string is
-/// copied into a Rust `String` and freed via the C API.
 pub fn flush_cpp_global_metrics(
     window_secs: f64,
     timestamp: &str,
@@ -25,9 +22,7 @@ pub fn flush_cpp_global_metrics(
 ) -> Option<String> {
     let ts = CString::new(timestamp).ok()?;
     let label = CString::new(section_label).ok()?;
-    // SAFETY: ts and label are valid null-terminated C strings. The
-    // returned pointer is either null or a malloc'd buffer that we
-    // free via crowdb_common_metrics_global_free.
+    // SAFETY: ts and label are valid null-terminated C strings.
     let ptr = unsafe {
         sys::crowdb_common_metrics_global_flush(
             window_secs,

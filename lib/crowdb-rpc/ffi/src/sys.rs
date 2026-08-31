@@ -272,6 +272,18 @@ extern "C" {
     pub fn crowdb_rpc_metrics_stop();
     pub fn crowdb_rpc_server_register_conn_count_gauge(server: crowdb_rpc_server_t, name: *const c_char);
 
+    // ── C++ global metrics registry (crowdb-common) ────────────────
+    pub fn crowdb_common_metrics_global_flush(
+        window_secs: f64,
+        timestamp: *const c_char,
+        section_label: *const c_char,
+        width: usize,
+        count_w: usize,
+        tps_w: usize,
+    ) -> *mut c_char;
+    pub fn crowdb_common_metrics_global_max_name_len() -> usize;
+    pub fn crowdb_common_metrics_global_free(s: *mut c_char);
+
     // ── Coroutine client (Option 3: C++ coroutine + Rust FFI) ────
     pub fn crowdb_rpc_co_spawn(
         client: crowdb_rpc_client_t,

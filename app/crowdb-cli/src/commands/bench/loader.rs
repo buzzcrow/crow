@@ -158,7 +158,11 @@ where
     for (i, t) in tasks.into_iter().enumerate() {
         let _ = t.await;
         if i == 0 {
-            tracing::info!(task = i, elapsed_ms = start.elapsed().as_millis(), "bench: first loader exited");
+            tracing::info!(
+                task = i,
+                elapsed_ms = start.elapsed().as_millis(),
+                "bench: first loader exited"
+            );
         }
     }
     let elapsed_ms = start.elapsed().as_millis();

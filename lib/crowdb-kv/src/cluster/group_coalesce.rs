@@ -54,9 +54,11 @@ impl PxGroup {
                     // and start a 1-op round during the swap.
                     let batch = {
                         let mut guard = group.coalescer.lock();
-                        guard.take().inspect(|_| {
+                        let taken = guard.take();
+                        if taken.is_some() {
                             *guard = Some(PendingBatch::default());
-                        })
+                        }
+                        taken
                     };
                     let Some(batch) = batch else { continue };
                     if batch.op_count > 0 {
@@ -214,9 +216,11 @@ impl PxGroup {
         }
         let batch = {
             let mut guard = self.coalescer.lock();
-            guard.take().inspect(|_| {
+            let taken = guard.take();
+            if taken.is_some() {
                 *guard = Some(PendingBatch::default());
-            })
+            }
+            taken
         };
         let Some(batch) = batch else { return };
         if batch.op_count == 0 {

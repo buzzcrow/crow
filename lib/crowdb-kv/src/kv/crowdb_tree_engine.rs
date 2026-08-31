@@ -326,11 +326,15 @@ impl KVEngine for CrowdbTreeEngine {
         match &snap_result {
             Ok(slot) => tracing::info!(
                 "persist_snapshot: flush_ms={} snapshot_ms={} snapshot_slot={}",
-                flush_ms, snap_ms, slot
+                flush_ms,
+                snap_ms,
+                slot
             ),
             Err(e) => tracing::error!(
                 "persist_snapshot FAILED: flush_ms={} snapshot_ms={} err={:?}",
-                flush_ms, snap_ms, e
+                flush_ms,
+                snap_ms,
+                e
             ),
         }
         snap_result.unwrap_or(0)

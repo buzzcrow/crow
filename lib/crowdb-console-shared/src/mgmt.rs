@@ -147,7 +147,7 @@ impl ServerClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                crate::clients::log_ops_http(
                     &cid,
                     "POST",
                     &url,
@@ -158,7 +158,7 @@ impl ServerClient {
                 self.rpc_err(format!("POST {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        crate::clients::log_ops_http(
             &cid,
             "POST",
             &url,
@@ -187,7 +187,7 @@ impl ServerClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                crate::clients::log_ops_http(
                     &cid,
                     "POST",
                     &url,
@@ -198,7 +198,7 @@ impl ServerClient {
                 self.rpc_err(format!("POST {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        crate::clients::log_ops_http(
             &cid,
             "POST",
             &url,
@@ -224,7 +224,7 @@ impl ServerClient {
             .send()
             .await
             .map_err(|e| {
-                crate::ops_log::append_http(
+                crate::clients::log_ops_http(
                     &cid,
                     "DELETE",
                     &url,
@@ -235,7 +235,7 @@ impl ServerClient {
                 self.rpc_err(format!("DELETE {path}: {e}"))
             })?;
         let status = resp.status();
-        crate::ops_log::append_http(
+        crate::clients::log_ops_http(
             &cid,
             "DELETE",
             &url,
