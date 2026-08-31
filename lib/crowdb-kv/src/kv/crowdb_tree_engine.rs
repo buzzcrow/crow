@@ -72,7 +72,7 @@ impl CrowdbTreeEngine {
         self.inner.handle().stats()
     }
 
-    /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
+    /// Flush C++ metrics into a formatted string for the `[cpp-tree]`
     /// log section. Delegates to `crowdb_tree_ffi::Crowdbtree::flush_metrics_str`.
     #[must_use]
     #[allow(dead_code)]

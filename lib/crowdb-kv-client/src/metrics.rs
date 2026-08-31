@@ -321,7 +321,7 @@ impl ClientMetrics {
     }
 
     /// Flush per-op-kind window latency histograms to `writer` in the
-    /// same column-aligned format as the server `[metrics]` log.
+    /// same column-aligned format as the server `[rust-metrics]` log.
     /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
     /// also use it for cumulative accumulation.
     #[allow(

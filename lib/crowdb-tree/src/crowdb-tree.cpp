@@ -3386,7 +3386,7 @@ std::string Crowdbtree::flush_metrics_str(double window_secs, const char *timest
     if (fp == nullptr) {
         return {};
     }
-    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-metrics", width, count_w, tps_w);
+    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-tree", width, count_w, tps_w);
     std::fflush(fp);
     std::fclose(fp);
     std::string result(buf, len);

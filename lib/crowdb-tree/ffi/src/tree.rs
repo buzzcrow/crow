@@ -171,7 +171,7 @@ impl Crowdbtree {
         check(unsafe { sys::ct_clear(self.as_ptr()) })
     }
 
-    /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
+    /// Flush C++ metrics into a formatted string for the `[cpp-tree]`
     /// log section. `width` overrides per-section max name length for
     /// column alignment with the Rust section (0 = use C++ internal max).
     pub fn flush_metrics_str(&self, window_secs: f64, timestamp: &str, width: usize) -> String {

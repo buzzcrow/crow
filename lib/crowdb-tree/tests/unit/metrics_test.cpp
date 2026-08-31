@@ -185,7 +185,7 @@ TEST(MetricsRegistry, FlushMetricsStrFormat)
 
     std::string out = t.flush_metrics_str(5.0, "2026-07-15T16:30:05.123Z", 0);
     ASSERT_FALSE(out.empty());
-    EXPECT_NE(out.find("[cpp-metrics"), std::string::npos);
+    EXPECT_NE(out.find("[cpp-tree"), std::string::npos);
     EXPECT_NE(out.find("window=5.000s"), std::string::npos);
     // Latency section should use us units.
     EXPECT_NE(out.find("us"), std::string::npos);

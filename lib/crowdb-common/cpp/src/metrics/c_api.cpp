@@ -23,7 +23,7 @@ extern "C" char *crowdb_common_metrics_global_flush(double window_secs, const ch
     if (fp == nullptr) {
         return nullptr;
     }
-    const char *label = section_label != nullptr ? section_label : "cpp-metrics-global";
+    const char *label = section_label != nullptr ? section_label : "cpp-rpc";
     reg.flush_to(fp, window_secs, timestamp, label, width, count_w, tps_w);
     std::fflush(fp);
     std::fclose(fp);

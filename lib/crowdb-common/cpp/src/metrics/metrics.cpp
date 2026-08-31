@@ -125,28 +125,6 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
 
     std::fprintf(fp, "[%s %s window=%.3fs]\n", section_label, timestamp, window_secs);
 
-    // Counters
-    if (!counters_.empty()) {
-        auto                                              idx = sorted_indices(counters_);
-        std::vector<std::pair<size_t, Counter::Snapshot>> active;
-        for (size_t i : idx) {
-            auto snap = counters_[i]->flush();
-            if (snap.count > 0) {
-                active.emplace_back(i, snap);
-            }
-        }
-        if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  total\n", static_cast<int>(name_w), "");
-            for (const auto &[i, snap] : active) {
-                double tps_d = static_cast<double>(snap.count) / window_secs;
-                auto   tps   = static_cast<uint64_t>(tps_d);
-                std::fprintf(fp, "%-*s  %*llu  %*llu  %6llu\n", static_cast<int>(name_w), counters_[i]->name().c_str(),
-                             static_cast<int>(cw), static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
-                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(snap.total));
-            }
-        }
-    }
-
     // Histograms
     if (!histograms_.empty()) {
         auto                                                       idx = sorted_indices(histograms_);
@@ -228,6 +206,28 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
                              static_cast<unsigned long long>(snap.max_bytes / 1024),
                              static_cast<unsigned long long>(rate / 1024),
                              static_cast<unsigned long long>(snap.total_bytes / 1024));
+            }
+        }
+    }
+
+    // Counters
+    if (!counters_.empty()) {
+        auto                                              idx = sorted_indices(counters_);
+        std::vector<std::pair<size_t, Counter::Snapshot>> active;
+        for (size_t i : idx) {
+            auto snap = counters_[i]->flush();
+            if (snap.count > 0) {
+                active.emplace_back(i, snap);
+            }
+        }
+        if (!active.empty()) {
+            std::fprintf(fp, "%-*s  count  tps(/s)  total\n", static_cast<int>(name_w), "");
+            for (const auto &[i, snap] : active) {
+                double tps_d = static_cast<double>(snap.count) / window_secs;
+                auto   tps   = static_cast<uint64_t>(tps_d);
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %6llu\n", static_cast<int>(name_w), counters_[i]->name().c_str(),
+                             static_cast<int>(cw), static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
+                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(snap.total));
             }
         }
     }

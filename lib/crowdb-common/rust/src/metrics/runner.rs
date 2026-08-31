@@ -61,9 +61,9 @@ impl MetricsRunner {
     }
 
     /// Set a post-flush C++ metrics callback. Called after the Rust
-    /// `[metrics]` + misc section is written. The callback receives
+    /// `[rust-metrics]` + misc section is written. The callback receives
     /// (writer, `window_secs`, timestamp, `shared_width`, `count_w`, `tps_w`) and should write
-    /// the `[cpp-metrics]` block(s) to the writer.
+    /// the `[cpp-tree]` block(s) to the writer.
     pub fn set_cpp_flush(
         &mut self,
         f: impl Fn(&mut dyn std::io::Write, f64, &str, usize, usize, usize) + Send + Sync + 'static,
@@ -212,7 +212,7 @@ mod tests {
             .map(|e| e.path())
             .expect("metrics log file not found");
         let content = std::fs::read_to_string(&metrics_file).unwrap();
-        let block_count = content.matches("[metrics").count();
+        let block_count = content.matches("[rust-metrics").count();
         assert!(
             block_count >= 2,
             "expected >= 2 flush blocks, got {block_count}: {content}"

@@ -5,7 +5,7 @@
 //! snapshot.pages.c (a magnitude counter with no paired latency in the
 //! C++ registry) into the Rust `MetricsRegistry` so they appear in the
 //! periodic metrics log. C++ engine counters/gauges/summaries/bandwidths
-//! are now flushed natively via the `[cpp-metrics]` section (FFI string
+//! are now flushed natively via the `[cpp-tree]` section (FFI string
 //! from `CrowdbTreeEngine::flush_metrics_str`).
 
 use std::sync::{Arc, Mutex};
@@ -102,7 +102,7 @@ fn read_paxos_gauges_per_group(store: &Arc<PxKvStore>) -> std::collections::Hash
 /// (store, group), installs a pre-flush collector that polls Paxos
 /// watermarks and snapshot.pages deltas, and installs a post-flush C++
 /// callback that calls `flush_metrics_str` per engine and writes the
-/// `[cpp-metrics]` block.
+/// `[cpp-tree]` block.
 ///
 /// # Panics
 ///
@@ -329,7 +329,7 @@ pub fn setup_engine_collector(
             if let Some(str) = crowdb_tree_ffi::flush_cpp_global_metrics(
                 window_secs,
                 timestamp,
-                "cpp-metrics-global",
+                "cpp-rpc",
                 shared_width,
                 count_w,
                 tps_w,

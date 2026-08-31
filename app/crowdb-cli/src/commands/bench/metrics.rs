@@ -4,7 +4,7 @@
 //! Bench metrics wiring — creates the project `MetricsRunner` and
 //! registers the bench counters + latency histogram on its registry.
 //!
-//! The runner writes periodic `[metrics ...]` blocks to a metrics log
+//! The runner writes periodic `[rust-metrics ...]` blocks to a metrics log
 //! file in the CLI's per-invocation log dir. After the workload, the
 //! final JSON report is appended to the same file via `write_raw`.
 

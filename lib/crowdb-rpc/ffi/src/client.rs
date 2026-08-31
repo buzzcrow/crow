@@ -450,7 +450,7 @@ fn standalone_buffer(handle: sys::crowdb_rpc_buffer_t) -> Option<Buffer> {
 }
 
 // Rust-side histograms (registered with the Rust MetricsRegistry::global(),
-// flushed in the [metrics] section).
+// flushed in the [rust-metrics] section).
 fn response_schedule_histogram() -> std::sync::Arc<metrics::LatencyHistogram> {
     use std::sync::OnceLock;
     static H: OnceLock<std::sync::Arc<metrics::LatencyHistogram>> = OnceLock::new();

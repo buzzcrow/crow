@@ -3,7 +3,7 @@
 
 // C ABI for flushing the global C++ MetricsRegistry. Used by the Rust
 // MetricsRunner to include process-level C++ metrics (e.g. rpc.client.*)
-// in the periodic metrics log alongside per-engine [cpp-metrics] blocks.
+// in the periodic metrics log alongside per-engine [cpp-tree] blocks.
 #pragma once
 
 #include <cstddef>
