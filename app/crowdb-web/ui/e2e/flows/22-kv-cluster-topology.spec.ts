@@ -264,8 +264,8 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
         if (await autoScanCheckbox.isChecked()) {
           await autoScanCheckbox.uncheck();
         }
-        await page.getByLabel('Store').selectOption('380');
-        await page.getByLabel('Group').selectOption('3800');
+        await page.getByTestId('kv-store-select').selectOption('380');
+        await page.getByTestId('kv-group-select').selectOption('3800');
 
         // Scan and verify store A keys appear
         const scanResponse = page.waitForResponse((r: any) => r.url().includes('/stores/380/groups/3800/kv/scan'));
@@ -275,8 +275,8 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
         await expect(page.getByTestId('kv-scan-table').getByText('iso-b-key1')).toHaveCount(0);
 
         // Switch to store B, scan, see only B keys
-        await page.getByLabel('Store').selectOption('381');
-        await page.getByLabel('Group').selectOption('3810');
+        await page.getByTestId('kv-store-select').selectOption('381');
+        await page.getByTestId('kv-group-select').selectOption('3810');
         const scanResponse2 = page.waitForResponse((r: any) => r.url().includes('/stores/381/groups/3810/kv/scan'));
         await page.getByRole('button', { name: /^Scan$/ }).click();
         await scanResponse2;
@@ -320,10 +320,10 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
         await page.goto('/');
         await page.getByTestId('domain-kv').click();
         await page.getByTestId('kv-tab-kv').click();
-        await page.getByLabel('Store').selectOption('390');
+        await page.getByTestId('kv-store-select').selectOption('390');
 
         // Group A (3900): put + get g39a-key.
-        await page.getByLabel('Group').selectOption('3900');
+        await page.getByTestId('kv-group-select').selectOption('3900');
         await page.getByLabel('Put key').fill('g39a-key');
         await page.getByLabel('Put value').fill('val-a');
         const putA = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
@@ -336,7 +336,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
         await expect(page.getByTestId('kv-get-result')).toHaveText('val-a', { timeout: 3_000 });
 
         // Group B (3901): put + get g39b-key.
-        await page.getByLabel('Group').selectOption('3901');
+        await page.getByTestId('kv-group-select').selectOption('3901');
         await page.getByLabel('Put key').fill('g39b-key');
         await page.getByLabel('Put value').fill('val-b');
         const putB = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
@@ -358,7 +358,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
 
         // Delete g39a-key in group A, then verify it is gone from A but
         // group B still serves g39b-key.
-        await page.getByLabel('Group').selectOption('3900');
+        await page.getByTestId('kv-group-select').selectOption('3900');
         await page.getByLabel('Delete key').fill('g39a-key');
         await page.getByRole('button', { name: /Delete$/ }).click();
         const dialog = page.getByRole('dialog');
@@ -373,7 +373,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
         await getAAfterDelete;
         await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
 
-        await page.getByLabel('Group').selectOption('3901');
+        await page.getByTestId('kv-group-select').selectOption('3901');
         await page.getByLabel('Get key').fill('g39b-key');
         const getBAfterDelete = page.waitForResponse((r: any) => r.url().includes('/kv/get'));
         await page.getByRole('button', { name: /^Get$/ }).click();

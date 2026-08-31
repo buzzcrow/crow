@@ -9,6 +9,7 @@ import { step } from '../fixtures/stepTimer';
 test.describe('physical · server lifecycle', () => {
   test('context menu items differ for node without server, node with server, and server', async ({ page, baseURL }) => {
     // --- Node without server: Deploy CrowDB Storage + Delete Node, no restart/stop ---
+    await step('ctx-menu: resetAll', () => resetAll(baseURL!));
     {
       await step('ctx-menu: setup no-server', async () => {
         await createRack(baseURL!, { id: 490, name: 'Rack 490' });
@@ -216,6 +217,7 @@ test.describe('physical · server lifecycle', () => {
 
   test('deleting a node cascades service shutdown; deleting the service keeps the node', async ({ page, baseURL }) => {
     // --- Delete node with deployed server cascades service shutdown ---
+    await step('cascade: resetAll', () => resetAll(baseURL!));
     {
       await step('cascade: setup delete-node', async () => {
         await createRack(baseURL!, { id: 493, name: 'Rack 493' });
@@ -244,7 +246,7 @@ test.describe('physical · server lifecycle', () => {
           const deleteDialog = page.getByRole('dialog', { name: /delete node/i });
           await expect(deleteDialog).toBeVisible();
           const confirmBtn = deleteDialog.getByRole('button', { name: /delete node/i });
-          await confirmBtn.evaluate((el) => (el as HTMLElement).click());
+          await confirmBtn.click();
 
           // Node should disappear from the tree.
           await expect(aside.getByText('N-493', { exact: true })).toHaveCount(0, { timeout: 10_000 });
@@ -281,7 +283,10 @@ test.describe('physical · server lifecycle', () => {
         const deleteDialog = page.getByRole('dialog', { name: /delete crowdb storage/i });
         await expect(deleteDialog).toBeVisible();
         const confirmBtn = deleteDialog.getByRole('button', { name: /delete crowdb storage/i });
-        await confirmBtn.evaluate((el) => (el as HTMLElement).click());
+        const deleteResp = page.waitForResponse((r: any) =>
+          r.request().method() === 'DELETE' && r.url().includes('/api/nodes/494/server'));
+        await confirmBtn.click();
+        await deleteResp;
 
         // Server disappears from tree, node remains.
         await expect(aside.getByText('KV-494', { exact: true })).toHaveCount(0, { timeout: 10_000 });

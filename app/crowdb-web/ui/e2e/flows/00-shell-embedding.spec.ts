@@ -10,6 +10,7 @@ import {
   createStore,
   deployNodeServer,
   freePort,
+  resetAll,
   seedRackAndNode,
   stopNodeServer,
 } from '../fixtures/consoleSetup';
@@ -34,6 +35,7 @@ test.describe('shell · embedding', () => {
   });
 
   test('embedding honors apiPrefix, readonly, and module opt-out', async ({ page, baseURL }) => {
+    await step('shell: resetAll', () => resetAll(baseURL!));
     await step('shell: seed rack/node', () => seedRackAndNode(baseURL!, 23, 23));
     await step('shell: deploy server', () => deployNodeServer(baseURL!, 23, freePort(), freePort()));
     await step('shell: create store', () => createStore(baseURL!, 233, [23]));

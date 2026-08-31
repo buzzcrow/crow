@@ -11,11 +11,13 @@ function renderHeader(overrides: Partial<{
   onRefresh: () => void;
   refreshing: boolean;
   onShowTopology: () => void;
+  onShowCapacity: () => void;
   onResetCluster: () => void;
   initialDomain: Domain;
 }> = {}) {
   const onRefresh = overrides.onRefresh ?? vi.fn();
   const onShowTopology = overrides.onShowTopology ?? vi.fn();
+  const onShowCapacity = overrides.onShowCapacity ?? vi.fn();
   const onResetCluster = overrides.onResetCluster ?? vi.fn();
   return render(
     <DomainProvider initialDomain={overrides.initialDomain ?? Domain.Cluster}>
@@ -24,6 +26,7 @@ function renderHeader(overrides: Partial<{
         onRefresh={onRefresh}
         refreshing={overrides.refreshing ?? false}
         onShowTopology={onShowTopology}
+        onShowCapacity={onShowCapacity}
         onResetCluster={onResetCluster}
       />
     </DomainProvider>,
@@ -69,6 +72,13 @@ describe('Header', () => {
     });
     fireEvent.click(getByTestId('domain-cluster'));
     expect(onShowTopology).toHaveBeenCalledOnce();
+  });
+
+  it('clicking the Chunk domain button calls onShowCapacity', () => {
+    const onShowCapacity = vi.fn();
+    const { getByTestId } = renderHeader({ onShowCapacity });
+    fireEvent.click(getByTestId('domain-chunk'));
+    expect(onShowCapacity).toHaveBeenCalledOnce();
   });
 
   it('clicking refresh calls onRefresh', () => {

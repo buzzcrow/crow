@@ -999,14 +999,18 @@ pub async fn http_stop_node_server(
 async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool {
     use crowdb_console_shared::lifecycle;
 
-    let node = {
+    let (node, config_pid) = {
         let cfg = state.config.read().unwrap();
         if cfg.server_for_node(node_id).is_none() {
             return false;
         }
-        cfg.node(node_id).cloned()
+        (cfg.node(node_id).cloned(), cfg.server_for_node(node_id).and_then(|s| s.pid))
     };
-    if let Some(pid) = state.runtime_pid(node_id) {
+    // Prefer the in-memory runtime PID (set at deploy time); fall back
+    // to the persisted config PID so we can still stop a server whose
+    // process was spawned by a prior web-server instance.
+    let pid = state.runtime_pid(node_id).or(config_pid);
+    if let Some(pid) = pid {
         let _ = match node {
             Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
                 .await
@@ -1039,11 +1043,36 @@ pub async fn http_delete_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    // Require-empty: refuse to delete if the node still hosts replicas.
+    // Cascade-clean: remove any KV replicas hosted on this node from
+    // group-0 sysdata before stopping the server. This avoids leaving
+    // orphaned replica records that would block future redeploys.
     let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    ops::kv_server::check_require_empty(&ctx, node_id)
-        .await
-        .map_err(map_config_err)?;
+    if let Ok(stores) = ctx.sysmd().list_stores().await {
+        for store in &stores {
+            if let Ok(groups) = ctx.sysmd().list_groups_in_store(store.store_id).await {
+                for group in &groups {
+                    if let Ok(replicas) = ctx
+                        .sysmd()
+                        .list_replicas_in_group(store.store_id, group.group_id)
+                        .await
+                    {
+                        for replica in &replicas {
+                            if replica.node_id == node_id {
+                                let _ = ctx
+                                    .sysmd()
+                                    .remove_replica(
+                                        store.store_id,
+                                        group.group_id,
+                                        replica.replica_id,
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if !stop_and_remove_server_for_node(&state, node_id).await {
         return Err((

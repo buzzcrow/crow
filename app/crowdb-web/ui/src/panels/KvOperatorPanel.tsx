@@ -534,6 +534,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
             <label htmlFor="kv-store-select" className="tw-text-xs tw-text-muted">Store</label>
             <select
               id="kv-store-select"
+              data-testid="kv-store-select"
               aria-label="Store"
               value={storeId}
               onChange={(e) => handleStoreChange(e.target.value)}
@@ -548,6 +549,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
             <label htmlFor="kv-group-select" className="tw-text-xs tw-text-muted">Group</label>
             <select
               id="kv-group-select"
+              data-testid="kv-group-select"
               aria-label="Group"
               value={groupId}
               onChange={(e) => handleGroupChange(e.target.value)}

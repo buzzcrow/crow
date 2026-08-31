@@ -31,6 +31,7 @@ test.describe('physical · rack + node CRUD', () => {
 
   test('creates racks and nodes through the UI and verifies the real backend', async ({ page, baseURL }) => {
     // --- Add a rack through the UI ---
+    await step('rack-CRUD: resetAll', () => resetAll(baseURL!));
     {
       await step('rack-CRUD: goto', () => page.goto('/'));
 
@@ -233,6 +234,7 @@ test.describe('physical · rack + node CRUD', () => {
    * the DOM and via the backend.
    */
   test('confirm-gates store, node, and rack deletion', async ({ page, baseURL }) => {
+    await step('del-gate: resetAll', () => resetAll(baseURL!));
     await step('del-gate: seedRackAndNode', () => seedRackAndNode(baseURL!, 25, 25));
     await step('del-gate: deployNodeServer', () => deployNodeServer(baseURL!, 25, freePort(), freePort()));
     await step('del-gate: createStore', () => createStore(baseURL!, 255, [25]));

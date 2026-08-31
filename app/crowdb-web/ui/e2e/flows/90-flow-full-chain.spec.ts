@@ -261,7 +261,7 @@ test.describe('flow · full chain', () => {
 
       // Switch to Cluster (Logical) view.
       await page.getByTestId('domain-kv').click();
-      await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
+      await expect(page.getByRole('heading', { name: 'KV' })).toBeVisible({ timeout: 3_000 });
 
       // 6. Create empty store 188 on n18a.
       await step('full-chain: clusterInit (full)', () => clusterInit(baseURL!, [181, 182]));

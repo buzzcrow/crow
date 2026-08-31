@@ -1190,13 +1190,12 @@ mod tests {
 
         cfg.save(&path).unwrap();
         let loaded = ConsoleConfig::load(&path).unwrap();
-        let mut expected = cfg.clone();
-        expected.servers[0].pid = None;
+        let expected = cfg.clone();
         assert_eq!(expected, loaded);
     }
 
     #[test]
-    fn pid_is_not_persisted_to_disk() {
+    fn pid_is_persisted_to_disk() {
         let dir = tempdir();
         let path = dir.join("console.toml");
 
@@ -1207,7 +1206,7 @@ mod tests {
 
         cfg.save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("pid"), "runtime pid must not be persisted: {raw}");
+        assert!(raw.contains("pid = 4242"), "runtime pid must be persisted: {raw}");
     }
 
     #[test]

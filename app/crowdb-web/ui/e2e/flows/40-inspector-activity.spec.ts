@@ -21,8 +21,8 @@ async function openKvPanel(page: any, storeId: string, groupId: string) {
   await step('inspector: goto', () => page.goto('/'));
   await page.getByTestId('domain-kv').click();
   await page.getByTestId('kv-tab-kv').click();
-  await page.getByLabel('Store').selectOption(storeId);
-  await page.getByLabel('Group').selectOption(groupId);
+  await page.getByTestId('kv-store-select').selectOption(storeId);
+  await page.getByTestId('kv-group-select').selectOption(groupId);
 }
 
 async function putKey(page: any, key: string, value: string) {

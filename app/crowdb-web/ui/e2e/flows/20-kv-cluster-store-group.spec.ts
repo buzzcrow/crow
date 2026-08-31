@@ -3,10 +3,14 @@
 // Baseline: 3.1s (2026-08-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, addGroup, clusterInit, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, addGroup, clusterInit, createStore, deployNodeServer, freePort, resetAll, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 import { step } from '../fixtures/stepTimer';
 
 test.describe('kv cluster · store + group CRUD', () => {
+  test.beforeAll(async ({ baseURL }) => {
+    await resetAll(baseURL!);
+  });
+
   test('creates stores, groups and replicas through the UI against a real deployed server', async ({ page, baseURL }) => {
     // --- store + group creation chain (store 57, groups 570 / 580) ---
     await step('store-group: setup', async () => {

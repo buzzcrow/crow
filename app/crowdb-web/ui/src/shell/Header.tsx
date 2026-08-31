@@ -14,6 +14,7 @@ interface HeaderProps {
   onRefresh: () => void;
   refreshing?: boolean;
   onShowTopology?: () => void;
+  onShowCapacity?: () => void;
   onResetCluster?: () => void;
 }
 
@@ -36,6 +37,7 @@ export function Header({
   onRefresh,
   refreshing,
   onShowTopology,
+  onShowCapacity,
   onResetCluster,
 }: HeaderProps) {
   const { domain, setDomain } = useDomain();
@@ -85,7 +87,7 @@ export function Header({
         </button>
         <button
           data-testid="domain-chunk"
-          onClick={() => { setDomain(Domain.Chunk); onShowTopology?.(); }}
+          onClick={() => { setDomain(Domain.Chunk); onShowCapacity?.(); }}
           className={cn(
             'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
             domain === Domain.Chunk ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',

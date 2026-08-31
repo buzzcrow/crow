@@ -379,11 +379,18 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
             label: 'Delete Node',
             icon: <Trash2 className="tw-h-4 tw-w-4" />,
             destructive: true,
-            // Cascade: stop + remove all services before deleting the node.
+            // Cascade: the backend's DELETE /api/nodes/:id handler
+            // (http_remove_node) calls stop_and_remove_server_for_node
+            // which stops the KV process, removes the server entry, and
+            // purges topology — all before removing the node. Calling
+            // removeServer separately here would hit check_require_empty
+            // (which refuses if the node hosts group-0 replicas), blocking
+            // the cascade. So we only remove diskdb explicitly (no
+            // check_require_empty gate) and let removeNode handle the KV
+            // cascade.
             onSelect: () => requestDelete('Node', nodeId, async () => {
               await runMutation('Delete Node', t.label || t.id, async () => {
                 if (hasDiskdb) await removeDiskdb(nodeId);
-                if (hasServer) await removeServer(nodeId);
                 await removeNode(nodeId);
               });
             }),
@@ -806,6 +813,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
         onRefresh={handleRefresh}
         refreshing={refreshing}
         onShowTopology={() => setCenterPanel('topology')}
+        onShowCapacity={() => setCenterPanel('capacity')}
         onResetCluster={readonly ? undefined : handleResetCluster}
       />
 

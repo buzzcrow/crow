@@ -30,6 +30,7 @@ function nextNumericId(values: Array<string | number>): string {
 test.describe('shell · UI behaviors', () => {
   test('dialog defaults, cancel, and tree interactions', async ({ page, baseURL }) => {
     // --- create dialog defaults and eligible candidate lists ---
+    await step('shell: resetAll', () => resetAll(baseURL!));
     // Batch independent API calls to reduce total round-trip time under load.
     await step('shell: create racks', () => Promise.all([
       createRack(baseURL!, { id: 201, name: 'Rack Twenty A' }),

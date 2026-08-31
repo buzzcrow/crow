@@ -14,8 +14,8 @@ async function openKvPanel(page: any) {
   await step('kv: goto', () => page.goto('/'));
   await page.getByTestId('domain-kv').click();
   await page.getByTestId('kv-tab-kv').click();
-  await page.getByLabel('Store').selectOption('99');
-  await page.getByLabel('Group').selectOption('990');
+  await page.getByTestId('kv-store-select').selectOption('99');
+  await page.getByTestId('kv-group-select').selectOption('990');
 }
 
 async function putKey(page: any, key: string, value: string) {
@@ -31,8 +31,14 @@ async function putKey(page: any, key: string, value: string) {
 
 test.describe('kv ops · put/get/scan/delete', () => {
   test.beforeAll(async () => {
+    // Stop any leftover server from a prior run, then deploy fresh.
+    await step('kv: stop leftover server', () => stopNodeServer(apiBase, 9));
     try {
       await step('kv: seed rack/node', () => seedRackAndNode(apiBase, 9, 9));
+    } catch (err) {
+      if (!String(err).includes('already exists')) throw err;
+    }
+    try {
       await step('kv: deploy server', () => deployNodeServer(apiBase, 9, freePort(), freePort()));
       await step('kv: create store', () => createStore(apiBase, 99, [9]));
       await step('kv: add group', () => addGroup(apiBase, 99, 990, 9900, [9]));

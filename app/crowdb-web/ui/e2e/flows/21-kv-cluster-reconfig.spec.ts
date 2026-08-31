@@ -93,8 +93,8 @@ async function openKvPanel(page: import('@playwright/test').Page, storeId: numbe
   await page.goto('/');
   await page.getByTestId('domain-kv').click();
   await page.getByTestId('kv-tab-kv').click();
-  await page.getByLabel('Store').selectOption(String(storeId));
-  await page.getByLabel('Group').selectOption(String(groupId));
+  await page.getByTestId('kv-store-select').selectOption(String(storeId));
+  await page.getByTestId('kv-group-select').selectOption(String(groupId));
 }
 
 /** The health badge inside a server tree item (Physical view). */
@@ -133,7 +133,7 @@ async function deleteNodeViaMenu(page: import('@playwright/test').Page, nodeId: 
   await expect(dialog).toBeVisible();
   const deleteResp = page.waitForResponse((r: any) =>
     r.request().method() === 'DELETE' && r.url().includes(`/api/nodes/${nodeId}`));
-  await dialog.getByRole('button', { name: /delete node/i }).evaluate((el: any) => (el as HTMLElement).click());
+  await dialog.getByRole('button', { name: /delete node/i }).click();
   await deleteResp;
   // Wait for the node to disappear from the tree (cascade stops + removes
   // the server, then removes the node).
