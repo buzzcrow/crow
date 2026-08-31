@@ -122,7 +122,12 @@ pub async fn http_add_rack(
     let entry = ops::hardware::add_rack(&ctx, body.id, &body.name)
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    // Apply directly to state.config (avoid commit_op_context race).
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_rack(entry.clone()).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -141,7 +146,11 @@ pub async fn http_remove_rack(
     ops::hardware::remove_rack(&ctx, id)
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_rack(id).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -182,7 +191,11 @@ pub async fn http_add_node(
     let entry = ops::hardware::add_node(&ctx, entry.clone())
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_node(entry.clone()).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
@@ -209,7 +222,11 @@ pub async fn http_remove_node(
     ops::hardware::remove_node(&ctx, id)
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_node(id).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     state.monitor_cache.drop_node(&id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -410,7 +427,11 @@ pub async fn http_add_rack_node(
     let entry = ops::hardware::add_node(&ctx, entry)
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_node(entry.clone()).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
@@ -667,7 +688,19 @@ pub async fn http_deploy_node_server(
     let deployed = ops::kv_server::deploy(&ctx, &req, Some(&workspace_dir))
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    // Apply the server entry directly to state.config instead of
+    // commit_op_context — the snapshot-replace pattern loses
+    // concurrent updates (e.g. parallel deploys on different nodes).
+    let entry = ctx
+        .config()
+        .server_for_node(node_id)
+        .ok_or_else(|| err_500("deploy succeeded but server entry not in ctx"))?
+        .clone();
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.add_server(entry).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     state.set_runtime_pid(node_id, deployed.pid);
     crate::mgmt::refresh_node_cache(&state, node_id).await;
     Ok((
@@ -730,7 +763,19 @@ pub async fn http_restart_node_server(
     let deployed = ops::kv_server::restart(&ctx, node_id, Some(&workspace_dir))
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    // Apply the updated server entry directly to state.config (avoid
+    // commit_op_context snapshot-replace race).
+    let new_entry = ctx
+        .config()
+        .server_for_node(node_id)
+        .ok_or_else(|| err_500("restart succeeded but server entry not in ctx"))?
+        .clone();
+    {
+        let mut cfg = state.config.write().unwrap();
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.add_server(new_entry).map_err(map_config_err)?;
+    }
+    state.persist().map_err(map_persist_err)?;
     state.set_runtime_pid(node_id, deployed.pid);
     // Clear cached KV RPC connections so the next KV request reconnects
     // to the restarted server instead of reusing a stale TCP connection.
@@ -788,7 +833,15 @@ pub async fn http_stop_node_server(
     let sent = ops::kv_server::stop(&ctx, node_id, pid)
         .await
         .map_err(map_config_err)?;
-    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+    // Apply PID clearing directly to state.config (avoid commit_op_context
+    // snapshot-replace race).
+    {
+        let mut cfg = state.config.write().unwrap();
+        if let Some(s) = cfg.server_for_node_mut(node_id) {
+            s.pid = None;
+        }
+    }
+    state.persist().map_err(map_persist_err)?;
     state.clear_runtime_pid(node_id);
     // Clear cached KV RPC connections — the server is stopping, so any
     // cached TCP connection is now dead. The next KV request (after a
@@ -871,13 +924,22 @@ pub async fn http_delete_node_server(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
     // Require-empty: refuse if the node still hosts replicas in
     // group-0 sysdata. Best-effort — if sysdata is unreachable, the
-    // check is skipped (cluster may not be initialized).
-    ops::kv_server::check_require_empty(&ctx, node_id)
-        .await
-        .map_err(map_config_err)?;
+    // check is skipped (cluster may not be initialized). Skip entirely
+    // when no store 0 exists in the local config — the cluster has not
+    // been initialized, so there can be no replicas to check, and the
+    // sysdata RPC would hang retrying against a bootstrap mgmt URL.
+    let cluster_initialized = {
+        let cfg = state.config.read().unwrap();
+        cfg.stores.iter().any(|s| s.store_id == 0)
+    };
+    if cluster_initialized {
+        let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+        ops::kv_server::check_require_empty(&ctx, node_id)
+            .await
+            .map_err(map_config_err)?;
+    }
     if !stop_and_remove_server_for_node(&state, node_id).await {
         return Err((
             StatusCode::NOT_FOUND,
