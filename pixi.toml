@@ -109,7 +109,7 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 # Grouping Guide"). Each group maps 1:1 to a parallel CI job. Run
 # `pixi run build-tests` once before any test task to pre-build all
 # Rust test binaries; C++ ctest tasks need `pixi run build-cpp`.
-clean-env = "pkill -9 -f 'crowdb-kv-server.*test-' 2>/dev/null; rm -rf test-logs test-data; true"
+clean-env = "pkill -9 -f 'crowdb-kv-server.*test-' 2>/dev/null; pkill -9 -f 'crowdb-kv-server.*e2e' 2>/dev/null; pkill -9 -f 'crowdb-web.*test-mode' 2>/dev/null; rm -rf test-logs test-data runtime-data; true"
 # Pre-build ALL Rust test binaries + bin targets in one parallel cargo
 # invocation. Run this once at the start of a CI job so every subsequent
 # `cargo test -p <crate>` step just executes the pre-built binaries
@@ -204,9 +204,9 @@ loc = "tokei . .github --exclude swagger-ui --exclude 'lib/crowdb-tree/build-*' 
 clean = { cmd = '''
 bash -c '
 set -e
-pkill crowdb-kv-server || true
-pkill crowdb-web || true
-pkill crowdb-cli || true
+pkill -f crowdb-kv-server || true
+pkill -f crowdb-web || true
+pkill -f crowdb-cli || true
 
 # ── Rust build artifacts ──
 echo "[clean] cargo clean"
@@ -232,6 +232,7 @@ rm -rf test-logs test-data runtime-data .test-tmp lib/crowdb-tree/.test-tmp
 rm -rf app/crowdb-web/ui/e2e/runtime-data
 rm -rf app/crowdb-web/ctdata app/crowdb-web/waldata
 rm -rf app/crowdb-cli/bench-runs bench-runs/*
+rm -rf app/crowdb-cli/runtime
 
 # `log/` is dangerous as a glob (common Rust module name) — explicit per crate.
 # Repo-root `log/` is where crowdb-kv-server writes (CWD-relative); the per-crate
