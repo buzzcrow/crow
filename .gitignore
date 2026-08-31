@@ -64,6 +64,7 @@ lib/crowdb-console-shared/conf/
 # List explicitly per crate to avoid ignoring source directories.
 app/crowdb-kv-server/log/
 app/crowdb-cli/log/
+app/crowdb-cli/cli-log/
 lib/crowdb-console-shared/log/
 app/crowdb-web/log/
 app/crowdb-diskdb/log/

@@ -118,16 +118,23 @@ pub async fn http_add_rack(
     State(state): State<AppState>,
     Json(body): Json<AddRackBody>,
 ) -> Result<(StatusCode, Json<RackEntry>), (StatusCode, Json<ErrorBody>)> {
-    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    let entry = ops::hardware::add_rack(&ctx, body.id, &body.name)
-        .await
-        .map_err(map_config_err)?;
-    // Apply directly to state.config (avoid commit_op_context race).
+    let entry = RackEntry {
+        id: body.id,
+        name: body.name,
+    };
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_rack(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
+        let value = crowdb_protocol::common::RackValue {
+            status: crowdb_protocol::common::HwStatus::Up as i32,
+            node_ids: Vec::new(),
+        };
+        let _ = ctx.sysmd().add_rack(body.id, &value).await;
+    }
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -142,15 +149,15 @@ pub async fn http_remove_rack(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    ops::hardware::remove_rack(&ctx, id)
-        .await
-        .map_err(map_config_err)?;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_rack(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
+        let _ = ctx.sysmd().remove_rack_cascade(id).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -187,10 +194,6 @@ pub async fn http_add_node(
     State(state): State<AppState>,
     Json(entry): Json<NodeEntry>,
 ) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
-    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    let entry = ops::hardware::add_node(&ctx, entry.clone())
-        .await
-        .map_err(map_config_err)?;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_node(entry.clone()).map_err(map_config_err)?;
@@ -199,6 +202,17 @@ pub async fn http_add_node(
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
+        let value = crowdb_protocol::common::NodeValue {
+            status: crowdb_protocol::common::HwStatus::Up as i32,
+            last_used_dg_id: 0,
+            disk_group_ids: Vec::new(),
+            status_changed_at_ms: 0,
+            temp_failure_since_ms: None,
+        };
+        let _ = ctx.sysmd().add_node(entry.rack_id, entry.id, &value).await;
+    }
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -218,15 +232,19 @@ pub async fn http_remove_node(
     // does not orphan a running crowdb-kv-server. No-op when no server is
     // deployed (e.g. the UI already called DELETE .../server first).
     stop_and_remove_server_for_node(&state, id).await;
-    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    ops::hardware::remove_node(&ctx, id)
-        .await
-        .map_err(map_config_err)?;
+    let rack_id = {
+        let cfg = state.config.read().unwrap();
+        cfg.nodes.iter().find(|n| n.id == id).map(|n| n.rack_id)
+    };
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_node(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let (Some(rack_id), Ok(ctx)) = (rack_id, state.op_context().await) {
+        let _ = ctx.sysmd().remove_node_cascade(rack_id, id).await;
+    }
     state.monitor_cache.drop_node(&id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -423,10 +441,6 @@ pub async fn http_add_rack_node(
     Json(mut entry): Json<NodeEntry>,
 ) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
     entry.rack_id = rack_id;
-    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    let entry = ops::hardware::add_node(&ctx, entry)
-        .await
-        .map_err(map_config_err)?;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_node(entry.clone()).map_err(map_config_err)?;
@@ -435,6 +449,17 @@ pub async fn http_add_rack_node(
     state
         .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
+    // Best-effort sysdata sync (non-blocking — config already committed).
+    if let Ok(ctx) = state.op_context().await {
+        let value = crowdb_protocol::common::NodeValue {
+            status: crowdb_protocol::common::HwStatus::Up as i32,
+            last_used_dg_id: 0,
+            disk_group_ids: Vec::new(),
+            status_changed_at_ms: 0,
+            temp_failure_since_ms: None,
+        };
+        let _ = ctx.sysmd().add_node(entry.rack_id, entry.id, &value).await;
+    }
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
