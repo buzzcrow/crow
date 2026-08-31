@@ -76,15 +76,13 @@ pub(crate) struct PendingReadBarrier {
 /// When the in-flight round completes, this batch is drained and
 /// becomes the next round (if non-empty). If it fills to `max_keys`
 /// before the round completes, it is flushed immediately as a
-/// concurrent round (the "multiple pipelines" path). The `timer` field
-/// is reserved for watchdog use (currently a no-op).
+/// concurrent round (the "multiple pipelines" path).
 #[derive(Default)]
 pub(crate) struct PendingBatch {
     pub(crate) op_bodies: Vec<u8>,
     pub(crate) op_count: u16,
     pub(crate) tags: Vec<DedupTag>,
     pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
-    pub(crate) timer: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct PxGroup {

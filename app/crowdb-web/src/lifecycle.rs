@@ -562,6 +562,7 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
                 service_type: match s.service_type {
                     crowdb_console_shared::config::ServiceType::Kv => "kv",
                     crowdb_console_shared::config::ServiceType::Diskdb => "diskdb",
+                    crowdb_console_shared::config::ServiceType::Rpc => "rpc",
                 }
                 .to_string(),
             }
@@ -1004,7 +1005,10 @@ async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool
         if cfg.server_for_node(node_id).is_none() {
             return false;
         }
-        (cfg.node(node_id).cloned(), cfg.server_for_node(node_id).and_then(|s| s.pid))
+        (
+            cfg.node(node_id).cloned(),
+            cfg.server_for_node(node_id).and_then(|s| s.pid),
+        )
     };
     // Prefer the in-memory runtime PID (set at deploy time); fall back
     // to the persisted config PID so we can still stop a server whose
@@ -1060,11 +1064,7 @@ pub async fn http_delete_node_server(
                             if replica.node_id == node_id {
                                 let _ = ctx
                                     .sysmd()
-                                    .remove_replica(
-                                        store.store_id,
-                                        group.group_id,
-                                        replica.replica_id,
-                                    )
+                                    .remove_replica(store.store_id, group.group_id, replica.replica_id)
                                     .await;
                             }
                         }

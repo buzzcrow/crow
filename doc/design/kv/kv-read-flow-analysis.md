@@ -61,10 +61,6 @@ AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
 | 32T | MinSlot | 32:32 | 265,130 | 119 | 116 | 206 | 276 |
 | 6T fan-in | MinSlot | 6:3 | 89,795 | 66 | — | 113 | — |
 
-At 6T, MinSlot is 24.0% faster. The modes are within 1.6% at 16T, and
-Linearizable is 2.3% faster at 32T. The 6T:3C fan-in run is error-free and
-reaches 93.6% of the 6T:6C MinSlot result.
-
 ### macOS — 2026-08-19
 
 Apple M5 Pro, 18c, arm64, macOS 26.5.

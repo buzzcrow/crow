@@ -98,7 +98,7 @@ pub(crate) fn op_context(cli: &Cli) -> Result<OpContext, ExitCode> {
 
 /// Load the console config from the CLI's `--config` path or the
 /// default location.
-fn load_config(cli: &Cli) -> Result<crowdb_console_shared::ConsoleConfig, ExitCode> {
+pub(crate) fn load_config(cli: &Cli) -> Result<crowdb_console_shared::ConsoleConfig, ExitCode> {
     let path = config_path(cli);
     if !path.exists() {
         return Ok(crowdb_console_shared::ConsoleConfig::default());

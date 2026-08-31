@@ -23,13 +23,48 @@ pub enum ClusterVerb {
     },
     /// Deploy a local N-node KV cluster on 127.0.0.1 (forks
     /// `crowdb-kv-server` on each node, bootstraps group 0).
+    /// With `-t rpc`, deploys a standalone crowdb-rpc-fb-server (echo)
+    /// for RPC regression bench.
     #[command(name = "local-deploy")]
     LocalDeploy {
         #[arg(short = 'n', long, default_value_t = 3)]
         nodes: usize,
-        /// Service type: `kv` (default) or `diskdb`.
+        /// Service type: `kv` (default), `diskdb`, or `rpc`.
         #[arg(short = 't', long, default_value = "kv")]
         service_type: String,
+        /// [rpc] Listen port. 0 = auto-allocate.
+        #[arg(long, default_value_t = 0)]
+        rpc_port: u16,
+        /// [rpc] Independent epoll instances (round-robin).
+        #[arg(long, default_value_t = 1)]
+        io_engines: u32,
+        /// [rpc] Total I/O worker threads.
+        #[arg(long, default_value_t = 1)]
+        io_workers: u32,
+        /// [rpc] Enable Nagle's algorithm (disable `TCP_NODELAY`).
+        #[arg(long, default_value_t = false)]
+        enable_nagle: bool,
+        /// [kv] `--rpc-workers` for the spawned server. 0 = server default (2).
+        #[arg(long, default_value_t = 0)]
+        rpc_workers: u32,
+        /// [kv] `--peer-pool-size` for the spawned server. 0 = server default (2).
+        #[arg(long, default_value_t = 0)]
+        peer_pool_size: usize,
+        /// [kv] `--max-inflight` for the spawned server. 0 = server default.
+        #[arg(long, default_value_t = 0)]
+        max_inflight: usize,
+        /// [kv] `--coalesce-max-keys` for the spawned server. 0 = server default.
+        #[arg(long, default_value_t = 0)]
+        coalesce_max_keys: usize,
+        /// [kv] `--coalesce-drain-threshold` for the spawned server. 0 = server default (max_inflight/4).
+        #[arg(long, default_value_t = 0)]
+        coalesce_drain_threshold: usize,
+        /// [kv] Enable `--event-write` on the spawned server.
+        #[arg(long, default_value_t = false)]
+        event_write: bool,
+        /// [kv] `--send-queue-capacity` for the spawned server. 0 = server default (4096).
+        #[arg(long, default_value_t = 0)]
+        send_queue_capacity: u32,
     },
     /// Tear down the entire cluster (all groups, stores, servers, sysdata).
     Reset,
@@ -102,44 +137,101 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                 }
             }
         }
-        ClusterVerb::LocalDeploy { nodes, service_type } => {
-            if service_type != "kv" {
-                eprintln!("error: local-deploy currently supports only `kv` service type");
-                return ExitCode::from(1);
-            }
-            let ctx = match op_context(cli) {
-                Ok(c) => c,
-                Err(c) => return c,
-            };
-            match crowdb_console_shared::ops::cluster::local_deploy(&ctx, nodes, None).await {
-                Ok(summary) => {
-                    // Persist the config so subsequent CLI invocations
-                    // can find the deployed servers.
-                    if let Err(c) = commit_config(cli, &ctx) {
-                        return c;
+        ClusterVerb::LocalDeploy {
+            nodes,
+            service_type,
+            rpc_port,
+            io_engines,
+            io_workers,
+            enable_nagle,
+            rpc_workers,
+            peer_pool_size,
+            max_inflight,
+            coalesce_max_keys,
+            coalesce_drain_threshold,
+            event_write,
+            send_queue_capacity,
+        } => match service_type.as_str() {
+            "kv" => {
+                let ctx = match op_context(cli) {
+                    Ok(c) => c,
+                    Err(c) => return c,
+                };
+                let tunables = crowdb_console_shared::ops::cluster::KvDeployTunables {
+                    rpc_workers: nonzero(rpc_workers),
+                    peer_pool_size: nonzero(peer_pool_size),
+                    max_inflight: nonzero(max_inflight),
+                    coalesce_max_keys: nonzero(coalesce_max_keys),
+                    coalesce_drain_threshold: nonzero(coalesce_drain_threshold),
+                    event_write: if event_write { Some(true) } else { None },
+                    send_queue_capacity: nonzero(send_queue_capacity),
+                };
+                match crowdb_console_shared::ops::cluster::local_deploy(&ctx, nodes, None, Some(&tunables))
+                    .await
+                {
+                    Ok(summary) => {
+                        if let Err(c) = commit_config(cli, &ctx) {
+                            return c;
+                        }
+                        if cli.json {
+                            return print_json(cli, &summary);
+                        }
+                        println!(
+                            "local-deploy complete: {} nodes (rack {}, nodes [{}]), group 0 bootstrapped",
+                            summary.node_count,
+                            summary.rack_id,
+                            summary
+                                .node_ids
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        ExitCode::SUCCESS
                     }
-                    if cli.json {
-                        return print_json(cli, &summary);
+                    Err(e) => {
+                        eprintln!("error: local-deploy: {e}");
+                        ExitCode::from(2)
                     }
-                    println!(
-                        "local-deploy complete: {} nodes (rack {}, nodes [{}]), group 0 bootstrapped",
-                        summary.node_count,
-                        summary.rack_id,
-                        summary
-                            .node_ids
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("error: local-deploy: {e}");
-                    ExitCode::from(2)
                 }
             }
-        }
+            "rpc" => {
+                let ctx = match op_context(cli) {
+                    Ok(c) => c,
+                    Err(c) => return c,
+                };
+                let rpc_cfg = crowdb_console_shared::ops::cluster::RpcDeployConfig {
+                    port: rpc_port,
+                    io_engines,
+                    io_workers,
+                    enable_nagle,
+                    ..Default::default()
+                };
+                match crowdb_console_shared::ops::cluster::local_deploy_rpc(&ctx, &rpc_cfg, None).await {
+                    Ok(summary) => {
+                        if let Err(c) = commit_config(cli, &ctx) {
+                            return c;
+                        }
+                        if cli.json {
+                            return print_json(cli, &summary);
+                        }
+                        println!(
+                            "local-deploy rpc: port={}, pid={}, io_engines={}, io_workers={}, nagle={}",
+                            summary.port, summary.pid, summary.io_engines, summary.io_workers, summary.nagle
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("error: local-deploy rpc: {e}");
+                        ExitCode::from(2)
+                    }
+                }
+            }
+            other => {
+                eprintln!("error: local-deploy: unsupported service type `{other}` (expected kv or rpc)");
+                ExitCode::from(1)
+            }
+        },
         ClusterVerb::Reset => {
             let ctx = match op_context(cli) {
                 Ok(c) => c,
@@ -254,4 +346,9 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
         ClusterVerb::DiskGroup { verb } => run_disk_group_verb(cli, verb).await,
         ClusterVerb::Disk { verb } => run_disk_verb(cli, verb).await,
     }
+}
+
+/// Convert 0 to `None` (use server default), pass through nonzero values.
+fn nonzero<T: Copy + PartialEq + Default>(v: T) -> Option<T> {
+    (v != T::default()).then_some(v)
 }

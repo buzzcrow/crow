@@ -34,6 +34,9 @@ app/crowdb-web/ui/e2e/log/
 /log/
 /runtime-data/
 /runtime/
+# CLI local-deploy workspaces + CLI ops logs.
+/cli-deploy/
+/cli-log/
 # bench deploy runtime dirs (runtime/<name>/handle.json + workspace)
 app/crowdb-cli/runtime/
 # bench-runs/ holds datetime-stamped run dirs; ignore contents

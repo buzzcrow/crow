@@ -90,6 +90,15 @@ async fn main() {
         kv_backend = %args.kv_backend,
         wal_backend = %args.wal_backend,
         max_inflight = args.max_inflight,
+        coalesce_max_keys = ?args.coalesce_max_keys,
+        coalesce_drain_threshold = ?args.coalesce_drain_threshold,
+        peer_pool_size = args.peer_pool_size,
+        event_write = args.event_write,
+        enable_nagle = args.enable_nagle,
+        quickack = args.quickack,
+        send_queue_capacity = args.send_queue_capacity,
+        rpc_workers = args.rpc_workers,
+        no_fsync = args.no_fsync,
         "parsed CLI arguments"
     );
 

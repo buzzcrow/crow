@@ -1,30 +1,20 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `bench` command handlers — KV workload + RPC bench.
+//! `bench` command — KV workload + RPC echo benchmark.
+//!
+//! Module index only; workload implementations live in `bench/`.
 
-use std::process::ExitCode;
+pub mod histogram;
+pub mod kv_clean;
+pub mod kv_client;
+pub mod kv_prepare;
+pub mod kv_read;
+pub mod kv_scan;
+pub mod kv_write;
+pub mod loader;
+pub mod result;
+pub mod rpc;
+pub mod verb;
 
-use clap::Subcommand;
-
-use crate::Cli;
-
-#[derive(Subcommand, Debug)]
-pub enum BenchVerb {
-    #[command(subcommand)]
-    Kv(KvBenchWorkload),
-    Rpc,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum KvBenchWorkload {
-    Read,
-    Write,
-    Scan,
-    Mix,
-}
-
-pub async fn run_bench_verb(_cli: &Cli, verb: BenchVerb) -> ExitCode {
-    eprintln!("bench {verb:?} — not yet wired to ops (Phase 3)");
-    ExitCode::from(1)
-}
+pub use verb::{run_bench_verb, BenchVerb};

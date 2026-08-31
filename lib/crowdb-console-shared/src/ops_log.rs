@@ -112,13 +112,14 @@ pub fn current() -> Option<&'static OpsLog> {
 /// Build the default log path for one console session.
 ///
 /// `role` is a short tag (`"web"`, `"cli"`) so concurrent sessions
-/// don't write to the same file.
+/// don't write to the same file. Logs are written to a project-local
+/// `cli-log/` directory (resolved from CWD) so they survive for
+/// inspection instead of being hidden in `~/.crowdb-kv/log/`.
 #[must_use]
 pub(crate) fn default_path(role: &str) -> PathBuf {
-    let dir = dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".crowdb-kv")
-        .join("log");
+    let dir = std::env::current_dir()
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(std::env::temp_dir))
+        .join("cli-log");
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());

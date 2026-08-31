@@ -59,16 +59,18 @@ run_bench() {
     local clean_out
     clean_out=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
         bench kv clean --json 2>&1)
-    if ! echo "$clean_out" | jq -e '.new_leader' >/dev/null 2>&1; then
-        echo "    ERROR: clean failed (Phase 3 stub?)"; echo "$clean_out" | tail -5
+    local clean_json; clean_json=$(echo "$clean_out" | sed -n '/^{/,/^}/p')
+    if [ -z "$clean_json" ] || ! echo "$clean_json" | jq -e '.new_leader' >/dev/null 2>&1; then
+        echo "    ERROR: clean failed"; echo "$clean_out" | tail -5
         echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
     local output
-    output=$(CROWDB_RPC_WORKERS="${RPC_WORKERS:-2}" pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
+    output=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
         bench kv write --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$conn" \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
+        --event-write --rpc-workers "${RPC_WORKERS:-2}" \
         --verify-bytes 0 --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
@@ -76,7 +78,8 @@ run_bench() {
         echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
-    local ops_s p50_us p99_us errors wal
+    local ops_s p50_us p99_us errors wal total_ops
+    total_ops=$(echo "$json" | jq -r '.total_ops')
     ops_s=$(echo "$json" | jq -r '.total_ops * 1000 / .duration_ms' | awk '{printf "%.0f", $1}')
     p50_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p50_us')
     p99_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p99_us')
@@ -103,7 +106,7 @@ run_bench() {
     inflight_enq=$(echo "$json" | jq -r '.server_metrics.inflight_enqueued // 0')
     inflight_wait=$(echo "$json" | jq -r '.server_metrics.inflight_wait_avg_us // 0')
     local co_factor
-    co_factor=$(awk "BEGIN { if ($wal_per_node > 0) printf \"%.1f\", $ops_s * 10 / $wal_per_node }")
+    co_factor=$(awk "BEGIN { if ($wal_per_node > 0) printf \"%.1f\", $total_ops / $wal_per_node }")
     echo "    ops/s=$ops_s wal/node=$wal_per_node co=${co_factor}/${COALESCE} p50=${p50_us}us p99=${p99_us}us err=$errors"
     echo "    rpc_agg: srv sagg=${srv_sa} ragg=${srv_ra} s2w=${srv_s2w}us | cli sagg=${cli_sa} ragg=${cli_ra} s2w=${cli_s2w}us"
     echo "    replica: r2=${r2_avg}us/${r2_tps}tps r3=${r3_avg}us/${r3_tps}tps"
@@ -111,15 +114,19 @@ run_bench() {
     echo -e "$label\t$WIN\t$COALESCE\t${RPC_WORKERS:-2}\t$ops_s\t$wal_per_node\t$p50_us\t$p99_us\t$errors\t$srv_sa\t$srv_ra\t$cli_sa\t$cli_ra\t$r2_avg\t$r2_tps\t$r3_avg\t$r3_tps\t$inflight_enq\t$inflight_wait" >> "$RESULTS_FILE"
 }
 
-# deploy_group <name> <win> <coalesce> <rpc_workers>
+# deploy_group <name> <win> <coalesce> <rpc_workers> <drain_threshold>
 # Deploy a 3-node cluster with the given server tunables via local-deploy.
 deploy_group() {
-    local name="$1" win="$2" coalesce="$3" workers="$4"
+    local name="$1" win="$2" coalesce="$3" workers="$4" drain="$5"
     local config_file="/tmp/bench-write-reg-${name}.toml"
-    echo "=== deploying cluster '$name' (win=$win, coalesce=$coalesce, workers=$workers) ==="
+    echo "=== deploying cluster '$name' (win=$win, coalesce=$coalesce, workers=$workers, drain=$drain) ==="
     rm -f "$config_file"
-    CROWDB_RPC_WORKERS="$workers" pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
-        cluster local-deploy -n 3 -t kv 2>&1 | tail -3
+    pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
+        cluster local-deploy -n 3 -t kv \
+        --event-write --peer-pool-size 4 \
+        --max-inflight "$win" --coalesce-max-keys "$coalesce" \
+        --coalesce-drain-threshold "$drain" \
+        --rpc-workers "$workers" 2>&1 | tail -3
     # Store config path for run_bench/teardown_group.
     echo "$config_file" > "/tmp/bench-write-reg-${name}.cfgpath"
 }
@@ -187,10 +194,10 @@ teardown_group() {
 
 echo -e "label\twin\tcoalesce\tworkers\tops_s\twal_per_node\tp50_us\tp99_us\terrors\tsrv_sagg\tsrv_ragg\tcli_sagg\tcli_ragg\tr2_avg\tr2_tps\tr3_avg\tr3_tps\tinflight_enq\tinflight_wait_us" > "$RESULTS_FILE"
 
-# Group A: win=32, coalesce=16 (5 sub-tests, workers=2 except 128T+)
+# Group A: win=32, coalesce=16, drain=1 (skip drain when other rounds in-flight) (5 sub-tests, workers=2 except 128T+)
 DEPLOY_A="write-reg-A-$$-$(date +%s)"
-WIN=32 COALESCE=16 RPC_WORKERS=2 deploy_group "$DEPLOY_A" 32 16 2
-echo "=== write (win=32, coalesce=16) ==="
+WIN=32 COALESCE=16 RPC_WORKERS=2 deploy_group "$DEPLOY_A" 32 16 2 1
+echo "=== write (win=32, coalesce=16, drain=1) ==="
 WIN=32 COALESCE=16 RPC_WORKERS=2 run_bench "$DEPLOY_A" 1 1 "write_1t_1c_win32_coales16"           # ref: 4,019 ops/s
 WIN=32 COALESCE=16 RPC_WORKERS=2 run_bench "$DEPLOY_A" 16 2 "write_16t_2c_win32_coales16"         # ref: 63,668 ops/s
 WIN=32 COALESCE=16 RPC_WORKERS=2 run_bench "$DEPLOY_A" 64 4 "write_64t_4c_win32_coales16"         # ref: 157,310 ops/s
@@ -198,10 +205,10 @@ WIN=32 COALESCE=16 RPC_WORKERS=4 run_bench "$DEPLOY_A" 128 4 "write_128t_4c_win3
 WIN=32 COALESCE=16 RPC_WORKERS=4 run_bench "$DEPLOY_A" 256 8 "write_256t_8c_win32_coales16"       # ref: 187,452 ops/s
 teardown_group "$DEPLOY_A"
 
-# Group B: win=64, coalesce=64 (2 sub-tests, workers=4)
+# Group B: win=64, coalesce=64, drain=1 (skip drain when other rounds in-flight) (2 sub-tests, workers=4)
 DEPLOY_B="write-reg-B-$$-$(date +%s)"
-WIN=64 COALESCE=64 RPC_WORKERS=4 deploy_group "$DEPLOY_B" 64 64 4
-echo "=== write (win=64, coalesce=64) ==="
+WIN=64 COALESCE=64 RPC_WORKERS=4 deploy_group "$DEPLOY_B" 64 64 4 1
+echo "=== write (win=64, coalesce=64, drain=1) ==="
 WIN=64 COALESCE=64 RPC_WORKERS=4 run_bench "$DEPLOY_B" 512 16 "write_512t_16c_win64_coales64"     # ref: 233,601 ops/s
 WIN=64 COALESCE=64 RPC_WORKERS=4 run_bench "$DEPLOY_B" 1000 16 "write_1000t_16c_win64_coales64"   # ref: 208,114 ops/s
 teardown_group "$DEPLOY_B"

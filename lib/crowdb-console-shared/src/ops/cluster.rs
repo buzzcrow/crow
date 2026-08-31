@@ -239,17 +239,14 @@ pub async fn topology(ctx: &OpContext, node_id: u64) -> Result<Vec<crate::snapsh
 pub async fn reset(ctx: &OpContext) -> Result<()> {
     let cfg = ctx.config().clone();
 
-    // Phase 1: stop all running servers.
+    // Phase 1: stop all running servers (Kv, Diskdb, Rpc).
     for server in &cfg.servers {
-        if server.service_type != crate::config::ServiceType::Kv {
-            continue;
-        }
         if let Some(pid) = server.pid {
             let _ = crate::lifecycle::stop_pid(pid);
         }
     }
 
-    // Phase 2: remove all non-system groups from each node.
+    // Phase 2: remove all non-system groups from each KV node.
     for server in &cfg.servers {
         if server.service_type != crate::config::ServiceType::Kv {
             continue;
@@ -336,12 +333,44 @@ pub struct LocalDeploySummary {
 /// servers (logs, data). If `None`, a temp directory is used.
 ///
 /// # Errors
+/// Optional server tunables for [`local_deploy`]. `None` fields leave
+/// the spawned server's own default in effect.
+#[derive(Debug, Clone, Default)]
+pub struct KvDeployTunables {
+    /// `--rpc-workers` value.
+    pub rpc_workers: Option<u32>,
+    /// `--peer-pool-size` value.
+    pub peer_pool_size: Option<usize>,
+    /// `--max-inflight` value.
+    pub max_inflight: Option<usize>,
+    /// `--coalesce-max-keys` value.
+    pub coalesce_max_keys: Option<usize>,
+    /// `--coalesce-drain-threshold` value.
+    pub coalesce_drain_threshold: Option<usize>,
+    /// `--event-write` flag.
+    pub event_write: Option<bool>,
+    /// `--send-queue-capacity` value.
+    pub send_queue_capacity: Option<u32>,
+}
+
+/// Deploy a local N-node KV cluster on `127.0.0.1`: creates rack 1,
+/// nodes 1..=N in the config, forks a `crowdb-kv-server` on each node
+/// with auto-allocated ports, then bootstraps group 0 via [`init`].
+///
+/// The `workspace_dir` is used as the runtime root for the spawned
+/// servers (logs, data). If `None`, a temp directory is used.
+///
+/// `tunables` overrides server-side flags (`--event-write`,
+/// `--peer-pool-size`, etc.). `None` uses server defaults.
+///
+/// # Errors
 /// Returns [`Error::NotFound`] if the `crowdb-kv-server` binary cannot
 /// be located. Returns [`Error::Io`] on spawn/readiness failures.
 pub async fn local_deploy(
     ctx: &OpContext,
     node_count: usize,
     workspace_dir: Option<&std::path::Path>,
+    tunables: Option<&KvDeployTunables>,
 ) -> Result<LocalDeploySummary> {
     if node_count == 0 {
         return Err(Error::Validation {
@@ -363,14 +392,12 @@ pub async fn local_deploy(
 
     let workspace = workspace_dir.map_or_else(default_workspace, std::path::PathBuf::from);
     std::fs::create_dir_all(&workspace)?;
-    std::fs::create_dir_all(workspace.join("bin"))?;
-    std::fs::create_dir_all(workspace.join("log"))?;
 
     let rack_id: u64 = 1;
     let node_ids: Vec<u64> = (1..=u64::try_from(node_count).unwrap_or(u64::MAX)).collect();
 
     write_rack_and_nodes(ctx, rack_id, &node_ids);
-    deploy_servers(ctx, &bin, &workspace, rack_id, &node_ids).await?;
+    deploy_servers(ctx, &bin, &workspace, rack_id, &node_ids, tunables).await?;
 
     // Re-seed the group-0 leader hint to the first deployed server's
     // RPC endpoint so sysdata writes during `init` target the right node.
@@ -395,11 +422,14 @@ pub async fn local_deploy(
     })
 }
 
-/// Default temp workspace path for `local_deploy` when no explicit
-/// `workspace_dir` is provided.
+/// Default workspace path for `local_deploy` when no explicit
+/// `workspace_dir` is provided. Uses a project-local `cli-deploy/`
+/// directory (resolved from CWD) so logs and data survive for
+/// inspection instead of being lost in `/tmp`.
 fn default_workspace() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "crowdb-local-deploy-{}-{}",
+    let base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    base.join("cli-deploy").join(format!(
+        "{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -443,6 +473,7 @@ async fn deploy_servers(
     workspace: &std::path::Path,
     rack_id: u64,
     node_ids: &[u64],
+    tunables: Option<&KvDeployTunables>,
 ) -> Result<()> {
     let port_base = test_ports::unique_test_port_range(u16::try_from(node_ids.len() * 2).unwrap_or(u16::MAX));
     for (i, nid) in node_ids.iter().enumerate() {
@@ -461,6 +492,13 @@ async fn deploy_servers(
             rpc_port,
             election_profile: Some("e2e".into()),
             binary: Some(bin.to_path_buf()),
+            rpc_workers: tunables.and_then(|t| t.rpc_workers),
+            peer_pool_size: tunables.and_then(|t| t.peer_pool_size),
+            max_inflight: tunables.and_then(|t| t.max_inflight),
+            coalesce_max_keys: tunables.and_then(|t| t.coalesce_max_keys),
+            coalesce_drain_threshold: tunables.and_then(|t| t.coalesce_drain_threshold),
+            event_write: tunables.and_then(|t| t.event_write),
+            send_queue_capacity: tunables.and_then(|t| t.send_queue_capacity),
             ..Default::default()
         };
         let node_entry = NodeEntry {
@@ -472,7 +510,14 @@ async fn deploy_servers(
             ssh_key: None,
             ssh_password: None,
         };
-        let deployed = lifecycle::deploy_local_in_dir(&req, &node_entry, workspace).await?;
+        // Each node gets its own subdirectory under the workspace so
+        // WAL data, btree data, and logs are isolated per kv-server.
+        let node_dir = workspace
+            .join(format!("rack{rack_id}"))
+            .join(format!("node{nid}"));
+        std::fs::create_dir_all(node_dir.join("log"))?;
+        std::fs::create_dir_all(node_dir.join("bin"))?;
+        let deployed = lifecycle::deploy_local_in_dir(&req, &node_entry, &node_dir).await?;
 
         let mut cfg = ctx.config_mut();
         cfg.add_server(ServerEntry {
@@ -492,4 +537,163 @@ async fn deploy_servers(
         })?;
     }
     Ok(())
+}
+
+// ── RPC fb-server deploy ──────────────────────────────────────────
+
+/// Summary of a completed RPC fb-server deploy.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RpcDeploySummary {
+    pub port: u16,
+    pub pid: u32,
+    pub io_engines: u32,
+    pub io_workers: u32,
+    pub nagle: bool,
+}
+
+/// Configuration for [`local_deploy_rpc`].
+#[derive(Debug, Clone)]
+pub struct RpcDeployConfig {
+    /// Listen port. 0 = auto-allocate.
+    pub port: u16,
+    pub io_engines: u32,
+    pub io_workers: u32,
+    pub enable_nagle: bool,
+    pub metrics_interval: u32,
+}
+
+impl Default for RpcDeployConfig {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            io_engines: 1,
+            io_workers: 1,
+            enable_nagle: false,
+            metrics_interval: 2,
+        }
+    }
+}
+
+/// Deploy a standalone `crowdb-rpc-fb-server` (C++ echo server) on
+/// `127.0.0.1`. Spawns the process, waits for the `listening port=`
+/// readiness line on stdout, and records the PID + port in the config
+/// so `cluster reset` can stop it.
+///
+/// Unlike [`local_deploy`], this does not create rack/node entries or
+/// bootstrap group 0 — the fb-server is a raw RPC echo endpoint with
+/// no KV layer.
+///
+/// # Errors
+/// Returns [`Error::NotFound`] if the binary cannot be located.
+/// Returns [`Error::Io`] on spawn or readiness failures.
+pub async fn local_deploy_rpc(
+    ctx: &OpContext,
+    cfg: &RpcDeployConfig,
+    workspace_dir: Option<&std::path::Path>,
+) -> Result<RpcDeploySummary> {
+    let bin = lifecycle::crowdb_rpc_fb_server_bin().ok_or_else(|| Error::NotFound {
+        kind: "binary".into(),
+        id: "crowdb-rpc-fb-server".into(),
+    })?;
+    if !bin.exists() {
+        return Err(Error::NotFound {
+            kind: "binary".into(),
+            id: bin.display().to_string(),
+        });
+    }
+
+    let port = if cfg.port == 0 {
+        test_ports::unique_test_port()
+    } else {
+        cfg.port
+    };
+
+    let workspace = workspace_dir.map_or_else(default_workspace, std::path::PathBuf::from);
+    let log_dir = workspace.join("log");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg(format!("--port={port}"))
+        .arg(format!("--io_engines={}", cfg.io_engines))
+        .arg(format!("--io_workers={}", cfg.io_workers))
+        .arg(format!("--logdir={}", log_dir.display()))
+        .arg(format!("--metrics_interval={}", cfg.metrics_interval));
+    if cfg.enable_nagle {
+        cmd.arg("--enable_nagle");
+    }
+    // Redirect stdout/stderr to a log file so the child doesn't get
+    // SIGPIPE when the CLI exits. The fb-server also writes structured
+    // logs to --logdir, but stdout has the "listening port=" line.
+    let stdout_path = log_dir.join("fb-server.stdout.log");
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_path)
+        .map_err(Error::Io)?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(stdout_path)
+        .map_err(Error::Io)?;
+    cmd.stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr));
+
+    let child = cmd.spawn()?;
+
+    let pid = child.id();
+    let ready = wait_for_rpc_ready(port, pid, 10).await;
+
+    if !ready {
+        let _ = lifecycle::stop_pid(pid);
+        return Err(Error::Io(std::io::Error::other(format!(
+            "crowdb-rpc-fb-server did not bind on port {port} within 10s"
+        ))));
+    }
+
+    // Record in config so reset() can stop it.
+    let server_id = format!("rpc-fb-{pid}");
+    let mut config = ctx.config_mut();
+    config.add_server(ServerEntry {
+        id: server_id.clone(),
+        url: format!("http://127.0.0.1:{port}"),
+        node_id: None,
+        rpc_url: Some(format!("http://127.0.0.1:{port}")),
+        rest_port: None,
+        rpc_port: Some(port),
+        auto_start: false,
+        binary: Some(bin.display().to_string()),
+        election_profile: None,
+        pid: Some(pid),
+        service_type: ServiceType::Rpc,
+        rpc_workers: None,
+        no_fsync: false,
+    })?;
+
+    Ok(RpcDeploySummary {
+        port,
+        pid,
+        io_engines: cfg.io_engines,
+        io_workers: cfg.io_workers,
+        nagle: cfg.enable_nagle,
+    })
+}
+
+/// Poll-connect to `127.0.0.1:port` until success or timeout. Drops
+/// the stdout pipe (the fb-server writes logs to `--logdir`, not stdout
+/// — stdout is only used for the `listening port=` line which we don't
+/// need since we know the port).
+async fn wait_for_rpc_ready(port: u16, pid: u32, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        if !lifecycle::process_is_alive(pid) {
+            return false;
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }

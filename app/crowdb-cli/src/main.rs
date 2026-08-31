@@ -96,6 +96,27 @@ enum ChunkVerb {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Initialize file logging to cli-log/ so tracing events (warnings,
+    // errors, transport failures) are captured for post-mortem analysis.
+    // The C++ crowdb-rpc transport also gets its own log file here.
+    let log_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("cli-log");
+    let _ = crowdb_common::logging::init_file_logging(
+        &log_dir,
+        "crowdb-cli",
+        50,
+        5,
+        "warn,crowdb_cli=info,crowdb_console_shared=info,crowdb_kv_client=info",
+    );
+    crowdb_rpc_ffi::init_logging(
+        log_dir.to_str().unwrap_or("cli-log"),
+        "info",
+        50,
+        5,
+        "crowdb-cli-rpc",
+    );
+
     crowdb_console_shared::ops_log::init_default("cli");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

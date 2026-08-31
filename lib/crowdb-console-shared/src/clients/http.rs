@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::snapshot::{HealthInfo, MetricsResponse, StoreView, TopologyResponse};
+use crate::snapshot::{HealthInfo, MetricsResponse, StoreView, TopologyResponse, WipeResult};
 
 /// Thin wrapper around a `reqwest::Client` bound to one `crowdb-kv-server`
 /// management base URL (e.g. `http://127.0.0.1:9910`).
@@ -139,6 +139,60 @@ impl ServerClient {
             });
         }
         Ok(())
+    }
+
+    /// `POST /stores/{sid}/groups/{gid}/wipe-user-data` — drop and
+    /// recreate the WAL + engine user data for the group on this node.
+    /// Used by `bench kv clean` to reset a cluster between write
+    /// sub-tests without a full redeploy.
+    ///
+    /// # Errors
+    /// Returns `Error::UpstreamRpc` for transport failures or a non-2xx
+    /// response.
+    pub async fn wipe_user_data(&self, store_id: u64, group_id: u64) -> Result<WipeResult> {
+        let path = format!("/stores/{store_id}/groups/{group_id}/wipe-user-data");
+        let url = format!("{}{path}", self.base_url);
+        let cid = crate::corr_id::current_or_new();
+        let started = std::time::Instant::now();
+        let resp = self
+            .inner
+            .post(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "POST",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                Error::UpstreamRpc {
+                    node_id: self.base_url.clone(),
+                    status: format!("POST {path}: {e}"),
+                }
+            })?;
+        let status = resp.status();
+        crate::ops_log::append_http(
+            &cid,
+            "POST",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
+        if !status.is_success() {
+            return Err(Error::UpstreamRpc {
+                node_id: self.base_url.clone(),
+                status: format!("POST {path}: HTTP {status}"),
+            });
+        }
+        resp.json::<WipeResult>().await.map_err(|e| Error::UpstreamRpc {
+            node_id: self.base_url.clone(),
+            status: format!("POST {path}: decode error: {e}"),
+        })
     }
 
     pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {

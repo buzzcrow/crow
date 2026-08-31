@@ -660,6 +660,38 @@ pub fn crowdb_diskdb_bin() -> Option<PathBuf> {
     None
 }
 
+/// Locate the standalone `crowdb-rpc-fb-server` C++ binary (built via
+/// `pixi run build-cpp`). Search order: `$CROWDB_RPC_FB_SERVER_BIN`,
+/// `lib/crowdb-rpc/build/crowdb-rpc-fb-server` relative to the repo
+/// root (walked up from the current exe), then `$PATH`.
+pub fn crowdb_rpc_fb_server_bin() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CROWDB_RPC_FB_SERVER_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    // The fb-server is a CMake target under lib/crowdb-rpc/build/.
+    // Walk up from the exe dir to find the repo root, then check the
+    // expected build path.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let mut p = dir.to_path_buf();
+            for _ in 0..5 {
+                let candidate = p.join("lib/crowdb-rpc/build/crowdb-rpc-fb-server");
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
+                if !p.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(path) = find_in_path(std::ffi::OsStr::new("crowdb-rpc-fb-server")) {
+        return Some(path);
+    }
+    warn!("crowdb-rpc-fb-server binary not found via env, repo build, or $PATH");
+    None
+}
+
 /// Resolve the `--config` path for a diskdb deploy. Uses the
 /// pre-copied config at `<workspace>/conf/crowdb_diskdb_config.toml`.
 /// Falls back to a minimal auto-generated config with all required

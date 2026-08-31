@@ -13,6 +13,7 @@
 
 mod buffer;
 mod client;
+pub mod co_bench;
 pub mod logging;
 mod server;
 pub mod sys;
