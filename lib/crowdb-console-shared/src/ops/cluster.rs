@@ -164,11 +164,39 @@ pub async fn init(ctx: &OpContext, nodes: &[u64]) -> Result<InitSummary> {
         .iter()
         .filter_map(|(nid, _)| ctx.node_mgmt_url(*nid).ok())
         .collect();
-    ctx.kv().set_mgmt_seeds(mgmt_seeds);
-    for (nid, _) in &succeeded {
-        if let Some(ep) = rpc_endpoint_for_store(ctx, *nid, 0).await {
-            ctx.kv().seed_leader(0, 0, ep);
-            break;
+    ctx.kv().set_mgmt_seeds(mgmt_seeds.clone());
+
+    // For multi-node init, the election driver starts after remotes are
+    // wired (Phase 2) but the leader isn't elected yet. Wait for the
+    // leader before seeding + writing sysdata — otherwise sysdata writes
+    // fail with "not leader" and callers see spurious errors.
+    if !single_node {
+        if let Some(leader_url) = wait_for_leader(&mgmt_seeds, std::time::Duration::from_secs(10)).await {
+            if let Ok(sc) = ServerClient::new(&leader_url) {
+                if let Ok(topo) = sc.topology().await {
+                    for store in &topo {
+                        if store.store_id == 0 {
+                            for group in &store.groups {
+                                if group.group_id == 0 && group.leader_id > 0 {
+                                    for remote in &group.remotes {
+                                        if remote.id == group.leader_id {
+                                            ctx.kv().seed_leader(0, 0, remote.endpoint.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (nid, _) in &succeeded {
+            if let Some(ep) = rpc_endpoint_for_store(ctx, *nid, 0).await {
+                ctx.kv().seed_leader(0, 0, ep);
+                break;
+            }
         }
     }
 

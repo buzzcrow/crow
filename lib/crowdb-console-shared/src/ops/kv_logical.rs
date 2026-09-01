@@ -19,6 +19,37 @@ use crate::config::ReplicaEntry;
 use crate::error::{Error, Result};
 use crate::ops::OpContext;
 
+/// Retry a sysdata write with backoff. Group-0 leader election may not
+/// have settled when `cluster_init` returns, causing "not leader" errors
+/// on the first attempt. Up to 5 attempts with 200ms backoff.
+async fn retry_sysmd<F, Fut, T, E>(label: &str, f: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display + Into<Error>,
+{
+    let mut last_err = None;
+    for attempt in 0..5u32 {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let msg = format!("{e}");
+                if !msg.contains("not leader") && !msg.contains("retries exhausted") {
+                    return Err(e.into());
+                }
+                last_err = Some(e);
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.map(Into::into).unwrap_or_else(|| Error::UpstreamRpc {
+        node_id: label.into(),
+        status: "sysmd write exhausted retries".into(),
+    }))
+}
+
 /// Build a [`ServerClient`] for a node's deployed kv-server.
 fn server_client(ctx: &OpContext, node_id: u64) -> Result<ServerClient> {
     let url = ctx.node_mgmt_url(node_id)?;
@@ -110,8 +141,13 @@ pub async fn add_store(ctx: &OpContext, store_id: u64, nodes: &[u64]) -> Result<
         }
     }
 
-    // Record in group-0 sysdata + local config.
-    let _ = ctx.sysmd().add_store(store_id, &succeeded).await;
+    // Record in group-0 sysdata + local config. The sysdata write must
+    // succeed — add_group reads sysdata to find the store, and a missing
+    // store record causes a spurious 404.
+    retry_sysmd("add_store", || async {
+        ctx.sysmd().add_store(store_id, &succeeded).await
+    })
+    .await?;
     {
         let mut cfg = ctx.config_mut();
         cfg.record_store(store_id, succeeded.clone());
@@ -233,10 +269,15 @@ pub async fn add_group(
         }
     }
 
-    // Record in group-0 sysdata + local config.
-    let _ = ctx.sysmd().add_group(store_id, group_id).await;
+    // Record in group-0 sysdata + local config. The sysdata write must
+    // succeed — add_replica reads sysdata to find existing replicas, and
+    // a missing group record causes a spurious 404.
+    retry_sysmd("add_group", || async {
+        ctx.sysmd().add_group(store_id, group_id).await
+    })
+    .await?;
     for (node_id, replica_id) in &succeeded {
-        record_replica(ctx, store_id, group_id, *replica_id, *node_id).await;
+        record_replica(ctx, store_id, group_id, *replica_id, *node_id).await?;
     }
     let replicas: Vec<ReplicaEntry> = succeeded
         .iter()
@@ -470,12 +511,12 @@ pub async fn add_replica(
     }
 
     // Record in group-0 sysdata + local config.
-    record_replica(ctx, store_id, group_id, new_rid, node_id).await;
+    record_replica(ctx, store_id, group_id, new_rid, node_id).await?;
     Ok(new_rid)
 }
 
 /// Record a new replica in group-0 sysdata + the local config.
-async fn record_replica(ctx: &OpContext, store_id: u64, group_id: u64, replica_id: u64, node_id: u64) {
+async fn record_replica(ctx: &OpContext, store_id: u64, group_id: u64, replica_id: u64, node_id: u64) -> Result<()> {
     let value = crowdb_protocol::common::ReplicaValue {
         store_id,
         group_id,
@@ -485,12 +526,16 @@ async fn record_replica(ctx: &OpContext, store_id: u64, group_id: u64, replica_i
         voting: true,
         endpoint: String::new(),
     };
-    let _ = ctx.sysmd().add_replica(&value).await;
+    retry_sysmd("add_replica", || async {
+        ctx.sysmd().add_replica(&value).await
+    })
+    .await?;
     {
         let mut cfg = ctx.config_mut();
         cfg.ensure_store_node(store_id, node_id);
         cfg.add_group_replica(store_id, group_id, ReplicaEntry { replica_id, node_id });
     }
+    Ok(())
 }
 
 /// Remove a replica: deregister from peers, delete local group, step
