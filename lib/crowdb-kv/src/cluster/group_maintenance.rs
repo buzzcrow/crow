@@ -83,23 +83,29 @@ pub(crate) fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationTo
 }
 
 async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) {
+    let mut last_flush = std::time::Instant::now();
     loop {
         let Some(g) = group.upgrade() else { return };
         // Gap 5 step 2: wait for either a flush signal (memtable froze),
         // the tick timeout (watchdog), or cancellation. The flush signal
         // makes drain rate track write rate; the tick is now a safety net
         // for idle/low-write tails, not the primary flush trigger.
-        tokio::select! {
+        let by_notify = tokio::select! {
             () = cancel.cancelled() => return,
-            () = g.flush_notify.notified() => {}
-            () = tokio::time::sleep(tick) => {}
+            () = g.flush_notify.notified() => true,
+            () = tokio::time::sleep(tick) => false,
+        };
+        // On tick: skip flush if we recently flushed via notify (proactive).
+        // The tick is a safety net for idle periods — if writes are active,
+        // flush_notify already drains small batches promptly. Skipping the
+        // tick flush avoids force-freezing the active table and draining a
+        // large batch, which would create big per-leaf deltas and trigger
+        // excessive consolidation.
+        let do_flush = by_notify || last_flush.elapsed() >= tick;
+        run_pass(&g, do_flush).await;
+        if do_flush {
+            last_flush = std::time::Instant::now();
         }
-        run_pass(&g).await;
-        // Gap 5 step 2: if the engine still has frozen memtables after
-        // this pass (writes continued during the pass), loop back to the
-        // select! immediately without any extra sleep — the flush didn't
-        // catch up, so try again. The select! itself waits on
-        // flush_notify / tick / cancel, so this just re-enters that wait.
     }
 }
 
@@ -174,8 +180,10 @@ async fn persist_snapshot_blocking(
 
 /// Run one maintenance pass. Exposed `pub(crate)` so tests can drive a
 /// single deterministic pass without waiting on the periodic loop's timer.
+/// `do_flush`: when false, skip the flush phase (tick woke the loop but a
+/// recent proactive flush already drained — only check snapshot/WAL).
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn run_pass(group: &PxGroup) {
+pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     let engine = group.local_replica().learner.engine();
     if !engine.is_healthy() {
         error!(
@@ -188,32 +196,36 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         );
     }
 
-    // 1. Flush every tick: drain L0 memtable into L1 in memory (cheap no-op
-    //    when L0 is empty). Advances last_applied_slot in memory only.
+    // 1. Flush: drain L0 memtable into L1 in memory (cheap no-op when L0
+    //    is empty). Advances last_applied_slot in memory only. Skipped on
+    //    tick wakes when a recent proactive flush already drained — avoids
+    //    force-freezing the active table and draining a large batch.
     // Runs on a blocking thread because flush holds the C++ write_mutex_.
-    let flush_start = std::time::Instant::now();
-    let engine_arc = group.local_replica().learner.engine_arc();
-    let group_id = group.group_id();
-    tokio::task::spawn_blocking(move || engine_arc.flush())
-        .await
-        .unwrap_or_else(|e| {
-            error!(
-                group_id,
-                error = %e,
-                "maintenance: flush blocking task panicked"
-            );
-        });
-    debug!(
-        group_id = group.group_id(),
-        replica_id = group.local_replica().id,
-        elapsed_ms = u64::try_from(flush_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "maintenance: flush phase complete"
-    );
+    if do_flush {
+        let flush_start = std::time::Instant::now();
+        let engine_arc = group.local_replica().learner.engine_arc();
+        let group_id = group.group_id();
+        tokio::task::spawn_blocking(move || engine_arc.flush())
+            .await
+            .unwrap_or_else(|e| {
+                error!(
+                    group_id,
+                    error = %e,
+                    "maintenance: flush blocking task panicked"
+                );
+            });
+        debug!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            elapsed_ms = u64::try_from(flush_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "maintenance: flush phase complete"
+        );
 
-    // Gap 5 step 4: increment flush counter for the snapshot trigger.
-    group
-        .flushes_since_snapshot
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Gap 5 step 4: increment flush counter for the snapshot trigger.
+        group
+            .flushes_since_snapshot
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // 2. Conditionally persist a durable snapshot to disk (expensive: sync +
     //    page writes). Three triggers: slot advance, time elapsed, or

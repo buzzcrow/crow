@@ -27,12 +27,12 @@ struct Options
 {
     // ── Consolidation (core doc §7) ──
     // Fold a leaf's delta chain into a fresh base when either threshold trips.
-    // O3: doubled from 8/256KiB to 16/512KiB to reduce consolidate frequency
-    // during flush drain (~127 → ~64 calls for 277K entries). Larger delta
-    // chains slow reads slightly between flushes (longer chain resolution)
-    // but the snapshot's prepare_snapshot_locked already folds chains, so
-    // deferring the fold to snapshot time is safe.
-    uint32_t max_delta_len   = 16;
+    // O3: max_delta_len raised from 16 to 64 — with flush_notify draining
+    // small batches (1-2 frozen tables per flush), the chain grows slowly.
+    // 64 gives headroom for sustained write bursts before consolidation
+    // fires. max_delta_bytes stays at 512 KiB. The snapshot's
+    // prepare_snapshot_locked folds chains, so deferring the fold is safe.
+    uint32_t max_delta_len   = 64;
     size_t   max_delta_bytes = 512ULL * 1024; // 512 KiB
 
     // ── Leaf split / merge (core doc §8) ──
