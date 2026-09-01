@@ -35,7 +35,6 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | Doc | When to read |
 | --- | --- |
 | `doc/working/plan-test.md` | Unfinished test task backlog. Read when picking the next test to implement. **Do not delete** — persistent backlog, not a per-task draft. |
-| `doc/working/todo_tree.md` | crowdb-tree drain & snapshot `write_mutex_` optimization plan. Read before working on flush/snapshot lock scope or drain pipelining. |
 | `doc/design/kv/kv-read-flow-analysis.md` | KV point-read flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-scan-flow-analysis.md` | KV scan flow trace, benchmarks, open issues. |
 | `doc/design/kv/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. |
