@@ -230,7 +230,7 @@ struct EngineStats
     uint64_t mt_upsert_total     = 0; // apply() writes into L0
     uint64_t mt_get_total        = 0; // get() lookups in L0
     uint64_t mt_get_hit_total    = 0; // L0 lookups that found a cell
-    uint64_t flush_drain_total   = 0; // drain_memtable_into_l1 calls
+    uint64_t flush_drain_total   = 0; // drain_all_frozen_locked calls
     uint64_t flush_entries_total = 0; // entries drained from L0 to L1
     uint64_t snapshot_total      = 0; // snapshot() calls (durable checkpoints)
     uint64_t l1_get_total        = 0; // get() lookups that descended to L1
@@ -697,6 +697,11 @@ class Crowdbtree
     // not-yet-drained frozen_ buffers), not just active_.
     [[nodiscard]] size_t memtable_count() const;
 
+    // Gap 5 step 2: number of frozen memtables waiting to be drained.
+    // The maintenance loop polls this to decide whether to flush
+    // immediately or sleep until the next tick.
+    [[nodiscard]] size_t frozen_table_count() const;
+
     MappingTable &mapping()
     {
         return mapping_;
@@ -812,17 +817,29 @@ class Crowdbtree
     // apply()/force_advance_slot(). Draining is the separate, explicit job
     // of flush() (background thread or caller-invoked).
     void maybe_swap_active();
-    // Drain `mt`'s slot <= cs eligible entries into L1 via the normal
-    // per-leaf delta-append path (same mechanism regardless of which
-    // MemTable -- active_ or a frozen_ entry -- they came from). Returns
-    // true if anything was written. Caller holds write_mutex_.
-    bool drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs);
+    // Drain all frozen memtables in one k-way sorted merge (O5) with
+    // sort-aware descent (O1). Replaces the per-memtable drain loop in
+    // flush(). Returns true if any entries were written to L1. Caller
+    // holds write_mutex_.
+    bool drain_all_frozen_locked(std::deque<std::shared_ptr<MemTable>> &to_drain, std::shared_ptr<MemTable> &active,
+                                 uint64_t cs);
+    // Publish a group of sorted leaf entries to `page_id` via the delta
+    // path (in-frame or heap BatchDelta). Returns true if a consolidate
+    // fired (caller should invalidate cached leaf info). Caller holds
+    // write_mutex_.
+    bool publish_group_to_leaf_locked(uint64_t page_id, uint64_t cs, std::vector<leaf_entry> group);
     // Snapshot import (install_snapshot): drop every live MemTable's content
     // and install one fresh, empty active_. Caller holds write_mutex_.
     void reset_memtables_locked();
 
     void consolidate_locked(uint64_t page_id);          // caller holds write_mutex_
     void maybe_split_or_merge_locked(uint64_t page_id); // dispatch on leaf size
+    // O4: set parent_page_id on all children of the inner page at `page_id`.
+    // Caller holds write_mutex_.
+    void set_children_parent_locked(uint64_t page_id, uint64_t parent_page_id);
+    // O4: store `new_page` at `page_id`, preserving parent_page_id from the
+    // old page. Caller holds write_mutex_.
+    void store_preserving_parent_locked(uint64_t page_id, PageBase *new_page);
     // Inner PIDs from root down to (but excluding) the leaf `target_page_id`.
     std::vector<uint64_t> path_to_page_id_locked(uint64_t target_page_id) const;
     void                  split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path);
@@ -1125,7 +1142,7 @@ class Crowdbtree
     // already folded into L1), so a hit in any live table never needs an L1
     // fallback.
     //
-    // Write-side correctness (flush()/drain_memtable_into_l1_locked()): a
+    // Write-side correctness (flush()/drain_all_frozen_locked()): a
     // drained key is appended to its target leaf's delta chain, never
     // written in place, and every reader of that chain (resolve_chain /
     // resolve_chain_sorted) resolves highest-slot-wins across the *whole*
@@ -1180,7 +1197,7 @@ class Crowdbtree
     mutable std::atomic<uint64_t> mt_upsert_total_{0};     // apply() writes into L0
     mutable std::atomic<uint64_t> mt_get_total_{0};        // get() lookups in L0
     mutable std::atomic<uint64_t> mt_get_hit_total_{0};    // L0 lookups that found a cell
-    mutable std::atomic<uint64_t> flush_drain_total_{0};   // drain_memtable_into_l1 calls
+    mutable std::atomic<uint64_t> flush_drain_total_{0};   // drain_all_frozen_locked calls
     mutable std::atomic<uint64_t> flush_entries_total_{0}; // entries drained from L0 to L1
     mutable std::atomic<uint64_t> snapshot_total_{0};      // snapshot() calls (durable checkpoints)
     mutable std::atomic<uint64_t> l1_get_total_{0};        // get() lookups that descended to L1

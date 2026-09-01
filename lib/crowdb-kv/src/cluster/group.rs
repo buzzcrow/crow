@@ -208,6 +208,16 @@ pub struct PxGroup {
     /// `run_pass` to gate periodic WAL durable flushes on
     /// `wal_flush_interval_ms`.
     pub(crate) last_wal_flush_time: parking_lot::Mutex<std::time::Instant>,
+    /// Gap 5 step 2: notified when a memtable freeze happens in the C++
+    /// engine, so the maintenance loop can flush immediately instead of
+    /// waiting for the next tick. Shared with the learner's apply path
+    /// via `set_flush_signal` so `apply_entry` can call `notify_one()`.
+    pub(crate) flush_notify: Arc<tokio::sync::Notify>,
+    /// Gap 5 step 4: count of flushes since the last `persist_snapshot`.
+    /// When this reaches `snapshot_flush_count_threshold`, trigger a
+    /// snapshot regardless of the slot/time thresholds. This is a proxy
+    /// for "enough new data has landed in L1 to be worth persisting".
+    pub(crate) flushes_since_snapshot: AtomicU64,
     /// Optional registry handles for read-path metrics. Set via
     /// [`Self::set_metrics_registry`] when a registry is wired.
     /// `None` in tests / no-registry mode.
@@ -319,6 +329,9 @@ impl std::fmt::Debug for PxGroup {
 
 impl PxGroup {
     pub fn new(group_id: PxGroupId, local_replica: PxLocalReplica) -> Self {
+        // O6: capture replica_id before the move into the struct for the
+        // per-replica snapshot jitter below.
+        let replica_id = local_replica.id;
         let mut group = Self {
             group_id,
             cached_quorum: 0,
@@ -353,8 +366,19 @@ impl PxGroup {
             node_config_store: None,
             membership_epoch: AtomicU64::new(0),
             last_snapshot_slot: AtomicU64::new(0),
-            last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
+            // O6: per-replica jitter to stagger snapshot timing. Offset the
+            // initial last_snapshot_time backward by replica_id * 200ms so
+            // each replica's time-threshold check fires at a different point
+            // in the tick cycle, avoiding synchronized I/O spikes across the
+            // cluster. Capped at 5s to avoid excessive delay for high IDs.
+            last_snapshot_time: parking_lot::Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis((replica_id * 200).min(5000)))
+                    .unwrap_or_else(std::time::Instant::now),
+            ),
             last_wal_flush_time: parking_lot::Mutex::new(std::time::Instant::now()),
+            flush_notify: Arc::new(tokio::sync::Notify::new()),
+            flushes_since_snapshot: AtomicU64::new(0),
             read_handles: OnceLock::new(),
             write_handles: OnceLock::new(),
             pending_read_barrier: parking_lot::Mutex::new(None),
@@ -377,6 +401,12 @@ impl PxGroup {
             .local_replica
             .learner
             .set_watch_registry(group_id, Arc::clone(&group.watch_registry));
+        // Gap 5 step 2: wire the flush signal so the apply path can wake
+        // the maintenance loop when a memtable freeze happens.
+        group
+            .local_replica
+            .learner
+            .set_flush_signal(Arc::clone(&group.flush_notify));
         group.recompute_quorum();
         group
     }

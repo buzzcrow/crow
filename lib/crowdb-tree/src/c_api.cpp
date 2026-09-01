@@ -398,6 +398,11 @@ uint64_t ct_last_applied_slot(const ct_tree *t)
     return t == nullptr ? 0 : t->tree->last_applied_slot();
 }
 
+size_t ct_frozen_table_count(const ct_tree *t)
+{
+    return t == nullptr ? 0 : t->tree->frozen_table_count();
+}
+
 void ct_set_gc_watermark(ct_tree *t, uint64_t snapshot_slot, uint64_t safe_slot)
 {
     if (t != nullptr) {

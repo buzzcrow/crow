@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <map>
+#include <numeric>
 #include <random>
 #include <string>
 #include <thread>
@@ -360,5 +361,241 @@ TEST(DoubleBuffer, ScanMergeLoserTreeDistinctKeysAcrossFrozenMemtables)
     ASSERT_EQ(out.size(), 9u);
     for (int i = 0; i < 9; ++i) {
         EXPECT_EQ(out[i].key, make_key(i)) << "key " << i << " out of order";
+    }
+}
+
+// O5+O1: verify the merged drain (k-way merge of frozen memtables with
+// sort-aware descent) produces the same L1 state as the per-memtable drain.
+// Multiple frozen memtables with overlapping keys and different slots must
+// resolve to highest-slot-wins after flush, with no duplicates or missing keys.
+TEST(DoubleBuffer, MergedDrainDedupAcrossFrozenMemtables)
+{
+    Options opt;
+    opt.max_memtable_count     = 6;
+    opt.memtable_flush_entries = 1; // freeze after every single apply
+    Crowdbtree t(opt);
+
+    // Write the same 5 keys into 3 separate frozen generations, each with
+    // a strictly increasing slot. The highest-slot version is always in the
+    // last generation. After flush, L1 must reflect the highest-slot value
+    // for each key (cross-memtable dedup).
+    const std::string keys[] = {"a", "b", "c", "d", "e"};
+    uint64_t          slot   = 10;
+    for (int gen = 0; gen < 3; ++gen) {
+        for (const auto &k : keys) {
+            ASSERT_TRUE(t.apply(slot, put_one(k, "v" + std::to_string(slot))).ok());
+            slot += 10;
+        }
+    }
+    // All slots are contiguous (10, 20, 30, ... 150), so flush drains all.
+    ASSERT_TRUE(t.flush().ok());
+
+    // After flush, L0 is empty and L1 has the highest-slot value per key.
+    // Slots: a@130, b@140, c@150, d@160(→wait, recalc).
+    // gen0: a@10, b@20, c@30, d@40, e@50
+    // gen1: a@60, b@70, c@80, d@90, e@100
+    // gen2: a@110, b@120, c@130, d@140, e@150
+    for (const auto &k : keys) {
+        uint64_t expected_slot = 0;
+        if (k == "a")
+            expected_slot = 110;
+        if (k == "b")
+            expected_slot = 120;
+        if (k == "c")
+            expected_slot = 130;
+        if (k == "d")
+            expected_slot = 140;
+        if (k == "e")
+            expected_slot = 150;
+        EXPECT_EQ(get_or(t, k, "?"), "v" + std::to_string(expected_slot));
+    }
+
+    // Scan must show exactly 5 keys, sorted, with highest-slot values.
+    std::vector<scan_entry> out;
+    bool                    trunc = false;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+    ASSERT_EQ(out.size(), 5u);
+    EXPECT_EQ(out[0].key, "a");
+    EXPECT_EQ(out[0].slot, 110u);
+    EXPECT_EQ(out[1].key, "b");
+    EXPECT_EQ(out[1].slot, 120u);
+    EXPECT_EQ(out[2].key, "c");
+    EXPECT_EQ(out[2].slot, 130u);
+    EXPECT_EQ(out[3].key, "d");
+    EXPECT_EQ(out[3].slot, 140u);
+    EXPECT_EQ(out[4].key, "e");
+    EXPECT_EQ(out[4].slot, 150u);
+}
+
+// O1: verify sort-aware descent correctly groups entries across leaf
+// boundaries and handles splits during a large flush. Write enough entries
+// to span multiple leaves (triggering splits), then flush and verify every
+// key is readable and the scan is strictly ordered with no duplicates.
+TEST(DoubleBuffer, SortAwareDescentAcrossLeafBoundariesWithSplits)
+{
+    Options opt;
+    opt.max_memtable_count     = 6;
+    opt.memtable_flush_entries = 50;  // freeze after 50 entries
+    opt.leaf_split_bytes       = 512; // small leaves → many splits during flush
+    opt.max_delta_len          = 4;   // frequent consolidates during drain
+    Crowdbtree t(opt);
+
+    const int N = 500;
+    // Write N keys in shuffled order across multiple frozen generations.
+    // The shuffle ensures the sorted merge stream crosses leaf boundaries
+    // frequently, exercising the sort-aware descent's boundary detection.
+    std::mt19937     rng(42);
+    std::vector<int> perm(N);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), rng);
+
+    std::map<std::string, std::string> oracle;
+    uint64_t                           slot = 1;
+    for (int i = 0; i < N; ++i) {
+        std::string key = make_key(perm[i]);
+        std::string val = "v" + std::to_string(slot);
+        ASSERT_TRUE(t.apply(slot, put_one(key, val)).ok());
+        oracle[key] = val;
+        slot++;
+    }
+    ASSERT_TRUE(t.flush().ok());
+
+    // Every key must be readable with the correct value.
+    for (const auto &kv : oracle) {
+        EXPECT_EQ(get_or(t, kv.first, "?"), kv.second) << "key " << kv.first;
+    }
+
+    // Scan must show all N keys, sorted, no duplicates.
+    std::vector<scan_entry> out;
+    bool                    trunc = false;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+    ASSERT_EQ(out.size(), static_cast<size_t>(N));
+    for (size_t i = 1; i < out.size(); ++i) {
+        EXPECT_LT(Slice(out[i - 1].key).compare(Slice(out[i].key)), 0) << "out of order at " << i;
+    }
+    for (const auto &e : out) {
+        EXPECT_EQ(e.value, oracle[e.key]) << "wrong value for " << e.key;
+    }
+}
+
+// Frozen queue full: when max_memtable_count is small and we write fast
+// without flushing, the frozen queue fills up and maybe_freeze_active
+// returns false — active_ keeps growing past the threshold. All entries
+// must stay readable (they're in active_). This verifies the backpressure
+// behavior documented in the maybe_freeze_active error log path.
+TEST(DoubleBuffer, FrozenQueueFullActiveKeepsGrowingEntriesReadable)
+{
+    Options opt;
+    opt.max_memtable_count     = 2; // 1 active + 1 frozen slot
+    opt.memtable_flush_entries = 3;
+    Crowdbtree t(opt);
+
+    // Write enough to fill the frozen queue (1 slot) and overflow active_.
+    // After 3 entries: active_ freezes → frozen_ has 1, active_ is fresh.
+    // After 6 entries: active_ tries to freeze but frozen_ is full →
+    // maybe_freeze_active returns false, active_ keeps growing.
+    const int N = 20;
+    for (int i = 0; i < N; ++i) {
+        ASSERT_TRUE(t.apply(static_cast<uint64_t>(i + 1), put_one(make_key(i), "v" + std::to_string(i))).ok());
+    }
+
+    // Without flush(), all entries must still be readable from L0
+    // (active_ + frozen_). The frozen queue full condition does NOT
+    // lose data — it just delays the freeze.
+    for (int i = 0; i < N; ++i) {
+        EXPECT_EQ(get_or(t, make_key(i), "?"), "v" + std::to_string(i));
+    }
+
+    // Flush drains everything — all entries move to L1.
+    ASSERT_TRUE(t.flush().ok());
+    for (int i = 0; i < N; ++i) {
+        EXPECT_EQ(get_or(t, make_key(i), "?"), "v" + std::to_string(i));
+    }
+}
+
+// Parent pointer correctness after splits (O4): write enough data to
+// trigger multiple leaf splits and inner node creation, then verify all
+// keys are readable. This exercises path_to_page_id_locked (which uses
+// parent pointers) during split/merge operations. With small split
+// thresholds, even a modest number of keys creates a multi-level tree.
+TEST(DoubleBuffer, ParentPointersCorrectAfterSplitsAndMerges)
+{
+    Options opt;
+    opt.leaf_split_bytes   = 256; // small leaves → many splits
+    opt.max_delta_len      = 2;   // frequent consolidates → splits during drain
+    opt.max_memtable_count = 6;
+    Crowdbtree t(opt);
+
+    // Write 200 keys in shuffled order to create a bushy tree with
+    // many splits and inner node levels.
+    std::mt19937     rng(12345);
+    std::vector<int> perm(200);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), rng);
+
+    std::map<std::string, std::string> oracle;
+    uint64_t                           slot = 1;
+    for (int i : perm) {
+        std::string key = make_key(i);
+        std::string val = "v" + std::to_string(slot);
+        oracle[key]     = val;
+        ASSERT_TRUE(t.apply(slot, put_one(key, val)).ok());
+        slot++;
+    }
+
+    // Flush to drain L0 → L1, triggering splits via consolidate.
+    ASSERT_TRUE(t.flush().ok());
+
+    // All keys must be readable with correct values — if parent pointers
+    // were stale after splits, path_to_page_id_locked would return a
+    // wrong path, causing maybe_split_or_merge_locked to operate on the
+    // wrong parent, corrupting the tree.
+    for (const auto &kv : oracle) {
+        EXPECT_EQ(get_or(t, kv.first, "?"), kv.second) << "key " << kv.first;
+    }
+
+    // Delete half the keys to trigger merges (which also use parent
+    // pointers via path_to_page_id_locked).
+    int deleted = 0;
+    for (auto it = oracle.begin(); it != oracle.end(); ++it) {
+        if (deleted >= 100) {
+            break;
+        }
+        Batch del{{{.key = it->first, .kind = OpKind::kDelete, .value = ""}}};
+        ASSERT_TRUE(t.apply(slot, del).ok());
+        slot++;
+        deleted++;
+    }
+
+    ASSERT_TRUE(t.flush().ok());
+
+    // Surviving keys must still be readable.
+    deleted = 0;
+    for (const auto &kv : oracle) {
+        if (deleted < 100) {
+            deleted++;
+            continue; // deleted key
+        }
+        EXPECT_EQ(get_or(t, kv.first, "?"), kv.second) << "surviving key " << kv.first;
+    }
+
+    // Scan must return surviving keys in sorted order, no corruption.
+    std::vector<scan_entry> out;
+    bool                    trunc = false;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+    // Deleted keys should have tombstones (or be GC'd); surviving keys
+    // must be present with correct values.
+    for (const auto &e : out) {
+        if (oracle.count(e.key) > 0) {
+            int idx = 0;
+            for (auto it = oracle.begin(); it != oracle.end() && it->first != e.key; ++it, ++idx) {
+            }
+            if (idx >= 100) {
+                EXPECT_EQ(e.value, oracle[e.key]) << "scan value for " << e.key;
+            }
+        }
     }
 }

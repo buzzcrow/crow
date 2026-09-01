@@ -264,8 +264,10 @@ async fn clear_then_persist_survives_reopen() {
     e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v")]))
         .into_ready()
         .unwrap();
+    e.flush();
     assert_eq!(e.persist_snapshot(), 1, "sanity: pre-clear state persisted");
     e.clear();
+    e.flush();
     assert_eq!(
         e.persist_snapshot(),
         0,
@@ -417,4 +419,53 @@ async fn get_bytes_fast_path_large_value() {
     let (slot, value) = result.unwrap();
     assert_eq!(slot, 1);
     assert_eq!(value.as_ref(), large.as_slice());
+}
+
+/// Gap 1: a `NoOp` slot (empty batch from `repair_once` gap-fill) must
+/// not block `contiguous_slot_` advancement. Apply a real write at
+/// slot 1, a `NoOp` at slot 2, a real write at slot 3, then flush +
+/// snapshot. Reopen and verify `resume_from_slot` advances to 3 (not
+/// stuck at 1). Without the `noop()` call, `contiguous_slot_` would
+/// stall at slot 1 and `last_applied_slot_` would never advance past 1.
+#[tokio::test]
+async fn noop_slot_does_not_block_contiguous_slot_advancement() {
+    use crowdb_kv::kv::KVEngine;
+
+    let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("crowdb-tree-engine");
+    let opt = CrowdbTreeOptions {
+        path: Some(tmp.path().to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    let e = CrowdbTreeEngine::open(&opt).expect("open durable engine");
+
+    // Slot 1: real write.
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k1", b"v1")]))
+        .into_ready()
+        .unwrap();
+    // Slot 2: NoOp (empty batch — simulates repair_once gap-fill).
+    e.noop(2);
+    // Slot 3: real write.
+    e.apply(3, &conformance::batch(vec![conformance::put(b"k2", b"v2")]))
+        .into_ready()
+        .unwrap();
+
+    // Flush + snapshot to make the state durable.
+    e.flush();
+    let snap_slot = e.persist_snapshot();
+    assert_eq!(
+        snap_slot, 3,
+        "snapshot should cover slot 3, not stuck at slot 1 before the NoOp"
+    );
+
+    // Reopen and verify resume_from_slot advanced past the NoOp.
+    drop(e);
+    let reopened = CrowdbTreeEngine::open(&opt).expect("reopen durable engine");
+    assert_eq!(
+        reopened.resume_from_slot(),
+        3,
+        "resume_from_slot should advance past NoOp slots"
+    );
+    // Both keys must be readable after reopen.
+    assert_eq!(reopened.get(b"k1").await, Some((1, b"v1".to_vec())));
+    assert_eq!(reopened.get(b"k2").await, Some((3, b"v2".to_vec())));
 }

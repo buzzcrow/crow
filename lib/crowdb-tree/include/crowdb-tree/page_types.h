@@ -46,6 +46,13 @@ struct PageBase
     size_t    chain_bytes = 0;              // approx bytes of this node + below (triggers)
     uint64_t  page_id     = kInvalidPageId; // logical page id (set on install)
 
+    // O4: parent pointer for O(depth) path lookup (replaces O(tree) DFS in
+    // path_to_page_id_locked). Only meaningful for base pages (inner + leaf).
+    // Maintained under write_mutex_ on every split/merge/root-change. Read
+    // only from path_to_page_id_locked (also under write_mutex_). kInvalidPageId
+    // for the root or uninitialized pages.
+    uint64_t parent_page_id = kInvalidPageId;
+
     // Durable backing of THIS base page's current frame bytes (PT6d). `~0ull`
     // (== kNoAddr in buffer_pool.h) means dirty/anonymous: the live frame is not
     // yet durable. Set on demand-load (clean) and by snapshot after a write;

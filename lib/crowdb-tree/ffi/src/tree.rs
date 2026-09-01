@@ -144,6 +144,12 @@ impl Crowdbtree {
         unsafe { sys::ct_last_applied_slot(self.as_ptr()) }
     }
 
+    /// Number of frozen memtables waiting to be drained. The maintenance
+    /// loop polls this to decide whether to flush immediately.
+    pub fn frozen_table_count(&self) -> usize {
+        unsafe { sys::ct_frozen_table_count(self.as_ptr()) }
+    }
+
     /// Logical retention GC watermark: `gc_slot = min(snapshot_slot, safe_slot)`.
     /// See `crow::tree::Crowdbtree::set_gc_watermark`.
     pub fn set_gc_watermark(&self, snapshot_slot: u64, safe_slot: u64) {

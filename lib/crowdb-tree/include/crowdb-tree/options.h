@@ -27,8 +27,13 @@ struct Options
 {
     // ── Consolidation (core doc §7) ──
     // Fold a leaf's delta chain into a fresh base when either threshold trips.
-    uint32_t max_delta_len   = 8;
-    size_t   max_delta_bytes = 256ULL * 1024; // 256 KiB
+    // O3: doubled from 8/256KiB to 16/512KiB to reduce consolidate frequency
+    // during flush drain (~127 → ~64 calls for 277K entries). Larger delta
+    // chains slow reads slightly between flushes (longer chain resolution)
+    // but the snapshot's prepare_snapshot_locked already folds chains, so
+    // deferring the fold to snapshot time is safe.
+    uint32_t max_delta_len   = 16;
+    size_t   max_delta_bytes = 512ULL * 1024; // 512 KiB
 
     // ── Leaf split / merge (core doc §8) ──
     // Split when a consolidated leaf exceeds leaf_split_bytes; merge when it
@@ -70,7 +75,11 @@ struct Options
     uint32_t max_inframe_delta = 8;
 
     // ── MemTable flush triggers ──
-    size_t   memtable_flush_bytes   = 4ULL * 1024 * 1024; // 4 MiB
+    // 16 MiB: large enough that a single flush captures a meaningful batch
+    // (reducing flush frequency), but small enough to bound active_ memory
+    // under sustained write load. With max_memtable_count=10, worst-case
+    // memory is ~160 MiB of un-drained memtables before backpressure kicks in.
+    size_t   memtable_flush_bytes   = 16ULL * 1024 * 1024; // 16 MiB
     uint32_t memtable_flush_entries = 100000;
 
     // ── MemTable double buffering (plan-tree #3) ──
@@ -89,11 +98,12 @@ struct Options
     // an explicit flush() is expected to catch up and free a slot. See
     // Crowdbtree's active_/frozen_ member comment for the full design,
     // including how non-contiguous (slot > the current contiguous frontier)
-    // leftovers are handled when a frozen buffer is drained. Default 5
-    // (1 active + 4 frozen) gives the maintenance loop enough headroom to
+    // leftovers are handled when a frozen buffer is drained. Default 10
+    // (1 active + 9 frozen) gives the maintenance loop enough headroom to
     // absorb writes during a multi-second flush/snapshot without active_
-    // growing unbounded.
-    uint32_t max_memtable_count = 5;
+    // growing unbounded. With 16 MiB memtables, worst-case un-drained
+    // memory is ~160 MiB before backpressure kicks in.
+    uint32_t max_memtable_count = 10;
 
     // ── Mapping table redesign (plan-tree #14) ──
     // Packed slot words per segment.

@@ -131,6 +131,10 @@ pub struct PxLearner {
     /// apply path is a hot path (`learn`) so the read must be
     /// lock-free, not a `RwLock` read on every apply.
     watch_registry: arc_swap::ArcSwapOption<(u64, Arc<crate::cluster::watch_registry::WatchRegistry>)>,
+    /// Gap 5 step 2: set by the group to the group's `flush_notify` so
+    /// the apply path can wake the maintenance loop when a memtable
+    /// freeze happens. `None` in tests that don't wire a group.
+    flush_signal: OnceLock<Arc<Notify>>,
 }
 
 impl Default for PxLearner {
@@ -154,6 +158,7 @@ impl Default for PxLearner {
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
             watch_registry: arc_swap::ArcSwapOption::new(None),
+            flush_signal: OnceLock::new(),
         }
     }
 }
@@ -182,6 +187,7 @@ impl PxLearner {
             apply_gate: Mutex::new(None),
             engine_apply: OnceLock::new(),
             watch_registry: arc_swap::ArcSwapOption::new(None),
+            flush_signal: OnceLock::new(),
         }
     }
 
@@ -197,6 +203,13 @@ impl PxLearner {
     #[must_use]
     pub fn engine_arc(&self) -> Arc<dyn KVEngine> {
         Arc::clone(&self.engine)
+    }
+
+    /// Gap 5 step 2: wire the group's `flush_notify` so the apply path
+    /// can wake the maintenance loop when a memtable freeze happens.
+    /// Called once during group creation.
+    pub fn set_flush_signal(&self, notify: Arc<Notify>) {
+        let _ = self.flush_signal.set(notify);
     }
 
     /// Wire the engine-apply latency summary. Called once during group
@@ -531,21 +544,25 @@ impl PxLearner {
 
     /// Decode `payload` and apply it to the engine at `slot`.
     ///
-    /// An empty payload (`NoOp` repair fill) decodes to an empty batch and is
-    /// a no-op for the engine while still advancing the frontier in `learn`.
-    /// Per-key highest-slot-wins is enforced inside [`KVEngine::apply`].
-    /// `async fn` for the same reason as [`Self::engine_get`]; `KVEngine::apply`
-    /// has no genuine `Pending` path yet either (no async apply C API), so
-    /// this never actually suspends today.
+    /// An empty payload (`NoOp` repair fill) decodes to an empty batch and
+    /// advances C++ `contiguous_slot_` via [`KVEngine::noop`] (Gap 1 fix) so
+    /// `flush()` can drain past it; the Rust frontier is advanced by the
+    /// caller in `learn`. Per-key highest-slot-wins is enforced inside
+    /// [`KVEngine::apply`]. `async fn` for the same reason as
+    /// [`Self::engine_get`]; `KVEngine::apply` has no genuine `Pending` path
+    /// yet either (no async apply C API), so this never actually suspends
+    /// today.
     ///
-    /// A local apply failure (e.g. a durable I/O error on a
-    /// `CrowdbTreeEngine`) is logged at `ERROR` and otherwise swallowed here:
-    /// the value is still Paxos-chosen (this is a local durability fault,
-    /// not a consensus outcome), so it must not be treated as "not applied"
-    /// or re-proposed. Detecting and reacting to a persistently-unhealthy
-    /// local engine is [`KVEngine::apply`]'s caller's job at a layer that
-    /// can see engine health across calls, not a single failed apply.
-    pub(crate) async fn apply_entry(&self, slot: SlotIndex, payload: &Bytes) {
+    /// Returns `Err` on a local apply failure (e.g. a durable I/O error on a
+    /// `CrowdbTreeEngine`). The error is logged at `ERROR` here; the caller
+    /// must NOT advance `contiguous_applied` on `Err` (Gap 2 fix) so
+    /// linearizable reads stall at the failed slot instead of reading
+    /// stale/missing data. The value is still Paxos-chosen (this is a local
+    /// durability fault, not a consensus outcome), so it must not be
+    /// re-proposed. Detecting and reacting to a persistently-unhealthy
+    /// local engine is the caller's job at a layer that can see engine
+    /// health across calls, not a single failed apply.
+    pub(crate) async fn apply_entry(&self, slot: SlotIndex, payload: &Bytes) -> Result<(), String> {
         // Test-only apply gate: park until the test releases, so the R35
         // fence test can hold the spawned R17 apply deterministically. The
         // guard is dropped at the `;` so the `Notify` is awaited without a
@@ -558,20 +575,42 @@ impl PxLearner {
         }
         let batch = Batch::decode(payload);
         if batch.ops.is_empty() {
-            return;
+            // Gap 1 fix: NoOp slots (from `repair_once` gap-fill) must
+            // still advance C++ `contiguous_slot_` so `flush()` can drain
+            // past them and `last_applied_slot_` advances. Without this,
+            // a single NoOp permanently blocks the durable watermark.
+            self.engine.noop(slot);
+            return Ok(());
         }
         let apply_start = std::time::Instant::now();
-        if let Err(error) = self.engine.apply(slot, &batch).await {
-            tracing::error!(
-                slot,
-                error = %error,
-                "critical: KVEngine::apply failed -- this slot is Paxos-chosen but may not be \
-                 durably reflected in the local engine; next step: check engine health and \
-                 consider failing this node out of the group"
-            );
+        match self.engine.apply(slot, &batch).await {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::error!(
+                    slot,
+                    error = %error,
+                    "critical: KVEngine::apply failed -- this slot is Paxos-chosen but may not be \
+                     durably reflected in the local engine; next step: check engine health and \
+                     consider failing this node out of the group"
+                );
+                // Gap 2 fix: return Err so the caller does NOT advance
+                // `contiguous_applied`. This stalls linearizable reads at
+                // the failed slot (visible, debuggable) instead of letting
+                // them pass the fence and read stale/missing data.
+                return Err(error);
+            }
         }
         if let Some(h) = self.engine_apply.get() {
             h.observe(apply_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        // Gap 5 step 2: if the apply triggered a memtable freeze, wake
+        // the maintenance loop so it flushes immediately instead of
+        // waiting for the next tick. `flush_pending()` is a cheap atomic
+        // read; the notify is a no-op if no signal is wired (tests).
+        if self.engine.flush_pending() {
+            if let Some(signal) = self.flush_signal.get() {
+                signal.notify_one();
+            }
         }
         // Watch/notify apply-path hook: if a watch registry is wired
         // and has watchers, emit the changed keys as notify frames.
@@ -586,6 +625,7 @@ impl PxLearner {
                 registry.emit(*group_id, slot, &batch.ops);
             }
         }
+        Ok(())
     }
 }
 
@@ -595,9 +635,14 @@ impl Learner for PxLearner {
         // advance both frontiers, then record dedup. With apply synchronous,
         // `contiguous_applied` tracks `contiguous_chosen` exactly — the R35
         // apply fence is a no-op fast path on this path.
-        self.apply_entry(entry.slot, &entry.payload).await;
+        // Gap 2: only advance `contiguous_applied` if the apply succeeded.
+        // On error, `contiguous_applied` stalls at the failed slot so
+        // linearizable reads block (visible) instead of reading stale data.
+        let apply_ok = self.apply_entry(entry.slot, &entry.payload).await.is_ok();
         self.update_chosen_frontier(entry.slot, entry.term);
-        self.advance_applied_frontier(entry.slot);
+        if apply_ok {
+            self.advance_applied_frontier(entry.slot);
+        }
         self.record_dedup_tags(dedup_tags, entry.slot);
     }
 }

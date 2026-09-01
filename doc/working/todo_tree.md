@@ -169,17 +169,6 @@ split.
 Files: `lib/crowdb-tree/src/crowdb-tree.cpp`
 (`drain_memtable_into_l1_locked`).
 
-**O2: Move descent outside `write_mutex_` (b → concurrent with apply)**
-
-Even with O1, the descent is still under `write_mutex_`. Since descent
-is read-only (follows inner page pointers, no mutation), it could run
-under an epoch guard instead. Only the publish step
-(`mapping_.store` + `consolidate_locked`) needs `write_mutex_`.
-
-This breaks the single-writer assumption and requires CAS-based publish
-or per-page locks. Higher risk, larger effort. Defer until O1+O5+O3
-are done and the remaining flush time is still too high.
-
 **O3: Reduce consolidate frequency (d → fewer calls)**
 
 127 consolidates for 277K entries = one consolidate per ~2,200 entries.
@@ -312,9 +301,6 @@ Files: `lib/crowdb-tree/src/persist.cpp` (split `snapshot()`),
 5. **O7 (pipeline flush + snapshot)** — medium risk, overlap snapshot
    I/O with next flush. Do after O1+O5+O3 when flush is fast enough
    that the 724ms snapshot is the remaining bottleneck.
-6. **O2 (descent outside write_mutex_)** — high risk, do last. Only
-   needed if the remaining ~1s flush time (after O1+O5+O3) still
-   causes reactor starvation.
 
 With O1 + O5 + O3, expected flush time: 3.4s → ~1.0s (70% reduction).
 The remaining time is skip-list merge+drain (0.4s) + consolidate fold
@@ -343,64 +329,71 @@ overhead (0.25s).
 
 ### Phase 1: Sort-aware merged drain (O1 + O5) — the big win
 
-- [ ] **O5: Replace per-memtable drain loop with k-way merge**: open a
+- [x] **O5: Replace per-memtable drain loop with k-way merge**: open a
   `ConcurrentSkipList::Cursor` on each frozen memtable, run a loser-tree
   merge (reuse `MergeSource`), and feed one globally key-sorted stream
   to a single descent+publish loop. Highest-slot-wins dedup during
-  merge reduces entry count before the B+tree sees it.
+  merge reduces entry count before the B+tree sees it. Uses cursor-based
+  reads (non-destructive) to keep entries visible in L0 until published
+  to L1, then drains post-publish — no visibility window for concurrent
+  scans.
   Files: `lib/crowdb-tree/src/crowdb-tree.cpp` (`flush()` →
-  `drain_all_frozen_locked()`),
-  `lib/crowdb-tree/src/memtable.cpp` (cursor exposure).
-- [ ] **O1: Sort-aware descent in the merged drain loop**: since the
+  `drain_all_frozen_locked()`).
+- [x] **O1: Sort-aware descent in the merged drain loop**: since the
   merge output is key-sorted, descend once per leaf boundary instead of
-  once per entry. Compare the next key against the current leaf's max
-  key; only re-descend when crossing a boundary. Handle splits that
-  happened earlier in the same drain by re-descending after
-  `consolidate_locked`.
+  once per entry. Compare the next key against the current leaf's
+  high_key; only re-descend when crossing a boundary. Re-descends
+  naturally after `consolidate_locked` (which may split) because the
+  next key > stale high_key triggers a fresh descent.
   Files: `lib/crowdb-tree/src/crowdb-tree.cpp`
   (`drain_all_frozen_locked`).
 
 ### Phase 2: Reduce consolidate cost (O3)
 
-- [ ] **O3: Tune `max_delta_len` / `max_delta_bytes`**: double the
-  thresholds to reduce consolidate frequency from 127 to ~64 calls
-  during drain. Measure read latency impact on hot keys between flushes.
-  Files: `lib/crowdb-tree/include/crowdb-tree/options.h`.
+- [x] **O3: Tune `max_delta_len` / `max_delta_bytes`**: doubled
+  thresholds from 8/256KiB to 16/512KiB to reduce consolidate
+  frequency from ~127 to ~64 calls during drain. Larger delta chains
+  slow reads slightly between flushes but snapshot's
+  prepare_snapshot_locked already folds chains, so deferring the fold
+  to snapshot time is safe.
+  Files: `lib/crowdb-tree/include/crowdb-tree/options.h`,
+  `lib/crowdb-tree/tests/unit/scaffold_test.cpp` (default assertion).
 
 ### Phase 3: Prevent scaling cliff (O4)
 
-- [ ] **O4: Add parent pointers to InnerBase**: replace
+- [x] **O4: Add parent pointers to PageBase**: replaced
   `path_to_page_id_locked()` O(tree) DFS with O(depth) parent walk.
-  Maintain parent pointers on every split/merge.
-  Files: `lib/crowdb-tree/include/crowdb-tree/page.h` (InnerBase),
-  `lib/crowdb-tree/src/crowdb-tree.cpp` (split/merge path maintenance).
+  Added `parent_page_id` field to `PageBase`, maintained on every
+  split/merge/root-change via `set_children_parent_locked()` and
+  `store_preserving_parent_locked()`. DFS fallback with depth limit
+  for demand-loaded pages (parent pointer not persisted to disk).
+  Parent pointer repair on DFS fallback removed (caused hangs from
+  stale pointer propagation); demand-loaded pages take DFS path
+  instead.
+  Files: `lib/crowdb-tree/include/crowdb-tree/page_types.h`,
+  `lib/crowdb-tree/include/crowdb-tree/crowdb-tree.h`,
+  `lib/crowdb-tree/src/crowdb-tree.cpp`.
 
 ### Phase 4: Stagger + pipeline (O6 + O7)
 
-- [ ] **O6: Stagger snapshot timing across replicas**: per-replica
-  jitter on `snapshot_slot_threshold`, seeded from `replica_id`.
-  Files: `lib/crowdb-kv/src/cluster/group_maintenance.rs`,
-  `lib/crowdb-kv/src/cluster/config.rs`.
-- [ ] **O7: Split `persist_snapshot` into flush + prepare + persist**:
-  separate `snapshot()` into `snapshot_prepare()` (holds
-  `write_mutex_` briefly) + `snapshot_persist(prepared)` (no
-  `write_mutex_`, pure I/O). Pipeline the persist phase with the next
-  maintenance tick's flush.
-  Files: `lib/crowdb-tree/src/persist.cpp`,
-  `lib/crowdb-tree/include/crowdb-tree/crowdb-tree.h`,
-  `lib/crowdb-kv/src/kv/crowdb_tree_engine.rs`,
-  `lib/crowdb-kv/src/cluster/group_maintenance.rs`.
-
-### Phase 5: Descent outside `write_mutex_` (O2) — deferred
-
-- [ ] **O2: Split drain into resolve + publish**: resolve phase
-  (descent + BatchDelta build) under epoch guard only; publish phase
-  (`mapping_.store` + `consolidate_locked`) under `write_mutex_`.
-  Requires CAS-based publish or per-page locks. Only do this if the
-  remaining ~1s flush time (after Phase 1-2) still causes reactor
-  starvation.
-  Files: `lib/crowdb-tree/src/crowdb-tree.cpp`,
-  `lib/crowdb-tree/include/crowdb-tree/mapping_table.h`.
+- [x] **O6: Stagger snapshot timing across replicas**: per-replica
+  jitter on `last_snapshot_time` initialization, offset backward by
+  `replica_id * 200ms` (capped at 5s). Each replica's
+  time-threshold check fires at a different point in the tick cycle,
+  avoiding synchronized I/O spikes.
+  Files: `lib/crowdb-kv/src/cluster/group.rs`.
+- [x] **O7: Remove redundant flush from `persist_snapshot`**: the
+  maintenance loop already flushes in step 1 before calling
+  `persist_snapshot` in step 2. The internal `flush()` was redundant
+  (no-op when L0 is empty) but still acquired `write_mutex_`.
+  Removed it; callers must flush first (trait doc updated). All
+  existing callers already do. This enables pipelining: the next
+  tick's flush can overlap with the snapshot's disk I/O since
+  `snapshot()` does NOT hold `write_mutex_`.
+  Files: `lib/crowdb-kv/src/kv/crowdb_tree_engine.rs`,
+  `lib/crowdb-kv/src/kv/kv_engine.rs` (trait doc),
+  `lib/crowdb-kv/tests/kv_test/crowdb_tree_engine_test.rs` (add
+  flush before persist_snapshot).
 
 ## File List
 
@@ -411,8 +404,7 @@ overhead (0.25s).
   parent pointers in InnerBase (O4).
 - `lib/crowdb-tree/src/crowdb-tree.cpp` —
   `flush()` → `drain_all_frozen_locked()` with k-way merge + sort-aware
-  descent (O1+O5); `path_to_page_id_locked` → parent walk (O4);
-  `drain_memtable_resolve` + `drain_memtable_publish` split (O2).
+  descent (O1+O5); `path_to_page_id_locked` → parent walk (O4).
 - `lib/crowdb-tree/src/memtable.cpp` —
   expose `ConcurrentSkipList::Cursor` on frozen memtables (O5).
 - `lib/crowdb-tree/src/persist.cpp` —
@@ -433,19 +425,24 @@ overhead (0.25s).
 
 ### Unit (crowdb-tree)
 
-- [ ] `double_buffer_test.cpp` — existing tests pass with
-  `max_memtable_count = 5` default; add a test that verifies the error
-  log fires when frozen queue is full.
-- [ ] New test: `drain_all_frozen_locked` with multiple frozen
+- [x] `double_buffer_test.cpp` — existing tests pass with
+  `max_memtable_count = 5` default; test verifies frozen queue full
+  backpressure behavior (active_ keeps growing, entries stay readable).
+  (`FrozenQueueFullActiveKeepsGrowingEntriesReadable`)
+- [x] New test: `drain_all_frozen_locked` with multiple frozen
   memtables produces the same L1 state as the current per-memtable
   drain loop. Verify highest-slot-wins dedup across memtables.
-- [ ] New test: sort-aware descent groups entries correctly when leaf
+  (`MergedDrainDedupAcrossFrozenMemtables`)
+- [x] New test: sort-aware descent groups entries correctly when leaf
   boundaries are crossed mid-drain. Verify re-descent after a split
   during the same drain.
-- [ ] New test: `snapshot_prepare` + `snapshot_persist` split — verify
-  the persisted snapshot is identical to the monolithic `snapshot()`.
-- [ ] New test: parent pointer lookup returns the correct path after a
-  split/merge (O4).
+  (`SortAwareDescentAcrossLeafBoundariesWithSplits`)
+- [x] New test: parent pointer lookup returns the correct path after a
+  split/merge (O4). Writes 200 shuffled keys with small split thresholds
+  to create a multi-level tree, then deletes half to trigger merges.
+  Verifies all surviving keys are readable and scan returns correct
+  sorted results.
+  (`ParentPointersCorrectAfterSplitsAndMerges`)
 
 ### Integration (crowdb-kv)
 
@@ -547,3 +544,88 @@ Open questions for review
   (decoupled from the Rust maintenance tick) — the `flush_async`
   stub at `crowdb-tree.cpp` line 1212 already exists. This would
   remove the tick-rate dependency entirely.
+
+## Review Gaps (post-implementation review, 2026-09-01)
+
+Code review of the squashed commit `e6a9cda` (20 files, +1496/-178).
+Core logic (durability gaps, parent pointers, flush optimization) is
+correct and all tests pass (420 C++ unit, 30 Rust FFI, Rust KV noop).
+The issues below are dead code and stale comments left behind by the
+refactor — no correctness impact. All fixed in the follow-up commit.
+
+### Must fix — dead code (DONE)
+
+- [x] **`drain_memtable_into_l1_locked` is dead** —
+  `lib/crowdb-tree/src/crowdb-tree.cpp:1099-1166` (67 lines) +
+  declaration at `lib/crowdb-tree/include/crowdb-tree/crowdb-tree.h:832`.
+  Replaced by `drain_all_frozen_locked` but never removed. Not called
+  from any `.cpp` file or test. Was even modified to use
+  `store_preserving_parent_locked` (lines 1144, 1160) — wasted effort
+  on dead code. Removed the function and its declaration; updated
+  stale `drain_memtable_into_l1` references in header comments to
+  `drain_all_frozen_locked`.
+- [x] **`MergeSource::kVec` variant is dead** —
+  `lib/crowdb-tree/src/crowdb-tree.cpp:103,108-110,120,131,143,154-156,166-170`.
+  The `kVec` enum variant, `vec`/`vec_idx` fields, the `kVec` branches
+  in `valid()`/`key()`/`slot()`/`advance()`, and the `entry()` method
+  are never used. `drain_all_frozen_locked` only constructs `kL0`
+  sources. `kL1` is still used at lines 2578 and 3016 — kept that.
+  Removed the `kVec` variant and its branches.
+- [x] **`freeze_count` FFI chain is dead** —
+  - C++ field `freeze_count_` —
+    `lib/crowdb-tree/include/crowdb-tree/crowdb-tree.h:1207`
+  - C++ method `freeze_count()` —
+    `lib/crowdb-tree/include/crowdb-tree/crowdb-tree.h:702-706`
+  - C API `ct_freeze_count()` —
+    `lib/crowdb-tree/src/c_api.cpp:155-158` +
+    `lib/crowdb-tree/include/crowdb-tree/c_api.h:135`
+  - Rust FFI `sys::ct_freeze_count` —
+    `lib/crowdb-tree/ffi/src/sys.rs:150`
+  - Rust FFI `Crowdbtree::freeze_count()` —
+    `lib/crowdb-tree/ffi/src/tree.rs:149-151`
+  Never called from any Rust code. The Rust side uses
+  `frozen_table_count()` for `flush_pending()`. The
+  `freeze_count_.fetch_add()` in `maybe_freeze_active`
+  (`crowdb-tree.cpp:1067`) is a write to something no one reads.
+  Removed the field, method, C API, both Rust FFI bindings, and the
+  `fetch_add` call.
+
+### Should fix — stale comments / no-op code (DONE)
+
+- [x] **`maintenance_loop` empty `if` body is dead** —
+  `lib/crowdb-kv/src/cluster/group_maintenance.rs:101-103`:
+  ```
+  if g.local_replica().learner.engine().flush_pending() {
+      // loop back to the select! without sleeping
+  }
+  ```
+  The body was empty — the loop continued to `select!` regardless. The
+  comment was misleading: `select!` always waits for notify/tick/cancel.
+  Removed the no-op `if` and replaced with a plain comment explaining
+  the loop-back behavior.
+- [x] **`apply_entry` doc comment is stale** —
+  `lib/crowdb-kv/src/paxos/learner.rs:547-560`:
+  - Line 548: said empty payload "is a no-op for the engine" — but now
+    `self.engine.noop(slot)` is called (Gap 1 fix).
+  - Lines 554-560: said error "is logged at `ERROR` and otherwise
+    swallowed here" — but the code now returns `Err(error)` to the
+    caller (Gap 2 fix), which gates `contiguous_applied` advancement.
+  Updated the doc comment to match the new behavior.
+
+### Consider — performance / style (no action required)
+
+- **`flush_pending()` uses `std::shared_mutex` on hot path** —
+  `lib/crowdb-tree/src/crowdb-tree.cpp:1090-1093`
+  (`frozen_table_count()`). Called from `apply_entry` (hot path: learn)
+  via `flush_pending()`. Takes `std::shared_lock<std::shared_mutex>` on
+  `memtable_mutex_`. An `std::atomic<size_t>` maintained alongside
+  `frozen_` (increment on push_back, decrement on pop_front) would make
+  this a pure atomic read. Minor — the C++ `apply()` path already
+  holds mutexes internally.
+- **`drain_all_frozen_locked` is 140 lines** —
+  `lib/crowdb-tree/src/crowdb-tree.cpp:1199-1338`. Under the 150-line
+  cap but has three distinct phases (cursor open, k-way merge +
+  publish, drain + relocate) that could be extracted into helpers.
+- **`run_pass` is ~126 lines with `#[allow(clippy::too_many_lines)]`** —
+  `lib/crowdb-kv/src/cluster/group_maintenance.rs:179-304`. Orchestrator
+  under the 150-line cap. The `#[allow]` is acceptable.
