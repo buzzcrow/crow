@@ -62,6 +62,13 @@ pub(crate) async fn http_add_group(
             }),
         ));
     }
+    // Ensure the group-0 leader is available before the sysdata write
+    // inside add_group. Right after a resetAll + cluster init, the
+    // election may still be in progress and op_context would seed a
+    // stale/non-leader endpoint, causing a 5s retry cycle.
+    if sid != 0 {
+        state.refresh_group0_leader(None).await;
+    }
     let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
     ops::kv_logical::add_group(&ctx, sid, body.group_id, body.replica_id, &body.nodes)
         .await
@@ -70,9 +77,7 @@ pub(crate) async fn http_add_group(
 
     // Refresh the monitor cache for all target nodes so health badges
     // and RPC endpoint resolution reflect the new group.
-    for nid in &body.nodes {
-        refresh_node_cache(&state, *nid).await;
-    }
+    futures::future::join_all(body.nodes.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
 
     Ok((
         StatusCode::CREATED,
@@ -109,9 +114,7 @@ pub(crate) async fn http_get_group(
             })
             .collect()
     };
-    for nid in &node_ids {
-        refresh_node_cache(&state, *nid).await;
-    }
+    futures::future::join_all(node_ids.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
     state
         .monitor_cache
         .resolve_group(sid, gid)
@@ -162,8 +165,6 @@ pub(crate) async fn http_remove_group(
         .map_err(map_config_err)?;
     state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
-    for nid in &hosting_nodes {
-        refresh_node_cache(&state, *nid).await;
-    }
+    futures::future::join_all(hosting_nodes.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
     Ok(StatusCode::NO_CONTENT)
 }

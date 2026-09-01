@@ -28,10 +28,16 @@ import { step } from '../fixtures/stepTimer';
  */
 test.describe('cluster · node inspect & cross-jump', () => {
   test('cross-jumps between views and shows local + remote replicas', async ({ page, baseURL }) => {
+    // resetAll first — clears stale kv_client seeds and cluster config
+    // left by prior tests. Without this, createStore in the third
+    // sub-section fails with "no known leader for group" because the
+    // kv_client's topology cache still points at stopped nodes from
+    // earlier sub-sections.
+    await step('xjump: resetAll', () => resetAll(baseURL!));
+
     // --- logical replica details -> hosting physical node ---
     await step('xjump: setup 6', async () => {
-      await stopNodeServer(baseURL!, 6);
-      try { await seedRackAndNode(baseURL!, 6, 6); } catch (err) { if (!String(err).includes('already exists')) throw err; }
+      await seedRackAndNode(baseURL!, 6, 6);
       await deployNodeServer(baseURL!, 6, freePort(), freePort());
       await createStore(baseURL!, 66, [6]);
       await addGroup(baseURL!, 66, 660, 6600, [6]);
@@ -60,8 +66,7 @@ test.describe('cluster · node inspect & cross-jump', () => {
 
     // --- physical node details -> hosting logical store ---
     await step('xjump: setup 62', async () => {
-      await stopNodeServer(baseURL!, 62);
-      try { await seedRackAndNode(baseURL!, 62, 62); } catch (err) { if (!String(err).includes('already exists')) throw err; }
+      await seedRackAndNode(baseURL!, 62, 62);
       await deployNodeServer(baseURL!, 62, freePort(), freePort());
       await createStore(baseURL!, 67, [62]);
       await addGroup(baseURL!, 67, 670, 6700, [62]);
@@ -92,11 +97,9 @@ test.describe('cluster · node inspect & cross-jump', () => {
     // --- node inspect: local + remote replicas, removed remote disappears ---
     // Unique ids/ports: 20-ui-behaviors already uses r21*/n21*.
     await step('xjump: setup replicas', async () => {
-      await stopNodeServer(baseURL!, 261);
-      await stopNodeServer(baseURL!, 262);
-      try { await createRack(baseURL!, { id: 26, name: 'Rack TwentySix' }); } catch (err) { if (!String(err).includes('already exists')) throw err; }
-      try { await createNode(baseURL!, { id: 261, rack_id: 26 }); } catch (err) { if (!String(err).includes('already exists')) throw err; }
-      try { await createNode(baseURL!, { id: 262, rack_id: 26 }); } catch (err) { if (!String(err).includes('already exists')) throw err; }
+      await createRack(baseURL!, { id: 26, name: 'Rack TwentySix' });
+      await createNode(baseURL!, { id: 261, rack_id: 26 });
+      await createNode(baseURL!, { id: 262, rack_id: 26 });
       await Promise.all([
         deployNodeServer(baseURL!, 261, freePort(), freePort()),
         deployNodeServer(baseURL!, 262, freePort(), freePort()),

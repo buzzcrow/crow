@@ -298,6 +298,30 @@ impl AppState {
         *self.kv_client.write().await = None;
     }
 
+    /// Re-seed the cached `CrowdbKvClient`'s mgmt seed list from the
+    /// current config. Called after cluster init (or server deploy) so
+    /// the shared client can discover leaders for the new topology.
+    /// No-op if no client is cached (it will be created with config
+    /// seeds on the next `kv_client()` call).
+    ///
+    /// # Panics
+    /// Panics if the config read lock is poisoned.
+    pub async fn reseed_kv_client(&self) {
+        let seeds = {
+            let cfg = self.config.read().unwrap();
+            cfg.servers
+                .iter()
+                .filter(|s| s.node_id.is_some())
+                .map(|s| s.url.clone())
+                .collect::<Vec<_>>()
+        };
+        if let Some(c) = self.kv_client.read().await.as_ref() {
+            if !seeds.is_empty() {
+                c.set_mgmt_seeds(seeds);
+            }
+        }
+    }
+
     /// Build an [`OpContext`] for a single request, sharing the cached
     /// `CrowdbKvClient` (topology cache + connection pool) and a
     /// snapshot of the persisted [`ConsoleConfig`].
@@ -328,12 +352,14 @@ impl AppState {
             cfg.clone()
         };
 
-        // Resolve the group-0 endpoint: prefer the live `listen_addr`
-        // from the monitor cache (the actual crowdb-rpc listener for
-        // store 0 on a node where the local replica is the leader);
-        // fall back to the configured `rpc_url` of a node hosting
-        // store 0; fall back to the first deployed server's mgmt URL
-        // (bootstrap case).
+        // Resolve the group-0 RPC endpoint: prefer the live
+        // `listen_addr` from the monitor cache (the actual crowdb-rpc
+        // listener for store 0 on a node where the local replica is
+        // the leader); fall back to the configured `rpc_url` of a node
+        // hosting store 0. When neither is available (bootstrap case
+        // — no store 0 in config yet), preserve the existing hint
+        // rather than seeding an HTTP mgmt URL that would hang the RPC
+        // client for 5 s.
         let (group0_endpoint, mgmt_seeds) = resolve_group0_endpoint(&config_snapshot);
         let live_endpoint = self.monitor_cache.group0_leader_endpoint().await;
 
@@ -355,6 +381,56 @@ impl AppState {
                 config_snapshot,
             ))
         }
+    }
+
+    /// Refresh the monitor cache for all nodes hosting group 0, then poll
+    /// until a self-reported leader is observed among Up nodes. Returns
+    /// `true` if a leader was found, `false` if the poll budget was
+    /// exhausted. Used by handlers that do sysdata writes after stopping a
+    /// node (e.g. `http_remove_node`) so the write targets the
+    /// post-election leader instead of a stale hint.
+    ///
+    /// # Panics
+    /// Panics if the `RwLock` is poisoned.
+    pub async fn refresh_group0_leader(&self, exclude_node: Option<u64>) -> bool {
+        let t0 = std::time::Instant::now();
+        let group0_nodes: Vec<u64> = {
+            let cfg = self.config.read().unwrap();
+            cfg.group(0, 0)
+                .map(|g| g.replicas.iter().map(|r| r.node_id).collect())
+                .unwrap_or_default()
+        };
+        let alive: Vec<u64> = group0_nodes
+            .iter()
+            .filter(|&&n| exclude_node != Some(n))
+            .copied()
+            .collect();
+        tracing::debug!(
+            "refresh_group0_leader: start alive={:?} exclude={:?} group0_nodes={:?}",
+            alive,
+            exclude_node,
+            group0_nodes
+        );
+        for attempt in 0..10u32 {
+            futures::future::join_all(alive.iter().map(|&n| crate::mgmt::refresh_node_cache(self, n))).await;
+            if self.monitor_cache.group0_leader_endpoint().await.is_some() {
+                tracing::debug!(
+                    "refresh_group0_leader: found leader after {} attempts in {}ms",
+                    attempt + 1,
+                    t0.elapsed().as_millis()
+                );
+                return true;
+            }
+            if attempt < 9 {
+                tokio::time::sleep(std::time::Duration::from_millis(50u64 * (1 + u64::from(attempt)))).await;
+            }
+        }
+        tracing::warn!(
+            "refresh_group0_leader: no leader found after 10 attempts in {}ms alive={:?}",
+            t0.elapsed().as_millis(),
+            alive
+        );
+        false
     }
 
     /// Write a mutated [`OpContext`]'s config back to `AppState.config`
@@ -382,14 +458,19 @@ impl AppState {
     }
 }
 
-/// Resolve the group-0 endpoint + mgmt seeds from a [`ConsoleConfig`]
+/// Resolve the group-0 RPC endpoint + mgmt seeds from a [`ConsoleConfig`]
 /// snapshot.
 ///
-/// Prefers a node hosting store 0 with a known `rpc_url`. Falls back
-/// to the first deployed server's mgmt URL (bootstrap case —
-/// `cluster init` needs an endpoint to call `/system/init` before
-/// group 0 exists). Returns `(None, seeds)` if no server is deployed;
-/// the seeds are all deployed servers' mgmt URLs.
+/// Returns the `rpc_url` of a node hosting store 0, or `None` if no
+/// store 0 exists or no hosting node has a known `rpc_url`. The mgmt
+/// seeds (all deployed servers' HTTP URLs) are always returned for
+/// topology discovery — `cluster init` uses them via `ServerClient`
+/// (HTTP), not via the KV client (RPC).
+///
+/// Does NOT fall back to a server's HTTP mgmt URL: that is not an RPC
+/// endpoint, and seeding it as the KV client's group-0 leader hint
+/// causes puts to hang for the full RPC reaper timeout (5 s) before
+/// the transport error triggers a topology refresh.
 fn resolve_group0_endpoint(config: &ConsoleConfig) -> (Option<String>, Vec<String>) {
     let mgmt_seeds: Vec<String> = config
         .servers
@@ -399,7 +480,7 @@ fn resolve_group0_endpoint(config: &ConsoleConfig) -> (Option<String>, Vec<Strin
         .filter(|u| !u.is_empty())
         .collect();
 
-    // Prefer a node hosting store 0 with a known rpc_url.
+    // Only return a real RPC endpoint from a node hosting store 0.
     if let Some(store0) = config.stores.iter().find(|s| s.store_id == 0) {
         for node_id in &store0.nodes {
             if let Some(server) = config.server_for_node(*node_id) {
@@ -412,14 +493,7 @@ fn resolve_group0_endpoint(config: &ConsoleConfig) -> (Option<String>, Vec<Strin
         }
     }
 
-    // Fall back to the first deployed server's mgmt URL (bootstrap).
-    let fallback = config
-        .servers
-        .iter()
-        .find(|s| s.node_id.is_some() && !s.url.is_empty())
-        .map(|s| s.url.clone());
-
-    (fallback, mgmt_seeds)
+    (None, mgmt_seeds)
 }
 
 /// Compile-time path to the React SPA build output. The `ui/`
@@ -478,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_group0_endpoint_falls_back_to_first_server_mgmt_url() {
+    fn resolve_group0_endpoint_no_store0_returns_none() {
         let mut config = ConsoleConfig::default();
         let _ = config.add_server(ServerEntry {
             id: "s1".into(),
@@ -496,7 +570,7 @@ mod tests {
             no_fsync: false,
         });
         let (endpoint, seeds) = resolve_group0_endpoint(&config);
-        assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:9910"));
+        assert!(endpoint.is_none(), "no store 0 → no RPC endpoint to seed");
         assert_eq!(seeds, vec!["http://127.0.0.1:9910"]);
     }
 

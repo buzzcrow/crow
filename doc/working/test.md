@@ -126,38 +126,172 @@ failure (round 8, `21-kv-cluster-reconfig` "4th replica catches up") was a
 had not re-rendered after the prior test's cleanup within 5 s. Fixed by
 raising the timeout to 10 s. Pass rate after fix: 100 % across all rounds.
 
+### Full suite timing — 2026-09-01 (4-batch run, 49 tests)
+
+Measured 2026-09-01 on Linux, debug binaries, single worker, real backend.
+All 19 spec files run in 4 batches of 5 (last batch had 2). 48 passed,
+1 failed (`12-cluster-node-inspect` "cross-jumps" — stale monitor cache:
+`group0_leader_endpoint` returned a stopped node's listen_addr because it
+didn't skip `Down` nodes; fixed by filtering `NodeHealth::Down` in
+`group0_leader_endpoint` + adding `resetAll` at test start).
+
+Top 10 slowest tests (per-test wall-clock):
+
+| # | Duration | Spec:line | Test |
+| --- | --- | --- | --- |
+| 1 | 29.5 s | `21-kv-reconfig:182` | stopping a non-leader keeps quorum, stopping the leader triggers reelection |
+| 2 | 18.2 s | `22-kv-topology:463` | comparative smoke suite passes on SIMPLE and COMPLEX topologies |
+| 3 | 16.7 s | `21-kv-reconfig:389` | stopping shared node degrades both stores, restart recovers |
+| 4 | 15.6 s | `90-flow-full-chain:20` | rack → node → server → store → group → replica → kv, both views (clusterInit fixed; test still fails at `add store 188 UI` — pre-existing leader election issue) |
+| 5 | 14.8 s | `31-kv-ops-advanced:94` | prefix/selected/inline delete + copy, load more, all-groups |
+| 6 | 14.4 s | `12-cluster-node-inspect:30` | cross-jumps between views (FAILED) |
+| 7 | 14.1 s | `01-shell-ui-behaviors:31` | dialog defaults, cancel, and tree interactions |
+| 8 | 13.4 s | `50-chunk-capacity-disk-group:421` | assign disk-group to diskdb via UI |
+| 9 | 12.7 s | `21-kv-reconfig:284` | deleting non-leader nodes preserves quorum down to majority |
+| 10 | 12.1 s | `22-kv-topology:297` | two groups on overlapping 3-node subsets operate independently |
+
+Slow steps (>= 5 s, from `stepTimer` instrumentation):
+
+| Duration | Spec | Step label |
+| --- | --- | --- |
+| 6818 ms | `12-cluster-node-inspect` | `xjump: setup replicas` |
+| 6693 ms | `22-kv-topology` | `smoke-complex: setupCluster` |
+| 6780 ms | `22-kv-topology` | `3groups: setup` |
+| 6774 ms | `22-kv-topology` | `iso-stores: setup` |
+| 6759 ms | `22-kv-topology` | `overlap: setup` |
+| 6470 ms | `22-kv-topology` | `smoke-simple: setupCluster` |
+| 6418 ms | `21-kv-reconfig` | `440: deleteNodeViaMenu(2)` |
+| 6012 ms | `21-kv-reconfig` | `430: putKeyUi+getKeyUi x2` |
+| 5987 ms | `21-kv-reconfig` | `quorum: putKeyUi+getKeyUi x2` (post-merge run) |
+| 5926 ms | `21-kv-reconfig` | `420: createStore+addGroup+waitForLeader` |
+| 5857 ms | `21-kv-reconfig` | `440: createStore+addGroup+waitForLeader` |
+| 5849 ms | `21-kv-reconfig` | `440: putKeyUi+getKeyUi(1)` |
+| 5725 ms | `21-kv-reconfig` | `430: createStore+addGroup+waitForLeader` |
+| 5652 ms | `21-kv-reconfig` | `reelect: restartServerViaMenu` (post-merge run) |
+| 5468 ms | `01-shell-ui-behaviors` | `shell: create store` |
+| ~~5465 ms~~ | `90-flow-full-chain` | `full-chain: clusterInit (full)` — **fixed** (now < 2 s) |
+| 5074 ms | `12-cluster-node-inspect` | `xjump2: resetAll` |
+
+Batch totals: batch 1 (00,01,10,11,12) = 1.5 m; batch 2 (20,21,22,30,31) =
+3.2 m; batch 3 (40,41,50,51,52) = 1.1 m; batch 4 (53,90) = 34.4 s. Grand
+total ≈ 6.6 m (vs 4.5 m in the 08-28 measurement — the 08-28 run excluded
+the failing `12-cluster-node-inspect` cross-jump test and used a warmer
+cache from a prior run).
+
 ### Slow parts — easy wins (implemented)
 
-- **`50-capacity-diskdb` test 41 "assign disk-group to diskdb"** — was 30.8 s
-  every round. The `expect.poll` for diskdb usage had `timeout: 30_000,
-  intervals: [2_000]`. The diskdb's crowdb-rpc is never reachable in the test
-  environment, so the full 30 s was wasted. Reduced to `timeout: 12_000,
-  intervals: [500]` (12 s = 1.2 keepalive-sync cycles; 500 ms catches the
-  first report faster when it does arrive). **Saved ~17 s per round.**
-- **`51-capacity-canvas` test 49 "datacenter root"** — was 21.2 s. The usage
-  poll had `timeout: 15_000`. Same root cause (crowdb-rpc unreachable).
-  Reduced to `timeout: 12_000`. **Saved ~3 s per round.**
-- **`11-physical-server-lifecycle` "deploy-ui: poll server"** — `expect.poll`
-  used default 500 ms interval. Added `intervals: [100]` for faster
-  detection. **Saved up to 400 ms.**
+- `50-capacity-diskdb` test 41 "assign disk-group to diskdb" — was 30.8 s
+- `51-capacity-canvas` test 49 "datacenter root" — was 21.2 s
+- `11-physical-server-lifecycle` "deploy-ui: poll server"
+- `21-kv-reconfig:182` "stopping a non-leader + stopping the leader" — was 29.5 s → 9–13 s (see "Fixes — 2026-09-02" below)
 
-### Slow parts — hard to fix (recorded)
+### Fixes — 2026-09-02 (topology eviction + heartbeat short-circuit)
 
-These are inherent to the system's async behavior and cannot be reduced
-without changing the backend or the test scenario:
+Two root causes were identified and fixed, eliminating all `VERY_SLOW`
+(>= 5 s) steps in `21-kv-reconfig` and `22-kv-topology`:
 
-- **`21-kv-cluster-reconfig` tests (12–30 s each)** — stopping/restarting
-  nodes and waiting for Paxos leader election. The election timeout is
-  governed by the consensus protocol's randomized timer (typically 5–10 s
-  per election round). Multiple election rounds + `openKvPanel` page reloads
-  (necessary for correctness after topology changes) compound the time.
-  Reducing the election timeout would make production clusters less stable.
+- **Topology cache over-eviction** (`lib/crowdb-kv-client/src/topology.rs`):
+  `merge()` evicted groups absent from a fresh `/topology` response, but
+  a seed that doesn't host store 0 would evict group 0's leader — causing
+  "no known leader for group (store_id=0, group_id=0)" on the next
+  sysdata write (e.g. `addGroup` after `deleteNode`). Fix: only evict
+  groups for stores that ARE present in the fresh body
+  (`fresh_stores.contains(&sid)`). A seed that doesn't host a store
+  shouldn't be authoritative for evicting groups in it.
+- **Heartbeat round not short-circuiting on quorum**
+  (`lib/crowdb-kv/src/cluster/group_election_leader.rs`):
+  `run_heartbeat_round()` waited for ALL peers (including downed/stopped
+  ones) even after quorum was reached. With a 1 s per-peer RPC timeout,
+  a linearizable read barrier blocked for ~1 s per downed peer; with the
+  5 s KV client RPC reaper timeout, this cascaded into ~5.5 s GET delays.
+  Fix: `joinset.abort_all()` + early return when `acks >= quorum`. A
+  missed higher-term from an aborted peer self-heals via the next
+  heartbeat round or election driver timeout.
+
+Post-fix timing (5 consecutive runs, 9/9 passed each, no `VERY_SLOW`):
+
+| Test | Before | After |
+| --- | --- | --- |
+| `21-kv-reconfig:193` (stop non-leader + stop leader) | 29.5 s | 9–13 s |
+| `21-kv-reconfig:275` (delete non-leader down to majority) | 12.7 s | 8–11 s |
+| `21-kv-reconfig:380` (stop shared node, restart) | 16.7 s (flaky) | 9–11 s (stable) |
+| `22-kv-topology:113` (multi-rack) | 7.8 s | 5–8 s |
+| `22-kv-topology:463` (smoke SIMPLE+COMPLEX) | 18.2 s | 7–8 s |
+| `putKeyUi+getKeyUi` steps | 5.5–6.0 s (VERY_SLOW) | < 2 s (no SLOW flag) |
+| `createStore+addGroup+waitForLeader` | 5.7–5.9 s | < 2 s (no SLOW flag) |
+| `22-kv-topology` setup steps | 6.5–6.8 s | 2.0–2.6 s |
+| Full 9-test suite | ~1.4 m (flaky) | ~1.1 m (stable) |
+
+- **Early mark-down in `http_stop_node_server`** (`app/crowdb-web/src/lifecycle.rs`):
+  The node was marked `Down` in the monitor cache AFTER the ~700ms SIGTERM
+  wait. During that window, concurrent `list_node_disk_groups` / tree health
+  polls tried to use the stopping node as the group-0 leader, wasting ~1.4s
+  on 4 retries before falling back to config. Fix: mark the node `Down`
+  BEFORE sending SIGTERM. Also applied to `stop_and_remove_server_for_node`
+  (used by `http_remove_node`).
+
+### Slow parts — recorded (needs investigation)
+
+These are slow steps where the observed time exceeds what the e2e config
+predicts. Some may be inherent (UI interaction chains), but the
+election/retry-related ones likely indicate real problems:
+
+- **`22-kv-topology` setup steps (2.0–2.6 s each)** — `smoke-simple`,
+  `smoke-complex`, `iso-stores`, `overlap`, `3groups` each do a full
+  `setupCluster`: seed racks/nodes, deploy servers, create store/group/
+  replica, wait for leader. The `deployNodeServer` (~400 ms per server,
+  parallel) + sequential `clusterInit` + `createStore` + `addGroup` +
+  `addReplica` calls dominate. Five tests each pay the full setup cost — a
+  shared `beforeAll` cluster could amortize, but each test needs a
+  different topology (different node subsets / store counts), so sharing
+  is non-trivial.
+- **`12-cluster-node-inspect:30` "cross-jumps" (13.5 s, FIXED)** —
+  `xjump: setup replicas` (5.2 s) + `xjump2: resetAll` (4.5 s). The setup
+  deploys 3 servers + creates a store/group with replicas across nodes;
+  the `resetAll` cascade removes racks/stores one-by-one with 300 ms
+  retries each. The `no known leader for group` warnings during
+  `resetAll` are expected — after stopping all nodes, group-0 has no
+  leader by design. The original failure was not the reset cascade but
+  a stale monitor cache: `group0_leader_endpoint` returned a stopped
+  node's `listen_addr` because it didn't skip `Down` nodes, shadowing
+  the freshly-elected leader on the running node. Fixed by filtering
+  `NodeHealth::Down` in `group0_leader_endpoint` + adding `resetAll` at
+  test start to clear stale kv_client seeds.
+- **`90-flow-full-chain:20` (15.6 s)** — `full-chain: clusterInit (full)`
+  (5.5 s, intermittent — **fixed**). The `clusterInit` fixture is a
+  single POST to `/api/cluster/init`. Per-phase tracing
+  (`RUST_LOG=crowdb_console_shared::ops=info`) showed the 5.3 s was in
+  Phase 5 `write_topology_to_sysdata` (5266 ms), matching the RPC reaper
+  timeout (5 s + 500 ms scan, `kv_rpc_transport.rs:93`). Root cause:
+  `resolve_group0_endpoint` fell back to the server's HTTP mgmt URL when
+  no store 0 existed in config; `op_context()` seeded that as the
+  group-0 RPC leader hint. TCP connected (REST server listening) but
+  the RPC handshake never completed — the reaper killed the request
+  after 5 s, then `handle_transport_err` refreshed topology and the
+  retry succeeded. Fix: `resolve_group0_endpoint` now returns `None`
+  when no store 0 exists (no HTTP fallback), so `op_context()` uses
+  `with_shared_client_preserving_hint` instead of seeding a wrong
+  endpoint. After fix, `clusterInit` completes in < 2 s (no SLOW flag).
+  Remaining test failure: `add store 188 UI` — pre-existing leader
+  election issue in the 2-node cluster (181, 182): precandidate fails
+  to gather quorum (`grants=1 quorum=2`), likely because
+  `clusterInit([181, 182])` returns 409 (store 0 already exists from
+  `clusterInit([77])`) without re-bootstrapping the multi-node group.
+- **`31-kv-ops-advanced:94` (14.8 s)** — `kv: scan` (3.2 s) +
+  `kv: inline delete` (3.8 s) + 6 sub-assertions. The scan/delete API
+  calls + table re-renders compound; both are O(n) in key count.
+- **`01-shell-ui-behaviors:31` (14.1 s)** — `shell: create store` (5.5 s)
+  + 10+ dialog/tree interaction assertions. The create-store step pays
+  the full cluster-init + leader-election cost.
 - **`440: openKvPanel` (5–10 s)** — `page.goto('/')` + KV panel init. The
   full page reload is required because `selectOption` hangs on stale options
   after node deletions without it (see comment in `openKvPanel`).
-- **`440: putKeyUi+getKeyUi` (5 s)** — each KV op goes through the UI →
+- **`440: putKeyUi+getKeyUi` (5–6 s, FIXED)** — each KV op goes through the UI →
   web server → crowdb-kv-server → consensus round → WAL → storage engine.
-  The 5 s is the end-to-end latency for two sequential KV ops (put + get).
+  Root cause: the linearizable read barrier's heartbeat round waited for
+  ALL peers (including downed ones) instead of short-circuiting on quorum.
+  Fix: heartbeat round aborts remaining peers once quorum is reached
+  (see "Fixes — 2026-09-02" above). Post-fix: < 2 s, no SLOW flag.
 - **`kv: scan` (3.5 s) / `kv: inline delete` (4.2 s)** — KV scan/delete API
   call + table re-render. The scan API serializes all matching keys; the
   table re-renders the full list. Both are O(n) in the number of keys.
@@ -170,9 +304,6 @@ without changing the backend or the test scenario:
   needed for a clean tree state after prior test operations.
 - **`stopNodeServer x3/x5` teardown (2.2 s)** — `Promise.all` of server
   shutdown API calls. Each server needs ~400 ms to shut down gracefully.
-- **`smoke-complex: setupCluster` (2.8 s)** — multi-node cluster setup:
-  seed racks/nodes, deploy servers, create store/group/replica, wait for
-  leader. The `waitForLeader` poll (200 ms interval) dominates.
 - **`iso-stores: scan UI` (11 s, intermittent)** — KV scan through the UI
   after store isolation verification. The scan API + table render is slow
   when the store has many keys from prior test seeding.
@@ -180,3 +311,67 @@ without changing the backend or the test scenario:
   capacity data from the backend on selection. The 6 `toBeVisible/
   toHaveText({ timeout: 10_000 })` calls resolve quickly but the data
   fetch + render takes ~5 s.
+
+### Open issues — 2026-09-02
+
+Prioritized list of remaining slow / flaky items to investigate:
+
+1. **`stopNodeServer` teardown (2.2–2.5 s)** — each server shutdown takes
+   ~700 ms (SIGTERM → graceful WAL flush → engine close → process exit).
+   3–5 servers in parallel = ~2.2 s. The early mark-down fix (see above)
+   eliminated the ~1.4s `list_node_disk_groups` retry cascade during
+   stops, but the inherent ~700ms graceful-shutdown latency remains.
+   Options: skip WAL flush on test-mode shutdown (`--no-fsync` already
+   disabled, but the engine close path still flushes); or use `resetAll`
+   in `finally` blocks instead of per-node `stopNodeServer` (one API call
+   vs N, and `stop_all_services` already parallelizes SIGTERM).
+   Impact: every test in `21`/`22` pays this in `finally`. ~20 tests ×
+   2.2 s = ~44 s of total teardown time.
+   ai-todo: we foce flush at the shutdown even with --no-fsync. It's a waste for test. 
+   do you mean each test will start / stop cluster? For UI test, we can reuse the cluster.
+   can we review, in tests in one file, if we can reuse the cluster?  if we cannot reuse , we can split the test to two files. It's a bigger change, but useful.
+
+2. **`22-kv-topology` setup steps (2.0–2.6 s each)** — 5 tests each pay
+   the full `setupCluster` cost: `seedRackAndNode` + `deployNodeServer`
+   + `clusterInit` + `createStore` + `addGroup` + `addReplica`. The
+   `deployNodeServer` (~400 ms × N, parallel) and the sequential
+   `clusterInit` → `createStore` → `addGroup` chain dominate. Options:
+   - Batch the `clusterInit` + `createStore` + `addGroup` into a single
+     "setup store" API endpoint (reduces 3 HTTP round-trips to 1).
+   - Allow `addGroup` to accept multiple nodes directly (currently
+     `addReplica` is needed to extend to new nodes one-by-one).
+
+3. **`90-flow-full-chain:20` — `add store 188 UI` failure (pre-existing)**
+   — 2-node cluster (181, 182): precandidate fails to gather quorum
+   (`grants=1 quorum=2`), likely because `clusterInit([181, 182])`
+   returns 409 (store 0 already exists from `clusterInit([77])`) without
+   re-bootstrapping the multi-node group. Needs investigation: should
+   `clusterInit` on an already-initialized cluster re-bootstrap the
+   group-0 membership to the new node set, or should the test use a
+   different setup path?
+
+4. **`iso-stores: scan UI` (11 s, intermittent)** — KV scan through the
+   UI after store isolation verification. The scan API + table render is
+   slow when the store has many keys from prior test seeding. Consider
+   limiting the scan result set or paginating the table render.
+
+5. **`dc: select datacenter + inspector` (5.4 s)** — inspector loads
+   capacity data from the backend on selection. The data fetch + render
+   takes ~5 s. Investigate whether the capacity query can be cached or
+   made lazy (load on expand, not on select).
+
+6. **`31-kv-ops-advanced:94` (14.8 s)** — `kv: scan` (3.2 s) +
+   `kv: inline delete` (3.8 s) + 6 sub-assertions. The scan/delete API
+   calls + table re-renders compound; both are O(n) in key count.
+   Consider reducing the test's key count or splitting into smaller
+   sub-tests.
+
+7. **`01-shell-ui-behaviors:31` (14.1 s)** — `shell: create store` (5.5 s)
+   + 10+ dialog/tree interaction assertions. The create-store step pays
+   the full cluster-init + leader-election cost. Consider using a
+   pre-initialized cluster fixture for UI-only interaction tests.
+
+8. **`overlap: KV ops UI` (2.7 s)** — KV put/get/delete through the UI
+   panel. The UI interaction chain (fill input → click → wait for
+   response → assert) is ~700 ms per op × 4 ops. Consider batching
+   assertions or reducing the number of UI round-trips.

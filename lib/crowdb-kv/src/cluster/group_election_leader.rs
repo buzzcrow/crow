@@ -162,8 +162,14 @@ impl PxGroup {
                         self.note_peer_durable(peer_id, hb.durable_snapshot_slot);
                         if acks >= quorum {
                             replica.renew_lease(t_send, cfg);
-                            // Keep draining remaining replies; no further
-                            // state changes happen unless a higher term shows.
+                            // Short-circuit: abort remaining (slow/downed)
+                            // peers instead of waiting for their RPC timeout.
+                            // A missed higher-term from an aborted peer
+                            // self-heals via the next heartbeat round or the
+                            // election driver's timeout — the quorum ack
+                            // already proves leadership at this term.
+                            joinset.abort_all();
+                            return HeartbeatOutcome::Continued { quorum_acked: true };
                         }
                     }
                 }

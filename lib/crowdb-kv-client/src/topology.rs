@@ -139,6 +139,9 @@ impl TopologyCache {
 
     async fn fetch_and_merge(&self) -> Result<()> {
         let seeds = self.seeds.read().unwrap().clone();
+        if seeds.is_empty() {
+            return Err(Error::NoSeeds);
+        }
         let mut last_err = None;
         for seed in &seeds {
             let url = format!("{}/topology", seed.trim_end_matches('/'));
@@ -154,7 +157,7 @@ impl TopologyCache {
             }
         }
         Err(Error::Topology(
-            last_err.unwrap_or_else(|| "no seeds configured".to_string()),
+            last_err.unwrap_or_else(|| "all seeds returned errors".to_string()),
         ))
     }
 
@@ -162,6 +165,10 @@ impl TopologyCache {
         // Collect the set of (store_id, group_id) present in the fresh
         // body so we can evict stale entries after the insert loop.
         let mut fresh_keys: HashSet<(u64, u64)> = HashSet::new();
+        // Collect store_ids present in the fresh body so eviction only
+        // fires for stores the seed actually hosts — a seed that doesn't
+        // host a store shouldn't evict groups in it (see eviction below).
+        let fresh_stores: HashSet<u64> = body.stores.iter().map(|s| s.store_id).collect();
         for store in &body.stores {
             for group in &store.groups {
                 fresh_keys.insert((store.store_id, group.group_id));
@@ -212,11 +219,18 @@ impl TopologyCache {
         // clean. The eviction hook lets `CrowdbKvClient` evict stale
         // `write_slot_highwater` entries — a stale `min_slot`
         // high-watermark does NOT self-heal (silent empty reads forever).
+        //
+        // Only evict groups for stores that ARE present in the fresh body.
+        // A seed that doesn't host a store shouldn't be authoritative for
+        // evicting groups in that store — otherwise a topology refresh
+        // from a non-store-0 seed would evict group 0's leader, causing
+        // "no known leader" on the next sysdata write.
         let evicted: Vec<(u64, u64)> = self
             .leaders
             .iter()
             .filter_map(|e| {
-                if fresh_keys.contains(e.key()) {
+                let (sid, _gid) = *e.key();
+                if fresh_keys.contains(e.key()) || !fresh_stores.contains(&sid) {
                     None
                 } else {
                     Some(*e.key())

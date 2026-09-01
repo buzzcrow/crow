@@ -79,7 +79,9 @@ impl OpContext {
         mgmt_seeds: &[String],
         config: ConsoleConfig,
     ) -> Self {
-        let _ = mgmt_seeds; // seeds are already in the shared client's config
+        if !mgmt_seeds.is_empty() {
+            kv.set_mgmt_seeds(mgmt_seeds.to_vec());
+        }
         kv.seed_leader(0, 0, group0_endpoint);
         let sysmd = CrowdbSysmdClient::from_shared(Arc::clone(&kv));
         Self {

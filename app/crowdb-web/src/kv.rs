@@ -85,7 +85,13 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, (axum::http::StatusCode, Json<ErrorBod
 }
 
 /// Resolve the crowdb-rpc endpoint for a group's leader via the monitor cache.
-/// Falls back to any healthy replica if no leader hint is available.
+/// Polls until a self-reported leader is observed among Up nodes (no
+/// first-healthy fallback) so KV writes are not routed to a follower —
+/// a follower rejects with "not leader" and triggers a slow retry cycle
+/// in the KV client (~2s per round). After all polling attempts, falls
+/// back to [`leader_for`](MonitorCache::leader_for) (which includes the
+/// first-healthy fallback) as a last resort so the caller can still
+/// attempt the op.
 ///
 /// Before returning, the monitor cache is refreshed for every node hosting
 /// the group until a leader is observed, so KV reads are not forwarded
@@ -109,11 +115,19 @@ pub async fn resolve_kv_endpoint(
             // the leader whenever we know one; only refuse if the group is
             // unavailable (lost quorum) or has no leader at all.
             if view.state != GroupHealth::Unavailable && view.state != GroupHealth::Unknown {
-                // Use leader_for (not view.leader) so stale leader records
-                // from dead nodes are skipped — leader_for checks node
-                // health and falls back to the first Up replica.
-                if let Some((_rid, node_id)) = state.monitor_cache.leader_for(sid, gid).await {
-                    return kv_endpoint_for_node(state, sid, node_id).await;
+                // Use strict_leader_for so we only return when a node
+                // self-reports as Leader and is Up — routing to a follower
+                // triggers "not leader" + slow retry in the KV client.
+                if let Some((_rid, node_id)) = state.monitor_cache.strict_leader_for(sid, gid).await {
+                    let endpoint = kv_endpoint_for_node(state, sid, node_id).await?;
+                    // For non-group-0 stores, verify the endpoint uses the
+                    // per-store listen port (not the node's default rpc_url).
+                    // If the monitor cache doesn't have listen_addr yet, keep
+                    // polling — sending to the wrong port triggers a 4-5s
+                    // retry cycle in the KV client.
+                    if sid == 0 || endpoint_has_store_port(state, sid, node_id, &endpoint).await {
+                        return Ok(endpoint);
+                    }
                 }
             }
         }
@@ -124,12 +138,41 @@ pub async fn resolve_kv_endpoint(
         sleep(Duration::from_millis(50 * (1 + attempt))).await;
     }
 
+    // Last-resort fallback: use leader_for (first-healthy fallback) so the
+    // caller can attempt the op rather than failing immediately. The KV
+    // client's retry loop will handle "not leader" if this is a follower.
+    if let Some((_rid, node_id)) = state.monitor_cache.leader_for(sid, gid).await {
+        let endpoint = kv_endpoint_for_node(state, sid, node_id).await?;
+        if sid == 0 || endpoint_has_store_port(state, sid, node_id, &endpoint).await {
+            return Ok(endpoint);
+        }
+    }
+
     Err((
         StatusCode::NOT_FOUND,
         Json(ErrorBody {
             error: format!("group {gid} in store {sid} not found or has no healthy leader"),
         }),
     ))
+}
+
+/// Check whether `endpoint`'s port matches the store's `listen_addr`
+/// port from the monitor cache. Returns `false` if the cache has no
+/// `listen_addr` for this store (meaning the endpoint fell back to
+/// the node's default `rpc_url`, which is wrong for non-group-0 stores).
+async fn endpoint_has_store_port(state: &AppState, sid: u64, node_id: NodeId, endpoint: &str) -> bool {
+    let snap = state.monitor_cache.snapshot().await;
+    let Some(listen_addr) = snap
+        .get(&node_id)
+        .and_then(|rec| rec.stores.get(&sid))
+        .and_then(|ns| ns.listen_addr.as_ref())
+    else {
+        return false;
+    };
+    let Some(listen_port) = port_of(listen_addr) else {
+        return false;
+    };
+    port_of(endpoint) == Some(listen_port)
 }
 
 async fn kv_endpoint_for_node(
@@ -230,9 +273,8 @@ async fn group_node_ids(state: &AppState, sid: u64, gid: u64) -> Vec<NodeId> {
 /// `(sid, gid)`. Called on initial endpoint resolution so the next
 /// `leader_for` call observes a post-election view.
 async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
-    for node_id in &group_node_ids(state, sid, gid).await {
-        refresh_node_cache(state, *node_id).await;
-    }
+    let node_ids = group_node_ids(state, sid, gid).await;
+    futures::future::join_all(node_ids.iter().map(|&nid| refresh_node_cache(state, nid))).await;
 }
 
 /// `crowdb-kv-server` management-API base URLs (`ServerEntry::url`, e.g.
@@ -288,21 +330,55 @@ async fn mgmt_seeds_for_group(
     Ok(seeds)
 }
 
-/// Seed the shared `CrowdbKvClient`'s topology cache for `(sid, gid)`
-/// using the monitor cache + mgmt seeds, then build an `OpContext`.
-/// The `ops::kv_data::*` functions use `ctx.kv()` which reads the
-/// topology cache — so seeding before the call ensures the leader is
-/// known without the ops functions doing their own resolution.
+/// Build an `OpContext` for a KV data-plane request on `(sid, gid)`.
+///
+/// Fails fast with `502` if no KV servers are deployed — the shared
+/// `CrowdbKvClient` would have no seeds for topology discovery and
+/// every op would retry for ~5s before failing. Returning a clear
+/// error immediately is better than a silent timeout.
+///
+/// Seeds + leader hint are synced from the current config + monitor
+/// cache so the shared client's topology cache is fresh for this call.
 async fn kv_op_context(
     state: &AppState,
     sid: u64,
     gid: u64,
 ) -> Result<crowdb_console_shared::ops::OpContext, (StatusCode, Json<ErrorBody>)> {
-    let seeds = mgmt_seeds_for_group(state, sid, gid).await?;
+    let t0 = std::time::Instant::now();
+    // Fail fast: if no KV servers are deployed, the client cannot
+    // discover any leader. Don't let it retry for seconds.
+    let all_seeds: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.servers
+            .iter()
+            .filter(|s| s.service_type == crowdb_console_shared::config::ServiceType::Kv)
+            .map(|s| s.url.clone())
+            .collect()
+    };
+    if all_seeds.is_empty() {
+        tracing::warn!("kv_op_context: no KV servers deployed — fail-fast 502 (store={sid}, group={gid})");
+        return Err(err_502(
+            "no KV servers deployed — cluster not initialized; run cluster init first",
+        ));
+    }
+    // Validate the target group exists + has replicas.
+    let _ = mgmt_seeds_for_group(state, sid, gid).await?;
     let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    ctx.kv().set_mgmt_seeds(seeds);
+    ctx.kv().set_mgmt_seeds(all_seeds);
+    let t_resolve = std::time::Instant::now();
     if let Ok(endpoint) = resolve_kv_endpoint(state, sid, gid).await {
+        tracing::debug!(
+            "kv_op_context: resolve_kv_endpoint store={sid} group={gid} endpoint={endpoint} in {}ms (total {}ms)",
+            t_resolve.elapsed().as_millis(),
+            t0.elapsed().as_millis()
+        );
         ctx.kv().seed_leader(sid, gid, endpoint);
+    } else {
+        tracing::warn!(
+            "kv_op_context: resolve_kv_endpoint failed for store={sid} group={gid} in {}ms (total {}ms)",
+            t_resolve.elapsed().as_millis(),
+            t0.elapsed().as_millis()
+        );
     }
     Ok(ctx)
 }
@@ -318,9 +394,15 @@ pub async fn http_kv_get(
 ) -> Result<Json<KvGetResponse>, (StatusCode, Json<ErrorBody>)> {
     let key = decode_key(q.key, q.key_hex)?;
     let ctx = kv_op_context(&state, sid, gid).await?;
+    let t_get = std::time::Instant::now();
     let outcome = ops::kv_data::get(&ctx, sid, gid, &key)
         .await
         .map_err(map_config_err)?;
+    tracing::debug!(
+        "http_kv_get: store={sid} group={gid} key={} get in {}ms",
+        String::from_utf8_lossy(&key),
+        t_get.elapsed().as_millis()
+    );
     match outcome {
         GetOutcome::NotFound => Ok(Json(KvGetResponse {
             found: false,
@@ -430,9 +512,15 @@ pub async fn http_kv_put(
         return Err(err_400("missing `value` or `value_hex`"));
     };
     let ctx = kv_op_context(&state, sid, gid).await?;
+    let t_put = std::time::Instant::now();
     let out = ops::kv_data::put(&ctx, sid, gid, &key, &value, Some((body.client_id, body.seq)))
         .await
         .map_err(map_config_err)?;
+    tracing::debug!(
+        "http_kv_put: store={sid} group={gid} key={} put in {}ms",
+        String::from_utf8_lossy(&key),
+        t_put.elapsed().as_millis()
+    );
     Ok(Json(KvWriteResponse {
         ok: true,
         revision: out.revision,

@@ -33,6 +33,14 @@ pub enum Error {
     #[error("topology discovery failed: {0}")]
     Topology(String),
 
+    /// No mgmt seed URLs are configured — the client cannot discover
+    /// any leader. Returned immediately (no retry) so the caller gets
+    /// a clear, fast error instead of a 5s timeout. If you see this,
+    /// the code that created the `CrowdbKvClient` forgot to call
+    /// `set_mgmt_seeds` with the cluster's server URLs.
+    #[error("no mgmt seeds configured — cannot discover leader; call set_mgmt_seeds first")]
+    NoSeeds,
+
     #[error("invalid endpoint {endpoint}: {reason}")]
     InvalidEndpoint { endpoint: String, reason: String },
 

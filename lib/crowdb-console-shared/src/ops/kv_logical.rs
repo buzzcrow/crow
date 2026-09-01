@@ -21,7 +21,7 @@ use crate::ops::OpContext;
 
 /// Retry a sysdata write with backoff. Group-0 leader election may not
 /// have settled when `cluster_init` returns, causing "not leader" errors
-/// on the first attempt. Up to 5 attempts with 200ms backoff.
+/// on the first attempt. Up to 5 attempts with 50ms backoff.
 async fn retry_sysmd<F, Fut, T, E>(label: &str, f: F) -> Result<T>
 where
     F: Fn() -> Fut,
@@ -39,7 +39,7 @@ where
                 }
                 last_err = Some(e);
                 if attempt < 4 {
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             }
         }
@@ -119,29 +119,50 @@ pub async fn add_store(ctx: &OpContext, store_id: u64, nodes: &[u64]) -> Result<
     let mut seen = HashSet::new();
     target_nodes.retain(|nid| seen.insert(*nid));
 
-    let mut succeeded: Vec<u64> = Vec::new();
-    for nid in &target_nodes {
-        let client = server_client(ctx, *nid)?;
-        client.health().await.map_err(|e| Error::NodeUnreachable {
-            node_id: nid.to_string(),
-            reason: e.to_string(),
-        })?;
-        let req = AddStoreRequest { store_id, port: None };
-        match client.add_store(&req).await {
-            Ok(_) => succeeded.push(*nid),
-            Err(e) => {
-                // Roll back successful creations.
-                for ok_nid in &succeeded {
-                    if let Ok(c) = server_client(ctx, *ok_nid) {
-                        let _ = c.remove_store(store_id).await;
-                    }
-                }
-                return Err(Error::UpstreamRpc {
+    // Health-check + add_store on each node concurrently. Collect
+    // successes; on any failure, roll back and return the first error.
+    let results: Vec<Result<u64>> = futures::future::join_all(target_nodes.iter().map(|nid| {
+        let nid = *nid;
+        async move {
+            let client = server_client(ctx, nid)?;
+            client.health().await.map_err(|e| Error::NodeUnreachable {
+                node_id: nid.to_string(),
+                reason: e.to_string(),
+            })?;
+            let req = AddStoreRequest { store_id, port: None };
+            client
+                .add_store(&req)
+                .await
+                .map(|_| nid)
+                .map_err(|e| Error::UpstreamRpc {
                     node_id: nid.to_string(),
                     status: format!("store create failed: {e}"),
-                });
+                })
+        }
+    }))
+    .await;
+
+    let mut succeeded: Vec<u64> = Vec::new();
+    let mut first_err: Option<Error> = None;
+    for res in results {
+        match res {
+            Ok(nid) => succeeded.push(nid),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
             }
         }
+    }
+    if let Some(e) = first_err {
+        // Roll back successful creations (concurrently).
+        futures::future::join_all(succeeded.iter().filter_map(|ok_nid| {
+            server_client(ctx, *ok_nid).ok().map(|c| async move {
+                let _ = c.remove_store(store_id).await;
+            })
+        }))
+        .await;
+        return Err(e);
     }
 
     // Record in group-0 sysdata + local config. The sysdata write must
@@ -202,6 +223,7 @@ pub async fn list_stores(ctx: &OpContext) -> Result<Vec<crowdb_protocol::common:
 ///
 /// # Errors
 /// Returns an error if `nodes` is empty or any upstream RPC fails.
+#[allow(clippy::too_many_lines)]
 pub async fn add_group(
     ctx: &OpContext,
     store_id: u64,
@@ -216,60 +238,95 @@ pub async fn add_group(
         });
     }
 
-    // Phase 1: create the group on each node.
-    let mut succeeded: Vec<(u64, u64)> = Vec::new(); // (node_id, replica_id)
-    for (i, nid) in nodes.iter().enumerate() {
-        let client = server_client(ctx, *nid)?;
-        let rid = replica_id + i as u64;
-        let req = AddGroupRequest {
-            group_id,
-            replica_id: rid,
-            initial_role: Some(if i == 0 {
-                AddGroupInitialRole::Leader
-            } else {
-                AddGroupInitialRole::Follower
-            }),
-            start_election: Some(nodes.len() <= 1),
-        };
-        match client.add_group(store_id, &req).await {
-            Ok(()) => succeeded.push((*nid, rid)),
+    // Phase 1: create the group on each node concurrently.
+    let results: Vec<Result<(u64, u64)>> =
+        futures::future::join_all(nodes.iter().enumerate().map(|(i, nid)| {
+            let nid = *nid;
+            let rid = replica_id + i as u64;
+            let single = nodes.len() <= 1;
+            async move {
+                let client = server_client(ctx, nid)?;
+                let req = AddGroupRequest {
+                    group_id,
+                    replica_id: rid,
+                    initial_role: Some(if i == 0 {
+                        AddGroupInitialRole::Leader
+                    } else {
+                        AddGroupInitialRole::Follower
+                    }),
+                    start_election: Some(single),
+                };
+                client
+                    .add_group(store_id, &req)
+                    .await
+                    .map(|()| (nid, rid))
+                    .map_err(|e| Error::UpstreamRpc {
+                        node_id: nid.to_string(),
+                        status: format!("group create failed: {e}"),
+                    })
+            }
+        }))
+        .await;
+
+    let mut succeeded: Vec<(u64, u64)> = Vec::new();
+    let mut first_err: Option<Error> = None;
+    for res in results {
+        match res {
+            Ok(entry) => succeeded.push(entry),
             Err(e) => {
-                for (ok_nid, _) in &succeeded {
-                    if let Ok(c) = server_client(ctx, *ok_nid) {
-                        let _ = c.remove_group(store_id, group_id).await;
-                    }
+                if first_err.is_none() {
+                    first_err = Some(e);
                 }
-                return Err(Error::UpstreamRpc {
-                    node_id: nid.to_string(),
-                    status: format!("group create failed: {e}"),
-                });
             }
         }
     }
+    if let Some(e) = first_err {
+        // Roll back successful creations (concurrently).
+        futures::future::join_all(succeeded.iter().filter_map(|(ok_nid, _)| {
+            server_client(ctx, *ok_nid).ok().map(|c| async move {
+                let _ = c.remove_group(store_id, group_id).await;
+            })
+        }))
+        .await;
+        return Err(e);
+    }
 
-    // Phase 2: wire remote replicas for multi-node.
+    // Phase 2: wire remote replicas for multi-node. Fetch all peer
+    // endpoints concurrently, then wire each node's remotes.
     if succeeded.len() > 1 {
-        for (i, (nid, _rid)) in succeeded.iter().enumerate() {
-            let Ok(client) = server_client(ctx, *nid) else {
-                continue;
-            };
-            let mut remotes: Vec<RemoteReplicaInfo> = Vec::new();
-            for (j, (peer_nid, peer_rid)) in succeeded.iter().enumerate() {
-                if j == i {
-                    continue;
+        let endpoints: Vec<Option<String>> =
+            futures::future::join_all(succeeded.iter().map(|(peer_nid, _)| {
+                let peer_nid = *peer_nid;
+                async move { rpc_endpoint_for_store(ctx, peer_nid, store_id).await }
+            }))
+            .await;
+
+        futures::future::join_all(succeeded.iter().enumerate().map(|(i, (nid, _))| {
+            let nid = *nid;
+            let remotes: Vec<RemoteReplicaInfo> = succeeded
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .filter_map(|(j, (_, peer_rid))| {
+                    endpoints.get(j).and_then(|ep| {
+                        ep.as_ref().map(|ep| RemoteReplicaInfo {
+                            replica_id: *peer_rid,
+                            endpoint: ep.clone(),
+                            voting: true,
+                        })
+                    })
+                })
+                .collect();
+            async move {
+                if remotes.is_empty() {
+                    return;
                 }
-                if let Some(ep) = rpc_endpoint_for_store(ctx, *peer_nid, store_id).await {
-                    remotes.push(RemoteReplicaInfo {
-                        replica_id: *peer_rid,
-                        endpoint: ep,
-                        voting: true,
-                    });
+                if let Ok(client) = server_client(ctx, nid) {
+                    let _ = client.add_remote_replicas(store_id, group_id, &remotes).await;
                 }
             }
-            if !remotes.is_empty() {
-                let _ = client.add_remote_replicas(store_id, group_id, &remotes).await;
-            }
-        }
+        }))
+        .await;
     }
 
     // Record in group-0 sysdata + local config. The sysdata write must
@@ -279,8 +336,17 @@ pub async fn add_group(
         ctx.sysmd().add_group(store_id, group_id).await
     })
     .await?;
-    for (node_id, replica_id) in &succeeded {
-        record_replica(ctx, store_id, group_id, *replica_id, *node_id).await?;
+    // Record replicas concurrently — sysmd writes are independent;
+    // config updates serialize on the RwLock.
+    let replica_results: Vec<Result<()>> =
+        futures::future::join_all(succeeded.iter().map(|(node_id, replica_id)| {
+            let node_id = *node_id;
+            let replica_id = *replica_id;
+            async move { record_replica(ctx, store_id, group_id, replica_id, node_id).await }
+        }))
+        .await;
+    for res in replica_results {
+        res?;
     }
     let replicas: Vec<ReplicaEntry> = succeeded
         .iter()

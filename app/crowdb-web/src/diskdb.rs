@@ -37,6 +37,11 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
     if snap.is_empty() {
         return None;
     }
+    // Use the shared kv_client so topology discovery seeds are
+    // consistent with the rest of the web server. Creating a standalone
+    // client with empty seeds here caused "no seeds configured" errors
+    // when refresh_endpoints triggered a topology refresh.
+    let kv = state.kv_client().await;
     for node_id in snap.keys() {
         // Skip stopped servers — no runtime pid means the process is
         // not running. Contacting it only wastes time on
@@ -45,9 +50,8 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
             continue;
         }
         if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
-            let kv = crowdb_kv_client::CrowdbKvClient::new(crowdb_kv_client::ClientConfig::new(Vec::new()));
             kv.seed_leader(0, 0, ep);
-            let svc = ServiceRegistryClient::new(kv);
+            let svc = ServiceRegistryClient::from_shared(kv);
             let transport = std::sync::Arc::new(DiskdbRpcTransport::new());
             let client = DiskdbClient::new(svc, transport);
             if let Err(e) = client.refresh_endpoints().await {

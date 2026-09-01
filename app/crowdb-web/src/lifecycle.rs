@@ -227,11 +227,13 @@ pub async fn http_remove_node(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let t0 = std::time::Instant::now();
     // Cascade-stop the server process and drop its deployment record +
     // topology before removing the node, so a direct DELETE /api/nodes/:id
     // does not orphan a running crowdb-kv-server. No-op when no server is
     // deployed (e.g. the UI already called DELETE .../server first).
     stop_and_remove_server_for_node(&state, id).await;
+    let t_stop = t0.elapsed().as_millis();
     let rack_id = {
         let cfg = state.config.read().unwrap();
         cfg.nodes.iter().find(|n| n.id == id).map(|n| n.rack_id)
@@ -241,11 +243,28 @@ pub async fn http_remove_node(
         cfg.remove_node(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    let t_cfg = t0.elapsed().as_millis() - t_stop;
+    // Refresh the monitor cache for remaining group-0 nodes and poll
+    // until a post-election leader is observed, so the sysdata write
+    // targets the new leader instead of a stale hint pointing at the
+    // just-stopped node (which would trigger a 5s transport-error
+    // retry cycle in the KV client).
+    state.refresh_group0_leader(Some(id)).await;
+    let t_refresh = t0.elapsed().as_millis() - t_stop - t_cfg;
     // Best-effort sysdata sync (non-blocking — config already committed).
     if let (Some(rack_id), Ok(ctx)) = (rack_id, state.op_context().await) {
         let _ = ctx.sysmd().remove_node_cascade(rack_id, id).await;
     }
+    let t_sysmd = t0.elapsed().as_millis() - t_stop - t_cfg - t_refresh;
     state.monitor_cache.drop_node(&id).await;
+    tracing::debug!(
+        "http_remove_node: id={id} stop={}ms cfg={}ms refresh={}ms sysmd={}ms total={}ms",
+        t_stop,
+        t_cfg,
+        t_refresh,
+        t_sysmd,
+        t0.elapsed().as_millis()
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -728,6 +747,9 @@ pub async fn http_deploy_node_server(
     state.persist().map_err(map_persist_err)?;
     state.set_runtime_pid(node_id, deployed.pid);
     crate::mgmt::refresh_node_cache(&state, node_id).await;
+    // A new server is now in the config — re-seed the shared kv_client
+    // so topology refresh can reach this node.
+    state.reseed_kv_client().await;
     Ok((
         StatusCode::CREATED,
         Json(DeployResult {

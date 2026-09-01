@@ -270,7 +270,7 @@ export async function waitForLeader(baseURL: string, storeId: number, groupId: n
           (typeof v.leader_id === 'number' && v.leader_id > 0);
         if (hasLeader) return;
       }
-      await new Promise((res) => setTimeout(res, 100));
+      await new Promise((res) => setTimeout(res, 50));
     }
     throw new Error(`leader not elected for store ${storeId} group ${groupId} within ${timeoutMs}ms`);
   } finally {
@@ -294,6 +294,21 @@ export async function createStore(baseURL: string, storeId: number, nodeIds: num
   if (storeId !== 0) {
     await clusterInit(baseURL, nodeIds);
   }
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post('/api/stores', {
+      data: { store_id: storeId, nodes: nodeIds },
+    });
+    expect(response.status(), await response.text()).toBe(201);
+  } finally {
+    await api.dispose();
+  }
+}
+
+// Like createStore but skips clusterInit — use after group-0 has been
+// bootstrapped once via clusterInit. add_store works on any deployed
+// node; it does not require the node to be in group-0's membership.
+export async function createStoreNoInit(baseURL: string, storeId: number, nodeIds: number[]) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post('/api/stores', {
@@ -619,14 +634,18 @@ export class CrowdbClusterDeployer {
   private async provisionRacksAndNodes(topo: TopologyDescriptor): Promise<{ racks: number[]; nodes: number[] }> {
     const racks: number[] = [];
     const nodes: number[] = [];
-    for (let i = 0; i < topo.nodeCount; i++) {
-      const rackId = topo.rackBase + i;
-      const nodeId = topo.nodeBase + i;
-      await createRack(this.baseURL, { id: rackId, name: `rack-${rackId}` });
-      await createNode(this.baseURL, { id: nodeId, rack_id: rackId });
-      racks.push(rackId);
-      nodes.push(nodeId);
-    }
+    // Create all rack+node pairs in parallel — each pair is independent.
+    await Promise.all(
+      Array.from({ length: topo.nodeCount }, (_, i) => {
+        const rackId = topo.rackBase + i;
+        const nodeId = topo.nodeBase + i;
+        racks.push(rackId);
+        nodes.push(nodeId);
+        return createRack(this.baseURL, { id: rackId, name: `rack-${rackId}` }).then(() =>
+          createNode(this.baseURL, { id: nodeId, rack_id: rackId }),
+        );
+      }),
+    );
     return { racks, nodes };
   }
 
@@ -659,100 +678,153 @@ export class CrowdbClusterDeployer {
   }
 
   private async createStoresAndGroups(nodes: number[], topo: TopologyDescriptor): Promise<StoreInfo[]> {
-    const stores: StoreInfo[] = [];
+    const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
+
+    // Build the full list of (storeId, groupId) pairs, then create
+    // stores and groups concurrently. Stores are independent; groups
+    // within a store are independent Paxos groups.
+    const storeSpecs: { storeId: number; groups: { groupId: number; groupNodes: number[] }[] }[] = [];
     for (let s = 0; s < topo.storeCount; s++) {
       const storeId = topo.storeBase + s;
-      const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
-      await createStore(this.baseURL, storeId, storeNodes);
-
-      const groups: GroupInfo[] = [];
+      const groups: { groupId: number; groupNodes: number[] }[] = [];
       for (let g = 0; g < topo.groupsPerStore; g++) {
         const groupId = topo.groupBase + s * topo.groupsPerStore + g;
         const groupNodes = nodes.slice(0, topo.replicasPerGroup);
-        await addGroup(this.baseURL, storeId, groupId, 1, groupNodes);
-        groups.push({ groupId, leaderNodeId: null, leaderEndpoint: null });
+        groups.push({ groupId, groupNodes });
       }
-      stores.push({ storeId, nodes: storeNodes, groups });
+      storeSpecs.push({ storeId, groups });
     }
-    return stores;
+
+    // Create all stores in parallel first (addGroup requires the store
+    // to exist on each node).
+    await Promise.all(storeSpecs.map((spec) => createStore(this.baseURL, spec.storeId, storeNodes)));
+
+    // Create all groups in parallel — each is an independent Paxos group.
+    const groupPromises: Promise<{ storeId: number; groupId: number }>[] = [];
+    for (const spec of storeSpecs) {
+      for (const g of spec.groups) {
+        groupPromises.push(
+          addGroup(this.baseURL, spec.storeId, g.groupId, 1, g.groupNodes).then(() => ({
+            storeId: spec.storeId,
+            groupId: g.groupId,
+          })),
+        );
+      }
+    }
+    await Promise.all(groupPromises);
+
+    // Assemble StoreInfo from the specs.
+    return storeSpecs.map((spec) => ({
+      storeId: spec.storeId,
+      nodes: storeNodes,
+      groups: spec.groups.map((g) => ({ groupId: g.groupId, leaderNodeId: null, leaderEndpoint: null })),
+    }));
   }
 
   private async deployDiskdbInstances(nodes: number[], topo: TopologyDescriptor): Promise<DiskdbInfo[]> {
-    const instances: DiskdbInfo[] = [];
-    if (!topo.deployDiskdb) return instances;
-    for (const nodeId of nodes) {
-      const rpcPort = freePortRange(3);
-      await deployDiskdb(this.baseURL, nodeId, rpcPort);
-      instances.push({ nodeId, pid: 0, rpcPort });
-    }
+    if (!topo.deployDiskdb) return [];
+    // Deploy all diskdb instances in parallel — each is independent.
+    const instances = await Promise.all(
+      nodes.map((nodeId) => {
+        const rpcPort = freePortRange(3);
+        return deployDiskdb(this.baseURL, nodeId, rpcPort).then(() => ({
+          nodeId,
+          pid: 0,
+          rpcPort,
+        }));
+      }),
+    );
     this.diskdbNodeIds = [...nodes];
     return instances;
   }
 
   private async createDiskGroupsAndDisks(nodes: number[], topo: TopologyDescriptor): Promise<void> {
     if (!topo.diskGroupsPerNode || topo.diskGroupsPerNode === 0) return;
-    for (const nodeId of nodes) {
-      for (let dg = 0; dg < topo.diskGroupsPerNode; dg++) {
-        const dgId = 1 + dg;
-        await addDiskGroup(this.baseURL, nodeId, dgId, `dg-${dgId}`);
-        if (topo.disksPerGroup && topo.disksPerGroup > 0) {
-          const disks = [];
-          for (let d = 0; d < topo.disksPerGroup; d++) {
-            disks.push({ disk_id: randomDiskId() });
+    // Create disk-groups + disks on all nodes in parallel — each node's
+    // disk-groups are independent.
+    await Promise.all(
+      nodes.map((nodeId) =>
+        (async () => {
+          for (let dg = 0; dg < topo.diskGroupsPerNode!; dg++) {
+            const dgId = 1 + dg;
+            await addDiskGroup(this.baseURL, nodeId, dgId, `dg-${dgId}`);
+            if (topo.disksPerGroup && topo.disksPerGroup! > 0) {
+              const disks = [];
+              for (let d = 0; d < topo.disksPerGroup!; d++) {
+                disks.push({ disk_id: randomDiskId() });
+              }
+              await addDisksBatch(this.baseURL, nodeId, dgId, disks);
+            }
           }
-          await addDisksBatch(this.baseURL, nodeId, dgId, disks);
-        }
-      }
-    }
+        })(),
+      ),
+    );
   }
 
   private async waitHealthy(stores: StoreInfo[], timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
+    // Poll all groups in parallel — leader elections are independent.
+    const groupSpecs: { storeId: number; groupId: number }[] = [];
     for (const store of stores) {
       for (const group of store.groups) {
-        while (true) {
-          const api = await apiContext(this.baseURL);
-          try {
-            const r = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}`);
-            if (r.ok()) {
-              const v = await r.json();
-              if (Array.isArray(v.replicas) && v.replicas.some((x: any) => String(x.role).toLowerCase() === 'leader')) {
-                break;
-              }
-            }
-          } finally {
-            await api.dispose();
-          }
-          if (Date.now() >= deadline) {
-            throw new Error(`no leader for store ${store.storeId} group ${group.groupId} within ${timeoutMs}ms`);
-          }
-          await new Promise((res) => setTimeout(res, 100));
-        }
+        groupSpecs.push({ storeId: store.storeId, groupId: group.groupId });
       }
     }
+    await Promise.all(
+      groupSpecs.map(({ storeId, groupId }) =>
+        (async () => {
+          while (true) {
+            const api = await apiContext(this.baseURL);
+            try {
+              const r = await api.get(`/api/stores/${storeId}/groups/${groupId}`);
+              if (r.ok()) {
+                const v = await r.json();
+                if (Array.isArray(v.replicas) && v.replicas.some((x: any) => String(x.role).toLowerCase() === 'leader')) {
+                  break;
+                }
+              }
+            } finally {
+              await api.dispose();
+            }
+            if (Date.now() >= deadline) {
+              throw new Error(`no leader for store ${storeId} group ${groupId} within ${timeoutMs}ms`);
+            }
+            await new Promise((res) => setTimeout(res, 100));
+          }
+        })(),
+      ),
+    );
   }
 
   private async collectLeaderInfo(stores: StoreInfo[]): Promise<StoreInfo[]> {
+    // Fetch leader info for all groups in parallel — each is an
+    // independent API call.
+    const promises: Promise<void>[] = [];
     for (const store of stores) {
       for (const group of store.groups) {
-        const api = await apiContext(this.baseURL);
-        try {
-          const r = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}`);
-          if (r.ok()) {
-            const v = await r.json();
-            const leader = v.replicas?.find((x: any) => String(x.role).toLowerCase() === 'leader');
-            group.leaderNodeId = leader?.node_id ?? null;
-          }
-          const epResp = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}/endpoint`);
-          if (epResp.ok()) {
-            const ep = await epResp.json();
-            if (ep.rpc_url) group.leaderEndpoint = ep.rpc_url;
-          }
-        } finally {
-          await api.dispose();
-        }
+        promises.push(
+          (async () => {
+            const api = await apiContext(this.baseURL);
+            try {
+              const r = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}`);
+              if (r.ok()) {
+                const v = await r.json();
+                const leader = v.replicas?.find((x: any) => String(x.role).toLowerCase() === 'leader');
+                group.leaderNodeId = leader?.node_id ?? null;
+              }
+              const epResp = await api.get(`/api/stores/${store.storeId}/groups/${group.groupId}/endpoint`);
+              if (epResp.ok()) {
+                const ep = await epResp.json();
+                if (ep.rpc_url) group.leaderEndpoint = ep.rpc_url;
+              }
+            } finally {
+              await api.dispose();
+            }
+          })(),
+        );
       }
     }
+    await Promise.all(promises);
     return stores;
   }
 }
@@ -776,20 +848,23 @@ export async function setupCluster(baseURL: string, topo: TopologyDescriptor): P
   const racks: number[] = [];
   const nodes: number[] = [];
 
-  for (let i = 0; i < topo.nodeCount; i++) {
-    const rackId = topo.rackBase + i;
-    const nodeId = topo.nodeBase + i;
-    await createRack(baseURL, { id: rackId, name: `rack-${rackId}` });
-    await createNode(baseURL, { id: nodeId, rack_id: rackId });
-    racks.push(rackId);
-    nodes.push(nodeId);
-  }
+  // Create all rack+node pairs in parallel — each pair is independent.
+  await Promise.all(
+    Array.from({ length: topo.nodeCount }, (_, i) => {
+      const rackId = topo.rackBase + i;
+      const nodeId = topo.nodeBase + i;
+      racks.push(rackId);
+      nodes.push(nodeId);
+      return createRack(baseURL, { id: rackId, name: `rack-${rackId}` }).then(() =>
+        createNode(baseURL, { id: nodeId, rack_id: rackId }),
+      );
+    }),
+  );
 
   await Promise.all(nodes.map((nodeId) => deployNodeServer(baseURL, nodeId, freePort(), freePort())));
 
   const stores: number[] = [];
   const groups: { storeId: number; groupId: number }[] = [];
-  const leaderWaits: Promise<void>[] = [];
 
   // Create all stores in parallel — stores are independent.
   const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
@@ -798,21 +873,24 @@ export async function setupCluster(baseURL: string, topo: TopologyDescriptor): P
   }
   await Promise.all(stores.map((storeId) => createStore(baseURL, storeId, storeNodes)));
 
-  // Create groups sequentially (each addGroup hits the same nodes,
-  // parallel calls could contend on the KV servers), but wait for
-  // leaders in parallel.
+  // Create all groups in parallel — each addGroup creates an independent
+  // Paxos group. The backend handles per-node fan-out concurrently.
+  const groupPromises: Promise<void>[] = [];
   for (let s = 0; s < topo.storeCount; s++) {
     const storeId = topo.storeBase + s;
     for (let g = 0; g < topo.groupsPerStore; g++) {
       const groupId = topo.groupBase + s * topo.groupsPerStore + g;
       const groupNodes = nodes.slice(0, topo.replicasPerGroup);
-      await addGroup(baseURL, storeId, groupId, 1, groupNodes);
       groups.push({ storeId, groupId });
-      leaderWaits.push(waitForLeader(baseURL, storeId, groupId));
+      groupPromises.push(
+        addGroup(baseURL, storeId, groupId, 1, groupNodes).then(() =>
+          waitForLeader(baseURL, storeId, groupId),
+        ),
+      );
     }
   }
 
-  await Promise.all(leaderWaits);
+  await Promise.all(groupPromises);
 
   return { racks, nodes, stores, groups, apiBase: baseURL };
 }

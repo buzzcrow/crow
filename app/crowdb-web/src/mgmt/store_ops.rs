@@ -92,9 +92,7 @@ pub(crate) async fn http_add_store(
 
     // Refresh the monitor cache for affected nodes so health badges
     // and RPC endpoint resolution reflect the new store.
-    for nid in &succeeded {
-        refresh_node_cache(&state, *nid).await;
-    }
+    futures::future::join_all(succeeded.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
 
     Ok((
         StatusCode::CREATED,
@@ -162,8 +160,6 @@ pub(crate) async fn http_remove_store(
         .map_err(map_config_err)?;
     state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
-    for nid in &hosting_nodes {
-        refresh_node_cache(&state, *nid).await;
-    }
+    futures::future::join_all(hosting_nodes.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
     Ok(StatusCode::NO_CONTENT)
 }

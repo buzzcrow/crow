@@ -199,64 +199,86 @@ fn remap_zero_host(addr: &str) -> String {
 pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crowdb_kv_client::HardwareClient> {
     let snap = state.monitor_cache.snapshot().await;
     if snap.is_empty() {
-        // First-run scenario — no nodes deployed yet. This is normal,
-        // not a warning-worthy condition. Callers fall back to config.
         return None;
     }
-    // Collect all group-0 hosting nodes: their crowdb-rpc endpoints (for
-    // seed_leader) and mgmt API URLs (for topology discovery seeds).
-    // Skip stopped servers (no runtime pid) — including their URLs as
-    // seeds only wastes time on connection-refused during topology
-    // refresh.
-    let mut rpc_eps: Vec<String> = Vec::new();
-    let mut mgmt_seeds: Vec<String> = Vec::new();
-    for node_id in snap.keys() {
-        if state.runtime_pid(*node_id).is_none() {
-            continue;
-        }
-        if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
-            rpc_eps.push(ep);
-            if let Ok(url) = mgmt_url_for_node(state, *node_id) {
-                mgmt_seeds.push(url);
-            }
-        }
-    }
-    if rpc_eps.is_empty() {
-        // The monitor cache is populated asynchronously by
-        // refresh_node_cache; right after cluster operations (deploy,
-        // restart, stop) a successful topology poll can transiently
-        // report store-0 with no listen_addr, so the cache lacks the
-        // group-0 endpoint even though the server is running. Actively
-        // refresh the running nodes and re-check before giving up — the
-        // endpoint exists, the cache just hasn't caught up.
-        let running: Vec<NodeId> = snap
-            .keys()
-            .copied()
-            .filter(|n| state.runtime_pid(*n).is_some())
-            .collect();
-        for nid in &running {
-            refresh_node_cache(state, *nid).await;
-        }
-        let snap2 = state.monitor_cache.snapshot().await;
-        for node_id in snap2.keys() {
+    // Resolve the group-0 leader endpoint. Prefer the monitor cache's
+    // live `listen_addr` (the actual crowdb-rpc listener for store 0 on
+    // the leader node); fall back to per-node `rpc_endpoint_for_node`.
+    let mut rpc_ep: Option<String> = state.monitor_cache.group0_leader_endpoint().await;
+    if rpc_ep.is_none() {
+        let mut mgmt_seeds: Vec<String> = Vec::new();
+        for node_id in snap.keys() {
             if state.runtime_pid(*node_id).is_none() {
                 continue;
             }
             if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
-                rpc_eps.push(ep);
+                if rpc_ep.is_none() {
+                    rpc_ep = Some(ep);
+                }
                 if let Ok(url) = mgmt_url_for_node(state, *node_id) {
                     mgmt_seeds.push(url);
                 }
             }
         }
-        if rpc_eps.is_empty() {
-            warn!("build_hardware_client: nodes exist but no group-0 endpoint found in monitor cache");
-            return None;
+        if rpc_ep.is_none() {
+            let running: Vec<NodeId> = snap
+                .keys()
+                .copied()
+                .filter(|n| state.runtime_pid(*n).is_some())
+                .collect();
+            for nid in &running {
+                refresh_node_cache(state, *nid).await;
+            }
+            let snap2 = state.monitor_cache.snapshot().await;
+            for node_id in snap2.keys() {
+                if state.runtime_pid(*node_id).is_none() {
+                    continue;
+                }
+                if let Some(ep) = rpc_endpoint_for_node(state, *node_id, 0).await {
+                    rpc_ep = Some(ep);
+                    break;
+                }
+            }
+            if rpc_ep.is_none() {
+                warn!("build_hardware_client: no group-0 endpoint found in monitor cache");
+                return None;
+            }
         }
     }
-    let kv = crowdb_kv_client::CrowdbKvClient::new(crowdb_kv_client::ClientConfig::new(mgmt_seeds));
-    kv.seed_leader(0, 0, rpc_eps[0].clone());
-    Some(crowdb_kv_client::HardwareClient::new(kv))
+    // Reuse the shared CrowdbKvClient — its topology cache persists
+    // across requests so the group-0 leader is already known from prior
+    // op_context / clusterInit calls. Creating a new client here would
+    // trigger a 5s leader-discovery retry on every poll, saturating the
+    // browser's HTTP/1.1 connection pool.
+    let kv = state.kv_client().await;
+    let mgmt_seeds: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.servers
+            .iter()
+            .filter(|s| s.node_id.is_some())
+            .map(|s| s.url.clone())
+            .collect()
+    };
+    let seed_count = mgmt_seeds.len();
+    if !mgmt_seeds.is_empty() {
+        kv.set_mgmt_seeds(mgmt_seeds);
+    }
+    if let Some(ep) = rpc_ep {
+        let bare = strip_scheme(remap_zero_host(&ep));
+        tracing::debug!(
+            endpoint = %bare,
+            seed_count,
+            "build_hardware_client: seeding shared client with group-0 endpoint"
+        );
+        kv.seed_leader(0, 0, bare);
+    } else {
+        // No endpoint resolved from cache — the shared client must
+        // already have a cached leader from a prior op_context call.
+        // If it doesn't, the next RPC will trigger a 5s topology
+        // refresh retry. Log at warn so this is visible.
+        warn!("build_hardware_client: no rpc endpoint resolved; relying on shared client's cached leader");
+    }
+    Some(crowdb_kv_client::HardwareClient::from_shared(kv))
 }
 
 /// Cheap check: is group-0 (store 0) known to the monitor cache?

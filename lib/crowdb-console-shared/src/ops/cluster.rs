@@ -103,6 +103,7 @@ async fn seed_leader_after_init(
 /// Returns [`Error::Validation`] if `nodes` is empty;
 /// [`Error::NodeUnreachable`] if a node is not reachable;
 /// [`Error::UpstreamRpc`] if `system/init` fails on a node.
+#[allow(clippy::too_many_lines)]
 pub async fn init(ctx: &OpContext, nodes: &[u64]) -> Result<InitSummary> {
     if nodes.is_empty() {
         return Err(Error::Validation {
@@ -116,69 +117,104 @@ pub async fn init(ctx: &OpContext, nodes: &[u64]) -> Result<InitSummary> {
     target_nodes.retain(|nid| seen.insert(*nid));
     let single_node = target_nodes.len() == 1;
 
-    // Phase 1: call /system/init on each node.
-    let mut succeeded: Vec<(u64, u64)> = Vec::new();
-    for (i, nid) in target_nodes.iter().enumerate() {
-        let client = server_client(ctx, *nid)?;
-        client.health().await.map_err(|e| Error::NodeUnreachable {
-            node_id: nid.to_string(),
-            reason: e.to_string(),
-        })?;
-
-        let replica_id = 1 + i as u64;
-        let req = SystemInitRequest {
-            replica_id,
-            start_election: single_node,
-        };
-        match client.system_init(&req).await {
-            Ok(_) => succeeded.push((*nid, replica_id)),
-            Err(e) => {
-                // 409 Conflict means group 0 already exists — skip.
-                let is_already_init = matches!(
-                    &e,
-                    Error::UpstreamRpc { status, .. } if status.contains("409")
-                );
-                if is_already_init {
-                    succeeded.push((*nid, replica_id));
-                    continue;
-                }
-                // Rollback: remove group 0 on nodes that succeeded.
-                for (ok_nid, _) in &succeeded {
-                    if let Ok(c) = server_client(ctx, *ok_nid) {
-                        let _ = c.remove_group(0, 0).await;
+    // Phase 1: call /system/init on each node concurrently.
+    let init_results: Vec<Result<(u64, u64)>> =
+        futures::future::join_all(target_nodes.iter().enumerate().map(|(i, nid)| {
+            let nid = *nid;
+            async move {
+                let client = server_client(ctx, nid)?;
+                client.health().await.map_err(|e| Error::NodeUnreachable {
+                    node_id: nid.to_string(),
+                    reason: e.to_string(),
+                })?;
+                let replica_id = 1 + i as u64;
+                let req = SystemInitRequest {
+                    replica_id,
+                    start_election: single_node,
+                };
+                match client.system_init(&req).await {
+                    Ok(_) => Ok((nid, replica_id)),
+                    Err(e) => {
+                        let is_already_init = matches!(
+                            &e,
+                            Error::UpstreamRpc { status, .. } if status.contains("409")
+                        );
+                        if is_already_init {
+                            Ok((nid, replica_id))
+                        } else {
+                            Err(Error::UpstreamRpc {
+                                node_id: nid.to_string(),
+                                status: format!("system/init failed: {e}"),
+                            })
+                        }
                     }
                 }
-                return Err(Error::UpstreamRpc {
-                    node_id: nid.to_string(),
-                    status: format!("system/init failed: {e}"),
-                });
+            }
+        }))
+        .await;
+
+    // Collect successes; on any failure, roll back and return the first error.
+    let mut succeeded: Vec<(u64, u64)> = Vec::new();
+    let mut first_err: Option<Error> = None;
+    for res in init_results {
+        match res {
+            Ok(entry) => succeeded.push(entry),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
             }
         }
     }
+    if let Some(e) = first_err {
+        // Rollback: remove group 0 on nodes that succeeded (concurrently).
+        futures::future::join_all(succeeded.iter().filter_map(|(ok_nid, _)| {
+            server_client(ctx, *ok_nid).ok().map(|c| async move {
+                let _ = c.remove_group(0, 0).await;
+            })
+        }))
+        .await;
+        return Err(e);
+    }
 
-    // Phase 2: wire remotes for multi-node.
+    // Phase 2: wire remotes for multi-node. Fetch all peer endpoints
+    // concurrently, then wire each node's remotes.
     if !single_node {
-        for (i, (nid, _rid)) in succeeded.iter().enumerate() {
-            let Ok(client) = server_client(ctx, *nid) else {
-                continue;
-            };
-            let mut remotes: Vec<RemoteReplicaInfo> = Vec::new();
-            for (j, (peer_nid, peer_rid)) in succeeded.iter().enumerate() {
-                if j == i {
-                    continue;
+        // Fetch all endpoints in parallel.
+        let endpoints: Vec<Option<String>> =
+            futures::future::join_all(succeeded.iter().map(|(peer_nid, _)| {
+                let peer_nid = *peer_nid;
+                async move { rpc_endpoint_for_store(ctx, peer_nid, 0).await }
+            }))
+            .await;
+
+        // Wire remotes on each node concurrently.
+        futures::future::join_all(succeeded.iter().enumerate().map(|(i, (nid, _))| {
+            let nid = *nid;
+            let remotes: Vec<RemoteReplicaInfo> = succeeded
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .filter_map(|(j, (_, peer_rid))| {
+                    endpoints.get(j).and_then(|ep| {
+                        ep.as_ref().map(|ep| RemoteReplicaInfo {
+                            replica_id: *peer_rid,
+                            endpoint: ep.clone(),
+                            voting: true,
+                        })
+                    })
+                })
+                .collect();
+            async move {
+                if remotes.is_empty() {
+                    return;
                 }
-                if let Some(ep) = rpc_endpoint_for_store(ctx, *peer_nid, 0).await {
-                    remotes.push(RemoteReplicaInfo {
-                        replica_id: *peer_rid,
-                        endpoint: ep,
-                        voting: true,
-                    });
+                if let Ok(client) = server_client(ctx, nid) {
+                    let _ = client.add_remote_replicas(0, 0, &remotes).await;
                 }
             }
-            if !remotes.is_empty() {
-                let _ = client.add_remote_replicas(0, 0, &remotes).await;
-            }
-        }
+        }))
+        .await;
     }
 
     // Phase 3: persist topology in local config.
@@ -229,15 +265,26 @@ async fn write_topology_to_sysdata(ctx: &OpContext, store_nodes: &[u64], succeed
     let cfg_snapshot = ctx.config().clone();
     let sysmd = ctx.sysmd();
 
+    // All sysmd keys (racks, nodes, stores, groups, replicas) are
+    // independent — write them concurrently to avoid sequential RTTs.
+    let mut writes: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     // Hardware hierarchy.
     for rack in &cfg_snapshot.racks {
+        let sysmd = sysmd.clone();
+        let rack_id = rack.id;
         let value = RackValue {
             status: HwStatus::Up as i32,
             node_ids: Vec::new(),
         };
-        let _ = sysmd.add_rack(rack.id, &value).await;
+        writes.push(tokio::spawn(async move {
+            let _ = sysmd.add_rack(rack_id, &value).await;
+        }));
     }
     for node in &cfg_snapshot.nodes {
+        let sysmd = sysmd.clone();
+        let rack_id = node.rack_id;
+        let node_id = node.id;
         let value = NodeValue {
             status: HwStatus::Up as i32,
             last_used_dg_id: 0,
@@ -245,13 +292,27 @@ async fn write_topology_to_sysdata(ctx: &OpContext, store_nodes: &[u64], succeed
             status_changed_at_ms: 0,
             temp_failure_since_ms: None,
         };
-        let _ = sysmd.add_node(node.rack_id, node.id, &value).await;
+        writes.push(tokio::spawn(async move {
+            let _ = sysmd.add_node(rack_id, node_id, &value).await;
+        }));
     }
 
     // KV-cluster topology.
-    let _ = sysmd.add_store(0, store_nodes).await;
-    let _ = sysmd.add_group(0, 0).await;
+    {
+        let sysmd = sysmd.clone();
+        let node_ids = store_nodes.to_vec();
+        writes.push(tokio::spawn(async move {
+            let _ = sysmd.add_store(0, &node_ids).await;
+        }));
+    }
+    {
+        let sysmd = sysmd.clone();
+        writes.push(tokio::spawn(async move {
+            let _ = sysmd.add_group(0, 0).await;
+        }));
+    }
     for (nid, rid) in succeeded {
+        let sysmd = sysmd.clone();
         let endpoint = cfg_snapshot
             .server_for_node(*nid)
             .and_then(|s| s.rpc_url.clone())
@@ -265,7 +326,13 @@ async fn write_topology_to_sysdata(ctx: &OpContext, store_nodes: &[u64], succeed
             voting: true,
             endpoint,
         };
-        let _ = sysmd.add_replica(&value).await;
+        writes.push(tokio::spawn(async move {
+            let _ = sysmd.add_replica(&value).await;
+        }));
+    }
+
+    for h in writes {
+        let _ = h.await;
     }
 }
 
@@ -456,7 +523,7 @@ async fn wait_for_leader(mgmt_urls: &[String], timeout: std::time::Duration) -> 
                 }
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

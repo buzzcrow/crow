@@ -121,6 +121,12 @@ impl MonitorCache {
     /// store 0, no group 0 exists, no replica reports a `Leader`
     /// role, or the leader's `listen_addr` has not yet been polled.
     ///
+    /// Skips nodes marked `Down` — their cache entries are stale and
+    /// the leader endpoint is no longer valid. Without this, a stopped
+    /// node that was previously the group-0 leader would shadow the
+    /// freshly-elected leader on a running node, causing sysdata writes
+    /// to fail with "no known leader".
+    ///
     /// Used by `AppState::op_context` to seed the shared
     /// `CrowdbKvClient` with the actual group-0 endpoint so sysdata
     /// writes reach the right listener (the configured `rpc_url` is
@@ -129,6 +135,9 @@ impl MonitorCache {
     pub async fn group0_leader_endpoint(&self) -> Option<String> {
         let guard = self.nodes.read().await;
         for rec in guard.values() {
+            if rec.health == NodeHealth::Down {
+                continue;
+            }
             let Some(ns) = rec.stores.get(&0) else {
                 continue;
             };
@@ -231,6 +240,24 @@ impl MonitorCache {
         // No healthy node — return the first replica so the caller can
         // attempt anyway; crowdb-rpc will surface `NodeUnreachable`.
         view.replicas.first().map(|r| (r.replica_id, r.node_id))
+    }
+
+    /// Strict variant of [`leader_for`]: returns a replica that self-reports
+    /// as `Leader` and whose hosting node is `Up`. No first-healthy fallback
+    /// — returns `None` when no self-reported leader is observed among Up
+    /// nodes. Used by [`resolve_kv_endpoint`](crate::kv) so KV writes are not
+    /// routed to a follower (which would reject with "not leader" and trigger
+    /// a slow retry cycle in the KV client).
+    pub async fn strict_leader_for(&self, store_id: StoreId, group_id: u64) -> Option<(ReplicaId, NodeId)> {
+        let view = self.resolve_group(store_id, group_id).await?;
+        let guard = self.nodes.read().await;
+        view.replicas
+            .iter()
+            .find(|r| {
+                r.role == ReplicaRole::Leader
+                    && guard.get(&r.node_id).is_some_and(|n| n.health == NodeHealth::Up)
+            })
+            .map(|r| (r.replica_id, r.node_id))
     }
 }
 

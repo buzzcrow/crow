@@ -1,9 +1,11 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-// Baseline: 28s (2026-08-16)
+// Baseline: 17s (2026-09-01)
 
-import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, freePort, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext, stepTime } from '../fixtures/consoleSetup';
+import { test, expect, consoleBaseURL } from '../fixtures/realBackend';
+import { addGroup, createStoreNoInit, deployNodeServer, freePort, seedRackAndNode, waitForLeader, resetAll, apiContext, stepTime, clusterInit } from '../fixtures/consoleSetup';
+
+const apiBase = consoleBaseURL();
 
 // API helpers for setup only (cluster bring-up + initial data + leader
 // discovery + recovery polling). The reconfiguration actions and post-action
@@ -138,10 +140,15 @@ async function deleteNodeViaMenu(page: import('@playwright/test').Page, nodeId: 
   const deleteResp = page.waitForResponse((r: any) =>
     r.request().method() === 'DELETE' && r.url().includes(`/api/nodes/${nodeId}`));
   await dialog.getByRole('button', { name: /delete node/i }).click();
+  const apiStart = Date.now();
   await deleteResp;
+  const apiMs = Date.now() - apiStart;
   // Wait for the node to disappear from the tree (cascade stops + removes
   // the server, then removes the node).
+  const treeStart = Date.now();
   await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toHaveCount(0, { timeout: 15_000 });
+  const treeMs = Date.now() - treeStart;
+  console.log(`[DEBUG] deleteNodeViaMenu(${nodeId}): API=${apiMs}ms tree=${treeMs}ms`);
 }
 
 async function putKeyUi(page: import('@playwright/test').Page, key: string, value: string) {
@@ -153,11 +160,17 @@ async function putKeyUi(page: import('@playwright/test').Page, key: string, valu
   // the delay between attempts (~2s per round).
   let lastError = '';
   for (let attempt = 0; attempt < 5; attempt++) {
+    const putStart = Date.now();
     const put = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
     await page.getByRole('button', { name: /^Put$/ }).click();
     const resp = await put;
-    if (resp.ok()) return;
+    const ms = Date.now() - putStart;
+    if (resp.ok()) {
+      if (attempt > 0) console.log(`[DEBUG] putKeyUi("${key}"): attempt ${attempt + 1} succeeded in ${ms}ms`);
+      return;
+    }
     try { lastError = await resp.text(); } catch { lastError = `HTTP ${resp.status()}`; }
+    console.log(`[DEBUG] putKeyUi("${key}"): attempt ${attempt + 1} failed in ${ms}ms: ${lastError}`);
   }
   throw new Error(`putKeyUi failed after 5 attempts: ${lastError}`);
 }
@@ -179,274 +192,224 @@ test.describe('kv cluster · reconfiguration', () => {
   // 30s default.
   test.describe.configure({ timeout: 120_000 });
 
+  // One cluster shared by all 4 tests. Each test uses a disjoint node
+  // set + store/group IDs, so mutations (stop/restart/delete) in one
+  // test don't affect another. Group-0 is bootstrapped once on the
+  // first 3 nodes; all stores are created via createStoreNoInit (no
+  // re-bootstrap).
+  //
+  // Node layout:
+  //   421-423  store 420  group 4200  — stop non-leader + leader reelect
+  //   441-445  store 440  group 4400  — delete non-leader down to majority
+  //   451-454  store 450  group 4500  — 4th replica catch-up
+  //   461-465  store 460+461  groups 4600+4610  — shared node degrades
+  test.beforeAll(async () => {
+    await stepTime('setup: resetAll', () => resetAll(apiBase));
+
+    const allNodes = [421, 422, 423, 441, 442, 443, 444, 445, 451, 452, 453, 454, 461, 462, 463, 464, 465];
+    await stepTime('setup: seedRackAndNode x17', () => Promise.all(allNodes.map((r) => seedRackAndNode(apiBase, r, r))));
+    await stepTime('setup: deployNodeServer x17', () => Promise.all(allNodes.map((n) => deployNodeServer(apiBase, n, freePort(), freePort()))));
+
+    // Bootstrap group-0 on the first 3 nodes.
+    await stepTime('setup: clusterInit', () => clusterInit(apiBase, [421, 422, 423]));
+
+    // Create all stores (skip clusterInit — group-0 already exists).
+    await stepTime('setup: createStore x5', () => Promise.all([
+      createStoreNoInit(apiBase, 420, [421, 422, 423]),
+      createStoreNoInit(apiBase, 440, [441, 442, 443, 444, 445]),
+      createStoreNoInit(apiBase, 450, [451, 452, 453, 454]),
+      createStoreNoInit(apiBase, 460, [461, 462, 463]),
+      createStoreNoInit(apiBase, 461, [463, 464, 465]),
+    ]));
+
+    // Create all groups (independent Paxos groups — parallel).
+    await stepTime('setup: addGroup x5', () => Promise.all([
+      addGroup(apiBase, 420, 4200, 42000, [421, 422, 423]),
+      addGroup(apiBase, 440, 4400, 44000, [441, 442, 443, 444, 445]),
+      addGroup(apiBase, 450, 4500, 45000, [451, 452, 453]),
+      addGroup(apiBase, 460, 4600, 46000, [461, 462, 463]),
+      addGroup(apiBase, 461, 4610, 46100, [463, 464, 465]),
+    ]));
+
+    // Wait for all leaders.
+    await stepTime('setup: waitForLeader x5', () => Promise.all([
+      waitForLeader(apiBase, 420, 4200, 10_000),
+      waitForLeader(apiBase, 440, 4400, 10_000),
+      waitForLeader(apiBase, 450, 4500, 10_000),
+      waitForLeader(apiBase, 460, 4600, 10_000),
+      waitForLeader(apiBase, 461, 4610, 10_000),
+    ]));
+  });
+
+  test.afterAll(async () => {
+    // resetAll stops all servers (stop_all_services parallelizes SIGTERM)
+    // and wipes config — one call replaces N per-node stopNodeServer.
+    await stepTime('teardown: resetAll', () => resetAll(apiBase));
+  });
+
   test('stopping a non-leader keeps quorum, stopping the leader triggers reelection', async ({ page, baseURL }) => {
-    // --- stopping a non-leader node preserves quorum and KV ops (store 420) ---
-    await stepTime('420: resetAll', () => resetAll(baseURL!));
+    // Single cluster lifecycle for both phases: stop non-leader (quorum
+    // preserved) then stop leader (reelection) on the same 3-node group.
+    // --- stopping a non-leader node preserves quorum and KV ops ---
+    await stepTime('quorum: kvPut', () => kvPut(baseURL!, 420, 4200, 'stop42-key', 'val42'));
 
-    await stepTime('420: seedRackAndNode x3', () => Promise.all([421, 422, 423].map((r) => seedRackAndNode(baseURL!, r, r))));
-    await stepTime('420: deployNodeServer x3', () => Promise.all([
-      deployNodeServer(baseURL!, 421, freePort(), freePort()),
-      deployNodeServer(baseURL!, 422, freePort(), freePort()),
-      deployNodeServer(baseURL!, 423, freePort(), freePort()),
-    ]));
+    const leaderNode = await stepTime('quorum: findLeaderNode', () => findLeaderNode(baseURL!, 420, 4200));
+    expect(leaderNode).not.toBeNull();
+    const stopNode = [421, 422, 423].find((n) => n !== leaderNode)!;
 
-    await stepTime('420: createStore+addGroup+waitForLeader', async () => {
-      await createStore(baseURL!, 420, [421, 422, 423]);
-      await addGroup(baseURL!, 420, 4200, 42000, [421, 422, 423]);
-      await waitForLeader(baseURL!, 420, 4200);
+    // Stop the non-leader server via the Cluster-domain context menu.
+    await stepTime('quorum: openCluster', () => openCluster(page));
+    await stepTime('quorum: stopServerViaMenu', () => stopServerViaMenu(page, stopNode));
+
+    // Tree health: the stopped server's badge drops from Healthy.
+    await stepTime('quorum: healthBadgeCheck', () =>
+      expect(serverHealthBadge(page, stopNode).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 }));
+
+    // Quorum intact: KV ops through the UI panel still succeed.
+    await stepTime('quorum: openKvPanel', () => openKvPanel(page, 420, 4200));
+    await stepTime('quorum: putKeyUi+getKeyUi x2', async () => {
+      await putKeyUi(page, 'stop42-key2', 'val42b');
+      expect(await getKeyUi(page, 'stop42-key2')).toBe('val42b');
+      expect(await getKeyUi(page, 'stop42-key')).toBe('val42');
     });
 
-    try {
-      await stepTime('420: kvPut', () => kvPut(baseURL!, 420, 4200, 'stop42-key', 'val42'));
+    // Restart via the context menu; poll the API until the node rejoins.
+    await stepTime('quorum: openCluster(2)', () => openCluster(page));
+    await stepTime('quorum: restartServerViaMenu', () => restartServerViaMenu(page, stopNode));
+    await stepTime('quorum: waitForReachableReplicas', () => waitForReachableReplicas(baseURL!, 420, 4200, 3));
 
-      const leaderNode = await stepTime('420: findLeaderNode', () => findLeaderNode(baseURL!, 420, 4200));
-      expect(leaderNode).not.toBeNull();
-      const stopNode = [421, 422, 423].find((n) => n !== leaderNode)!;
+    // --- stopping the leader triggers reelection and KV ops continue ---
+    await stepTime('reelect: kvPut', () => kvPut(baseURL!, 420, 4200, 'reelect43-key', 'val43'));
 
-      // Stop the non-leader server via the Cluster-domain context menu.
-      await stepTime('420: openCluster', () => openCluster(page));
-      await stepTime('420: stopServerViaMenu', () => stopServerViaMenu(page, stopNode));
+    // Re-find the leader — it may have changed after the restart above.
+    const leaderNode2 = await stepTime('reelect: findLeaderNode', () => findLeaderNode(baseURL!, 420, 4200));
+    expect(leaderNode2, 'leader should be elected').not.toBeNull();
 
-      // Tree health: the stopped server's badge drops from Healthy.
-      await stepTime('420: healthBadgeCheck', () =>
-        expect(serverHealthBadge(page, stopNode).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 }));
+    // Stop the leader via the context menu.
+    await stepTime('reelect: openCluster', () => openCluster(page));
+    await stepTime('reelect: stopServerViaMenu', () => stopServerViaMenu(page, leaderNode2!));
+    await stepTime('reelect: healthBadgeCheck', () =>
+      expect(serverHealthBadge(page, leaderNode2!).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 }));
 
-      // Quorum intact: KV ops through the UI panel still succeed.
-      await stepTime('420: openKvPanel', () => openKvPanel(page, 420, 4200));
-      await stepTime('420: putKeyUi+getKeyUi x2', async () => {
-        await putKeyUi(page, 'stop42-key2', 'val42b');
-        expect(await getKeyUi(page, 'stop42-key2')).toBe('val42b');
-        expect(await getKeyUi(page, 'stop42-key')).toBe('val42');
-      });
-
-      // Restart via the context menu; poll the API until the node rejoins.
-      await stepTime('420: openCluster(2)', () => openCluster(page));
-      await stepTime('420: restartServerViaMenu', () => restartServerViaMenu(page, stopNode));
-      await stepTime('420: waitForReachableReplicas', () => waitForReachableReplicas(baseURL!, 420, 4200, 3));
-    } finally {
-      await stepTime('420: stopNodeServer x3', () => Promise.all([
-        stopNodeServer(baseURL!, 421),
-        stopNodeServer(baseURL!, 422),
-        stopNodeServer(baseURL!, 423),
-      ]));
-    }
-
-    // --- stopping the leader triggers reelection and KV ops continue (store 430) ---
-    await stepTime('430: resetAll', () => resetAll(baseURL!));
-
-    await stepTime('430: seedRackAndNode x3', () => Promise.all([431, 432, 433].map((r) => seedRackAndNode(baseURL!, r, r))));
-    await stepTime('430: deployNodeServer x3', () => Promise.all([
-      deployNodeServer(baseURL!, 431, freePort(), freePort()),
-      deployNodeServer(baseURL!, 432, freePort(), freePort()),
-      deployNodeServer(baseURL!, 433, freePort(), freePort()),
-    ]));
-
-    await stepTime('430: createStore+addGroup+waitForLeader', async () => {
-      await createStore(baseURL!, 430, [431, 432, 433]);
-      await addGroup(baseURL!, 430, 4300, 43000, [431, 432, 433]);
-      await waitForLeader(baseURL!, 430, 4300);
+    // A new leader is elected (API poll) and KV ops through the UI still succeed.
+    await stepTime('reelect: waitForReelection', () => waitForReelection(baseURL!, 420, 4200));
+    await stepTime('reelect: openKvPanel', () => openKvPanel(page, 420, 4200));
+    await stepTime('reelect: putKeyUi+getKeyUi x2', async () => {
+      await putKeyUi(page, 'reelect43-key2', 'val43b');
+      expect(await getKeyUi(page, 'reelect43-key2')).toBe('val43b');
+      expect(await getKeyUi(page, 'reelect43-key')).toBe('val43');
     });
 
-    try {
-      await stepTime('430: kvPut', () => kvPut(baseURL!, 430, 4300, 'reelect43-key', 'val43'));
-
-      const leaderNode = await stepTime('430: findLeaderNode', () => findLeaderNode(baseURL!, 430, 4300));
-      expect(leaderNode, 'leader should be elected').not.toBeNull();
-
-      // Stop the leader via the context menu.
-      await stepTime('430: openCluster', () => openCluster(page));
-      await stepTime('430: stopServerViaMenu', () => stopServerViaMenu(page, leaderNode!));
-      await stepTime('430: healthBadgeCheck', () =>
-        expect(serverHealthBadge(page, leaderNode!).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 }));
-
-      // A new leader is elected (API poll) and KV ops through the UI still succeed.
-      await stepTime('430: waitForReelection', () => waitForReelection(baseURL!, 430, 4300));
-      await stepTime('430: openKvPanel', () => openKvPanel(page, 430, 4300));
-      await stepTime('430: putKeyUi+getKeyUi x2', async () => {
-        await putKeyUi(page, 'reelect43-key2', 'val43b');
-        expect(await getKeyUi(page, 'reelect43-key2')).toBe('val43b');
-        expect(await getKeyUi(page, 'reelect43-key')).toBe('val43');
-      });
-
-      // Restart the old leader; poll the API until all 3 replicas rejoin.
-      await stepTime('430: openCluster(2)', () => openCluster(page));
-      await stepTime('430: restartServerViaMenu', () => restartServerViaMenu(page, leaderNode!));
-      await stepTime('430: waitForReachableReplicas', () => waitForReachableReplicas(baseURL!, 430, 4300, 3));
-    } finally {
-      await stepTime('430: stopNodeServer x3', () => Promise.all([
-        stopNodeServer(baseURL!, 431),
-        stopNodeServer(baseURL!, 432),
-        stopNodeServer(baseURL!, 433),
-      ]));
-    }
+    // Restart the old leader; poll the API until all 3 replicas rejoin.
+    await stepTime('reelect: openCluster(2)', () => openCluster(page));
+    await stepTime('reelect: restartServerViaMenu', () => restartServerViaMenu(page, leaderNode2!));
+    await stepTime('reelect: waitForReachableReplicas', () => waitForReachableReplicas(baseURL!, 420, 4200, 3));
   });
 
   test('deleting non-leader nodes preserves quorum down to majority', async ({ page, baseURL }) => {
-    await stepTime('440: resetAll', () => resetAll(baseURL!));
+    await stepTime('440: kvPut', () => kvPut(baseURL!, 440, 4400, 'del44-key', 'val44'));
 
-    await stepTime('440: seedRackAndNode x5', () => Promise.all([441, 442, 443, 444, 445].map((r) => seedRackAndNode(baseURL!, r, r))));
-    await stepTime('440: deployNodeServer x5', () => Promise.all([
-      deployNodeServer(baseURL!, 441, freePort(), freePort()),
-      deployNodeServer(baseURL!, 442, freePort(), freePort()),
-      deployNodeServer(baseURL!, 443, freePort(), freePort()),
-      deployNodeServer(baseURL!, 444, freePort(), freePort()),
-      deployNodeServer(baseURL!, 445, freePort(), freePort()),
-    ]));
+    const leaderNode = await stepTime('440: findLeaderNode', () => findLeaderNode(baseURL!, 440, 4400));
+    expect(leaderNode).not.toBeNull();
+    const nonLeader1 = [441, 442, 443, 444, 445].find((n) => n !== leaderNode)!;
 
-    await stepTime('440: createStore+addGroup+waitForLeader', async () => {
-      await createStore(baseURL!, 440, [441, 442, 443, 444, 445]);
-      await addGroup(baseURL!, 440, 4400, 44000, [441, 442, 443, 444, 445]);
-      await waitForLeader(baseURL!, 440, 4400);
+    // Delete the first non-leader node via the context menu + confirm dialog.
+    await stepTime('440: openCluster', () => openCluster(page));
+    await stepTime('440: deleteNodeViaMenu(1)', () => deleteNodeViaMenu(page, nonLeader1));
+
+    // Quorum intact (4-of-5): KV ops through the UI still succeed.
+    await stepTime('440: openKvPanel(1)', () => openKvPanel(page, 440, 4400));
+    await stepTime('440: putKeyUi+getKeyUi(1)', async () => {
+      await putKeyUi(page, 'del44-key2', 'val44b');
+      expect(await getKeyUi(page, 'del44-key2')).toBe('val44b');
     });
 
-    try {
-      await stepTime('440: kvPut', () => kvPut(baseURL!, 440, 4400, 'del44-key', 'val44'));
+    // Delete a second non-leader node (down to 3 replicas — exactly majority).
+    const nonLeader2 = [441, 442, 443, 444, 445].find((n) => n !== leaderNode && n !== nonLeader1)!;
+    await stepTime('440: openCluster(2)', () => openCluster(page));
+    await stepTime('440: deleteNodeViaMenu(2)', () => deleteNodeViaMenu(page, nonLeader2));
 
-      const leaderNode = await stepTime('440: findLeaderNode', () => findLeaderNode(baseURL!, 440, 4400));
-      expect(leaderNode).not.toBeNull();
-      const nonLeader1 = [441, 442, 443, 444, 445].find((n) => n !== leaderNode)!;
-
-      // Delete the first non-leader node via the context menu + confirm dialog.
-      await stepTime('440: openCluster', () => openCluster(page));
-      await stepTime('440: deleteNodeViaMenu(1)', () => deleteNodeViaMenu(page, nonLeader1));
-
-      // Quorum intact (4-of-5): KV ops through the UI still succeed.
-      await stepTime('440: openKvPanel(1)', () => openKvPanel(page, 440, 4400));
-      await stepTime('440: putKeyUi+getKeyUi(1)', async () => {
-        await putKeyUi(page, 'del44-key2', 'val44b');
-        expect(await getKeyUi(page, 'del44-key2')).toBe('val44b');
-      });
-
-      // Delete a second non-leader node (down to 3 replicas — exactly majority).
-      const nonLeader2 = [441, 442, 443, 444, 445].find((n) => n !== leaderNode && n !== nonLeader1)!;
-      await stepTime('440: openCluster(2)', () => openCluster(page));
-      await stepTime('440: deleteNodeViaMenu(2)', () => deleteNodeViaMenu(page, nonLeader2));
-
-      await stepTime('440: openKvPanel(2)', () => openKvPanel(page, 440, 4400));
-      await stepTime('440: putKeyUi+getKeyUi(2)', async () => {
-        await putKeyUi(page, 'del44-key3', 'val44c');
-        expect(await getKeyUi(page, 'del44-key3')).toBe('val44c');
-        expect(await getKeyUi(page, 'del44-key')).toBe('val44');
-      });
-    } finally {
-      await stepTime('440: stopNodeServer x5', () => Promise.all([441, 442, 443, 444, 445].map((n) => stopNodeServer(baseURL!, n))));
-    }
+    await stepTime('440: openKvPanel(2)', () => openKvPanel(page, 440, 4400));
+    await stepTime('440: putKeyUi+getKeyUi(2)', async () => {
+      await putKeyUi(page, 'del44-key3', 'val44c');
+      expect(await getKeyUi(page, 'del44-key3')).toBe('val44c');
+      expect(await getKeyUi(page, 'del44-key')).toBe('val44');
+    });
   });
 
   test('4th replica catches up and group still accepts writes', async ({ page, baseURL }) => {
-    await resetAll(baseURL!);
+    // Put data before adding the replica.
+    await kvPut(baseURL!, 450, 4500, 'add45-key1', 'val1');
+    await kvPut(baseURL!, 450, 4500, 'add45-key2', 'val2');
 
-    await Promise.all([451, 452, 453, 454].map((r) => seedRackAndNode(baseURL!, r, r)));
-    await Promise.all([
-      deployNodeServer(baseURL!, 451, freePort(), freePort()),
-      deployNodeServer(baseURL!, 452, freePort(), freePort()),
-      deployNodeServer(baseURL!, 453, freePort(), freePort()),
-      deployNodeServer(baseURL!, 454, freePort(), freePort()),
-    ]);
+    // Add the 4th replica via the KV-Cluster Add Replica dialog.
+    await openKvCluster(page);
+    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+    await expect(aside.getByText('G-4500').first()).toBeVisible({ timeout: 10_000 });
+    await aside.getByText('G-4500').first().click({ button: 'right' });
+    await page.getByRole('menuitem', { name: /add replica/i }).click();
+    await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
+    await page.getByLabel('Node', { exact: true }).selectOption(String(454));
+    const addResp = page.waitForResponse((r: any) => r.url().includes('/replicas'));
+    await page.getByRole('button', { name: /add replica/i }).click();
+    await addResp;
 
-    await createStore(baseURL!, 450, [451, 452, 453, 454]);
-    await addGroup(baseURL!, 450, 4500, 45000, [451, 452, 453]);
-    await waitForLeader(baseURL!, 450, 4500);
+    // The new replica (LR-45003) appears in the logical tree.
+    await expect(aside.getByText('LR-45003')).toBeVisible({ timeout: 10_000 });
 
-    try {
-      // Put data before adding the replica.
-      await kvPut(baseURL!, 450, 4500, 'add45-key1', 'val1');
-      await kvPut(baseURL!, 450, 4500, 'add45-key2', 'val2');
+    // Catch-up: poll the API until the new replica reports state = running,
+    // proving it replicated the existing data — not just that it appeared
+    // in the group status.
+    await waitForReplicaRunning(baseURL!, 450, 4500, 45003);
 
-      // Add the 4th replica via the KV-Cluster Add Replica dialog.
-      await openKvCluster(page);
-      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-      await expect(aside.getByText('G-4500').first()).toBeVisible({ timeout: 10_000 });
-      await aside.getByText('G-4500').first().click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /add replica/i }).click();
-      await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
-      await page.getByLabel('Node', { exact: true }).selectOption(String(454));
-      const addResp = page.waitForResponse((r: any) => r.url().includes('/replicas'));
-      await page.getByRole('button', { name: /add replica/i }).click();
-      await addResp;
+    // Group still accepts writes through the UI.
+    await openKvPanel(page, 450, 4500);
+    await putKeyUi(page, 'add45-key3', 'val3');
+    expect(await getKeyUi(page, 'add45-key3')).toBe('val3');
 
-      // The new replica (LR-45003) appears in the logical tree.
-      await expect(aside.getByText('LR-45003')).toBeVisible({ timeout: 10_000 });
-
-      // Catch-up: poll the API until the new replica reports state = running,
-      // proving it replicated the existing data — not just that it appeared
-      // in the group status.
-      await waitForReplicaRunning(baseURL!, 450, 4500, 45003);
-
-      // Group still accepts writes through the UI.
-      await openKvPanel(page, 450, 4500);
-      await putKeyUi(page, 'add45-key3', 'val3');
-      expect(await getKeyUi(page, 'add45-key3')).toBe('val3');
-
-      // Pre-existing keys are readable (replicated to the new replica).
-      expect(await getKeyUi(page, 'add45-key1')).toBe('val1');
-      expect(await getKeyUi(page, 'add45-key2')).toBe('val2');
-    } finally {
-      await Promise.all([451, 452, 453, 454].map((n) => stopNodeServer(baseURL!, n)));
-    }
+    // Pre-existing keys are readable (replicated to the new replica).
+    expect(await getKeyUi(page, 'add45-key1')).toBe('val1');
+    expect(await getKeyUi(page, 'add45-key2')).toBe('val2');
   });
 
   test('stopping shared node degrades both stores, restart recovers', async ({ page, baseURL }) => {
-    await resetAll(baseURL!);
+    await kvPut(baseURL!, 460, 4600, 'ms46-a-key', 'val-a');
+    await kvPut(baseURL!, 461, 4610, 'ms46-b-key', 'val-b');
 
-    await Promise.all([461, 462, 463, 464, 465].map((r) => seedRackAndNode(baseURL!, r, r)));
-    await Promise.all([
-      deployNodeServer(baseURL!, 461, freePort(), freePort()),
-      deployNodeServer(baseURL!, 462, freePort(), freePort()),
-      deployNodeServer(baseURL!, 463, freePort(), freePort()),
-      deployNodeServer(baseURL!, 464, freePort(), freePort()),
-      deployNodeServer(baseURL!, 465, freePort(), freePort()),
-    ]);
+    const leaderA = await findLeaderNode(baseURL!, 460, 4600);
+    const leaderB = await findLeaderNode(baseURL!, 461, 4610);
 
-    await createStore(baseURL!, 460, [461, 462, 463]);
-    await addGroup(baseURL!, 460, 4600, 46000, [461, 462, 463]);
-    await waitForLeader(baseURL!, 460, 4600);
+    // Prefer the overlap node (463); if it leads either store, stop a
+    // non-leader from store A instead.
+    const stopNode = leaderA !== 463 && leaderB !== 463 ? 463 : leaderA === 461 ? 462 : 461;
 
-    await createStore(baseURL!, 461, [463, 464, 465]);
-    await addGroup(baseURL!, 461, 4610, 46100, [463, 464, 465]);
-    await waitForLeader(baseURL!, 461, 4610);
+    // Stop via the Cluster-domain context menu.
+    await openCluster(page);
+    await stopServerViaMenu(page, stopNode);
+    await expect(serverHealthBadge(page, stopNode).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 });
 
-    try {
-      await kvPut(baseURL!, 460, 4600, 'ms46-a-key', 'val-a');
-      await kvPut(baseURL!, 461, 4610, 'ms46-b-key', 'val-b');
+    // Store A still accepts writes through the UI (quorum 2-of-3).
+    await openKvPanel(page, 460, 4600);
+    await putKeyUi(page, 'ms46-a-key2', 'val-a2');
+    expect(await getKeyUi(page, 'ms46-a-key2')).toBe('val-a2');
 
-      const leaderA = await findLeaderNode(baseURL!, 460, 4600);
-      const leaderB = await findLeaderNode(baseURL!, 461, 4610);
-
-      // Prefer the overlap node (463); if it leads either store, stop a
-      // non-leader from store A instead.
-      const stopNode = leaderA !== 463 && leaderB !== 463 ? 463 : leaderA === 461 ? 462 : 461;
-
-      // Stop via the Cluster-domain context menu.
-      await openCluster(page);
-      await stopServerViaMenu(page, stopNode);
-      await expect(serverHealthBadge(page, stopNode).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 });
-
-      // Store A still accepts writes through the UI (quorum 2-of-3).
-      await openKvPanel(page, 460, 4600);
-      await putKeyUi(page, 'ms46-a-key2', 'val-a2');
-      expect(await getKeyUi(page, 'ms46-a-key2')).toBe('val-a2');
-
-      // If the overlap node was stopped, store B also lost a replica but
-      // keeps quorum 2-of-3.
-      if (stopNode === 463) {
-        await openKvPanel(page, 461, 4610);
-        await putKeyUi(page, 'ms46-b-key2', 'val-b2');
-        expect(await getKeyUi(page, 'ms46-b-key2')).toBe('val-b2');
-      }
-
-      // Restart; poll the API until store A has all replicas reachable.
-      await openCluster(page);
-      await restartServerViaMenu(page, stopNode);
-      await waitForReachableReplicas(baseURL!, 460, 4600, 3);
-
-      // Original keys still readable after recovery.
-      await openKvPanel(page, 460, 4600);
-      expect(await getKeyUi(page, 'ms46-a-key')).toBe('val-a');
+    // If the overlap node was stopped, store B also lost a replica but
+    // keeps quorum 2-of-3.
+    if (stopNode === 463) {
       await openKvPanel(page, 461, 4610);
-      expect(await getKeyUi(page, 'ms46-b-key')).toBe('val-b');
-    } finally {
-      await Promise.all([461, 462, 463, 464, 465].map((n) => stopNodeServer(baseURL!, n)));
+      await putKeyUi(page, 'ms46-b-key2', 'val-b2');
+      expect(await getKeyUi(page, 'ms46-b-key2')).toBe('val-b2');
     }
+
+    // Restart; poll the API until store A has all replicas reachable.
+    await openCluster(page);
+    await restartServerViaMenu(page, stopNode);
+    await waitForReachableReplicas(baseURL!, 460, 4600, 3);
+
+    // Original keys still readable after recovery.
+    await openKvPanel(page, 460, 4600);
+    expect(await getKeyUi(page, 'ms46-a-key')).toBe('val-a');
+    await openKvPanel(page, 461, 4610);
+    expect(await getKeyUi(page, 'ms46-b-key')).toBe('val-b');
   });
 });

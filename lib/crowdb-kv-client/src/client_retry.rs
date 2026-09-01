@@ -58,6 +58,10 @@ impl CrowdbKvClient {
         self.metrics.record_leader_query();
         self.metrics.record_topology_refresh();
         if let Err(e) = self.topology.refresh().await {
+            if matches!(e, Error::NoSeeds) {
+                warn!(error = %e, "topology refresh failed in wait_and_refresh_leader");
+                return endpoint.to_string();
+            }
             warn!(error = %e, "topology refresh failed in wait_and_refresh_leader");
         }
         tokio::time::sleep(self.retry.unknown_leader_wait).await;
@@ -72,6 +76,10 @@ impl CrowdbKvClient {
     /// retry against. Logs refresh failures instead of silently
     /// swallowing them; the caller's `count_other` surfaces
     /// `RetriesExhausted` if the endpoint stays stale.
+    ///
+    /// On `NoSeeds` (configuration error, not transient), skips the
+    /// backoff sleep so the caller's `count_other` exhausts the retry
+    /// budget immediately instead of waiting seconds.
     pub(crate) async fn handle_transport_err(
         &self,
         store_id: u64,
@@ -80,15 +88,21 @@ impl CrowdbKvClient {
         backoff: &mut Duration,
     ) -> String {
         self.metrics.record_topology_refresh();
+        let mut no_seeds = false;
         if let Err(e) = self.topology.refresh().await {
+            if matches!(e, Error::NoSeeds) {
+                no_seeds = true;
+            }
             warn!(error = %e, "topology refresh failed in handle_transport_err");
         }
         let endpoint = self
             .topology
             .leader(store_id, group_id)
             .unwrap_or_else(|| current.to_string());
-        tokio::time::sleep(*backoff).await;
-        *backoff = (*backoff * 2).min(self.retry.backoff_max);
+        if !no_seeds {
+            tokio::time::sleep(*backoff).await;
+            *backoff = (*backoff * 2).min(self.retry.backoff_max);
+        }
         endpoint
     }
 

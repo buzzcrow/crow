@@ -109,12 +109,13 @@ pub(crate) async fn http_add_replica(
 
     // Refresh the monitor cache for the target node + all peers so
     // health badges and RPC endpoint resolution reflect the new replica.
-    refresh_node_cache(&state, body.node_id).await;
-    for nid in &existing_replicas {
-        if *nid != body.node_id {
-            refresh_node_cache(&state, *nid).await;
-        }
-    }
+    let mut refresh_targets: Vec<NodeId> = existing_replicas
+        .iter()
+        .filter(|&&nid| nid != body.node_id)
+        .copied()
+        .collect();
+    refresh_targets.push(body.node_id);
+    futures::future::join_all(refresh_targets.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
 
     Ok((
         StatusCode::CREATED,
@@ -160,11 +161,10 @@ pub(crate) async fn http_remove_replica(
         .map_err(map_config_err)?;
     state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
+    let mut refresh_targets: Vec<NodeId> = peers.clone();
     if let Some(target) = target_node {
-        refresh_node_cache(&state, target).await;
+        refresh_targets.push(target);
     }
-    for nid in &peers {
-        refresh_node_cache(&state, *nid).await;
-    }
+    futures::future::join_all(refresh_targets.iter().map(|&nid| refresh_node_cache(&state, nid))).await;
     Ok(StatusCode::NO_CONTENT)
 }

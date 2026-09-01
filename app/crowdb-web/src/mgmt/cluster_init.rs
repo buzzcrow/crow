@@ -43,11 +43,21 @@ pub(crate) async fn http_cluster_init(
         .map_err(map_config_err)?;
     state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
+    // The cluster is now live — re-seed the shared kv_client with the
+    // current config's server URLs so topology refresh can find the
+    // new group-0 leader. Without this, a client left over from before
+    // reset has stale/empty seeds and every KV op retries for ~5s.
+    state.reseed_kv_client().await;
+
     // Refresh the monitor cache for all init nodes so health badges
     // and RPC endpoint resolution reflect the new group-0 state.
-    for &(node_id, _) in &summary.nodes {
-        refresh_node_cache(&state, node_id).await;
-    }
+    futures::future::join_all(
+        summary
+            .nodes
+            .iter()
+            .map(|&(node_id, _)| refresh_node_cache(&state, node_id)),
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,

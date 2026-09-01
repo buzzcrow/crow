@@ -41,6 +41,19 @@ Do not jump to a fix — first identify exactly where the test diverges from exp
 
 Check Rust logs (`RUST_BACKTRACE=full`), C++ logs (`log_level="debug"`), WAL segments, and crowdb-tree files for `WARN`/`ERROR`, `panic`, or unexpected state.
 
+### Diagnostic Keywords (grep targets)
+
+When debugging slow E2E tests or KV client issues, grep the console-web log file (`~/.crowdb-kv/log/console-web-*.log`) and stderr for these keywords:
+
+- `CrowdbKvClient: new standalone instance created` — red flag: client not reusing shared transport
+- `resolve_leader: no mgmt seeds configured` — fail-fast on empty seeds
+- `kv_op_context: no KV servers deployed` — 502, cluster not initialized
+- `build_hardware_client: no rpc endpoint resolved` — no cached leader, next RPC will retry ~5s
+- `build_hardware_client: no group-0 endpoint found` — no running node hosts store 0
+- `list_node_disk_groups: group-0 query failed` — group-0 RPC failed, falling back to config
+- `topology refresh failed in handle_transport_err` — topology discovery failed
+- `topology discovery failed: http://...` — the failed seed URL; if it's a node's `rpc_url` instead of the store's `listen_addr`, the client is seeded wrong
+
 ## Step 3b — Crash Analysis
 
 If a process crashed or disappeared without a log line, **always** get the crash report and analyze the call stack before attempting any fix. Never skip to workarounds.
