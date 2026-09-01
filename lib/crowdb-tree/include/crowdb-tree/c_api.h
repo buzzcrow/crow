@@ -294,6 +294,10 @@ ct_status ct_del(ct_tree *t, const uint8_t *key, size_t klen);
 
 ct_status ct_flush(ct_tree *t);
 
+// Maintenance-path drain: drains already-frozen memtables without
+// force-freezing the active table. See Crowdbtree::flush_optional().
+ct_status ct_flush_optional(ct_tree *t);
+
 // Point read. *found is 0/1; on found, *slot and *value (owned) are set.
 ct_status ct_get(ct_tree *t, const uint8_t *key, size_t klen, int32_t *found, uint64_t *slot, ct_buf *value);
 

@@ -84,22 +84,12 @@ pub(crate) fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationTo
 
 async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) {
     loop {
-        let Some(g) = group.upgrade() else { return };
-        // Gap 5 step 2: wait for either a flush signal (memtable froze),
-        // the tick timeout (watchdog), or cancellation. The flush signal
-        // makes drain rate track write rate; the tick is now a safety net
-        // for idle/low-write tails, not the primary flush trigger.
         tokio::select! {
             () = cancel.cancelled() => return,
-            () = g.flush_notify.notified() => {}
             () = tokio::time::sleep(tick) => {}
         }
+        let Some(g) = group.upgrade() else { return };
         run_pass(&g).await;
-        // Gap 5 step 2: if the engine still has frozen memtables after
-        // this pass (writes continued during the pass), loop back to the
-        // select! immediately without any extra sleep — the flush didn't
-        // catch up, so try again. The select! itself waits on
-        // flush_notify / tick / cancel, so this just re-enters that wait.
     }
 }
 
@@ -188,8 +178,12 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         );
     }
 
-    // 1. Flush every tick: drain L0 memtable into L1 in memory (cheap no-op
-    //    when L0 is empty). Advances last_applied_slot in memory only.
+    // 1. Flush: drain L0 memtable into L1 in memory (cheap no-op when L0
+    //    is empty). Advances last_applied_slot in memory only. Uses
+    //    per-memtable drains (drain_memtable_locked) to produce small
+    //    per-leaf delta nodes that stay under max_delta_bytes, avoiding
+    //    the excessive consolidation that the k-way merge caused when
+    //    draining many memtables at once.
     // Runs on a blocking thread because flush holds the C++ write_mutex_.
     let flush_start = std::time::Instant::now();
     let engine_arc = group.local_replica().learner.engine_arc();

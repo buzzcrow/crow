@@ -1134,6 +1134,38 @@ bool Crowdbtree::publish_group_to_leaf_locked(uint64_t page_id, uint64_t cs, std
     return false;
 }
 
+bool Crowdbtree::drain_memtable_locked(MemTable *mt, uint64_t cs)
+{
+    mt->set_durable_floor(cs);
+    std::vector<mem_entry> drained = mt->drain_up_to(cs);
+    if (drained.empty()) {
+        return false;
+    }
+    flush_drain_total_.fetch_add(1, std::memory_order_relaxed);
+    flush_entries_total_.fetch_add(drained.size(), std::memory_order_relaxed);
+    if (metrics_.flush_drain_c != nullptr) {
+        metrics_.flush_drain_c->inc();
+    }
+    if (metrics_.flush_entries_c != nullptr) {
+        metrics_.flush_entries_c->inc_by(drained.size());
+    }
+    auto   resolve = [this](uint64_t p) { return resident(p); };
+    size_t i       = 0;
+    while (i < drained.size()) {
+        uint64_t                page_id = find_leaf_page_id(resolve, root_page_id_.load(), Slice(drained[i].key));
+        std::vector<leaf_entry> group;
+        group.push_back({.key = std::move(drained[i].key), .cell = std::move(drained[i].cell)});
+        ++i;
+        while (i < drained.size() &&
+               find_leaf_page_id(resolve, root_page_id_.load(), Slice(drained[i].key)) == page_id) {
+            group.push_back({.key = std::move(drained[i].key), .cell = std::move(drained[i].cell)});
+            ++i;
+        }
+        publish_group_to_leaf_locked(page_id, cs, std::move(group));
+    }
+    return true;
+}
+
 bool Crowdbtree::drain_all_frozen_locked(std::deque<std::shared_ptr<MemTable>> &to_drain,
                                          std::shared_ptr<MemTable> &active, uint64_t cs)
 {
@@ -1304,9 +1336,26 @@ Status Crowdbtree::flush()
 
     std::shared_ptr<MemTable> active         = current_active();
     uint64_t                  entries_before = flush_entries_total_.load(std::memory_order_relaxed);
-    // Drain all frozen memtables in one k-way sorted merge (O5) with
-    // sort-aware descent (O1), replacing the per-memtable drain loop.
-    bool wrote_any = drain_all_frozen_locked(to_drain, active, cs);
+    // Drain frozen memtables one at a time (per-memtable drain) instead of
+    // a k-way merge. Each memtable produces small per-leaf delta nodes
+    // (~100 entries * 512B = 50 KiB << 512 KiB max_delta_bytes), so
+    // consolidation triggers naturally at max_delta_len (16 drains) instead
+    // of on every leaf every drain. The k-way merge (drain_all_frozen_locked)
+    // is kept for flush_optional() but not used here — it creates large
+    // delta nodes when draining many memtables at once.
+    bool wrote_any = false;
+    for (auto &mt : to_drain) {
+        if (drain_memtable_locked(mt.get(), cs)) {
+            wrote_any = true;
+        }
+        if (mt->empty()) {
+            continue;
+        }
+        // Non-contiguous leftovers (slot > cs): relocate to active_.
+        for (auto &e : mt->drain_up_to(UINT64_MAX)) {
+            active->upsert(Slice(e.key), e.slot, std::move(e.cell));
+        }
+    }
     // Keep the live active_ table's durable floor current even when nothing
     // above needed freezing/draining (e.g. an idle background-timer tick).
     active->set_durable_floor(cs);
@@ -1329,6 +1378,70 @@ Status Crowdbtree::flush()
     maybe_evict_locked(); // keep cache bounded; only clean bases go
     uint64_t entries_drained = flush_entries_total_.load(std::memory_order_relaxed) - entries_before;
     CRB_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, to_drain.size(), entries_drained, cs);
+    if (metrics_.flush_l != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        metrics_.flush_l->observe(static_cast<uint64_t>(ns));
+    }
+    return Status::Ok();
+}
+
+Status Crowdbtree::flush_optional()
+{
+    auto                        t0 = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    uint64_t                    cs = contiguous_slot_.load();
+
+    // Only freeze if the active table has crossed its threshold (non-forced).
+    // This avoids freezing small active tables on every maintenance tick,
+    // which would produce many small L1 deltas and trigger excessive leaf
+    // consolidation. Threshold-triggered freezes already happen on the apply
+    // path; this just catches the same condition under the lock.
+    maybe_freeze_active(/*force=*/false);
+
+    std::deque<std::shared_ptr<MemTable>> to_drain;
+    {
+        std::unique_lock<std::shared_mutex> mlk(memtable_mutex_);
+        to_drain.swap(frozen_);
+    }
+
+    if (to_drain.empty()) {
+        // Nothing frozen to drain — advance the durable watermark and return.
+        std::shared_ptr<MemTable> active = current_active();
+        active->set_durable_floor(cs);
+        if (cs > last_applied_slot_.load()) {
+            last_applied_slot_.store(cs);
+        }
+        if (metrics_.flush_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            metrics_.flush_l->observe(static_cast<uint64_t>(ns));
+        }
+        return Status::Ok();
+    }
+
+    std::shared_ptr<MemTable> active         = current_active();
+    uint64_t                  entries_before = flush_entries_total_.load(std::memory_order_relaxed);
+    bool                      wrote_any      = drain_all_frozen_locked(to_drain, active, cs);
+    active->set_durable_floor(cs);
+
+    if (!wrote_any) {
+        if (cs > last_applied_slot_.load()) {
+            last_applied_slot_.store(cs);
+        }
+        if (metrics_.flush_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            metrics_.flush_l->observe(static_cast<uint64_t>(ns));
+        }
+        return Status::Ok();
+    }
+
+    last_applied_slot_.store(cs);
+    version_.fetch_add(1);
+    maybe_evict_locked();
+    uint64_t entries_drained = flush_entries_total_.load(std::memory_order_relaxed) - entries_before;
+    CRB_LOG_INFO("[{}] flush_optional: tables={} entries={} contiguous_slot={}", name_, to_drain.size(),
+                 entries_drained, cs);
     if (metrics_.flush_l != nullptr) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         metrics_.flush_l->observe(static_cast<uint64_t>(ns));

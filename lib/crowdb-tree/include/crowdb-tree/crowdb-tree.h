@@ -507,6 +507,15 @@ class Crowdbtree
     // lost -- see the active_/frozen_ member comment for the full design.
     Status flush();
 
+    // Maintenance-path drain: drains already-frozen memtables (from
+    // threshold-triggered freezes on the apply path) without force-freezing
+    // the active table. Use this from periodic maintenance ticks to avoid
+    // freezing small active tables on every tick (which produces many small
+    // L1 deltas and triggers excessive leaf consolidation). flush() should
+    // still be used by snapshot/install_snapshot/explicit drain paths that
+    // need to fully drain all pending writes.
+    Status flush_optional();
+
     // Async twin of flush(). flush() only drains
     // L0 (MemTable) into L1 (in-memory B+tree) -- it never touches
     // Options::page_store (only snapshot() writes durable bytes), so unlike
@@ -815,6 +824,12 @@ class Crowdbtree
     // holds write_mutex_.
     bool drain_all_frozen_locked(std::deque<std::shared_ptr<MemTable>> &to_drain, std::shared_ptr<MemTable> &active,
                                  uint64_t cs);
+    // Drain a single memtable into L1 using sort-aware descent + per-leaf
+    // delta publish. Returns true if any entries were written. Caller holds
+    // write_mutex_. Used by flush() for per-memtable drains (avoids the
+    // large delta nodes that the k-way merge produces when draining many
+    // memtables at once, which would trigger excessive consolidation).
+    bool drain_memtable_locked(MemTable *mt, uint64_t cs);
     // Publish a group of sorted leaf entries to `page_id` via the delta
     // path (in-frame or heap BatchDelta). Returns true if a consolidate
     // fired (caller should invalidate cached leaf info). Caller holds
