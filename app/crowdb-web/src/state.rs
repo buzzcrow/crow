@@ -328,19 +328,33 @@ impl AppState {
             cfg.clone()
         };
 
-        // Resolve the group-0 endpoint: prefer a node hosting store 0
-        // with a known rpc_url; fall back to the first deployed
-        // server's mgmt URL (bootstrap case). If no server is
-        // deployed, use a dummy endpoint — sysdata syncs silently fail.
+        // Resolve the group-0 endpoint: prefer the live `listen_addr`
+        // from the monitor cache (the actual crowdb-rpc listener for
+        // store 0 on a node where the local replica is the leader);
+        // fall back to the configured `rpc_url` of a node hosting
+        // store 0; fall back to the first deployed server's mgmt URL
+        // (bootstrap case).
         let (group0_endpoint, mgmt_seeds) = resolve_group0_endpoint(&config_snapshot);
-        let endpoint = group0_endpoint.unwrap_or_else(|| "127.0.0.1:1".to_string());
+        let live_endpoint = self.monitor_cache.group0_leader_endpoint().await;
 
-        Ok(OpContext::with_shared_client(
-            kv,
-            endpoint,
-            &mgmt_seeds,
-            config_snapshot,
-        ))
+        // If we have a live endpoint from the monitor cache, seed it
+        // (overwriting any stale hint). If we don't, preserve the
+        // existing hint — the shared client may already have a good
+        // one from a prior `ops::cluster::init` or `NotLeaderHint`.
+        if let Some(ep) = live_endpoint.or(group0_endpoint) {
+            Ok(OpContext::with_shared_client(
+                kv,
+                ep,
+                &mgmt_seeds,
+                config_snapshot,
+            ))
+        } else {
+            Ok(OpContext::with_shared_client_preserving_hint(
+                kv,
+                &mgmt_seeds,
+                config_snapshot,
+            ))
+        }
     }
 
     /// Write a mutated [`OpContext`]'s config back to `AppState.config`

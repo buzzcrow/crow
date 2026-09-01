@@ -42,6 +42,7 @@ interface TopologyCanvasProps {
   nodeHealthById?: Record<string, NodeHealth>;
   diskdbNodeIds?: Set<number>;
   diskdbInstances?: { instance_id: number; owned_dg_ids: number[] }[];
+  nodeDiskGroups?: Record<number, import('./buildFlow').NodeDiskGroups>;
   refreshToken?: number;
   focusRequest?: { targetId: string; subtree: boolean; nonce: number } | null;
   /** Right-click on a canvas node. */
@@ -110,7 +111,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
   }
 }
 
-function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
+function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, nodeDiskGroups, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
   const { domain } = useDomain();
   const { selectedEntity, selectEntity } = useSelection();
   const { fitView, setViewport, setCenter, getZoom, getNodes } = useReactFlow();
@@ -131,8 +132,8 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   const fitRafIdRef = useRef<number | undefined>(undefined);
 
   const { nodes: rawNodes, edges } = useMemo(
-    () => buildFlowForDomain(domain, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances),
-    [domain, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances],
+    () => buildFlowForDomain(domain, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, nodeDiskGroups),
+    [domain, racks, nodes, servers, stores, nodeStores, nodeHealthById, diskdbNodeIds, diskdbInstances, nodeDiskGroups],
   );
 
   const positioned = useMemo(() => layoutTree(rawNodes, edges), [rawNodes, edges]);

@@ -28,6 +28,35 @@ fn test_cfg() -> PxElectionConfig {
     PxElectionConfig::for_tests()
 }
 
+/// Yield to let the election driver start and register its `sleep_until`
+/// timer, then advance past the election deadline and poll until the
+/// replica reaches the expected role.
+///
+/// The election driver registers a `sleep_until` timer on its first
+/// poll. If that registration happens *after* a single `advance` call
+/// (because one `yield_now` didn't give the driver enough time to reach
+/// `sleep_until`), the timer deadline is computed from the
+/// already-advanced clock and never fires. Yielding multiple times
+/// before `advance` ensures the timer is registered first.
+async fn advance_until_role(group: &Arc<PxGroup>, cfg: &PxElectionConfig, expected: PxLocalReplicaRole) {
+    // Let the election driver start and register its timer.
+    for _ in 0..10 {
+        if group.local_replica().role() == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Advance past the election deadline.
+    tokio::time::advance(Duration::from_millis(cfg.election_max_ms + 10)).await;
+    // Poll until the role transitions.
+    for _ in 0..100 {
+        if group.local_replica().role() == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 // ------------------------------------------------------------------
 // E2E multi-node
 // ------------------------------------------------------------------
@@ -189,17 +218,7 @@ async fn single_voter_candidate_becomes_leader() {
 
     let handle = spawn(Arc::downgrade(&group), test_cfg(), cancel.clone());
 
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(test_cfg().election_max_ms + 10)).await;
-    // The election driver needs multiple yield points to process the
-    // timer firing, become candidate, win self-quorum, and become leader.
-    // Poll with yields until the role transitions to Leader.
-    for _ in 0..100 {
-        if group.local_replica().role() == PxLocalReplicaRole::Leader {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    advance_until_role(&group, &test_cfg(), PxLocalReplicaRole::Leader).await;
 
     assert_eq!(
         group.local_replica().role(),
@@ -231,17 +250,7 @@ async fn single_voter_with_prevote_enabled_becomes_leader() {
     let cancel = group.tenure_cancel();
 
     let handle = spawn(Arc::downgrade(&group), cfg, cancel.clone());
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(cfg.election_max_ms + 10)).await;
-    // The PreVote path has more async steps than the direct-vote path
-    // (PreVote round + real election round). Poll with yields until the
-    // role transitions to Leader, up to a generous limit.
-    for _ in 0..100 {
-        if group.local_replica().role() == PxLocalReplicaRole::Leader {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    advance_until_role(&group, &cfg, PxLocalReplicaRole::Leader).await;
 
     assert_eq!(
         group.local_replica().role(),
@@ -266,18 +275,21 @@ async fn leader_heartbeat_tick_renews_lease() {
     let handle = spawn(Arc::downgrade(&group), cfg, cancel.clone());
 
     // First election deadline -> Leader.
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(cfg.election_max_ms + 10)).await;
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-    }
+    advance_until_role(&group, &cfg, PxLocalReplicaRole::Leader).await;
     assert_eq!(group.local_replica().role(), PxLocalReplicaRole::Leader);
 
     // Run several heartbeat ticks; lease_read_until should advance
-    // past the moment of becoming leader.
+    // past the moment of becoming leader. Yield first to let the
+    // leader state register its heartbeat timer, then advance.
     let lease_before = group.local_replica().lease_state_snapshot().lease_read_until;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
     tokio::time::advance(Duration::from_millis(cfg.heartbeat_interval_ms * 4 + 5)).await;
-    for _ in 0..16 {
+    for _ in 0..100 {
+        if group.local_replica().lease_state_snapshot().lease_read_until > lease_before {
+            break;
+        }
         tokio::task::yield_now().await;
     }
     let lease_after = group.local_replica().lease_state_snapshot().lease_read_until;
@@ -299,11 +311,7 @@ async fn admin_step_down_drops_leader_to_follower() {
     let handle = spawn(Arc::downgrade(&group), cfg, cancel.clone());
 
     // Single-voter election: Follower -> Leader.
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(cfg.election_max_ms + 10)).await;
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-    }
+    advance_until_role(&group, &cfg, PxLocalReplicaRole::Leader).await;
     assert_eq!(group.local_replica().role(), PxLocalReplicaRole::Leader);
     let term_before = group.local_replica().current_term_snapshot();
 
@@ -317,7 +325,10 @@ async fn admin_step_down_drops_leader_to_follower() {
 
     // The handler flips role + signals the driver; driver runs the
     // canonical step-down sequence on its next wakeup.
-    for _ in 0..16 {
+    for _ in 0..100 {
+        if group.local_replica().role() == PxLocalReplicaRole::Follower {
+            break;
+        }
         tokio::task::yield_now().await;
     }
     assert_eq!(group.local_replica().role(), PxLocalReplicaRole::Follower);
@@ -338,11 +349,7 @@ async fn propose_after_admin_step_down_returns_not_leader() {
 
     // Single-voter election: Follower -> Leader. Stamp_proposing_term
     // fires inside finalize_leader, so a proposal here would be admitted.
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(cfg.election_max_ms + 10)).await;
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-    }
+    advance_until_role(&group, &cfg, PxLocalReplicaRole::Leader).await;
     assert_eq!(group.local_replica().role(), PxLocalReplicaRole::Leader);
     let term = group.local_replica().current_term_snapshot();
     assert_eq!(
@@ -358,7 +365,10 @@ async fn propose_after_admin_step_down_returns_not_leader() {
         reason: "test step-down".into(),
     });
     assert!(reply.accepted);
-    for _ in 0..16 {
+    for _ in 0..100 {
+        if group.local_replica().role() == PxLocalReplicaRole::Follower {
+            break;
+        }
         tokio::task::yield_now().await;
     }
     assert_eq!(group.local_replica().role(), PxLocalReplicaRole::Follower);

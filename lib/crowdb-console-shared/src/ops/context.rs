@@ -89,6 +89,33 @@ impl OpContext {
         }
     }
 
+    /// Build an `OpContext` from a pre-built shared [`CrowdbKvClient`]
+    /// without overwriting the existing group-0 leader hint.
+    ///
+    /// Like [`Self::with_shared_client`] but does NOT call
+    /// `kv.seed_leader(0, 0, ...)`. Use this when the shared client
+    /// may already have a better leader hint from a prior
+    /// `ops::cluster::init` or from a `NotLeaderHint` response, and
+    /// the caller only has a fallback (possibly stale) endpoint.
+    /// `mgmt_seeds` are still applied so topology discovery can find
+    /// new nodes.
+    #[must_use]
+    pub fn with_shared_client_preserving_hint(
+        kv: Arc<CrowdbKvClient>,
+        mgmt_seeds: &[String],
+        config: ConsoleConfig,
+    ) -> Self {
+        if !mgmt_seeds.is_empty() {
+            kv.set_mgmt_seeds(mgmt_seeds.to_vec());
+        }
+        let sysmd = CrowdbSysmdClient::from_shared(Arc::clone(&kv));
+        Self {
+            sysmd,
+            kv,
+            config: RwLock::new(config),
+        }
+    }
+
     /// Access the [`CrowdbSysmdClient`] for group-0 system metadata.
     #[must_use]
     pub fn sysmd(&self) -> &CrowdbSysmdClient {

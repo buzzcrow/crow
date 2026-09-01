@@ -771,7 +771,7 @@ impl PxLocalReplica {
         let skew = std::time::Duration::from_millis(cfg.max_clock_skew_ms);
         let extended_until = t_send + lease_dur.saturating_sub(skew);
         self.extend_lease_read_until(extended_until);
-        self.record_quorum_heartbeat(Instant::now());
+        self.record_quorum_heartbeat(tokio::time::Instant::now().into_std());
     }
 
     /// Snapshot of the configured lease duration (ms).

@@ -2,78 +2,69 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { listRacks, listNodes, listNodeStores, pingNode } from '../api';
+import { listRacks, listNodes, listNodeStores, pingNode, listNodeDiskGroups, listDisksInGroup } from '../api';
 import { NodeHealth } from '../types';
-import type { Rack, Node, NodeStore } from '../types';
+import type { Rack, Node, NodeStore, DiskGroupEntry, DiskEntry } from '../types';
 
-interface UsePhysicalTreeOptions {
-  /** Polling interval in milliseconds when active (view is visible) */
+export interface NodeDiskGroups {
+  diskGroups: DiskGroupEntry[];
+  disksByDg: Record<number, DiskEntry[]>;
+}
+
+interface UseClusterTreeOptions {
   pollIntervalActive?: number;
-  /** Polling interval in milliseconds when inactive (view is hidden) */
   pollIntervalInactive?: number;
-  /** Whether polling is enabled */
   enabled?: boolean;
-  /** Recursive depth to fetch */
   recursive?: number;
 }
 
-interface UsePhysicalTreeResult {
-  /** List of racks with nested nodes */
+interface UseClusterTreeResult {
   racks: Rack[];
-  /** Flat list of all nodes across all racks */
   nodes: Node[];
-  /** Per-node store/group detail (local + remotes), keyed by node id. */
   nodeStores: Record<string, NodeStore[]>;
   nodeHealthById: Record<string, NodeHealth>;
-  /** Whether data is currently loading */
+  nodeDiskGroups: Record<number, NodeDiskGroups>;
   loading: boolean;
-  /** Error if fetch failed */
   error: Error | null;
-  /** Manually trigger a refresh */
   refresh: () => Promise<void>;
-  /** Get a specific node by ID */
   getNodeById: (nodeId: number) => Node | undefined;
 }
 
 /**
- * Hook for polling the physical infrastructure tree (racks -> nodes -> servers -> stores -> groups)
+ * Hook for polling the cluster infrastructure tree:
+ * racks -> nodes -> { KV stores/groups, disk-groups/disks }.
+ *
+ * Merges the former `usePhysicalTree` (rack/node/KV) with the
+ * disk-group/disk fetch logic from `useCapacityTree`.
  */
-export function usePhysicalTree({
+export function useClusterTree({
   pollIntervalActive = 5000,
   pollIntervalInactive = 30000,
   enabled = true,
   recursive = 3,
-}: UsePhysicalTreeOptions = {}): UsePhysicalTreeResult {
+}: UseClusterTreeOptions = {}): UseClusterTreeResult {
   const [racks, setRacks] = useState<Rack[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [nodeStores, setNodeStores] = useState<Record<string, NodeStore[]>>({});
   const [nodeHealthById, setNodeHealthById] = useState<Record<string, NodeHealth>>({});
+  const [nodeDiskGroups, setNodeDiskGroups] = useState<Record<number, NodeDiskGroups>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const isActiveRef = useRef(true);
   const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const hasLoadedRef = useRef(false);
 
-  // Fetch physical tree data
   const fetchData = useCallback(async () => {
     if (!enabled) return;
 
     try {
-      // Only show loading state on the initial fetch; subsequent polls
-      // refresh silently to avoid flipping the sidebar placeholder.
       if (!hasLoadedRef.current) {
         setLoading(true);
       }
-      // Note: do NOT clear the error optimistically here — clearing it before
-      // the request resolves makes the header health pill flip between
-      // Failed/Unknown every poll cycle when the server is down. It is cleared
-      // only once the fetch chain actually succeeds (end of this try block).
 
-      // Fetch racks with recursive depth
       const racksData = await listRacks(recursive);
       setRacks(Array.isArray(racksData) ? racksData : []);
 
-      // Fetch flat list of nodes
       const nodesData = await listNodes(undefined, recursive);
       const nodeList = Array.isArray(nodesData) ? nodesData : [];
       setNodes(nodeList);
@@ -90,10 +81,7 @@ export function usePhysicalTree({
       );
       setNodeHealthById(Object.fromEntries(reachability));
 
-      // Only nodes with a running server are in the monitor cache; querying
-      // a serverless node returns 404 (noisy console errors). Determine
-      // which nodes host a server from the flat list and the recursive rack
-      // view (`has_server`), and fetch per-node store detail only for those.
+      // Determine which nodes host a server.
       const serverNodeIds = new Set<number>();
       for (const n of nodeList) if (n.server) serverNodeIds.add(n.id);
       for (const rack of Array.isArray(racksData) ? racksData : []) {
@@ -104,9 +92,7 @@ export function usePhysicalTree({
         }
       }
 
-      // Fetch per-node store/group detail (local + remotes) in parallel.
-      // This is the physical/debugging view's source of peer wiring; the
-      // recursive racks tree only inlines the local replica per group.
+      // Fetch per-node KV store/group detail in parallel.
       const storeEntries = await Promise.all(
         [...serverNodeIds].map(async (id) => {
           try {
@@ -118,32 +104,93 @@ export function usePhysicalTree({
         }),
       );
       setNodeStores(Object.fromEntries(storeEntries));
+
+      // Fetch disk-groups + disks for every node (not just server nodes —
+      // disk-groups can exist on a node without a running KV server).
+      const allNodeIds = nodeList.map((n) => n.id);
+      await fetchDiskGroups(allNodeIds);
+
       setError(null);
     } catch (err) {
-      console.error('Failed to fetch physical tree:', err);
-      setError(err instanceof Error ? err : new Error('Unknown error fetching physical tree'));
+      console.error('Failed to fetch cluster tree:', err);
+      setError(err instanceof Error ? err : new Error('Unknown error fetching cluster tree'));
     } finally {
       hasLoadedRef.current = true;
       setLoading(false);
     }
   }, [enabled, recursive]);
 
-  // Initial fetch
+  const fetchDiskGroups = useCallback(
+    async (nodeIds: number[]) => {
+      if (!enabled || nodeIds.length === 0) {
+        setNodeDiskGroups({});
+        return;
+      }
+      try {
+        // Fetch disk-groups for all nodes first; render immediately.
+        const dgLists = await Promise.all(
+          nodeIds.map(async (nodeId) => {
+            try {
+              const dgs = await listNodeDiskGroups(nodeId);
+              return [nodeId, dgs] as const;
+            } catch {
+              return [nodeId, [] as DiskGroupEntry[]] as const;
+            }
+          }),
+        );
+        setNodeDiskGroups((prev) => {
+          const map: Record<number, NodeDiskGroups> = { ...prev };
+          for (const [id, dgs] of dgLists) {
+            const existing = map[id];
+            map[id] = {
+              diskGroups: dgs,
+              disksByDg: existing?.disksByDg ?? {},
+            };
+          }
+          return map;
+        });
+
+        // Load disks for each DG in the background.
+        await Promise.all(
+          dgLists.flatMap(([nodeId, dgs]) =>
+            dgs.map(async (dg) => {
+              try {
+                const disks = await listDisksInGroup(nodeId, dg.id);
+                setNodeDiskGroups((prev) => {
+                  const node = prev[nodeId] || {
+                    diskGroups: dgs,
+                    disksByDg: {},
+                  };
+                  if (node.diskGroups.length === 0 && dgs.length > 0) {
+                    node.diskGroups = dgs;
+                  }
+                  node.disksByDg = { ...node.disksByDg, [dg.id]: disks };
+                  return { ...prev, [nodeId]: node };
+                });
+              } catch {
+                // leave disks undefined; UI retries on next poll
+              }
+            }),
+          ),
+        );
+      } catch (err) {
+        console.error('Failed to fetch node disk-groups:', err);
+      }
+    },
+    [enabled],
+  );
+
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  // Polling logic
   useEffect(() => {
     if (!enabled) return;
 
     const scheduleNextPoll = () => {
-      // Clear any existing timeout
       if (pollTimeoutRef.current) {
         clearTimeout(pollTimeoutRef.current);
       }
-
-      // Schedule next poll based on active status
       const interval = isActiveRef.current ? pollIntervalActive : pollIntervalInactive;
       pollTimeoutRef.current = setTimeout(async () => {
         await fetchData();
@@ -160,22 +207,19 @@ export function usePhysicalTree({
     };
   }, [enabled, pollIntervalActive, pollIntervalInactive, fetchData]);
 
-  // Track page visibility to adjust polling interval
   useEffect(() => {
     const handleVisibilityChange = () => {
       isActiveRef.current = document.visibilityState === 'visible';
     };
-
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, []);
 
-  // Get a node by ID
   const getNodeById = useCallback(
     (nodeId: number): Node | undefined => {
-      return nodes.find(n => n.id === nodeId);
+      return nodes.find((n) => n.id === nodeId);
     },
-    [nodes]
+    [nodes],
   );
 
   return {
@@ -183,6 +227,7 @@ export function usePhysicalTree({
     nodes,
     nodeStores,
     nodeHealthById,
+    nodeDiskGroups,
     loading,
     error,
     refresh: fetchData,

@@ -1,14 +1,17 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-use crate::error::{err_400, err_502, ErrorBody};
+//! KV data-plane handlers — delegate to `ops::kv_data::*`.
+
+use crate::error::{err_400, err_502, map_config_err, ErrorBody};
 use crate::mgmt::refresh_node_cache;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crowdb_console_shared::cluster::{GroupHealth, NodeId};
-use crowdb_kv_client::{GetOutcome, ReadMode, ScanOutcome};
+use crowdb_console_shared::ops;
+use crowdb_kv_client::{GetOutcome, ScanOutcome};
 use hex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -285,15 +288,23 @@ async fn mgmt_seeds_for_group(
     Ok(seeds)
 }
 
-/// Map a [`crowdb_kv_client::Error`] to a JSON error response. Every variant
-/// here is either a discovery/transport failure or a retry-budget
-/// exhaustion, which mirrors the old `with_leader_retry`'s uniform "give up
-/// and surface 502" outcome once its own candidate-endpoint queue was
-/// drained -- there is no 4xx case since `mgmt_seeds_for_group` already
-/// rejected an unknown group before a [`CrowdbKvClient`] is even constructed.
-#[allow(clippy::needless_pass_by_value)]
-fn map_kv_client_err(e: crowdb_kv_client::Error) -> (StatusCode, Json<ErrorBody>) {
-    err_502(format!("{e}"))
+/// Seed the shared `CrowdbKvClient`'s topology cache for `(sid, gid)`
+/// using the monitor cache + mgmt seeds, then build an `OpContext`.
+/// The `ops::kv_data::*` functions use `ctx.kv()` which reads the
+/// topology cache — so seeding before the call ensures the leader is
+/// known without the ops functions doing their own resolution.
+async fn kv_op_context(
+    state: &AppState,
+    sid: u64,
+    gid: u64,
+) -> Result<crowdb_console_shared::ops::OpContext, (StatusCode, Json<ErrorBody>)> {
+    let seeds = mgmt_seeds_for_group(state, sid, gid).await?;
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    ctx.kv().set_mgmt_seeds(seeds);
+    if let Ok(endpoint) = resolve_kv_endpoint(state, sid, gid).await {
+        ctx.kv().seed_leader(sid, gid, endpoint);
+    }
+    Ok(ctx)
 }
 
 /// Get a value from the KV store.
@@ -306,16 +317,10 @@ pub async fn http_kv_get(
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<Json<KvGetResponse>, (StatusCode, Json<ErrorBody>)> {
     let key = decode_key(q.key, q.key_hex)?;
-    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = state.kv_client().await;
-    client.set_mgmt_seeds(seeds);
-    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
-        client.seed_leader(sid, gid, endpoint);
-    }
-    let outcome = client
-        .get(sid, gid, &key, ReadMode::Linearizable, None)
+    let ctx = kv_op_context(&state, sid, gid).await?;
+    let outcome = ops::kv_data::get(&ctx, sid, gid, &key)
         .await
-        .map_err(map_kv_client_err)?;
+        .map_err(map_config_err)?;
     match outcome {
         GetOutcome::NotFound => Ok(Json(KvGetResponse {
             found: false,
@@ -390,27 +395,11 @@ pub async fn http_kv_scan(
         (None, None) => Vec::new(),
     };
     let limit = q.limit;
-    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = state.kv_client().await;
-    client.set_mgmt_seeds(seeds);
-    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
-        client.seed_leader(sid, gid, endpoint);
-    }
-    let ScanOutcome { items, truncated, .. } = client
-        .scan(
-            sid,
-            gid,
-            &prefix,
-            &start_after,
-            &[],
-            limit,
-            ReadMode::Linearizable,
-            None,
-            false,
-            None,
-        )
-        .await
-        .map_err(map_kv_client_err)?;
+    let ctx = kv_op_context(&state, sid, gid).await?;
+    let ScanOutcome { items, truncated, .. } =
+        ops::kv_data::scan(&ctx, sid, gid, &prefix, &start_after, limit)
+            .await
+            .map_err(map_config_err)?;
     let items = items
         .into_iter()
         .map(|(k, v)| KvScanItemView {
@@ -440,18 +429,10 @@ pub async fn http_kv_put(
     } else {
         return Err(err_400("missing `value` or `value_hex`"));
     };
-    let client_id = body.client_id;
-    let seq = body.seq;
-    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = state.kv_client().await;
-    client.set_mgmt_seeds(seeds);
-    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
-        client.seed_leader(sid, gid, endpoint);
-    }
-    let out = client
-        .put(sid, gid, &key, &value, Some((client_id, seq)))
+    let ctx = kv_op_context(&state, sid, gid).await?;
+    let out = ops::kv_data::put(&ctx, sid, gid, &key, &value, Some((body.client_id, body.seq)))
         .await
-        .map_err(map_kv_client_err)?;
+        .map_err(map_config_err)?;
     Ok(Json(KvWriteResponse {
         ok: true,
         revision: out.revision,
@@ -468,18 +449,10 @@ pub async fn http_kv_delete(
     Json(body): Json<KvWriteBody>,
 ) -> Result<Json<KvWriteResponse>, (StatusCode, Json<ErrorBody>)> {
     let key = decode_key(body.key, body.key_hex)?;
-    let client_id = body.client_id;
-    let seq = body.seq;
-    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
-    let client = state.kv_client().await;
-    client.set_mgmt_seeds(seeds);
-    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
-        client.seed_leader(sid, gid, endpoint);
-    }
-    let out = client
-        .delete(sid, gid, &key, Some((client_id, seq)))
+    let ctx = kv_op_context(&state, sid, gid).await?;
+    let out = ops::kv_data::delete(&ctx, sid, gid, &key, Some((body.client_id, body.seq)))
         .await
-        .map_err(map_kv_client_err)?;
+        .map_err(map_config_err)?;
     Ok(Json(KvWriteResponse {
         ok: true,
         revision: out.revision,

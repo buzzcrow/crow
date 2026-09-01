@@ -16,6 +16,15 @@ use std::time::Instant as StdInstant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+/// Current monotonic instant for lease bookkeeping. Uses
+/// `tokio::time::Instant::now()` so that `#[tokio::test(start_paused)]
+///` tests respect the paused clock — `std::time::Instant::now()` would
+/// keep ticking in real time and expire the lease under CI load. In
+/// production (non-paused runtime) both are identical.
+fn lease_now() -> StdInstant {
+    tokio::time::Instant::now().into_std()
+}
+
 use crate::cluster::group::{PendingReadBarrier, PxGroup};
 use crate::cluster::group_election::{
     HeartbeatOutcome, LeaderElection, PendingLeaderHandoff, ReadBarrierOutcome, StepDownReason,
@@ -85,7 +94,7 @@ impl PxGroup {
         let group_id = self.group_id;
         let voting_peers = self.voting_remote_ids();
         let quorum = self.quorum();
-        let t_send = StdInstant::now();
+        let t_send = lease_now();
         // `t_send_ms_mono` is monotonic millis since the process-start
         // anchor shared with `common::time::process_anchor`.
         let t_send_ms_mono = crate::common::time::instant_to_anchor_ms(t_send);
@@ -195,7 +204,7 @@ impl PxGroup {
             return ReadBarrierOutcome::NoQuorum;
         }
 
-        let lease_valid = replica.lease_read_valid(StdInstant::now());
+        let lease_valid = replica.lease_read_valid(lease_now());
         if let Some(h) = self.read_handles() {
             h.lease_valid.set(u64::from(lease_valid));
         }
@@ -317,7 +326,7 @@ impl PxGroup {
 
         // Reset lease state at the start of the tenure. The first heartbeat
         // round that gets quorum extends the lease and unlocks read fast-path.
-        replica.reset_lease_to(StdInstant::now());
+        replica.reset_lease_to(lease_now());
 
         // Drop any safe-slot / per-peer watermarks inherited from a prior
         // tenure. `group_safe_slot` only advances within a tenure, so a new
@@ -399,7 +408,7 @@ impl PxGroup {
             }
             // Lease-unrenewable check on every Leader tick.
             let last_quorum = replica.last_quorum_heartbeat_at();
-            if StdInstant::now().duration_since(last_quorum) >= Duration::from_millis(cfg.lease_duration_ms) {
+            if lease_now().duration_since(last_quorum) >= Duration::from_millis(cfg.lease_duration_ms) {
                 self.step_down(&tenure_cancel, leader_term, StepDownReason::LeaseUnrenewable);
                 return;
             }

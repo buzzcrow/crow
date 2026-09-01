@@ -8,7 +8,7 @@ import { DomainProvider, useDomain } from './contexts/DomainContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { ActivityProvider, useActivity } from './contexts/ActivityContext';
-import { usePhysicalTree } from './data/usePhysicalTree';
+import { useClusterTree } from './data/useClusterTree';
 import { useLogicalTree } from './data/useLogicalTree';
 import { useCapacityTree } from './data/useCapacityTree';
 import { Header, ClusterHealth } from './shell/Header';
@@ -130,7 +130,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
 
   const physicalActive = domain === Domain.Cluster;
   const capacityActive = domain === Domain.Chunk;
-  const { racks, nodes, nodeStores, nodeHealthById, loading: physLoading, error: physError, refresh: refreshPhysical } = usePhysicalTree({
+  const { racks, nodes, nodeStores, nodeHealthById, nodeDiskGroups: clusterDiskGroups, loading: physLoading, error: physError, refresh: refreshPhysical } = useClusterTree({
     enabled: true,
     recursive: 2,
     pollIntervalActive: 1000,
@@ -142,11 +142,24 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
     pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
-  const { instances: diskdbInstances, usage: capacityUsage, hardwareCapacity, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
+  const { instances: diskdbInstances, usage: capacityUsage, hardwareCapacity, scanStatus: capacityScanStatus, loading: capLoading, error: capError, refresh: refreshCapacity, nodeDiskGroups: capNodeDiskGroups, fetchNodeDiskGroups } = useCapacityTree({
     enabled: domain === Domain.Chunk || domain === Domain.Cluster,
     pollIntervalActive: 5000,
     pollIntervalInactive: 30000,
   });
+
+  // Merge disk-group maps: prefer cluster tree (fresh, all nodes), fall
+  // back to capacity tree (on-demand fetch for the Capacity panel).
+  const nodeDiskGroups = useMemo(() => {
+    const merged: Record<number, import('./data/useClusterTree').NodeDiskGroups> = {};
+    for (const [id, ndg] of Object.entries(capNodeDiskGroups)) {
+      merged[Number(id)] = ndg;
+    }
+    for (const [id, ndg] of Object.entries(clusterDiskGroups)) {
+      merged[Number(id)] = ndg;
+    }
+    return merged;
+  }, [capNodeDiskGroups, clusterDiskGroups]);
 
   const loading = physLoading || logLoading || capLoading;
   const dataError = physError || logError || capError;
@@ -938,6 +951,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
               nodeHealthById={nodeHealthById}
               diskdbNodeIds={diskdbNodeIds}
               diskdbInstances={diskdbInstances}
+              nodeDiskGroups={nodeDiskGroups}
               refreshToken={lastRefreshTime.getTime()}
               focusRequest={canvasFocusRequest}
               onEntityContextMenu={onCanvasContextMenu}

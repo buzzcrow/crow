@@ -20,13 +20,13 @@ import {
 import { step } from '../fixtures/stepTimer';
 
 /**
- * Physical node inspect — cross-jump + local/remote replica wiring.
+ * Cluster node inspect — cross-jump + local/remote replica wiring.
  *
- * The physical/debugging view is the only place a node's remote-replica
+ * The cluster/debugging view is the only place a node's remote-replica
  * proxies are surfaced. The inspector also offers cross-jump buttons that
- * move between the logical (KV Cluster) and physical topologies.
+ * move between the KV and cluster topologies.
  */
-test.describe('physical · node inspect & cross-jump', () => {
+test.describe('cluster · node inspect & cross-jump', () => {
   test('cross-jumps between views and shows local + remote replicas', async ({ page, baseURL }) => {
     // --- logical replica details -> hosting physical node ---
     await step('xjump: setup 6', async () => {
@@ -184,7 +184,7 @@ test.describe('physical · node inspect & cross-jump', () => {
         await expect(crossJumpButton).toBeVisible({ timeout: 3_000 });
         await crossJumpButton.click();
 
-        // View should switch to Logical
+        // View should switch to KV
         await expect(page.getByRole('heading', { name: 'KV' })).toBeVisible({ timeout: 3_000 });
 
         // Store should be selected in the logical tree

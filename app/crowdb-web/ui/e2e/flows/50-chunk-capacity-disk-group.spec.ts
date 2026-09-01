@@ -127,7 +127,7 @@ test.describe('capacity · diskdb', () => {
     // --- capacity view shows rack → node hierarchy (no + button) ---
 
     // The + button should NOT be visible in Capacity view (racks are
-    // created in the Physical view only).
+    // created in the Cluster domain only).
     await expect(aside.getByRole('button', { name: 'Add Rack' })).toHaveCount(0);
 
     // The rack should appear in the tree.
@@ -138,14 +138,14 @@ test.describe('capacity · diskdb', () => {
     // --- node context menu shows Add Disk Group + Deploy DiskDB ---
     // Capacity view has its own menu code path: rack/node management
     // (Add Node, Delete Rack, Delete Node, Restart/Stop DiskDB) belongs
-    // to the Physical view and must NOT appear here.
+    // to the Cluster domain and must NOT appear here.
 
     // Right-click the node.
     await openContextMenu(page, aside.getByText(`N-${DISKDB_NODE}`, { exact: true }));
 
     await expect(page.getByRole('menuitem', { name: /add disk group/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toBeVisible();
-    // Regression: Capacity view must not expose Physical-view operations.
+    // Regression: Capacity view must not expose Cluster-domain operations.
     await expect(page.getByRole('menuitem', { name: /add node/i })).toHaveCount(0);
     await expect(page.getByRole('menuitem', { name: /delete node/i })).toHaveCount(0);
     await expect(page.getByRole('menuitem', { name: /restart diskdb/i })).toHaveCount(0);
@@ -1497,9 +1497,9 @@ test.describe('capacity · diskdb', () => {
         }
       }
 
-      // --- reload, verify Restart/Stop DiskDB visible in Physical view ---
+      // --- reload, verify Restart/Stop DiskDB visible in Cluster domain ---
       // Capacity view no longer exposes Restart/Stop/Delete DiskDB on
-      // the node context menu — those are Physical-view operations on
+      // the node context menu — those are Cluster-domain operations on
       // the DDB-{nodeId} server item.
       await page.goto('/');
       await page.getByTestId('domain-cluster').click();
@@ -1515,7 +1515,7 @@ test.describe('capacity · diskdb', () => {
       await expect(page.getByRole('menuitem', { name: /deploy diskdb/i })).toHaveCount(0);
       await page.keyboard.press('Escape');
 
-      // --- restart DDB via Physical view DDB context menu ---
+      // --- restart DDB via Cluster domain DDB context menu ---
       const restartResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/restart'));
       await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /restart diskdb/i);
       await restartResponse;
@@ -1540,7 +1540,7 @@ test.describe('capacity · diskdb', () => {
         }
       }
 
-      // --- stop DDB via Physical view DDB context menu ---
+      // --- stop DDB via Cluster domain DDB context menu ---
       const stopResponse = page.waitForResponse((r: { url(): string }) => r.url().includes('/diskdb/stop'));
       await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /stop diskdb/i);
       await stopResponse;
@@ -1588,7 +1588,7 @@ test.describe('capacity · diskdb', () => {
       await expect(kvItemAfterDdbStop.getByTitle('Healthy')).toBeVisible({ timeout: 10_000 });
 
       // --- restart DDB after stop (verifies entry was preserved) ---
-      // Physical view: right-click DDB-{nodeId} → Restart DiskDB.
+      // Cluster domain: right-click DDB-{nodeId} → Restart DiskDB.
       await page.goto('/');
       await page.getByTestId('domain-cluster').click();
       await expect(aside.getByText(`N-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
@@ -1615,7 +1615,7 @@ test.describe('capacity · diskdb', () => {
         }
       }
 
-      // --- stop KV via Physical view context menu, verify DDB unaffected ---
+      // --- stop KV via Cluster domain context menu, verify DDB unaffected ---
       // Regression: http_stop_node_server dropped the shared monitor_cache
       // entry, making DDB health go Unknown. Also, server_for_node could
       // find DDB instead of KV.
@@ -1693,7 +1693,7 @@ test.describe('capacity · diskdb', () => {
       // so we assert on the title attribute, not text content.
       await expect(kvItem.getByTitle('Healthy')).toBeVisible({ timeout: 20_000 });
 
-      // --- delete DiskDB via Physical-view context menu (confirm dialog) ---
+      // --- delete DiskDB via Cluster-domain context menu (confirm dialog) ---
       await expect(aside.getByText(`DDB-${nodeId}`, { exact: true })).toBeVisible({ timeout: 5_000 });
       await clickMenuItem(page, aside.getByText(`DDB-${nodeId}`, { exact: true }), /delete diskdb/i);
 
@@ -1878,7 +1878,7 @@ test.describe('capacity · diskdb', () => {
     }
   });
 
-  test('DGs remain visible in Physical view after web server restart (no diskdb running)', async ({ page, baseURL }) => {
+  test('DGs remain visible in Cluster domain after web server restart (no diskdb running)', async ({ page, baseURL }) => {
     test.setTimeout(30_000);
     const rackId = DISKDB_RACK;
     const nodeId = DISKDB_NODE;
@@ -1888,9 +1888,9 @@ test.describe('capacity · diskdb', () => {
 
     try {
       // No diskdb is deployed on this node, so the DG should still
-      // appear under the node in the Physical view.
+      // appear under the node in the Cluster domain.
       await page.goto('/');
-      // The Physical view's disk-group data arrives via a fetch chain
+      // The Cluster domain's disk-group data arrives via a fetch chain
       // (listNodes → fetchNodeDiskGroups) that lags the racks tree on
       // slow CI runners. Wait for the disk-groups response for this
       // node before asserting, rather than relying on the 5 s poll.

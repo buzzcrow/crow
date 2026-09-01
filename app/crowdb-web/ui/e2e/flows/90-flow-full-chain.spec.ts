@@ -9,7 +9,7 @@ import { step } from '../fixtures/stepTimer';
 /**
  * Cross-function end-to-end flow: rack → node → deploy server → store →
  * group → replica → KV put/get, driven entirely through the SPA against a
- * live crowdb-web + crowdb-kv-server, in both Physical and KV Cluster views.
+ * live crowdb-web + crowdb-kv-server, in both Cluster and KV Cluster views.
  *
  * The two source flows cannot share one setup: the second half resets the
  * backend to an empty registry before rebuilding the whole chain through
@@ -34,7 +34,7 @@ test.describe('flow · full chain', () => {
     const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
     try {
-    // --- Physical: add rack ---
+    // --- Cluster: add rack ---
     await step('full-chain: add rack UI', async () => {
       await page.getByTestId('domain-cluster').click();
       await page.getByRole('button', { name: 'Add Rack' }).click();
@@ -45,7 +45,7 @@ test.describe('flow · full chain', () => {
       await expect(aside.getByText('R-77 (Rack Smoke)')).toBeVisible({ timeout: 3_000 });
     });
 
-    // --- Physical: add node via context menu ---
+    // --- Cluster: add node via context menu ---
     await step('full-chain: add node UI', async () => {
       await aside.getByText('R-77 (Rack Smoke)').click({ button: 'right' });
       await page.getByRole('menuitem', { name: 'Add Node' }).click();
@@ -58,7 +58,7 @@ test.describe('flow · full chain', () => {
       await expect(aside.getByText('N-77', { exact: true })).toBeVisible({ timeout: 3_000 });
     });
 
-    // --- Physical: deploy CrowDB Storage Server via context menu ---
+    // --- Cluster: deploy CrowDB Storage Server via context menu ---
     await step('full-chain: deploy server UI', async () => {
       await aside.getByText('N-77', { exact: true }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /Deploy CrowDB Storage/i }).click();
@@ -82,7 +82,7 @@ test.describe('flow · full chain', () => {
     }, { timeout: 3_000, intervals: [100] }).toBeGreaterThan(0));
     expect(consoleErrors.filter((e) => !/Failed to load resource/i.test(e)), 'console errors after deploy').toEqual([]);
 
-    // --- Logical: add empty KV store on n1 ---
+    // --- KV: add empty KV store on n1 ---
     await step('full-chain: clusterInit', () => clusterInit(baseURL!, [77]));
     await step('full-chain: add store UI', async () => {
       await page.getByTestId('domain-kv').click();
@@ -94,7 +94,7 @@ test.describe('flow · full chain', () => {
       await expect(aside.getByText('S-7')).toBeVisible({ timeout: 3_000 });
     });
 
-    // --- Logical: create first group in store 7 ---
+    // --- KV: create first group in store 7 ---
     await step('full-chain: add group UI', async () => {
       await aside.getByText('S-7').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add group/i }).click();
@@ -104,7 +104,7 @@ test.describe('flow · full chain', () => {
       await page.getByLabel(/^77\b/).check();
       await page.getByRole('button', { name: /create group/i }).click();
 
-      // --- Logical: expand store, see group + replica ---
+      // --- KV: expand store, see group + replica ---
       const store7 = page.getByRole('treeitem').filter({ hasText: 'S-7' });
       const expandStore7 = store7.getByRole('button', { name: 'Expand' });
       if (await expandStore7.count()) await expandStore7.click();
@@ -162,7 +162,7 @@ test.describe('flow · full chain', () => {
       await api.dispose();
     }
 
-    // Ignore transient network 404s (e.g. a logical poll racing store
+    // Ignore transient network 404s (e.g. a KV poll racing store
     // creation); fail only on real JS/runtime errors.
     const jsErrors = consoleErrors.filter((e) => !/Failed to load resource/i.test(e));
     expect(jsErrors, jsErrors.join('\n')).toEqual([]);
@@ -259,7 +259,7 @@ test.describe('flow · full chain', () => {
         }, { timeout: 3_000, intervals: [100] }).toBeGreaterThan(0);
       });
 
-      // Switch to Cluster (Logical) view.
+      // Switch to KV view.
       await page.getByTestId('domain-kv').click();
       await expect(page.getByRole('heading', { name: 'KV' })).toBeVisible({ timeout: 3_000 });
 

@@ -17,6 +17,10 @@ use crate::ops::OpContext;
 
 /// Put a key-value pair into a store/group.
 ///
+/// `ids` is an optional `(client_id, seq)` for idempotent retries —
+/// the server deduplicates writes with the same `ids` within its
+/// retention window.
+///
 /// # Errors
 /// Returns an error if the leader is unreachable or the put fails.
 pub async fn put(
@@ -25,8 +29,9 @@ pub async fn put(
     group_id: u64,
     key: &[u8],
     value: &[u8],
+    ids: Option<(u64, u64)>,
 ) -> Result<WriteOutcome> {
-    Ok(ctx.kv().put(store_id, group_id, key, value, None).await?)
+    Ok(ctx.kv().put(store_id, group_id, key, value, ids).await?)
 }
 
 /// Get a key from a store/group.
@@ -42,11 +47,18 @@ pub async fn get(ctx: &OpContext, store_id: u64, group_id: u64, key: &[u8]) -> R
 
 /// Delete a key from a store/group.
 ///
+/// `ids` is an optional `(client_id, seq)` for idempotent retries.
+///
 /// # Errors
 /// Returns an error if the leader is unreachable or the delete fails.
-pub async fn delete(ctx: &OpContext, store_id: u64, group_id: u64, key: &[u8]) -> Result<()> {
-    ctx.kv().delete(store_id, group_id, key, None).await?;
-    Ok(())
+pub async fn delete(
+    ctx: &OpContext,
+    store_id: u64,
+    group_id: u64,
+    key: &[u8],
+    ids: Option<(u64, u64)>,
+) -> Result<WriteOutcome> {
+    Ok(ctx.kv().delete(store_id, group_id, key, ids).await?)
 }
 
 /// Scan keys with a prefix in a store/group.

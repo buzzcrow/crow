@@ -116,6 +116,36 @@ impl MonitorCache {
         })
     }
 
+    /// Resolve the live crowdb-rpc listen address of the group-0
+    /// leader (store 0, group 0). Returns `None` if no node hosts
+    /// store 0, no group 0 exists, no replica reports a `Leader`
+    /// role, or the leader's `listen_addr` has not yet been polled.
+    ///
+    /// Used by `AppState::op_context` to seed the shared
+    /// `CrowdbKvClient` with the actual group-0 endpoint so sysdata
+    /// writes reach the right listener (the configured `rpc_url` is
+    /// only correct for the bootstrap store, not for store 0 once the
+    /// system group has been initialized on a different port).
+    pub async fn group0_leader_endpoint(&self) -> Option<String> {
+        let guard = self.nodes.read().await;
+        for rec in guard.values() {
+            let Some(ns) = rec.stores.get(&0) else {
+                continue;
+            };
+            let Some(g) = ns.groups.iter().find(|g| g.group_id == 0) else {
+                continue;
+            };
+            if g.local.role == ReplicaRole::Leader {
+                if let Some(addr) = &ns.listen_addr {
+                    if !addr.is_empty() {
+                        return Some(addr.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Aggregate every node's report for a single group into one
     /// logical `GroupView`. Returns `None` if no node hosts the group.
     pub async fn resolve_group(&self, store_id: StoreId, group_id: u64) -> Option<GroupView> {

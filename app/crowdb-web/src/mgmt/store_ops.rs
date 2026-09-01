@@ -1,20 +1,19 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! A5: Logical store plane — orchestrated store create/delete.
+//! A5: Logical store plane — writes delegate to `ops::kv_logical`,
+//! reads from the monitor cache (live role/leader info).
 
-use crate::error::{err_400, err_409, err_500, err_502, ErrorBody};
+use crate::error::{err_502, map_config_err, map_persist_err, ErrorBody};
 use crate::expand::Recursive;
-use crate::mgmt::{build_server_client, cluster_initialized, mgmt_url_for_node, refresh_node_cache};
+use crate::mgmt::{cluster_initialized, refresh_node_cache};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use crowdb_console_shared::clients::http::ServerClient;
 use crowdb_console_shared::cluster::{GroupSummary, NodeId, StoreView};
-use crowdb_console_shared::mgmt::AddStoreRequest;
+use crowdb_console_shared::ops;
 use serde::Deserialize;
-use std::collections::HashSet;
 
 /// `GET /api/stores`. List stores aggregated from the monitor cache.
 ///
@@ -64,85 +63,38 @@ pub(crate) struct CreateStoreBody {
     pub nodes: Vec<NodeId>,
 }
 
-/// `POST /api/stores`. Create an empty store across the listed nodes (or the
-/// first node with a running server if `nodes` is empty). Orchestrated:
-/// fans out `add_store` to each node, rolls back on partial failure.
-///
-/// # Panics
-/// Panics if the `RwLock` is poisoned.
+/// `POST /api/stores`. Create an empty store across the listed nodes
+/// (or the first node with a running server if `nodes` is empty).
+/// Delegates to `ops::kv_logical::add_store` which handles fan-out +
+/// rollback + sysdata recording.
 ///
 /// # Errors
-/// Returns an error if no nodes are available or any upstream RPC fails.
+/// Returns `409` if the cluster is not initialized (non-zero store),
+/// `502` if no nodes are available or any upstream RPC fails,
+/// `500` if config persistence fails.
 pub(crate) async fn http_add_store(
     State(state): State<AppState>,
     Json(body): Json<CreateStoreBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
     if body.store_id != 0 && !cluster_initialized(&state).await {
-        return Err(err_409(
-            "cluster not initialized; call POST /api/cluster/init first",
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "cluster not initialized; call POST /api/cluster/init first".into(),
+            }),
         ));
     }
-    let mut target_nodes = if body.nodes.is_empty() {
-        let cfg = state.config.read().unwrap();
-        let first = cfg
-            .servers
-            .iter()
-            .find_map(|s| s.node_id)
-            .ok_or_else(|| err_400("no nodes with deployed servers"))?;
-        vec![first]
-    } else {
-        body.nodes.clone()
-    };
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    let succeeded = ops::kv_logical::add_store(&ctx, body.store_id, &body.nodes)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
 
-    let mut seen = HashSet::<NodeId>::new();
-    target_nodes.retain(|node_id| seen.insert(*node_id));
-
-    let mut reachable_targets: Vec<(NodeId, ServerClient)> = Vec::with_capacity(target_nodes.len());
-    for nid in &target_nodes {
-        let url = mgmt_url_for_node(&state, *nid)?;
-        let client = build_server_client(url.clone())?;
-        client.health().await.map_err(|e| {
-            err_502(format!(
-                "selected node {nid} is not currently reachable at {url}: {e}"
-            ))
-        })?;
-        reachable_targets.push((*nid, client));
-    }
-
-    let mut succeeded: Vec<NodeId> = Vec::new();
-    for (nid, client) in &reachable_targets {
-        let req = AddStoreRequest {
-            store_id: body.store_id,
-            port: None,
-        };
-        match client.add_store(&req).await {
-            Ok(_) => succeeded.push(*nid),
-            Err(e) => {
-                // Roll back successful creations.
-                for ok_nid in &succeeded {
-                    if let Ok(u) = mgmt_url_for_node(&state, *ok_nid) {
-                        if let Ok(c) = build_server_client(u) {
-                            let _ = c.remove_store(body.store_id).await;
-                        }
-                    }
-                }
-                return Err(err_502(format!("store create failed on node {nid}: {e}")));
-            }
-        }
-    }
-
-    // Refresh cache for all affected nodes.
+    // Refresh the monitor cache for affected nodes so health badges
+    // and RPC endpoint resolution reflect the new store.
     for nid in &succeeded {
         refresh_node_cache(&state, *nid).await;
     }
-
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.record_store(body.store_id, succeeded.clone());
-    }
-    state
-        .persist()
-        .map_err(|e| err_500(format!("persist config: {e}")))?;
 
     Ok((
         StatusCode::CREATED,
@@ -175,46 +127,43 @@ pub(crate) async fn http_get_store(
 }
 
 /// `DELETE /api/stores/:store_id`. Delete the store across every hosting
-/// node. Idempotent on per-node 404.
-///
-/// # Panics
-/// Panics if the `RwLock` is poisoned.
+/// node. Delegates to `ops::kv_logical::remove_store` which handles
+/// fan-out + sysdata cleanup + config update.
 ///
 /// # Errors
-/// Returns `404` if the store is not found in the cache.
+/// Returns `409` if `store_id` is 0 (the system store),
+/// `500` if config persistence fails.
 pub(crate) async fn http_remove_store(
     State(state): State<AppState>,
     Path(sid): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     if sid == 0 {
-        return Err(err_409(
-            "store 0 is the system store; use POST /api/cluster/reset to tear down the entire cluster",
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error:
+                    "store 0 is the system store; use POST /api/cluster/reset to tear down the entire cluster"
+                        .into(),
+            }),
         ));
     }
-    let view = state.monitor_cache.resolve_store(sid).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("store {sid} not found"),
-            }),
-        )
-    })?;
-    for nid in &view.nodes {
-        if let Ok(url) = mgmt_url_for_node(&state, *nid) {
-            if let Ok(client) = build_server_client(url) {
-                let _ = client.remove_store(sid).await;
-            }
-        }
-    }
-    for nid in &view.nodes {
+    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+    // Resolve hosting nodes from group-0 sysdata before removal
+    // so we can refresh their caches afterwards.
+    let hosting_nodes = ctx
+        .sysmd()
+        .get_store(sid)
+        .await
+        .map_err(|e| map_config_err(e.into()))?
+        .map(|s| s.node_ids)
+        .unwrap_or_default();
+    ops::kv_logical::remove_store(&ctx, sid)
+        .await
+        .map_err(map_config_err)?;
+    state.commit_op_context(&ctx).map_err(map_persist_err)?;
+
+    for nid in &hosting_nodes {
         refresh_node_cache(&state, *nid).await;
     }
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.remove_store_record(sid);
-    }
-    state
-        .persist()
-        .map_err(|e| err_500(format!("persist config: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }

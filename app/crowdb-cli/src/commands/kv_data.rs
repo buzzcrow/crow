@@ -100,6 +100,7 @@ pub async fn run_kv_data_verb(cli: &Cli, verb: KvDataVerb) -> ExitCode {
                 group_id,
                 key.as_bytes(),
                 value.as_bytes(),
+                None,
             )
             .await
             {
@@ -169,9 +170,10 @@ pub async fn run_kv_data_verb(cli: &Cli, verb: KvDataVerb) -> ExitCode {
                 Ok(c) => c,
                 Err(c) => return c,
             };
-            match crowdb_console_shared::ops::kv_data::delete(&ctx, store_id, group_id, key.as_bytes()).await
+            match crowdb_console_shared::ops::kv_data::delete(&ctx, store_id, group_id, key.as_bytes(), None)
+                .await
             {
-                Ok(()) => {
+                Ok(_) => {
                     if !cli.json {
                         println!("deleted");
                     }

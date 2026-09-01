@@ -97,7 +97,7 @@ async function openKvPanel(page: import('@playwright/test').Page, storeId: numbe
   await page.getByTestId('kv-group-select').selectOption(String(groupId));
 }
 
-/** The health badge inside a server tree item (Physical view). */
+/** The health badge inside a server tree item (Cluster domain). */
 function serverHealthBadge(page: import('@playwright/test').Page, nodeId: number) {
   return page
     .getByRole('treeitem')
@@ -199,7 +199,7 @@ test.describe('kv cluster · reconfiguration', () => {
       expect(leaderNode).not.toBeNull();
       const stopNode = [421, 422, 423].find((n) => n !== leaderNode)!;
 
-      // Stop the non-leader server via the Physical-view context menu.
+      // Stop the non-leader server via the Cluster-domain context menu.
       await stepTime('420: openCluster', () => openCluster(page));
       await stepTime('420: stopServerViaMenu', () => stopServerViaMenu(page, stopNode));
 
@@ -413,7 +413,7 @@ test.describe('kv cluster · reconfiguration', () => {
       // non-leader from store A instead.
       const stopNode = leaderA !== 463 && leaderB !== 463 ? 463 : leaderA === 461 ? 462 : 461;
 
-      // Stop via the Physical-view context menu.
+      // Stop via the Cluster-domain context menu.
       await openCluster(page);
       await stopServerViaMenu(page, stopNode);
       await expect(serverHealthBadge(page, stopNode).filter({ hasText: 'Healthy' })).toHaveCount(0, { timeout: 10_000 });

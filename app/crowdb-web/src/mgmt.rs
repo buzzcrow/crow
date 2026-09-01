@@ -31,7 +31,6 @@ use crowdb_console_shared::error::Error as SharedError;
 use crowdb_console_shared::MetricsResponse;
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::time::Duration;
 use tracing::warn;
 
 // ── Shared helpers ───────────────────────────────────────────────────
@@ -49,38 +48,6 @@ pub(crate) fn mgmt_url_for_node(
 
 pub(crate) fn build_server_client(url: String) -> Result<ServerClient, (StatusCode, Json<ErrorBody>)> {
     ServerClient::new(url).map_err(|e| err_500(format!("client build: {e}")))
-}
-
-/// Poll `mgmt_url`'s `/stores/{sid}` until `(sid, gid)` reports a leader
-/// other than `excluded_leader_id` (the node being stepped down/removed),
-/// or the timeout elapses. Best-effort: a `false` return does not block
-/// the caller, it only means the leader-less window will close via lease
-/// expiry instead of immediately.
-pub(crate) async fn wait_for_new_leader(
-    mgmt_url: &str,
-    sid: u64,
-    gid: u64,
-    excluded_leader_id: u64,
-    timeout: Duration,
-) -> bool {
-    let Ok(client) = ServerClient::new(mgmt_url.to_string()) else {
-        return false;
-    };
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if let Ok(detail) = client.get_store(sid).await {
-            if detail
-                .groups
-                .iter()
-                .find(|g| g.group_id == gid)
-                .is_some_and(|g| g.leader_id != 0 && g.leader_id != excluded_leader_id)
-            {
-                return true;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    false
 }
 
 /// Check whether the cluster is initialized (group 0 exists and is ready

@@ -6,7 +6,7 @@ import { test, expect } from '../fixtures/realBackend';
 import { apiContext, createNode, createRack, createStore, deployNodeServer, freePort, freePortRange, removeDiskdb, resetAll, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 import { step } from '../fixtures/stepTimer';
 
-test.describe('physical · rack + node CRUD', () => {
+test.describe('cluster · rack + node CRUD', () => {
   test('renders the SPA shell against a real empty backend', async ({ page }) => {
     const consoleErrors: string[] = [];
     page.on('console', (message) => {
@@ -189,7 +189,7 @@ test.describe('physical · rack + node CRUD', () => {
 
         await step('rack-CRUD: DDB inspect UI', async () => {
           // The DiskDB server should appear as a DDB-{nodeId} item under
-          // N-{nodeId} in the Physical view tree (mirrors KV-{nodeId}).
+          // N-{nodeId} in the Cluster domain tree (mirrors KV-{nodeId}).
           // Expand the node first so its children are rendered.
           const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
           const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
@@ -229,7 +229,7 @@ test.describe('physical · rack + node CRUD', () => {
    * Destructive confirms for store / node / rack (Req §3.2, §6).
    *
    * Replica/group deletes are covered by the KV cluster specs; this closes
-   * the physical and logical *root* deletes. Each delete is confirm-gated:
+   * the cluster and KV *root* deletes. Each delete is confirm-gated:
    * we cancel once to prove the guard, then confirm and verify removal in
    * the DOM and via the backend.
    */
@@ -247,7 +247,7 @@ test.describe('physical · rack + node CRUD', () => {
       await step('del-gate: goto', () => page.goto('/'));
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
-      // ── Store (logical) ──────────────────────────────────────────
+      // ── Store (KV) ──────────────────────────────────────────
       await step('del-gate: delete store UI', async () => {
         await page.getByTestId('domain-kv').click();
         await expect(aside.getByText('S-255', { exact: true })).toBeVisible({ timeout: 3_000 });
@@ -273,7 +273,7 @@ test.describe('physical · rack + node CRUD', () => {
         );
       });
 
-      // ── Node (physical, serverless n25x) ─────────────────────────
+      // ── Node (cluster, serverless n25x) ─────────────────────────
       await step('del-gate: delete node UI', async () => {
         await page.getByTestId('domain-cluster').click();
         const node25x = page.getByRole('treeitem').filter({ hasText: 'N-274' });
@@ -293,7 +293,7 @@ test.describe('physical · rack + node CRUD', () => {
       const nodeResp = await api.get('/api/nodes/274');
       expect(nodeResp.status()).toBe(404);
 
-      // ── Rack (physical, empty r25e) ──────────────────────────────
+      // ── Rack (cluster, empty r25e) ──────────────────────────────
       await step('del-gate: delete rack UI', async () => {
         const rack25e = page.getByRole('treeitem').filter({ hasText: 'R-255' });
         await expect(rack25e).toBeVisible({ timeout: 3_000 });
@@ -318,7 +318,7 @@ test.describe('physical · rack + node CRUD', () => {
 
   /**
    * Datacenter root (plan-datacenter-root): a fixed UI-only `datacenter`
-   * node sits above racks in the Physical sidebar and topology canvas.
+   * node sits above racks in the Cluster sidebar and topology canvas.
    * Right-clicking it offers only Add Rack (the default DC is immutable).
    */
   test('datacenter root wraps racks; Add Rack from datacenter context menu', async ({ page, baseURL }) => {

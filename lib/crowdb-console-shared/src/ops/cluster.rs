@@ -156,7 +156,23 @@ pub async fn init(ctx: &OpContext, nodes: &[u64]) -> Result<InitSummary> {
         cfg.record_group(0, 0, replicas);
     }
 
-    // Phase 4: write hardware + KV-cluster topology into group-0 sysdata.
+    // Phase 4: seed the KV client with the group-0 leader endpoint so
+    // `write_topology_to_sysdata` (which uses `ctx.sysmd()`) can reach
+    // group 0. Without this, the shared `CrowdbKvClient` may have a
+    // stale or dummy leader hint from before init.
+    let mgmt_seeds: Vec<String> = succeeded
+        .iter()
+        .filter_map(|(nid, _)| ctx.node_mgmt_url(*nid).ok())
+        .collect();
+    ctx.kv().set_mgmt_seeds(mgmt_seeds);
+    for (nid, _) in &succeeded {
+        if let Some(ep) = rpc_endpoint_for_store(ctx, *nid, 0).await {
+            ctx.kv().seed_leader(0, 0, ep);
+            break;
+        }
+    }
+
+    // Phase 5: write hardware + KV-cluster topology into group-0 sysdata.
     write_topology_to_sysdata(ctx, &store_nodes, &succeeded).await;
 
     Ok(InitSummary {

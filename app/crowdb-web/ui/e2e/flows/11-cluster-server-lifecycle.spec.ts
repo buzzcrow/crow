@@ -6,7 +6,7 @@ import { test, expect } from '../fixtures/realBackend';
 import { apiContext, createNode, createRack, deployNodeServer, freePort, resetAll, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 import { step } from '../fixtures/stepTimer';
 
-test.describe('physical · server lifecycle', () => {
+test.describe('cluster · server lifecycle', () => {
   test('context menu items differ for node without server, node with server, and server', async ({ page, baseURL }) => {
     // --- Node without server: Deploy CrowDB Storage + Delete Node, no restart/stop ---
     await step('ctx-menu: resetAll', () => resetAll(baseURL!));

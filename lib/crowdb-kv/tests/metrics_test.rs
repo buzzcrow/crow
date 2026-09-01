@@ -336,10 +336,12 @@ async fn cpp_metrics_block_appears_with_matching_window() {
         content.contains("[cpp-tree "),
         "missing [cpp-tree] block in:\n{content}"
     );
-    // Both blocks should have window= with 3 decimal places.
+    // Both blocks should have window= with 3 decimal places. The
+    // 1-second flush interval can produce a window slightly under 1s
+    // (e.g. 0.999s) due to timing jitter, so accept 0.9xx as well.
     assert!(
-        content.contains("window=1."),
-        "expected window=1.xxx in:\n{content}"
+        content.contains("window=1.") || content.contains("window=0.9"),
+        "expected window≈1.xxx in:\n{content}"
     );
 }
 

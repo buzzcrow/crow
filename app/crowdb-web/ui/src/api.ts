@@ -259,7 +259,7 @@ async function fetchWithOptions(
  * a flat `Vec<RackEntry>`; at `recursive>=1` it switches to an envelope
  * `{ items, truncated_at }` (`app/crowdb-web/src/lifecycle.rs`
  * `http_list_racks`). We normalize both shapes back to `Rack[]` so every
- * caller — in particular `usePhysicalTree` — sees the rack a user just
+ * caller — in particular `useClusterTree` — sees the rack a user just
  * created and renders it in the sidebar.
  */
 export async function listRacks(recursive?: number, options?: RequestOptions): Promise<Rack[]> {

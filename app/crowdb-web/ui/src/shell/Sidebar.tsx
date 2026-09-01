@@ -80,6 +80,91 @@ export function Sidebar({
 
   const treeNodes = useMemo<TreeNode[]>(() => {
     if (domain === Domain.Cluster) {
+      // Cluster domain: rack → node → disk-group → disk (hardware topology).
+      // No KV stores/groups — those live in the KV domain.
+      if (racks.length === 0) return [];
+
+      // Build lookup maps for status badges.
+      const dgStatusByKey = new Map<string, number>();
+      const diskStatusById = new Map<string, number>();
+      if (hardwareCapacity?.disk_groups) {
+        for (const dg of hardwareCapacity.disk_groups) {
+          dgStatusByKey.set(`${dg.rack_id}:${dg.node_id}:${dg.disk_group_id}`, dg.status);
+          for (const disk of dg.disks || []) {
+            diskStatusById.set(disk.disk_id, disk.status);
+          }
+        }
+      }
+      if (capacityUsage?.disk_groups) {
+        for (const dg of capacityUsage.disk_groups) {
+          const key = `${dg.rack_id}:${dg.node_id}:${dg.disk_group_id}`;
+          if (!dgStatusByKey.has(key)) dgStatusByKey.set(key, dg.status);
+          for (const disk of dg.disks || []) {
+            if (!diskStatusById.has(disk.disk_id)) diskStatusById.set(disk.disk_id, disk.status);
+          }
+        }
+      }
+
+      return [datacenterRoot(racks.map((rack) => ({
+        id: `R-${rack.id}`,
+        rawId: rack.id,
+        label: rack.name ? `${rackLabel(String(rack.id))} (${rack.name})` : rackLabel(String(rack.id)),
+        type: 'Rack' as const,
+        icon: <FolderTree className="tw-h-4 tw-w-4 tw-text-muted" />,
+        children: (rack.nodes || []).map((entry) => {
+          const nodeId: number = entry.id;
+          const ndg = nodeDiskGroups[nodeId];
+          const diskGroups = ndg?.diskGroups || [];
+          const children: TreeNode[] = [];
+
+          for (const dg of diskGroups) {
+            const disks = ndg?.disksByDg[dg.id] || [];
+            const dgStatus = dgStatusByKey.get(`${rack.id}:${nodeId}:${dg.id}`);
+            children.push({
+              id: `CL-DG-${nodeId}-${dg.id}`,
+              rawId: dg.id,
+              label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+              type: 'DiskGroup' as const,
+              icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+              hwStatus: dgStatus ?? undefined,
+              parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
+              children: disks.map((d) => {
+                const diskStatus = diskStatusById.get(d.disk_id);
+                return {
+                  id: `CL-D-${nodeId}-${dg.id}-${d.disk_id}`,
+                  rawId: d.disk_id,
+                  label: d.disk_id.slice(0, 12) + '…',
+                  type: 'Disk' as const,
+                  icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                  hwStatus: diskStatus ?? undefined,
+                  parentIds: {
+                    rack_id: rack.id,
+                    node_id: nodeId,
+                    disk_group_id: dg.id,
+                    disk_id: d.disk_id,
+                  },
+                };
+              }),
+            });
+          }
+
+          return {
+            id: `N-${nodeId}`,
+            rawId: nodeId,
+            label: nodeLabel(String(nodeId)),
+            type: 'Node' as const,
+            icon: <Monitor className="tw-h-4 tw-w-4 tw-text-muted" />,
+            health: toUiHealth(nodeHealthById[String(nodeId)]),
+            parentIds: { rack_id: rack.id },
+            children: children.length ? children : undefined,
+          };
+        }),
+      })))];
+    }
+
+    if (domain === Domain.KV) {
+      // KV domain: rack → node → KV-server → store → group → replica.
+      // The logical sub-tree is nested under each deployed KV server.
       if (racks.length === 0) return [];
       return [datacenterRoot(racks.map((rack) => ({
         id: `R-${rack.id}`,
@@ -156,68 +241,6 @@ export function Sidebar({
               }),
             });
           }
-          // DiskDB server sub-tree (only when a diskdb process is
-          // running on this node). Shows owned DGs as children.
-          if (diskdbNodeIds?.has(nodeId)) {
-            const ndg = nodeDiskGroups[nodeId];
-            // Find the diskdb instance on this node to get owned_dg_ids.
-            const ddbInstance = diskdbInstances.find((i) => i.instance_id === nodeId);
-            const ownedDgIds = new Set(ddbInstance?.owned_dg_ids || []);
-            const allDgs = ndg?.diskGroups || [];
-            // Show only owned DGs; if no ownership info yet, show all.
-            const ownedDgs = ownedDgIds.size > 0
-              ? allDgs.filter((dg) => ownedDgIds.has(dg.id))
-              : allDgs;
-            const dgChildren: TreeNode[] = ownedDgs.map((dg) => {
-              const hwDg = hardwareCapacity?.disk_groups.find((g) => g.disk_group_id === dg.id);
-              return {
-                id: `PDG-${nodeId}-${dg.id}`,
-                rawId: dg.id,
-                label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
-                type: 'DiskGroup' as const,
-                icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
-                hwStatus: hwDg?.status,
-                parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
-              };
-            });
-            children.push({
-              id: `DDB-${nodeId}`,
-              rawId: `${nodeId}-ddb`,
-              label: `DDB-${nodeId}`,
-              type: 'Server',
-              icon: <Cog className="tw-h-4 tw-w-4 tw-text-muted" />,
-              health: toUiHealth(diskdbHealthById?.get(nodeId)),
-              serviceType: 'diskdb',
-              parentIds: { rack_id: rack.id, node_id: nodeId },
-              children: dgChildren.length ? dgChildren : undefined,
-            });
-          }
-          // Always show DGs under the node, even when no diskdb is
-          // running. This ensures DGs survive a server restart.
-          // Avoid duplicates: if the DDB sub-tree already shows a DG,
-          // skip it here.
-          {
-            const ndg = nodeDiskGroups[nodeId];
-            const allDgs = ndg?.diskGroups || [];
-            const ddbInstance = diskdbInstances.find((i) => i.instance_id === nodeId);
-            const ownedDgIds = new Set(ddbInstance?.owned_dg_ids || []);
-            const shownInDdb = diskdbNodeIds?.has(nodeId) && ownedDgIds.size > 0;
-            const standaloneDgs = shownInDdb
-              ? allDgs.filter((dg) => !ownedDgIds.has(dg.id))
-              : allDgs;
-            for (const dg of standaloneDgs) {
-              const hwDg = hardwareCapacity?.disk_groups.find((g) => g.disk_group_id === dg.id);
-              children.push({
-                id: `PDG-${nodeId}-${dg.id}`,
-                rawId: dg.id,
-                label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
-                type: 'DiskGroup' as const,
-                icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
-                hwStatus: hwDg?.status,
-                parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
-              });
-            }
-          }
           return {
             id: `N-${nodeId}`,
             rawId: nodeId,
@@ -233,18 +256,13 @@ export function Sidebar({
     }
 
     if (domain === Domain.Chunk) {
-      // Capacity tree: rack → node → disk-group → disk.
+      // Chunk domain: rack → node → {chunkdb, diskdb, diskio} server
+      // instances. Under a diskdb server, owned disk-groups + disks
+      // expand (read-only — managed from the Cluster domain).
       if (racks.length === 0) return [];
 
-      const diskdbNodeSet = diskdbNodeIds ?? new Set(diskdbInstances.map((i) => i.instance_id));
-      void diskdbNodeSet;
-
-      // Build lookup maps for status badges.
-      // Primary: hardwareCapacity (group-0 sysdata, always available).
-      // Fallback: capacityUsage (diskdb, only for owned DGs).
       const dgStatusByKey = new Map<string, number>();
       const diskStatusById = new Map<string, number>();
-      const diskZoneCountById = new Map<string, number>();
       if (hardwareCapacity?.disk_groups) {
         for (const dg of hardwareCapacity.disk_groups) {
           dgStatusByKey.set(`${dg.rack_id}:${dg.node_id}:${dg.disk_group_id}`, dg.status);
@@ -259,7 +277,6 @@ export function Sidebar({
           if (!dgStatusByKey.has(key)) dgStatusByKey.set(key, dg.status);
           for (const disk of dg.disks || []) {
             if (!diskStatusById.has(disk.disk_id)) diskStatusById.set(disk.disk_id, disk.status);
-            diskZoneCountById.set(disk.disk_id, disk.zone_count);
           }
         }
       }
@@ -272,39 +289,57 @@ export function Sidebar({
         icon: <FolderTree className="tw-h-4 tw-w-4 tw-text-muted" />,
         children: (rack.nodes || []).map((entry) => {
           const nodeId: number = entry.id;
-          const ndg = nodeDiskGroups[nodeId];
-          const diskGroups = ndg?.diskGroups || [];
           const children: TreeNode[] = [];
 
-          // Disk-group → disk children.
-          for (const dg of diskGroups) {
-            const disks = ndg?.disksByDg[dg.id] || [];
-            const dgStatus = dgStatusByKey.get(`${rack.id}:${nodeId}:${dg.id}`);
+          // DiskDB server sub-tree with owned disk-groups + disks.
+          if (diskdbNodeIds?.has(nodeId)) {
+            const ndg = nodeDiskGroups[nodeId];
+            const ddbInstance = diskdbInstances.find((i) => i.instance_id === nodeId);
+            const ownedDgIds = new Set(ddbInstance?.owned_dg_ids || []);
+            const allDgs = ndg?.diskGroups || [];
+            const ownedDgs = ownedDgIds.size > 0
+              ? allDgs.filter((dg) => ownedDgIds.has(dg.id))
+              : allDgs;
+            const dgChildren: TreeNode[] = ownedDgs.map((dg) => {
+              const disks = ndg?.disksByDg[dg.id] || [];
+              const dgStatus = dgStatusByKey.get(`${rack.id}:${nodeId}:${dg.id}`);
+              return {
+                id: `CH-DG-${nodeId}-${dg.id}`,
+                rawId: dg.id,
+                label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+                type: 'DiskGroup' as const,
+                icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+                hwStatus: dgStatus ?? undefined,
+                parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
+                children: disks.map((d) => {
+                  const diskStatus = diskStatusById.get(d.disk_id);
+                  return {
+                    id: `CH-D-${nodeId}-${dg.id}-${d.disk_id}`,
+                    rawId: d.disk_id,
+                    label: d.disk_id.slice(0, 12) + '…',
+                    type: 'Disk' as const,
+                    icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                    hwStatus: diskStatus ?? undefined,
+                    parentIds: {
+                      rack_id: rack.id,
+                      node_id: nodeId,
+                      disk_group_id: dg.id,
+                      disk_id: d.disk_id,
+                    },
+                  };
+                }),
+              };
+            });
             children.push({
-              id: `CDG-${nodeId}-${dg.id}`,
-              rawId: dg.id,
-              label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
-              type: 'DiskGroup' as const,
-              icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
-              hwStatus: dgStatus ?? undefined,
-              parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
-              children: disks.map((d) => {
-                const diskStatus = diskStatusById.get(d.disk_id);
-                return {
-                  id: `CD-${nodeId}-${dg.id}-${d.disk_id}`,
-                  rawId: d.disk_id,
-                  label: d.disk_id.slice(0, 12) + '…',
-                  type: 'Disk' as const,
-                  icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
-                  hwStatus: diskStatus ?? undefined,
-                  parentIds: {
-                    rack_id: rack.id,
-                    node_id: nodeId,
-                    disk_group_id: dg.id,
-                    disk_id: d.disk_id,
-                  },
-                };
-              }),
+              id: `DDB-${nodeId}`,
+              rawId: `${nodeId}-ddb`,
+              label: `DDB-${nodeId}`,
+              type: 'Server',
+              icon: <Cog className="tw-h-4 tw-w-4 tw-text-muted" />,
+              health: toUiHealth(diskdbHealthById?.get(nodeId)),
+              serviceType: 'diskdb',
+              parentIds: { rack_id: rack.id, node_id: nodeId },
+              children: dgChildren.length ? dgChildren : undefined,
             });
           }
 
@@ -322,6 +357,7 @@ export function Sidebar({
       })))];
     }
 
+    // Fallback (uninitialized KV domain): logical store tree.
     if (stores.length === 0) return [];
     return [datacenterRoot(stores.map((store) => {
       const sid = String(store.store_id);
