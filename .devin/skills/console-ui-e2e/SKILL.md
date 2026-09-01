@@ -39,6 +39,16 @@ Cluster setup (server deploys) dominates runtime, not browser interaction.
 - **Ignore toasts** — never assert on `getByRole('alert')`. If a toast blocks a click, use `locator.evaluate((el) => el.click())`.
 - **Baseline timing** — every spec has `// Baseline: Xs (date)`. Runtime > 2x baseline → investigate.
 
+## No Workarounds (enforced)
+
+Fix the upstream root cause, not the test. Follow `/debug-test`. Banned:
+- Inflating timeouts beyond the 3 s / 10 s caps above.
+- `waitForResponse`/`waitForTimeout` to mask backend slowness (only use `waitForResponse` when the test needs the response body).
+- `expect.poll` on an API to "wait for convergence" before a UI assertion — fix the backend or the UI's own polling.
+- Swapping `toBeVisible` for `boundingBox`/`count`/`innerText` to bypass a `hidden` element — fix the component.
+- Retry loops in tests — fix backend idempotency.
+- `if`/`try-catch` around assertions to silently skip flaky checks.
+
 ## Verification & Regression
 
 - **Run what you change** — any change to `app/crowdb-web/ui/src/**` or `e2e/**` must be verified by running the affected spec. TypeScript compiling is not proof for a UI fix.

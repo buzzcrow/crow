@@ -38,7 +38,7 @@ interface UseClusterTreeResult {
  * disk-group/disk fetch logic from `useCapacityTree`.
  */
 export function useClusterTree({
-  pollIntervalActive = 5000,
+  pollIntervalActive = 3000,
   pollIntervalInactive = 30000,
   enabled = true,
   recursive = 3,

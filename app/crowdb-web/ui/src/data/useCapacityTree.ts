@@ -43,7 +43,7 @@ interface UseCapacityTreeResult {
 }
 
 export function useCapacityTree({
-  pollIntervalActive = 5000,
+  pollIntervalActive = 3000,
   pollIntervalInactive = 30000,
   enabled = true,
 }: UseCapacityTreeOptions = {}): UseCapacityTreeResult {

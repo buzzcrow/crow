@@ -789,21 +789,30 @@ export async function setupCluster(baseURL: string, topo: TopologyDescriptor): P
 
   const stores: number[] = [];
   const groups: { storeId: number; groupId: number }[] = [];
+  const leaderWaits: Promise<void>[] = [];
 
+  // Create all stores in parallel — stores are independent.
+  const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
+  for (let s = 0; s < topo.storeCount; s++) {
+    stores.push(topo.storeBase + s);
+  }
+  await Promise.all(stores.map((storeId) => createStore(baseURL, storeId, storeNodes)));
+
+  // Create groups sequentially (each addGroup hits the same nodes,
+  // parallel calls could contend on the KV servers), but wait for
+  // leaders in parallel.
   for (let s = 0; s < topo.storeCount; s++) {
     const storeId = topo.storeBase + s;
-    const storeNodes = nodes.slice(0, Math.min(topo.replicasPerGroup, nodes.length));
-    await createStore(baseURL, storeId, storeNodes);
-    stores.push(storeId);
-
     for (let g = 0; g < topo.groupsPerStore; g++) {
       const groupId = topo.groupBase + s * topo.groupsPerStore + g;
       const groupNodes = nodes.slice(0, topo.replicasPerGroup);
       await addGroup(baseURL, storeId, groupId, 1, groupNodes);
-      await waitForLeader(baseURL, storeId, groupId);
       groups.push({ storeId, groupId });
+      leaderWaits.push(waitForLeader(baseURL, storeId, groupId));
     }
   }
+
+  await Promise.all(leaderWaits);
 
   return { racks, nodes, stores, groups, apiBase: baseURL };
 }

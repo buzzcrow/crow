@@ -59,10 +59,21 @@ If existing logs don't reveal the gap, add targeted logs at decision points (`tr
 
 ## Anti-Patterns (never do)
 
-- **Increasing timeouts** to make a slow test pass — investigate why it's slow first.
+- **Increasing timeouts** to make a slow test pass — investigate why it's slow first. Timeout limits in `/console-ui-e2e` (3 s / 10 s) are hard caps.
 - **Ignoring errors** — log and surface every error.
 - **Weakening assertions** — fix the selector or the code, not the assertion.
-- **Downstream workarounds** — fix the upstream root cause.
+- **Downstream workarounds** — fix the upstream root cause. See "Banned Workarounds" below.
 - **Waiting on toasts** — never assert on `getByRole('alert')`. If a toast blocks a click, use `locator.evaluate((el) => el.click())`. See `/coding` E2E rules.
 - **Ignoring baseline timing** — if a test exceeds 2x its `// Baseline: Xs`, investigate the regression before accepting the run.
 - **Blocking on long-running test output** — use a short timeout (10–30s); if output shows repeat errors (same line 3+ times, no progress), investigate the log file directly — the test is stuck, not progressing.
+
+## Banned Workarounds (enforced — see also `/console-ui-e2e`)
+
+Fix the upstream root cause, not the test or caller. Banned:
+- Inflating timeouts beyond the 3 s / 10 s caps.
+- `waitForResponse`/`waitForTimeout` to mask backend slowness (only use `waitForResponse` when the test needs the response body).
+- `expect.poll` on an API to "wait for convergence" before a UI assertion — fix the backend or the UI's own polling.
+- Swapping `toBeVisible` for `boundingBox`/`count`/`innerText` to bypass a `hidden` element — fix the component.
+- Retry loops in tests — fix backend idempotency.
+- `if`/`try-catch` around assertions to silently skip flaky checks.
+- `let _ = ...` to suppress sysdata/config write errors — retry with backoff inside the op or return the error. If genuinely eventual-consistent, document why and expose a way to wait for convergence.

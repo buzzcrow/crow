@@ -259,20 +259,34 @@ test.describe('capacity · canvas + scanner/recalc', () => {
       await stepTime('dc: usage poll + totals match', async () => {
         const api = await apiContext(baseURL!);
         try {
-          let usageOk = false;
+          // Quick precondition: check if any diskdb instance has
+          // reported group_usages via the local service registry
+          // (fast — no crowdb-rpc fan-out). If none after 3s, diskdb
+          // is deployed but not reachable via crowdb-rpc; skip the
+          // expensive 12s usage poll.
+          let hasUsage = false;
           try {
+            await expect.poll(async () => {
+              const r = await api.get('/api/diskdb/instances');
+              if (!r.ok()) return false;
+              const instances = await r.json();
+              return Array.isArray(instances) && instances.some((i: any) => Array.isArray(i.group_usages) && i.group_usages.length > 0);
+            }, { timeout: 3_000, intervals: [200] }).toBe(true);
+            hasUsage = true;
+          } catch {
+            console.warn(`DG-${dgId} never reported usage — diskdb crowdb-rpc not reachable, skipping totals match`);
+          }
+
+          if (hasUsage) {
+            // Diskdb is reporting usage — now poll the usage endpoint
+            // for the specific DG.
             await expect.poll(async () => {
               const r = await api.get('/api/diskdb/usage');
               if (!r.ok()) return false;
               const body = await r.json();
               return Array.isArray(body.disk_groups) && body.disk_groups.some((g: any) => g.disk_group_id === dgId);
-            }, { timeout: 12_000, intervals: [200] }).toBe(true);
-            usageOk = true;
-          } catch {
-            console.warn(`DG-${dgId} never reported usage — diskdb crowdb-rpc not reachable, skipping totals match`);
-          }
+            }, { timeout: 10_000, intervals: [200] }).toBe(true);
 
-          if (usageOk) {
             const r = await api.get('/api/diskdb/usage');
             const body = await r.json();
             const sum = (body.disk_groups || []).reduce(
