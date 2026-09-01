@@ -91,12 +91,12 @@ test.describe('flow · full chain', () => {
       await page.getByLabel('KV Store ID (numeric)').fill('7');
       await page.getByLabel(/^77\b/).check();
       await page.getByRole('button', { name: /create kv store/i }).click();
-      await expect(aside.getByText('S-7')).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('S-7').first()).toBeVisible({ timeout: 3_000 });
     });
 
     // --- KV: create first group in store 7 ---
     await step('full-chain: add group UI', async () => {
-      await aside.getByText('S-7').click({ button: 'right' });
+      await aside.getByText('S-7').first().click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add group/i }).click();
       await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
       await page.getByLabel('Group ID (numeric)').fill('70');
@@ -108,7 +108,7 @@ test.describe('flow · full chain', () => {
       const store7 = page.getByRole('treeitem').filter({ hasText: 'S-7' });
       const expandStore7 = store7.getByRole('button', { name: 'Expand' });
       if (await expandStore7.count()) await expandStore7.click();
-      await expect(aside.getByText('G-70')).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('G-70').first()).toBeVisible({ timeout: 3_000 });
     });
     expect(consoleErrors.filter((e) => !/Failed to load resource/i.test(e)), 'console errors after group creation').toEqual([]);
 
@@ -271,11 +271,11 @@ test.describe('flow · full chain', () => {
         await page.getByLabel('KV Store ID (numeric)').fill('188');
         await page.getByLabel(/^181\b/).check();
         await page.getByRole('button', { name: /create kv store/i }).click();
-        await expect(aside.getByText('S-188')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('S-188').first()).toBeVisible({ timeout: 3_000 });
       });
 
       await step('full-chain: add group 1880 UI', async () => {
-        await aside.getByText('S-188').click({ button: 'right' });
+        await aside.getByText('S-188').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add group/i }).click();
         await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
         await page.getByLabel('Group ID (numeric)').fill('1880');
@@ -292,11 +292,11 @@ test.describe('flow · full chain', () => {
 
       // 7. Add replica to group 1880 on n18b via UI.
       await step('full-chain: add replica UI', async () => {
-        await expect(aside.getByText('G-1880')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('G-1880').first()).toBeVisible({ timeout: 3_000 });
         const group1880 = page.getByRole('treeitem').filter({ hasText: 'G-1880' });
         const expandGroup1880 = group1880.getByRole('button', { name: 'Expand' });
         if (await expandGroup1880.count()) await expandGroup1880.click();
-        await aside.getByText('G-1880').click({ button: 'right' });
+        await aside.getByText('G-1880').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add replica/i }).click();
         await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
         await page.getByLabel('Node', { exact: true }).selectOption('182');

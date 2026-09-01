@@ -13,6 +13,14 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:9920",
       "/healthz": "http://127.0.0.1:9920",
+      "/internal": "http://127.0.0.1:9920",
+    },
+  },
+  preview: {
+    proxy: {
+      "/api": "http://127.0.0.1:9920",
+      "/healthz": "http://127.0.0.1:9920",
+      "/internal": "http://127.0.0.1:9920",
     },
   },
   build: {

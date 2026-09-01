@@ -152,7 +152,7 @@ test.describe('kv cluster · multi-rack/multi-store/multi-group topology', () =>
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         for (const gid of [1990, 1991, 1992]) {
-          await expect(aside.getByText(`G-${gid}`)).toBeVisible({ timeout: 3_000 });
+          await expect(aside.getByText(`G-${gid}`).first()).toBeVisible({ timeout: 3_000 });
         }
       });
 

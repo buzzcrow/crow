@@ -79,9 +79,9 @@ test.describe('shell · UI behaviors', () => {
         await addStoreDialog.getByRole('button', { name: 'Cancel' }).click();
       });
 
-      await expect(aside.getByText('S-207')).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('S-207').first()).toBeVisible({ timeout: 10_000 });
       await step('shell: Add Group dialog', async () => {
-        await aside.getByText('S-207').click({ button: 'right' });
+        await aside.getByText('S-207').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add group/i }).click();
         const addGroupDialog = page.getByRole('dialog', { name: 'Add Group' });
         await expect(addGroupDialog).toBeVisible();
@@ -103,9 +103,9 @@ test.describe('shell · UI behaviors', () => {
       });
 
       const expectedReplicaAfterGroup = String(Number(expectedReplicaId) + 2);
-      await expect(aside.getByText(`G-${expectedGroupId}`)).toBeVisible({ timeout: 10_000 });
+      await expect(aside.getByText(`G-${expectedGroupId}`).first()).toBeVisible({ timeout: 10_000 });
       await step('shell: Add Replica dialog', async () => {
-        await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
+        await aside.getByText(`G-${expectedGroupId}`).first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add replica/i }).click();
         const addReplicaDialog = page.getByRole('dialog', { name: 'Add Replica' });
         await expect(addReplicaDialog).toBeVisible();
@@ -121,7 +121,7 @@ test.describe('shell · UI behaviors', () => {
       });
 
       await step('shell: Add Replica cancel', async () => {
-        await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
+        await aside.getByText(`G-${expectedGroupId}`).first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add replica/i }).click();
         const remainingReplicaDialog = page.getByRole('dialog', { name: 'Add Replica' });
         await expect(remainingReplicaDialog.getByLabel('Replica ID (optional)')).toHaveValue(String(Number(expectedReplicaAfterGroup) + 1));

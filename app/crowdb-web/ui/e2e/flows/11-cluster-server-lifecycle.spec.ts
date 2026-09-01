@@ -53,8 +53,17 @@ test.describe('cluster · server lifecycle', () => {
         await page.getByTestId('domain-cluster').click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-        // Wait for the server to appear in the tree (polling takes a moment).
-        await expect(aside.getByText('KV-491')).toBeVisible({ timeout: 10_000 });
+        // Wait for the server to be deployed via API (KV-xxx tree items
+        // are in the KV domain, not the Cluster domain).
+        const waitApi = await apiContext(baseURL!);
+        try {
+          await expect.poll(async () => {
+            const r = await waitApi.get('/api/nodes/491/server');
+            return r.ok() ? await r.json() : null;
+          }, { timeout: 10_000, intervals: [100] }).toBeTruthy();
+        } finally {
+          await waitApi.dispose();
+        }
 
         // Right-click the node (not the server).
         await aside.getByText('N-491', { exact: true }).click({ button: 'right' });
@@ -83,7 +92,8 @@ test.describe('cluster · server lifecycle', () => {
 
       await step('ctx-menu: server-node UI', async () => {
         await page.goto('/');
-        await page.getByTestId('domain-cluster').click();
+        // KV-xxx tree items are in the KV domain, not the Cluster domain.
+        await page.getByTestId('domain-kv').click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         // Wait for the server node to appear.
@@ -170,7 +180,9 @@ test.describe('cluster · server lifecycle', () => {
         expect((await pingResp.json()).ok).toBe(true);
       });
 
-      // Restart and Stop are on the server (KV) context menu, not the node.
+      // Restart and Stop are on the server (KV) context menu, not the
+      // node. KV-xxx tree items are in the KV domain, not the Cluster domain.
+      await page.getByTestId('domain-kv').click();
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-27' });
       await expect(serverItem).toBeVisible({ timeout: 5_000 });
 
@@ -232,8 +244,12 @@ test.describe('cluster · server lifecycle', () => {
           await page.getByTestId('domain-cluster').click();
 
           const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-          // Wait for server to appear so the cascade knows to remove it.
-          await expect(aside.getByText('KV-493')).toBeVisible({ timeout: 10_000 });
+          // Wait for the server to be deployed via API (KV-xxx tree
+          // items are in the KV domain, not the Cluster domain).
+          await expect.poll(async () => {
+            const r = await api.get('/api/nodes/493/server');
+            return r.ok();
+          }, { timeout: 10_000, intervals: [100] }).toBe(true);
 
           // Server is deployed before the cascade delete.
           expect((await api.get('/api/nodes/493/server')).status()).toBe(200);
@@ -270,7 +286,8 @@ test.describe('cluster · server lifecycle', () => {
 
       await step('cascade: delete svc UI', async () => {
         await page.goto('/');
-        await page.getByTestId('domain-cluster').click();
+        // KV-xxx tree items are in the KV domain, not the Cluster domain.
+        await page.getByTestId('domain-kv').click();
 
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
         await expect(aside.getByText('KV-494')).toBeVisible({ timeout: 10_000 });
@@ -290,6 +307,8 @@ test.describe('cluster · server lifecycle', () => {
 
         // Server disappears from tree, node remains.
         await expect(aside.getByText('KV-494', { exact: true })).toHaveCount(0, { timeout: 10_000 });
+        // Switch to Cluster domain to verify node remains.
+        await page.getByTestId('domain-cluster').click();
         await expect(aside.getByText('N-494', { exact: true })).toBeVisible();
       });
 

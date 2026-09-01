@@ -461,7 +461,57 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
           }
         }
       } else {
-        if (t.type === 'Store' && modules?.groups !== false) {
+        if (t.type === 'Server') {
+          // KV-domain server context menu: restart, stop, delete.
+          const nodeId = Number(p.node_id);
+          if (t.serviceType === 'diskdb') {
+            items.push({
+              id: 'ddb-restart',
+              label: 'Restart DiskDB',
+              icon: <RotateCw className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(nodeId)),
+            });
+            items.push({
+              id: 'ddb-stop',
+              label: 'Stop DiskDB',
+              icon: <Square className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(nodeId)),
+            });
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-ddb',
+              label: 'Delete DiskDB',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => requestDelete('DiskDB', t.label || t.id, async () => {
+                await runMutation('Delete DiskDB', t.label || t.id, () => removeDiskdb(nodeId));
+              }),
+            });
+          } else {
+            items.push({
+              id: 'restart',
+              label: 'Restart CrowDB Storage',
+              icon: <RotateCw className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Restart CrowDB Storage', t.label || t.id, () => restartServer(nodeId)),
+            });
+            items.push({
+              id: 'stop',
+              label: 'Stop CrowDB Storage',
+              icon: <Square className="tw-h-4 tw-w-4" />,
+              onSelect: () => runMutation('Stop CrowDB Storage', t.label || t.id, () => stopServer(nodeId)),
+            });
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-service',
+              label: 'Delete CrowDB Storage',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => requestDelete('CrowDB Storage', t.label || t.id, async () => {
+                await runMutation('Delete CrowDB Storage', t.label || t.id, () => removeServer(nodeId));
+              }),
+            });
+          }
+        } else if (t.type === 'Store' && modules?.groups !== false) {
           items.push({
             id: 'add-group',
             label: 'Add Group',
@@ -565,6 +615,31 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, onEvent }: 
             onSelect: () => setDialog((d) => ({ ...d, deployDiskdb: { nodeId } })),
           });
         }
+      } else if (t.type === 'Server') {
+        // Chunk-domain DDB server context menu: restart, stop, delete.
+        const nodeId = Number(p.node_id);
+        items.push({
+          id: 'ddb-restart',
+          label: 'Restart DiskDB',
+          icon: <RotateCw className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Restart DiskDB', t.label || t.id, () => restartDiskdb(nodeId)),
+        });
+        items.push({
+          id: 'ddb-stop',
+          label: 'Stop DiskDB',
+          icon: <Square className="tw-h-4 tw-w-4" />,
+          onSelect: () => runMutation('Stop DiskDB', t.label || t.id, () => stopDiskdb(nodeId)),
+        });
+        items.push({ id: 's1', separator: true });
+        items.push({
+          id: 'del-ddb',
+          label: 'Delete DiskDB',
+          icon: <Trash2 className="tw-h-4 tw-w-4" />,
+          destructive: true,
+          onSelect: () => requestDelete('DiskDB', t.label || t.id, async () => {
+            await runMutation('Delete DiskDB', t.label || t.id, () => removeDiskdb(nodeId));
+          }),
+        });
       } else if (t.type === 'DiskGroup') {
         const dgId = Number(t.rawId);
         const dgNodeId = Number(p.node_id);

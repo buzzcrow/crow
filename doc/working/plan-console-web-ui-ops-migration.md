@@ -28,8 +28,9 @@ per-domain IA fixed (Cluster: rack→node→DG→disk; KV: rack→node→KV-serv
 type added to topology canvas. Vitest embedding-contract test. E2E
 specs renamed + stale references updated.
 
-Remaining work: F6 (Playwright E2E — requires running cluster) + F7
-(commit).
+Remaining work: F6 (full Playwright E2E suite — smoke test passed,
+full 50-test run pending), E12 3-way split (file renamed but not
+split — shared `beforeAll` makes it non-trivial).
 
 ## Phase C — Backend handler migration (remaining)
 
@@ -158,12 +159,14 @@ apply poll-not-sleep + shared-cluster-in-`beforeAll` principles.
 - [x] **E11: `41-canvas-fit-pan.spec.ts`** — Cluster domain canvas.
   Stale refs at lines 10, 43, 122, 152, 165, 170, 183, 184.
   Files: `app/crowdb-web/ui/e2e/flows/41-canvas-fit-pan.spec.ts`.
-- [x] **E12: Split `50-capacity-diskdb.spec.ts`** into
+- [~] **E12: Split `50-capacity-diskdb.spec.ts`** into
   `50-chunk-capacity-disk-group.spec.ts`,
   `51-chunk-capacity-disk.spec.ts`,
   `52-chunk-capacity-zone.spec.ts` — Chunk domain Capacity sub-view;
   each with `beforeAll` shared cluster; poll-not-sleep. The 91 KB
-  file has 13 stale refs.
+  file has 13 stale refs. **File renamed but NOT split** — tests
+  share a `beforeAll` with cluster setup and have interdependencies;
+  split deferred.
   Files: `app/crowdb-web/ui/e2e/flows/50-capacity-diskdb.spec.ts`
   (split into 3).
 - [x] **E13: `53-chunk-capacity-canvas.spec.ts`** (renamed from
@@ -189,7 +192,7 @@ apply poll-not-sleep + shared-cluster-in-`beforeAll` principles.
 - [ ] **F6: Run Playwright E2E** — `cd app/crowdb-web/ui && npx
   playwright test --config=e2e/realBackend.config.ts`. All specs
   pass; check `slowReporter` output for slow tests.
-- [ ] **F7: Commit** — implementation commits (Phase C–E) + final
+- [x] **F7: Commit** — implementation commits (Phase C–E) + final
   commit with design draft + plan.
 
 ## Remaining file list
@@ -225,7 +228,7 @@ apply poll-not-sleep + shared-cluster-in-`beforeAll` principles.
   handler integration test after C4).
 
 **Unit (Vitest):**
-- [ ] `CrowdbConsoleProps` embedding contract (`initialDomain`, no
+- [x] `CrowdbConsoleProps` embedding contract (`initialDomain`, no
   `initialViewMode`/`initialNodeId`/`'swagger'`).
 
 **Integration (Rust handler tests):**

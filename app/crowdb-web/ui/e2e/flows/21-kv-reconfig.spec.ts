@@ -107,6 +107,8 @@ function serverHealthBadge(page: import('@playwright/test').Page, nodeId: number
 }
 
 async function stopServerViaMenu(page: import('@playwright/test').Page, nodeId: number) {
+  // KV-xxx tree items are in the KV domain, not the Cluster domain.
+  await page.getByTestId('domain-kv').click();
   const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
   await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible({ timeout: 10_000 });
   await aside.getByText(`KV-${nodeId}`, { exact: true }).click({ button: 'right' });
@@ -116,6 +118,8 @@ async function stopServerViaMenu(page: import('@playwright/test').Page, nodeId: 
 }
 
 async function restartServerViaMenu(page: import('@playwright/test').Page, nodeId: number) {
+  // KV-xxx tree items are in the KV domain, not the Cluster domain.
+  await page.getByTestId('domain-kv').click();
   const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
   await expect(aside.getByText(`KV-${nodeId}`, { exact: true })).toBeVisible({ timeout: 10_000 });
   await aside.getByText(`KV-${nodeId}`, { exact: true }).click({ button: 'right' });
@@ -352,8 +356,8 @@ test.describe('kv cluster · reconfiguration', () => {
       // Add the 4th replica via the KV-Cluster Add Replica dialog.
       await openKvCluster(page);
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-      await expect(aside.getByText('G-4500')).toBeVisible({ timeout: 10_000 });
-      await aside.getByText('G-4500').click({ button: 'right' });
+      await expect(aside.getByText('G-4500').first()).toBeVisible({ timeout: 10_000 });
+      await aside.getByText('G-4500').first().click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add replica/i }).click();
       await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
       await page.getByLabel('Node', { exact: true }).selectOption(String(454));

@@ -111,7 +111,8 @@ test.describe('cluster · node inspect & cross-jump', () => {
     try {
       await step('xjump: replicas UI', async () => {
         await page.goto('/');
-        await page.getByTestId('domain-cluster').click();
+        // Stores/replicas are in the KV domain, not the Cluster domain.
+        await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
         // Per-node store detail loads after the tree mounts, so rows added by
@@ -188,7 +189,7 @@ test.describe('cluster · node inspect & cross-jump', () => {
         await expect(page.getByRole('heading', { name: 'KV' })).toBeVisible({ timeout: 3_000 });
 
         // Store should be selected in the logical tree
-        await expect(aside.getByText('S-330')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('S-330').first()).toBeVisible({ timeout: 3_000 });
       });
     } finally {
       await step('xjump2: teardown', () => stopNodeServer(baseURL!, 33));

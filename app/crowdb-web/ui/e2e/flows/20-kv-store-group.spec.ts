@@ -32,14 +32,14 @@ test.describe('kv cluster · store + group CRUD', () => {
         await page.getByLabel(/^5\b/).check();
         await page.getByRole('button', { name: /create kv store/i }).click();
 
-        await expect(aside.getByText('S-57')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('S-57').first()).toBeVisible({ timeout: 3_000 });
 
         // The fixed datacenter root sits above stores in the KV domain.
         await expect(aside.getByRole('treeitem').filter({ hasText: /^datacenter$/ })).toBeVisible({ timeout: 3_000 });
         await expect(aside.getByRole('treeitem').first()).toHaveText(/datacenter/);
 
         // Add the first group via the store row context menu.
-        await aside.getByText('S-57').click({ button: 'right' });
+        await aside.getByText('S-57').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add group/i }).click();
         await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
         await page.getByLabel('Group ID (numeric)').fill('570');
@@ -52,15 +52,15 @@ test.describe('kv cluster · store + group CRUD', () => {
         const store57 = page.getByRole('treeitem').filter({ hasText: 'S-57' });
         const expandStore57 = store57.getByRole('button', { name: 'Expand' });
         if (await expandStore57.count()) await expandStore57.click();
-        await expect(aside.getByText('G-570')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('G-570').first()).toBeVisible({ timeout: 3_000 });
 
         // Verify parent-child: S-57 is expanded and G-570 is visible in the tree
         const store57Item = page.getByRole('treeitem').filter({ hasText: 'S-57' });
         await expect(store57Item).toHaveAttribute('aria-expanded', 'true');
-        await expect(aside.getByText('G-570')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('G-570').first()).toBeVisible({ timeout: 3_000 });
 
         // Add a second group via the store row context menu.
-        await aside.getByText('S-57').click({ button: 'right' });
+        await aside.getByText('S-57').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add group/i }).click();
         await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
         await page.getByLabel('Group ID (numeric)').fill('580');
@@ -68,7 +68,7 @@ test.describe('kv cluster · store + group CRUD', () => {
         await page.getByLabel(/^5\b/).check();
         await page.getByRole('button', { name: /create group/i }).click();
 
-        await expect(aside.getByText('G-580')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('G-580').first()).toBeVisible({ timeout: 3_000 });
       });
 
       await step('store-group: verify API', async () => {
@@ -108,11 +108,11 @@ test.describe('kv cluster · store + group CRUD', () => {
         await page.goto('/');
         await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-        await expect(aside.getByText('G-1770')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('G-1770').first()).toBeVisible({ timeout: 3_000 });
 
         // Right-click selects + targets the group (without toggling its expand,
         // so the existing replica row stays visible).
-        await aside.getByText('G-1770').click({ button: 'right' });
+        await aside.getByText('G-1770').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /add replica/i }).click();
 
         await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
@@ -197,9 +197,9 @@ test.describe('kv cluster · store + group CRUD', () => {
         await page.goto('/');
         await page.getByTestId('domain-kv').click();
         const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-        await expect(aside.getByText('G-880')).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('G-880').first()).toBeVisible({ timeout: 3_000 });
 
-        await aside.getByText('G-880').click({ button: 'right' });
+        await aside.getByText('G-880').first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /delete group/i }).click();
         await expect(page.getByRole('dialog', { name: 'Delete Group' })).toBeVisible();
         await page.getByRole('button', { name: /delete group/i }).click();

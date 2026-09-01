@@ -290,13 +290,13 @@ export function Sidebar({
         children: (rack.nodes || []).map((entry) => {
           const nodeId: number = entry.id;
           const children: TreeNode[] = [];
+          const ndg = nodeDiskGroups[nodeId];
+          const allDgs = ndg?.diskGroups || [];
 
           // DiskDB server sub-tree with owned disk-groups + disks.
           if (diskdbNodeIds?.has(nodeId)) {
-            const ndg = nodeDiskGroups[nodeId];
             const ddbInstance = diskdbInstances.find((i) => i.instance_id === nodeId);
             const ownedDgIds = new Set(ddbInstance?.owned_dg_ids || []);
-            const allDgs = ndg?.diskGroups || [];
             const ownedDgs = ownedDgIds.size > 0
               ? allDgs.filter((dg) => ownedDgIds.has(dg.id))
               : allDgs;
@@ -341,6 +341,39 @@ export function Sidebar({
               parentIds: { rack_id: rack.id, node_id: nodeId },
               children: dgChildren.length ? dgChildren : undefined,
             });
+          } else {
+            // No DDB deployed: show disk-groups directly under the node
+            // so they can be managed (add/delete/status/assign).
+            for (const dg of allDgs) {
+              const disks = ndg?.disksByDg[dg.id] || [];
+              const dgStatus = dgStatusByKey.get(`${rack.id}:${nodeId}:${dg.id}`);
+              children.push({
+                id: `CH-DG-${nodeId}-${dg.id}`,
+                rawId: dg.id,
+                label: dg.name ? `${dg.name} (DG-${dg.id})` : `DG-${dg.id}`,
+                type: 'DiskGroup' as const,
+                icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+                hwStatus: dgStatus ?? undefined,
+                parentIds: { rack_id: rack.id, node_id: nodeId, disk_group_id: dg.id },
+                children: disks.map((d) => {
+                  const diskStatus = diskStatusById.get(d.disk_id);
+                  return {
+                    id: `CH-D-${nodeId}-${dg.id}-${d.disk_id}`,
+                    rawId: d.disk_id,
+                    label: d.disk_id.slice(0, 12) + '…',
+                    type: 'Disk' as const,
+                    icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                    hwStatus: diskStatus ?? undefined,
+                    parentIds: {
+                      rack_id: rack.id,
+                      node_id: nodeId,
+                      disk_group_id: dg.id,
+                      disk_id: d.disk_id,
+                    },
+                  };
+                }),
+              });
+            }
           }
 
           return {

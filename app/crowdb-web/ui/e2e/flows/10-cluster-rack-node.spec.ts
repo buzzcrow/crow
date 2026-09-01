@@ -188,9 +188,8 @@ test.describe('cluster · rack + node CRUD', () => {
         });
 
         await step('rack-CRUD: DDB inspect UI', async () => {
-          // The DiskDB server should appear as a DDB-{nodeId} item under
-          // N-{nodeId} in the Cluster domain tree (mirrors KV-{nodeId}).
-          // Expand the node first so its children are rendered.
+          // DDB-xxx tree items are in the Chunk domain, not the Cluster domain.
+          await page.getByTestId('domain-chunk').click();
           const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
           const expandNode = aside.getByRole('treeitem').filter({ hasText: `N-${nodeId}` }).locator('button[aria-label="Expand"]');
           if (await expandNode.count() > 0) await expandNode.first().click();
@@ -212,7 +211,9 @@ test.describe('cluster · rack + node CRUD', () => {
           await expect(ddbTypeDd).toHaveText('DiskDB', { timeout: 3_000 });
           await expect(inspector.getByText(/service_type/i)).toHaveCount(0);
 
-          // Selecting the KV item shows Type = "KV".
+          // Selecting the KV item shows Type = "KV". KV-xxx tree items
+          // are in the KV domain, not the Cluster domain.
+          await page.getByTestId('domain-kv').click();
           await aside.getByText(`KV-${nodeId}`, { exact: true }).click();
           const kvTypeDd = inspector.locator('dl > div').filter({ has: page.locator('dt', { hasText: 'Type' }) }).locator('dd');
           await expect(kvTypeDd).toHaveText('KV', { timeout: 3_000 });
@@ -250,16 +251,16 @@ test.describe('cluster · rack + node CRUD', () => {
       // ── Store (KV) ──────────────────────────────────────────
       await step('del-gate: delete store UI', async () => {
         await page.getByTestId('domain-kv').click();
-        await expect(aside.getByText('S-255', { exact: true })).toBeVisible({ timeout: 3_000 });
+        await expect(aside.getByText('S-255', { exact: true }).first()).toBeVisible({ timeout: 3_000 });
 
         // Cancel first.
-        await aside.getByText('S-255', { exact: true }).click({ button: 'right' });
+        await aside.getByText('S-255', { exact: true }).first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /delete store/i }).click();
         await page.getByRole('dialog', { name: 'Delete Store' }).getByRole('button', { name: 'Cancel' }).click();
-        await expect(aside.getByText('S-255', { exact: true })).toBeVisible();
+        await expect(aside.getByText('S-255', { exact: true }).first()).toBeVisible();
 
         // Confirm.
-        await aside.getByText('S-255', { exact: true }).click({ button: 'right' });
+        await aside.getByText('S-255', { exact: true }).first().click({ button: 'right' });
         await page.getByRole('menuitem', { name: /delete store/i }).click();
         await page.getByRole('dialog', { name: 'Delete Store' }).getByRole('button', { name: /delete store/i }).click();
         await expect(aside.getByText('S-255', { exact: true })).toHaveCount(0, { timeout: 3_000 });

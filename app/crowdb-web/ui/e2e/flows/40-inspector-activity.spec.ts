@@ -111,7 +111,9 @@ test.describe('inspector · activity log', () => {
       const pingToast = page.getByRole('alert').filter({ hasText: /ping/i });
       await expect(pingToast).toBeVisible({ timeout: 10_000 });
 
-      // Restart and Stop are on the server (KV) context menu.
+      // Restart and Stop are on the server (KV) context menu. KV-xxx
+      // tree items are in the KV domain, not the Cluster domain.
+      await page.getByTestId('domain-kv').click();
       const serverItem = page.getByRole('treeitem').filter({ hasText: 'KV-47' });
       await expect(serverItem).toBeVisible({ timeout: 5_000 });
 
@@ -137,7 +139,9 @@ test.describe('inspector · activity log', () => {
       const stopToast = page.getByRole('alert').filter({ hasText: /stop/i });
       await expect(stopToast).toBeVisible({ timeout: 10_000 });
 
-      // Verify all three operations appear in the activity log
+      // Verify all three operations appear in the activity log.
+      // Switch back to Cluster domain to select the node.
+      await page.getByTestId('domain-cluster').click();
       await nodeItem.getByRole('button', { name: 'N-47' }).click();
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
       await expect(inspector).toBeVisible({ timeout: 10_000 });
