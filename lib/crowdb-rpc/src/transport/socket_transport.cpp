@@ -216,7 +216,7 @@ void Worker::run_loop()
                     if (ev.conn != nullptr && ev.conn->is_open()) {
                         // ev.fd is the write fd (dup'd). try_send uses it.
                         uint64_t wh_start = now_nanos();
-                        bool     has_more = on_writable_impl(ev.conn, ev.fd, stats_);
+                        bool     all_sent = on_writable_impl(ev.conn, ev.fd, stats_);
                         hist_write_handle().observe(now_nanos() - wh_start);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
@@ -231,16 +231,19 @@ void Worker::run_loop()
                             ev.conn->write_fd = -1;
                             closed_fds.push_back(rfd);
                         }
-                        else if (has_more) {
-                            // Still has data — re-arm write in one-shot mode.
-                            if (engine_->oneshot()) {
-                                engine_->arm_write(ev.fd, ev.conn);
-                            }
-                        }
-                        else {
+                        else if (all_sent) {
                             // Queue empty — disarm write (MOD with 0 events).
                             // Read fd is independent — no need to re-arm read.
                             engine_->disarm_write(ev.fd, ev.conn);
+                        }
+                        else {
+                            // EAGAIN/partial — re-arm write for retry.
+                            // Non-oneshot: level-triggered EPOLLOUT stays
+                            // armed, no MOD needed (kernel only fires when
+                            // socket becomes writable again).
+                            if (engine_->oneshot()) {
+                                engine_->arm_write(ev.fd, ev.conn);
+                            }
                         }
                     }
                     break;
