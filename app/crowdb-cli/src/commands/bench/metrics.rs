@@ -4,8 +4,8 @@
 //! Bench metrics wiring — creates the project `MetricsRunner` and
 //! registers the bench counters + latency histogram on its registry.
 //!
-//! The runner writes periodic `[rust-metrics ...]` + `[cpp-rpc ...]`
-//! blocks to a single metrics log file (`crowdb-cli-metrics-*.log`) in
+//! The runner writes periodic `rust` + `cpp-rpc` blocks to a single
+//! metrics log file (`crowdb-cli-metrics-*.log`) in
 //! the CLI's per-invocation log dir. The C++ crowdb-rpc process-level
 //! counters (e.g. `rpc.client.*`) are flushed into the same file via a
 //! `set_cpp_flush` callback that calls
@@ -112,13 +112,14 @@ impl BenchMetrics {
         }
     }
 
-    /// Write the final JSON report to the metrics log file. Falls back
-    /// to `eprintln!` if the runner is disabled (no metrics log).
-    pub fn write_report(&self, json: &serde_json::Value) {
+    /// Write the final report to the metrics log file as readable text.
+    /// Falls back to `eprintln!` if the runner is disabled (no metrics log).
+    pub fn write_report(&self, result: &super::result::BenchResult) {
+        let text = result.to_string();
         if let Some(ref r) = self.runner {
-            r.write_raw(&format!("bench_report {json}"));
+            r.write_raw(&text);
         } else {
-            eprintln!("bench_report {json}");
+            eprint!("{text}");
         }
     }
 }

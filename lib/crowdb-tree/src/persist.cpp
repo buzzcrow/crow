@@ -71,7 +71,7 @@ constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 4;
 
 std::string make_metrics_prefix(const Options &opt)
 {
-    return "s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id) + ".ct";
+    return "s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id) + ".tree";
 }
 
 // Per-store anchor slot size and the byte offset where the page/segment

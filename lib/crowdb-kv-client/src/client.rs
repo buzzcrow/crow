@@ -297,7 +297,7 @@ impl CrowdbKvClient {
     }
 
     /// Flush per-op-kind window latency histograms to `writer` in the
-    /// same column-aligned format as the server `[rust-metrics]` log.
+    /// same column-aligned format as the server `rust` log.
     /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
     /// also use it for cumulative accumulation.
     pub fn flush_latencies<W: std::fmt::Write>(

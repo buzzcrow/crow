@@ -8,28 +8,6 @@ queue full errors (81K) and active memtable growth.
 Before fixing the maintenance loop, we need better observability to
 characterize the stall behavior. This file tracks metrics/log refinements.
 
-## Done
-
-- [x] Rename `rpc.transport.round` -> `rpc.epoll.run` (clearer semantics)
-- [x] Bandwidth metrics: KB -> MB with 2 decimal places (Rust + C++ flush)
-- [x] Rename `rpc.transport.*` -> `rpc.*` (shorter, no confusion)
-- [x] Rename `rpc.read.bw` -> `rpc.socket.read.bw`, `rpc.writev.bw` ->
-      `rpc.socket.writev.bw` (distinguish socket-level I/O)
-- [x] Merge `rpc.request.submit_fail.c` + `rpc.send_queue_reject.c` into
-      `rpc.send.queue.full.c` (redundant — both fire on same enqueue_send
-      failure at different layers)
-- [x] `sys.cpu_user_us` / `sys.cpu_sys_us` -> `sys.cpu.util.user` /
-      `sys.cpu.util.sys` (percent, 0-100%) — raw microseconds were hard to
-      interpret
-- [x] RPC transport lifecycle logs: listen, start, stop, connection
-      accepted (with peer ip:port), connection established (with remote
-      addr), connection closed (with peer addr)
-- [x] Bench `kv write` start log: include all config fields (duration,
-      loaders, connections, key_space, value_size, event_write, rpc_workers,
-      send_queue_capacity, metrics_interval)
-- [x] Bench `kv write` stop log: include ops + errors summary
-- [x] Server config log: one setting per line, aligned columns
-
 ## Pending — Complex (needs refinement)
 
 ### P0: Remove legacy duplicate metrics system
@@ -139,12 +117,12 @@ visible at a glance.
 WAL flush -> GC. Long snapshots (1.6-2.6s) block flushes, causing frozen
 queue full errors. We need logs to characterize each phase's duration
 and the queue depth at entry/exit. Per-phase latency histograms are not
-needed at this level — `ct.flush.l` already covers the storage-engine
+needed at this level — `tree.flush.l` already covers the storage-engine
 flush call, and logs suffice for one-off stall characterization.
 
 **Needed metrics**:
 - Frozen memtable count + live records gauge: see P3
-  (`ct.mt.frozen.g` / `ct.mt.records.g`) — defined there as tree-engine
+  (`tree.mt.frozen.g` / `tree.mt.records.g`) — defined there as tree-engine
   metrics; P2 consumes them to characterize the stall
 
 **Needed logs**:
@@ -155,10 +133,10 @@ flush call, and logs suffice for one-off stall characterization.
 
 **Refinement resolved**:
 - Verified: the two memtable gauges don't exist yet (see P3).
-- `ct.flush.l` exists and covers the storage-engine `Crowdbtree::flush()`
+- `tree.flush.l` exists and covers the storage-engine `Crowdbtree::flush()`
   call (draining frozen memtables to L1/pages). No separate
   maintenance-loop flush-phase histogram needed — logs cover it.
-- Gauge naming owned by P3 (`ct.mt.frozen.g` / `ct.mt.records.g`).
+- Gauge naming owned by P3 (`tree.mt.frozen.g` / `tree.mt.records.g`).
 
 ### P3: Tree metrics refactor (3-layer gap review)
 
@@ -168,22 +146,22 @@ apply.l/snapshot.l removal). Remaining work below, organized by the
 three engine layers: tree operations, page mapping table, backend I/O.
 
 **Naming**: Every tree metric is registered with a per-group prefix
-`make_metrics_prefix(opt)` = `s.{store_id}.g.{group_id}.ct`, so the
-full metric name in the log is `s.X.g.Y.ct.<rest>`. The names below
+`make_metrics_prefix(opt)` = `s.{store_id}.g.{group_id}.tree`, so the
+full metric name in the log is `s.X.g.Y.tree.<rest>`. The names below
 drop the `s.X.g.Y.` prefix for brevity; each one is scoped to its own
 store/group at registration time. A tree belongs to exactly one group,
 so per-group status is already distinguishable — no extra plumbing
 needed.
 
 **Done** (all layers):
-- Backend label split: logical metrics use `ct.*`, I/O metrics use
-  `ct.{backend}.*`
-- Removed `ct.{backend}.apply.l` (duplicate of `paxos.learn.apply.l`)
-- Removed `ct.{backend}.snapshot.l` wrapper (sub-phases are more useful)
-- Removed `ct.{backend}.scan.l0.snapshot.l` (always 0us, cursor not copy)
-- Removed `ct.{backend}.scan.l0.skip.l` (hardcoded 0, dead since R50)
+- Backend label split: logical metrics use `tree.*`, I/O metrics use
+  `tree.{backend}.*`
+- Removed `tree.{backend}.apply.l` (duplicate of `paxos.learn.apply.l`)
+- Removed `tree.{backend}.snapshot.l` wrapper (sub-phases are more useful)
+- Removed `tree.{backend}.scan.l0.snapshot.l` (always 0us, cursor not copy)
+- Removed `tree.{backend}.scan.l0.skip.l` (hardcoded 0, dead since R50)
 - Merged `scan.l1.descent.l` + `scan.l1.resolve.l` -> `scan.l1.l`
-- Brought back `ct.snapshot.l` as a logical metric (no backend label)
+- Brought back `tree.snapshot.l` as a logical metric (no backend label)
 
 ---
 
@@ -195,35 +173,35 @@ Existing: `mt.upsert.c`, `mt.get.c`, `mt.get.hit.c`, `l1.get.c`,
 `scan.l`, `scan.l1.l`, `scan.merge.l`.
 
 **Renames**:
-- `ct.mt.upsert.c` -> `ct.mt.apply.c` (covers put + del, not just upsert)
+- `tree.mt.upsert.c` -> `tree.mt.apply.c` (covers put + del, not just upsert)
 
 **New metrics**:
-- `ct.mt.apply.l` — memtable upsert batch latency
-- `ct.mt.get.l` — memtable get latency (L0 lookup across all live tables)
-- `ct.mt.frozen.g` — frozen memtable count (also consumed by P2 to
+- `tree.mt.apply.l` — memtable upsert batch latency
+- `tree.mt.get.l` — memtable get latency (L0 lookup across all live tables)
+- `tree.mt.frozen.g` — frozen memtable count (also consumed by P2 to
   characterize maintenance stall)
-- `ct.mt.records.g` — total live records across all memtables (also
+- `tree.mt.records.g` — total live records across all memtables (also
   consumed by P2)
-- `ct.mt.freeze.c` — memtable freeze count (backpressure / write pacing)
-- `ct.l1.get.l` — L1 get latency (B-tree descent + leaf chain resolve)
-- `ct.page.split.c` — leaf split count (SMO churn → write amplification)
-- `ct.page.merge.c` — leaf merge count
-- `ct.page.consolidate.c` — consolidation count (pairs with
+- `tree.mt.freeze.c` — memtable freeze count (backpressure / write pacing)
+- `tree.l1.get.l` — L1 get latency (B-tree descent + leaf chain resolve)
+- `tree.page.split.c` — leaf split count (SMO churn → write amplification)
+- `tree.page.merge.c` — leaf merge count
+- `tree.page.consolidate.c` — consolidation count (pairs with
   `page.write.l` which already times the consolidate wall time)
-- `ct.tree.height.g` — tree height gauge (sampled on root change;
+- `tree.tree.height.g` — tree height gauge (sampled on root change;
   characterizes read amplification and structural growth)
-- `ct.scan.retry.c` — scan async retry count (cold-page stall → tail
+- `tree.scan.retry.c` — scan async retry count (cold-page stall → tail
   latency)
-- `ct.gc.tombstones.c` — GC reclaimed tombstone count (from `GcStats`)
-- `ct.gc.pages.c` — GC reclaimed page count
+- `tree.gc.tombstones.c` — GC reclaimed tombstone count (from `GcStats`)
+- `tree.gc.pages.c` — GC reclaimed page count
 
 **Considered but skipped**:
 - `apply.c` / `put.c` / `del.c` (op-level counters) — `paxos.learn.apply.l`
   count already gives ops/s at the consensus layer; `mt.apply.c` counts
   per-key. Redundant.
-- `ct.get.retry.c` — get async retry; lower priority than scan retry
+- `tree.get.retry.c` — get async retry; lower priority than scan retry
   (get is point lookup, scan is long-running and more stall-prone).
-- `ct.mt.freeze.{reason}.c` (per-reason freeze counters) — total
+- `tree.mt.freeze.{reason}.c` (per-reason freeze counters) — total
   `mt.freeze.c` + logs suffice; per-reason split is over-instrumented.
 - Open/recovery timing (`open.l`) — one-shot at startup; a log line
   suffices, no need for a registry metric.
@@ -238,18 +216,18 @@ Existing: `page.map.lookup.c` (bumped in `resident()` on every page
 address resolution).
 
 **Renames**:
-- `ct.{backend}.page.map.lookup.c` -> `ct.{backend}.page.find.c`
-- Merge `ct.{backend}.buf.hits.c` + `ct.{backend}.buf.misses.c` into
-  `ct.{backend}.page.find.c` + `ct.{backend}.page.find.hit.c`
+- `tree.{backend}.page.map.lookup.c` -> `tree.{backend}.page.find.c`
+- Merge `tree.{backend}.buf.hits.c` + `tree.{backend}.buf.misses.c` into
+  `tree.{backend}.page.find.c` + `tree.{backend}.page.find.hit.c`
   (page.find.c = total page lookups, page.find.hit.c = buffer pool
   hits; hit rate = hit / find)
 
 **New metrics**:
-- `ct.page.map.alloc.c` — page ID allocations (hot path, tree growth
+- `tree.page.map.alloc.c` — page ID allocations (hot path, tree growth
   rate; called on every new leaf/inner/overflow page, split, merge)
-- `ct.page.map.total_pids.g` — `next_page_id_` gauge (total pages ever
+- `tree.page.map.total_pids.g` — `next_page_id_` gauge (total pages ever
   allocated — cumulative growth indicator)
-- `ct.page.map.segments.g` — segments allocated gauge (mapping table
+- `tree.page.map.segments.g` — segments allocated gauge (mapping table
   memory growth)
 
 **Considered but skipped**:
@@ -272,18 +250,18 @@ Existing: `buf.hits.c`, `buf.misses.c`, `buf.evictions.c`,
 incremented — bug to fix**).
 
 **Renames**:
-- `ct.{backend}.demand.load.l` -> `ct.{backend}.page.load.l`
+- `tree.{backend}.demand.load.l` -> `tree.{backend}.page.load.l`
 
 **New metrics**:
-- `ct.{backend}.page.writeback.l` — eviction writeback latency
+- `tree.{backend}.page.writeback.l` — eviction writeback latency
   (`BufferPool::write_back` → `store_->write_at`). This is the biggest
   missing backend I/O signal — the main source of I/O outside snapshots
   and the likely cause of flush-drain stalls.
-- `ct.{backend}.page.write.bw` — page write bandwidth (flush drain,
+- `tree.{backend}.page.write.bw` — page write bandwidth (flush drain,
   distinct from snapshot writes)
-- `ct.{backend}.fsync.l` — fsync/barrier latency (durability SLO;
+- `tree.{backend}.fsync.l` — fsync/barrier latency (durability SLO;
   currently `page_store->sync()` and `submit_fsync` are untimed)
-- Fix `ct.snapshot.pages.c` — wire to the snapshot prepare loop
+- Fix `tree.snapshot.pages.c` — wire to the snapshot prepare loop
   (registered but never incremented)
 
 **Considered but skipped**:
@@ -314,3 +292,122 @@ incremented — bug to fix**).
   fix snapshot.pages.c
 - `lib/crowdb-tree/bench/scan_step_bench.cpp` — print updates
 - `lib/crowdb-tree/tests/` — init_metrics call signature fixes
+
+---
+
+## GC Trigger Review (2026-09-01 bench analysis)
+
+**Observation**: `tree.gc.l` fired with `count=6` in a write-only
+workload (no deletes). The user expected GC to be gated by a
+"reclaimable pages" threshold, not fire unconditionally.
+
+### Current flow
+
+1. The maintenance loop (`group_maintenance.rs:310-315`) calls
+   `engine.set_gc_watermark(snapshot_slot, safe_slot)` then
+   `engine.collect_garbage()` on **every maintenance tick** (default
+   ~50ms).
+2. `set_gc_watermark` (`crowdb-tree.cpp:885-891`) sets
+   `gc_floor_ = min(snapshot_slot, safe_slot)` via a monotonic CAS.
+3. `collect_garbage` (`crowdb-tree.cpp:893-993`) has one gate:
+   if `gc_floor_ <= last_gc_floor_`, skip the full tree walk. Otherwise,
+   walk every leaf, resolve each chain, and drop tombstones with
+   `slot <= gc_floor`.
+4. The `tree.gc.l` latency summary increments its `count` on every call,
+   even when zero tombstones are reclaimed.
+
+### Why GC fires on a write-only workload
+
+In a live group, `snapshot_slot` and `safe_slot` advance continuously
+with consensus progress, so `gc_floor_` rises on most ticks. The gate
+only suppresses re-sweeps at the *same* watermark — it does not check
+whether the tree has any tombstones to reclaim. The sweep walks all
+leaves, finds `dropped == 0` for each (no tombstones), and returns with
+zero `GcStats` but still records latency.
+
+The `count=6` means the maintenance loop called `collect_garbage()` six
+times in the metrics window — not that six pages were reclaimed.
+`tree.gc.tombstones.c` and `tree.gc.pages.c` will be zero.
+
+### Decision needed
+
+The current design runs a full tree walk on every watermark advance,
+even when there are no tombstones. Options:
+
+1. **Add a tombstone-aware gate.** Track a "has tombstones" flag or a
+   live tombstone counter. Skip the sweep entirely when no tombstones
+   exist. This avoids the tree walk cost on write-only workloads.
+2. **Add a minimum-reclaimable threshold.** Only sweep when the
+   estimated reclaimable page count exceeds a bar (e.g. N pages or M%
+   of tree). This reduces sweep frequency but adds tracking overhead.
+3. **Keep as-is.** The sweep is cheap when no tombstones are found
+   (early return per leaf at `dropped == 0`). The `count` in the
+   latency summary is misleading but the actual cost is low.
+
+**Recommendation**: Option 1. A simple `AtomicU64 tombstone_count_`
+incremented on tombstone insert and decremented on GC drop. Skip the
+sweep when `tombstone_count_.load() == 0`. The counter is approximate
+(tombstones can be counted multiple times across delta chains) but the
+gate only needs to know "are there any tombstones at all," not the
+exact count. This eliminates the tree walk on pure-write workloads
+with zero overhead on the hot path (the increment is already paid at
+insert time).
+
+**Code positions**:
+- Gate: `crowdb-tree.cpp:905` (`collect_garbage` entry)
+- Tombstone insert: `crowdb-tree.cpp` `apply` path (where `is_tombstone`
+  cells are created)
+- Tombstone drop: `crowdb-tree.cpp:3971` (`resolve_leaf_chain_for_rebuild`)
+- Watermark: `crowdb-tree.cpp:885-891` (`set_gc_watermark`)
+- Maintenance call site: `group_maintenance.rs:310-315`
+
+---
+
+## Flush Latency Review (2026-09-01 bench analysis)
+
+**Observation**: `tree.flush.l` avg=643ms, max=1422ms. 14,621 frozen
+queue full errors. The flush is not keeping up with the write rate.
+
+See `doc/design/tree/design-crowdb-tree-engine-flush-flow.md` for the
+full flow analysis with code positions and bottleneck breakdown.
+
+---
+
+## Snapshot Latency Review (2026-09-01 bench analysis)
+
+**Observation**: `tree.snapshot.l` avg=2027ms, max=2027ms. Sub-phase
+metrics show `tree.mem.snapshot.apply.l` = 733-1309ms (CPU phase under
+`write_mutex_`) and `tree.mem.snapshot.page.write.io.l` max=296-432ms
+per page. `tree.mem.fsync.l` = 0ms (page cache, not a bottleneck on
+this setup).
+
+See `doc/design/tree/design-crowdb-tree-engine-snapshot-flow.md` for the
+full flow analysis with code positions and bottleneck breakdown.
+
+---
+
+## Long-tail diagnostics: what logs exist
+
+**C++ tree engine** (`lib/crowdb-tree/src/*.cpp`):
+- `CRB_LOG_INFO` at flush completion: `flush: tables={} entries={}
+  contiguous_slot={}` (`crowdb-tree.cpp:1334`)
+- `CRB_LOG_INFO` at snapshot commit: `snapshot committed: seq={}
+  last_applied={} live_pages={} written={} segdir_len={}`
+  (`persist.cpp:691`)
+- `CRB_LOG_ERROR` when frozen queue is full: `maybe_freeze_active:
+  frozen queue full` with depth/entries/bytes (`crowdb-tree.cpp:1058`)
+- **No `CRB_LOG_DEBUG` or `CRB_LOG_TRACE` calls exist anywhere in
+  `lib/crowdb-tree/src/`** — per-phase timing is metrics-only.
+
+**Rust maintenance loop** (`group_maintenance.rs`):
+- `debug!` for flush/snapshot/WAL/GC phase completion (elapsed_ms) —
+  not emitted at default `crowdb_kv=info` level
+- `info!` for snapshot trigger and persist_snapshot completion (>100ms)
+- Enable with `RUST_LOG=crowdb_kv=debug` (or
+  `crowdb_kv::cluster::group_maintenance=debug`)
+
+**Actual bench run logs** (node3):
+- 65 flush completion logs, 6 snapshot commit logs
+- 20,026 frozen queue full errors (the stall signal)
+- Snapshot wall times from Rust log: 0ms, 1141ms, 2029ms, 1914ms, 1ms
+- No per-phase C++ debug logs (none exist in the code)

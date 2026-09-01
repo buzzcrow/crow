@@ -145,7 +145,7 @@ template <typename T> static std::vector<size_t> sorted_indices(const std::vecto
     return idx;
 }
 
-void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timestamp, const char *section_label,
+void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char * /*timestamp*/, const char *section_label,
                                size_t width, size_t count_w, size_t tps_w)
 {
     std::scoped_lock lock(flush_mutex_);
@@ -160,7 +160,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
     size_t cw = count_w > 0 ? count_w : 7;
     size_t tw = tps_w > 0 ? tps_w : 7;
 
-    std::fprintf(fp, "[%s %s window=%.3fs]\n", section_label, timestamp, window_secs);
+    std::fprintf(fp, "%s\n", section_label);
 
     // Histograms
     if (!histograms_.empty()) {

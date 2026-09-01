@@ -88,7 +88,7 @@ reset window state). Interval is typically 5s or 10s.
   structs. `MetricsRunner` spawns a tokio interval task, computes real
   elapsed `window_secs` per tick, flushes Rust metrics, then invokes a
   post-flush callback that calls C++ `flush_metrics_str()` for each engine
-  and writes the `[cpp-tree]` block. Also provides `snapshot(prefix)` for
+  and writes the `cpp-tree` block. Also provides `snapshot(prefix)` for
   in-memory access without resetting window state.
 - C++ (`lib/crowdb-tree/include/lib/crowdb-tree/metrics.h`, `lib/crowdb-tree/src/metrics.cpp`):
   Same type-grouped pattern. `Crowdbtree` owns its own `MetricsRegistry`
@@ -149,18 +149,17 @@ flush window.
 ### 2.6 Metrics Log File
 
 Dedicated file `metrics-{timestamp}-{pid}.log` in the log directory, separate
-from application log. Each flush cycle produces three blocks:
-`[rust-metrics ...]` (Rust), `[cpp-tree ...]` (C++ per-engine), and
-`[cpp-rpc ...]` (C++ global / crowdb-rpc), all with the same timestamp and
-`window={N.NN}s` header (2 decimal places, real elapsed time). Blocks are
-followed by type-grouped sections in order: LatencyHistogram, LatencySummary,
-Bandwidth, Counter, Gauge, then System. Names sorted alphabetically within
-each section, padded to `max_name_len` for alignment. Zero-suppression:
-counters/histograms/summaries/bandwidths with zero window activity are
-skipped; gauges always printed. C++ `flush_to()` output is format-aligned to
-Rust's column layout (same units, columns, precision). Format designed for
-both human reading and script parsing (split on whitespace, parse as
-numbers).
+from application log. Each flush cycle produces one shared timestamp header
+`[{ISO8601} window={N.NN}s]`, then section blocks: `rust` (Rust metrics +
+misc system metrics), `cpp-tree` (C++ per-engine), and `cpp-rpc` (C++ global /
+crowdb-rpc). Blocks are followed by type-grouped sections in order:
+LatencyHistogram, LatencySummary, Bandwidth, Counter, Gauge, then System.
+Names sorted alphabetically within each section, padded to `max_name_len` for
+alignment. Zero-suppression: counters/histograms/summaries/bandwidths with
+zero window activity are skipped; gauges always printed. C++ `flush_to()`
+output is format-aligned to Rust's column layout (same units, columns,
+precision). Format designed for both human reading and script parsing (split
+on whitespace, parse as numbers).
 
 ### 2.7 In-Memory Access
 
@@ -173,8 +172,8 @@ to parse log files to get metric values.
 C++ owns its own `MetricsRegistry` per `Crowdbtree` instance. Rust triggers C++
 to flush its metrics section into the same log file via FFI
 (`ct_flush_metrics_str`). No metric handles cross FFI at runtime, only a
-formatted string. Three log blocks per flush cycle: `[rust-metrics]` (Rust),
-`[cpp-tree]` (C++ per-engine), and `[cpp-rpc]` (C++ global). The existing
+formatted string. Three log blocks per flush cycle: `rust` (Rust),
+`cpp-tree` (C++ per-engine), and `cpp-rpc` (C++ global). The existing
 `ct_get_stats` FFI call (used by `/topology` and the one remaining
 `snapshot.pages.c` delta bridge) is unaffected.
 
@@ -308,7 +307,7 @@ written to the log by the Rust `MetricsRunner` post-flush callback.
 
 Once C++ owns its registry, the Rust-side bridge (`engine_collector.rs`)
 no longer polls C++ cumulative counters and gauges. Those metrics appear
-natively in `[cpp-tree]`. The Rust `[rust-metrics]` section keeps only
+natively in `cpp-tree`. The Rust `rust` section keeps only
 Rust-native metrics (KV service, RPC, Paxos, WAL). The one exception is
 `snapshot.pages.c`, a magnitude counter with no paired latency in the C++
 registry, which remains bridged via `ct_get_stats` delta polling.
@@ -324,7 +323,7 @@ FFI-driven flush).
 
 ### 2.16 Shared Column Width
 
-Both `[rust-metrics]` and `[cpp-tree]` sections use the same column width
+Both `rust` and `cpp-tree` sections use the same column width
 for metric names. Before each flush tick, Rust queries each C++ engine's
 max name length via `ct_max_name_len()`, computes
 `shared_width = max(rust_max, max(cpp_maxes))`, and passes it to both its

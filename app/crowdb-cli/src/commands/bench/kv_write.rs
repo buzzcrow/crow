@@ -20,7 +20,7 @@ use rand::{Rng, SeedableRng};
 use super::kv_client::{build_kv_client, KvClientTunables};
 use super::loader::{run_workload, BenchRecorder};
 use super::metrics::BenchMetrics;
-use super::result::{BenchOps, BenchResult, ReplicaStats, ServerMetrics, TransportStats};
+use super::result::{BenchOps, BenchResult, ReplicaStats, ServerMetrics, ServerRpcLatency, TransportStats};
 use super::verb::WriteArgs;
 use crate::commands::load_config;
 use crate::Cli;
@@ -144,8 +144,7 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
         client_transport_stats,
         server_metrics,
     };
-    let json = serde_json::to_value(&result).unwrap_or_default();
-    metrics.write_report(&json);
+    metrics.write_report(&result);
     crate::commands::print_json(cli, &result)
 }
 
@@ -177,6 +176,8 @@ async fn fetch_server_metrics(cli: &Cli, store_id: u64, group_id: u64) -> Option
     let mut inflight_wait_count = 0u64;
     let mut rpc_s2w_sum = 0u64;
     let mut rpc_s2w_count = 0u64;
+    // Server-side per-op RPC latency accumulators (averaged across nodes).
+    let mut rpc_lat = RpcLatencyAcc::default();
     // Replica RPC: collect all `rpc.l@<peer>` summaries across nodes.
     // The leader sends accept rounds to peers; followers only send
     // fetchgap/chosen_notice. We aggregate by peer id and report the
@@ -224,9 +225,24 @@ async fn fetch_server_metrics(cli: &Cli, store_id: u64, group_id: u64) -> Option
         if let Ok(resp) = sc.metrics(&store_prefix).await {
             for point in &resp.metrics {
                 let fields = field_map(&point.fields);
-                if point.name.ends_with(".rpc.submit_to_writev.avg_us.g") {
-                    rpc_s2w_sum += get_u64(&fields, "value");
-                    rpc_s2w_count += 1;
+                match point.name.as_str() {
+                    n if n.ends_with(".rpc.submit_to_writev.avg_us.g") => {
+                        rpc_s2w_sum += get_u64(&fields, "value");
+                        rpc_s2w_count += 1;
+                    }
+                    n if n.ends_with(".rpc.put.lh") => {
+                        rpc_lat.put.add(&fields);
+                    }
+                    n if n.ends_with(".rpc.get.lh") => {
+                        rpc_lat.get.add(&fields);
+                    }
+                    n if n.ends_with(".rpc.scan.lh") => {
+                        rpc_lat.scan.add(&fields);
+                    }
+                    n if n.ends_with(".rpc.delete.lh") => {
+                        rpc_lat.delete.add(&fields);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -266,6 +282,7 @@ async fn fetch_server_metrics(cli: &Cli, store_id: u64, group_id: u64) -> Option
         },
         inflight_enqueued,
         inflight_wait_avg_us,
+        rpc_latency: rpc_lat.finalize(),
     })
 }
 
@@ -284,4 +301,69 @@ fn get_u64(map: &std::collections::HashMap<&str, f64>, key: &str) -> u64 {
                 *v as u64
             }
         })
+}
+
+/// Accumulator for one op-type's RPC latency across nodes. Histograms
+/// report avg_ns/p50_ns/p99_ns; we sum and divide by node count.
+#[derive(Default)]
+struct RpcLatencyAccOp {
+    avg_ns: u64,
+    p50_ns: u64,
+    p99_ns: u64,
+    count: u64,
+}
+
+impl RpcLatencyAccOp {
+    fn add(&mut self, fields: &std::collections::HashMap<&str, f64>) {
+        if get_u64(fields, "count") == 0 {
+            return;
+        }
+        self.avg_ns += get_u64(fields, "avg_ns");
+        self.p50_ns += get_u64(fields, "p50_ns");
+        self.p99_ns += get_u64(fields, "p99_ns");
+        self.count += 1;
+    }
+    fn finalize_us(&self) -> (u64, u64, u64) {
+        let n = self.count.max(1);
+        (
+            self.avg_ns / n / 1000,
+            self.p50_ns / n / 1000,
+            self.p99_ns / n / 1000,
+        )
+    }
+}
+
+/// Accumulator for all op-type RPC latencies across nodes.
+#[derive(Default)]
+struct RpcLatencyAcc {
+    put: RpcLatencyAccOp,
+    get: RpcLatencyAccOp,
+    scan: RpcLatencyAccOp,
+    delete: RpcLatencyAccOp,
+}
+
+impl RpcLatencyAcc {
+    fn finalize(&self) -> Option<ServerRpcLatency> {
+        if self.put.count == 0 && self.get.count == 0 && self.scan.count == 0 && self.delete.count == 0 {
+            return None;
+        }
+        let (put_avg, put_p50, put_p99) = self.put.finalize_us();
+        let (get_avg, get_p50, get_p99) = self.get.finalize_us();
+        let (scan_avg, scan_p50, scan_p99) = self.scan.finalize_us();
+        let (delete_avg, delete_p50, delete_p99) = self.delete.finalize_us();
+        Some(ServerRpcLatency {
+            put_avg_us: put_avg,
+            put_p50_us: put_p50,
+            put_p99_us: put_p99,
+            get_avg_us: get_avg,
+            get_p50_us: get_p50,
+            get_p99_us: get_p99,
+            scan_avg_us: scan_avg,
+            scan_p50_us: scan_p50,
+            scan_p99_us: scan_p99,
+            delete_avg_us: delete_avg,
+            delete_p50_us: delete_p50,
+            delete_p99_us: delete_p99,
+        })
+    }
 }

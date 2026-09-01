@@ -712,10 +712,16 @@ overlapping reader guards drain.
    `last_applied_slot < gc_slot` is retired, and pages reachable only from
    it are freed.
 
-Triggers: periodic sweep (default every 5 min), a backend low-free-space
-pressure signal (focused sweep / eager snapshot+GC), and post-snapshot
-(eligible tombstones below the new `snapshot_slot` are swept). `GcStats`
-reports tombstones dropped, versions retired, pages/bytes freed.
+Triggers: the maintenance loop calls `collect_garbage()` on every tick
+(default ~50ms), gated by `gc_floor_ > last_gc_floor_` (the watermark
+must have advanced since the last sweep). A backend low-free-space
+pressure signal triggers a focused sweep / eager snapshot+GC.
+Post-snapshot, eligible tombstones below the new `snapshot_slot` are
+swept. The gate only suppresses re-sweeps at the same watermark — it
+does not check whether the tree has any tombstones, so the full tree
+walk runs on every watermark advance even in write-only workloads with
+nothing to reclaim. `GcStats` reports tombstones dropped, versions
+retired, pages/bytes freed.
 
 ---
 

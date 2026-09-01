@@ -114,6 +114,25 @@ pub struct ServerMetrics {
     pub replica: ReplicaStats,
     pub inflight_enqueued: u64,
     pub inflight_wait_avg_us: u64,
+    /// Server-side per-op RPC latency (averaged across nodes).
+    pub rpc_latency: Option<ServerRpcLatency>,
+}
+
+/// Server-side per-request-type RPC latency, averaged across nodes.
+#[derive(Debug, Default, Serialize)]
+pub struct ServerRpcLatency {
+    pub put_avg_us: u64,
+    pub put_p50_us: u64,
+    pub put_p99_us: u64,
+    pub get_avg_us: u64,
+    pub get_p50_us: u64,
+    pub get_p99_us: u64,
+    pub scan_avg_us: u64,
+    pub scan_p50_us: u64,
+    pub scan_p99_us: u64,
+    pub delete_avg_us: u64,
+    pub delete_p50_us: u64,
+    pub delete_p99_us: u64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -193,6 +212,29 @@ impl fmt::Display for BenchResult {
                 "  replica: r2={}us/{}tps  r3={}us/{}tps",
                 sm.replica.r2, sm.replica.r2_tps, sm.replica.r3, sm.replica.r3_tps,
             )?;
+            if let Some(rl) = &sm.rpc_latency {
+                writeln!(f, "  server_rpc_latency (avg/p50/p99 us):",)?;
+                writeln!(
+                    f,
+                    "    put:    {}/{}/{}",
+                    rl.put_avg_us, rl.put_p50_us, rl.put_p99_us,
+                )?;
+                writeln!(
+                    f,
+                    "    get:    {}/{}/{}",
+                    rl.get_avg_us, rl.get_p50_us, rl.get_p99_us,
+                )?;
+                writeln!(
+                    f,
+                    "    scan:   {}/{}/{}",
+                    rl.scan_avg_us, rl.scan_p50_us, rl.scan_p99_us,
+                )?;
+                writeln!(
+                    f,
+                    "    delete: {}/{}/{}",
+                    rl.delete_avg_us, rl.delete_p50_us, rl.delete_p99_us,
+                )?;
+            }
         }
         write!(f, "=== end report ===")
     }
