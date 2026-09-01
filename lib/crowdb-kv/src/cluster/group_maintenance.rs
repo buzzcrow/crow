@@ -191,6 +191,7 @@ pub(crate) async fn run_pass(group: &PxGroup) {
     // 1. Flush every tick: drain L0 memtable into L1 in memory (cheap no-op
     //    when L0 is empty). Advances last_applied_slot in memory only.
     // Runs on a blocking thread because flush holds the C++ write_mutex_.
+    let flush_start = std::time::Instant::now();
     let engine_arc = group.local_replica().learner.engine_arc();
     let group_id = group.group_id();
     tokio::task::spawn_blocking(move || engine_arc.flush())
@@ -202,6 +203,12 @@ pub(crate) async fn run_pass(group: &PxGroup) {
                 "maintenance: flush blocking task panicked"
             );
         });
+    debug!(
+        group_id = group.group_id(),
+        replica_id = group.local_replica().id,
+        elapsed_ms = u64::try_from(flush_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "maintenance: flush phase complete"
+    );
 
     // Gap 5 step 4: increment flush counter for the snapshot trigger.
     group
@@ -227,6 +234,24 @@ pub(crate) async fn run_pass(group: &PxGroup) {
     let should_snapshot = slot_advance >= group.config.election.snapshot_slot_threshold
         || time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms)
         || (flush_threshold > 0 && flush_count >= flush_threshold);
+    if should_snapshot {
+        let trigger = if slot_advance >= group.config.election.snapshot_slot_threshold {
+            "slot"
+        } else if time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms) {
+            "time"
+        } else {
+            "flush_count"
+        };
+        info!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            trigger,
+            slot_advance,
+            time_elapsed_ms = u64::try_from(time_elapsed.as_millis()).unwrap_or(u64::MAX),
+            flush_count,
+            "maintenance: snapshot triggered"
+        );
+    }
 
     let engine_snapshot_at = if should_snapshot {
         let at = persist_snapshot_blocking(group, contiguous, slot_advance, time_elapsed).await;
@@ -253,20 +278,22 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         };
         if elapsed >= Duration::from_millis(wal_interval) {
             if let Some(wal) = group.local_replica().wal() {
+                let wal_start = std::time::Instant::now();
                 match wal.flush_all().await {
                     Ok(()) => {
                         *group.last_wal_flush_time.lock() = std::time::Instant::now();
                         debug!(
                             group_id = group.group_id(),
                             replica_id = group.local_replica().id,
-                            elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-                            "maintenance: WAL flush_all completed"
+                            elapsed_ms = u64::try_from(wal_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            "maintenance: WAL flush phase complete"
                         );
                     }
                     Err(e) => {
                         warn!(
                             group_id = group.group_id(),
                             replica_id = group.local_replica().id,
+                            elapsed_ms = u64::try_from(wal_start.elapsed().as_millis()).unwrap_or(u64::MAX),
                             error = %e,
                             "maintenance: WAL flush_all failed"
                         );
@@ -283,6 +310,7 @@ pub(crate) async fn run_pass(group: &PxGroup) {
     let safe_slot = group.group_safe_slot();
     let snapshot_slot = group.group_snapshot_slot();
     engine.set_gc_watermark(snapshot_slot, safe_slot);
+    let gc_start = std::time::Instant::now();
     let engine_arc = group.local_replica().learner.engine_arc();
     tokio::task::spawn_blocking(move || engine_arc.collect_garbage())
         .await
@@ -293,6 +321,12 @@ pub(crate) async fn run_pass(group: &PxGroup) {
                 "maintenance: collect_garbage blocking task panicked"
             );
         });
+    debug!(
+        group_id = group.group_id(),
+        replica_id = group.local_replica().id,
+        elapsed_ms = u64::try_from(gc_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "maintenance: GC phase complete"
+    );
 
     // 5. WAL GC: only advance snapshot_slot when we actually persisted.
     let Some(wal) = group.local_replica().wal() else {

@@ -533,6 +533,9 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out)
     }
     snapshot_pages_written_.store(pages_written);
     snapshot_pages_total_.fetch_add(pages_written, std::memory_order_relaxed);
+    if (metrics_.snapshot_pages_c != nullptr && pages_written > 0) {
+        metrics_.snapshot_pages_c->inc_by(pages_written);
+    }
     uint64_t segments_written = 0;
 
     // Pass 2: build a fresh image for every segment still dirty after pass
@@ -708,6 +711,7 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
     if (opt_.page_store == nullptr) {
         return Status::invalid_argument("snapshot: no page_store");
     }
+    auto snap_t0 = std::chrono::steady_clock::now();
     acquire_snapshot_slot();
     PreparedSnapshot prepared;
     Status           ps;
@@ -757,7 +761,13 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
     }
     // Barrier: pages + segment images + directory durable before the anchor
     // that references them.
-    Status sync1 = opt_.page_store->sync();
+    auto   fsync_t0 = std::chrono::steady_clock::now();
+    Status sync1    = opt_.page_store->sync();
+    if (metrics_.fsync_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - fsync_t0).count();
+        metrics_.fsync_l->observe(static_cast<uint64_t>(ns));
+    }
     if (!sync1.ok()) {
         release_snapshot_slot();
         return sync1;
@@ -768,7 +778,13 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
         release_snapshot_slot();
         return aw;
     }
-    Status sync2 = opt_.page_store->sync();
+    auto   fsync2_t0 = std::chrono::steady_clock::now();
+    Status sync2     = opt_.page_store->sync();
+    if (metrics_.fsync_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - fsync2_t0).count();
+        metrics_.fsync_l->observe(static_cast<uint64_t>(ns));
+    }
     if (!sync2.ok()) {
         release_snapshot_slot();
         return sync2;
@@ -816,6 +832,11 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
     release_snapshot_slot();
     if (out_last_applied != nullptr) {
         *out_last_applied = prepared.last_applied_slot;
+    }
+    if (metrics_.snapshot_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - snap_t0).count();
+        metrics_.snapshot_l->observe(static_cast<uint64_t>(ns));
     }
     return Status::Ok();
 }

@@ -18,6 +18,7 @@
 // old tagged-pointer scheme that allocated an unloaded_page struct.
 #pragma once
 
+#include "crowdb-common/metrics/metrics.h"
 #include "crowdb-tree/epoch.h"
 #include "crowdb-tree/mapping_segment.h"
 #include "crowdb-tree/mapping_slot.h"
@@ -76,6 +77,12 @@ class MappingTable
     void set_epoch_manager(EpochManager *epoch)
     {
         epoch_ = epoch;
+    }
+
+    // Wire optional metrics handle for page allocation counting.
+    void set_alloc_counter(Counter *c)
+    {
+        alloc_counter_ = c;
     }
 
     // Allocate a fresh PID. Monotonic -- PIDs are never recycled (plan-tree
@@ -139,7 +146,8 @@ class MappingTable
     mutable std::mutex alloc_mu_;
     uint64_t           next_page_id_ = 0;
 
-    EpochManager *epoch_ = nullptr; // set via set_epoch_manager; not owned
+    EpochManager *epoch_         = nullptr; // set via set_epoch_manager; not owned
+    Counter      *alloc_counter_ = nullptr; // set via set_alloc_counter
 };
 
 } // namespace crowdb::tree

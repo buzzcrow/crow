@@ -314,8 +314,8 @@ void Crowdbtree::retire_orphaned_page(uint64_t page_id, PageBase *p)
 PageBase *Crowdbtree::resident(uint64_t page_id) const
 {
     map_lookup_total_.fetch_add(1, std::memory_order_relaxed);
-    if (metrics_.page_map_lookup_c != nullptr) {
-        metrics_.page_map_lookup_c->inc();
+    if (metrics_.page_find_c != nullptr) {
+        metrics_.page_find_c->inc();
     }
     uint64_t w = mapping_.get_word(page_id);
     if (slot_word::is_empty(w) || !slot_word::is_unloaded(w)) {
@@ -356,20 +356,20 @@ PageBase *Crowdbtree::resident(uint64_t page_id) const
         CRB_LOG_ERROR("[{}] demand-load I/O fault: pid={} addr={} len={} status={}", name_, page_id, addr, phys_len,
                       s.to_string());
         io_failed_.store(true);
-        if (metrics_.demand_load_l != nullptr) {
+        if (metrics_.page_load_l != nullptr) {
             auto ns =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
-            metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
+            metrics_.page_load_l->observe(static_cast<uint64_t>(ns));
         }
         if (metrics_.page_read_bw != nullptr) {
             metrics_.page_read_bw->observe(blob.size());
         }
         return nullptr;
     }
-    if (metrics_.demand_load_l != nullptr) {
+    if (metrics_.page_load_l != nullptr) {
         auto ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
-        metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
+        metrics_.page_load_l->observe(static_cast<uint64_t>(ns));
     }
     if (metrics_.page_read_bw != nullptr) {
         metrics_.page_read_bw->observe(blob.size());
@@ -742,6 +742,7 @@ void Crowdbtree::apply_batch(uint64_t slot, const Batch &batch)
     if (batch.ops.empty()) {
         return;
     }
+    auto                          apply_t0 = std::chrono::steady_clock::now();
     std::map<std::string, buffer> latest; // key -> single-alloc encoded cell buffer
     for (const auto &op : batch.ops) {
         latest[op.key] = encode_cell_buf(slot, op.kind, Slice(op.value));
@@ -756,9 +757,14 @@ void Crowdbtree::apply_batch(uint64_t slot, const Batch &batch)
         auto node = latest.extract(latest.begin());
         active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
         mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-        if (metrics_.mt_upsert_c != nullptr) {
-            metrics_.mt_upsert_c->inc();
+        if (metrics_.mt_apply_c != nullptr) {
+            metrics_.mt_apply_c->inc();
         }
+    }
+    if (metrics_.mt_apply_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - apply_t0).count();
+        metrics_.mt_apply_l->observe(static_cast<uint64_t>(ns));
     }
 }
 
@@ -829,8 +835,8 @@ Status Crowdbtree::apply_encoded(uint64_t slot, std::vector<encoded_op> ops)
             auto node = latest.extract(latest.begin());
             active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
             mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-            if (metrics_.mt_upsert_c != nullptr) {
-                metrics_.mt_upsert_c->inc();
+            if (metrics_.mt_apply_c != nullptr) {
+                metrics_.mt_apply_c->inc();
             }
         }
     }
@@ -861,8 +867,8 @@ Status Crowdbtree::apply_external(uint64_t slot, std::vector<external_op> ops)
             auto node = latest.extract(latest.begin());
             active->upsert_external(Slice(node.key()), slot, node.mapped().first, std::move(node.mapped().second));
             mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-            if (metrics_.mt_upsert_c != nullptr) {
-                metrics_.mt_upsert_c->inc();
+            if (metrics_.mt_apply_c != nullptr) {
+                metrics_.mt_apply_c->inc();
             }
         }
     }
@@ -959,6 +965,12 @@ GcStats Crowdbtree::collect_garbage()
     if (root_page_id_.load() != kInvalidPageId) {
         walk(root_page_id_.load());
     }
+    if (metrics_.gc_tombstones_c != nullptr && stats.tombstones_dropped > 0) {
+        metrics_.gc_tombstones_c->inc_by(stats.tombstones_dropped);
+    }
+    if (metrics_.gc_pages_c != nullptr && stats.pages_freed > 0) {
+        metrics_.gc_pages_c->inc_by(stats.pages_freed);
+    }
     return stats;
 }
 
@@ -1035,6 +1047,9 @@ bool Crowdbtree::maybe_freeze_active(bool force)
     }
     frozen_.push_back(active_);
     active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed), &epoch_);
+    if (metrics_.mt_freeze_c != nullptr) {
+        metrics_.mt_freeze_c->inc();
+    }
     // Propagate the known-durable floor to the fresh table immediately (not
     // just on its first flush()) so a stale re-apply landing in it before
     // its own first drain is still correctly rejected.
@@ -1318,6 +1333,9 @@ void Crowdbtree::consolidate_locked(uint64_t page_id)
     if (head == nullptr) {
         return;
     }
+    if (metrics_.page_consolidate_c != nullptr) {
+        metrics_.page_consolidate_c->inc();
+    }
     // A bare leaf base with no in-frame deltas (PT12) has nothing to fold; a base
     // carrying in-frame deltas DOES (we fold them into a fresh sorted base).
     if (head->type == page_type::kLeafBase && static_cast<LeafBase *>(head)->view().delta_count() == 0) {
@@ -1478,6 +1496,9 @@ void Crowdbtree::maybe_split_or_merge_locked(uint64_t page_id)
 
 void Crowdbtree::split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path)
 {
+    if (metrics_.page_split_c != nullptr) {
+        metrics_.page_split_c->inc();
+    }
     auto                   *leaf = static_cast<LeafBase *>(resident(leaf_page_id));
     std::vector<leaf_entry> e    = leaf->entries(); // materialized owned copy
     size_t                  mid  = e.size() / 2;
@@ -1564,6 +1585,9 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
 {
     if (path.empty()) {
         return; // root leaf: nothing to merge with
+    }
+    if (metrics_.page_merge_c != nullptr) {
+        metrics_.page_merge_c->inc();
     }
     uint64_t                     parent_page_id = path.back();
     auto                        *parent         = static_cast<InnerBase *>(resident(parent_page_id));
@@ -1771,6 +1795,7 @@ GetView Crowdbtree::get_view(Slice key) const
     // buffer — the epoch guard keeps the skip-list node (and its cell
     // version) alive past any concurrent overwrite/drain, exactly as it
     // keeps an L1 frame resident. No copy, no std::string staging.
+    auto                                   l0_t0  = std::chrono::steady_clock::now();
     std::vector<std::shared_ptr<MemTable>> tables = all_memtables();
     const CellVersion                     *best   = nullptr;
     for (auto &mt : tables) {
@@ -1791,6 +1816,11 @@ GetView Crowdbtree::get_view(Slice key) const
         if (metrics_.mt_get_hit_c != nullptr) {
             metrics_.mt_get_hit_c->inc();
         }
+        if (metrics_.mt_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l0_t0).count();
+            metrics_.mt_get_l->observe(static_cast<uint64_t>(ns));
+        }
         if ((best->flags & kFlagTombstone) != 0) {
             return result; // not found
         }
@@ -1806,29 +1836,55 @@ GetView Crowdbtree::get_view(Slice key) const
         }
         return result;
     }
+    if (metrics_.mt_get_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l0_t0).count();
+        metrics_.mt_get_l->observe(static_cast<uint64_t>(ns));
+    }
 
     // L1: descend to the leaf and resolve its chain. A non-overflow cell's
     // value lives directly in head's frame, which result.guard_ keeps
     // resident for result's lifetime -- borrow it, no copy.
+    auto l1_t0 = std::chrono::steady_clock::now();
     l1_get_total_.fetch_add(1, std::memory_order_relaxed);
     if (metrics_.l1_get_c != nullptr) {
         metrics_.l1_get_c->inc();
     }
     uint64_t page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, root_page_id_.load(), key);
     if (page_id == kInvalidPageId) {
+        if (metrics_.l1_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+            metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
+        }
         return result;
     }
     PageBase *head = resident(page_id);
     CellView  v;
     if (!resolve_chain(head, key, &v)) {
+        if (metrics_.l1_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+            metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
+        }
         return result;
     }
     if (v.is_tombstone()) {
+        if (metrics_.l1_get_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+            metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
+        }
         return result;
     }
     l1_get_hit_total_.fetch_add(1, std::memory_order_relaxed);
     if (metrics_.l1_get_hit_c != nullptr) {
         metrics_.l1_get_hit_c->inc();
+    }
+    if (metrics_.l1_get_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - l1_t0).count();
+        metrics_.l1_get_l->observe(static_cast<uint64_t>(ns));
     }
     result.found_ = true;
     result.slot_  = v.slot();
@@ -3137,6 +3193,9 @@ void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_o
             // Resume from the last accumulated key (if any) to avoid
             // re-traversing already-resolved leaves.
             auto resume_after = make_resume_after(start_after_owned, last_key);
+            if (metrics_.scan_retry_c != nullptr) {
+                metrics_.scan_retry_c->inc();
+            }
             scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
                                keys_only, deadline_ms, std::move(accumulated), std::move(last_key), accumulated_count,
                                std::move(on_done));
@@ -3172,6 +3231,9 @@ void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_o
                 // Resume from the last accumulated key to avoid
                 // re-traversing already-resolved leaves.
                 auto resume_after = make_resume_after(start_after_owned, last_key);
+                if (metrics_.scan_retry_c != nullptr) {
+                    metrics_.scan_retry_c->inc();
+                }
                 scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
                                    keys_only, deadline_ms, std::move(accumulated), std::move(last_key),
                                    accumulated_count, std::move(on_done));
@@ -3181,6 +3243,9 @@ void Crowdbtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_o
 #endif
     // No async backend wired -- fall back to the existing synchronous
     // demand-load and retry, still on this same thread.
+    if (metrics_.scan_retry_c != nullptr) {
+        metrics_.scan_retry_c->inc();
+    }
     (void)resident(pending_page_id);
     auto resume_after = make_resume_after(start_after_owned, last_key);
     scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget, keys_only,
@@ -3556,40 +3621,69 @@ void Crowdbtree::init_metrics(const std::string &prefix, const std::string &back
     std::string io = backend_label.empty() ? prefix : prefix + "." + backend_label;
 
     // ── Logical metrics (backend-independent) ──
-    metrics_.flush_l                     = r->register_summary(prefix + ".flush.l");
-    metrics_.flush_drain_c               = r->register_counter(prefix + ".flush.drain.c");
-    metrics_.flush_entries_c             = r->register_counter(prefix + ".flush.entries.c");
-    metrics_.mt_upsert_c                 = r->register_counter(prefix + ".mt.upsert.c");
-    metrics_.mt_get_c                    = r->register_counter(prefix + ".mt.get.c");
-    metrics_.mt_get_hit_c                = r->register_counter(prefix + ".mt.get.hit.c");
-    metrics_.l1_get_c                    = r->register_counter(prefix + ".l1.get.c");
-    metrics_.l1_get_hit_c                = r->register_counter(prefix + ".l1.get.hit.c");
-    metrics_.page_write_l                = r->register_summary(prefix + ".page.write.l");
-    metrics_.page_map_lookup_c           = r->register_counter(prefix + ".page.map.lookup.c");
-    metrics_.scan_c                      = r->register_counter(prefix + ".scan.c");
-    metrics_.scan_entries_c              = r->register_counter(prefix + ".scan.entries.c");
-    metrics_.scan_l                      = r->register_summary(prefix + ".scan.l");
-    metrics_.scan_l1_l                   = r->register_summary(prefix + ".scan.l1.l");
-    metrics_.scan_merge_l                = r->register_summary(prefix + ".scan.merge.l");
+    metrics_.flush_l         = r->register_summary(prefix + ".flush.l");
+    metrics_.flush_drain_c   = r->register_counter(prefix + ".flush.drain.c");
+    metrics_.flush_entries_c = r->register_counter(prefix + ".flush.entries.c");
+    metrics_.mt_apply_c      = r->register_counter(prefix + ".mt.apply.c");
+    metrics_.mt_apply_l      = r->register_summary(prefix + ".mt.apply.l");
+    metrics_.mt_get_c        = r->register_counter(prefix + ".mt.get.c");
+    metrics_.mt_get_hit_c    = r->register_counter(prefix + ".mt.get.hit.c");
+    metrics_.mt_get_l        = r->register_summary(prefix + ".mt.get.l");
+    metrics_.mt_frozen_g  = r->register_callback_gauge(prefix + ".mt.frozen.g",
+                                                       [this] { return static_cast<uint64_t>(frozen_table_count()); });
+    metrics_.mt_records_g = r->register_callback_gauge(prefix + ".mt.records.g", [this] {
+        size_t total = 0;
+        for (const auto &mt : all_memtables()) {
+            total += mt->count();
+        }
+        return static_cast<uint64_t>(total);
+    });
+    metrics_.mt_freeze_c  = r->register_counter(prefix + ".mt.freeze.c");
+    metrics_.l1_get_c     = r->register_counter(prefix + ".l1.get.c");
+    metrics_.l1_get_hit_c = r->register_counter(prefix + ".l1.get.hit.c");
+    metrics_.l1_get_l     = r->register_summary(prefix + ".l1.get.l");
+    metrics_.page_write_l = r->register_summary(prefix + ".page.write.l");
+    metrics_.page_split_c = r->register_counter(prefix + ".page.split.c");
+    metrics_.page_merge_c = r->register_counter(prefix + ".page.merge.c");
+    metrics_.page_consolidate_c = r->register_counter(prefix + ".page.consolidate.c");
+    metrics_.tree_height_g =
+        r->register_callback_gauge(prefix + ".tree.height.g", [this] { return static_cast<uint64_t>(height()); });
+    metrics_.page_map_alloc_c = r->register_counter(prefix + ".page.map.alloc.c");
+    metrics_.page_map_total_pids_g =
+        r->register_callback_gauge(prefix + ".page.map.total_pids.g", [this] { return mapping_.next_page_id(); });
+    metrics_.page_map_segments_g = r->register_callback_gauge(
+        prefix + ".page.map.segments.g", [this] { return static_cast<uint64_t>(mapping_.segments_allocated()); });
+    metrics_.snapshot_l       = r->register_summary(prefix + ".snapshot.l");
+    metrics_.snapshot_pages_c = r->register_counter(prefix + ".snapshot.pages.c");
+    metrics_.scan_c           = r->register_counter(prefix + ".scan.c");
+    metrics_.scan_entries_c   = r->register_counter(prefix + ".scan.entries.c");
+    metrics_.scan_l           = r->register_summary(prefix + ".scan.l");
+    metrics_.scan_l1_l        = r->register_summary(prefix + ".scan.l1.l");
+    metrics_.scan_merge_l     = r->register_summary(prefix + ".scan.merge.l");
+    metrics_.scan_retry_c     = r->register_counter(prefix + ".scan.retry.c");
+    metrics_.gc_tombstones_c  = r->register_counter(prefix + ".gc.tombstones.c");
+    metrics_.gc_pages_c       = r->register_counter(prefix + ".gc.pages.c");
 
     // ── Backend I/O metrics ──
-    metrics_.buf_hits                    = r->register_counter(io + ".buf.hits.c");
-    metrics_.buf_misses                  = r->register_counter(io + ".buf.misses.c");
+    metrics_.page_find_c                 = r->register_counter(io + ".page.find.c");
     metrics_.buf_evictions               = r->register_counter(io + ".buf.evictions.c");
     metrics_.buf_writebacks              = r->register_counter(io + ".buf.writebacks.c");
     metrics_.buf_resident                = r->register_gauge(io + ".buf.resident.g");
     metrics_.buf_dirty                   = r->register_gauge(io + ".buf.dirty.g");
-    metrics_.demand_load_l               = r->register_summary(io + ".demand.load.l");
+    metrics_.page_load_l                 = r->register_summary(io + ".page.load.l");
+    metrics_.page_writeback_l            = r->register_summary(io + ".page.writeback.l");
+    metrics_.page_writeback_bw           = r->register_bandwidth(io + ".page.writeback.bw");
+    metrics_.fsync_l                     = r->register_summary(io + ".fsync.l");
     metrics_.snapshot_apply_l            = r->register_summary(io + ".snapshot.apply.l");
     metrics_.snapshot_page_write_l       = r->register_summary(io + ".snapshot.page.write.io.l");
     metrics_.snapshot_page_write_cache_c = r->register_counter(io + ".snapshot.page.write.cache.c");
     metrics_.snapshot_page_write_bw      = r->register_bandwidth(io + ".snapshot.page.write.bw");
     metrics_.snapshot_meta_write_bw      = r->register_bandwidth(io + ".snapshot.meta.write.bw");
     metrics_.page_read_bw                = r->register_bandwidth(io + ".page.read.bw");
-    metrics_.snapshot_pages_c            = r->register_counter(io + ".snapshot.pages.c");
 
-    pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
-                       metrics_.buf_resident, metrics_.buf_dirty);
+    pool_->set_metrics(metrics_.buf_evictions, metrics_.buf_writebacks, metrics_.buf_resident, metrics_.buf_dirty,
+                       metrics_.page_writeback_l, metrics_.page_writeback_bw);
+    mapping_.set_alloc_counter(metrics_.page_map_alloc_c);
 }
 
 std::string Crowdbtree::flush_metrics_str(double window_secs, const char *timestamp, size_t width, size_t count_w,

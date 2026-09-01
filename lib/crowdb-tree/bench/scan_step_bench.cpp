@@ -72,7 +72,7 @@ Setup build_tree(int n, int value_size, bool flush, bool flush_only = false, int
     opt.frame_bytes      = 64 * 1024;
     opt.leaf_split_bytes = 64 * 1024;
     s.tree               = std::make_unique<Crowdbtree>(opt);
-    s.tree->init_metrics("s.0.g.0");
+    s.tree->init_metrics("s.0.g.0", "");
     for (int i = 0; i < n; ++i) {
         std::string k = make_key(i);
         std::string v = make_value(value_size, i);
@@ -95,8 +95,8 @@ void print_profile(const char *label, const ScanProfile &p)
     auto us = [](uint64_t ns) { return static_cast<double>(ns) / 1000.0; };
     std::printf("  %-14s count=%llu entries=%llu total_avg=%.1fus\n", label, static_cast<unsigned long long>(p.count),
                 static_cast<unsigned long long>(p.entries), us(p.total.avg_ns));
-    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l1", us(p.l1.avg_ns),
-                us(p.l1.max_ns), us(p.l1.sum_ns));
+    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l1", us(p.l1.avg_ns), us(p.l1.max_ns),
+                us(p.l1.sum_ns));
     std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "merge", us(p.merge.avg_ns), us(p.merge.max_ns),
                 us(p.merge.sum_ns));
 }
@@ -149,7 +149,7 @@ void run_concurrent(const char *label, int n_prepop, int value_size, size_t limi
     opt.leaf_split_bytes   = 64 * 1024;
     opt.max_memtable_count = max_memtable_count;
     s.tree                 = std::make_unique<Crowdbtree>(opt);
-    s.tree->init_metrics("s.0.g.0");
+    s.tree->init_metrics("s.0.g.0", "");
 
     // Pre-populate L1: n_prepop keys at slots 1..n_prepop, then flush+snapshot.
     for (int i = 0; i < n_prepop; ++i) {

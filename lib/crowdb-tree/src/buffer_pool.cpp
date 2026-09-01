@@ -128,10 +128,18 @@ void BufferPool::ht_erase(uint64_t page_id)
 
 Status BufferPool::write_back(uint32_t idx)
 {
-    FrameMeta &m = frames_[idx];
-    Status     s = store_->write_at(m.addr, frame_bytes(idx), page_bytes_);
+    FrameMeta &m  = frames_[idx];
+    auto       t0 = std::chrono::steady_clock::now();
+    Status     s  = store_->write_at(m.addr, frame_bytes(idx), page_bytes_);
+    if (m_writeback_l_ != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        m_writeback_l_->observe(static_cast<uint64_t>(ns));
+    }
     if (!s.ok()) {
         return s;
+    }
+    if (m_page_writeback_bw_ != nullptr) {
+        m_page_writeback_bw_->observe(page_bytes_);
     }
     m.dirty = false;
     ++stats_.writebacks;
@@ -184,16 +192,10 @@ Status BufferPool::pin(uint64_t page_id, PageAddr addr, FrameRef *out)
         ++m.pin;
         m.ref = 1;
         ++stats_.hits;
-        if (m_hits_ != nullptr) {
-            m_hits_->inc();
-        }
         *out = FrameRef(this, idx, frame_bytes(idx), page_id);
         return Status::Ok();
     }
     ++stats_.misses;
-    if (m_misses_ != nullptr) {
-        m_misses_->inc();
-    }
     int64_t v = acquire_victim();
     if (v < 0) {
         return Status::internal_error("BufferPool: no evictable frame (all pinned)");

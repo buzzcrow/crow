@@ -37,6 +37,7 @@ namespace crowdb::tree
 // references compile unchanged. (Not a `namespace crowdb::tree =
 // crowdb::common::metrics;` alias — only the specific types are bridged.)
 using crowdb::common::metrics::Bandwidth;
+using crowdb::common::metrics::CallbackGauge;
 using crowdb::common::metrics::Counter;
 using crowdb::common::metrics::Gauge;
 using crowdb::common::metrics::LatencySummary;
@@ -1234,29 +1235,49 @@ class Crowdbtree
     struct MetricsHandles
     {
         // Buffer pool (backend I/O)
-        Counter        *buf_hits       = nullptr;
-        Counter        *buf_misses     = nullptr;
-        Counter        *buf_evictions  = nullptr;
-        Counter        *buf_writebacks = nullptr;
-        Gauge          *buf_resident   = nullptr;
-        Gauge          *buf_dirty      = nullptr;
+        Counter *buf_evictions  = nullptr;
+        Counter *buf_writebacks = nullptr;
+        Gauge   *buf_resident   = nullptr;
+        Gauge   *buf_dirty      = nullptr;
         // Flush (L0 → L1)
-        LatencySummary *flush_l        = nullptr;
-        Counter        *flush_drain_c  = nullptr;
+        LatencySummary *flush_l         = nullptr;
+        Counter        *flush_drain_c   = nullptr;
         Counter        *flush_entries_c = nullptr;
-        // MemTable (L0) operation counters
-        Counter *mt_upsert_c  = nullptr;
-        Counter *mt_get_c     = nullptr;
-        Counter *mt_get_hit_c = nullptr;
-        // L1 (B-tree) query counters
-        Counter *l1_get_c     = nullptr;
-        Counter *l1_get_hit_c = nullptr;
+        // MemTable (L0) operation counters + latency
+        Counter        *mt_apply_c   = nullptr;
+        LatencySummary *mt_apply_l   = nullptr;
+        Counter        *mt_get_c     = nullptr;
+        Counter        *mt_get_hit_c = nullptr;
+        LatencySummary *mt_get_l     = nullptr;
+        CallbackGauge  *mt_frozen_g  = nullptr;
+        CallbackGauge  *mt_records_g = nullptr;
+        Counter        *mt_freeze_c  = nullptr;
+        // L1 (B-tree) query counters + latency
+        Counter        *l1_get_c     = nullptr;
+        Counter        *l1_get_hit_c = nullptr;
+        LatencySummary *l1_get_l     = nullptr;
         // B+tree page mutation (during drain/split/merge/consolidate)
-        LatencySummary *page_write_l = nullptr;
-        // Mapping table lookup counter
-        Counter *page_map_lookup_c = nullptr;
+        LatencySummary *page_write_l       = nullptr;
+        Counter        *page_split_c       = nullptr;
+        Counter        *page_merge_c       = nullptr;
+        Counter        *page_consolidate_c = nullptr;
+        // Tree structure
+        CallbackGauge *tree_height_g = nullptr;
+        // Mapping table
+        Counter       *page_find_c           = nullptr;
+        Counter       *page_map_alloc_c      = nullptr;
+        CallbackGauge *page_map_total_pids_g = nullptr;
+        CallbackGauge *page_map_segments_g   = nullptr;
         // Demand-load (page fault I/O) latency
-        LatencySummary *demand_load_l = nullptr;
+        LatencySummary *page_load_l = nullptr;
+        // Page writeback (eviction I/O) latency
+        LatencySummary *page_writeback_l = nullptr;
+        // Page writeback bandwidth (eviction I/O, non-snapshot)
+        Bandwidth *page_writeback_bw = nullptr;
+        // fsync/barrier latency
+        LatencySummary *fsync_l = nullptr;
+        // Snapshot — logical (full snapshot wall time)
+        LatencySummary *snapshot_l = nullptr;
         // Snapshot I/O sub-metrics (backend)
         LatencySummary *snapshot_apply_l            = nullptr;
         LatencySummary *snapshot_page_write_l       = nullptr;
@@ -1271,6 +1292,10 @@ class Crowdbtree
         LatencySummary *scan_l         = nullptr;
         LatencySummary *scan_l1_l      = nullptr;
         LatencySummary *scan_merge_l   = nullptr;
+        Counter        *scan_retry_c   = nullptr;
+        // GC
+        Counter *gc_tombstones_c = nullptr;
+        Counter *gc_pages_c      = nullptr;
     };
 
     MetricsHandles metrics_;

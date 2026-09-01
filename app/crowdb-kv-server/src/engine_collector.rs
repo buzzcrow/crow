@@ -32,8 +32,11 @@ struct EngineHandles {
 impl EngineHandles {
     fn register(registry: &mut MetricsRegistry, store_id: u64, group_id: u64) -> Self {
         Self {
-            paxos_chosen: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.learn.slot.con.chosen.g")),
-            paxos_applied: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.learn.slot.con.applied.g")),
+            paxos_chosen: registry
+                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.learn.slot.con.chosen.g")),
+            paxos_applied: registry.register_gauge(format!(
+                "s.{store_id}.g.{group_id}.paxos.learn.slot.con.applied.g"
+            )),
             paxos_highest_seen: registry
                 .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.acp.slot.highest_seen.g")),
             paxos_term: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.current_term.g")),
