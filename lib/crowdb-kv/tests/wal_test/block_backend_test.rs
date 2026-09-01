@@ -29,12 +29,6 @@ async fn unaligned_device_writes_payload_directly_without_amplification() {
     assert_eq!(&buf, b"hello");
 
     assert_eq!(device.write_count(), 1);
-    assert_eq!(device.logical_bytes_written(), 5);
-    assert_eq!(
-        device.physical_bytes_written(),
-        5,
-        "no amplification for byte-addressable media"
-    );
     assert_eq!(device.rmw_count(), 0);
 }
 
@@ -57,12 +51,6 @@ async fn aligned_device_partial_write_does_read_modify_write() {
     file.read_exact_at(&mut buf, 100).await.unwrap();
     assert_eq!(buf, payload, "payload round-trips through RMW");
 
-    assert_eq!(device.logical_bytes_written(), 200);
-    assert_eq!(
-        device.physical_bytes_written(),
-        4096,
-        "widened to one aligned block"
-    );
     assert_eq!(device.rmw_count(), 1);
 }
 
@@ -79,8 +67,6 @@ async fn unaligned_device_counts_writes_and_durable_flushes() {
 
     assert_eq!(device.write_count(), 2);
     assert_eq!(device.fdatasync_count(), 2);
-    assert_eq!(device.logical_bytes_written(), 4);
-    assert_eq!(device.physical_bytes_written(), 4);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -104,7 +90,6 @@ async fn aligned_device_rmw_preserves_neighbouring_bytes_in_same_block() {
     // Both writes are partial blocks → two RMWs; each rewrites the 4 KiB block.
     assert_eq!(device.write_count(), 2);
     assert_eq!(device.rmw_count(), 2);
-    assert_eq!(device.physical_bytes_written(), 4096 * 2);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -117,8 +102,6 @@ async fn aligned_device_block_aligned_write_avoids_amplification() {
     // Offset and length both aligned to the 4 KiB I/O unit → no RMW.
     file.write_at(&block, 4096).await.unwrap();
 
-    assert_eq!(device.logical_bytes_written(), 4096);
-    assert_eq!(device.physical_bytes_written(), 4096, "exact block, no widening");
     assert_eq!(device.rmw_count(), 0);
 }
 
@@ -131,6 +114,5 @@ async fn aligned_device_supports_custom_io_unit() {
     file.write_at(&[1u8; 100], 0).await.unwrap();
 
     // 100 bytes at offset 0 widens to one 512-byte sector.
-    assert_eq!(device.physical_bytes_written(), 512);
     assert_eq!(device.rmw_count(), 1);
 }

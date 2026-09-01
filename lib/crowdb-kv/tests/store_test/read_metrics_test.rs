@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Integration tests for R19 read-path metrics: barrier latency, lease vs
-//! `ReadIndex` path counters, `engine_get` latency, MinSlot-fallback counter,
+//! Integration tests for R19 read-path metrics: barrier latency,
+//! `engine_get` latency, MinSlot-fallback counter, e2e read latency,
 //! and read-state gauges.
 
 use crowdb_kv::cluster::group::PxGroup;
@@ -36,7 +36,6 @@ async fn linearizable_read_records_barrier_engine_and_path_counters() {
     // Establish an applied frontier so reads have a non-zero slot.
     let put = store.kv_put(1, b"rk", b"rv", 11, 1, 1, 1).await;
     assert!(put.ok);
-    let slot = put.revision;
 
     // First linearizable get: lease starts expired → ReadIndex path.
     // run_heartbeat_round on a single-voter leader trivially gets quorum
@@ -55,15 +54,7 @@ async fn linearizable_read_records_barrier_engine_and_path_counters() {
             .map_or("", |(_, v)| v.as_str())
     };
 
-    // readindex_path counter: 1 (first get)
-    let ri = find("read.readindex_path.c");
-    assert!(ri.starts_with("c:1:"), "readindex_path count=1, got {ri}");
-
-    // lease_path counter: 1 (second get)
-    let lp = find("read.lease_path.c");
-    assert!(lp.starts_with("c:1:"), "lease_path count=1, got {lp}");
-
-    // barrier latency summary: 2 observations
+    // barrier latency summary: 2 observations (one ReadIndex, one lease)
     let bl = find("read.barrier.l");
     assert!(bl.starts_with("l:2:"), "barrier summary count=2, got {bl}");
 
@@ -71,16 +62,9 @@ async fn linearizable_read_records_barrier_engine_and_path_counters() {
     let eg = find("read.engine_get.l");
     assert!(eg.starts_with("l:2:"), "engine_get summary count=2, got {eg}");
 
-    // lease_valid gauge: 1 (lease was valid at the second barrier)
-    let lv = find("read.lease_valid.g");
-    assert!(lv == "g:1", "lease_valid gauge=1, got {lv}");
-
-    // contiguous_applied gauge: reflects the applied frontier
-    let ca = find("read.contiguous_applied.g");
-    assert!(
-        ca == format!("g:{slot}"),
-        "contiguous_applied gauge={slot}, got {ca}"
-    );
+    // e2e read latency summary: 2 observations
+    let e2e = find("read.e2e.l");
+    assert!(e2e.starts_with("l:2:"), "e2e summary count=2, got {e2e}");
 
     // safe_slot gauge: 0 for a single-node group with no peer reports
     let ss = find("read.safe_slot.g");
@@ -136,21 +120,17 @@ async fn read_metrics_appear_in_flush_output() {
     let out = String::from_utf8(buf).unwrap();
 
     // Counters (all non-zero → not suppressed)
-    assert!(out.contains("s.0.g.1.read.lease_path.c"));
-    assert!(out.contains("s.0.g.1.read.readindex_path.c"));
     assert!(out.contains("s.0.g.1.read.minslot_fallback.c"));
     // Summaries
     assert!(out.contains("s.0.g.1.read.barrier.l"));
     assert!(out.contains("s.0.g.1.read.engine_get.l"));
-    // Gauges (always printed, but zero-value gauges are suppressed)
-    assert!(out.contains("s.0.g.1.read.lease_valid.g"));
-    assert!(out.contains("s.0.g.1.read.contiguous_applied.g"));
+    assert!(out.contains("s.0.g.1.read.e2e.l"));
     // safe_slot.g is 0 for a single-node group → zero-suppressed;
     // verified via snapshot in the path-counters test above.
 }
 
 #[tokio::test]
-async fn lease_path_plus_readindex_path_equals_linearizable_get_count() {
+async fn barrier_count_equals_linearizable_get_count() {
     let (store, registry) = store_with_registry();
     store.add_group(leader_group(1, 1));
     store.kv_put(1, b"rk", b"rv", 11, 1, 1, 1).await;
@@ -165,17 +145,15 @@ async fn lease_path_plus_readindex_path_equals_linearizable_get_count() {
     let count = |suffix: &str| {
         s.iter()
             .find(|(n, _)| n.ends_with(suffix))
-            .and_then(|(_, v)| v.strip_prefix("c:"))
+            .and_then(|(_, v)| v.strip_prefix("l:"))
             .and_then(|v| v.split(':').next())
             .and_then(|n| n.parse::<u64>().ok())
             .unwrap_or(0)
     };
 
-    let lease = count("read.lease_path.c");
-    let readindex = count("read.readindex_path.c");
+    let barrier = count("read.barrier.l");
     assert_eq!(
-        lease + readindex,
-        3,
-        "lease_path({lease}) + readindex_path({readindex}) should equal 3 linearizable gets"
+        barrier, 3,
+        "barrier count={barrier} should equal 3 linearizable gets"
     );
 }

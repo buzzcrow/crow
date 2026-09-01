@@ -67,7 +67,7 @@ Plan files live under `doc/working/`; flow analyses live under `doc/design/kv/`.
 | `doc/design/kv/design-crowdb-kv-test.md` | Test strategy, layer-by-layer test guide, coverage rules. |
 | `doc/design/kv/design-crowdb-kv-observability.md` | Metrics module: five metric types, registry, instrumentation points, log format. |
 | `doc/design/tree/design-crowdb-tree.md` | crowdb-tree overview, `KVEngine`/`EngineView`, out-of-order apply + two-GC model, FFI boundary. |
-| `doc/design/tree/design-crowdb-tree-engine.md` | In-memory engine: slot cell, pages/delta, write path, versioned root, lock-free epoch reclamation, io_uring FFI. |
+| `doc/design/tree/design-crowdb-tree-engine.md` | In-memory engine: slot cell, pages/delta, write path, versioned root, lock-free epoch reclamation, io_uring FFI, metrics. |
 | `doc/design/tree/design-crowdb-tree-storage.md` | Durable storage: `PageStore` backends, slotted frame format, buffer pool, snapshot/recovery, mapping table, GC. |
 | `doc/design/console/design-crowdb-console.md` | Console core crate, web + CLI frontends, two-hierarchy API, monitor task, SSH lifecycle, bootstrap, sysdata sync, cluster destroy. |
 | `doc/design/console/design-crowdb-console-ui.md` | Web UI v1: 3-pane shell, React Flow canvas, inspector, KV Operator center panel. |

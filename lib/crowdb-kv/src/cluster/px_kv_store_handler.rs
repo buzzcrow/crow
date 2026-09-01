@@ -25,6 +25,7 @@ impl KvStore for PxKvStore {
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvResponse {
+        let e2e_start = Instant::now();
         #[cfg(feature = "test-util")]
         let test_delay = *self.get_delay.lock();
         #[cfg(feature = "test-util")]
@@ -35,7 +36,7 @@ impl KvStore for PxKvStore {
             return missing_group_response(request_id, request_create_ms);
         };
 
-        match self.resolve_read_point(&group, read_mode, min_slot).await {
+        let result = match self.resolve_read_point(&group, read_mode, min_slot).await {
             ReadDecision::Serve { read_slot, safe_slot } => {
                 let engine_start = Instant::now();
                 let value = group.local_replica().learner.engine_get_bytes(key).await;
@@ -57,7 +58,11 @@ impl KvStore for PxKvStore {
             ReadDecision::Unavailable { msg } => {
                 crate::rpc::KvResponse::err(msg, request_id, request_create_ms)
             }
+        };
+        if let Some(h) = group.read_handles() {
+            h.e2e.observe(e2e_start.elapsed().as_nanos() as u64);
         }
+        result
     }
 
     async fn kv_put(

@@ -11,12 +11,6 @@ namespace crowdb::rpc
 // is owned by the registry (unique_ptr); we store the raw pointer for
 // hot-path access.
 
-Counter &rpc_submit_fail()
-{
-    static Counter *c = MetricsRegistry::global().register_counter("rpc.request.submit_fail.c");
-    return *c;
-}
-
 Counter &rpc_submit_retry()
 {
     static Counter *c = MetricsRegistry::global().register_counter("rpc.request.submit_retry.c");
@@ -37,7 +31,6 @@ Counter &rpc_reaped()
 
 void reset_rpc_client_counters()
 {
-    rpc_submit_fail().flush();
     rpc_submit_retry().flush();
     rpc_resp_missed().flush();
     rpc_reaped().flush();

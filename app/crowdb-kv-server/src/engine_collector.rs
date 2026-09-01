@@ -22,9 +22,9 @@ use crowdb_rpc_ffi::CrowdbRpcTransportStats;
 struct EngineHandles {
     paxos_chosen: Arc<Gauge>,
     paxos_applied: Arc<Gauge>,
-    paxos_last_chosen: Arc<Gauge>,
     paxos_highest_seen: Arc<Gauge>,
     paxos_term: Arc<Gauge>,
+    paxos_leader: Arc<Gauge>,
     paxos_inflight: Arc<Gauge>,
     snapshot_pages: Arc<Counter>,
 }
@@ -32,13 +32,12 @@ struct EngineHandles {
 impl EngineHandles {
     fn register(registry: &mut MetricsRegistry, store_id: u64, group_id: u64) -> Self {
         Self {
-            paxos_chosen: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.chosen_slot.g")),
-            paxos_applied: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.applied_slot.g")),
-            paxos_last_chosen: registry
-                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.last_chosen_slot.g")),
+            paxos_chosen: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.learn.slot.con.chosen.g")),
+            paxos_applied: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.learn.slot.con.applied.g")),
             paxos_highest_seen: registry
-                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.highest_seen_slot.g")),
+                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.acp.slot.highest_seen.g")),
             paxos_term: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.current_term.g")),
+            paxos_leader: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.leader_id.g")),
             paxos_inflight: registry
                 .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.inflight_slots.g")),
             snapshot_pages: registry
@@ -70,9 +69,9 @@ impl RpcTransportHandles {
 struct PaxosGauges {
     contiguous_chosen: u64,
     contiguous_applied: u64,
-    last_chosen_slot: u64,
     highest_seen_slot: u64,
     current_term: u64,
+    leader_id: u64,
     inflight_slots: u64,
 }
 
@@ -86,9 +85,9 @@ fn read_paxos_gauges_per_group(store: &Arc<PxKvStore>) -> std::collections::Hash
             PaxosGauges {
                 contiguous_chosen: replica.contiguous_chosen(),
                 contiguous_applied: replica.contiguous_applied(),
-                last_chosen_slot: replica.last_chosen_slot(),
                 highest_seen_slot: replica.highest_seen_slot(),
                 current_term: replica.current_term_snapshot(),
+                leader_id: group.leader_id(),
                 inflight_slots: group.inflight_slot_count(),
             },
         );
@@ -219,9 +218,9 @@ pub fn setup_engine_collector(
             if let Some(p) = per_group_p.get(&key.1) {
                 hd.paxos_chosen.set(p.contiguous_chosen);
                 hd.paxos_applied.set(p.contiguous_applied);
-                hd.paxos_last_chosen.set(p.last_chosen_slot);
                 hd.paxos_highest_seen.set(p.highest_seen_slot);
                 hd.paxos_term.set(p.current_term);
+                hd.paxos_leader.set(p.leader_id);
                 hd.paxos_inflight.set(p.inflight_slots);
             }
 
@@ -256,22 +255,10 @@ pub fn setup_engine_collector(
                     if let Some(snap) = wal.block_device_snapshot() {
                         let mut last = last_block_device.lock().expect("last_block_device poisoned");
                         let prev = last.entry(*key).or_default();
-                        let d_logical = snap
-                            .logical_bytes_written
-                            .saturating_sub(prev.logical_bytes_written);
-                        let d_physical = snap
-                            .physical_bytes_written
-                            .saturating_sub(prev.physical_bytes_written);
                         let d_rmw = snap.rmw_count.saturating_sub(prev.rmw_count);
                         *prev = snap;
                         drop(last);
                         if let Some(h) = wal.block_device_counter_handles() {
-                            if d_logical > 0 {
-                                h.logical_bytes.inc_by(d_logical);
-                            }
-                            if d_physical > 0 {
-                                h.physical_bytes.inc_by(d_physical);
-                            }
                             if d_rmw > 0 {
                                 h.rmw.inc_by(d_rmw);
                             }

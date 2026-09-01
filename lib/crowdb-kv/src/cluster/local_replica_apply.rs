@@ -149,7 +149,6 @@ impl PxLocalReplica {
             h.gap_count.set(self.gap_slots.lock().len() as u64);
             h.fetchgap_inflight
                 .set(self.fetchgap_inflight.load(Ordering::Acquire));
-            h.last_chosen_slot.set(self.learner.last_chosen_slot());
             h.known_commit_slot
                 .set(self.known_commit_slot.load(Ordering::Acquire));
         }

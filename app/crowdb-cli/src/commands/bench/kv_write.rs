@@ -28,6 +28,7 @@ use crate::Cli;
 const STORE_ID: u64 = 0;
 const GROUP_ID: u64 = 0;
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
     let client = match build_kv_client(
         cli,
@@ -61,7 +62,15 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
         connections = args.connections,
         key_space,
         value_size,
-        "bench kv write: workload starting"
+        event_write = args.event_write,
+        rpc_workers = args.rpc_workers,
+        send_queue_capacity = if args.send_queue_capacity > 0 {
+            args.send_queue_capacity
+        } else {
+            4096
+        },
+        metrics_interval_secs = args.metrics_interval,
+        "bench kv write: starting"
     );
     let start = Instant::now();
     let recorder = Arc::clone(&metrics.recorder);
@@ -93,7 +102,12 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
     .await;
 
     let duration_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-    tracing::info!(duration_ms, "bench kv write: workload ended — stopping metrics");
+    tracing::info!(
+        duration_ms,
+        ops = run.recorder.ops(),
+        errors = run.recorder.errors(),
+        "bench kv write: workload complete"
+    );
 
     metrics.stop().await;
 

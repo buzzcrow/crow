@@ -244,14 +244,8 @@ struct EngineStats
 // this is a destructive read -- the window resets on each call). `count` is the
 // number of scans in the window; `entries` is the total entries returned. Each
 // step's `sum_ns` / `max_ns` cover only that step; `avg_ns` is sum_ns / count.
-// Steps: l0_snapshot (MemTable::snapshot copy), l0_skip (upper_bound pass),
-// l1_descent (find_leaf_page_id), l1_resolve (per-leaf LeafChainCursor setup +
-// cursor seek, summed across all leaves touched), merge (min-key select +
-// winner + per-entry cursor step + consider/decode, excluding l1_resolve),
-// total (whole scan). The per-entry leaf work is lazy, so it is
-// counted under merge -- timing each cursor step would cost more than the step
-// itself; l1_resolve is now per-leaf setup only and scales with leaves
-// touched, not entries per leaf.
+// Steps: l1 (B-tree descent + per-leaf resolve), merge (L0+L1 advance +
+// winner + decode), total (whole scan).
 struct ScanProfile
 {
     uint64_t count   = 0; // scans in the window
@@ -264,10 +258,7 @@ struct ScanProfile
         uint64_t avg_ns = 0; // sum_ns / count (filled by scan_profile)
     };
 
-    Step l0_snapshot;
-    Step l0_skip;
-    Step l1_descent;
-    Step l1_resolve;
+    Step l1;
     Step merge;
     Step total;
 };
@@ -751,7 +742,7 @@ class Crowdbtree
 
     // Create the internal MetricsRegistry and register all handles
     // using the provided name prefix (e.g. "s.1.g.0"). Called from open().
-    void init_metrics(const std::string &prefix);
+    void init_metrics(const std::string &prefix, const std::string &backend_label);
 
     // Flush all C++ metrics into a formatted string (for FFI return to
     // Rust). Uses open_memstream internally. `width` overrides the
@@ -1242,50 +1233,44 @@ class Crowdbtree
     // ── Metrics handles (registered in init_metrics) ──
     struct MetricsHandles
     {
+        // Buffer pool (backend I/O)
         Counter        *buf_hits       = nullptr;
         Counter        *buf_misses     = nullptr;
         Counter        *buf_evictions  = nullptr;
         Counter        *buf_writebacks = nullptr;
         Gauge          *buf_resident   = nullptr;
         Gauge          *buf_dirty      = nullptr;
-        LatencySummary *apply_l        = nullptr;
-        LatencySummary *snapshot_l     = nullptr;
+        // Flush (L0 → L1)
         LatencySummary *flush_l        = nullptr;
+        Counter        *flush_drain_c  = nullptr;
+        Counter        *flush_entries_c = nullptr;
         // MemTable (L0) operation counters
         Counter *mt_upsert_c  = nullptr;
         Counter *mt_get_c     = nullptr;
         Counter *mt_get_hit_c = nullptr;
-        // Flush (L0 → L1) counters
-        Counter *flush_drain_c   = nullptr;
-        Counter *flush_entries_c = nullptr;
         // L1 (B-tree) query counters
         Counter *l1_get_c     = nullptr;
         Counter *l1_get_hit_c = nullptr;
-        // B+tree page mutation counters (during drain/split/merge/consolidate)
-        Counter        *page_write_c = nullptr;
+        // B+tree page mutation (during drain/split/merge/consolidate)
         LatencySummary *page_write_l = nullptr;
         // Mapping table lookup counter
         Counter *page_map_lookup_c = nullptr;
-        // Demand-load (page fault I/O) counter + latency
-        Counter        *demand_load_c = nullptr;
+        // Demand-load (page fault I/O) latency
         LatencySummary *demand_load_l = nullptr;
-        // Snapshot sub-metrics (new)
-        LatencySummary *snapshot_apply_l            = nullptr; // prepare_snapshot_locked latency
-        LatencySummary *snapshot_page_write_l       = nullptr; // per-page write_at latency
-        Counter        *snapshot_page_write_cache_c = nullptr; // clean pages (no write)
-        Bandwidth      *snapshot_page_write_bw      = nullptr; // per-page write bytes
-        Bandwidth      *snapshot_meta_write_bw      = nullptr; // metadata write bytes (seg+dir+anchor)
-        Bandwidth      *page_read_bw                = nullptr; // demand-load read bytes
-        Counter        *snapshot_pages_c            = nullptr; // cumulative pages written
-        // Scan per-step profile: counters + per-step LatencySummary.
-        Counter        *scan_c             = nullptr; // scan calls
-        Counter        *scan_entries_c     = nullptr; // entries returned
-        LatencySummary *scan_l             = nullptr; // total scan latency
-        LatencySummary *scan_l0_snapshot_l = nullptr;
-        LatencySummary *scan_l0_skip_l     = nullptr;
-        LatencySummary *scan_l1_descent_l  = nullptr;
-        LatencySummary *scan_l1_resolve_l  = nullptr;
-        LatencySummary *scan_merge_l       = nullptr;
+        // Snapshot I/O sub-metrics (backend)
+        LatencySummary *snapshot_apply_l            = nullptr;
+        LatencySummary *snapshot_page_write_l       = nullptr;
+        Counter        *snapshot_page_write_cache_c = nullptr;
+        Bandwidth      *snapshot_page_write_bw      = nullptr;
+        Bandwidth      *snapshot_meta_write_bw      = nullptr;
+        Bandwidth      *page_read_bw                = nullptr;
+        Counter        *snapshot_pages_c            = nullptr;
+        // Scan
+        Counter        *scan_c         = nullptr;
+        Counter        *scan_entries_c = nullptr;
+        LatencySummary *scan_l         = nullptr;
+        LatencySummary *scan_l1_l      = nullptr;
+        LatencySummary *scan_merge_l   = nullptr;
     };
 
     MetricsHandles metrics_;

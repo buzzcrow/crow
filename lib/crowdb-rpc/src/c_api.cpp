@@ -10,6 +10,7 @@
 #include "crowdb-rpc/client/client.h"
 #include "crowdb-rpc/client/rpc_client_metrics.h"
 #include "crowdb-rpc/co_client.h"
+#include "crowdb-rpc/rpc_metrics.h"
 #include "crowdb-rpc/server/message.h"
 #include "crowdb-rpc/server/server.h"
 #include "crowdb-rpc/transport/socket_transport.h"
@@ -339,7 +340,7 @@ void crowdb_rpc_client_get_counters(crowdb_rpc_client_t /*client*/, crowdb_rpc_c
         if (out == nullptr) {
             return;
         }
-        out->submit_fail  = crowdb::rpc::rpc_submit_fail().window();
+        out->submit_fail  = crowdb::rpc::cnt_send_queue_full().window();
         out->submit_retry = crowdb::rpc::rpc_submit_retry().window();
         out->resp_missed  = crowdb::rpc::rpc_resp_missed().window();
         out->reaped       = crowdb::rpc::rpc_reaped().window();

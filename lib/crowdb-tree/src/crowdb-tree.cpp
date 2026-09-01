@@ -789,7 +789,6 @@ void Crowdbtree::note_applied_slot(uint64_t slot)
 
 Status Crowdbtree::apply(uint64_t slot, const Batch &batch)
 {
-    auto t0 = std::chrono::steady_clock::now();
     // Reject oversized keys before any state is mutated (plan-tree #15). A key
     // this large is assumed to be a caller bug; validating up front keeps apply
     // all-or-nothing.
@@ -802,10 +801,6 @@ Status Crowdbtree::apply(uint64_t slot, const Batch &batch)
     }
     apply_batch(slot, batch);
     note_applied_slot(slot);
-    if (metrics_.apply_l != nullptr) {
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-        metrics_.apply_l->observe(static_cast<uint64_t>(ns));
-    }
     return Status::Ok();
 }
 
@@ -2158,14 +2153,10 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
     for (auto &mt : all_memtables()) {
         l0.push_back({.cur = mt->cursor(start_after)});
     }
-    auto l0_snapshot_ns = dur_ns(t0);
-    // R50: the cursor seeks directly to start_after (O(log N)), so the
-    // separate upper_bound skip pass is gone — l0_skip is always 0.
-    auto l0_skip_ns = uint64_t{0};
 
-    uint64_t l1_resolve_ns = 0;
-    uint64_t gc            = gc_floor_.load();
-    uint64_t page_id       = root_page_id_.load();
+    uint64_t l1_ns   = 0;
+    uint64_t gc      = gc_floor_.load();
+    uint64_t page_id = root_page_id_.load();
     // Descend at the cursor when present, else at the prefix start -- a
     // non-empty start_after lands directly on the leaf containing it,
     // skipping every earlier leaf in the prefix range.
@@ -2173,8 +2164,8 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
     if (page_id != kInvalidPageId) {
         t0      = std::chrono::steady_clock::now();
         page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, page_id, descend_key);
+        l1_ns += page_id != kInvalidPageId ? dur_ns(t0) : 0;
     }
-    auto l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
     // A lazy cursor over the current leaf's chain, not a materialized
     // vector -- it yields borrowed key/cell Slices in key order and only
     // resolves as far as the merge loop pulls, so a limit-bounded scan never
@@ -2202,7 +2193,7 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
                 l1.seek(descend_key, /*exclusive=*/!start_after.empty());
             }
             first_leaf = false;
-            l1_resolve_ns += dur_ns(rt);
+            l1_ns += dur_ns(rt);
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
             // R58: prefetch the right-sibling leaf's memory while the merge
@@ -2564,18 +2555,15 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
         }
     }
     auto loop_ns = dur_ns(t_loop);
-    // merge = loop overhead excluding the leaf-resolution time already counted
-    // under l1_resolve (refill bookkeeping + min-key select + winner + decode).
-    uint64_t merge_ns = (loop_ns > l1_resolve_ns) ? loop_ns - l1_resolve_ns : 0;
+    // merge = loop overhead excluding L1 work (refill bookkeeping + min-key
+    // select + winner + decode).
+    uint64_t merge_ns = (loop_ns > l1_ns) ? loop_ns - l1_ns : 0;
     uint64_t total_ns = dur_ns(t_total);
     if (metrics_.scan_c != nullptr) {
         metrics_.scan_c->inc();
         metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
-        metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
-        metrics_.scan_l0_skip_l->observe(l0_skip_ns);
-        metrics_.scan_l1_descent_l->observe(l1_descent_ns);
-        metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
+        metrics_.scan_l1_l->observe(l1_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
     if (out_count != nullptr) {
@@ -2622,8 +2610,6 @@ bool Crowdbtree::try_scan_no_load(
     for (auto &mt : all_memtables()) {
         l0.push_back({.cur = mt->cursor(start_after)});
     }
-    auto l0_snapshot_ns = dur_ns(t0);
-    auto l0_skip_ns     = uint64_t{0}; // R50: cursor seeks directly
 
     // Non-blocking probe (mirrors try_get_view_no_load's `probe`): bails out
     // on an unloaded slot instead of demand-loading it, recording which
@@ -2643,9 +2629,9 @@ bool Crowdbtree::try_scan_no_load(
         return v;
     };
 
-    uint64_t l1_resolve_ns = 0;
-    uint64_t gc            = gc_floor_.load();
-    uint64_t page_id       = root_page_id_.load();
+    uint64_t l1_ns   = 0;
+    uint64_t gc      = gc_floor_.load();
+    uint64_t page_id = root_page_id_.load();
     // Descend at the cursor when present, else at the prefix start -- see
     // scan()'s own comment.
     Slice descend_key = !start_after.empty() ? start_after : prefix;
@@ -2656,8 +2642,8 @@ bool Crowdbtree::try_scan_no_load(
             *out_pending_page_id = blocked_page_id;
             return false; // genuine miss on the initial descent
         }
+        l1_ns += page_id != kInvalidPageId ? dur_ns(t0) : 0;
     }
-    auto l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
     // Lazy leaf cursor -- see scan()'s own comment.
     LeafChainCursor l1;
     bool            first_leaf = true;
@@ -2678,7 +2664,7 @@ bool Crowdbtree::try_scan_no_load(
                 l1.seek(descend_key, /*exclusive=*/!start_after.empty());
             }
             first_leaf = false;
-            l1_resolve_ns += dur_ns(rt);
+            l1_ns += dur_ns(rt);
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
             // R58: prefetch the right-sibling leaf (see scan()'s refill_l1).
@@ -2989,16 +2975,13 @@ bool Crowdbtree::try_scan_no_load(
         }
     }
     auto     loop_ns  = dur_ns(t_loop);
-    uint64_t merge_ns = (loop_ns > l1_resolve_ns) ? loop_ns - l1_resolve_ns : 0;
+    uint64_t merge_ns = (loop_ns > l1_ns) ? loop_ns - l1_ns : 0;
     uint64_t total_ns = dur_ns(t_total);
     if (metrics_.scan_c != nullptr) {
         metrics_.scan_c->inc();
         metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
-        metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
-        metrics_.scan_l0_skip_l->observe(l0_skip_ns);
-        metrics_.scan_l1_descent_l->observe(l1_descent_ns);
-        metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
+        metrics_.scan_l1_l->observe(l1_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
     if (out_count != nullptr) {
@@ -3560,53 +3543,51 @@ ScanProfile Crowdbtree::scan_profile() const
     p.count   = metrics_.scan_c != nullptr ? metrics_.scan_c->flush().count : 0;
     p.entries = metrics_.scan_entries_c != nullptr ? metrics_.scan_entries_c->flush().count : 0;
     fill(metrics_.scan_l, p.total, p.count);
-    fill(metrics_.scan_l0_snapshot_l, p.l0_snapshot, p.count);
-    fill(metrics_.scan_l0_skip_l, p.l0_skip, p.count);
-    fill(metrics_.scan_l1_descent_l, p.l1_descent, p.count);
-    fill(metrics_.scan_l1_resolve_l, p.l1_resolve, p.count);
+    fill(metrics_.scan_l1_l, p.l1, p.count);
     fill(metrics_.scan_merge_l, p.merge, p.count);
     return p;
 }
 
-void Crowdbtree::init_metrics(const std::string &prefix)
+void Crowdbtree::init_metrics(const std::string &prefix, const std::string &backend_label)
 {
     metrics_registry_ = std::make_unique<MetricsRegistry>();
     auto *r           = metrics_registry_.get();
+    // Backend-specific I/O prefix (empty for mem backend → no suffix).
+    std::string io = backend_label.empty() ? prefix : prefix + "." + backend_label;
 
-    metrics_.buf_hits                    = r->register_counter(prefix + ".buf.hits.c");
-    metrics_.buf_misses                  = r->register_counter(prefix + ".buf.misses.c");
-    metrics_.buf_evictions               = r->register_counter(prefix + ".buf.evictions.c");
-    metrics_.buf_writebacks              = r->register_counter(prefix + ".buf.writebacks.c");
-    metrics_.buf_resident                = r->register_gauge(prefix + ".buf.resident.g");
-    metrics_.buf_dirty                   = r->register_gauge(prefix + ".buf.dirty.g");
-    metrics_.apply_l                     = r->register_summary(prefix + ".apply.l");
-    metrics_.snapshot_l                  = r->register_summary(prefix + ".snapshot.l");
+    // ── Logical metrics (backend-independent) ──
+    metrics_.flush_l                     = r->register_summary(prefix + ".flush.l");
+    metrics_.flush_drain_c               = r->register_counter(prefix + ".flush.drain.c");
+    metrics_.flush_entries_c             = r->register_counter(prefix + ".flush.entries.c");
     metrics_.mt_upsert_c                 = r->register_counter(prefix + ".mt.upsert.c");
     metrics_.mt_get_c                    = r->register_counter(prefix + ".mt.get.c");
     metrics_.mt_get_hit_c                = r->register_counter(prefix + ".mt.get.hit.c");
-    metrics_.flush_drain_c               = r->register_counter(prefix + ".flush.drain.c");
-    metrics_.flush_entries_c             = r->register_counter(prefix + ".flush.entries.c");
     metrics_.l1_get_c                    = r->register_counter(prefix + ".l1.get.c");
     metrics_.l1_get_hit_c                = r->register_counter(prefix + ".l1.get.hit.c");
-    metrics_.flush_l                     = r->register_summary(prefix + ".flush.l");
     metrics_.page_write_l                = r->register_summary(prefix + ".page.write.l");
     metrics_.page_map_lookup_c           = r->register_counter(prefix + ".page.map.lookup.c");
-    metrics_.demand_load_l               = r->register_summary(prefix + ".demand.load.l");
-    metrics_.snapshot_apply_l            = r->register_summary(prefix + ".snapshot.apply.l");
-    metrics_.snapshot_page_write_l       = r->register_summary(prefix + ".snapshot.page.write.io.l");
-    metrics_.snapshot_page_write_cache_c = r->register_counter(prefix + ".snapshot.page.write.cache.c");
-    metrics_.snapshot_page_write_bw      = r->register_bandwidth(prefix + ".snapshot.page.write.bw");
-    metrics_.snapshot_meta_write_bw      = r->register_bandwidth(prefix + ".snapshot.meta.write.bw");
-    metrics_.page_read_bw                = r->register_bandwidth(prefix + ".page.read.bw");
-    metrics_.snapshot_pages_c            = r->register_counter(prefix + ".snapshot.pages.c");
     metrics_.scan_c                      = r->register_counter(prefix + ".scan.c");
     metrics_.scan_entries_c              = r->register_counter(prefix + ".scan.entries.c");
     metrics_.scan_l                      = r->register_summary(prefix + ".scan.l");
-    metrics_.scan_l0_snapshot_l          = r->register_summary(prefix + ".scan.l0.snapshot.l");
-    metrics_.scan_l0_skip_l              = r->register_summary(prefix + ".scan.l0.skip.l");
-    metrics_.scan_l1_descent_l           = r->register_summary(prefix + ".scan.l1.descent.l");
-    metrics_.scan_l1_resolve_l           = r->register_summary(prefix + ".scan.l1.resolve.l");
+    metrics_.scan_l1_l                   = r->register_summary(prefix + ".scan.l1.l");
     metrics_.scan_merge_l                = r->register_summary(prefix + ".scan.merge.l");
+
+    // ── Backend I/O metrics ──
+    metrics_.buf_hits                    = r->register_counter(io + ".buf.hits.c");
+    metrics_.buf_misses                  = r->register_counter(io + ".buf.misses.c");
+    metrics_.buf_evictions               = r->register_counter(io + ".buf.evictions.c");
+    metrics_.buf_writebacks              = r->register_counter(io + ".buf.writebacks.c");
+    metrics_.buf_resident                = r->register_gauge(io + ".buf.resident.g");
+    metrics_.buf_dirty                   = r->register_gauge(io + ".buf.dirty.g");
+    metrics_.demand_load_l               = r->register_summary(io + ".demand.load.l");
+    metrics_.snapshot_apply_l            = r->register_summary(io + ".snapshot.apply.l");
+    metrics_.snapshot_page_write_l       = r->register_summary(io + ".snapshot.page.write.io.l");
+    metrics_.snapshot_page_write_cache_c = r->register_counter(io + ".snapshot.page.write.cache.c");
+    metrics_.snapshot_page_write_bw      = r->register_bandwidth(io + ".snapshot.page.write.bw");
+    metrics_.snapshot_meta_write_bw      = r->register_bandwidth(io + ".snapshot.meta.write.bw");
+    metrics_.page_read_bw                = r->register_bandwidth(io + ".page.read.bw");
+    metrics_.snapshot_pages_c            = r->register_counter(io + ".snapshot.pages.c");
+
     pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
                        metrics_.buf_resident, metrics_.buf_dirty);
 }

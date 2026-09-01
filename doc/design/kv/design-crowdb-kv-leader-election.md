@@ -270,7 +270,7 @@ The mutex over the batch serializes enqueue and drain, so no waiter is lost. A r
 
 **Correctness** is identical to the single-read procedure in §7.1. The heartbeat quorum at the leader's term confirms no higher-term election displaced this leader during the round, so every committed write is reflected in the leader's local state. The engine get returns the *latest* applied value for the key (single-version, highest-slot-wins), not a value pinned to `R`; each batched read performs its own `engine_get_bytes` after the barrier resolves and observes the freshest local state at its serve time. The shared `R` reported in the response is therefore a conservative freshness floor (the pre-round `contiguous_chosen`), never an over-estimate. A write that commits *during* the round has slot > `R` and is returned by the engine get, so late-arriving batched reads are not stale.
 
-**Metric.** `read.readindex_rounds.c` increments once per ReadIndex heartbeat round (by the round leader). `read.readindex_path.c` still increments once per read that takes the ReadIndex path, so for a batched burst of N reads `readindex_rounds.c == 1` and `readindex_path.c == N`; average batch size is `readindex_path.c / readindex_rounds.c`. `read.barrier.l` drops toward one RTT amortized across the batch.
+**Metric.** `read.barrier.l` count increments once per read that enters the ReadIndex barrier. For a batched burst of N reads coalesced onto a single heartbeat round, all N reads observe the same (amortized) barrier latency — `read.barrier.l` drops toward one RTT amortized across the batch.
 
 ### 7.3 When to choose ReadIndex over lease
 

@@ -488,7 +488,7 @@ payload contract, out of scope).
   stream ordering
 - `design-crowdb-kv-slot.md` §5 — pipelined fanout and per-peer flow control
 - `design-crowdb-kv-observability.md` — write-path phase metrics
-  (`write.propose_e2e.l`, `write.prepare_phase.l`, `write.accept_phase.l`,
-  `write.accept_quorum_rpc.l`, `write.engine_apply.l`)
+  (`paxos.propose.e2e.l`, `paxos.classic.prepare.l`,
+  `paxos.accept.quorum_rpc.l`, `paxos.learn.apply.l`)
 - `design-crowdb-rpc.md` §6 — Flatbuffer Wrapper Convention
 - `design-crowdb-rpc-diskdb-migration.md` — R115's proven migration pattern

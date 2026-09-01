@@ -333,8 +333,7 @@ impl PxRemoteReplica {
     ) -> Result<T, PxReplicaError> {
         match result {
             Ok(Ok(reply)) => {
-                #[allow(clippy::cast_possible_truncation)]
-                self.record_ok(started.elapsed().as_millis() as u64);
+                self.record_ok(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
                 Ok(reply)
             }
             Ok(Err(e)) => {
@@ -354,10 +353,10 @@ impl PxRemoteReplica {
     }
 
     /// Record a successful RPC to both legacy and registry handles.
-    fn record_ok(&self, rtt_ms: u64) {
-        self.metrics.record_ok(rtt_ms);
+    fn record_ok(&self, rtt_ns: u64) {
+        self.metrics.record_ok(rtt_ns);
         if let Some(h) = self.rpc_handles.get() {
-            h.latency.observe(rtt_ms.saturating_mul(1_000_000));
+            h.latency.observe(rtt_ns);
         }
     }
 

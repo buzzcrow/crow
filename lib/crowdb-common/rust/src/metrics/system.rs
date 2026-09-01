@@ -19,10 +19,10 @@ use std::fs;
 /// Snapshot of system-level metrics at a single point in time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemMetrics {
-    /// User CPU time (microseconds) since the previous snapshot.
-    pub cpu_user_us: u64,
-    /// System CPU time (microseconds) since the previous snapshot.
-    pub cpu_sys_us: u64,
+    /// User CPU utilization (percent) since the previous snapshot.
+    pub cpu_user_pct: u64,
+    /// System CPU utilization (percent) since the previous snapshot.
+    pub cpu_sys_pct: u64,
     /// Resident set size in KB.
     pub rss_kb: u64,
     /// TCP retransmit count delta since previous snapshot (Linux only).
@@ -64,11 +64,11 @@ impl SystemCollector {
     pub fn collect(&mut self) -> SystemMetrics {
         let (user_us, sys_us) = read_cpu_times();
         let (retransmits, lost) = read_tcp_stats();
-        let _elapsed = self.prev_instant.elapsed();
+        let elapsed = self.prev_instant.elapsed();
         self.prev_instant = Instant::now();
 
-        let cpu_user_us = user_us.saturating_sub(self.prev_cpu_user_us);
-        let cpu_sys_us = sys_us.saturating_sub(self.prev_cpu_sys_us);
+        let delta_user_us = user_us.saturating_sub(self.prev_cpu_user_us);
+        let delta_sys_us = sys_us.saturating_sub(self.prev_cpu_sys_us);
         let tcp_retransmits = retransmits.saturating_sub(self.prev_tcp_retransmits);
         let tcp_lost = lost.saturating_sub(self.prev_tcp_lost);
 
@@ -79,9 +79,20 @@ impl SystemCollector {
 
         let rss_kb = read_rss_kb();
 
+        // CPU utilization = (delta_cpu_us / elapsed_us) * 100, capped at 100.
+        let elapsed_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        let cpu_user_pct = delta_user_us
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(elapsed_us))
+            .map_or(0, |v| v.min(100));
+        let cpu_sys_pct = delta_sys_us
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(elapsed_us))
+            .map_or(0, |v| v.min(100));
+
         SystemMetrics {
-            cpu_user_us,
-            cpu_sys_us,
+            cpu_user_pct,
+            cpu_sys_pct,
             rss_kb,
             tcp_retransmits,
             tcp_lost,
@@ -97,11 +108,11 @@ impl Default for SystemCollector {
 
 /// Write a system snapshot to the flush writer in the "misc" section format.
 pub fn flush_system<W: Write>(writer: &mut W, snap: &SystemMetrics) {
-    let _ = writeln!(writer, "sys.cpu_user_us  {}", snap.cpu_user_us);
-    let _ = writeln!(writer, "sys.cpu_sys_us   {}", snap.cpu_sys_us);
-    let _ = writeln!(writer, "sys.rss_kb       {}", snap.rss_kb);
-    let _ = writeln!(writer, "sys.tcp_retrans  {}", snap.tcp_retransmits);
-    let _ = writeln!(writer, "sys.tcp_lost     {}", snap.tcp_lost);
+    let _ = writeln!(writer, "sys.cpu.util.user  {}%", snap.cpu_user_pct);
+    let _ = writeln!(writer, "sys.cpu.util.sys   {}%", snap.cpu_sys_pct);
+    let _ = writeln!(writer, "sys.rss_kb         {}", snap.rss_kb);
+    let _ = writeln!(writer, "sys.tcp_retrans    {}", snap.tcp_retransmits);
+    let _ = writeln!(writer, "sys.tcp_lost       {}", snap.tcp_lost);
 }
 
 // ── Platform-specific readers ───────────────────────────────────
@@ -225,17 +236,17 @@ mod tests {
     #[test]
     fn collect_delta_is_non_negative() {
         let mut collector = SystemCollector::new();
-        let snap1 = collector.collect();
+        let _snap1 = collector.collect();
         let snap2 = collector.collect();
-        // Deltas should be non-negative (monotonic counters).
-        assert!(snap2.cpu_user_us <= snap1.cpu_user_us + 1_000_000);
+        // Utilization should be non-negative and bounded.
+        assert!(snap2.cpu_user_pct <= 100);
     }
 
     #[test]
     fn flush_system_writes_all_fields() {
         let snap = SystemMetrics {
-            cpu_user_us: 1000,
-            cpu_sys_us: 500,
+            cpu_user_pct: 42,
+            cpu_sys_pct: 17,
             rss_kb: 4096,
             tcp_retransmits: 3,
             tcp_lost: 1,
@@ -243,10 +254,10 @@ mod tests {
         let mut buf = Vec::new();
         flush_system(&mut buf, &snap);
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("sys.cpu_user_us"));
-        assert!(out.contains("1000"));
-        assert!(out.contains("sys.cpu_sys_us"));
-        assert!(out.contains("500"));
+        assert!(out.contains("sys.cpu.util.user"));
+        assert!(out.contains("42%"));
+        assert!(out.contains("sys.cpu.util.sys"));
+        assert!(out.contains("17%"));
         assert!(out.contains("sys.rss_kb"));
         assert!(out.contains("4096"));
         assert!(out.contains("sys.tcp_retrans"));

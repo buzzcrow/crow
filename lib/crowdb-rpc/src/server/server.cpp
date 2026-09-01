@@ -3,6 +3,7 @@
 
 #include "crowdb-rpc/server/server.h"
 
+#include "crowdb-common/log.h"
 #include "crowdb-rpc/client/client.h" // RpcClient, RpcError (for request_client_ + fail_all)
 #include "crowdb-rpc/rpc_metrics.h"
 #include "crowdb-rpc/server/handler.h"
@@ -79,6 +80,7 @@ bool RpcServer::listen(const std::string &addr, int port)
     if (::getsockname(listen_fd_, reinterpret_cast<struct sockaddr *>(&bound), &bound_len) == 0) {
         listen_port_ = ntohs(bound.sin_port);
     }
+    CRB_LOG_INFO("rpc server: listening on {}:{}", addr, listen_port_);
 
     // Register built-in handlers.
     handlers_.register_handler(static_cast<uint16_t>(proto::FBMsgType_EConnectionPingRequest), handle_ping);
@@ -96,6 +98,7 @@ void RpcServer::start()
     if (running_.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
+    CRB_LOG_INFO("rpc server: starting");
     transport_->start();
     // Block until the acceptor is ready to accept connections.
     // This eliminates the race where callers connect before the
@@ -111,6 +114,7 @@ void RpcServer::stop()
     if (!running_.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
+    CRB_LOG_INFO("rpc server: stopping");
     // Join the acceptor before closing listen_fd_ — on Linux, close() on
     // a socket another thread is blocked in accept() on does NOT unblock
     // it (unlike macOS). The acceptor uses poll() with a 100ms timeout,
@@ -173,6 +177,16 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
             continue;
         }
 
+        // Get peer address for logging.
+        struct sockaddr_in peer{};
+        socklen_t          peer_len = sizeof(peer);
+        char               peer_ip[INET_ADDRSTRLEN] = {};
+        int                peer_port                 = 0;
+        if (::getpeername(fd, reinterpret_cast<struct sockaddr *>(&peer), &peer_len) == 0) {
+            ::inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof(peer_ip));
+            peer_port = ntohs(peer.sin_port);
+        }
+
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
@@ -188,7 +202,7 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
         }
 #endif
 
-        auto conn      = transport_->create_connection(fd, "client");
+        auto conn      = transport_->create_connection(fd, std::string(peer_ip) + ":" + std::to_string(peer_port));
         conn->quickack = transport_->quickack();
         conn->set_on_frame([this](Frame *frame, Connection *c) { dispatch(frame, c); });
         // Fail pending server-initiated requests when the connection closes.
@@ -198,6 +212,8 @@ void RpcServer::acceptor_loop(std::promise<void> ready)
                 request_client_->fail_all(c, RpcError::ConnectionClosed);
             }
         });
+        CRB_LOG_INFO("rpc server: connection accepted {}:{} -> conn_id={}", peer_ip, peer_port,
+                     static_cast<long long>(conn->id()));
     }
 }
 

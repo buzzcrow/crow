@@ -51,8 +51,8 @@ handles cross the FFI boundary at runtime.
   Flush shows last value. Use cases: buffer pool resident/dirty pages,
   in-flight slots.
 - **Bandwidth** (`AtomicU64` x 3) — monotonic bytes, tracks count + sum +
-  total_bytes. `observe(bytes)`. Flush shows `count`, `tps`, `avg_size(KB)`,
-  `rate(KB/s)`. Use cases: KV bytes in/out.
+  total_bytes. `observe(bytes)`. Flush shows `count`, `tps`, `avg_size(MB)`,
+  `rate(MB/s)`. Use cases: KV bytes in/out.
 - **LatencyHistogram** (13 buckets + 2 `AtomicU64`) — fixed-bucket percentile
   distribution. Bucket boundaries: `0, 1us, 10us, 100us, 500us, 1ms, 5ms,
   10ms, 50ms, 100ms, 500ms, 1s, infinity`. `observe(ns)` does binary search +
@@ -213,9 +213,13 @@ engine-layer metrics.
 
 - **Latency hierarchy** (feature layer → thinnest layer):
   - `kv.get.lh` — get RPC end-to-end (existing).
+  - `read.e2e.l` — `LatencySummary` for the full server-side read path
+    (barrier + engine_get), measured in `kv_get` handler.
   - `read.barrier.l` — `LatencySummary` for
     `linearizable_read_barrier` (near-zero for lease path, one heartbeat
     RTT for ReadIndex).
+  - `read.apply_fence.l` — `LatencySummary` for the R35 apply fence
+    wait (fast path is a single atomic load).
   - `read.engine_get.l` — `LatencySummary` for `KVEngine::get_bytes`
     (isolates engine cost from consensus barrier cost).
   - `kv.scan.l` — scan RPC end-to-end (existing).
@@ -224,24 +228,15 @@ engine-layer metrics.
   - `kv.read_bytes_in.bw` / `kv.read_bytes_out.bw` — read traffic
     separated from the combined `bytes_in/out.bw`.
 - **Counters** (outcome / population separation):
-  - `read.lease_path.c` — linearizable reads via lease fast path.
-  - `read.readindex_path.c` — linearizable reads via ReadIndex fallback.
   - `kv.get_forwarded.c` — reads forwarded to leader (server-side).
   - `kv.get_forward_failed.c` — forward attempts that failed.
   - `read.minslot_fallback.c` — MinSlot reads redirected to leader
     because the local replica hasn't caught up.
-- **Gauges** (state, bridged on-demand at `resolve_read_point`, same
-  pattern as `inflight_slots.g`):
-  - `read.lease_valid.g` — 1 if leader's read lease is valid at the most
-    recent barrier, 0 otherwise.
-  - `read.contiguous_applied.g` — current `contiguous_applied`.
+- **Gauges** (state, bridged on-demand at `resolve_read_point`):
   - `read.safe_slot.g` — current `group_safe_slot`.
 
-`read.lease_path.c + read.readindex_path.c` equals the total linearizable
-get count in the same window. The path counters are outcome counters (which
-path served the read), not call counters; `read.barrier.l` already carries
-the total call count. This follows the counter/summary non-redundancy
-principle (justified under "different population/outcome").
+`read.barrier.l` count equals the total linearizable get count in the
+same window (lease fast path + ReadIndex path combined).
 
 ### 2.11 Write Path Metrics
 
@@ -252,14 +247,14 @@ on `PxLocalReplica` (alongside the WAL handles) and observed in
 `PxLearner::apply_entry`.
 
 - **Latency hierarchy** (feature layer → thinnest layer):
-  - `write.propose_e2e.l` — `propose_inner` entry → return (the full
+  - `paxos.propose.e2e.l` — `propose_inner` entry → return (the full
     client-observed proposal latency, including retries).
-  - `write.prepare_phase.l` — `run_prepare_phase` entry → return.
-  - `write.accept_phase.l` — `run_accept_phase` entry → return.
-  - `write.accept_quorum_rpc.l` — accept-phase start → first-quorum
+  - `paxos.classic.prepare.l` — `run_prepare_phase` entry → return
+    (classic Paxos only; leader path skips prepare).
+  - `paxos.accept.quorum_rpc.l` — accept-phase start → first-quorum
     reached (the k-th-fastest remote reply latency; recorded only on the
     quorum short-circuit success path, not on the failure path).
-  - `write.engine_apply.l` — `PxLearner::apply_entry` entry → return
+  - `paxos.learn.apply.l` — `PxLearner::apply_entry` entry → return
     (isolates engine apply cost from consensus phase cost).
 
 All five are `LatencySummary` (count + sum + max), matching the read-path

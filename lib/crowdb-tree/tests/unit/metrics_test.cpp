@@ -167,7 +167,7 @@ TEST(MetricsRegistry, FlushFormat)
     // Counter header should appear (counter was inc'd)
     EXPECT_NE(output.find("count  tps(/s)  total"), std::string::npos);
     // Bandwidth header should be suppressed (no bandwidth registered)
-    EXPECT_EQ(output.find("avg_size(KB)"), std::string::npos);
+    EXPECT_EQ(output.find("avg_size(MB)"), std::string::npos);
 }
 
 TEST(MetricsRegistry, FlushMetricsStrFormat)
@@ -176,7 +176,7 @@ TEST(MetricsRegistry, FlushMetricsStrFormat)
     Options      opt;
     opt.page_store = &store;
     Crowdbtree t(opt);
-    t.init_metrics("s.0.g.0");
+    t.init_metrics("s.0.g.0", "mem");
 
     // Trigger a snapshot to populate some metrics.
     ASSERT_TRUE(t.apply(1, Batch{{{.key = "k", .kind = OpKind::kPut, .value = "v"}}}).ok());
@@ -189,8 +189,8 @@ TEST(MetricsRegistry, FlushMetricsStrFormat)
     EXPECT_NE(out.find("window=5.000s"), std::string::npos);
     // Latency section should use us units.
     EXPECT_NE(out.find("us"), std::string::npos);
-    // Bandwidth section should use KB.
-    EXPECT_NE(out.find("KB"), std::string::npos);
+    // Bandwidth section should use MB.
+    EXPECT_NE(out.find("MB"), std::string::npos);
     // tps column should be present.
     EXPECT_NE(out.find("tps"), std::string::npos);
     // max_name_len should be non-zero after init_metrics.

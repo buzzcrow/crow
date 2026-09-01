@@ -193,7 +193,7 @@ void Worker::run_loop()
                             // level-triggered re-firing on the dead fd.
                             // Map erase is deferred to after the pending-write
                             // flush to avoid dangling raw pointers.
-                            CRB_LOG_INFO("worker: conn closed on read fd={} conn_id={} name={}", ev.fd,
+                            CRB_LOG_INFO("rpc transport: connection closed (read) fd={} conn_id={} peer={}", ev.fd,
                                          static_cast<long long>(ev.conn->id()), ev.conn->name());
                             int wfd = ev.conn->write_fd;
                             engine_->remove_connection(ev.fd, wfd);
@@ -220,7 +220,7 @@ void Worker::run_loop()
                         hist_write_handle().observe(now_nanos() - wh_start);
                         if (!ev.conn->is_open()) {
                             // Connection closed during write (hard error).
-                            CRB_LOG_INFO("worker: conn closed on write fd={} conn_id={} name={}", ev.fd,
+                            CRB_LOG_INFO("rpc transport: connection closed (write) fd={} conn_id={} peer={}", ev.fd,
                                          static_cast<long long>(ev.conn->id()), ev.conn->name());
                             int rfd = static_cast<int>(ev.conn->transport_handle);
                             engine_->remove_connection(rfd, ev.fd);
@@ -305,7 +305,7 @@ void Worker::run_loop()
 
             // Round latency: epoll wake → round complete (skip empty wakes).
             if (round_start > 0) {
-                hist_round().observe(now_nanos() - round_start);
+                hist_epoll_run().observe(now_nanos() - round_start);
             }
         }
         CRB_LOG_INFO("worker {} event loop exited", id_);
@@ -541,7 +541,7 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     }
     frame->create_nano = now_nano();
     if (!conn->enqueue_send(frame)) {
-        cnt_send_queue_reject().inc();
+        cnt_send_queue_full().inc();
         stats_.send_queue_rejects.fetch_add(1, std::memory_order_relaxed);
         CRB_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
                      static_cast<long long>(conn->id()), conn->name());
@@ -694,6 +694,8 @@ std::shared_ptr<Connection> SocketTransport::connect(const std::string &addr, in
 
     auto conn      = create_connection(fd, addr + ":" + std::to_string(port));
     conn->quickack = quickack_;
+    CRB_LOG_INFO("rpc transport: connection established -> {}:{} conn_id={}", addr, port,
+                 static_cast<long long>(conn->id()));
     return conn;
 }
 

@@ -188,7 +188,7 @@ async fn read_your_writes_uses_auto_tracked_watermark() {
 /// A multi-page `Linearizable` scan pays the leader read barrier once
 /// (page 1) then switches subsequent pages to `MinSlot` with page-1's
 /// `read_slot` as the freshness floor — skipping the per-page barrier.
-/// Verified by checking the store's `lease_path + readindex_path` counter
+/// Verified by checking the store's `read.barrier.l` summary count
 /// is 1 (not N) after an N-page scan.
 #[tokio::test]
 async fn linearizable_multi_page_scan_pays_barrier_once() {
@@ -241,20 +241,16 @@ async fn linearizable_multi_page_scan_pays_barrier_once() {
 
     // Only page 1 paid the leader barrier; pages 2..3 used MinSlot.
     let snap = registry.lock().unwrap().snapshot("s.1.g.1.read.");
-    let count = |suffix: &str| {
-        snap.iter()
-            .find(|(n, _)| n.ends_with(suffix))
-            .and_then(|(_, v)| v.strip_prefix("c:"))
-            .and_then(|v| v.split(':').next())
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(0)
-    };
-    let lease = count("read.lease_path.c");
-    let readindex = count("read.readindex_path.c");
-    let barriers = lease + readindex;
+    let barrier_count = snap
+        .iter()
+        .find(|(n, _)| n.ends_with("read.barrier.l"))
+        .and_then(|(_, v)| v.strip_prefix("l:"))
+        .and_then(|v| v.split(':').next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0);
     assert_eq!(
-        barriers, 1,
-        "multi-page Linearizable scan should pay 1 barrier (page 1 only), got {barriers} (lease={lease}, readindex={readindex})"
+        barrier_count, 1,
+        "multi-page Linearizable scan should pay 1 barrier (page 1 only), got {barrier_count}"
     );
 
     server.stop();

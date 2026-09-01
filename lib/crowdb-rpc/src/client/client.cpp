@@ -111,7 +111,7 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
                         if (frame->data != nullptr)
                             frame->data->release();
                         delete frame;
-                        rpc_submit_fail().inc();
+                        // submit() already incremented rpc.send.queue.full.c
                         CRB_LOG_WARN("send: submit failed (slab) request_id={} conn_id={}",
                                      static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
                         return false;
@@ -143,7 +143,7 @@ bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id
             if (frame->data != nullptr)
                 frame->data->release();
             delete frame;
-            rpc_submit_fail().inc();
+            // submit() already incremented rpc.send.queue.full.c
             CRB_LOG_WARN("send: submit failed (map) request_id={} conn_id={}",
                          static_cast<unsigned long long>(request_id), static_cast<long long>(conn->id()));
             return false;

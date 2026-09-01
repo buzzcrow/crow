@@ -71,11 +71,7 @@ constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 4;
 
 std::string make_metrics_prefix(const Options &opt)
 {
-    std::string prefix = "s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id);
-    if (!opt.backend_label.empty()) {
-        prefix += ".ct." + opt.backend_label;
-    }
-    return prefix;
+    return "s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id) + ".ct";
 }
 
 // Per-store anchor slot size and the byte offset where the page/segment
@@ -709,7 +705,6 @@ void Crowdbtree::release_snapshot_slot()
 
 Status Crowdbtree::snapshot(uint64_t *out_last_applied)
 {
-    auto t0 = std::chrono::steady_clock::now();
     if (opt_.page_store == nullptr) {
         return Status::invalid_argument("snapshot: no page_store");
     }
@@ -821,10 +816,6 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
     release_snapshot_slot();
     if (out_last_applied != nullptr) {
         *out_last_applied = prepared.last_applied_slot;
-    }
-    if (metrics_.snapshot_l != nullptr) {
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-        metrics_.snapshot_l->observe(static_cast<uint64_t>(ns));
     }
     return Status::Ok();
 }
@@ -984,7 +975,7 @@ Status Crowdbtree::open(const Options &opt, std::unique_ptr<Crowdbtree> *out)
     if (!read_best_anchor(*store, iu, &anchor)) {
         // No valid snapshot: fresh empty tree (already constructed).
         CRB_LOG_INFO("[{}] open: no committed anchor; starting empty", opt.name);
-        tree->init_metrics(make_metrics_prefix(opt));
+        tree->init_metrics(make_metrics_prefix(opt), opt.backend_label);
         *out = std::move(tree);
         return Status::Ok();
     }
@@ -1051,7 +1042,7 @@ Status Crowdbtree::open(const Options &opt, std::unique_ptr<Crowdbtree> *out)
 
     CRB_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
                  anchor.last_applied_slot, anchor.root_page_id, entries.size());
-    tree->init_metrics(make_metrics_prefix(opt));
+    tree->init_metrics(make_metrics_prefix(opt), opt.backend_label);
     *out = std::move(tree);
     return Status::Ok();
 }

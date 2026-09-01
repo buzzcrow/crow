@@ -79,28 +79,26 @@ async fn main() {
     let mut metrics_runner =
         create_metrics_runner(args.metrics_interval, args.log_max_file_mb, args.log_max_files);
 
-    info!(
-        stores = ?args.stores.as_deref(),
-        groups = ?args.groups.as_deref(),
-        replica = args.replica,
-        ports = ?args.ports.as_deref(),
-        management_addr = %args.management_addr,
-        management_port = args.management_port,
-        election_profile = %args.election_profile,
-        kv_backend = %args.kv_backend,
-        wal_backend = %args.wal_backend,
-        max_inflight = args.max_inflight,
-        coalesce_max_keys = ?args.coalesce_max_keys,
-        coalesce_drain_threshold = ?args.coalesce_drain_threshold,
-        peer_pool_size = args.peer_pool_size,
-        event_write = args.event_write,
-        enable_nagle = args.enable_nagle,
-        quickack = args.quickack,
-        send_queue_capacity = args.send_queue_capacity,
-        rpc_workers = args.rpc_workers,
-        no_fsync = args.no_fsync,
-        "parsed CLI arguments"
-    );
+    info!("server config:");
+    info!("  stores              {:?}", args.stores.as_deref());
+    info!("  groups              {:?}", args.groups.as_deref());
+    info!("  replica             {}", args.replica);
+    info!("  ports               {:?}", args.ports.as_deref());
+    info!("  management_addr     {}", args.management_addr);
+    info!("  management_port     {}", args.management_port);
+    info!("  election_profile    {}", args.election_profile);
+    info!("  kv_backend          {}", args.kv_backend);
+    info!("  wal_backend         {}", args.wal_backend);
+    info!("  max_inflight        {}", args.max_inflight);
+    info!("  coalesce_max_keys   {:?}", args.coalesce_max_keys);
+    info!("  coalesce_drain_thr  {:?}", args.coalesce_drain_threshold);
+    info!("  peer_pool_size      {}", args.peer_pool_size);
+    info!("  event_write         {}", args.event_write);
+    info!("  enable_nagle        {}", args.enable_nagle);
+    info!("  quickack            {}", args.quickack);
+    info!("  send_queue_capacity {}", args.send_queue_capacity);
+    info!("  rpc_workers         {}", args.rpc_workers);
+    info!("  no_fsync            {}", args.no_fsync);
 
     let bootstrap = parse_and_validate_cli_args(&args);
 

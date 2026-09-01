@@ -297,7 +297,6 @@ pub(crate) struct ReplicationRegistryHandles {
     pub(crate) apply_loop_skip: Arc<Counter>,
     pub(crate) gap_count: Arc<Gauge>,
     pub(crate) fetchgap_inflight: Arc<Gauge>,
-    pub(crate) last_chosen_slot: Arc<Gauge>,
     pub(crate) known_commit_slot: Arc<Gauge>,
 }
 
@@ -830,11 +829,10 @@ impl PxLocalReplica {
             apply_loop_skip: r.register_counter(format!("{prefix}.paxos.apply_loop.skip.c")),
             gap_count: r.register_gauge(format!("{prefix}.paxos.gap_count.g")),
             fetchgap_inflight: r.register_gauge(format!("{prefix}.paxos.fetchgap.inflight.g")),
-            last_chosen_slot: r.register_gauge(format!("{prefix}.paxos.last_chosen_slot.g")),
             known_commit_slot: r.register_gauge(format!("{prefix}.paxos.known_commit_slot.g")),
         };
         let _ = self.replication_handles.set(repl_handles);
-        let engine_apply = r.register_summary(format!("{prefix}.write.engine_apply.l"));
+        let engine_apply = r.register_summary(format!("{prefix}.paxos.learn.apply.l"));
         self.learner.set_engine_apply_summary(engine_apply);
         if let Some(ref wal) = self.wal {
             let bl = wal.backend_label();
@@ -845,8 +843,6 @@ impl PxLocalReplica {
             wal.set_fsync_metrics(fsync_summary, write_bw);
             if wal.backend().is_block_device() {
                 let handles = crate::wal::wal_engine::BlockDeviceCounterHandles {
-                    logical_bytes: r.register_counter(format!("{prefix}.wal.{bl}.logical_bytes.c")),
-                    physical_bytes: r.register_counter(format!("{prefix}.wal.{bl}.physical_bytes.c")),
                     rmw: r.register_counter(format!("{prefix}.wal.{bl}.rmw.c")),
                 };
                 wal.set_block_device_counters(handles);

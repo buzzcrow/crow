@@ -577,10 +577,6 @@ async fn aligned_engine_append_rotate_seal_replays_all_records() {
         device.rmw_count() > 0,
         "aligned path should record read-modify-write events"
     );
-    assert!(
-        device.physical_bytes_written() > device.logical_bytes_written(),
-        "aligned path should amplify physical bytes beyond logical"
-    );
 
     let replay = replay_group(&backend, &[disk], group_id).await.unwrap();
     let recovered: Vec<u64> = replay.records.iter().map(|r| r.slot).collect();

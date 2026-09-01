@@ -263,7 +263,7 @@ TEST(IncrementalCheckpoint, SnapshotPagesTotalAccumulates)
     opt.leaf_split_bytes = 160;
     opt.frame_bytes      = 4096;
     Crowdbtree t(opt);
-    t.init_metrics("s.0.g.0");
+    t.init_metrics("s.0.g.0", "mem");
 
     std::map<std::string, std::string> oracle;
     fill(&t, 200, &oracle);

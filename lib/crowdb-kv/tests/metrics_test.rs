@@ -65,9 +65,9 @@ fn bandwidth_count_avg_size_and_rate() {
     assert!(
         out.contains("count")
             && out.contains("tps(/s)")
-            && out.contains("avg_size(KB)")
-            && out.contains("rate(KB/s)")
-            && out.contains("total(KB)")
+            && out.contains("avg_size(MB)")
+            && out.contains("rate(MB/s)")
+            && out.contains("total(MB)")
     );
     assert!(out.contains("10"));
     assert!(out.contains("s.1.kv.bytes_in.bw"));

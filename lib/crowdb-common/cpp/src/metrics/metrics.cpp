@@ -227,7 +227,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  avg_size(KB)  max(KB)  rate(KB/s)  total(KB)\n",
+            std::fprintf(fp, "%-*s  count  tps(/s)  avg_size(MB)  max(MB)  rate(MB/s)  total(MB)\n",
                          static_cast<int>(name_w), "");
             for (const auto &[i, snap] : active) {
                 uint64_t avg_size = snap.count > 0 ? snap.sum / snap.count : 0;
@@ -235,13 +235,14 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
                 auto     rate     = static_cast<uint64_t>(rate_d);
                 double   tps_d    = static_cast<double>(snap.count) / window_secs;
                 auto     tps      = static_cast<uint64_t>(tps_d);
-                std::fprintf(fp, "%-*s  %*llu  %*llu  %12llu  %7llu  %10llu  %9llu\n", static_cast<int>(name_w),
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %12.2f  %7.2f  %10.2f  %9.2f\n", static_cast<int>(name_w),
                              bandwidths_[i]->name().c_str(), static_cast<int>(cw),
                              static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
-                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg_size / 1024),
-                             static_cast<unsigned long long>(snap.max_bytes / 1024),
-                             static_cast<unsigned long long>(rate / 1024),
-                             static_cast<unsigned long long>(snap.total_bytes / 1024));
+                             static_cast<unsigned long long>(tps),
+                             static_cast<double>(avg_size) / (1024.0 * 1024.0),
+                             static_cast<double>(snap.max_bytes) / (1024.0 * 1024.0),
+                             static_cast<double>(rate) / (1024.0 * 1024.0),
+                             static_cast<double>(snap.total_bytes) / (1024.0 * 1024.0));
             }
         }
     }

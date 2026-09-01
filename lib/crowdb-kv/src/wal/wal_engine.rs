@@ -45,16 +45,12 @@ pub struct BatchStats {
 /// to compute per-window deltas for the metrics registry.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BlockDeviceSnapshot {
-    pub logical_bytes_written: u64,
-    pub physical_bytes_written: u64,
     pub rmw_count: u64,
 }
 
 /// Registered counter handles for block device metrics. Stored on
 /// `WalEngine` via `OnceLock` and polled by the engine collector.
 pub struct BlockDeviceCounterHandles {
-    pub logical_bytes: Arc<Counter>,
-    pub physical_bytes: Arc<Counter>,
     pub rmw: Arc<Counter>,
 }
 
@@ -481,13 +477,9 @@ impl WalEngine {
         let _handles = self.block_device_counters.get()?;
         match self.backend.as_ref() {
             IoBackend::BlockDevice(dev) => Some(BlockDeviceSnapshot {
-                logical_bytes_written: dev.logical_bytes_written(),
-                physical_bytes_written: dev.physical_bytes_written(),
                 rmw_count: dev.rmw_count(),
             }),
             IoBackend::MemBlock(dev) => Some(BlockDeviceSnapshot {
-                logical_bytes_written: dev.logical_bytes_written(),
-                physical_bytes_written: dev.physical_bytes_written(),
                 rmw_count: dev.rmw_count(),
             }),
             IoBackend::File => None,

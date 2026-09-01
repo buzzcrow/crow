@@ -439,7 +439,6 @@ impl PxKvStore {
         let safe_slot = group.group_safe_slot();
         let contiguous_applied = replica.contiguous_applied();
         if let Some(h) = group.read_handles() {
-            h.contiguous_applied.set(contiguous_applied);
             h.safe_slot.set(safe_slot);
         }
         let mode = ReadMode::try_from(read_mode).unwrap_or(ReadMode::Linearizable);

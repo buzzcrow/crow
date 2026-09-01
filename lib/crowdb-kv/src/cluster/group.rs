@@ -39,7 +39,6 @@ pub(crate) use crate::cluster::group_prepare::PrepareAttempt;
 pub(crate) struct WriteRegistryHandles {
     pub(crate) propose_e2e: Arc<LatencySummary>,
     pub(crate) prepare_phase: Arc<LatencySummary>,
-    pub(crate) accept_phase: Arc<LatencySummary>,
     pub(crate) accept_quorum_rpc: Arc<LatencySummary>,
 }
 
@@ -48,16 +47,13 @@ pub(crate) struct WriteRegistryHandles {
 /// `OnceLock` for lock-free hot-path reads. Mirrors the pattern of
 /// `ElectionRegistryHandles` on `PxLocalReplica`.
 pub(crate) struct ReadRegistryHandles {
-    pub(crate) lease_path: Arc<Counter>,
-    pub(crate) readindex_path: Arc<Counter>,
-    pub(crate) readindex_rounds: Arc<Counter>,
     pub(crate) minslot_fallback: Arc<Counter>,
     pub(crate) barrier: Arc<LatencySummary>,
     pub(crate) engine_get: Arc<LatencySummary>,
     /// R35 apply-fence wait latency (fast path is a single atomic load).
     pub(crate) apply_fence: Arc<LatencySummary>,
-    pub(crate) lease_valid: Arc<Gauge>,
-    pub(crate) contiguous_applied: Arc<Gauge>,
+    /// End-to-end read latency: `resolve_read_point` + `engine_get`.
+    pub(crate) e2e: Arc<LatencySummary>,
     pub(crate) safe_slot: Arc<Gauge>,
 }
 
@@ -587,23 +583,18 @@ impl PxGroup {
         };
         let _ = self.inflight.handles.set(inflight_handles);
         let read_handles = ReadRegistryHandles {
-            lease_path: r.register_counter(format!("{prefix}.read.lease_path.c")),
-            readindex_path: r.register_counter(format!("{prefix}.read.readindex_path.c")),
-            readindex_rounds: r.register_counter(format!("{prefix}.read.readindex_rounds.c")),
             minslot_fallback: r.register_counter(format!("{prefix}.read.minslot_fallback.c")),
             barrier: r.register_summary(format!("{prefix}.read.barrier.l")),
             engine_get: r.register_summary(format!("{prefix}.read.engine_get.l")),
             apply_fence: r.register_summary(format!("{prefix}.read.apply_fence.l")),
-            lease_valid: r.register_gauge(format!("{prefix}.read.lease_valid.g")),
-            contiguous_applied: r.register_gauge(format!("{prefix}.read.contiguous_applied.g")),
+            e2e: r.register_summary(format!("{prefix}.read.e2e.l")),
             safe_slot: r.register_gauge(format!("{prefix}.read.safe_slot.g")),
         };
         let _ = self.read_handles.set(read_handles);
         let write_handles = WriteRegistryHandles {
-            propose_e2e: r.register_summary(format!("{prefix}.write.propose_e2e.l")),
-            prepare_phase: r.register_summary(format!("{prefix}.write.prepare_phase.l")),
-            accept_phase: r.register_summary(format!("{prefix}.write.accept_phase.l")),
-            accept_quorum_rpc: r.register_summary(format!("{prefix}.write.accept_quorum_rpc.l")),
+            propose_e2e: r.register_summary(format!("{prefix}.paxos.propose.e2e.l")),
+            prepare_phase: r.register_summary(format!("{prefix}.paxos.classic.prepare.l")),
+            accept_quorum_rpc: r.register_summary(format!("{prefix}.paxos.accept.quorum_rpc.l")),
         };
         let _ = self.write_handles.set(write_handles);
     }

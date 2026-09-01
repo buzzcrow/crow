@@ -205,13 +205,9 @@ impl PxGroup {
         }
 
         let lease_valid = replica.lease_read_valid(lease_now());
-        if let Some(h) = self.read_handles() {
-            h.lease_valid.set(u64::from(lease_valid));
-        }
         if lease_valid {
             if let Some(h) = self.read_handles() {
                 h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
-                h.lease_path.inc();
             }
             return ReadBarrierOutcome::Ready { read_slot };
         }
@@ -249,9 +245,6 @@ impl PxGroup {
             let outcome = rx.await.unwrap_or(ReadBarrierOutcome::NoQuorum);
             if let Some(h) = self.read_handles() {
                 h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
-                if matches!(outcome, ReadBarrierOutcome::Ready { .. }) {
-                    h.readindex_path.inc();
-                }
             }
             return outcome;
         }
@@ -291,10 +284,6 @@ impl PxGroup {
 
         if let Some(h) = self.read_handles() {
             h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
-            h.readindex_rounds.inc();
-            if matches!(outcome, ReadBarrierOutcome::Ready { .. }) {
-                h.readindex_path.inc();
-            }
         }
         outcome
     }

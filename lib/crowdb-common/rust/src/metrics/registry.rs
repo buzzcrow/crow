@@ -574,9 +574,9 @@ mod tests {
         reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05.123Z");
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(out.contains("avg_size(KB)") && out.contains("rate(KB/s)"));
+        assert!(out.contains("avg_size(MB)") && out.contains("rate(MB/s)"));
         assert!(out.contains("s.1.kv.bytes_in.bw"));
-        assert!(out.contains("1.0"));
+        assert!(out.contains("0.00"));
     }
 
     #[test]

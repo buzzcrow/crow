@@ -25,7 +25,7 @@ class Worker;
 //
 // Latency histogram for the submit → writev queue wait. The raw
 // aggregation counters and event-loop timing that used to live here
-// have been replaced by crowdb-common metrics (rpc.transport.* histograms,
+// have been replaced by crowdb-common metrics (rpc.* histograms,
 // bandwidths, and counters registered via rpc_metrics.h).
 //
 // Latency steps (nanoseconds, log2 buckets 0..30 = 1ns..1s):

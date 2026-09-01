@@ -52,24 +52,6 @@ impl PxGroup {
         dedup_tags: &[DedupTag],
         quorum: usize,
     ) -> AcceptAttempt {
-        let phase_start = std::time::Instant::now();
-        let result = self
-            .run_accept_phase_impl(replica, entry, dedup_tags, quorum)
-            .await;
-        if let Some(h) = self.write_handles.get() {
-            h.accept_phase
-                .observe(phase_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
-        }
-        result
-    }
-
-    async fn run_accept_phase_impl(
-        &self,
-        replica: &PxLocalReplica,
-        entry: &PxLogEntry,
-        dedup_tags: &[DedupTag],
-        quorum: usize,
-    ) -> AcceptAttempt {
         let quorum_rpc_start = std::time::Instant::now();
         let mut fold = ReplyFold::new();
         let group_id = self.group_id;

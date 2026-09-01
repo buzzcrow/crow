@@ -5,9 +5,9 @@
 // values, to identify the 1KiB anomaly's root cause. Builds a flushed L1-only
 // tree (no L0) at each value size, runs N scans, and prints per-step
 // avg/max via Crowdbtree::scan_profile(). An L0 variant leaves entries
-// unflushed to measure the MemTable::snapshot() copy cost directly.
+// unflushed to measure the L0 cursor cost directly.
 //
-// R50 Gate 2: concurrent write+scan scenarios measure l0_snapshot under a
+// R50 Gate 2: concurrent write+scan scenarios measure scan latency under a
 // non-empty L0 at scan time — sustained writes with a periodic flush
 // (production-like) and a flush backlog (upper bound). See
 // doc/backlog/R50-epoch-protected-memtable.md Gate 2.
@@ -95,14 +95,8 @@ void print_profile(const char *label, const ScanProfile &p)
     auto us = [](uint64_t ns) { return static_cast<double>(ns) / 1000.0; };
     std::printf("  %-14s count=%llu entries=%llu total_avg=%.1fus\n", label, static_cast<unsigned long long>(p.count),
                 static_cast<unsigned long long>(p.entries), us(p.total.avg_ns));
-    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l0_snapshot", us(p.l0_snapshot.avg_ns),
-                us(p.l0_snapshot.max_ns), us(p.l0_snapshot.sum_ns));
-    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l0_skip", us(p.l0_skip.avg_ns),
-                us(p.l0_skip.max_ns), us(p.l0_skip.sum_ns));
-    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l1_descent", us(p.l1_descent.avg_ns),
-                us(p.l1_descent.max_ns), us(p.l1_descent.sum_ns));
-    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l1_resolve", us(p.l1_resolve.avg_ns),
-                us(p.l1_resolve.max_ns), us(p.l1_resolve.sum_ns));
+    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l1", us(p.l1.avg_ns),
+                us(p.l1.max_ns), us(p.l1.sum_ns));
     std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "merge", us(p.merge.avg_ns), us(p.merge.max_ns),
                 us(p.merge.sum_ns));
 }
@@ -125,12 +119,10 @@ void run_scenario(const char *label, int n, int value_size, bool flush, size_t l
                 iters);
     print_profile("per-scan", p);
     if (p.count > 0) {
-        std::printf("    leaves-touched-est: l1_resolve_avg / total_avg = %.1f%%\n",
-                    100.0 * static_cast<double>(p.l1_resolve.sum_ns) / static_cast<double>(p.total.sum_ns));
+        std::printf("    l1-est:              l1_avg / total_avg        = %.1f%%\n",
+                    100.0 * static_cast<double>(p.l1.sum_ns) / static_cast<double>(p.total.sum_ns));
         std::printf("    merge-est:           merge_avg / total_avg    = %.1f%%\n",
                     100.0 * static_cast<double>(p.merge.sum_ns) / static_cast<double>(p.total.sum_ns));
-        std::printf("    l0-snapshot-est:     l0_snapshot_avg/total    = %.1f%%\n",
-                    100.0 * static_cast<double>(p.l0_snapshot.sum_ns) / static_cast<double>(p.total.sum_ns));
     }
 }
 
@@ -140,7 +132,7 @@ void run_scenario(const char *label, int n, int value_size, bool flush, size_t l
 // thread calls flush() every `flush_every_ms` (mimicking the production
 // maintenance tick). `max_memtable_count` controls how many frozen tables
 // can queue before active_ grows past its threshold. Measures
-// scan_profile() over the whole scan window — the average l0_snapshot
+// scan_profile() over the whole scan window — the average scan latency
 // reflects the steady-state L0 size across flush cycles.
 //
 // `prefill_l0` (>0) writes that many entries without flushing before
@@ -234,10 +226,8 @@ void run_concurrent(const char *label, int n_prepop, int value_size, size_t limi
                 static_cast<unsigned long long>(wd), write_kps, static_cast<unsigned long long>(fd));
     print_profile("per-scan", p);
     if (p.count > 0) {
-        std::printf("    l0-snapshot-est:     l0_snapshot_avg/total    = %.1f%%\n",
-                    100.0 * static_cast<double>(p.l0_snapshot.sum_ns) / static_cast<double>(p.total.sum_ns));
-        std::printf("    l1-resolve-est:      l1_resolve_avg/total     = %.1f%%\n",
-                    100.0 * static_cast<double>(p.l1_resolve.sum_ns) / static_cast<double>(p.total.sum_ns));
+        std::printf("    l1-est:              l1_avg/total              = %.1f%%\n",
+                    100.0 * static_cast<double>(p.l1.sum_ns) / static_cast<double>(p.total.sum_ns));
     }
 }
 } // namespace
@@ -264,7 +254,7 @@ int main()
     // Incremental flush (mimics the production maintenance loop's periodic
     // flush every ~30k keys): shapes the tree differently from a single
     // end-of-load flush. Confirms whether tree shape explains the production
-    // 64B l1_resolve cost (3985us) vs the single-flush microbench (1170us).
+    // 64B l1 cost (3985us) vs the single-flush microbench (1170us).
     run_scenario("L1-incremental 64B", N, 64, true, 1000, ITERS, true, 30000);
     run_scenario("L1-incremental 1KiB", N, 1024, true, 1000, ITERS, true, 30000);
 
@@ -282,9 +272,9 @@ int main()
     // R50 Gate 2: concurrent write+scan with a non-empty L0 at scan time.
     // Production-like: 1 writer at max rate + flush every 3s (mimics the
     // maintenance tick), default max_memtable_count=2. Measures the
-    // steady-state l0_snapshot averaged over ~3 flush cycles (10s).
+    // steady-state scan latency averaged over ~3 flush cycles (10s).
     std::printf("\n=== R50 Gate 2: concurrent write+scan ===\n");
-    std::printf("Measures l0_snapshot under sustained writes with non-empty L0.\n");
+    std::printf("Measures scan latency under sustained writes with non-empty L0.\n");
     run_concurrent("concurrent_64B_flush3s", N, 64, 1000, 10, 3000, 2, 0);
     run_concurrent("concurrent_1KiB_flush3s", N, 1024, 1000, 10, 3000, 2, 0);
 
