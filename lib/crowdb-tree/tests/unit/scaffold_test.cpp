@@ -54,7 +54,7 @@ TEST(Status, Codes)
 TEST(Options, Defaults)
 {
     Options o;
-    EXPECT_EQ(o.max_delta_len, 64U);
-    EXPECT_EQ(o.max_delta_bytes, 4U * 1024U * 1024U);
+    EXPECT_EQ(o.max_delta_len, 16U);
+    EXPECT_EQ(o.max_delta_bytes, 512U * 1024U);
     EXPECT_GT(o.leaf_split_bytes, o.leaf_merge_bytes);
 }

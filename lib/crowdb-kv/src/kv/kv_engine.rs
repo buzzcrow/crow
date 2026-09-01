@@ -138,16 +138,6 @@ pub trait KVEngine: Send + Sync {
     /// distinction).
     fn flush(&self) {}
 
-    /// Maintenance-path drain: drains already-frozen memtables without
-    /// force-freezing the active table. Used by the periodic maintenance
-    /// loop to avoid freezing small active tables on every tick (which
-    /// produces many small L1 deltas and triggers excessive leaf
-    /// consolidation). Default: delegates to [`Self::flush`] (engines
-    /// without a frozen-queue concept have no distinction).
-    fn flush_optional(&self) {
-        self.flush();
-    }
-
     /// Highest slot `S` such that every slot in `[1, S]` is durably reflected
     /// in this engine already — i.e. a caller rebuilding state from a WAL can
     /// safely skip re-`apply`ing slots `<= S` and start at `S + 1`. Must be

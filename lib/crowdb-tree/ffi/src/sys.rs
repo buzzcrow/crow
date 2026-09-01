@@ -178,7 +178,6 @@ extern "C" {
     pub fn ct_put(t: *mut ct_tree, key: *const u8, klen: usize, val: *const u8, vlen: usize) -> c_int;
     pub fn ct_del(t: *mut ct_tree, key: *const u8, klen: usize) -> c_int;
     pub fn ct_flush(t: *mut ct_tree) -> c_int;
-    pub fn ct_flush_optional(t: *mut ct_tree) -> c_int;
     pub fn ct_get(
         t: *mut ct_tree,
         key: *const u8,

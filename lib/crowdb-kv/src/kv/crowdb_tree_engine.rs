@@ -292,14 +292,6 @@ impl KVEngine for CrowdbTreeEngine {
         }
     }
 
-    fn flush_optional(&self) {
-        // Maintenance-path drain: only drain already-frozen memtables,
-        // don't force-freeze the active table. See Crowdbtree::flush_optional().
-        if let Err(e) = self.inner.handle().flush_optional() {
-            tracing::error!("flush_optional failed: {:?}", e);
-        }
-    }
-
     fn noop(&self, slot: u64) {
         self.inner.handle().force_advance_slot(slot);
     }

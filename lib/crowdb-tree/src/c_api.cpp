@@ -744,14 +744,6 @@ ct_status ct_flush(ct_tree *t)
     return to_status(t->tree->flush());
 }
 
-ct_status ct_flush_optional(ct_tree *t)
-{
-    if (t == nullptr) {
-        return static_cast<ct_status>(Code::kInvalidArgument);
-    }
-    return to_status(t->tree->flush_optional());
-}
-
 ct_status ct_get(ct_tree *t, const uint8_t *key, size_t klen, int32_t *found, uint64_t *slot, ct_buf *value)
 {
     if (t == nullptr || found == nullptr) {

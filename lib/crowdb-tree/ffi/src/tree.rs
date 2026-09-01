@@ -140,12 +140,6 @@ impl Crowdbtree {
         check(unsafe { sys::ct_flush(self.as_ptr()) })
     }
 
-    /// Maintenance-path drain: drains already-frozen memtables without
-    /// force-freezing the active table. See `Crowdbtree::flush_optional()`.
-    pub fn flush_optional(&self) -> Result<(), CtError> {
-        check(unsafe { sys::ct_flush_optional(self.as_ptr()) })
-    }
-
     pub fn last_applied_slot(&self) -> u64 {
         unsafe { sys::ct_last_applied_slot(self.as_ptr()) }
     }
