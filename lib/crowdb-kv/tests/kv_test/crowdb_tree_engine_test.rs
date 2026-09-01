@@ -219,7 +219,6 @@ fn clear_drops_all_state() {
         .unwrap();
     e.clear();
     assert_eq!(e.get(b"k").into_ready(), None);
-    assert_eq!(e.live_key_count(), 0);
     assert!(iter_all_dyn(&e).is_empty());
 }
 
@@ -287,7 +286,6 @@ async fn clear_then_persist_survives_reopen() {
         None,
         "clear() + persist must not resurrect the pre-clear key after reopen"
     );
-    assert_eq!(reopened.live_key_count(), 0);
     assert_eq!(reopened.resume_from_slot(), 0);
 }
 

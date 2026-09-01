@@ -141,7 +141,7 @@ impl MetricsRegistry {
     /// format. Resets window state on each metric. Uses the registry's
     /// own `max_name_len` for column width.
     pub fn flush<W: Write>(&self, writer: &mut W, window_secs: f64, timestamp: &str) {
-        self.flush_with_width(writer, window_secs, timestamp, self.max_name_len, 5, 7);
+        self.flush_with_width(writer, window_secs, timestamp, self.max_name_len, 7, 7);
     }
 
     /// Flush with an explicit column width (for cross-section alignment
@@ -574,7 +574,7 @@ mod tests {
         reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05.123Z");
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(out.contains("avg_size(MB)") && out.contains("rate(MB/s)"));
+        assert!(out.contains("avg_size(KB)") && out.contains("rate(MB/s)"));
         assert!(out.contains("s.1.kv.bytes_in.bw"));
         assert!(out.contains("0.00"));
     }

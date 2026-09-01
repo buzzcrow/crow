@@ -33,7 +33,6 @@ fn status_single_group_no_remotes() {
     assert_eq!(g.local_replica.id, 3);
     assert_eq!(g.local_replica.role, "leader");
     assert!(g.local_replica.voting);
-    assert_eq!(g.local_replica.kv_store.key_count, 0);
     assert!(g.remotes.is_empty());
 }
 

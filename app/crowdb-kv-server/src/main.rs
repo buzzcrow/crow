@@ -91,7 +91,7 @@ async fn main() {
     info!("  wal_backend         {}", args.wal_backend);
     info!("  max_inflight        {}", args.max_inflight);
     info!("  coalesce_max_keys   {:?}", args.coalesce_max_keys);
-    info!("  coalesce_drain_thr  {:?}", args.coalesce_drain_threshold);
+    info!("  coalesce_drain_threshold {:?}", args.coalesce_drain_threshold);
     info!("  peer_pool_size      {}", args.peer_pool_size);
     info!("  event_write         {}", args.event_write);
     info!("  enable_nagle        {}", args.enable_nagle);

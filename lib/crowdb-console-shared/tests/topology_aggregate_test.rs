@@ -39,7 +39,7 @@ async fn fake_server(port_tx: tokio::sync::oneshot::Sender<SocketAddr>) {
                                         "id": 1,
                                         "role": "Leader",
                                         "voting": true,
-                                        "kv_store": { "key_count": 0 }
+                                        "kv_store": {}
                                     },
                                     "remotes": []
                                 }

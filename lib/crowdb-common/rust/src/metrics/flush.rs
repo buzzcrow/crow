@@ -206,7 +206,7 @@ pub(super) fn flush_bandwidths<W: Write>(
         "",
         "count",
         "tps(/s)",
-        "avg_size(MB)",
+        "avg_size(KB)",
         "rate(MB/s)",
         "total(MB)",
         width = width,
@@ -215,7 +215,7 @@ pub(super) fn flush_bandwidths<W: Write>(
     );
     for (e, snap) in &active {
         #[allow(clippy::cast_precision_loss)]
-        let avg_mb = snap.avg_size as f64 / (1024.0 * 1024.0);
+        let avg_kb = snap.avg_size as f64 / 1024.0;
         #[allow(clippy::cast_precision_loss)]
         let rate_mb = snap.rate as f64 / (1024.0 * 1024.0);
         #[allow(clippy::cast_precision_loss)]
@@ -227,7 +227,7 @@ pub(super) fn flush_bandwidths<W: Write>(
             e.name,
             snap.count,
             tps(snap.count, window_secs),
-            avg_mb,
+            avg_kb,
             rate_mb,
             total_mb,
             name_w = name_w,

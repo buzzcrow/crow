@@ -285,7 +285,7 @@ mod tests {
                         "role": "leader",
                         "voting": true,
                         "status": "ok",
-                        "kv_store": { "key_count": 0, "engine_healthy": true }
+                        "kv_store": { "engine_healthy": true }
                     },
                     "remotes": []
                 }]
@@ -347,7 +347,7 @@ mod tests {
                         "role": "leader",
                         "voting": true,
                         "status": "ok",
-                        "kv_store": { "key_count": 0, "engine_healthy": true }
+                        "kv_store": { "engine_healthy": true }
                     },
                     "remotes": []
                 })

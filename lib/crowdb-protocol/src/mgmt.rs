@@ -357,8 +357,6 @@ pub struct ReplicaStatus {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct KvStoreStatus {
-    /// O(1) read of the in-memory map length.
-    pub key_count: u64,
     /// `true` for `InMemKV` always; for a `CrowdbTreeEngine`, `false`
     /// once a durable I/O fault has latched.
     #[serde(default = "default_true")]

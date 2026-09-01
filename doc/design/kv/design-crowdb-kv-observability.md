@@ -51,7 +51,7 @@ handles cross the FFI boundary at runtime.
   Flush shows last value. Use cases: buffer pool resident/dirty pages,
   in-flight slots.
 - **Bandwidth** (`AtomicU64` x 3) — monotonic bytes, tracks count + sum +
-  total_bytes. `observe(bytes)`. Flush shows `count`, `tps`, `avg_size(MB)`,
+  total_bytes. `observe(bytes)`. Flush shows `count`, `tps`, `avg_size(KB)`,
   `rate(MB/s)`. Use cases: KV bytes in/out.
 - **LatencyHistogram** (13 buckets + 2 `AtomicU64`) — fixed-bucket percentile
   distribution. Bucket boundaries: `0, 1us, 10us, 100us, 500us, 1ms, 5ms,

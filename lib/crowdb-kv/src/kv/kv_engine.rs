@@ -97,9 +97,6 @@ pub trait KVEngine: Send + Sync {
         deadline_ms: u64,
     ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>>;
 
-    /// Number of live (non-tombstoned) keys.
-    fn live_key_count(&self) -> usize;
-
     /// Drop all state. Used by snapshot-install reset (before importing a
     /// peer's snapshot) and by tests that need to simulate a wiped replica.
     fn clear(&self);

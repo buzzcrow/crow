@@ -124,8 +124,8 @@ impl MetricsRunner {
                 }
                 if let Ok(reg) = registry.lock() {
                     let rust_max = reg.max_name_len();
-                    let (cpp_count_w, cpp_tps_w) = cpp_negotiate.as_ref().map_or((5, 7), |neg| neg());
-                    let count_w = 5.max(cpp_count_w);
+                    let (cpp_count_w, cpp_tps_w) = cpp_negotiate.as_ref().map_or((7, 7), |neg| neg());
+                    let count_w = 7.max(cpp_count_w);
                     let tps_w = 7.max(cpp_tps_w);
                     if let Ok(mut w) = writer.lock() {
                         reg.flush_with_width(&mut *w, window_secs, &ts, rust_max, count_w, tps_w);
@@ -165,8 +165,8 @@ impl MetricsRunner {
         let ts = iso8601_now();
         if let Ok(reg) = self.registry.lock() {
             let rust_max = reg.max_name_len();
-            let (cpp_count_w, cpp_tps_w) = self.cpp_negotiate.as_ref().map_or((5, 7), |neg| neg());
-            let count_w = 5.max(cpp_count_w);
+            let (cpp_count_w, cpp_tps_w) = self.cpp_negotiate.as_ref().map_or((7, 7), |neg| neg());
+            let count_w = 7.max(cpp_count_w);
             let tps_w = 7.max(cpp_tps_w);
             if let Ok(mut w) = self.writer.lock() {
                 reg.flush_with_width(&mut *w, window_secs, &ts, rust_max, count_w, tps_w);

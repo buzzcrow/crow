@@ -337,7 +337,7 @@ impl ClientMetrics {
         window_secs: f64,
     ) {
         let width = 24usize;
-        let count_w = 5usize;
+        let count_w = 7usize;
         let tps_w = 7usize;
 
         let entries: [(&str, &PreciseHistogram); 5] = [

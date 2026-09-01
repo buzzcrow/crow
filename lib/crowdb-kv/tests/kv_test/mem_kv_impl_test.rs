@@ -163,13 +163,6 @@ impl KVEngine for InMemKV {
         KVFuture::ready(Ok((items, truncated)))
     }
 
-    fn live_key_count(&self) -> usize {
-        self.map
-            .iter()
-            .filter(|r| matches!(r.value().1, Cell::Value(_)))
-            .count()
-    }
-
     fn clear(&self) {
         self.map.clear();
     }

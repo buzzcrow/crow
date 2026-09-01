@@ -74,7 +74,7 @@ async fn clear_wipes_kv_state_but_preserves_accepted_log() {
     replica.learner.engine().clear();
     assert_eq!(replica.learner.engine_get(b"k1").await, None);
     assert_eq!(replica.learner.engine_get(b"k2").await, None);
-    assert_eq!(replica.learner.live_key_count(), 0);
+    assert!(iter_all_dyn(replica.learner.engine()).is_empty());
 
     // The acceptor's accepted log is preserved — we can still read entries.
     assert!(replica.accepted_at(1).await.is_some());

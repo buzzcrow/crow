@@ -509,9 +509,9 @@ void ct_negotiate_widths(const ct_tree *t, ct_column_widths input, ct_column_wid
     if (out == nullptr) {
         return;
     }
-    // C++ preferred column widths: count=5, tps=7.
+    // C++ preferred column widths: count=7, tps=7.
     // If t is null or no registry, just echo back C++ defaults.
-    out->count_w = 5;
+    out->count_w = 7;
     out->tps_w   = 7;
     (void)t;
     (void)input;

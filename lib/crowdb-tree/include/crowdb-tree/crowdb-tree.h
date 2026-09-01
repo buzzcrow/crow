@@ -206,8 +206,7 @@ struct GcStats
 // cheap (O(1)) internal counter worth exposing to an operator into one
 // struct, so a caller/FFI/console poll costs one call instead of many
 // small ones. Deliberately excludes anything that requires walking the
-// tree (height()/leaf_count()) or the full keyspace (live key count,
-// already exposed separately via KVEngine::live_key_count) -- every field
+// tree (height()/leaf_count()) or the full keyspace -- every field
 // here is already an atomic counter or BufferPool::stats(), also O(1).
 struct EngineStats
 {
@@ -259,6 +258,7 @@ struct ScanProfile
         uint64_t avg_ns = 0; // sum_ns / count (filled by scan_profile)
     };
 
+    Step l0;
     Step l1;
     Step merge;
     Step total;
@@ -1179,6 +1179,7 @@ class Crowdbtree
     std::atomic<uint64_t>     last_applied_slot_{0};
     std::atomic<uint64_t>     version_{0};
     std::atomic<uint64_t>     gc_floor_{0};
+    std::atomic<uint64_t>     last_gc_floor_{0};             // gc_floor_ at the last collect_garbage sweep
     std::atomic<uint64_t>     snapshot_pages_written_{0};    // pages written by last snapshot
     std::atomic<uint64_t>     snapshot_pages_total_{0};      // cumulative pages written across all snapshots
     std::atomic<uint64_t>     snapshot_segments_written_{0}; // segment images written by last snapshot
@@ -1243,8 +1244,7 @@ class Crowdbtree
         LatencySummary *flush_l         = nullptr;
         Counter        *flush_drain_c   = nullptr;
         Counter        *flush_entries_c = nullptr;
-        // MemTable (L0) operation counters + latency
-        Counter        *mt_apply_c   = nullptr;
+        // MemTable (L0) operation latency
         LatencySummary *mt_apply_l   = nullptr;
         Counter        *mt_get_c     = nullptr;
         Counter        *mt_get_hit_c = nullptr;
@@ -1287,15 +1287,18 @@ class Crowdbtree
         Bandwidth      *page_read_bw                = nullptr;
         Counter        *snapshot_pages_c            = nullptr;
         // Scan
-        Counter        *scan_c         = nullptr;
         Counter        *scan_entries_c = nullptr;
         LatencySummary *scan_l         = nullptr;
+        LatencySummary *scan_l0_l      = nullptr;
         LatencySummary *scan_l1_l      = nullptr;
         LatencySummary *scan_merge_l   = nullptr;
         Counter        *scan_retry_c   = nullptr;
         // GC
-        Counter *gc_tombstones_c = nullptr;
-        Counter *gc_pages_c      = nullptr;
+        Counter        *gc_tombstones_c       = nullptr;
+        Counter        *gc_pages_c            = nullptr;
+        Counter        *gc_leaves_checked_c   = nullptr;
+        Counter        *gc_leaves_reclaimed_c = nullptr;
+        LatencySummary *gc_l                  = nullptr;
     };
 
     MetricsHandles metrics_;

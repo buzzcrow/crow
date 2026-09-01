@@ -289,12 +289,6 @@ impl PxLearner {
             .await
     }
 
-    /// Number of live (non-tombstoned) keys in the engine.
-    #[must_use]
-    pub fn live_key_count(&self) -> usize {
-        self.engine.live_key_count()
-    }
-
     /// Highest contiguous chosen slot.
     #[must_use]
     pub fn contiguous_chosen(&self) -> SlotIndex {

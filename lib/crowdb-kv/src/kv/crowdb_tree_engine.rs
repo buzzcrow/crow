@@ -251,16 +251,6 @@ impl KVEngine for CrowdbTreeEngine {
         }
     }
 
-    fn live_key_count(&self) -> usize {
-        // No dedicated count primitive in the C API; a full unlimited scan
-        // already excludes tombstones server-side, matching InMemKV's own
-        // O(n) linear-scan cost for this method.
-        self.inner
-            .handle()
-            .scan(b"", b"", b"", 0, 0, false, 0, false)
-            .map_or(0, |(entries, _)| entries.len())
-    }
-
     fn clear(&self) {
         // `Crowdbtree::clear` (crowdb-tree/ffi) wraps the new `ct_clear` C API
         // entry point, which duplicates the same wipe sequence (epoch-safe

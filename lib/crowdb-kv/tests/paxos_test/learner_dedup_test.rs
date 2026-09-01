@@ -9,6 +9,7 @@
 //! watermark advancement including out-of-order gap fill.
 
 use bytes::Bytes;
+use crowdb_kv::kv::CrowdbTreeEngine;
 use crowdb_kv::paxos::learner::PxLearner;
 use crowdb_kv::paxos::roles::{DedupTag, Learner, PxBallot, PxLogEntry};
 
@@ -195,7 +196,12 @@ async fn noop_entry_advances_watermark_without_mutating_kv() {
     learner.learn(noop_entry(2), &[]).await;
     assert_eq!(learner.contiguous_chosen(), 2);
     assert_eq!(learner.contiguous_applied(), 2);
-    assert_eq!(learner.live_key_count(), 1, "NoOp must not add keys");
+    let e = learner
+        .engine()
+        .as_any()
+        .downcast_ref::<CrowdbTreeEngine>()
+        .expect("default learner uses CrowdbTreeEngine");
+    assert_eq!(e.iter_all_for_tests().len(), 1, "NoOp must not add keys");
 }
 
 #[tokio::test]

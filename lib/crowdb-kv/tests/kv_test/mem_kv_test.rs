@@ -97,7 +97,6 @@ fn delete_nonexistent_key_is_noop() {
     let e = InMemKV::new();
     e.apply(1, &batch(vec![del(b"missing")])).into_ready().unwrap();
     assert_eq!(e.get(b"missing").into_ready(), None);
-    assert_eq!(e.live_key_count(), 0);
     let all = iter_all_dyn(&e);
     assert_eq!(
         all,
@@ -112,7 +111,6 @@ fn clear_drops_all_state() {
     e.apply(1, &batch(vec![put(b"k", b"v")])).into_ready().unwrap();
     e.clear();
     assert_eq!(e.get(b"k").into_ready(), None);
-    assert_eq!(e.live_key_count(), 0);
     assert!(iter_all_dyn(&e).is_empty());
 }
 

@@ -79,16 +79,17 @@ impl SystemCollector {
 
         let rss_kb = read_rss_kb();
 
-        // CPU utilization = (delta_cpu_us / elapsed_us) * 100, capped at 100.
+        // CPU utilization = (delta_cpu_us / elapsed_us) * 100.
+        // On multi-core systems this can exceed 100% (e.g. 300% = 3 cores).
         let elapsed_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         let cpu_user_pct = delta_user_us
             .checked_mul(100)
             .and_then(|v| v.checked_div(elapsed_us))
-            .map_or(0, |v| v.min(100));
+            .unwrap_or(0);
         let cpu_sys_pct = delta_sys_us
             .checked_mul(100)
             .and_then(|v| v.checked_div(elapsed_us))
-            .map_or(0, |v| v.min(100));
+            .unwrap_or(0);
 
         SystemMetrics {
             cpu_user_pct,
@@ -110,7 +111,9 @@ impl Default for SystemCollector {
 pub fn flush_system<W: Write>(writer: &mut W, snap: &SystemMetrics) {
     let _ = writeln!(writer, "sys.cpu.util.user  {}%", snap.cpu_user_pct);
     let _ = writeln!(writer, "sys.cpu.util.sys   {}%", snap.cpu_sys_pct);
-    let _ = writeln!(writer, "sys.rss_kb         {}", snap.rss_kb);
+    #[allow(clippy::cast_precision_loss)]
+    let rss_gb = snap.rss_kb as f64 / 1024.0 / 1024.0;
+    let _ = writeln!(writer, "sys.rss_gb         {rss_gb:.2}");
     let _ = writeln!(writer, "sys.tcp_retrans    {}", snap.tcp_retransmits);
     let _ = writeln!(writer, "sys.tcp_lost       {}", snap.tcp_lost);
 }
@@ -238,8 +241,8 @@ mod tests {
         let mut collector = SystemCollector::new();
         let _snap1 = collector.collect();
         let snap2 = collector.collect();
-        // Utilization should be non-negative and bounded.
-        assert!(snap2.cpu_user_pct <= 100);
+        // Utilization should be non-negative (can exceed 100% on multi-core).
+        assert!(snap2.cpu_user_pct <= 100 * 1024);
     }
 
     #[test]
@@ -258,8 +261,8 @@ mod tests {
         assert!(out.contains("42%"));
         assert!(out.contains("sys.cpu.util.sys"));
         assert!(out.contains("17%"));
-        assert!(out.contains("sys.rss_kb"));
-        assert!(out.contains("4096"));
+        assert!(out.contains("sys.rss_gb"));
+        assert!(out.contains("0.00"));
         assert!(out.contains("sys.tcp_retrans"));
         assert!(out.contains('3'));
         assert!(out.contains("sys.tcp_lost"));

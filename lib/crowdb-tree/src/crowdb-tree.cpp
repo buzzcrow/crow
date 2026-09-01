@@ -757,9 +757,6 @@ void Crowdbtree::apply_batch(uint64_t slot, const Batch &batch)
         auto node = latest.extract(latest.begin());
         active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
         mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-        if (metrics_.mt_apply_c != nullptr) {
-            metrics_.mt_apply_c->inc();
-        }
     }
     if (metrics_.mt_apply_l != nullptr) {
         auto ns =
@@ -835,9 +832,6 @@ Status Crowdbtree::apply_encoded(uint64_t slot, std::vector<encoded_op> ops)
             auto node = latest.extract(latest.begin());
             active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
             mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-            if (metrics_.mt_apply_c != nullptr) {
-                metrics_.mt_apply_c->inc();
-            }
         }
     }
     note_applied_slot(slot);
@@ -867,9 +861,6 @@ Status Crowdbtree::apply_external(uint64_t slot, std::vector<external_op> ops)
             auto node = latest.extract(latest.begin());
             active->upsert_external(Slice(node.key()), slot, node.mapped().first, std::move(node.mapped().second));
             mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
-            if (metrics_.mt_apply_c != nullptr) {
-                metrics_.mt_apply_c->inc();
-            }
         }
     }
     note_applied_slot(slot);
@@ -901,9 +892,24 @@ void Crowdbtree::set_gc_watermark(uint64_t snapshot_slot, uint64_t safe_slot)
 
 GcStats Crowdbtree::collect_garbage()
 {
+    auto                        t0 = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(write_mutex_);
     GcStats                     stats;
     uint64_t                    gc = gc_floor_.load();
+
+    // Skip the full tree walk when gc_floor_ hasn't advanced since the last
+    // sweep — no tombstone can have become newly eligible, so the walk would
+    // visit every resident leaf only to find dropped== 0 on each. The floor
+    // advances only when set_gc_watermark raises it (snapshot_slot or
+    // safe_slot moved forward), so this gates the walk on actual progress.
+    if (gc <= last_gc_floor_.load(std::memory_order_relaxed)) {
+        if (metrics_.gc_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            metrics_.gc_l->observe(static_cast<uint64_t>(ns));
+        }
+        return stats;
+    }
 
     std::function<void(uint64_t)> walk = [&](uint64_t page_id) {
         // Peek without demand-loading (mapping_.get_word, not resident()): only
@@ -935,6 +941,9 @@ GcStats Crowdbtree::collect_garbage()
         // most sweeps have nothing to reclaim, and rebuilding unconditionally
         // would allocate + retire a fresh LeafBase for every resident leaf on
         // every sweep for no reason.
+        if (metrics_.gc_leaves_checked_c != nullptr) {
+            metrics_.gc_leaves_checked_c->inc();
+        }
         size_t                  dropped       = 0;
         size_t                  dropped_bytes = 0;
         std::vector<uint64_t>   dead_overflow;
@@ -942,6 +951,9 @@ GcStats Crowdbtree::collect_garbage()
             resolve_leaf_chain_for_rebuild(head, gc, &dead_overflow, &dropped, &dropped_bytes);
         if (dropped == 0) {
             return;
+        }
+        if (metrics_.gc_leaves_reclaimed_c != nullptr) {
+            metrics_.gc_leaves_reclaimed_c->inc();
         }
         uint64_t  right    = static_cast<LeafBase *>(base)->right_sibling();
         LeafBase *new_leaf = build_leaf_spilling_locked(std::move(fresh), right);
@@ -965,11 +977,17 @@ GcStats Crowdbtree::collect_garbage()
     if (root_page_id_.load() != kInvalidPageId) {
         walk(root_page_id_.load());
     }
+    last_gc_floor_.store(gc, std::memory_order_relaxed);
+
     if (metrics_.gc_tombstones_c != nullptr && stats.tombstones_dropped > 0) {
         metrics_.gc_tombstones_c->inc_by(stats.tombstones_dropped);
     }
     if (metrics_.gc_pages_c != nullptr && stats.pages_freed > 0) {
         metrics_.gc_pages_c->inc_by(stats.pages_freed);
+    }
+    if (metrics_.gc_l != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        metrics_.gc_l->observe(static_cast<uint64_t>(ns));
     }
     return stats;
 }
@@ -2209,6 +2227,7 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
     for (auto &mt : all_memtables()) {
         l0.push_back({.cur = mt->cursor(start_after)});
     }
+    uint64_t l0_ns = dur_ns(t0);
 
     uint64_t l1_ns   = 0;
     uint64_t gc      = gc_floor_.load();
@@ -2615,10 +2634,10 @@ Crowdbtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, s
     // select + winner + decode).
     uint64_t merge_ns = (loop_ns > l1_ns) ? loop_ns - l1_ns : 0;
     uint64_t total_ns = dur_ns(t_total);
-    if (metrics_.scan_c != nullptr) {
-        metrics_.scan_c->inc();
+    if (metrics_.scan_l != nullptr) {
         metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
+        metrics_.scan_l0_l->observe(l0_ns);
         metrics_.scan_l1_l->observe(l1_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
@@ -2666,6 +2685,7 @@ bool Crowdbtree::try_scan_no_load(
     for (auto &mt : all_memtables()) {
         l0.push_back({.cur = mt->cursor(start_after)});
     }
+    uint64_t l0_ns = dur_ns(t0);
 
     // Non-blocking probe (mirrors try_get_view_no_load's `probe`): bails out
     // on an unloaded slot instead of demand-loading it, recording which
@@ -3033,10 +3053,10 @@ bool Crowdbtree::try_scan_no_load(
     auto     loop_ns  = dur_ns(t_loop);
     uint64_t merge_ns = (loop_ns > l1_ns) ? loop_ns - l1_ns : 0;
     uint64_t total_ns = dur_ns(t_total);
-    if (metrics_.scan_c != nullptr) {
-        metrics_.scan_c->inc();
+    if (metrics_.scan_l != nullptr) {
         metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
+        metrics_.scan_l0_l->observe(l0_ns);
         metrics_.scan_l1_l->observe(l1_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
@@ -3605,9 +3625,20 @@ ScanProfile Crowdbtree::scan_profile() const
         s.max_ns  = snap.max;
         s.avg_ns  = snap.sum / count;
     };
-    p.count   = metrics_.scan_c != nullptr ? metrics_.scan_c->flush().count : 0;
+    // Count from scan_l (scan_c removed — count derivable from latency).
+    uint64_t scan_count = 0;
+    if (metrics_.scan_l != nullptr) {
+        auto snap      = metrics_.scan_l->flush();
+        scan_count     = snap.count;
+        p.total.sum_ns = snap.sum;
+        p.total.max_ns = snap.max;
+        if (snap.count > 0) {
+            p.total.avg_ns = snap.sum / snap.count;
+        }
+    }
+    p.count   = scan_count;
     p.entries = metrics_.scan_entries_c != nullptr ? metrics_.scan_entries_c->flush().count : 0;
-    fill(metrics_.scan_l, p.total, p.count);
+    fill(metrics_.scan_l0_l, p.l0, p.count);
     fill(metrics_.scan_l1_l, p.l1, p.count);
     fill(metrics_.scan_merge_l, p.merge, p.count);
     return p;
@@ -3624,7 +3655,6 @@ void Crowdbtree::init_metrics(const std::string &prefix, const std::string &back
     metrics_.flush_l         = r->register_summary(prefix + ".flush.l");
     metrics_.flush_drain_c   = r->register_counter(prefix + ".flush.drain.c");
     metrics_.flush_entries_c = r->register_counter(prefix + ".flush.entries.c");
-    metrics_.mt_apply_c      = r->register_counter(prefix + ".mt.apply.c");
     metrics_.mt_apply_l      = r->register_summary(prefix + ".mt.apply.l");
     metrics_.mt_get_c        = r->register_counter(prefix + ".mt.get.c");
     metrics_.mt_get_hit_c    = r->register_counter(prefix + ".mt.get.hit.c");
@@ -3653,16 +3683,19 @@ void Crowdbtree::init_metrics(const std::string &prefix, const std::string &back
         r->register_callback_gauge(prefix + ".page.map.total_pids.g", [this] { return mapping_.next_page_id(); });
     metrics_.page_map_segments_g = r->register_callback_gauge(
         prefix + ".page.map.segments.g", [this] { return static_cast<uint64_t>(mapping_.segments_allocated()); });
-    metrics_.snapshot_l       = r->register_summary(prefix + ".snapshot.l");
-    metrics_.snapshot_pages_c = r->register_counter(prefix + ".snapshot.pages.c");
-    metrics_.scan_c           = r->register_counter(prefix + ".scan.c");
-    metrics_.scan_entries_c   = r->register_counter(prefix + ".scan.entries.c");
-    metrics_.scan_l           = r->register_summary(prefix + ".scan.l");
-    metrics_.scan_l1_l        = r->register_summary(prefix + ".scan.l1.l");
-    metrics_.scan_merge_l     = r->register_summary(prefix + ".scan.merge.l");
-    metrics_.scan_retry_c     = r->register_counter(prefix + ".scan.retry.c");
-    metrics_.gc_tombstones_c  = r->register_counter(prefix + ".gc.tombstones.c");
-    metrics_.gc_pages_c       = r->register_counter(prefix + ".gc.pages.c");
+    metrics_.snapshot_l            = r->register_summary(prefix + ".snapshot.l");
+    metrics_.snapshot_pages_c      = r->register_counter(prefix + ".snapshot.pages.c");
+    metrics_.scan_entries_c        = r->register_counter(prefix + ".scan.entries.c");
+    metrics_.scan_l                = r->register_summary(prefix + ".scan.l");
+    metrics_.scan_l0_l             = r->register_summary(prefix + ".scan.l0.l");
+    metrics_.scan_l1_l             = r->register_summary(prefix + ".scan.l1.l");
+    metrics_.scan_merge_l          = r->register_summary(prefix + ".scan.merge.l");
+    metrics_.scan_retry_c          = r->register_counter(prefix + ".scan.retry.c");
+    metrics_.gc_tombstones_c       = r->register_counter(prefix + ".gc.tombstones.c");
+    metrics_.gc_pages_c            = r->register_counter(prefix + ".gc.pages.c");
+    metrics_.gc_leaves_checked_c   = r->register_counter(prefix + ".gc.leaves.checked.c");
+    metrics_.gc_leaves_reclaimed_c = r->register_counter(prefix + ".gc.leaves.reclaimed.c");
+    metrics_.gc_l                  = r->register_summary(prefix + ".gc.l");
 
     // ── Backend I/O metrics ──
     metrics_.page_find_c                 = r->register_counter(io + ".page.find.c");

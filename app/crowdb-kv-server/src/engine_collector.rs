@@ -50,10 +50,9 @@ impl EngineHandles {
 }
 
 /// Registered Rust handles for one store's crowdb-rpc transport stats:
-/// submit→writev queue-wait gauges (cumulative snapshot).
+/// submit→writev queue-wait gauge (cumulative snapshot).
 struct RpcTransportHandles {
     submit_to_writev_avg_us: Arc<Gauge>,
-    submit_to_writev_count: Arc<Gauge>,
 }
 
 impl RpcTransportHandles {
@@ -61,8 +60,6 @@ impl RpcTransportHandles {
         Self {
             submit_to_writev_avg_us: registry
                 .register_gauge(format!("s.{store_id}.rpc.submit_to_writev.avg_us.g")),
-            submit_to_writev_count: registry
-                .register_gauge(format!("s.{store_id}.rpc.submit_to_writev.count.g")),
         }
     }
 }
@@ -287,7 +284,6 @@ pub fn setup_engine_collector(
             drop(last);
             hd.submit_to_writev_avg_us
                 .set(sw.sum_ns.checked_div(sw.count).unwrap_or(0) / 1000);
-            hd.submit_to_writev_count.set(sw.count);
         }
     });
 
@@ -335,7 +331,7 @@ pub fn setup_engine_collector(
     // defaults.
     let stores3 = Arc::clone(store_registry);
     runner.set_cpp_negotiate(move || {
-        let mut result = (5, 7);
+        let mut result = (7, 7);
         let mut found = false;
         for entry in &stores3.stores {
             if found {
@@ -349,7 +345,7 @@ pub fn setup_engine_collector(
                 let replica = group.local_replica();
                 let engine = replica.learner.engine();
                 if let Some(e) = engine.as_any().downcast_ref::<CrowdbTreeEngine>() {
-                    result = e.negotiate_widths(5, 7);
+                    result = e.negotiate_widths(7, 7);
                     found = true;
                 }
             });

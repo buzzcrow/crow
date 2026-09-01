@@ -95,6 +95,8 @@ void print_profile(const char *label, const ScanProfile &p)
     auto us = [](uint64_t ns) { return static_cast<double>(ns) / 1000.0; };
     std::printf("  %-14s count=%llu entries=%llu total_avg=%.1fus\n", label, static_cast<unsigned long long>(p.count),
                 static_cast<unsigned long long>(p.entries), us(p.total.avg_ns));
+    std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l0", us(p.l0.avg_ns), us(p.l0.max_ns),
+                us(p.l0.sum_ns));
     std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "l1", us(p.l1.avg_ns), us(p.l1.max_ns),
                 us(p.l1.sum_ns));
     std::printf("    %-18s avg=%7.1fus  max=%8.1fus  sum=%9.1fus\n", "merge", us(p.merge.avg_ns), us(p.merge.max_ns),
@@ -119,6 +121,8 @@ void run_scenario(const char *label, int n, int value_size, bool flush, size_t l
                 iters);
     print_profile("per-scan", p);
     if (p.count > 0) {
+        std::printf("    l0-est:              l0_avg / total_avg        = %.1f%%\n",
+                    100.0 * static_cast<double>(p.l0.sum_ns) / static_cast<double>(p.total.sum_ns));
         std::printf("    l1-est:              l1_avg / total_avg        = %.1f%%\n",
                     100.0 * static_cast<double>(p.l1.sum_ns) / static_cast<double>(p.total.sum_ns));
         std::printf("    merge-est:           merge_avg / total_avg    = %.1f%%\n",
@@ -226,6 +230,8 @@ void run_concurrent(const char *label, int n_prepop, int value_size, size_t limi
                 static_cast<unsigned long long>(wd), write_kps, static_cast<unsigned long long>(fd));
     print_profile("per-scan", p);
     if (p.count > 0) {
+        std::printf("    l0-est:              l0_avg/total              = %.1f%%\n",
+                    100.0 * static_cast<double>(p.l0.sum_ns) / static_cast<double>(p.total.sum_ns));
         std::printf("    l1-est:              l1_avg/total              = %.1f%%\n",
                     100.0 * static_cast<double>(p.l1.sum_ns) / static_cast<double>(p.total.sum_ns));
     }

@@ -165,9 +165,11 @@ TEST(MetricsRegistry, FlushFormat)
     EXPECT_NE(output.find("s.1.kv.scan.l"), std::string::npos);
     EXPECT_NE(output.find("512"), std::string::npos);
     // Counter header should appear (counter was inc'd)
-    EXPECT_NE(output.find("count  tps(/s)  total"), std::string::npos);
+    EXPECT_NE(output.find("count"), std::string::npos);
+    EXPECT_NE(output.find("tps(/s)"), std::string::npos);
+    EXPECT_NE(output.find("total"), std::string::npos);
     // Bandwidth header should be suppressed (no bandwidth registered)
-    EXPECT_EQ(output.find("avg_size(MB)"), std::string::npos);
+    EXPECT_EQ(output.find("avg_size(KB)"), std::string::npos);
 }
 
 TEST(MetricsRegistry, FlushMetricsStrFormat)

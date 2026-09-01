@@ -952,7 +952,6 @@ impl PxLocalReplica {
             status,
             messages,
             kv_store: KvStoreStatus {
-                key_count: self.learner.live_key_count() as u64,
                 engine_healthy,
                 crowtree_stats,
             },
