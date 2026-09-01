@@ -556,6 +556,18 @@ void crowdb_rpc_client_stop_reaper(crowdb_rpc_client_t client)
     }
 }
 
+void crowdb_rpc_client_dump_pending(crowdb_rpc_client_t client)
+{
+    try {
+        if (client == nullptr) {
+            return;
+        }
+        client->client->dump_pending();
+    }
+    catch (...) {
+    }
+}
+
 crowdb_rpc_status crowdb_rpc_client_send(crowdb_rpc_client_t client, crowdb_rpc_server_t server, crowdb_rpc_conn_t conn,
                                          uint64_t request_id, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
                                          uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data)

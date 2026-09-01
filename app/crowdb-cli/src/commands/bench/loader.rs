@@ -116,16 +116,22 @@ pub struct WorkloadRun {
 /// `op` performs exactly one operation and records its outcome into the
 /// shared recorder. Returns the recorder + the measured run duration.
 ///
+/// `on_stop` is called once, immediately after the timer fires and
+/// `running` is set to false, but before the loader tasks have exited —
+/// so any in-flight requests are still pending. Use it to dump diagnostics.
+///
 /// `num_loaders` is clamped to >= 1.
-pub async fn run_workload<F, Fut>(
+pub async fn run_workload<F, Fut, S>(
     recorder: Arc<BenchRecorder>,
     num_loaders: usize,
     duration: Duration,
     op: F,
+    on_stop: S,
 ) -> WorkloadRun
 where
     F: Fn(Arc<BenchRecorder>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
+    S: FnOnce() + Send + 'static,
 {
     let loaders = num_loaders.max(1);
     let start = Instant::now();
@@ -142,7 +148,8 @@ where
         }));
     }
 
-    // Timer task: flip running=false at the deadline.
+    // Timer task: flip running=false at the deadline, then call on_stop
+    // while in-flight requests are still pending (before loaders exit).
     let timer_rec = Arc::clone(&recorder);
     let timer = tokio::spawn(async move {
         tokio::time::sleep(duration).await;
@@ -153,6 +160,7 @@ where
             ops_at_deadline,
             "bench: stop signaled — loaders draining in-flight ops"
         );
+        on_stop();
     });
 
     for (i, t) in tasks.into_iter().enumerate() {

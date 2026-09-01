@@ -149,6 +149,10 @@ void crowdb_rpc_client_start_reaper(crowdb_rpc_client_t client, uint64_t timeout
 // No-op if not running.
 void crowdb_rpc_client_stop_reaper(crowdb_rpc_client_t client);
 
+// Dump all pending request IDs + deadlines to the log. For diagnostics:
+// call when the bench stops to see which requests are still in-flight.
+void crowdb_rpc_client_dump_pending(crowdb_rpc_client_t client);
+
 // Callback-based call: reserves a slab slot by request_id,
 // stores the callback + user_data, and submits. The callback is invoked
 // directly on the I/O worker thread when the response arrives — no

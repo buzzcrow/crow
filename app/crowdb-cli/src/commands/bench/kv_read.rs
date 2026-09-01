@@ -105,6 +105,7 @@ pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
                 }
             }
         },
+        || {},
     )
     .await;
 

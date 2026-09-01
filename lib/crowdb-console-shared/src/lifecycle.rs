@@ -9,7 +9,7 @@
 //! ignored for transport. C4 replaces this module's body with `russh`,
 //! preserving the public API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -184,6 +184,23 @@ fn resolve_config_path(req: &DeployRequest) -> Option<PathBuf> {
     req.config.clone()
 }
 
+// stage_server_binary creates a symlink at dir/bin/crowdb-kv-server.
+// We set current_dir(dir) below, so use a path relative to the CWD
+// (just "bin/crowdb-kv-server") — an absolute or full-relative path
+// would be resolved relative to the new CWD and fail with ENOENT.
+fn resolve_launch_binary(binary: &Path, workspace_dir: Option<&Path>) -> Result<PathBuf> {
+    if let Some(dir) = workspace_dir {
+        stage_server_binary(binary, dir)?;
+        Ok(PathBuf::from("bin").join(
+            binary
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("crowdb-kv-server")),
+        ))
+    } else {
+        Ok(binary.to_path_buf())
+    }
+}
+
 async fn deploy_local_in_workspace(
     req: &DeployRequest,
     node: &NodeEntry,
@@ -210,11 +227,7 @@ async fn deploy_local_in_workspace(
             message: "could not locate crowdb-kv-server binary; set $CROWDB_KV_SERVER_BIN".into(),
         })?,
     };
-    let launch_binary = if let Some(dir) = workspace_dir {
-        stage_server_binary(&binary, dir)?
-    } else {
-        binary.clone()
-    };
+    let launch_binary = resolve_launch_binary(&binary, workspace_dir)?;
 
     let config_path = resolve_config_path(req);
 

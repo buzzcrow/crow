@@ -274,6 +274,21 @@ impl CrowdbKvClient {
         self.rpc_transport.as_ref().map(|t| t.server().transport_stats())
     }
 
+    /// Dump all pending RPC request IDs + deadlines to the C++ log.
+    /// For diagnostics: call when the bench stops to see which requests
+    /// are still in-flight.
+    pub fn dump_pending_requests(&self) {
+        if let Some(t) = &self.rpc_transport {
+            t.rpc().dump_pending();
+        }
+    }
+
+    /// The next RPC request ID that will be allocated (for diagnostics).
+    #[must_use]
+    pub fn next_req_id(&self) -> u64 {
+        self.rpc_transport.as_ref().map_or(0, |t| t.next_req_id())
+    }
+
     /// This client session's opaque `client_id`.
     #[must_use]
     pub fn client_id(&self) -> u64 {

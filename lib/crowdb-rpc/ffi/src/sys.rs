@@ -177,6 +177,8 @@ extern "C" {
 
     pub fn crowdb_rpc_client_stop_reaper(client: crowdb_rpc_client_t);
 
+    pub fn crowdb_rpc_client_dump_pending(client: crowdb_rpc_client_t);
+
     pub fn crowdb_rpc_client_send(
         client: crowdb_rpc_client_t,
         server: crowdb_rpc_server_t,

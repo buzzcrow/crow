@@ -131,10 +131,12 @@ impl KvRpcTransport {
     }
 
     /// Convert an `RpcError` to `Error`, dropping cached connections
-    /// for `endpoint` on retryable transport errors so the next call
-    /// reconnects. Preserves the endpoint in the error message.
+    /// for `endpoint` only on connection-level errors (closed/reset).
+    /// `SendQueueFull` and `Timeout` are transient — the connection is
+    /// still alive, so we keep it and let the caller retry on the same
+    /// pool. Preserves the endpoint in the error message.
     fn map_rpc_err(&self, e: RpcError, endpoint: &str) -> Error {
-        if e.is_retryable() {
+        if matches!(e, RpcError::ConnectionClosed | RpcError::ConnectionError) {
             self.drop_endpoint(endpoint);
         }
         Error::Transport {
@@ -765,6 +767,13 @@ impl KvRpcTransport {
     /// Allocate a request ID (public — used by `WatchNotifyClient`).
     pub fn alloc_id(&self) -> u64 {
         self.next_id()
+    }
+
+    /// The next request ID that will be allocated (for diagnostics:
+    /// compare against dumped pending IDs to see how old they are).
+    #[must_use]
+    pub fn next_req_id(&self) -> u64 {
+        self.next_req_id.load(Ordering::Relaxed)
     }
 }
 

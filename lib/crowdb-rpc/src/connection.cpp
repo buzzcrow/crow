@@ -150,7 +150,15 @@ bool Connection::try_send(int fd, TransportStats *stats)
 
     if (!is_open()) {
         OutFrame *discarded[BATCH_MAX];
-        int       discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        // Discard overflow first, then send queue.
+        int discarded_count = drain_overflow(discarded, BATCH_MAX);
+        while (discarded_count > 0) {
+            for (int i = 0; i < discarded_count; ++i) {
+                release_frame(discarded[i]);
+            }
+            discarded_count = drain_overflow(discarded, BATCH_MAX);
+        }
+        discarded_count = drain_send_queue(discarded, BATCH_MAX);
         while (discarded_count > 0) {
             for (int i = 0; i < discarded_count; ++i) {
                 release_frame(discarded[i]);
@@ -176,6 +184,16 @@ retry:
             frame_count =
                 restore_pending(pending_frames_, pending_count_, frames, frame_totals, iovs, hdr_bufs, &iov_count);
             pending_count_ = 0;
+        }
+
+        // Drain overflow (deferred-retry frames) before the main queue.
+        if (frame_count < BATCH_MAX) {
+            int ovf_n = drain_overflow(&frames[frame_count], BATCH_MAX - frame_count);
+            for (int i = 0; i < ovf_n; i++) {
+                frame_totals[frame_count] = frame_total(frames[frame_count]);
+                iov_count += build_frame_iovecs(frames[frame_count], hdr_bufs[frame_count], &iovs[iov_count]);
+                frame_count++;
+            }
         }
 
         // Drain the MPSC queue for new frames (single call).
@@ -279,7 +297,14 @@ retry:
         }
         pending_count_ = 0;
         OutFrame *discarded[BATCH_MAX];
-        int       discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        int       discarded_count = drain_overflow(discarded, BATCH_MAX);
+        while (discarded_count > 0) {
+            for (int i = 0; i < discarded_count; ++i) {
+                release_frame(discarded[i]);
+            }
+            discarded_count = drain_overflow(discarded, BATCH_MAX);
+        }
+        discarded_count = drain_send_queue(discarded, BATCH_MAX);
         while (discarded_count > 0) {
             for (int i = 0; i < discarded_count; ++i) {
                 release_frame(discarded[i]);
@@ -290,7 +315,7 @@ retry:
     in_send_.store(false, std::memory_order_release);
 
     // Race check: if more frames arrived while we were sending, retry.
-    if (all_sent && send_queue_.has_pending()) {
+    if (all_sent && (send_queue_.has_pending() || overflow_.has_pending())) {
         expected = false;
         if (in_send_.compare_exchange_strong(expected, true)) {
             goto retry;
@@ -312,7 +337,14 @@ void Connection::close()
         }
         pending_count_ = 0;
         OutFrame *discarded[BATCH_MAX];
-        int       discarded_count = drain_send_queue(discarded, BATCH_MAX);
+        int       discarded_count = drain_overflow(discarded, BATCH_MAX);
+        while (discarded_count > 0) {
+            for (int i = 0; i < discarded_count; ++i) {
+                release_frame(discarded[i]);
+            }
+            discarded_count = drain_overflow(discarded, BATCH_MAX);
+        }
+        discarded_count = drain_send_queue(discarded, BATCH_MAX);
         while (discarded_count > 0) {
             for (int i = 0; i < discarded_count; ++i) {
                 release_frame(discarded[i]);

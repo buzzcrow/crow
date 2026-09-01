@@ -44,10 +44,13 @@ where
             }
         }
     }
-    Err(last_err.map(Into::into).unwrap_or_else(|| Error::UpstreamRpc {
-        node_id: label.into(),
-        status: "sysmd write exhausted retries".into(),
-    }))
+    Err(last_err.map_or_else(
+        || Error::UpstreamRpc {
+            node_id: label.into(),
+            status: "sysmd write exhausted retries".into(),
+        },
+        Into::into,
+    ))
 }
 
 /// Build a [`ServerClient`] for a node's deployed kv-server.
@@ -516,7 +519,13 @@ pub async fn add_replica(
 }
 
 /// Record a new replica in group-0 sysdata + the local config.
-async fn record_replica(ctx: &OpContext, store_id: u64, group_id: u64, replica_id: u64, node_id: u64) -> Result<()> {
+async fn record_replica(
+    ctx: &OpContext,
+    store_id: u64,
+    group_id: u64,
+    replica_id: u64,
+    node_id: u64,
+) -> Result<()> {
     let value = crowdb_protocol::common::ReplicaValue {
         store_id,
         group_id,
@@ -526,10 +535,7 @@ async fn record_replica(ctx: &OpContext, store_id: u64, group_id: u64, replica_i
         voting: true,
         endpoint: String::new(),
     };
-    retry_sysmd("add_replica", || async {
-        ctx.sysmd().add_replica(&value).await
-    })
-    .await?;
+    retry_sysmd("add_replica", || async { ctx.sysmd().add_replica(&value).await }).await?;
     {
         let mut cfg = ctx.config_mut();
         cfg.ensure_store_node(store_id, node_id);

@@ -83,6 +83,13 @@ impl RpcClient {
         unsafe { sys::crowdb_rpc_client_stop_reaper(self.handle) };
     }
 
+    /// Dump all pending request IDs + deadlines to the C++ log. For
+    /// diagnostics: call when the bench stops to see which requests are
+    /// still in-flight and their age.
+    pub fn dump_pending(&self) {
+        unsafe { sys::crowdb_rpc_client_dump_pending(self.handle) };
+    }
+
     /// Send a request with a C ABI completion callback: reserves a slab
     /// slot by request_id, stores the callback + user_data, and
     /// submits. The callback is invoked directly on the C++ I/O worker

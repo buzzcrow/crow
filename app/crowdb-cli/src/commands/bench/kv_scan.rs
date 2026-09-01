@@ -114,6 +114,7 @@ pub async fn run(cli: &Cli, args: ScanArgs) -> ExitCode {
                 }
             }
         },
+        || {},
     )
     .await;
 

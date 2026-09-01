@@ -323,6 +323,59 @@ size_t RpcClient::pending_count()
     return n;
 }
 
+void RpcClient::dump_pending()
+{
+    size_t   slab_pending = 0;
+    size_t   map_pending  = pending_.size();
+    uint64_t now          = steady_now_ns();
+    uint64_t min_id       = UINT64_MAX;
+    uint64_t max_id       = 0;
+    uint64_t max_age_ns   = 0;
+    uint64_t timeout_ns   = default_timeout_ns_.load(std::memory_order_relaxed);
+
+    // Slab pool: scan all slots, dump PENDING ones.
+    if (completion_pool_ != nullptr) {
+        for (size_t i = 0; i < pool_size_; ++i) {
+            uint8_t s = completion_pool_[i].state.load(std::memory_order_acquire);
+            if (s == SLOT_PENDING_READY || s == SLOT_PENDING_CLAIMED) {
+                uint64_t rid      = completion_pool_[i].request_id;
+                uint64_t deadline = completion_pool_[i].deadline_ns.load(std::memory_order_relaxed);
+                uint64_t age      = (deadline > 0) ? now - (deadline - timeout_ns) : 0;
+                int64_t  conn_id  = completion_pool_[i].conn ? completion_pool_[i].conn->id() : -1;
+                bool     expired  = (deadline > 0 && now >= deadline);
+                if (rid < min_id)
+                    min_id = rid;
+                if (rid > max_id)
+                    max_id = rid;
+                if (age > max_age_ns)
+                    max_age_ns = age;
+                ++slab_pending;
+                CRB_LOG_INFO("dump_pending: slot={} state={} rid={} conn_id={} age_us={} expired={}", i,
+                             static_cast<int>(s), static_cast<unsigned long long>(rid), static_cast<long long>(conn_id),
+                             age / 1000, expired ? 1 : 0);
+            }
+        }
+    }
+
+    // Map: iterate entries.
+    for (auto &kv : pending_) {
+        uint64_t rid = kv.first;
+        if (rid < min_id)
+            min_id = rid;
+        if (rid > max_id)
+            max_id = rid;
+        int64_t  conn_id  = kv.second.conn ? kv.second.conn->id() : -1;
+        uint64_t deadline = kv.second.deadline_ns;
+        uint64_t age      = (deadline > 0) ? now - (deadline - timeout_ns) : 0;
+        bool     expired  = (deadline > 0 && now >= deadline);
+        CRB_LOG_INFO("dump_pending: map rid={} conn_id={} age_us={} expired={}", static_cast<unsigned long long>(rid),
+                     static_cast<long long>(conn_id), age / 1000, expired ? 1 : 0);
+    }
+
+    CRB_LOG_INFO("dump_pending: slab={} map={} total={} min_id={} max_id={} max_age_us={}", slab_pending, map_pending,
+                 slab_pending + map_pending, (min_id == UINT64_MAX) ? 0 : min_id, max_id, max_age_ns / 1000);
+}
+
 void RpcClient::start_reaper(uint64_t timeout_ns, uint64_t scan_interval_ns)
 {
     if (reaper_running_.load(std::memory_order_relaxed)) {

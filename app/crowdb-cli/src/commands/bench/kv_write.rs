@@ -75,6 +75,7 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
     let start = Instant::now();
     let recorder = Arc::clone(&metrics.recorder);
     let stats_client = Arc::clone(&client);
+    let dump_client = Arc::clone(&client);
     let run = run_workload(
         recorder,
         args.loader_num,
@@ -97,6 +98,14 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
                     Err(_) => rec.record_err(),
                 }
             }
+        },
+        move || {
+            let next_id = dump_client.next_req_id();
+            tracing::info!(
+                next_req_id = next_id,
+                "bench: dumping pending RPC requests at stop time"
+            );
+            dump_client.dump_pending_requests();
         },
     )
     .await;

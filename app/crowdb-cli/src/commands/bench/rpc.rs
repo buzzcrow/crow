@@ -195,33 +195,39 @@ async fn run_tokio(
 ) -> Arc<BenchRecorder> {
     let conns = Arc::new(conns);
     let next_id = Arc::new(AtomicU64::new(1));
-    let run = run_workload(recorder, loader_num, duration, move |rec: Arc<BenchRecorder>| {
-        let client = Arc::clone(&client);
-        let server = Arc::clone(&server);
-        let conns = Arc::clone(&conns);
-        let next_id = Arc::clone(&next_id);
-        let data_bytes = data_bytes.clone();
-        async move {
-            let id = next_id.fetch_add(1, Ordering::Relaxed);
-            let conn_idx = usize::try_from(id).map_or(0, |v| v % conns.len());
-            let conn = &conns[conn_idx];
-            let ctrl = Buffer::from_bytes(&build_control(id));
-            let data = Buffer::from_bytes(&data_bytes);
-            let t0 = Instant::now();
-            match client.call(&server, conn, id, ctrl, Some(data), ECHO_MSG_TYPE) {
-                Ok(fut) => match fut.await {
-                    Ok(_) => {
-                        rec.record_ok(
-                            t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
-                            data_bytes.len() as u64,
-                        );
-                    }
+    let run = run_workload(
+        recorder,
+        loader_num,
+        duration,
+        move |rec: Arc<BenchRecorder>| {
+            let client = Arc::clone(&client);
+            let server = Arc::clone(&server);
+            let conns = Arc::clone(&conns);
+            let next_id = Arc::clone(&next_id);
+            let data_bytes = data_bytes.clone();
+            async move {
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                let conn_idx = usize::try_from(id).map_or(0, |v| v % conns.len());
+                let conn = &conns[conn_idx];
+                let ctrl = Buffer::from_bytes(&build_control(id));
+                let data = Buffer::from_bytes(&data_bytes);
+                let t0 = Instant::now();
+                match client.call(&server, conn, id, ctrl, Some(data), ECHO_MSG_TYPE) {
+                    Ok(fut) => match fut.await {
+                        Ok(_) => {
+                            rec.record_ok(
+                                t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+                                data_bytes.len() as u64,
+                            );
+                        }
+                        Err(_) => rec.record_err(),
+                    },
                     Err(_) => rec.record_err(),
-                },
-                Err(_) => rec.record_err(),
+                }
             }
-        }
-    })
+        },
+        || {},
+    )
     .await;
     run.recorder
 }

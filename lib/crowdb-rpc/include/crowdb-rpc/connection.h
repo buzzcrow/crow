@@ -80,7 +80,20 @@ class Connection
     // Check if the connection has pending send data (queue or partials).
     bool has_pending_send() const
     {
-        return send_queue_.has_pending() || pending_count_ > 0;
+        return send_queue_.has_pending() || overflow_.has_pending() || pending_count_ > 0;
+    }
+
+    // Push a frame to the overflow queue (called when send_queue is full).
+    // Returns true on success, false if overflow is also full.
+    bool enqueue_overflow(OutFrame *frame)
+    {
+        return overflow_.try_push(frame);
+    }
+
+    // Drain up to max frames from the overflow queue.
+    int drain_overflow(OutFrame **out, int max)
+    {
+        return overflow_.drain(out, max);
     }
 
     // Close the connection, fail pending requests, signal reconnect.
@@ -162,6 +175,11 @@ class Connection
     // producer threads push via enqueue_send (Transport::submit); the I/O
     // worker drains via drain_send_queue for writev (Path B).
     SendQueue send_queue_;
+
+    // Overflow queue: frames that couldn't be enqueued to send_queue_
+    // (backpressure). Drained first in try_send() so retry responses
+    // are sent before new frames. Same lock-free MPSC, smaller capacity.
+    SendQueue overflow_{256};
 
     // in_send_ CAS lock serializes concurrent writev — only one thread
     // drains+sends at a time; others just enqueue and return. The winner

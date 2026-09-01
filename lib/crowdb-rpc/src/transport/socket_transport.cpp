@@ -541,10 +541,30 @@ bool SocketTransport::submit(Connection *conn, OutFrame *frame)
     }
     frame->create_nano = now_nano();
     if (!conn->enqueue_send(frame)) {
+        // Send queue full — try the overflow queue (deferred retry).
+        // The I/O worker drains overflow first in try_send(), so these
+        // frames are sent before new send_queue_ frames.
+        if (conn->enqueue_overflow(frame)) {
+            cnt_send_queue_full().inc();
+            // Arm write so the worker picks up the overflow frames.
+            auto *engine = static_cast<SocketEngine *>(conn->io_engine);
+            if (engine != nullptr) {
+                int wfd = conn->write_fd >= 0 ? conn->write_fd : static_cast<int>(conn->transport_handle);
+                engine->arm_write(wfd, conn);
+            }
+            return true;
+        }
+        // Overflow also full — drop the frame (last resort).
         cnt_send_queue_full().inc();
         stats_.send_queue_rejects.fetch_add(1, std::memory_order_relaxed);
-        CRB_LOG_WARN("submit: enqueue_send failed (backpressure or closed) conn_id={} name={}",
-                     static_cast<long long>(conn->id()), conn->name());
+        CRB_LOG_WARN("submit: enqueue_send + overflow failed (backpressure) conn_id={} name={} request_id={}",
+                     static_cast<long long>(conn->id()), conn->name(),
+                     static_cast<unsigned long long>(frame->request_id));
+        if (frame->control != nullptr)
+            frame->control->release();
+        if (frame->data != nullptr)
+            frame->data->release();
+        delete frame;
         return false;
     }
 
@@ -587,7 +607,25 @@ bool SocketTransport::submit_inline(Connection *conn, OutFrame *frame)
     // (retry_direct for Path A, flush_send for Path B), batching all
     // frames accumulated during the read loop into a single writev.
     // send_direct is only used by submit() for cross-thread sends.
-    return conn->enqueue_send(frame);
+    if (conn->enqueue_send(frame)) {
+        return true;
+    }
+    // Send queue full — try overflow (deferred retry).
+    if (conn->enqueue_overflow(frame)) {
+        cnt_send_queue_full().inc();
+        return true;
+    }
+    // Overflow also full — drop (last resort).
+    cnt_send_queue_full().inc();
+    stats_.send_queue_rejects.fetch_add(1, std::memory_order_relaxed);
+    CRB_LOG_WARN("submit_inline: enqueue + overflow failed conn_id={} request_id={}",
+                 static_cast<long long>(conn->id()), static_cast<unsigned long long>(frame->request_id));
+    if (frame->control != nullptr)
+        frame->control->release();
+    if (frame->data != nullptr)
+        frame->data->release();
+    delete frame;
+    return false;
 }
 
 Worker *SocketTransport::get_worker()

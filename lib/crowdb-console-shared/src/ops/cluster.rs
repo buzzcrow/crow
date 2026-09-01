@@ -57,6 +57,46 @@ async fn rpc_endpoint_for_store(ctx: &OpContext, node_id: u64, store_id: u64) ->
     None
 }
 
+/// Seed the KV client with the group-0 leader endpoint after init.
+/// For single-node, use the node's own RPC endpoint. For multi-node,
+/// wait for election to complete and read the leader from topology.
+async fn seed_leader_after_init(
+    ctx: &OpContext,
+    single_node: bool,
+    succeeded: &[(u64, u64)],
+    mgmt_seeds: &[String],
+) {
+    if single_node {
+        for (nid, _) in succeeded {
+            if let Some(ep) = rpc_endpoint_for_store(ctx, *nid, 0).await {
+                ctx.kv().seed_leader(0, 0, ep);
+                break;
+            }
+        }
+        return;
+    }
+    if let Some(leader_url) = wait_for_leader(mgmt_seeds, std::time::Duration::from_secs(10)).await {
+        if let Ok(sc) = ServerClient::new(&leader_url) {
+            if let Ok(topo) = sc.topology().await {
+                for store in &topo {
+                    if store.store_id == 0 {
+                        for group in &store.groups {
+                            if group.group_id == 0 && group.leader_id > 0 {
+                                for remote in &group.remotes {
+                                    if remote.id == group.leader_id {
+                                        ctx.kv().seed_leader(0, 0, remote.endpoint.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Initialize the cluster by bootstrapping group 0 on the listed nodes.
 ///
 /// # Errors
@@ -170,35 +210,7 @@ pub async fn init(ctx: &OpContext, nodes: &[u64]) -> Result<InitSummary> {
     // wired (Phase 2) but the leader isn't elected yet. Wait for the
     // leader before seeding + writing sysdata — otherwise sysdata writes
     // fail with "not leader" and callers see spurious errors.
-    if !single_node {
-        if let Some(leader_url) = wait_for_leader(&mgmt_seeds, std::time::Duration::from_secs(10)).await {
-            if let Ok(sc) = ServerClient::new(&leader_url) {
-                if let Ok(topo) = sc.topology().await {
-                    for store in &topo {
-                        if store.store_id == 0 {
-                            for group in &store.groups {
-                                if group.group_id == 0 && group.leader_id > 0 {
-                                    for remote in &group.remotes {
-                                        if remote.id == group.leader_id {
-                                            ctx.kv().seed_leader(0, 0, remote.endpoint.clone());
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        for (nid, _) in &succeeded {
-            if let Some(ep) = rpc_endpoint_for_store(ctx, *nid, 0).await {
-                ctx.kv().seed_leader(0, 0, ep);
-                break;
-            }
-        }
-    }
+    seed_leader_after_init(ctx, single_node, &succeeded, &mgmt_seeds).await;
 
     // Phase 5: write hardware + KV-cluster topology into group-0 sysdata.
     write_topology_to_sysdata(ctx, &store_nodes, &succeeded).await;
