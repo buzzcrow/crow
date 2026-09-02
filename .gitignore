@@ -67,6 +67,8 @@ lib/crowdb-diskio-client/log/
 doc/working/profile-*
 # bench sweep raw output (bench-write-*.tsv, bench-read-*.tsv, etc.)
 doc/working/bench-*.tsv
+# sanitize regression raw output (sanitize-regression.tsv)
+doc/working/sanitize-regression.tsv
 perf.data*
 perf-script.txt
 flamegraph.svg
