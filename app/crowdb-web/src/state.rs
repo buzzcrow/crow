@@ -352,25 +352,31 @@ impl AppState {
             cfg.clone()
         };
 
-        // Resolve the group-0 RPC endpoint: prefer the live
-        // `listen_addr` from the monitor cache (the actual crowdb-rpc
-        // listener for store 0 on a node where the local replica is
-        // the leader); fall back to the configured `rpc_url` of a node
-        // hosting store 0. When neither is available (bootstrap case
-        // — no store 0 in config yet), preserve the existing hint
-        // rather than seeding an HTTP mgmt URL that would hang the RPC
-        // client for 5 s.
-        let (group0_endpoint, mgmt_seeds) = resolve_group0_endpoint(&config_snapshot);
+        // Resolve mgmt seeds + a config-derived group-0 endpoint. The
+        // config endpoint is the first node hosting store 0 — not
+        // necessarily the leader — so it is NOT used to seed the leader
+        // hint (see below). Only a live endpoint from the monitor cache
+        // (the actual leader) overwrites the hint.
+        let (_, mgmt_seeds) = resolve_group0_endpoint(&config_snapshot);
         let live_endpoint = self.monitor_cache.group0_leader_endpoint().await;
 
-        // If we have a live endpoint from the monitor cache, seed it
-        // (overwriting any stale hint). If we don't, preserve the
-        // existing hint — the shared client may already have a good
-        // one from a prior `ops::cluster::init` or `NotLeaderHint`.
-        if let Some(ep) = live_endpoint.or(group0_endpoint) {
+        // Only overwrite the leader hint with a live endpoint from the
+        // monitor cache (the actual leader). A config-derived fallback
+        // (`group0_endpoint`) is just the first node hosting store 0 —
+        // not necessarily the leader. Overwriting with it clobbers the
+        // correct hint set by a prior `ops::cluster::init` or
+        // `NotLeaderHint`, causing sysdata writes to hit a non-leader
+        // that returns "not leader" with no hint (mid-election),
+        // exhausting retries. When no live endpoint is available,
+        // preserve the existing hint; `resolve_leader` will discover
+        // via `mgmt_seeds` if no hint is set.
+        if let Some(ep) = live_endpoint {
+            // Remap 0.0.0.0 → 127.0.0.1 and strip any http:// scheme so
+            // the endpoint is a bare host:port for the RPC transport.
+            let bare = crate::mgmt::strip_scheme(crate::mgmt::remap_zero_host(&ep));
             Ok(OpContext::with_shared_client(
                 kv,
-                ep,
+                bare,
                 &mgmt_seeds,
                 config_snapshot,
             ))

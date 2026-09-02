@@ -1195,6 +1195,19 @@ async fn shutdown_kv_data(state: &AppState) -> Vec<String> {
 
     // Step 3: clean group-0 sysdata — rack cascade, store records,
     // diskdb unregister. Group-0 is still alive at this point.
+    // Refresh the monitor cache for all running nodes first so the
+    // group-0 leader endpoint is current (a prior test may have
+    // stopped/restarted nodes, leaving stale cache entries).
+    let running_nodes: Vec<NodeId> = {
+        let snap = state.monitor_cache.snapshot().await;
+        snap.keys()
+            .copied()
+            .filter(|n| state.runtime_pid(*n).is_some())
+            .collect()
+    };
+    for nid in &running_nodes {
+        crate::mgmt::refresh_node_cache(state, *nid).await;
+    }
     if let Some(hw) = crate::mgmt::build_hardware_client(state).await {
         for rid in &rack_ids {
             if let Err(e) = hw.remove_rack_cascade(*rid).await {

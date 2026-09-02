@@ -84,7 +84,16 @@ async fn seed_leader_after_init(
                             if group.group_id == 0 && group.leader_id > 0 {
                                 for remote in &group.remotes {
                                     if remote.id == group.leader_id {
-                                        ctx.kv().seed_leader(0, 0, remote.endpoint.clone());
+                                        let ep = remote.endpoint.clone();
+                                        let stripped = ep
+                                            .strip_prefix("http://")
+                                            .or_else(|| ep.strip_prefix("https://"))
+                                            .unwrap_or(&ep);
+                                        let remapped = stripped.strip_prefix("0.0.0.0:").map_or_else(
+                                            || stripped.to_string(),
+                                            |port| format!("127.0.0.1:{port}"),
+                                        );
+                                        ctx.kv().seed_leader(0, 0, remapped);
                                         break;
                                     }
                                 }
@@ -509,6 +518,13 @@ async fn wait_for_leader(
         if std::time::Instant::now() >= deadline {
             return None;
         }
+        // Poll each node's topology endpoint. Only return the mgmt URL
+        // of the node whose local replica IS the leader — the caller
+        // (seed_leader_after_init) needs an HTTP mgmt URL to query
+        // topology and extract the leader's RPC endpoint. Returning a
+        // remote's RPC endpoint here causes seed_leader_after_init to
+        // fail silently (ServerClient::new + topology() on a non-HTTP
+        // endpoint), leaving the KV client without a leader hint.
         for url in mgmt_urls {
             let Ok(sc) = ServerClient::new(url) else { continue };
             if let Ok(stores) = sc.topology().await {
@@ -517,15 +533,11 @@ async fn wait_for_leader(
                         continue;
                     }
                     for group in &store.groups {
-                        if group.group_id == group_id && group.leader_id > 0 {
-                            if group.leader_id == group.local_replica_id {
-                                return Some(url.clone());
-                            }
-                            for remote in &group.remotes {
-                                if remote.id == group.leader_id {
-                                    return Some(remote.endpoint.clone());
-                                }
-                            }
+                        if group.group_id == group_id
+                            && group.leader_id > 0
+                            && group.leader_id == group.local_replica_id
+                        {
+                            return Some(url.clone());
                         }
                     }
                 }

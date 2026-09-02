@@ -162,7 +162,7 @@ pub(crate) async fn rpc_endpoint_for_node(
     None
 }
 
-fn strip_scheme(s: String) -> String {
+pub(crate) fn strip_scheme(s: String) -> String {
     if let Some(stripped) = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")) {
         stripped.to_string()
     } else {
@@ -183,7 +183,7 @@ pub(crate) fn port_of(url: &str) -> Option<u16> {
     port_str.parse::<u16>().ok()
 }
 
-fn remap_zero_host(addr: &str) -> String {
+pub(crate) fn remap_zero_host(addr: &str) -> String {
     addr.strip_prefix("0.0.0.0:")
         .map_or_else(|| addr.to_string(), |port| format!("127.0.0.1:{port}"))
 }
@@ -204,7 +204,8 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crowdb_kv_
     // Resolve the group-0 leader endpoint. Prefer the monitor cache's
     // live `listen_addr` (the actual crowdb-rpc listener for store 0 on
     // the leader node); fall back to per-node `rpc_endpoint_for_node`.
-    let mut rpc_ep: Option<String> = state.monitor_cache.group0_leader_endpoint().await;
+    let live_leader_ep = state.monitor_cache.group0_leader_endpoint().await;
+    let mut rpc_ep: Option<String> = live_leader_ep.clone();
     if rpc_ep.is_none() {
         let mut mgmt_seeds: Vec<String> = Vec::new();
         for node_id in snap.keys() {
@@ -263,8 +264,16 @@ pub(crate) async fn build_hardware_client(state: &AppState) -> Option<crowdb_kv_
     if !mgmt_seeds.is_empty() {
         kv.set_mgmt_seeds(mgmt_seeds);
     }
-    if let Some(ep) = rpc_ep {
-        let bare = strip_scheme(remap_zero_host(&ep));
+    if let Some(ep) = &live_leader_ep {
+        let bare = strip_scheme(remap_zero_host(ep));
+        tracing::debug!(
+            endpoint = %bare,
+            seed_count,
+            "build_hardware_client: seeding shared client with group-0 leader endpoint"
+        );
+        kv.seed_leader(0, 0, bare);
+    } else if let Some(ep) = &rpc_ep {
+        let bare = strip_scheme(remap_zero_host(ep));
         tracing::debug!(
             endpoint = %bare,
             seed_count,

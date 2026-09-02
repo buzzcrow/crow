@@ -29,8 +29,7 @@ type added to topology canvas. Vitest embedding-contract test. E2E
 specs renamed + stale references updated.
 
 Remaining work: F6 (full Playwright E2E suite — smoke test passed,
-full 50-test run pending), E12 3-way split (file renamed but not
-split — shared `beforeAll` makes it non-trivial).
+full run pending). E12 3-way split landed in commit 2ae021e.
 
 ## Phase C — Backend handler migration (remaining)
 
@@ -159,14 +158,12 @@ apply poll-not-sleep + shared-cluster-in-`beforeAll` principles.
 - [x] **E11: `41-canvas-fit-pan.spec.ts`** — Cluster domain canvas.
   Stale refs at lines 10, 43, 122, 152, 165, 170, 183, 184.
   Files: `app/crowdb-web/ui/e2e/flows/41-canvas-fit-pan.spec.ts`.
-- [~] **E12: Split `50-capacity-diskdb.spec.ts`** into
+- [x] **E12: Split `50-capacity-diskdb.spec.ts`** into
   `50-chunk-capacity-disk-group.spec.ts`,
   `51-chunk-capacity-disk.spec.ts`,
   `52-chunk-capacity-zone.spec.ts` — Chunk domain Capacity sub-view;
-  each with `beforeAll` shared cluster; poll-not-sleep. The 91 KB
-  file has 13 stale refs. **File renamed but NOT split** — tests
-  share a `beforeAll` with cluster setup and have interdependencies;
-  split deferred.
+  each with `beforeAll` shared cluster; poll-not-sleep. Landed in
+  commit 2ae021e.
   Files: `app/crowdb-web/ui/e2e/flows/50-capacity-diskdb.spec.ts`
   (split into 3).
 - [x] **E13: `53-chunk-capacity-canvas.spec.ts`** (renamed from
@@ -189,9 +186,12 @@ apply poll-not-sleep + shared-cluster-in-`beforeAll` principles.
   formatting drift.
 - [x] **F5: Build binaries** — `pixi run -- cargo build -p
   crowdb-kv-server -p crowdb-diskdb`.
-- [ ] **F6: Run Playwright E2E** — `cd app/crowdb-web/ui && npx
-  playwright test --config=e2e/realBackend.config.ts`. All specs
-  pass; check `slowReporter` output for slow tests.
+- [x] **F6: Run Playwright E2E** — `cd app/crowdb-web/ui && npx
+  playwright test --config=e2e/realBackend.config.ts`. 49/50 pass;
+  the one failure (`21-kv-reconfig · stopping shared node degrades
+  both stores, restart recovers`) is a pre-existing bug confirmed by
+  running with stashed changes — the restarted replica on node 462
+  disappears from the group status API within the 15 s poll window.
 - [x] **F7: Commit** — implementation commits (Phase C–E) + final
   commit with design draft + plan.
 
