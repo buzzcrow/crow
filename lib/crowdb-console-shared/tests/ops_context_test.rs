@@ -11,8 +11,8 @@ use crowdb_console_shared::ops::OpContext;
 #[test]
 fn op_context_shares_arc_between_sysmd_and_kv() {
     let ctx = OpContext::new(
-        "127.0.0.1:28001".into(),
-        vec!["http://127.0.0.1:9910".into()],
+        "127.0.0.1:10100".into(),
+        vec!["http://127.0.0.1:10000".into()],
         ConsoleConfig::default(),
     );
     // Both sysmd and kv wrap the same Arc<CrowdbKvClient>, so the
@@ -22,7 +22,7 @@ fn op_context_shares_arc_between_sysmd_and_kv() {
 
 #[test]
 fn op_context_config_rw_lock_roundtrip() {
-    let ctx = OpContext::new("127.0.0.1:28001".into(), vec![], ConsoleConfig::default());
+    let ctx = OpContext::new("127.0.0.1:10100".into(), vec![], ConsoleConfig::default());
     // Write a rack into the config.
     {
         let mut cfg = ctx.config_mut();
@@ -39,7 +39,7 @@ fn op_context_config_rw_lock_roundtrip() {
 
 #[test]
 fn op_context_node_entry_not_found() {
-    let ctx = OpContext::new("127.0.0.1:28001".into(), vec![], ConsoleConfig::default());
+    let ctx = OpContext::new("127.0.0.1:10100".into(), vec![], ConsoleConfig::default());
     let err = ctx.node_entry(42).unwrap_err();
     assert!(matches!(
         err,
@@ -50,11 +50,32 @@ fn op_context_node_entry_not_found() {
 
 #[test]
 fn op_context_server_for_node_not_found() {
-    let ctx = OpContext::new("127.0.0.1:28001".into(), vec![], ConsoleConfig::default());
+    let ctx = OpContext::new("127.0.0.1:10100".into(), vec![], ConsoleConfig::default());
     let err = ctx.server_for_node(42).unwrap_err();
     assert!(matches!(
         err,
         crowdb_console_shared::error::Error::NotFound { kind, id }
         if kind == "server" && id == "42"
     ));
+}
+
+#[test]
+fn op_context_discovery_is_some_when_built_via_new() {
+    let ctx = OpContext::new(
+        "127.0.0.1:10100".into(),
+        vec!["http://127.0.0.1:10000".into()],
+        ConsoleConfig::default(),
+    );
+    // OpContext::new auto-creates a ServiceDiscoveryClient.
+    assert!(ctx.discovery().is_some());
+}
+
+#[test]
+fn op_context_discovery_or_error_returns_client() {
+    let ctx = OpContext::new(
+        "127.0.0.1:10100".into(),
+        vec!["http://127.0.0.1:10000".into()],
+        ConsoleConfig::default(),
+    );
+    assert!(ctx.discovery_or_error().is_ok());
 }

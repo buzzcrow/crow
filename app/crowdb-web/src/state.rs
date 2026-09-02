@@ -36,6 +36,11 @@ pub struct AppState {
     /// cache persists — avoids re-discovering the leader from seeds on
     /// every put/get/delete. Invalidated on `/internal/reset`.
     pub kv_client: Arc<tokio::sync::RwLock<Option<Arc<crowdb_kv_client::CrowdbKvClient>>>>,
+    /// Cached `ServiceDiscoveryClient` reused across requests so the
+    /// discovery cache (service registry entries) persists. Built from
+    /// the same `CrowdbKvClient` as `kv_client` so topology + connection
+    /// pool are shared.
+    pub discovery_client: Arc<tokio::sync::RwLock<Option<Arc<crowdb_kv_client::ServiceDiscoveryClient>>>>,
     /// Rate-limiter for repeated crowdb-rpc failure warnings: maps
     /// `endpoint` → last-warned timestamp. Prevents flooding the
     /// console with identical "instance query failed" warnings every
@@ -90,6 +95,7 @@ impl AppState {
             diskdb_client: Arc::new(tokio::sync::RwLock::new(None)),
             kv_rpc_transport: Arc::new(tokio::sync::RwLock::new(None)),
             kv_client: Arc::new(tokio::sync::RwLock::new(None)),
+            discovery_client: Arc::new(tokio::sync::RwLock::new(None)),
             warn_dedup: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -296,6 +302,24 @@ impl AppState {
     /// the topology cache from scratch. Called on `/internal/reset`.
     pub async fn clear_kv_client(&self) {
         *self.kv_client.write().await = None;
+    }
+
+    /// Get or lazily build the cached `ServiceDiscoveryClient`. Shares
+    /// the same `CrowdbKvClient` as `kv_client()` so topology + connection
+    /// pool are shared. Used by web handlers that need to discover living
+    /// service instances (diskdb, chunkdb) from the group-0 registry.
+    pub async fn discovery_client(&self) -> Arc<crowdb_kv_client::ServiceDiscoveryClient> {
+        if let Some(d) = self.discovery_client.read().await.as_ref() {
+            return Arc::clone(d);
+        }
+        let mut guard = self.discovery_client.write().await;
+        if let Some(d) = guard.as_ref() {
+            return Arc::clone(d);
+        }
+        let kv = self.kv_client().await;
+        let d = Arc::new(crowdb_kv_client::ServiceDiscoveryClient::from_shared_kv(kv));
+        *guard = Some(Arc::clone(&d));
+        d
     }
 
     /// Re-seed the cached `CrowdbKvClient`'s mgmt seed list from the
@@ -562,11 +586,11 @@ mod tests {
         let mut config = ConsoleConfig::default();
         let _ = config.add_server(ServerEntry {
             id: "s1".into(),
-            url: "http://127.0.0.1:9910".into(),
+            url: "http://127.0.0.1:10000".into(),
             node_id: Some(1),
             rpc_url: None,
-            rest_port: Some(9910),
-            rpc_port: Some(28001),
+            rest_port: Some(10000),
+            rpc_port: Some(10100),
             auto_start: true,
             binary: None,
             election_profile: None,
@@ -577,7 +601,7 @@ mod tests {
         });
         let (endpoint, seeds) = resolve_group0_endpoint(&config);
         assert!(endpoint.is_none(), "no store 0 → no RPC endpoint to seed");
-        assert_eq!(seeds, vec!["http://127.0.0.1:9910"]);
+        assert_eq!(seeds, vec!["http://127.0.0.1:10000"]);
     }
 
     #[test]
@@ -585,11 +609,11 @@ mod tests {
         let mut config = ConsoleConfig::default();
         let _ = config.add_server(ServerEntry {
             id: "s1".into(),
-            url: "http://127.0.0.1:9910".into(),
+            url: "http://127.0.0.1:10000".into(),
             node_id: Some(1),
-            rpc_url: Some("http://127.0.0.1:28001".into()),
-            rest_port: Some(9910),
-            rpc_port: Some(28001),
+            rpc_url: Some("http://127.0.0.1:10100".into()),
+            rest_port: Some(10000),
+            rpc_port: Some(10100),
             auto_start: true,
             binary: None,
             election_profile: None,
@@ -600,8 +624,8 @@ mod tests {
         });
         config.record_store(0, vec![1]);
         let (endpoint, seeds) = resolve_group0_endpoint(&config);
-        assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:28001"));
-        assert_eq!(seeds, vec!["http://127.0.0.1:9910"]);
+        assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:10100"));
+        assert_eq!(seeds, vec!["http://127.0.0.1:10000"]);
     }
 
     #[tokio::test]
@@ -619,11 +643,11 @@ mod tests {
         let mut config = ConsoleConfig::default();
         let _ = config.add_server(ServerEntry {
             id: "s1".into(),
-            url: "http://127.0.0.1:9910".into(),
+            url: "http://127.0.0.1:10000".into(),
             node_id: Some(1),
-            rpc_url: Some("http://127.0.0.1:28001".into()),
-            rest_port: Some(9910),
-            rpc_port: Some(28001),
+            rpc_url: Some("http://127.0.0.1:10100".into()),
+            rest_port: Some(10000),
+            rpc_port: Some(10100),
             auto_start: true,
             binary: None,
             election_profile: None,
@@ -651,11 +675,11 @@ mod tests {
         let mut config = ConsoleConfig::default();
         let _ = config.add_server(ServerEntry {
             id: "s1".into(),
-            url: "http://127.0.0.1:9910".into(),
+            url: "http://127.0.0.1:10000".into(),
             node_id: Some(1),
-            rpc_url: Some("http://127.0.0.1:28001".into()),
-            rest_port: Some(9910),
-            rpc_port: Some(28001),
+            rpc_url: Some("http://127.0.0.1:10100".into()),
+            rest_port: Some(10000),
+            rpc_port: Some(10100),
             auto_start: true,
             binary: None,
             election_profile: None,

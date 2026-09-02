@@ -42,18 +42,6 @@ complexity, and dependency. Before implementation, follow the
   to replace its private `freePort()` counter. Open questions: claim-to-
   bind TOCTOU mitigation, claim-file path/format, probe port range,
   cross-host scope, paired-port override semantics.
-- **[R128](R128-cluster-group0-service-discovery.md)** — group-0
-  service discovery — Area: cluster / client — All four services
-  (kv-server, diskdb, chunkdb, diskio) already register to group-0
-  sysdata via `ServiceRegistryClient` and heartbeat periodically. But
-  clients don't use the registry for discovery — they hardcode
-  `127.0.0.1:<port>` or require the operator to pass `--sysmd-ip` /
-  `--sysmd-port` explicitly. R128 builds the client-side discovery
-  layer: a `ServiceDiscoveryClient` with caching + TTL refresh, wired
-  into `crowdb-cli`, `crowdb-web`, and the `crowdb-console-shared` ops
-  layer. Group-0's famous mgmt port (10000, from R118) is the
-  bootstrap point. Open questions: cache refresh strategy (poll vs.
-  watch/notify), instance selection, discovery vs. explicit mode.
 - **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
   review & unification — Area: cluster / observability — CROWDB has
   two logging stacks (Rust `tracing` in `crowdb-common/rust`, C++

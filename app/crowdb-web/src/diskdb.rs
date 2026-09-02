@@ -62,7 +62,11 @@ pub(crate) async fn build_diskdb_client(state: &AppState) -> Option<DiskdbClient
             }
         }
     }
-    let svc = ServiceRegistryClient::from_shared(kv);
+    // Use the shared ServiceDiscoveryClient's ServiceRegistryClient so
+    // the discovery cache + connection pool are shared with the rest
+    // of the web server (R128).
+    let discovery = state.discovery_client().await;
+    let svc = discovery.registry().clone();
     let transport = std::sync::Arc::new(DiskdbRpcTransport::new());
     let client = DiskdbClient::new(svc, transport);
     if let Err(e) = client.refresh_endpoints().await {

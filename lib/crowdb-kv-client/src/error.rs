@@ -52,6 +52,20 @@ pub enum Error {
 
     #[error("mgmt API error: {0}")]
     Mgmt(String),
+
+    /// No living instances of a service were found in the group-0
+    /// service registry. Returned by `ServiceDiscoveryClient::discover_one`
+    /// when `read_all_instances` returns an empty vector.
+    #[error("no living instances of service '{service}' in group-0 registry")]
+    NoLivingInstances { service: String },
+
+    /// The group-0 service registry is unreachable — the underlying
+    /// `CrowdbKvClient` exhausted its retry budget trying to read
+    /// `/srv/<service>/`. The cache is not invalidated on this error
+    /// (a stale cache is better than no cache if group-0 is transiently
+    /// down).
+    #[error("group-0 registry unreachable for service '{service}': {source}")]
+    DiscoveryUnreachable { service: String, source: Box<Error> },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
