@@ -12,6 +12,7 @@ pub struct ServerHandle {
     child: Child,
     base_url: String,
     root: Option<crowdb_test_harness::test_dirs::TestDir>,
+    stderr_buf: Arc<Mutex<Vec<String>>>,
 }
 
 impl ServerHandle {
@@ -60,6 +61,20 @@ impl Drop for ServerHandle {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
+        }
+        if std::thread::panicking() {
+            let stderr_lines = self.stderr_buf.lock().unwrap_or_else(|e| e.into_inner());
+            if !stderr_lines.is_empty() {
+                let start = stderr_lines.len().saturating_sub(80);
+                eprintln!(
+                    "\n=== crowdb-kv-server pid={pid} stderr (last {} lines) ===\n{}\n=== end stderr ===",
+                    stderr_lines.len() - start,
+                    stderr_lines[start..].join("\n")
+                );
+            }
+            eprintln!(
+                "crowdb-kv-server pid={pid} logs: look for crowdb-kv-server-*-{pid}.log under app/crowdb-kv-server/log/"
+            );
         }
     }
 }
@@ -182,6 +197,7 @@ pub async fn start_test_server_at(
         child,
         base_url: format!("http://{addr}"),
         root: None,
+        stderr_buf,
     };
     handle.wait_for_ready(Duration::from_secs(10)).await?;
     Ok(handle)

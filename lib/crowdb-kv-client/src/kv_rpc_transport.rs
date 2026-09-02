@@ -131,12 +131,21 @@ impl KvRpcTransport {
     }
 
     /// Convert an `RpcError` to `Error`, dropping cached connections
-    /// for `endpoint` only on connection-level errors (closed/reset).
-    /// `SendQueueFull` and `Timeout` are transient — the connection is
-    /// still alive, so we keep it and let the caller retry on the same
-    /// pool. Preserves the endpoint in the error message.
+    /// for `endpoint` on connection-level errors (closed/reset) and
+    /// `Timeout`. `Timeout` can indicate a dead connection whose TCP
+    /// FIN has not yet been processed by the epoll worker (e.g. the
+    /// remote process was killed and restarted on the same port) — the
+    /// reaper fails the pending request but leaves the stale fd in the
+    /// pool, so retrying on the same connection would time out again.
+    /// Dropping forces `conn_for` to establish a fresh connection.
+    /// `SendQueueFull` is truly transient (the connection is alive but
+    /// the send queue is full) so the pool is preserved. Preserves the
+    /// endpoint in the error message.
     fn map_rpc_err(&self, e: RpcError, endpoint: &str) -> Error {
-        if matches!(e, RpcError::ConnectionClosed | RpcError::ConnectionError) {
+        if matches!(
+            e,
+            RpcError::ConnectionClosed | RpcError::ConnectionError | RpcError::Timeout
+        ) {
             self.drop_endpoint(endpoint);
         }
         Error::Transport {
