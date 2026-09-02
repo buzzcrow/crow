@@ -33,22 +33,14 @@ app/crowdb-web/ui/e2e/log/
 # Top-level artifact dirs (anchored to repo root).
 /log/
 /runtime-data/
-/runtime/
 # CLI local-deploy workspaces + CLI ops logs.
 /cli-deploy/
 /cli-log/
 # CLI --log-root used by regression scripts (per-run log folders).
 /bench-log/
-# bench deploy runtime dirs (runtime/<name>/handle.json + workspace)
-app/crowdb-cli/runtime/
-# bench-runs/ holds datetime-stamped run dirs; ignore contents
-# but keep the directory itself in the repo.
-/bench-runs/*
 test-logs/
 test-data/
 temp-data/
-
-app/crowdb-cli/bench-runs/
 
 # Per-crate runtime dirs — these names don't appear in source code,
 # so globbing is safe and avoids repeating per crate.
@@ -57,8 +49,6 @@ app/crowdb-cli/bench-runs/
 # Runtime config dirs (operator-supplied real configs, not tracked).
 # Tracked default configs live in app/<crate>/conf/*.json.
 app/crowdb-diskdb/conf/runtime/
-app/crowdb-kv-server/conf/runtime/
-lib/crowdb-console-shared/conf/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.

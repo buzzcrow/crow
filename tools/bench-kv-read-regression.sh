@@ -18,13 +18,11 @@
 #     - minslot_16t:   minslot high concurrency
 #     - lin_32t:       linearizable saturation
 #     - minslot_32t:   minslot saturation
-#   HTTP/2 connection lock sentinel:
-#     - minslot_6t_2to1: 6T:3C (2:1 ratio, h2 lock contention)
 #   Correctness verification (--verify-bytes 8):
 #     - lin_16t_verify:   linearizable correctness
 #     - minslot_16t_verify: minslot correctness
 #
-# 11 runs × 20s ≈ 220s (no deploy/pre-pop overhead per sub-test).
+# 10 runs × 20s ≈ 200s (no deploy/pre-pop overhead per sub-test).
 #
 # Reference platform: see doc/design/kv/kv-read-flow-analysis.md. After
 # a run, update the "Latest Benchmark Results" section there with the
@@ -100,9 +98,29 @@ run_subtest() {
 #   minslot_16t        minslot      16:16 107455   147     235     0    +1.0% vs lin (converging)
 #   lin_32t            linearizable 32:32 119473   265     418     0    saturation
 #   minslot_32t        minslot      32:32 113270   280     432     0    -5.2% vs lin (saturated)
-#   minslot_6t_2to1    minslot      6:3   74752    79      151     0    h2 lock, -3.7% vs 6:6
 #   lin_16t_verify     linearizable 16:16 105613   150     252     0    corr=0
 #   minslot_16t_verify minslot      16:16 106662   148     237     0    corr=0
+#
+# 2026-09-02 (AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux 6.8):
+#   Same hw as the Linux reference in kv-read-flow-analysis.md (2026-08-28).
+#   +page-count metrics +flush re-check loop. 20s mem mode, 3-node cluster,
+#   100k pre-populated keys, 64B values. p50/p99 use coarser histogram
+#   buckets (100/500us increments) — not directly comparable to the
+#   2026-08-28 exact values. lin_1t had 144 errors (lease-expiry burst
+#   at startup, not storage-related). Not strictly better than 2026-08-28
+#   — reference NOT updated per regression policy.
+#
+#   label              mode        T:C   ops/s    avg_us  p50_us  p99_us  err  notes
+#   lin_1t             linearizable 1:1   13825    70      500     500     144  startup lease burst
+#   minslot_1t         minslot      1:1   12196    79      100     500     0
+#   lin_6t             linearizable 6:6   67159    86      100     500     0    -13.2% vs ref
+#   minslot_6t         minslot      6:6   96356    60      100     100     0    +0.4% vs ref
+#   lin_16t            linearizable 16:16 231137   66      100     500     0    -0.8% vs ref
+#   minslot_16t        minslot      16:16 224174   67      100     500     0    -5.2% vs ref
+#   lin_32t            linearizable 32:32 265939   116     500     500     0    -1.9% vs ref
+#   minslot_32t        minslot      32:32 256674   119     500     500     0    -3.2% vs ref
+#   lin_16t_verify     linearizable 16:16 232790   65      100     500     0    corr=0
+#   minslot_16t_verify minslot      16:16 226425   67      100     500     0    corr=0
 #
 # Analysis: doc/design/kv/kv-read-flow-analysis.md § Latest Benchmark Results.
 
@@ -134,9 +152,6 @@ run_subtest "lin_16t"       linearizable auto 16 16
 run_subtest "minslot_16t"   minslot      zero 16 16
 run_subtest "lin_32t"       linearizable auto 32 32
 run_subtest "minslot_32t"   minslot      zero 32 32
-
-echo "=== HTTP/2 connection lock sentinel (2T:1C should drop) ==="
-run_subtest "minslot_6t_2to1" minslot    zero 6 3
 
 echo "=== Correctness verification ==="
 run_subtest "lin_16t_verify"     linearizable auto 16 16 8

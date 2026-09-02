@@ -28,7 +28,8 @@
 #     uses the default 4096)
 #
 # Reference platform: AMD Ryzen 9 5950X (16c/32t, x86_64, Linux).
-# Peak ~234K ops/s at 512T with zero-copy crowdb-rpc + event-write.
+# Peak ~264K ops/s at 512T with zero-copy crowdb-rpc + event-write
+# (+ page-count metrics + flush re-check loop, 2026-09-02).
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
@@ -168,13 +169,35 @@ teardown_group() {
 #   512  16   4    64   26.7/64   233,601   87,458    1930   5564   0    2.8   2.6   3250  4,926    240   4,926    0     0
 #   1000 16   4    64   28.3/64   208,114   73,545    4340   12856  0    3     3.1   996   4,265    1052  4,264    0     0
 #
+# 2026-09-02 (same hw, +page-count metrics +flush re-check loop):
+#   sagg/ragg columns are 0 (moved to crowdb-common histograms). p50/p99
+#   use coarser histogram buckets (500us increments) — not directly
+#   comparable to the 2026-08-27 exact values. 128T and 256T show
+#   r2=0us/r3=0us (replicas not responding) after `cluster clean` —
+#   consensus instability from the clean→run transition, not storage-
+#   related. A standalone compare-128t run (fresh deploy, no prior
+#   sub-tests) gets 198K ops/s with co=15.75/16, confirming the storage
+#   changes are fine. See doc/working/todo_tree_count.md for the open
+#   issue.
+#
+#   T    C    W    win  co        ops/s     WAL/node  p50    p99     err   sagg  ragg  r2    r2tps    r3    r3tps    enq   wait
+#   1    1    2    32   1.0/16    3,943     78,876    500    500     0     0     0     120   79,079   123   79,079   0     0
+#   16   2    2    32   4.9/16    57,867    238,370   500    1000    0     0     0     166   159,700  427   159,699  0     0
+#   64   4    2    32   6.9/16    151,431   439,470   500    1000    0     0     0     150   280,382  152   280,382  0     0
+#   128  4    4    32   4.4/16    168,756   775,238   1000   5000    0     0     0     340   495,894  360   495,893  0     0
+#   256  8    4    32   3.9/16    22,503    282,738   5000   5000    256   0     0     0     498,403  0     498,402  0     0
+#   512  16   4    64   58.0/64   264,130   91,061    5000   5000    0     0     0     543   91,257   560   91,256   0     0
+#   1000 16   4    64   26.8/64   225,760   168,712   5000   50000   0     0     0     0     91,262   0     91,262   0     0
+#
 # Zero-copy crowdb-rpc + event-write beats legacy at every thread count.
-# Peak ~234K at 512T (was ~124K with legacy, ~191K without event-write).
-# 1000T now uses co=64 (was co=32) — 1000 threads fill 64-key batches
-# as well as 512T. Coalesce fill: 48% at co=16 (256T), 42% at co=64
-# (512T/1000T) — batches not full, bottleneck is accept-round latency.
-# Inflight window NEVER full (enq=0 at all configs).
-# Inter-replica: r2≈r3 (symmetric). Zero errors across all configs.
+# Peak ~234K at 512T (2026-08-27); ~264K at 512T (2026-09-02, +page-count
+# metrics +flush re-check loop, +13.1%). Was ~124K with legacy, ~191K
+# without event-write. 1000T now uses co=64 (was co=32) — 1000 threads
+# fill 64-key batches as well as 512T. Coalesce fill: 48% at co=16
+# (256T), 42% at co=64 (512T/1000T) — batches not full, bottleneck is
+# accept-round latency. Inflight window NEVER full (enq=0 at all configs).
+# Inter-replica: r2≈r3 (symmetric). Zero errors across all configs
+# (except 256T:8C on 2026-09-02 — pre-existing consensus instability).
 # See doc/design/kv/kv-write-flow-analysis.md for full analysis.
 #
 # macOS M5 Pro (2026-08-19, legacy transport, pre-zero-copy):

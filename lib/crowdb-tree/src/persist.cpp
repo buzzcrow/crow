@@ -60,14 +60,15 @@ namespace
 {
 
 constexpr uint32_t kAnchorMagic   = 0x41435443; // 'CTCA' little-endian
-constexpr uint32_t kFormatVersion = 2;          // clean-break format
+constexpr uint32_t kFormatVersion = 3;          // clean-break format (v3: +leaf/inner_count)
 // Minimum on-disk anchor slot size. The actual slot is rounded up to the
 // store IU so larger-IU devices (16K/64K SSD) get IU-aligned, IU-sized slots
 // (PT9 geometry); for iu <= 4096 (dividing 4096) it stays 4096.
 constexpr uint64_t kAnchorBytes = 4096;
 // magic,format_version,snapshot_seq,root_page_id,last_applied_slot,
-// next_page_id,segment_slots,segdir_addr,segdir_len,segdir_crc,anchor_crc.
-constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 4;
+// next_page_id,segment_slots,segdir_addr,segdir_len,segdir_crc,
+// leaf_count,inner_count,anchor_crc.
+constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 4 + 8 + 8 + 4;
 
 std::string make_metrics_prefix(const Options &opt)
 {
@@ -107,6 +108,8 @@ struct CommitAnchor
     uint64_t segdir_addr       = 0;
     uint32_t segdir_len        = 0;
     uint32_t segdir_crc        = 0;
+    uint64_t leaf_count        = 0; // live leaf pages (O(1) gauge, restored on open)
+    uint64_t inner_count       = 0; // live inner pages (O(1) gauge, restored on open)
 };
 
 void put_u32(std::vector<uint8_t> *out, uint32_t v)
@@ -153,6 +156,8 @@ void encode_anchor(const CommitAnchor &a, uint64_t slot_bytes, std::vector<uint8
     put_u64(buf, a.segdir_addr);
     put_u32(buf, a.segdir_len);
     put_u32(buf, a.segdir_crc);
+    put_u64(buf, a.leaf_count);
+    put_u64(buf, a.inner_count);
     uint32_t crc = crowdb::common::crc32c(buf->data(), buf->size());
     put_u32(buf, crc);
     buf->resize(slot_bytes, 0); // zero pad to the IU-aligned slot size
@@ -181,6 +186,8 @@ bool decode_anchor(const uint8_t *buf, CommitAnchor *a)
     a->segdir_addr       = get_u64(buf + 44);
     a->segdir_len        = get_u32(buf + 52);
     a->segdir_crc        = get_u32(buf + 56);
+    a->leaf_count        = get_u64(buf + 60);
+    a->inner_count       = get_u64(buf + 68);
     return true;
 }
 
@@ -648,6 +655,8 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out)
     anchor.segdir_addr       = segdir_addr;
     anchor.segdir_len        = static_cast<uint32_t>(segdir_len);
     anchor.segdir_crc        = crowdb::common::crc32c(out->directory_write.blob.data(), segdir_len);
+    anchor.leaf_count        = leaf_count_.load(std::memory_order_relaxed);
+    anchor.inner_count       = inner_count_.load(std::memory_order_relaxed);
 
     std::vector<uint8_t> abuf;
     encode_anchor(anchor, superblock_slot_bytes(iu), &abuf);
@@ -1060,6 +1069,8 @@ Status Crowdbtree::open(const Options &opt, std::unique_ptr<Crowdbtree> *out)
     tree->last_applied_slot_.store(anchor.last_applied_slot);
     tree->contiguous_slot_.store(anchor.last_applied_slot);
     tree->version_.store(anchor.snapshot_seq);
+    tree->leaf_count_.store(anchor.leaf_count, std::memory_order_relaxed);
+    tree->inner_count_.store(anchor.inner_count, std::memory_order_relaxed);
 
     CRB_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
                  anchor.last_applied_slot, anchor.root_page_id, entries.size());

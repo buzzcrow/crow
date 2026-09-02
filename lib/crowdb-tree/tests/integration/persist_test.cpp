@@ -804,3 +804,69 @@ TEST(Persist, BlockCompactionSingleMediumUnaffected)
     EXPECT_TRUE(t.get(Slice("b"), &s, &v));
     EXPECT_EQ(v, "2");
 }
+
+// leaf/inner counts are persisted in the commit anchor and restored on open.
+TEST(Persist, LeafInnerCountSurvivesSnapshotOpen)
+{
+    crowdb::tree_test::TempDir tmp("licnt_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string dir = tmp.path;
+
+    uint64_t expected_leaves = 0;
+    uint64_t expected_inners = 0;
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 8 * 1024, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256; // small leaves → many splits
+        opt.max_delta_len    = 1;   // consolidate aggressively
+        Crowdbtree t(opt);
+
+        // Write enough to build a multi-level tree.
+        for (int i = 0; i < 200; ++i) {
+            ASSERT_TRUE(t.apply(static_cast<uint64_t>(i + 1), put_one(make_key(i), "v" + std::to_string(i))).ok());
+            ASSERT_TRUE(t.flush().ok());
+        }
+        ASSERT_GT(t.height(), 1);
+        ASSERT_TRUE(t.snapshot().ok());
+        expected_leaves = t.leaf_count_atomic();
+        expected_inners = t.inner_count_atomic();
+        ASSERT_GT(expected_leaves, 1U);
+        ASSERT_GT(expected_inners, 0U);
+    }
+
+    // Reopen: counts must be restored from the anchor.
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 8 * 1024, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        std::unique_ptr<Crowdbtree> t;
+        ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
+        EXPECT_EQ(t->leaf_count_atomic(), expected_leaves);
+        EXPECT_EQ(t->inner_count_atomic(), expected_inners);
+        // Data is intact too.
+        for (int i = 0; i < 200; ++i) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t->get(Slice(make_key(i)), &s, &v)) << "missing " << make_key(i);
+        }
+    }
+}
+
+// Fresh empty tree (no anchor): leaf=1, inner=0.
+TEST(Persist, OpenEmptyTreeCounts)
+{
+    crowdb::tree_test::TempDir tmp("empty_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::unique_ptr<BlockPageStore> store;
+    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, 8 * 1024, 1, &store).ok());
+    Options opt;
+    opt.page_store = store.get();
+    std::unique_ptr<Crowdbtree> t;
+    ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
+    EXPECT_EQ(t->leaf_count_atomic(), 1U);
+    EXPECT_EQ(t->inner_count_atomic(), 0U);
+}

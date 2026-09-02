@@ -199,8 +199,8 @@ loc = "tokei . .github --exclude swagger-ui --exclude 'lib/crowdb-tree/build-*' 
 # ── Clean ────────────────────────────────────────────────────────
 # Removes all build/test/runtime artifacts, keeping only git-tracked
 # files, the pixi env (.pixi/), and install-deps caches (node_modules).
-# System-temp dirs (crowdb-web-*, crowdb-cli-test-* from std::env::temp_dir)
-# live outside the repo and are not touched.
+# C++ tests create hardcoded /tmp dirs (crowdb-*-tests, crowtree_log_*,
+# crowtree_metrics_test_*) — cleaned at the end.
 clean = { cmd = '''
 bash -c '
 set -e
@@ -231,14 +231,13 @@ echo "[clean] test runtime data"
 rm -rf test-logs test-data runtime-data .test-tmp lib/crowdb-tree/.test-tmp
 rm -rf app/crowdb-web/ui/e2e/runtime-data
 rm -rf app/crowdb-web/ctdata app/crowdb-web/waldata
-rm -rf app/crowdb-cli/bench-runs bench-runs/*
-rm -rf app/crowdb-cli/runtime
 
 # `log/` is dangerous as a glob (common Rust module name) — explicit per crate.
 # Repo-root `log/` is where crowdb-kv-server writes (CWD-relative); the per-crate
 # paths are future-proofing (those bins currently log under runtime-data/).
+# `cli-log/` is where crowdb-cli writes cluster deploy/bench logs (CWD-relative).
 echo "[clean] log dirs"
-rm -rf log app/crowdb-kv-server/log app/crowdb-diskdb/log app/crowdb-chunkdb/log \
+rm -rf log cli-log app/crowdb-kv-server/log app/crowdb-diskdb/log app/crowdb-chunkdb/log \
   app/crowdb-cli/log lib/crowdb-console-shared/log app/crowdb-web/log \
   app/crowdb-web/ui/e2e/log \
   lib/crowdb-chunk-client/log lib/crowdb-diskdb-client/log lib/crowdb-diskio-client/log
@@ -278,6 +277,17 @@ find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -pr
 echo "[clean] .DS_Store"
 find . \( -name .pixi -o -name node_modules -o -name target -o -name .git \) -prune \
   -o -name .DS_Store -print0 2>/dev/null | xargs -0 rm -f 2>/dev/null || true
+
+# ── System temp dirs (C++ tests with hardcoded /tmp paths) ──
+echo "[clean] /tmp test dirs"
+rm -rf /tmp/crowdb-common-diskio-uring-tests \
+       /tmp/crowdb-diskio-blocking-tests \
+       /tmp/crowdb-diskio-diskset-tests \
+       /tmp/crowdb-diskio-uring-tests
+rm -rf /tmp/crowtree_log_* /tmp/crowtree_metrics_test_*
+# Bench script temp files (config, cfgpath, output, logs)
+rm -f /tmp/bench-write-reg-* /tmp/bench-read-regression-* /tmp/bench-scan-regression-* \
+      /tmp/bench-rpc-regression-* /tmp/bench-compare-128t-*
 echo "[clean] done"
 '
 ''' }

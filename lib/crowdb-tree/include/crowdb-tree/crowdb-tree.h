@@ -237,6 +237,8 @@ struct EngineStats
     uint64_t l1_get_hit_total    = 0; // L1 lookups that found a cell
     uint64_t map_lookup_total    = 0; // mapping table lookups
     uint64_t demand_load_total   = 0; // demand-load page faults
+    uint64_t leaf_count          = 0; // live leaf pages (O(1) atomic)
+    uint64_t inner_count         = 0; // live inner pages (O(1) atomic)
 };
 
 // Per-step scan profile: each step's aggregate over the window since the last
@@ -505,6 +507,14 @@ class Crowdbtree
     // buffering. Non-contiguous leftovers (slot above the current contiguous
     // frontier) are relocated onto the live active_ MemTable rather than
     // lost -- see the active_/frozen_ member comment for the full design.
+    //
+    // Re-check loop: after each k-way merge drain pass, re-swaps frozen_ and
+    // drains again if new memtables froze during the prior pass (apply() on
+    // other threads keeps writing and may trip the freeze threshold mid-
+    // drain). This catches the backlog in one flush() call instead of leaving
+    // it for the next maintenance tick. Capped at max_memtable_count
+    // iterations; remaining tables (if any) stay in frozen_ for the next
+    // flush().
     Status flush();
 
     // Async twin of flush(). flush() only drains
@@ -713,6 +723,19 @@ class Crowdbtree
     [[nodiscard]] int    height() const;     // 1 = single-leaf root
     [[nodiscard]] size_t leaf_count() const; // live leaves reachable from the root
 
+    // O(1) atomic snapshot of the leaf/inner page counters (maintained at
+    // SMO sites, restored from the commit anchor on open()). For tests and
+    // metrics — prefer these over leaf_count() (which walks the tree).
+    [[nodiscard]] uint64_t leaf_count_atomic() const
+    {
+        return leaf_count_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] uint64_t inner_count_atomic() const
+    {
+        return inner_count_.load(std::memory_order_relaxed);
+    }
+
     // # of base pages physically written by the most recent snapshot (the rest
     // were clean and retained their durable addr). For incremental-snapshot tests.
     [[nodiscard]] uint64_t last_snapshot_pages_written() const
@@ -832,12 +855,20 @@ class Crowdbtree
     // O4: store `new_page` at `page_id`, preserving parent_page_id from the
     // old page. Caller holds write_mutex_.
     void store_preserving_parent_locked(uint64_t page_id, PageBase *new_page);
+    // Sync the leaf/inner gauge handles to the atomic counters (no-op when
+    // metrics aren't registered). Called after every SMO counter update.
+    void sync_page_count_gauges();
     // Inner PIDs from root down to (but excluding) the leaf `target_page_id`.
     std::vector<uint64_t> path_to_page_id_locked(uint64_t target_page_id) const;
-    void                  split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path);
-    void                  propagate_split_locked(std::vector<uint64_t> path, uint64_t child_page_id, std::string sep,
-                                                 uint64_t right_page_id);
-    void                  try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<uint64_t> &path);
+    // Iteratively 2-way split a leaf (and its resulting halves) until every
+    // leaf fits under leaf_split_bytes. Needed because consolidation can fold
+    // a large delta chain into a leaf many times the threshold. Caller holds
+    // write_mutex_.
+    void split_leaf_to_threshold_locked(uint64_t leaf_page_id);
+    void split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path);
+    void propagate_split_locked(std::vector<uint64_t> path, uint64_t child_page_id, std::string sep,
+                                uint64_t right_page_id);
+    void try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<uint64_t> &path);
     // Merge an underfull non-root inner page with its left sibling (mirrors leaf
     // merge), recursing up; collapses the root when it drops to a single child.
     // `path` is the inner PIDs from root down to (but excluding) `inner_page_id`.
@@ -1109,7 +1140,11 @@ class Crowdbtree
     // flush() call) but can hold up to (opt_.max_memtable_count - 1) if
     // writes keep tripping the threshold faster than flush() (explicit call
     // or the background thread) drains them -- see max_memtable_count's
-    // comment in options.h for the capacity/back-pressure behavior.
+    // comment in options.h for the capacity/back-pressure behavior. flush()
+    // uses a re-check loop that drains frozen_ to empty (modulo the
+    // max_memtable_count iteration cap) in one call, so tables that freeze
+    // during a drain pass are caught in the same flush() rather than left
+    // for the next tick.
     //
     // Both members are guarded by memtable_mutex_, but *only* for the
     // pointer/queue values themselves -- MemTable has its own internal
@@ -1198,6 +1233,12 @@ class Crowdbtree
     mutable std::atomic<uint64_t> map_lookup_total_{0};    // mapping table lookups (find_leaf_page_id / resident)
     mutable std::atomic<uint64_t> demand_load_total_{0};   // demand-load page faults
 
+    // Live leaf/inner page counts (O(1) gauges, maintained at SMO sites and
+    // restored from the commit anchor on open()). See leaf_count_atomic() /
+    // inner_count_atomic(). An empty tree starts at leaf=1 (root leaf), inner=0.
+    std::atomic<uint64_t> leaf_count_{1};
+    std::atomic<uint64_t> inner_count_{0};
+
     // Logical clock for CLOCK-informed eviction ranking (plan-tree #17).
     // `resident()`'s hot path bumps this and stamps the touched page's own
     // `PageBase::last_touch_tick` on every access (a single relaxed atomic
@@ -1262,7 +1303,10 @@ class Crowdbtree
         Counter        *page_merge_c       = nullptr;
         Counter        *page_consolidate_c = nullptr;
         // Tree structure
-        CallbackGauge *tree_height_g = nullptr;
+        CallbackGauge *tree_height_g        = nullptr;
+        Gauge         *tree_leaf_count_g    = nullptr;
+        Gauge         *tree_inner_count_g   = nullptr;
+        CallbackGauge *tree_retired_count_g = nullptr;
         // Mapping table
         Counter       *page_find_c           = nullptr;
         Counter       *page_map_alloc_c      = nullptr;

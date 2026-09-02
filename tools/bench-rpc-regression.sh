@@ -67,6 +67,26 @@
 #   1  16  1,000   32  1,206,111   825    420  5,844   9,600     0    1    0
 # Conclusion: nagle on, quickack off is optimal for RPC echo (-11% vs
 # nagle+quickack). QUICKACK is for Paxos (KV bench), not raw RPC echo.
+#
+# 2026-09-02 (same hw, +page-count metrics +flush re-check loop):
+#   RPC echo does not touch the storage engine — this run confirms the
+#   changes have no transport-level impact. Results are within noise
+#   (-1% to -5% vs 2026-08-31). p50/p99 use coarser histogram buckets
+#   (100/500/1000/5000us) — not directly comparable to 2026-08-31 exact
+#   values. Not strictly better — reference NOT updated per regression
+#   policy.
+#
+#   Wkr  Load       Mode       Nagle  ops/s        avg    p50    p99     p999   err
+#   1    1T:1C      coroutine  off    50,663       18     100    100     null   0
+#   4    64T:4C     coroutine  off    514,318      123    500    500     null   0
+#   8    512T:8C    coroutine  off    814,807      626    1000   1000    null   0
+#   16   1,000T:32C coroutine  off    1,271,548    783    500    10000   null   0
+#   4    64T:4C     coroutine  on     973,317      64     100    500     null   0
+#   8    512T:8C    coroutine  on     1,775,602    286    500    500     null   0
+#   16   1,000T:32C coroutine  on     2,130,032    466    500    5000    null   0
+#   1    1T:1C      tokio      off    28,062       34     100    100     null   0
+#   4    64T:4C     tokio      off    492,924      126    500    500     null   0
+#   16   1,000T:32C tokio      off    988,956      999    1000   5000    null   0
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

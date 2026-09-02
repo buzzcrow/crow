@@ -282,6 +282,16 @@ Crowdbtree::Crowdbtree(Options opt) : opt_(std::move(opt)), name_(opt_.name)
     root_page_id_.store(page_id);
 }
 
+void Crowdbtree::sync_page_count_gauges()
+{
+    if (metrics_.tree_leaf_count_g != nullptr) {
+        metrics_.tree_leaf_count_g->set(leaf_count_.load(std::memory_order_relaxed));
+    }
+    if (metrics_.tree_inner_count_g != nullptr) {
+        metrics_.tree_inner_count_g->set(inner_count_.load(std::memory_order_relaxed));
+    }
+}
+
 Crowdbtree::~Crowdbtree()
 {
     try {
@@ -1279,7 +1289,6 @@ Status Crowdbtree::flush()
 {
     auto                        t0 = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(write_mutex_);
-    uint64_t                    cs = contiguous_slot_.load();
 
     // Always freeze whatever is in active_ right now (even below threshold)
     // so an explicit flush() call (or the periodic background-thread tick)
@@ -1290,31 +1299,50 @@ Status Crowdbtree::flush()
     // is left in the live active_ table (a no-op if it's already empty).
     maybe_freeze_active(/*force=*/true);
 
-    // Move the frozen_ queue into a local variable under a brief exclusive
-    // lock, then process it lock-free from here on: this is what makes it
-    // safe to iterate/erase without racing a concurrent maybe_swap_active()
-    // (called from other threads' apply(), without write_mutex_) that only
-    // ever *pushes* onto the (now-empty) live frozen_ member from this point
-    // on -- flush() never touches the live frozen_ member again this call.
-    std::deque<std::shared_ptr<MemTable>> to_drain;
-    {
-        std::unique_lock<std::shared_mutex> mlk(memtable_mutex_);
-        to_drain.swap(frozen_);
+    uint64_t entries_before = flush_entries_total_.load(std::memory_order_relaxed);
+    size_t   total_tables   = 0;
+    bool     wrote_any      = false;
+    uint64_t final_cs       = contiguous_slot_.load();
+
+    // Re-check loop: drain all frozen memtables, then re-swap frozen_ and
+    // drain again if new tables froze during the previous pass (apply() on
+    // other threads keeps writing and may trip the threshold mid-drain).
+    // This catches the backlog in one flush() call instead of leaving it for
+    // the next maintenance tick. Capped at max_memtable_count iterations so
+    // a sustained write rate faster than drain throughput exits cleanly.
+    for (size_t iter = 0; iter < opt_.max_memtable_count; ++iter) {
+        std::deque<std::shared_ptr<MemTable>> to_drain;
+        {
+            std::unique_lock<std::shared_mutex> mlk(memtable_mutex_);
+            to_drain.swap(frozen_);
+        }
+        if (to_drain.empty()) {
+            break;
+        }
+        // Re-read cs each pass: apply() (no write_mutex_) may have advanced
+        // the contiguous frontier between drain passes, letting this pass
+        // drain entries that were non-contiguous leftovers in the prior pass.
+        uint64_t                  cs     = contiguous_slot_.load();
+        std::shared_ptr<MemTable> active = current_active();
+        total_tables += to_drain.size();
+        if (drain_all_frozen_locked(to_drain, active, cs)) {
+            wrote_any = true;
+        }
+        active->set_durable_floor(cs);
+        last_applied_slot_.store(cs);
+        version_.fetch_add(1);
+        final_cs = cs;
+    }
+    size_t remaining = frozen_table_count();
+    if (remaining > 0) {
+        CRB_LOG_WARN("[{}] flush: hit iteration cap ({}), {} tables still frozen; next tick drains them", name_,
+                     opt_.max_memtable_count, remaining);
     }
 
-    std::shared_ptr<MemTable> active         = current_active();
-    uint64_t                  entries_before = flush_entries_total_.load(std::memory_order_relaxed);
-    // Drain all frozen memtables in one k-way sorted merge (O5) with
-    // sort-aware descent (O1), replacing the per-memtable drain loop.
-    bool wrote_any = drain_all_frozen_locked(to_drain, active, cs);
-    // Keep the live active_ table's durable floor current even when nothing
-    // above needed freezing/draining (e.g. an idle background-timer tick).
-    active->set_durable_floor(cs);
-
     if (!wrote_any) {
-        // Still advance the durable watermark/version so snapshots see progress.
-        if (cs > last_applied_slot_.load()) {
-            last_applied_slot_.store(cs);
+        // Still advance the durable watermark so snapshots see progress.
+        if (final_cs > last_applied_slot_.load()) {
+            last_applied_slot_.store(final_cs);
         }
         if (metrics_.flush_l != nullptr) {
             auto ns =
@@ -1324,11 +1352,9 @@ Status Crowdbtree::flush()
         return Status::Ok();
     }
 
-    last_applied_slot_.store(cs);
-    version_.fetch_add(1);
     maybe_evict_locked(); // keep cache bounded; only clean bases go
     uint64_t entries_drained = flush_entries_total_.load(std::memory_order_relaxed) - entries_before;
-    CRB_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, to_drain.size(), entries_drained, cs);
+    CRB_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, total_tables, entries_drained, final_cs);
     if (metrics_.flush_l != nullptr) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         metrics_.flush_l->observe(static_cast<uint64_t>(ns));
@@ -1504,11 +1530,47 @@ void Crowdbtree::maybe_split_or_merge_locked(uint64_t page_id)
     }
     auto *leaf = static_cast<LeafBase *>(head);
     if (leaf->count() >= 2 && leaf->data_bytes() > opt_.leaf_split_bytes) {
-        split_leaf_locked(page_id, path_to_page_id_locked(page_id));
+        split_leaf_to_threshold_locked(page_id);
     }
     else if (leaf->data_bytes() < opt_.leaf_merge_bytes && page_id != root_page_id_.load()) {
         // Includes empty leaves (count 0) so fully-deleted leaves merge away.
         try_merge_leaf_locked(page_id, path_to_page_id_locked(page_id));
+    }
+}
+
+void Crowdbtree::split_leaf_to_threshold_locked(uint64_t leaf_page_id)
+{
+    // Consolidation can fold a large delta chain into a leaf that is many
+    // times the split threshold. A single 2-way split leaves both halves
+    // oversized when the leaf is > 2x the threshold. Iteratively split each
+    // oversized half (via a worklist) until every leaf fits under the
+    // threshold. Reuses split_leaf_locked for each halving; the worklist
+    // ensures both the left half (still at leaf_page_id) and the right half
+    // (a new sibling) get re-checked. Terminates because each split halves
+    // the entry count and we stop at count < 2.
+    std::vector<uint64_t> worklist;
+    worklist.push_back(leaf_page_id);
+    while (!worklist.empty()) {
+        uint64_t pid = worklist.back();
+        worklist.pop_back();
+        PageBase *head = resident(pid);
+        if (head == nullptr || head->type != page_type::kLeafBase) {
+            continue;
+        }
+        auto *leaf = static_cast<LeafBase *>(head);
+        if (leaf->count() < 2 || leaf->data_bytes() <= opt_.leaf_split_bytes) {
+            continue;
+        }
+        split_leaf_locked(pid, path_to_page_id_locked(pid));
+        // Both halves may still exceed the threshold; re-check them.
+        PageBase *fresh = resident(pid);
+        if (fresh != nullptr && fresh->type == page_type::kLeafBase) {
+            worklist.push_back(pid);
+            uint64_t right = static_cast<LeafBase *>(fresh)->right_sibling();
+            if (right != kInvalidPageId) {
+                worklist.push_back(right);
+            }
+        }
     }
 }
 
@@ -1540,6 +1602,8 @@ void Crowdbtree::split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> 
     LeafBase *left = LeafBase::build(lo, right_page_id, pool_, opt_.frame_bytes);
     store_preserving_parent_locked(leaf_page_id, left);
     retire_page(leaf);
+    leaf_count_.fetch_add(1, std::memory_order_relaxed);
+    sync_page_count_gauges();
 }
 
 void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t child_page_id, std::string sep,
@@ -1553,6 +1617,8 @@ void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t chi
         root_page_id_.store(new_root);
         // O4: set parent pointers on the new root's children.
         set_children_parent_locked(new_root, new_root);
+        inner_count_.fetch_add(1, std::memory_order_relaxed);
+        sync_page_count_gauges();
         return;
     }
     uint64_t parent_page_id = path.back();
@@ -1577,6 +1643,7 @@ void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t chi
         // O4: update parent pointers for all children (the new right_page_id
         // child and any existing children whose parent was just rebuilt).
         set_children_parent_locked(parent_page_id, parent_page_id);
+        sync_page_count_gauges();
         return;
     }
 
@@ -1595,6 +1662,7 @@ void Crowdbtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t chi
     // O4: set parent pointers on children of both split inner pages.
     set_children_parent_locked(parent_page_id, parent_page_id);
     set_children_parent_locked(rinner_page_id, rinner_page_id);
+    inner_count_.fetch_add(1, std::memory_order_relaxed);
 
     propagate_split_locked(std::move(path), parent_page_id, std::move(median), rinner_page_id);
 }
@@ -1649,6 +1717,7 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
     for (uint64_t h : dead_overflow) {
         retire_overflow_chain_locked(h);
     }
+    leaf_count_.fetch_sub(1, std::memory_order_relaxed);
 
     // 2. Repoint the parent: drop separators_[idx-1] and children_[idx].
     std::vector<std::string> seps     = parent->separators();
@@ -1667,6 +1736,7 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
             new_root_head->parent_page_id = kInvalidPageId;
         }
         retire_orphaned_page(parent_page_id, parent);
+        inner_count_.fetch_sub(1, std::memory_order_relaxed);
     }
     else {
         size_t parent_seps = seps.size();
@@ -1693,6 +1763,7 @@ void Crowdbtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<
         ppath.pop_back();                   // -> root..grandparent (parent's path)
         try_merge_inner_locked(parent_page_id, std::move(ppath));
     }
+    sync_page_count_gauges();
 }
 
 void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64_t> path)
@@ -1753,6 +1824,7 @@ void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint
     retire_page(left);
     // O4: update parent pointers for the merged left sibling's children.
     set_children_parent_locked(left_page_id, left_page_id);
+    inner_count_.fetch_sub(1, std::memory_order_relaxed); // two inners → one
 
     // 2. Repoint the grandparent: drop separators[idx-1] and children[idx].
     std::vector<std::string> gseps     = gp->separators();
@@ -1771,6 +1843,7 @@ void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint
             new_root_head->parent_page_id = kInvalidPageId;
         }
         retire_orphaned_page(gp_page_id, gp);
+        inner_count_.fetch_sub(1, std::memory_order_relaxed); // root inner retired
     }
     else {
         size_t gp_seps = gseps.size();
@@ -1793,6 +1866,7 @@ void Crowdbtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint
         path.pop_back(); // -> root..great-grandparent (grandparent's path)
         try_merge_inner_locked(gp_page_id, std::move(path));
     }
+    sync_page_count_gauges();
 }
 
 GetView Crowdbtree::get_view(Slice key) const
@@ -3334,6 +3408,8 @@ Status Crowdbtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint
         root_page_id_.store(page_id);
         // Replace L0 and reset the durable watermarks so the imported slots apply.
         reset_memtables_locked();
+        leaf_count_.store(1, std::memory_order_relaxed);
+        inner_count_.store(0, std::memory_order_relaxed);
         last_applied_slot_.store(0);
         contiguous_slot_.store(0);
         gc_floor_.store(0);
@@ -3480,6 +3556,8 @@ Status Crowdbtree::install_snapshot_native(std::vector<NativeFrame> frames, uint
     free_all_resident_pages(/*retire=*/true);
 
     uint64_t max_page_id = root_page_id;
+    uint64_t leaves      = 0;
+    uint64_t inners      = 0;
     for (NativeFrame &f : frames) {
         if (f.page_id == kInvalidPageId) {
             return Status::invalid_argument("native snapshot: invalid page_id");
@@ -3490,6 +3568,12 @@ Status Crowdbtree::install_snapshot_native(std::vector<NativeFrame> frames, uint
         }
         page_type ft   = frame_page_type(f.frame.data());
         auto      plen = static_cast<uint32_t>(f.frame.size());
+        if (ft == page_type::kLeafBase) {
+            ++leaves;
+        }
+        else if (ft == page_type::kInnerBase) {
+            ++inners;
+        }
         PageBase *page = nullptr;
         switch (ft) {
         case page_type::kLeafBase:
@@ -3511,6 +3595,8 @@ Status Crowdbtree::install_snapshot_native(std::vector<NativeFrame> frames, uint
     }
     mapping_.set_next_page_id(max_page_id + 1);
     root_page_id_.store(root_page_id);
+    leaf_count_.store(leaves, std::memory_order_relaxed);
+    inner_count_.store(inners, std::memory_order_relaxed);
     // O4: initialize parent pointers on all inner pages' children by walking
     // from the root down. The root itself has no parent (kInvalidPageId).
     {
@@ -3564,6 +3650,8 @@ Status Crowdbtree::clear()
     mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
     root_page_id_.store(page_id);
     reset_memtables_locked();
+    leaf_count_.store(1, std::memory_order_relaxed);
+    inner_count_.store(0, std::memory_order_relaxed);
     last_applied_slot_.store(0);
     contiguous_slot_.store(0);
     gc_floor_.store(0);
@@ -3607,6 +3695,8 @@ EngineStats Crowdbtree::stats() const
     s.l1_get_hit_total    = l1_get_hit_total_.load(std::memory_order_relaxed);
     s.map_lookup_total    = map_lookup_total_.load(std::memory_order_relaxed);
     s.demand_load_total   = demand_load_total_.load(std::memory_order_relaxed);
+    s.leaf_count          = leaf_count_.load(std::memory_order_relaxed);
+    s.inner_count         = inner_count_.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -3678,6 +3768,14 @@ void Crowdbtree::init_metrics(const std::string &prefix, const std::string &back
     metrics_.page_consolidate_c = r->register_counter(prefix + ".page.consolidate.c");
     metrics_.tree_height_g =
         r->register_callback_gauge(prefix + ".tree.height.g", [this] { return static_cast<uint64_t>(height()); });
+    metrics_.tree_leaf_count_g  = r->register_gauge(prefix + ".tree.leaf.count.g");
+    metrics_.tree_inner_count_g = r->register_gauge(prefix + ".tree.inner.count.g");
+    metrics_.tree_retired_count_g =
+        r->register_callback_gauge(prefix + ".tree.retired.count.g", [this] { return epoch_.pending_retired(); });
+    // Seed the leaf/inner gauges with the current counter values (so the first
+    // metrics flush before any SMO shows the right counts).
+    metrics_.tree_leaf_count_g->set(leaf_count_.load(std::memory_order_relaxed));
+    metrics_.tree_inner_count_g->set(inner_count_.load(std::memory_order_relaxed));
     metrics_.page_map_alloc_c = r->register_counter(prefix + ".page.map.alloc.c");
     metrics_.page_map_total_pids_g =
         r->register_callback_gauge(prefix + ".page.map.total_pids.g", [this] { return mapping_.next_page_id(); });

@@ -18,17 +18,28 @@ the C++ `Crowdbtree::flush()` call only.
 flush():
     t0 = steady_clock::now()
     lock(write_mutex_)
-    cs = contiguous_slot_.load()
     maybe_freeze_active(force=true)          // freeze active if past threshold
-    swap frozen_ -> to_drain                 // under memtable_mutex_
-    wrote_any = drain_all_frozen_locked(to_drain, active, cs)
-    active->set_durable_floor(cs)
-    if !wrote_any: observe flush_l; return   // no-op flush
-    last_applied_slot_ = cs
-    version_++
-    maybe_evict_locked()                     // still under write_mutex_
+    for iter in 0..max_memtable_count:
+        swap frozen_ -> to_drain             // under memtable_mutex_
+        if to_drain.empty(): break
+        cs = contiguous_slot_.load()         // re-read each pass
+        active = current_active()
+        wrote_any |= drain_all_frozen_locked(to_drain, active, cs)
+        active->set_durable_floor(cs)
+        last_applied_slot_ = cs
+        version_++
+    if frozen_ still non-empty: warn (iteration cap hit)
+    if !wrote_any: advance last_applied_slot; observe flush_l; return
+    maybe_evict_locked()                     // once, after all drains
     observe flush_l
 ```
+
+The re-check loop drains memtables that freeze *during* an in-flight drain
+in the same `flush()` call — `apply()` on other threads keeps writing and
+may trip the freeze threshold mid-drain. Re-reading `cs` each pass lets the
+next pass drain entries that became contiguous during the prior pass. Capped
+at `max_memtable_count` iterations so a sustained write rate faster than
+drain throughput exits cleanly (remaining tables drain on the next tick).
 
 ### `drain_all_frozen_locked` (`crowdb-tree.cpp:1137-1276`)
 
@@ -107,6 +118,9 @@ errors. The flush cannot keep up with the write rate.
 
 ### Levers
 
+- **Re-check loop in flush()** (implemented): drains memtables that freeze
+  during an in-flight drain in the same `flush()` call, reducing the frozen-
+  queue-full errors that occur when the backlog grows between flushes.
 - **Increase buffer pool size** so the L1 working set stays resident.
   This eliminates demand-load stalls — the dominant cost.
 - **Pre-warm leaves** before acquiring `write_mutex_`. The frozen

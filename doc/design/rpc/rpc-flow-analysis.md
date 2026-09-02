@@ -93,6 +93,29 @@ and from 1,550us to 171us (−89%) with nagle. The 1,000T nagle-on peak
 rises to 2.21M ops/s (+9.4%). Tokio 1T:1C improves 24.6% (29,367 vs
 23,564) — the fixed correlation eliminates resp_missed overhead.
 
+### Linux — 2026-09-02
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux 6.8. Same hw as 2026-08-31.
+The crowdb-tree engine changes (page-count metrics + flush re-check
+loop) do not touch the RPC transport — this run confirms no
+transport-level regression. Results are within noise (−1% to −5% vs
+2026-08-31). p50/p99 use coarser histogram buckets (100/500/1000/5000us)
+than the 2026-08-31 exact values. Not strictly better — reference
+retained per regression policy.
+
+| Workers | Load | Mode | Nagle | ops/s | avg us | p50 us | p99 us | Errors |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1T:1C | coroutine | off | 50,663 | 18 | 100 | 100 | 0 |
+| 4 | 64T:4C | coroutine | off | 514,318 | 123 | 500 | 500 | 0 |
+| 8 | 512T:8C | coroutine | off | 814,807 | 626 | 1,000 | 1,000 | 0 |
+| 16 | 1,000T:32C | coroutine | off | 1,271,548 | 783 | 500 | 10,000 | 0 |
+| 4 | 64T:4C | coroutine | on | 973,317 | 64 | 100 | 500 | 0 |
+| 8 | 512T:8C | coroutine | on | 1,775,602 | 286 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | coroutine | on | 2,130,032 | 466 | 500 | 5,000 | 0 |
+| 1 | 1T:1C | tokio | off | 28,062 | 34 | 100 | 100 | 0 |
+| 4 | 64T:4C | tokio | off | 492,924 | 126 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | tokio | off | 988,956 | 999 | 1,000 | 5,000 | 0 |
+
 ### macOS — 2026-08-21
 
 Apple M5 Pro, 18c, arm64, macOS 26/Darwin 25.5. kqueue, 128B values, and
@@ -204,3 +227,11 @@ Perf: 6 of 10 configs strictly better than 2026-08-27. The most dramatic
 improvement is p99 at 1,000T: 6,148us→324us (−95%) without nagle,
 1,550us→171us (−89%) with nagle. Peak nagle-on throughput rises to
 2.21M ops/s (+9.4%). Tokio 1T:1C improves 24.6% (29,367 vs 23,564).
+
+### B-tree page-count metrics + flush re-check loop (2026-09-02)
+
+The crowdb-tree engine changes (page-count gauges + flush re-check loop)
+do not touch the RPC transport layer. This run confirms no
+transport-level regression: results are within noise (−1% to −5% vs
+2026-08-31). Reference retained per regression policy. See the
+"Linux — 2026-09-02" subsection above for the full table.
