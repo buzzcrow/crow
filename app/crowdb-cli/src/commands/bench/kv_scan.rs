@@ -21,11 +21,10 @@ use super::result::{BenchOps, BenchResult};
 use super::verb::{BenchMinSlot, BenchReadEndpoint, BenchReadMode, ScanArgs};
 use crate::Cli;
 
-const STORE_ID: u64 = 0;
-const GROUP_ID: u64 = 0;
-
 #[allow(clippy::too_many_lines)]
 pub async fn run(cli: &Cli, args: ScanArgs) -> ExitCode {
+    let store_id = args.store;
+    let group_id = args.group;
     let read_mode = match args.read_mode {
         BenchReadMode::Linearizable => ReadMode::Linearizable,
         BenchReadMode::Minslot => ReadMode::MinSlot,
@@ -81,8 +80,8 @@ pub async fn run(cli: &Cli, args: ScanArgs) -> ExitCode {
                 let t0 = Instant::now();
                 match client
                     .scan(
-                        STORE_ID,
-                        GROUP_ID,
+                        store_id,
+                        group_id,
                         &prefix,
                         &start_after,
                         &[],

@@ -116,6 +116,27 @@ retained per regression policy.
 | 4 | 64T:4C | tokio | off | 492,924 | 126 | 500 | 500 | 0 |
 | 16 | 1,000T:32C | tokio | off | 988,956 | 999 | 1,000 | 5,000 | 0 |
 
+### Linux — 2026-09-02 (group 1, mem-block WAL wipe fix)
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux 6.8. Same hw as prior runs.
+RPC echo does not touch the KV/storage layer, so the mem-block WAL wipe
+fix and group-1 bench change have no transport-level impact. Results are
+within noise of the prior 2026-09-02 run (all within ±2.6%). Reference
+retained per regression policy.
+
+| Workers | Load | Mode | Nagle | ops/s | avg us | p50 us | p99 us | Errors |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1T:1C | coroutine | off | 50,168 | 18 | 100 | 100 | 0 |
+| 4 | 64T:4C | coroutine | off | 505,195 | 125 | 500 | 500 | 0 |
+| 8 | 512T:8C | coroutine | off | 817,808 | 624 | 1,000 | 1,000 | 0 |
+| 16 | 1,000T:32C | coroutine | off | 1,275,553 | 781 | 500 | 10,000 | 0 |
+| 4 | 64T:4C | coroutine | on | 968,977 | 64 | 100 | 500 | 0 |
+| 8 | 512T:8C | coroutine | on | 1,775,375 | 286 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | coroutine | on | 2,116,393 | 468 | 500 | 5,000 | 0 |
+| 1 | 1T:1C | tokio | off | 28,790 | 33 | 100 | 100 | 0 |
+| 4 | 64T:4C | tokio | off | 490,288 | 126 | 500 | 500 | 0 |
+| 16 | 1,000T:32C | tokio | off | 991,402 | 996 | 1,000 | 5,000 | 0 |
+
 ### macOS — 2026-08-21
 
 Apple M5 Pro, 18c, arm64, macOS 26/Darwin 25.5. kqueue, 128B values, and

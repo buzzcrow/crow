@@ -451,6 +451,44 @@ impl MemBlockDevice {
         Ok(())
     }
 
+    /// Remove all segments and layouts under `prefix`. Unlike
+    /// `unlink_segment`, this is idempotent — a missing prefix is not an
+    /// error. This is the mem-block equivalent of `tokio::fs::remove_dir_all`:
+    /// without it, `wipe_user_data`'s `tokio::fs::remove_dir_all` call is a
+    /// no-op on the in-memory backend, leaving old WAL segments behind that
+    /// `create_group_with_wal` then replays (causing multi-second stalls and
+    /// preventing the old group's memory from being freed).
+    pub(super) fn remove_prefix(&self, prefix: &Path) -> io::Result<()> {
+        self.controller.check_io()?;
+        let mut segments = self.segments.lock();
+        let mut layouts = self.layouts.lock();
+        // Remove segments whose path starts with `prefix`.
+        let seg_keys: Vec<PathBuf> = segments
+            .keys()
+            .filter(|p| p.starts_with(prefix))
+            .cloned()
+            .collect();
+        for k in &seg_keys {
+            segments.remove(k);
+        }
+        // Remove layouts whose path starts with `prefix`.
+        let layout_keys: Vec<PathBuf> = layouts
+            .iter()
+            .filter(|p| p.starts_with(prefix))
+            .cloned()
+            .collect();
+        for k in &layout_keys {
+            layouts.remove(k);
+        }
+        tracing::info!(
+            prefix = %prefix.display(),
+            segments_removed = seg_keys.len(),
+            layouts_removed = layout_keys.len(),
+            "MemBlockDevice::remove_prefix"
+        );
+        Ok(())
+    }
+
     pub(super) fn list_layout(&self, layout_path: &Path) -> io::Result<Vec<PathBuf>> {
         self.controller.check_io()?;
         let segments = self.segments.lock();

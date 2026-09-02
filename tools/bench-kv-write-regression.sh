@@ -38,10 +38,38 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Defensive: ensure ASan/LSan is off. A stale CROWDB_ASAN=1 from a prior
+# sanitize-regression.sh run (same shell, or exported in the env) would
+# silently instrument the C++ libraries and tank throughput by ~50-100x.
+# This is a release throughput sentinel — never run under ASan.
+unset CROWDB_ASAN
+
 RESULTS_FILE="doc/working/bench-write-regression.tsv"
 DURATION=20
 KEYSPACE=1000000
 VALUE_SIZE=512
+
+# sample_rss <config_file> <label>
+# Reads server PIDs from the config file and reports total RSS (MB)
+# across all server processes. Used to track RSS growth across sub-tests.
+# Prints the human-readable line to stderr, the numeric value to stdout
+# (so callers can capture it via $(...)).
+sample_rss() {
+    local config_file="$1" label="$2"
+    local total=0 alive=0
+    for pid in $(grep '^pid' "$config_file" | awk '{print $3}'); do
+        if [ -r "/proc/$pid/status" ]; then
+            local rss; rss=$(grep VmRSS "/proc/$pid/status" | awk '{print $2}')
+            if [ -n "$rss" ]; then
+                total=$((total + rss))
+                alive=$((alive + 1))
+            fi
+        fi
+    done
+    local total_mb=$((total / 1024))
+    echo "    rss[$label]: ${total_mb}MB across ${alive} servers" >&2
+    echo "$total_mb"
+}
 
 # run_bench <deploy_name> <threads> <conn> <label>
 # Assumes the deploy was already created with the right server tunables.
@@ -56,19 +84,25 @@ run_bench() {
         echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
-    # Clean: wipe user data on every node (keep group0), wait re-elect.
+    # RSS before clean (measures leftover from prior sub-test).
+    local rss_pre_clean; rss_pre_clean=$(sample_rss "$config_file" "pre-clean")
+    # Clean: wipe user data on bench group (group 0 sysdata preserved).
     local clean_out
     clean_out=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
-        cluster clean --json 2>&1)
+        cluster clean --store 0 --group 1 --json 2>&1)
     local clean_json; clean_json=$(echo "$clean_out" | sed -n '/^{/,/^}/p')
     if [ -z "$clean_json" ] || ! echo "$clean_json" | jq -e '.new_leader' >/dev/null 2>&1; then
         echo "    ERROR: clean failed"; echo "$clean_out" | tail -5
         echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
+    # RSS after clean (measures how much memory clean actually freed).
+    local rss_post_clean; rss_post_clean=$(sample_rss "$config_file" "post-clean")
+    local clean_delta=$((rss_pre_clean - rss_post_clean))
+    echo "    rss clean delta: ${clean_delta}MB freed"
     local output
     output=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
-        bench kv write --duration-secs "$DURATION" \
+        bench kv write --store 0 --group 1 --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$conn" \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --event-write --rpc-workers "${RPC_WORKERS:-2}" \
@@ -79,6 +113,10 @@ run_bench() {
         echo -e "$label\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0" >> "$RESULTS_FILE"
         return
     fi
+    # RSS after workload (measures how much the workload grew RSS).
+    local rss_post_bench; rss_post_bench=$(sample_rss "$config_file" "post-bench")
+    local bench_delta=$((rss_post_bench - rss_post_clean))
+    echo "    rss bench delta: +${bench_delta}MB (post-bench - post-clean)"
     local ops_s p50_us p99_us errors wal total_ops
     total_ops=$(echo "$json" | jq -r '.total_ops')
     ops_s=$(echo "$json" | jq -r '.total_ops * 1000 / .duration_ms' | awk '{printf "%.0f", $1}')
@@ -116,7 +154,9 @@ run_bench() {
 }
 
 # deploy_group <name> <win> <coalesce> <rpc_workers> <drain_threshold>
-# Deploy a 3-node cluster with the given server tunables via local-deploy.
+# Deploy a 3-node cluster with the given server tunables via local-deploy,
+# then create a bench group (store 0, group 1) so benchmarks don't touch
+# group 0 sysdata.
 deploy_group() {
     local name="$1" win="$2" coalesce="$3" workers="$4" drain="$5"
     local config_file="/tmp/bench-write-reg-${name}.toml"
@@ -129,8 +169,13 @@ deploy_group() {
         --coalesce-drain-threshold "$drain" \
         --rpc-workers "$workers" \
         --kv-backend mem-block --wal-backend mem-block 2>&1 | tail -3
+    echo "=== creating bench group 0/1 (group 0 sysdata preserved) ==="
+    pixi run -- cargo run --release -p crowdb-cli -- --config "$config_file" \
+        kv group add -s 0 -g 1 -n 1,2,3 2>&1 | tail -3
     # Store config path for run_bench/teardown_group.
     echo "$config_file" > "/tmp/bench-write-reg-${name}.cfgpath"
+    # Baseline RSS right after deploy (before any sub-test).
+    local _baseline; _baseline=$(sample_rss "$config_file" "post-deploy-baseline")
 }
 
 # teardown_group <name>
@@ -152,23 +197,6 @@ teardown_group() {
 # If a run is worse, do NOT update — investigate and fix the regression
 # first, otherwise silent performance regressions slip in.
 #
-# Reference results (2026-08-27, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
-#   Zero-copy crowdb-rpc + event-write + peer-pool=4. Event-write coalesces
-#   frames via I/O worker (one writev for N queued frames). Peer-pool=4
-#   spreads consensus send pressure across 4 connections per peer.
-#   win=32 (64 for 512T+), coalesce=16/64, 20s mem mode, 3-node cluster,
-#   512B values, 1M keys. CROWDB_RPC_WORKERS tuned per config.
-#   Flow: deploy once per tunable group → (clean → run) × N → teardown.
-#
-#   T    C    W    win  co        ops/s     WAL/node  p50    p99    err  sagg  ragg  r2    r2tps    r3    r3tps    enq   wait
-#   1    1    2    32   0.5/16    4,019     80,396    256    348    0    1     0.9   0     4,119    0     4,119    0     0
-#   16   2    2    32   3.3/16    63,668    190,965   226    551    0    1.3   1.5   29    9,603    6     9,603    0     0
-#   64   4    2    32   7.3/16    157,310   214,033   365    1020   0    1.8   1.9   500   11,110   1000  11,110   0     0
-#   128  4    4    32   7.8/16    189,585   242,486   576    1596   0    1.9   2.4   125   13,350   78    13,350   0     0
-#   256  8    4    32   7.6/16    187,452   245,880   1156   3792   0    1.9   2.2   187   13,577   186   13,578   0     0
-#   512  16   4    64   26.7/64   233,601   87,458    1930   5564   0    2.8   2.6   3250  4,926    240   4,926    0     0
-#   1000 16   4    64   28.3/64   208,114   73,545    4340   12856  0    3     3.1   996   4,265    1052  4,264    0     0
-#
 # 2026-09-02 (same hw, +page-count metrics +flush re-check loop):
 #   sagg/ragg columns are 0 (moved to crowdb-common histograms). p50/p99
 #   use coarser histogram buckets (500us increments) — not directly
@@ -188,6 +216,24 @@ teardown_group() {
 #   256  8    4    32   3.9/16    22,503    282,738   5000   5000    256   0     0     0     498,403  0     498,402  0     0
 #   512  16   4    64   58.0/64   264,130   91,061    5000   5000    0     0     0     543   91,257   560   91,256   0     0
 #   1000 16   4    64   26.8/64   225,760   168,712   5000   50000   0     0     0     0     91,262   0     91,262   0     0
+#
+# 2026-09-02 (same hw, +mem-block WAL wipe fix + bench on group 1):
+#   wipe_user_data now calls IoBackend::remove_dir_all (clears mem-block
+#   in-memory segments — tokio::fs::remove_dir_all was a no-op on them)
+#   and calls remove_group BEFORE create_group_with_wal. Bench runs on
+#   group 1 (group 0 sysdata preserved). The 256T consensus instability
+#   is fixed: 22K→181K ops/s, 256→0 errors. r2/r3 now respond at all
+#   thread counts. cluster clean frees RSS between sub-tests (128MB–9.5GB
+#   freed). 512T slightly lower (264K→240K) — within run-to-run noise.
+#
+#   T    C    W    win  co        ops/s     WAL/node  p50    p99     err   sagg  ragg  r2    r2tps    r3    r3tps    enq   wait
+#   1    1    2    32   1.0/16    6,258     125,165   500    500     0     0     0     75    125,352  76    125,267  0     0
+#   16   2    2    32   4.3/16    65,897    303,919   500    500     0     0     0     250   178,925  152   178,894  0     0
+#   64   4    2    32   6.1/16    155,883   511,013   500    1000    0     0     0     169   207,256  159   207,215  0     0
+#   128  4    4    32   4.9/16    184,812   749,977   1000   5000    0     0     0     233   418,032  220   417,987  0     0
+#   256  8    4    32   3.7/16    181,204   983,928   5000   5000    0     0     0     502   652,144  414   652,048  0     0
+#   512  16   4    64   57.4/64   239,669   83,509    5000   5000    0     0     0     868   83,660   645   83,614   0     0
+#   1000 16   4    64   27.7/64   220,607   159,609   5000   50000   0     0     0     0     83,662   0     83,617   0     0
 #
 # Zero-copy crowdb-rpc + event-write beats legacy at every thread count.
 # Peak ~234K at 512T (2026-08-27); ~264K at 512T (2026-09-02, +page-count
@@ -215,6 +261,12 @@ teardown_group() {
 # macOS peak ~87K at 256T (legacy). M5 Pro faster at 1T (10K vs 3.7K, 2.7x)
 # due to lower per-op overhead, but saturates earlier (non-SMT 18-core vs
 # 32-thread SMT AMD). Zero-copy comparison on M5 Pro pending.
+
+# Build release binaries with ASan explicitly off. Rebuilds are cheap
+# (cargo skips unchanged crates); this only recompiles if a prior
+# sanitize run left an ASan-instrumented artifact in target/release.
+echo "=== building release (CROWDB_ASAN unset) ==="
+pixi run -- cargo build --release -p crowdb-cli -p crowdb-kv-server 2>&1 | tail -3
 
 echo -e "label\twin\tcoalesce\tworkers\tops_s\twal_per_node\tp50_us\tp99_us\terrors\tsrv_sagg\tsrv_ragg\tcli_sagg\tcli_ragg\tr2_avg\tr2_tps\tr3_avg\tr3_tps\tinflight_enq\tinflight_wait_us" > "$RESULTS_FILE"
 

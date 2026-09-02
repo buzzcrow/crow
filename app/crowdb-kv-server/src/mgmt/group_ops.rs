@@ -741,52 +741,77 @@ pub(super) async fn wipe_user_data(
     let store = state
         .get_store(sid)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
-    let group = store.get_group(gid).ok_or_else(|| {
-        err_json(
-            StatusCode::NOT_FOUND,
-            format!("group {gid} not found in store {sid}"),
-        )
-    })?;
 
-    let replica_id = group.local_replica().id;
+    // Extract replica_id + do step-down + WAL check in a scoped block so
+    // the strong `Arc<PxGroup>` is dropped BEFORE remove_group. Without
+    // this, `group` stays alive until function return, keeping the old
+    // WalEngine + MemBlockDevice in memory even after remove_group +
+    // malloc_trim — RSS grows monotonically across bench sub-tests until
+    // OOM.
+    let replica_id = {
+        let group = store.get_group(gid).ok_or_else(|| {
+            err_json(
+                StatusCode::NOT_FOUND,
+                format!("group {gid} not found in store {sid}"),
+            )
+        })?;
+        let rid = group.local_replica().id;
 
-    // Reject a known-bad WAL before touching anything.
-    if let Some(wal) = group.local_replica().wal() {
-        if wal.is_failed() {
-            return Err(err_json(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "WAL failed — wipe not safe, redeploy",
-            ));
+        // Reject a known-bad WAL before touching anything.
+        if let Some(wal) = group.local_replica().wal() {
+            if wal.is_failed() {
+                return Err(err_json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "WAL failed — wipe not safe, redeploy",
+                ));
+            }
+        } else {
+            // Replica not yet wired — nothing to wipe.
+            info!(
+                store_id = sid,
+                group_id = gid,
+                "wipe-user-data: replica has no WAL wired — no-op"
+            );
+            return Ok(Json(WipeResult {
+                store_id: sid,
+                group_id: gid,
+                accepted: false,
+            }));
         }
-    } else {
-        // Replica not yet wired — nothing to wipe.
+
+        // Step down if leader so the group stops accepting writes before
+        // the data is destroyed. `accepted: false` (not leader) is fine.
+        let step = group.step_down_if_leader("wipe-user-data");
         info!(
             store_id = sid,
             group_id = gid,
-            "wipe-user-data: replica has no WAL wired — no-op"
+            stepped_down = step.accepted,
+            "wipe-user-data: step-down before wipe"
         );
-        return Ok(Json(WipeResult {
-            store_id: sid,
-            group_id: gid,
-            accepted: false,
-        }));
-    }
+        rid
+    }; // group Arc dropped here
 
-    // Step down if leader so the group stops accepting writes before
-    // the data is destroyed. `accepted: false` (not leader) is fine.
-    let step = group.step_down_if_leader("wipe-user-data");
-    info!(
-        store_id = sid,
-        group_id = gid,
-        stepped_down = step.accepted,
-        "wipe-user-data: step-down before wipe"
-    );
+    // Remove the old group from the store BEFORE creating the new one.
+    // This cancels the old group's tenure (election driver, maintenance
+    // loop, fetchgap driver all observe the cancel and exit) and drops
+    // the store's strong Arc<PxGroup>. Combined with the scoped drop
+    // above, the old group's Arc refcount reaches zero (assuming no
+    // in-flight tasks hold strong clones — they observe cancel within
+    // one RPC timeout) and the old WalEngine + MemBlockDevice + engine
+    // are freed. Doing this BEFORE create_group_with_wal ensures the old
+    // group's memory is released even if WAL replay is slow.
+    store.remove_group(gid);
 
-    // Delete the on-disk WAL group dir + engine dir so
-    // `create_group_with_wal` replays an empty WAL → fresh state.
+    // Wipe the WAL segments for this group. Must go through IoBackend,
+    // not tokio::fs::remove_dir_all: the mem-block backend stores
+    // segments in-memory (BTreeMap<PathBuf, Vec<u8>>), and
+    // tokio::fs::remove_dir_all is a no-op on it. Without this, the old
+    // WAL segments persist and create_group_with_wal replays them,
+    // causing multi-second stalls and preventing the wipe from actually
+    // wiping anything.
     let wal_group_dir =
         crate::startup::store_wal_root(&state.config.wal_root, sid).join(format!("group{gid}"));
-    if let Err(e) = tokio::fs::remove_dir_all(&wal_group_dir).await {
+    if let Err(e) = state.wal_backend.remove_dir_all(&wal_group_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -844,15 +869,22 @@ pub(super) async fn wipe_user_data(
         new_group.stamp_proposing_term(new_group.local_replica().current_term_snapshot());
     }
 
-    // Atomically replace the old group: remove the old group from the
-    // store first (cancels its tenure + drops the store's Arc<PxGroup>),
-    // then add the new group. The remove-before-add is critical:
-    // `add_group` calls `inherit_local_state_from(prior)`, which
-    // `Arc::clone`s the prior's learner (engine) + WAL — undoing the
-    // wipe. Removing first means there is no prior to inherit from,
-    // so the new group's fresh engine + WAL are preserved.
-    store.remove_group(gid);
+    // Add the new group. remove_group was already called above, so there
+    // is no prior to inherit from — the new group's fresh engine + WAL
+    // are preserved.
     store.add_group(new_group);
+
+    // Yield + short sleep to let the old group's detached tasks (bulk
+    // phase1, election driver) observe tenure_cancel and drop their
+    // strong Arc clones before malloc_trim.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // glibc malloc retains freed pages in per-thread arenas instead of
+    // returning them to the OS. malloc_trim(0) forces glibc to munmap
+    // freeable pages, releasing RSS. No-op on non-glibc allocators.
+    #[cfg(target_os = "linux")]
+    malloc_trim_zero();
 
     info!(
         store_id = sid,
@@ -864,4 +896,23 @@ pub(super) async fn wipe_user_data(
         group_id: gid,
         accepted: true,
     }))
+}
+
+/// Force glibc malloc to return freed pages to the OS (munmap). Called
+/// after `wipe_user_data` drops the old group's WAL + engine, which can
+/// free gigabytes of `Vec<u8>` from the mem-block backend. Without this,
+/// glibc retains the freed pages in per-thread arenas and RSS grows
+/// monotonically across bench sub-tests until OOM.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn malloc_trim_zero() {
+    extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+    // Safety: malloc_trim(0) is always safe to call — it asks glibc to
+    // return freeable pages above the top of the heap to the OS. It
+    // cannot cause UB; the worst case is a no-op on non-glibc allocators.
+    unsafe {
+        malloc_trim(0);
+    }
 }

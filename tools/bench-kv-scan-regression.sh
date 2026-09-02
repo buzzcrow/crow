@@ -62,7 +62,7 @@ run_subtest() {
     echo ">>> $label (${threads}T:${connections}C) ..."
     local output
     output=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-        bench kv scan --duration-secs "$DURATION" \
+        bench kv scan --store 0 --group 1 --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
@@ -113,6 +113,26 @@ run_subtest() {
 #   lin_32t          1000    32:32 38859    820     2416     0
 #   minslot_32t      1000    32:32 36684    869     1416     0    -5.6% throughput, -41% p99
 #
+# Reference results (2026-09-02, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
+#   20s mem mode, 3-node cluster, 100k pre-populated keys (group 1),
+#   64B values unless noted. +mem-block WAL wipe fix + bench on group 1.
+#
+#   label            limit   T:C   scans/s  avg_us  p99_us   err  notes
+#   bounded_10       10      1:1   11864    83      500      0    O(limit) headline
+#   bounded_1k       1000    1:1   1316     724     5000     0    typical scan
+#   bounded_10k      10000   1:1   134      7031    50000    0    large bounded
+#   full_100k        100000  1:1   13       70091   100000   0    pagination
+#   deep_pag_10      10      1:1   12577    78      500      0    O(limit) pushdown
+#   mixed_1k         1000    1:1   1120     845     1000     0    64B:70%,1KiB:20%,16KiB:10%
+#   minslot_1k       1000    1:1   1126     846     5000     0    MinSlot routing
+#   largeval_16k     1000    1:1   1131     832     1000     0    16KiB values
+#   lin_4t           1000    4:4   4270     893     5000     0    max leader throughput
+#   minslot_4t       1000    4:4   4083     934     5000     0    -4.4% vs lin
+#   lin_16t          1000    16:16 21897    700     5000     0
+#   minslot_16t      1000    16:16 21954    698     5000     0    +0.3% vs lin
+#   lin_32t          1000    32:32 24215    1289    5000     0
+#   minslot_32t      1000    32:32 24253    1285    5000     0    +0.2% throughput
+#
 # Analysis: doc/design/kv/kv-scan-flow-analysis.md § Latest Benchmark Results.
 
 echo -e "label\tlimit\tprefix\tstart_after\tvalue_size\tread_mode\tT:C\tscans_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
@@ -125,10 +145,15 @@ pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
     cluster local-deploy -n 3 -t kv \
     --kv-backend mem-block --wal-backend mem-block
 
+# Create bench group 1 (group 0 sysdata preserved).
+echo "=== Creating bench group 0/1 (group 0 sysdata preserved) ==="
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    kv group add -s 0 -g 1 -n 1,2,3 2>&1 | tail -3
+
 # Phase 2: pre-populate keys once (Phase 3: bench prepare not yet wired).
 echo "=== Pre-populating $KEYSPACE keys (Phase 3: bench prepare stub) ==="
 pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-    bench kv prepare --keys "$KEYSPACE" --value-size 64 2>&1 || \
+    bench kv prepare --store 0 --group 1 --keys "$KEYSPACE" --value-size 64 2>&1 || \
     echo "WARNING: bench prepare is a Phase 3 stub — skipping pre-pop"
 
 # Phase 3: run all sub-tests against the same cluster.

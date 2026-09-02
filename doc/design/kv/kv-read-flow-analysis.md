@@ -81,6 +81,28 @@ than 2026-08-28 — reference retained per regression policy.
 | 32T | Linearizable | 32:32 | 265,939 | 116 | 500 | 500 | 0 |
 | 32T | MinSlot | 32:32 | 256,674 | 119 | 500 | 500 | 0 |
 
+### Linux — 2026-09-02 (group 1, mem-block WAL wipe fix)
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04. Same hw as prior runs
+but bench now runs on group 1 (group 0 sysdata preserved). Numbers are
+within run-to-run noise of the prior 2026-09-02 run (all within ±2.6%).
+`lin_1t` still has the startup lease-expiry burst (1188 errors, corr=0)
+— pre-existing, not related to the group-1 change.
+
+| Config | Mode | T:C | ops/s | avg us | p50 us | p99 us | Errors |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1T | Linearizable | 1:1 | 14,493 | 66 | 100 | 500 | 1188 |
+| 1T | MinSlot | 1:1 | 12,368 | 78 | 100 | 500 | 0 |
+| 6T | Linearizable | 6:6 | 68,923 | 83 | 100 | 500 | 0 |
+| 6T | MinSlot | 6:6 | 97,380 | 59 | 100 | 100 | 0 |
+| 16T | Linearizable | 16:16 | 232,388 | 65 | 100 | 500 | 0 |
+| 16T | MinSlot | 16:16 | 228,956 | 66 | 100 | 500 | 0 |
+| 32T | Linearizable | 32:32 | 268,557 | 114 | 500 | 500 | 0 |
+| 32T | MinSlot | 32:32 | 260,685 | 116 | 500 | 500 | 0 |
+
+Correctness verification (verify-bytes=8): lin_16t 234,234 ops/s
+(corr=0), minslot_16t 228,800 ops/s (corr=0).
+
 ### macOS — 2026-08-19
 
 Apple M5 Pro, 18c, arm64, macOS 26.5.

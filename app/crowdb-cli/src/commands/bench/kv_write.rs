@@ -25,11 +25,10 @@ use super::verb::WriteArgs;
 use crate::commands::load_config;
 use crate::Cli;
 
-const STORE_ID: u64 = 0;
-const GROUP_ID: u64 = 0;
-
 #[allow(clippy::too_many_lines)]
 pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
+    let store_id = args.store;
+    let group_id = args.group;
     let client = match build_kv_client(
         cli,
         crowdb_kv_client::ReadEndpointPolicy::Leader,
@@ -90,7 +89,7 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
                 let key = format!("k{id:020}");
                 let value = build_value(id, value_size);
                 let t0 = Instant::now();
-                match client.put(STORE_ID, GROUP_ID, key.as_bytes(), &value, None).await {
+                match client.put(store_id, group_id, key.as_bytes(), &value, None).await {
                     Ok(_) => rec.record_ok(
                         t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
                         value.len() as u64,
@@ -122,7 +121,7 @@ pub async fn run(cli: &Cli, args: WriteArgs) -> ExitCode {
 
     // Fetch server-side metrics from every node.
     tracing::info!("bench kv write: fetching server metrics");
-    let server_metrics = fetch_server_metrics(cli, STORE_ID, GROUP_ID).await;
+    let server_metrics = fetch_server_metrics(cli, store_id, group_id).await;
     tracing::info!(
         elapsed_ms = start.elapsed().as_millis(),
         "bench kv write: server metrics fetched"

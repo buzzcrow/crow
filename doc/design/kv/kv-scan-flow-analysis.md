@@ -101,6 +101,36 @@ The Linux run is slower on most single-thread and 4T scans, but the gap
 narrows at 16T and 32T. These platform results are not direct hardware
 comparisons.
 
+### Linux — 2026-09-02 (group 1, mem-block WAL wipe fix)
+
+AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04. Same hw as 2026-08-28
+but bench now runs on group 1 (group 0 sysdata preserved) with the
+mem-block WAL wipe fix. 20s mem mode, 3-node cluster, 100k pre-populated
+keys. p50/p99 use coarser histogram buckets (100/500us increments).
+
+| Config | Limit | Value | Mode | T:C | scans/s | avg us | p99 us |
+| --- | ---: | ---: | --- | --- | ---: | ---: | ---: |
+| bounded_10 | 10 | 64B | Linearizable | 1:1 | 11,864 | 83 | 500 |
+| bounded_1k | 1,000 | 64B | Linearizable | 1:1 | 1,316 | 724 | 5,000 |
+| bounded_10k | 10,000 | 64B | Linearizable | 1:1 | 134 | 7,031 | 50,000 |
+| full_100k | 100,000 | 64B | Linearizable | 1:1 | 13 | 70,091 | 100,000 |
+| deep_pag_10 | 10 | 64B | Linearizable | 1:1 | 12,577 | 78 | 500 |
+| mixed_1k | 1,000 | mixed | Linearizable | 1:1 | 1,120 | 845 | 1,000 |
+| minslot_1k | 1,000 | 64B | MinSlot | 1:1 | 1,126 | 846 | 5,000 |
+| largeval_16k | 1,000 | 16KiB | Linearizable | 1:1 | 1,131 | 832 | 1,000 |
+| lin_4t | 1,000 | 64B | Linearizable | 4:4 | 4,270 | 893 | 5,000 |
+| minslot_4t | 1,000 | 64B | MinSlot | 4:4 | 4,083 | 934 | 5,000 |
+| lin_16t | 1,000 | 64B | Linearizable | 16:16 | 21,897 | 700 | 5,000 |
+| minslot_16t | 1,000 | 64B | MinSlot | 16:16 | 21,954 | 698 | 5,000 |
+| lin_32t | 1,000 | 64B | Linearizable | 32:32 | 24,215 | 1,289 | 5,000 |
+| minslot_32t | 1,000 | 64B | MinSlot | 32:32 | 24,253 | 1,285 | 5,000 |
+
+The `largeval_16k` sentinel is 10x faster than the 2026-08-28 run (1,131
+vs 20 scans/s) — the R67 spawn_blocking fix is working well on Linux.
+MinSlot and Linearizable converge at 16T+ (within 0.3%). The
+`deep_pag_10` O(limit) pushdown is confirmed (12,577 vs 11,864
+bounded_10 — nearly identical).
+
 ## 3. Change History
 
 ### Zero-copy value returns

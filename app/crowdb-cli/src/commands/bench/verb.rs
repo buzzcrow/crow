@@ -68,7 +68,7 @@ pub struct RpcArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct PrepareArgs {
-    /// Number of keys to write into store 0 / group 0.
+    /// Number of keys to write into the target store/group.
     #[arg(long, default_value_t = 100_000)]
     pub keys: u64,
     /// Value size in bytes.
@@ -77,6 +77,12 @@ pub struct PrepareArgs {
     /// Concurrent put tasks.
     #[arg(long, default_value_t = 16)]
     pub concurrency: usize,
+    /// Target store ID (default 0 = system store).
+    #[arg(long, default_value_t = 0)]
+    pub store: u64,
+    /// Target group ID (default 0 = system group; use 1+ for bench groups).
+    #[arg(long, default_value_t = 0)]
+    pub group: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -109,6 +115,12 @@ pub struct ReadArgs {
     /// Metrics flush interval in seconds. 0 disables the metrics log.
     #[arg(long, default_value_t = 1)]
     pub metrics_interval: u64,
+    /// Target store ID (default 0 = system store).
+    #[arg(long, default_value_t = 0)]
+    pub store: u64,
+    /// Target group ID (default 0 = system group; use 1+ for bench groups).
+    #[arg(long, default_value_t = 0)]
+    pub group: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -137,6 +149,12 @@ pub struct WriteArgs {
     /// Metrics flush interval in seconds. 0 disables the metrics log.
     #[arg(long, default_value_t = 1)]
     pub metrics_interval: u64,
+    /// Target store ID (default 0 = system store).
+    #[arg(long, default_value_t = 0)]
+    pub store: u64,
+    /// Target group ID (default 0 = system group; use 1+ for bench groups).
+    #[arg(long, default_value_t = 0)]
+    pub group: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -175,6 +193,12 @@ pub struct ScanArgs {
     /// Metrics flush interval in seconds. 0 disables the metrics log.
     #[arg(long, default_value_t = 1)]
     pub metrics_interval: u64,
+    /// Target store ID (default 0 = system store).
+    #[arg(long, default_value_t = 0)]
+    pub store: u64,
+    /// Target group ID (default 0 = system group; use 1+ for bench groups).
+    #[arg(long, default_value_t = 0)]
+    pub group: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

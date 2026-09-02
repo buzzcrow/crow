@@ -85,8 +85,16 @@ pub enum ClusterVerb {
     /// Remove orphaned sysdata entries without stopping running servers.
     Reset,
     /// Wipe user data on every node + wait for re-election. Preserves
-    /// group-0 sysdata + topology — servers stay running.
-    Clean,
+    /// group-0 sysdata + topology — servers stay running. Use --store/--group
+    /// to target a non-system group (recommended for benchmarks).
+    Clean {
+        /// Target store ID (default 0 = system store).
+        #[arg(long, default_value_t = 0)]
+        store: u64,
+        /// Target group ID (default 0 = system group; use 1+ for bench groups).
+        #[arg(long, default_value_t = 0)]
+        group: u64,
+    },
     /// Show cluster status (list all stores from group-0 sysdata).
     Status,
     /// Show the topology view from a node's `/topology` endpoint.
@@ -317,12 +325,12 @@ pub async fn run_cluster_verb(cli: &Cli, verb: ClusterVerb) -> ExitCode {
                 }
             }
         }
-        ClusterVerb::Clean => {
+        ClusterVerb::Clean { store, group } => {
             let ctx = match op_context(cli) {
                 Ok(c) => c,
                 Err(c) => return c,
             };
-            match crowdb_console_shared::ops::cluster::clean(&ctx).await {
+            match crowdb_console_shared::ops::cluster::clean(&ctx, store, group).await {
                 Ok(result) => {
                     if cli.json {
                         return print_json(cli, &result);

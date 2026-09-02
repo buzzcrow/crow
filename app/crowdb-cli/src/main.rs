@@ -75,7 +75,7 @@ impl Cli {
                     ClusterVerb::LocalDeploy { .. } => "local-deploy",
                     ClusterVerb::Destroy => "destroy",
                     ClusterVerb::Reset => "reset",
-                    ClusterVerb::Clean => "clean",
+                    ClusterVerb::Clean { .. } => "clean",
                     ClusterVerb::Status => "status",
                     ClusterVerb::Topology { .. } => "topology",
                     ClusterVerb::Rack { .. } => "rack",

@@ -75,7 +75,7 @@ async fn seed_leader_after_init(
         }
         return;
     }
-    if let Some(leader_url) = wait_for_leader(mgmt_seeds, std::time::Duration::from_secs(10)).await {
+    if let Some(leader_url) = wait_for_leader(mgmt_seeds, 0, 0, std::time::Duration::from_secs(10)).await {
         if let Ok(sc) = ServerClient::new(&leader_url) {
             if let Ok(topo) = sc.topology().await {
                 for store in &topo {
@@ -448,14 +448,14 @@ pub struct CleanResult {
 }
 
 /// Wipe user data on every node (drop + recreate WAL + engine for
-/// store 0 / group 0) and wait for re-election. Preserves group-0
-/// sysdata + topology — servers stay running, only user data is
-/// cleared. Used by regression benchmarks to start each sub-test
-/// from a data-empty cluster without a full redeploy.
+/// the target store/group) and wait for re-election. When targeting
+/// group 0, preserves sysdata + topology — servers stay running, only
+/// user data is cleared. For benchmarks, prefer targeting a non-system
+/// group (store 0, group 1+) to avoid touching group-0 sysdata.
 ///
 /// # Errors
 /// Returns an error if no servers are configured.
-pub async fn clean(ctx: &OpContext) -> Result<CleanResult> {
+pub async fn clean(ctx: &OpContext, store_id: u64, group_id: u64) -> Result<CleanResult> {
     let cfg = ctx.config().clone();
     let mut mgmt_urls: Vec<String> = cfg.servers.iter().map(|s| s.url.clone()).collect();
     mgmt_urls.sort();
@@ -476,7 +476,9 @@ pub async fn clean(ctx: &OpContext) -> Result<CleanResult> {
             let Ok(sc) = ServerClient::new(&url) else {
                 return false;
             };
-            sc.wipe_user_data(0, 0).await.is_ok_and(|r| r.accepted)
+            sc.wipe_user_data(store_id, group_id)
+                .await
+                .is_ok_and(|r| r.accepted)
         }));
     }
     for h in handles {
@@ -486,16 +488,22 @@ pub async fn clean(ctx: &OpContext) -> Result<CleanResult> {
     }
 
     // Wait for re-election: poll topology until a leader is found.
-    let leader = wait_for_leader(&mgmt_urls, std::time::Duration::from_secs(10)).await;
+    let leader =
+        wait_for_leader(&mgmt_urls, store_id, group_id, std::time::Duration::from_secs(10)).await;
     Ok(CleanResult {
         new_leader: leader.unwrap_or_default(),
         wiped_nodes: wiped,
     })
 }
 
-/// Poll `/topology` on every server until a leader for store 0 /
-/// group 0 is elected (`leader_id` > 0), or `timeout` elapses.
-async fn wait_for_leader(mgmt_urls: &[String], timeout: std::time::Duration) -> Option<String> {
+/// Poll `/topology` on every server until a leader for the target
+/// store/group is elected (`leader_id` > 0), or `timeout` elapses.
+async fn wait_for_leader(
+    mgmt_urls: &[String],
+    store_id: u64,
+    group_id: u64,
+    timeout: std::time::Duration,
+) -> Option<String> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if std::time::Instant::now() >= deadline {
@@ -505,11 +513,11 @@ async fn wait_for_leader(mgmt_urls: &[String], timeout: std::time::Duration) -> 
             let Ok(sc) = ServerClient::new(url) else { continue };
             if let Ok(stores) = sc.topology().await {
                 for store in &stores {
-                    if store.store_id != 0 {
+                    if store.store_id != store_id {
                         continue;
                     }
                     for group in &store.groups {
-                        if group.group_id == 0 && group.leader_id > 0 {
+                        if group.group_id == group_id && group.leader_id > 0 {
                             if group.leader_id == group.local_replica_id {
                                 return Some(url.clone());
                             }

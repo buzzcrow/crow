@@ -1008,7 +1008,7 @@ pub async fn http_cluster_clean(
     State(state): State<AppState>,
 ) -> Result<Json<ops::cluster::CleanResult>, (StatusCode, Json<ErrorBody>)> {
     let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    ops::cluster::clean(&ctx)
+    ops::cluster::clean(&ctx, 0, 0)
         .await
         .map(Json)
         .map_err(|e| err_502(format!("{e}")))

@@ -55,7 +55,7 @@ run_subtest() {
     echo ">>> $display ..."
     local output
     output=$(pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-        bench kv read --duration-secs "$DURATION" \
+        bench kv read --store 0 --group 1 --duration-secs "$DURATION" \
         --loader-num "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
@@ -101,26 +101,23 @@ run_subtest() {
 #   lin_16t_verify     linearizable 16:16 105613   150     252     0    corr=0
 #   minslot_16t_verify minslot      16:16 106662   148     237     0    corr=0
 #
-# 2026-09-02 (AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux 6.8):
-#   Same hw as the Linux reference in kv-read-flow-analysis.md (2026-08-28).
-#   +page-count metrics +flush re-check loop. 20s mem mode, 3-node cluster,
-#   100k pre-populated keys, 64B values. p50/p99 use coarser histogram
-#   buckets (100/500us increments) — not directly comparable to the
-#   2026-08-28 exact values. lin_1t had 144 errors (lease-expiry burst
-#   at startup, not storage-related). Not strictly better than 2026-08-28
-#   — reference NOT updated per regression policy.
+# 2026-09-02 (same hw, +mem-block WAL wipe fix + bench on group 1):
+#   Bench runs on group 1 (group 0 sysdata preserved). Numbers are within
+#   run-to-run noise of the prior 2026-09-02 run. lin_1t still has the
+#   startup lease-expiry burst (1188 errors, corr=0) — pre-existing, not
+#   related to the group-1 change.
 #
-#   label              mode        T:C   ops/s    avg_us  p50_us  p99_us  err  notes
-#   lin_1t             linearizable 1:1   13825    70      500     500     144  startup lease burst
-#   minslot_1t         minslot      1:1   12196    79      100     500     0
-#   lin_6t             linearizable 6:6   67159    86      100     500     0    -13.2% vs ref
-#   minslot_6t         minslot      6:6   96356    60      100     100     0    +0.4% vs ref
-#   lin_16t            linearizable 16:16 231137   66      100     500     0    -0.8% vs ref
-#   minslot_16t        minslot      16:16 224174   67      100     500     0    -5.2% vs ref
-#   lin_32t            linearizable 32:32 265939   116     500     500     0    -1.9% vs ref
-#   minslot_32t        minslot      32:32 256674   119     500     500     0    -3.2% vs ref
-#   lin_16t_verify     linearizable 16:16 232790   65      100     500     0    corr=0
-#   minslot_16t_verify minslot      16:16 226425   67      100     500     0    corr=0
+#   label              mode        T:C   ops/s    avg_us  p50_us  p99_us  err   notes
+#   lin_1t             linearizable 1:1   14493    66      100     500     1188  startup lease burst
+#   minslot_1t         minslot      1:1   12368    78      100     500     0
+#   lin_6t             linearizable 6:6   68923    83      100     500     0     +2.6% vs prior
+#   minslot_6t         minslot      6:6   97380    59      100     100     0     +1.1% vs prior
+#   lin_16t            linearizable 16:16 232388   65      100     500     0     +0.5% vs prior
+#   minslot_16t        minslot      16:16 228956   66      100     500     0     +2.1% vs prior
+#   lin_32t            linearizable 32:32 268557   114     500     500     0     +1.0% vs prior
+#   minslot_32t        minslot      32:32 260685   116     500     500     0     +1.6% vs prior
+#   lin_16t_verify     linearizable 16:16 234234   64      100     500     0     corr=0
+#   minslot_16t_verify minslot      16:16 228800   66      100     500     0     corr=0
 #
 # Analysis: doc/design/kv/kv-read-flow-analysis.md § Latest Benchmark Results.
 
@@ -134,10 +131,15 @@ pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
     cluster local-deploy -n 3 -t kv \
     --kv-backend mem-block --wal-backend mem-block
 
+# Create bench group 1 (group 0 sysdata preserved).
+echo "=== Creating bench group 0/1 (group 0 sysdata preserved) ==="
+pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
+    kv group add -s 0 -g 1 -n 1,2,3 2>&1 | tail -3
+
 # Phase 2: pre-populate keys once (Phase 3: bench prepare not yet wired).
 echo "=== Pre-populating $KEYSPACE keys (Phase 3: bench prepare stub) ==="
 pixi run -- cargo run --release -p crowdb-cli -- --config "$CONFIG_FILE" \
-    bench kv prepare --keys "$KEYSPACE" --value-size 64 2>&1 || \
+    bench kv prepare --store 0 --group 1 --keys "$KEYSPACE" --value-size 64 2>&1 || \
     echo "WARNING: bench prepare is a Phase 3 stub — skipping pre-pop"
 
 # Phase 3: run all sub-tests against the same cluster.

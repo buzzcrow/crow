@@ -23,10 +23,9 @@ use super::result::{BenchOps, BenchResult};
 use super::verb::{BenchMinSlot, BenchReadEndpoint, BenchReadMode, ReadArgs};
 use crate::Cli;
 
-const STORE_ID: u64 = 0;
-const GROUP_ID: u64 = 0;
-
 pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
+    let store_id = args.store;
+    let group_id = args.group;
     let read_mode = match args.read_mode {
         BenchReadMode::Linearizable => ReadMode::Linearizable,
         BenchReadMode::Minslot => ReadMode::MinSlot,
@@ -70,6 +69,8 @@ pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
             value_size,
             read_mode,
             min_slot_arg,
+            store_id,
+            group_id,
         ),
         || {},
     )
@@ -108,6 +109,8 @@ fn make_read_workload(
     value_size: usize,
     read_mode: ReadMode,
     min_slot_arg: BenchMinSlot,
+    store_id: u64,
+    group_id: u64,
 ) -> impl Fn(Arc<BenchRecorder>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     move |rec: Arc<BenchRecorder>| {
         let client = Arc::clone(&client);
@@ -121,7 +124,7 @@ fn make_read_workload(
             };
             let t0 = Instant::now();
             match client
-                .get(STORE_ID, GROUP_ID, key.as_bytes(), read_mode, min_slot)
+                .get(store_id, group_id, key.as_bytes(), read_mode, min_slot)
                 .await
             {
                 Ok(GetOutcome::Found { value, .. }) => {

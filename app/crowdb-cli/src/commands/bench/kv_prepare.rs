@@ -16,11 +16,9 @@ use super::kv_client::{build_kv_client, KvClientTunables};
 use super::verb::PrepareArgs;
 use crate::Cli;
 
-/// Store 0 / group 0 — the default bench target.
-const STORE_ID: u64 = 0;
-const GROUP_ID: u64 = 0;
-
 pub async fn run(cli: &Cli, args: PrepareArgs) -> ExitCode {
+    let store_id = args.store;
+    let group_id = args.group;
     let client = match build_kv_client(
         cli,
         crowdb_kv_client::ReadEndpointPolicy::Leader,
@@ -38,7 +36,7 @@ pub async fn run(cli: &Cli, args: PrepareArgs) -> ExitCode {
     let warm_val = vec![0u8; value_size];
     for _ in 0..50 {
         if client
-            .put(STORE_ID, GROUP_ID, warm_key, &warm_val, None)
+            .put(store_id, group_id, warm_key, &warm_val, None)
             .await
             .is_ok()
         {
@@ -78,7 +76,7 @@ pub async fn run(cli: &Cli, args: PrepareArgs) -> ExitCode {
                 let mut succeeded = false;
                 let mut last_err = None;
                 for attempt in 0..3u32 {
-                    match client.put(STORE_ID, GROUP_ID, key.as_bytes(), &value, None).await {
+                    match client.put(store_id, group_id, key.as_bytes(), &value, None).await {
                         Ok(_) => {
                             ok_count.fetch_add(1, Ordering::Relaxed);
                             succeeded = true;
