@@ -38,6 +38,13 @@ pub struct NodeRecord {
     /// Last error from a failed probe, if any. Cleared on the next
     /// successful observation.
     pub last_error: Option<String>,
+    /// Set by the restart handler to signal that the server is loading
+    /// stores from WAL. While `true`, `refresh_node_cache` and the
+    /// background monitor preserve previously-known stores that the
+    /// server's `/topology` hasn't confirmed yet (WAL replay may still
+    /// be in progress). Cleared automatically once the topology reports
+    /// every store the cache had before the restart.
+    pub recovering: bool,
 }
 
 /// Live, thread-safe cache of every node's most recent topology report.
@@ -80,6 +87,18 @@ impl MonitorCache {
         let entry = guard.entry(node_id).or_default();
         entry.health = NodeHealth::Down;
         entry.last_error = Some(reason.into());
+    }
+
+    /// Mark a node as recovering from a restart. The cache preserves
+    /// previously-known stores that the server's `/topology` hasn't
+    /// confirmed yet (WAL replay may still be in progress). The flag
+    /// is cleared automatically by `refresh_node_cache` / the
+    /// background monitor once the topology reports every store the
+    /// cache had before the restart.
+    pub async fn mark_recovering(&self, node_id: NodeId) {
+        let mut guard = self.nodes.write().await;
+        let entry = guard.entry(node_id).or_default();
+        entry.recovering = true;
     }
 
     /// Aggregate every node's report for a single store into one
@@ -428,24 +447,55 @@ impl MonitorTask {
         let probe = tokio::time::timeout(self.cfg.probe_timeout, client.health()).await;
         match probe {
             Ok(Ok(_)) => {
-                let mut rec = NodeRecord {
-                    health: NodeHealth::Up,
-                    last_seen_ms: now_ms(),
-                    stores: BTreeMap::new(),
-                    last_error: None,
-                };
+                let mut stores = BTreeMap::new();
                 // Topology fetch reuses the same per-node-store shape;
                 // the cache stays empty until the per-node topology RPC
                 // (A4) is wired through `ServerClient`. For A0–A2 the
                 // health probe is enough to drive `leader_for`'s
                 // healthy-fallback path.
-                if let Ok(Ok(stores)) = tokio::time::timeout(self.cfg.probe_timeout, client.topology()).await
+                if let Ok(Ok(fetched)) = tokio::time::timeout(self.cfg.probe_timeout, client.topology()).await
                 {
                     // Best-effort translation of the legacy snapshot
                     // shape into the new per-node-store cache entry.
                     // The new RPC (A4) will replace this verbatim.
-                    rec.stores = legacy_topology_to_node_stores(t.node_id, &stores);
+                    stores = legacy_topology_to_node_stores(t.node_id, &fetched);
                 }
+                // If the node is recovering from a restart, preserve
+                // previously-known stores that the server's /topology
+                // hasn't confirmed yet (WAL replay may still be in
+                // progress). The recovering flag is cleared once the
+                // topology reports every store the cache had before
+                // the restart.
+                let (merged, still_recovering) = {
+                    let snap = self.cache.snapshot().await;
+                    if let Some(old) = snap.get(&t.node_id) {
+                        if old.recovering {
+                            let mut merged = old.stores.clone();
+                            let mut all_confirmed = true;
+                            for (sid, ns) in &stores {
+                                merged.insert(*sid, ns.clone());
+                            }
+                            for old_sid in old.stores.keys() {
+                                if !stores.contains_key(old_sid) {
+                                    all_confirmed = false;
+                                    break;
+                                }
+                            }
+                            (merged, !all_confirmed)
+                        } else {
+                            (stores, false)
+                        }
+                    } else {
+                        (stores, false)
+                    }
+                };
+                let rec = NodeRecord {
+                    health: NodeHealth::Up,
+                    last_seen_ms: now_ms(),
+                    stores: merged,
+                    last_error: None,
+                    recovering: still_recovering,
+                };
                 self.cache.set_node_report(t.node_id, rec).await;
             }
             Ok(Err(e)) => {
@@ -550,6 +600,7 @@ mod tests {
             last_seen_ms: 1,
             stores: m,
             last_error: None,
+            recovering: false,
         }
     }
 

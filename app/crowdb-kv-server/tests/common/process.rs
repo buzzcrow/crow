@@ -63,7 +63,10 @@ impl Drop for ServerHandle {
             }
         }
         if std::thread::panicking() {
-            let stderr_lines = self.stderr_buf.lock().unwrap_or_else(|e| e.into_inner());
+            let stderr_lines = self
+                .stderr_buf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !stderr_lines.is_empty() {
                 let start = stderr_lines.len().saturating_sub(80);
                 eprintln!(

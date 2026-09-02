@@ -829,6 +829,13 @@ pub async fn http_restart_node_server(
     if let Some(t) = state.kv_rpc_transport.read().await.as_ref() {
         t.clear_connections();
     }
+    // Mark the node as recovering so the monitor cache preserves
+    // previously-known stores until the server's /topology confirms
+    // them (WAL replay may still be in progress when the first
+    // topology fetch succeeds). Must be set BEFORE
+    // restore_persisted_topology_for_node, which calls
+    // refresh_node_cache internally.
+    state.monitor_cache.mark_recovering(node_id).await;
     crate::mgmt::restore_persisted_topology_for_node(&state, node_id)
         .await
         .map_err(|e| err_502(format!("restore topology after restart: {e}")))?;

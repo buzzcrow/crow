@@ -162,13 +162,18 @@ impl PxGroup {
                         self.note_peer_durable(peer_id, hb.durable_snapshot_slot);
                         if acks >= quorum {
                             replica.renew_lease(t_send, cfg);
-                            // Short-circuit: abort remaining (slow/downed)
-                            // peers instead of waiting for their RPC timeout.
-                            // A missed higher-term from an aborted peer
-                            // self-heals via the next heartbeat round or the
-                            // election driver's timeout — the quorum ack
-                            // already proves leadership at this term.
-                            joinset.abort_all();
+                            // Quorum reached — renew lease and return
+                            // immediately. Don't abort the remaining
+                            // in-flight heartbeats: a restarted peer
+                            // needs at least one heartbeat to learn the
+                            // leader (set believed_leader_id). Aborting
+                            // would cancel the RPC before it reaches the
+                            // peer, leaving it in Unknown state
+                            // indefinitely. Spawn a background drain so
+                            // the remaining tasks complete and deliver
+                            // the heartbeat; their results are ignored
+                            // (a higher-term self-heals next round).
+                            tokio::spawn(async move { while joinset.join_next().await.is_some() {} });
                             return HeartbeatOutcome::Continued { quorum_acked: true };
                         }
                     }

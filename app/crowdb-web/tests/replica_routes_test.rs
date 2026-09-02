@@ -165,6 +165,7 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
                 last_seen_ms: 1,
                 stores: legacy_topology_to_node_stores(u.node_id, &stores),
                 last_error: None,
+                recovering: false,
             };
             state.monitor_cache.set_node_report(u.node_id, rec).await;
         }

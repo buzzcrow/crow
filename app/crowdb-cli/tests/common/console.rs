@@ -209,6 +209,7 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
             last_seen_ms: 1,
             stores: legacy_topology_to_node_stores(1, &stores),
             last_error: None,
+            recovering: false,
         };
         state.monitor_cache.set_node_report(1, rec).await;
     }

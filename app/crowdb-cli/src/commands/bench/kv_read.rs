@@ -102,6 +102,7 @@ pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
     crate::commands::print_json(cli, &result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_read_workload(
     client: Arc<CrowdbKvClient>,
     key_space: u64,

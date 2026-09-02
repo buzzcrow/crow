@@ -809,30 +809,7 @@ pub(super) async fn wipe_user_data(
     // WAL segments persist and create_group_with_wal replays them,
     // causing multi-second stalls and preventing the wipe from actually
     // wiping anything.
-    let wal_group_dir =
-        crate::startup::store_wal_root(&state.config.wal_root, sid).join(format!("group{gid}"));
-    if let Err(e) = state.wal_backend.remove_dir_all(&wal_group_dir).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to delete WAL dir {}: {e}", wal_group_dir.display()),
-            ));
-        }
-    }
-    let engine_dir = crate::startup::store_crowdb_tree_path(&state.config.data_root, sid, gid);
-    if let Err(e) = tokio::fs::remove_dir_all(&engine_dir).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to delete engine dir {}: {e}", engine_dir.display()),
-            ));
-        }
-    }
-    info!(
-        store_id = sid,
-        group_id = gid,
-        "wipe-user-data: deleted WAL + engine dirs, recreating group"
-    );
+    wipe_wal_and_engine_dirs(&state, sid, gid).await?;
 
     // Recreate the group with a fresh WAL + engine. `create_group_with_wal`
     // replays the now-empty WAL (→ slot 0), creates fresh WalEngine +
@@ -896,6 +873,42 @@ pub(super) async fn wipe_user_data(
         group_id: gid,
         accepted: true,
     }))
+}
+
+/// Delete the WAL segment dir (via `IoBackend` so the mem-block backend
+/// is covered) and the crowdb-tree engine dir for `(sid, gid)`. `NotFound`
+/// is tolerated (fresh group never wrote). Extracted from `wipe_user_data`
+/// to keep that handler under the clippy line limit.
+async fn wipe_wal_and_engine_dirs(
+    state: &RegistryArc,
+    sid: u64,
+    gid: u64,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let wal_group_dir =
+        crate::startup::store_wal_root(&state.config.wal_root, sid).join(format!("group{gid}"));
+    if let Err(e) = state.wal_backend.remove_dir_all(&wal_group_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete WAL dir {}: {e}", wal_group_dir.display()),
+            ));
+        }
+    }
+    let engine_dir = crate::startup::store_crowdb_tree_path(&state.config.data_root, sid, gid);
+    if let Err(e) = tokio::fs::remove_dir_all(&engine_dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete engine dir {}: {e}", engine_dir.display()),
+            ));
+        }
+    }
+    info!(
+        store_id = sid,
+        group_id = gid,
+        "wipe-user-data: deleted WAL + engine dirs, recreating group"
+    );
+    Ok(())
 }
 
 /// Force glibc malloc to return freed pages to the OS (munmap). Called

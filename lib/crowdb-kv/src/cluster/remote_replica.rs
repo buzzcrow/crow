@@ -342,6 +342,12 @@ impl PxRemoteReplica {
             }
             Err(_) => {
                 self.record_err();
+                // Drop the endpoint's cached connections so the next
+                // call creates a fresh connection instead of reusing
+                // a stale one that will never receive a response.
+                if let Some(t) = self.rpc_transport.get() {
+                    t.drop_endpoint(&self.endpoint);
+                }
                 Err(PxReplicaError::Internal(format!(
                     "{} rpc timeout after {} ms at peer {}",
                     rpc_name,

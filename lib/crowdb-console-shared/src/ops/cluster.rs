@@ -497,8 +497,7 @@ pub async fn clean(ctx: &OpContext, store_id: u64, group_id: u64) -> Result<Clea
     }
 
     // Wait for re-election: poll topology until a leader is found.
-    let leader =
-        wait_for_leader(&mgmt_urls, store_id, group_id, std::time::Duration::from_secs(10)).await;
+    let leader = wait_for_leader(&mgmt_urls, store_id, group_id, std::time::Duration::from_secs(10)).await;
     Ok(CleanResult {
         new_leader: leader.unwrap_or_default(),
         wiped_nodes: wiped,

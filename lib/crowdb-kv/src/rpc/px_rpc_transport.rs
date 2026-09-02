@@ -150,7 +150,7 @@ impl PxRpcTransport {
     /// RPC fails with a retryable transport error (`SendQueueFull`,
     /// `ConnectionClosed`, etc.) — the cached connection is dead and
     /// must be replaced.
-    fn drop_endpoint(&self, rpc_endpoint: &str) {
+    pub(crate) fn drop_endpoint(&self, rpc_endpoint: &str) {
         let normalized = normalize_endpoint(rpc_endpoint);
         if let Some(mut entry) = self.connections.get_mut(&normalized) {
             entry.value_mut().clear();

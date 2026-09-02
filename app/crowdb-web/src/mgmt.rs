@@ -101,13 +101,37 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: NodeId) {
         if let Ok(client) = ServerClient::new(&url) {
             match client.topology().await {
                 Ok(stores) => {
+                    let new_stores =
+                        crowdb_console_shared::monitor::legacy_topology_to_node_stores(node_id, &stores);
+                    let (merged, still_recovering) = {
+                        let snap = state.monitor_cache.snapshot().await;
+                        if let Some(old) = snap.get(&node_id) {
+                            if old.recovering {
+                                let mut merged = old.stores.clone();
+                                let mut all_confirmed = true;
+                                for (sid, ns) in &new_stores {
+                                    merged.insert(*sid, ns.clone());
+                                }
+                                for old_sid in old.stores.keys() {
+                                    if !new_stores.contains_key(old_sid) {
+                                        all_confirmed = false;
+                                        break;
+                                    }
+                                }
+                                (merged, !all_confirmed)
+                            } else {
+                                (new_stores, false)
+                            }
+                        } else {
+                            (new_stores, false)
+                        }
+                    };
                     let rec = crowdb_console_shared::monitor::NodeRecord {
                         health: NodeHealth::Up,
                         last_seen_ms: 1,
-                        stores: crowdb_console_shared::monitor::legacy_topology_to_node_stores(
-                            node_id, &stores,
-                        ),
+                        stores: merged,
                         last_error: None,
+                        recovering: still_recovering,
                     };
                     state.monitor_cache.set_node_report(node_id, rec).await;
                 }
