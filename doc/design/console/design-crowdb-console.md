@@ -84,17 +84,26 @@ Targets:
 
 ### 2.1 Call Path
 
-The web frontend (SPA backed by Axum) and the CLI follow different
-paths:
+The web frontend (SPA backed by Axum) and the CLI follow the same
+path through the shared `ops` module:
 
-- **Web**: `user → crowdb-web (Axum) → shared → crowdb-kv-server`
+- **Web**: `user → crowdb-web (Axum) → shared (ops module) → group-0 sysdata + crowdb-kv-server`
 - **CLI**: `user → crowdb-cli → shared (ops module) → group-0 sysdata + crowdb-kv-server mgmt`
+
+Both frontends build an `OpContext` and call the same `ops::*`
+functions. The CLI builds one per invocation from `--sysmd-ip` /
+`--sysmd-port`; the web backend builds one per request via
+`AppState::op_context()`, sharing the cached `CrowdbKvClient`
+(topology cache + connection pool) and snapshotting the persisted
+`ConsoleConfig`. Mutations inside `ops::*` update the per-request
+`OpContext` config snapshot; the handler writes the mutated config
+back to `AppState.config` + persists to TOML after `ops::*` returns.
 
 The CLI talks directly to group-0 system metadata via
 `CrowdbSysmdClient` and to individual `crowdb-kv-server` management
 APIs via `ServerClient` — no `crowdb-web` intermediary. The `ops`
-module in `shared` holds the operation logic that both the CLI and
-(later) the web UI can call.
+module in `shared` holds the operation logic that both frontends
+call.
 
 ```
                 ┌──────────────┐        ┌──────────────┐
@@ -126,8 +135,10 @@ module in `shared` holds the operation logic that both the CLI and
 - `web` (Axum) and `cli` (clap) only parse input and render output.
 - The web SPA **does not** reimplement business logic; it calls
   `shared` via the Axum backend, never `crowdb-kv-server` directly.
-- The CLI calls `shared`'s `ops` module directly, building an
-  `OpContext` from `--sysmd-ip` / `--sysmd-port` global flags.
+- Both frontends build an `OpContext` and call `shared`'s `ops`
+  module directly — the CLI from `--sysmd-ip` / `--sysmd-port` global
+  flags, the web backend via `AppState::op_context()` (sharing the
+  cached `CrowdbKvClient` + snapshotting `ConsoleConfig`).
 - Both frontends share the same `shared` entry points, so any feature
   is reachable from both surfaces by construction.
 
@@ -363,7 +374,12 @@ server id namespace in the console API.
 ### 6.1 Design Rules
 
 The console-facing API is split along the **two hierarchy views**
-defined in §3, and every route lives under exactly one of them.
+defined in §3, and every route lives under exactly one of them. Every
+handler builds an `OpContext` via `AppState::op_context()` and
+delegates to the matching `ops::*` function — the web backend no
+longer hand-rolls orchestration logic (fan-out, rollback, sysdata
+sync). The `ops` module owns all multi-step logic; the handler only
+parses input, calls `ops::*`, writes back config, and renders output.
 
 **R1. Two URL trees, one per hierarchy.**
 - `/api/racks/...` and `/api/nodes/...` form the **physical** tree.
@@ -382,14 +398,23 @@ This is how the operator inspects "is the cluster consistent?" vs.
 "what does this one node think it has?".
 
 **R3. Logical writes orchestrate; physical writes act on one node.**
-A logical write declares *intent*; the web backend fans out per-node
-calls in `shared` and rolls back on partial failure. A physical write
+A logical write declares *intent*; the `ops` function fans out
+per-node calls and rolls back on partial failure. A physical write
 is the low-level primitive. It touches exactly that node, never fans
 out. Logical writes are implemented on top of physical primitives.
 
 **R4. No `server_id` namespace.**
 Process lifecycle and reachability probes use
 `/api/nodes/:node_id/server/...`. Node identity *is* server identity.
+
+**R5. `OpContext` per request.**
+Each handler builds an `OpContext` from `AppState::op_context()`,
+which shares the cached `Arc<CrowdbKvClient>` (topology cache +
+connection pool) and snapshots the persisted `ConsoleConfig`. After
+`ops::*` returns, the handler writes the mutated config back to
+`AppState.config` (short write-lock, no `await` inside) and persists
+via the config engine. On error, the snapshot is discarded —
+`AppState.config` is unchanged.
 
 > **Retired contracts (no compatibility shim):** `?server=<mgmt_url>`
 > query parameter, `/api/servers/:sid/...`,
@@ -703,11 +728,12 @@ config extension. The `runtime/` directory is gitignored. The
 ## 11. Sysdata sync — rack/node/disk-group/disk handlers
 
 Console add/remove handlers for racks, nodes, disk-groups, and disks
-update the console config TOML then sync group-0 sysdata via
-`HardwareClient` (built by `build_hardware_client` in
-`app/crowdb-web/src/mgmt.rs`). If group 0 is not yet initialized, the
-sysdata sync is skipped — `cluster_init` Phase 5 writes the full
-hierarchy on bootstrap.
+delegate to `ops::hardware::*`, which updates the `OpContext` config
+snapshot first, then syncs group-0 sysdata via `ctx.sysmd()`
+(`HardwareClient`). If group 0 is not yet initialized, the sysdata
+sync is skipped — `cluster_init` Phase 5 writes the full hierarchy on
+bootstrap. After `ops::*` returns, the handler writes the mutated
+config back to `AppState.config` and persists to TOML.
 
 ## 12. Cluster reset
 
@@ -736,3 +762,9 @@ The `POST /internal/reset` endpoint on `crowdb-kv-server` remains for
 UI use; the CLI implements its own teardown via the shared `ops`
 module. When no KV servers are running, the RPC steps are skipped
 (fast path for E2E test fixtures).
+
+The web backend exposes `POST /api/cluster/reset` (calls
+`ops::cluster::reset`) and `POST /api/cluster/clean` (calls
+`ops::cluster::clean` — removes orphaned sysdata entries from stopped
+servers without full teardown). Both are reachable from the CLI and
+the web UI.

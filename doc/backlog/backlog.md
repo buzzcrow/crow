@@ -15,16 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R127](R127-console-web-ui-ops-migration.md)** — Web UI migrate to
-  shared ops + layout rework — Area: console / web — Migrate `crowdb-web`
-  Axum handlers to call `crowdb_console_shared::ops::*` (same as CLI
-  post-R126), eliminating ~2000 lines of duplicated orchestration. Add
-  missing web endpoints (`cluster destroy`, `cluster reset`, `cluster clean`, `kv server
-  delete` with require-empty). Rework UI information architecture to
-  align with the CLI's four-domain structure. UI layout is deferred to
-  design — open questions on domain navigation, chunk/bench handling,
-  and migration sequencing.
-
 - **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
   review & unification — Area: cluster / observability — CROWDB has
   two logging stacks (Rust `tracing` in `crowdb-common/rust`, C++
