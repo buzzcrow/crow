@@ -4,40 +4,43 @@
 import { expect, request } from '@playwright/test';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_SERVER_BINARY =
   process.env.CROWDB_KV_SERVER_BINARY ?? resolve(__dirname, '../../../../../target/debug/crowdb-kv-server');
 
-// Monotonic port counter for E2E tests. Tests run sequentially (workers: 1),
-// so a counter is safe — each test cleans up its own servers before the
-// next test starts. Stays below the Linux ephemeral port range
-// (32768–60999) so the kernel never hands these ports to outgoing
-// connections, which would cause "Address already in use" bind errors.
-const PORT_BASE = 30000;
-const PORT_CEILING = 32768;
-let nextPort = PORT_BASE;
-export function freePort(): number {
-  if (nextPort >= PORT_CEILING) {
-    throw new Error(`freePort: exhausted ${PORT_CEILING - PORT_BASE} ports; raise PORT_CEILING above the ephemeral range`);
-  }
-  return nextPort++;
+// Path to the crowdb-port-alloc CLI binary. Used for flock-coordinated
+// port allocation with bind probes — no port 0, no TOCTOU.
+const PORT_ALLOC_BIN =
+  process.env.CROWDB_PORT_ALLOC_BIN ?? resolve(__dirname, '../../../../../target/debug/crowdb-port-alloc');
+
+// Per-process claim file root for E2E port allocation. Uses a temp
+// directory keyed by PID so parallel test runs don't collide.
+const PORT_ALLOC_ROOT = resolve(`/tmp/crowdb-port-alloc-e2e-${process.pid}`);
+
+// Allocate a single port for the given service via the crowdb-port-alloc
+// CLI. Services: kv-mgmt, kv-listen, diskdb-listen, diskdb-http,
+// diskdb-rpc, chunkdb-http, chunkdb-rpc, diskio-rpc, web.
+export function freePort(service = 'kv-mgmt'): number {
+  const out = execSync(
+    `${PORT_ALLOC_BIN} --root "${PORT_ALLOC_ROOT}" --service ${service}`,
+    { encoding: 'utf-8' },
+  ).trim();
+  return parseInt(out, 10);
 }
 
-// Allocate `count` consecutive ports. Needed for diskdb, which derives
-// http_port = rpc_port + 1 and rpc_listen_port = rpc_port + 2 from the
-// single rpc_port passed to deployDiskdb. Without this, the monotonic
-// counter only advances by 1, and the next freePort() call returns a
-// port the diskdb is already bound to (port conflict).
-export function freePortRange(count: number): number {
+// Allocate `count` consecutive ports for the given service. Returns the
+// base port (first in the range).
+export function freePortRange(count: number, service = 'kv-mgmt'): number {
   if (count < 1) throw new Error('freePortRange: count must be >= 1');
-  if (nextPort + count > PORT_CEILING) {
-    throw new Error(`freePortRange: exhausted ${PORT_CEILING - PORT_BASE} ports; raise PORT_CEILING above the ephemeral range`);
-  }
-  const base = nextPort;
-  nextPort += count;
-  return base;
+  const out = execSync(
+    `${PORT_ALLOC_BIN} --root "${PORT_ALLOC_ROOT}" --service ${service} --count ${count}`,
+    { encoding: 'utf-8' },
+  ).trim();
+  const ports = out.split('\n').map((p) => parseInt(p.trim(), 10));
+  return ports[0];
 }
 
 // ── Timing instrumentation ──────────────────────────────────────────
@@ -345,11 +348,20 @@ export async function clusterClean(baseURL: string) {
 export const DEFAULT_DISKDB_BINARY =
   process.env.CROWDB_DISKDB_BIN ?? resolve(__dirname, '../../../../../target/debug/crowdb-diskdb');
 
-export async function deployDiskdb(baseURL: string, nodeId: number, rpcPort: number) {
+export async function deployDiskdb(
+  baseURL: string,
+  nodeId: number,
+  rpcPort: number,
+  listenPort?: number,
+  httpPort?: number,
+) {
   const api = await apiContext(baseURL);
   try {
+    const body: Record<string, number> = { rpc_port: rpcPort };
+    if (listenPort !== undefined) body.listen_port = listenPort;
+    if (httpPort !== undefined) body.http_port = httpPort;
     const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/diskdb/deploy`, {
-      data: { rpc_port: rpcPort },
+      data: body,
     });
     expect(response.status(), await response.text()).toBe(201);
   } finally {
@@ -651,8 +663,8 @@ export class CrowdbClusterDeployer {
 
   private async deployKvServers(nodes: number[], topo: TopologyDescriptor): Promise<NodeInfo[]> {
     const deployPromises = nodes.map((nodeId) => {
-      const restPort = freePort();
-      const rpcPort = freePort();
+      const restPort = freePort('kv-mgmt');
+      const rpcPort = freePort('kv-listen');
       return deployNodeServer(this.baseURL, nodeId, restPort, rpcPort).then(async () => {
         const api = await apiContext(this.baseURL);
         try {
@@ -724,10 +736,13 @@ export class CrowdbClusterDeployer {
   private async deployDiskdbInstances(nodes: number[], topo: TopologyDescriptor): Promise<DiskdbInfo[]> {
     if (!topo.deployDiskdb) return [];
     // Deploy all diskdb instances in parallel — each is independent.
+    // Allocate independent ports for listen, http, and rpc.
     const instances = await Promise.all(
       nodes.map((nodeId) => {
-        const rpcPort = freePortRange(3);
-        return deployDiskdb(this.baseURL, nodeId, rpcPort).then(() => ({
+        const listenPort = freePort('diskdb-listen');
+        const httpPort = freePort('diskdb-http');
+        const rpcPort = freePort('diskdb-rpc');
+        return deployDiskdb(this.baseURL, nodeId, rpcPort, listenPort, httpPort).then(() => ({
           nodeId,
           pid: 0,
           rpcPort,
@@ -861,7 +876,7 @@ export async function setupCluster(baseURL: string, topo: TopologyDescriptor): P
     }),
   );
 
-  await Promise.all(nodes.map((nodeId) => deployNodeServer(baseURL, nodeId, freePort(), freePort())));
+  await Promise.all(nodes.map((nodeId) => deployNodeServer(baseURL, nodeId, freePort('kv-mgmt'), freePort('kv-listen'))));
 
   const stores: number[] = [];
   const groups: { storeId: number; groupId: number }[] = [];

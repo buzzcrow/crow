@@ -3,79 +3,78 @@
 
 //! Default port allocation for CROWDB services.
 //!
-//! Each service type has a **base port** — the start port for that
-//! service type. When multiple instances of the same service type run
-//! on one node, each instance picks `base + instance * stride`. Port
-//! ranges are non-overlapping across service types so different
-//! services never collide on the same node.
+//! Each service type gets a **1000-port block** with a shared prefix
+//! (same kind of server = same leading digits), all ports **>10000**.
+//! Within a block, each listener kind gets a 100-port sub-range. All
+//! services use **stride 1** — no paired-port logic. Port 0 is never
+//! used (rejected everywhere by CLI parse and the port allocator).
 //!
-//! ## Port ranges
+//! ## Port map
 //!
-//! - `9910`–`9919` — crowdb-kv-server HTTP management API (stride 1)
-//! - `9920`–`9929` — crowdb-web HTTP service (stride 1)
-//! - `9931`–`9940` — crowdb-diskdb crowdb-rpc listener (R115 migration,
-//!   stride 1; instance `i` uses `9931 + i`)
-//! - `9941`–`9960` — crowdb-diskdb main listener + HTTP management (paired,
-//!   stride 2; instance `i` uses listener `9941 + 2i`, HTTP `9942 + 2i`)
-//! - `9971`–`9990` — crowdb-chunkdb main listener + HTTP management (paired,
-//!   stride 2; instance `i` uses listener `9971 + 2i`, HTTP `9972 + 2i`)
-//! - `28001`–`28200` — crowdb-kv-server main `PxKvStore` listener pool
-//!   (stride 1)
-//! - `28101`–`28300` — crowdb-kv-server crowdb-rpc consensus listener (R32
-//!   migration, stride 1; inter-KV-server only. R117 adds a separate
-//!   client-facing port)
-//! - `28201`–`28400` — crowdb-kv-server crowdb-rpc client-facing listener
-//!   (R117 migration, stride 1; client-to-server only. Separate from
-//!   the consensus port so the two surfaces evolve independently)
+//! - `10000`–`10999` — crowdb-kv-server (prefix 10)
+//!   - `10000`–`10099` — HTTP management API (stride 1)
+//!   - `10100`–`10199` — main `PxKvStore` listener (hosts both
+//!     consensus and client crowdb-rpc handlers; stride 1)
+//!   - `10200`–`10999` — spare
+//! - `11000`–`11999` — crowdb-diskdb (prefix 11)
+//!   - `11000`–`11099` — main listener (stride 1)
+//!   - `11100`–`11199` — HTTP management API (stride 1; independent
+//!     of listen — no paired-port invariant)
+//!   - `11200`–`11299` — crowdb-rpc listener (stride 1)
+//!   - `11300`–`11999` — spare
+//! - `12000`–`12999` — crowdb-chunkdb (prefix 12)
+//!   - `12100`–`12199` — HTTP management API (stride 1)
+//!   - `12200`–`12299` — crowdb-rpc listener (stride 1)
+//!   - `12300`–`12999` — spare
+//! - `13000`–`13999` — crowdb-diskio (prefix 13)
+//!   - `13000`–`13099` — crowdb-rpc listener (stride 1)
+//!   - `13100`–`13999` — spare
+//! - `14000`–`14999` — crowdb-web (prefix 14)
+//!   - `14000`–`14099` — HTTP service (stride 1)
+//!   - `14100`–`14999` — spare
 //!
-//! Future service types (diskio, …) should pick a base
-//! outside these ranges and document it here.
+//! The group-0 kv-server mgmt port (`10000`) is the famous bootstrap
+//! discovery port — any client can contact group-0 to read the service
+//! registry and learn all living services' IP + port.
+//!
+//! Future service types should pick a base outside these ranges (next
+//! free prefix: 15xxx) and document it here.
 
-/// crowdb-kv-server HTTP management API — base port.
-pub const KV_SERVER_MGMT_BASE: u16 = 9910;
+/// crowdb-kv-server HTTP management API — base port. Also the famous
+/// group-0 bootstrap discovery port.
+pub const KV_SERVER_MGMT_BASE: u16 = 10000;
 
 /// crowdb-kv-server main `PxKvStore` listener — base port (port pool).
-pub const KV_SERVER_LISTEN_BASE: u16 = 28001;
-
-/// crowdb-kv-server crowdb-rpc consensus listener — base port (R32
-/// migration). Separate from the main listener so both servers run
-/// simultaneously during the mixed-rollout window. Inter-KV-server
-/// only (replica-to-replica Paxos). R117 adds a separate client-facing
-/// port. Stride 1 (one port per instance).
-pub const KV_RPC_BASE: u16 = 28101;
-
-/// crowdb-kv-server crowdb-rpc client-facing listener — base port (R117
-/// migration). Separate from the consensus port so the two surfaces
-/// evolve independently. Stride 1 (one port per instance). Derived
-/// from the main listener port via `KV_CLIENT_RPC_BASE - KV_SERVER_LISTEN_BASE
-/// = 200` (parallel to R32's `KV_RPC_BASE - KV_SERVER_LISTEN_BASE =
-/// 100`).
-pub const KV_CLIENT_RPC_BASE: u16 = 28201;
+/// Hosts both consensus and client crowdb-rpc handlers on the same
+/// listener (RPC port collapse — no separate consensus/client ports).
+pub const KV_SERVER_LISTEN_BASE: u16 = 10100;
 
 /// crowdb-diskdb main listener — base port.
-pub const DISKDB_LISTEN_BASE: u16 = 9941;
+pub const DISKDB_LISTEN_BASE: u16 = 11000;
 
-/// crowdb-diskdb HTTP management API — base port.
-pub const DISKDB_HTTP_BASE: u16 = 9942;
+/// crowdb-diskdb HTTP management API — base port. Independent of
+/// `DISKDB_LISTEN_BASE` (no paired-port invariant).
+pub const DISKDB_HTTP_BASE: u16 = 11100;
 
-/// crowdb-diskdb crowdb-rpc listener — base port (R115 migration). Separate
-/// from the main listener so both servers run simultaneously during the
-/// mixed-rollout window. Stride 1 (one port per instance).
-pub const DISKDB_RPC_BASE: u16 = 9931;
+/// crowdb-diskdb crowdb-rpc listener — base port.
+pub const DISKDB_RPC_BASE: u16 = 11200;
 
-/// crowdb-chunkdb main listener — base port.
-pub const CHUNKDB_LISTEN_BASE: u16 = 9971;
+/// crowdb-chunkdb main listener — base port. Vestigial: the chunkdb
+/// server binds `rpc_listen_addr` and `http_listen_addr` only; this
+/// range is reserved for future use.
+pub const CHUNKDB_LISTEN_BASE: u16 = 12000;
 
 /// crowdb-chunkdb HTTP management API — base port.
-pub const CHUNKDB_HTTP_BASE: u16 = 9972;
+pub const CHUNKDB_HTTP_BASE: u16 = 12100;
 
-/// crowdb-chunkdb crowdb-rpc listener — base port (R116 migration).
-/// Separate from the main listener so both servers run simultaneously
-/// during the mixed-rollout window. Stride 1 (one port per instance).
-pub const CHUNKDB_RPC_BASE: u16 = 9961;
+/// crowdb-chunkdb crowdb-rpc listener — base port.
+pub const CHUNKDB_RPC_BASE: u16 = 12200;
+
+/// crowdb-diskio crowdb-rpc listener — base port.
+pub const DISKIO_RPC_BASE: u16 = 13000;
 
 /// crowdb-web HTTP service — base port.
-pub const WEB_BASE: u16 = 9920;
+pub const WEB_BASE: u16 = 14000;
 
 /// CROWDB service type for default port allocation.
 ///
@@ -87,22 +86,23 @@ pub const WEB_BASE: u16 = 9920;
 pub enum ServicePort {
     /// crowdb-kv-server HTTP management API.
     KvServerMgmt,
-    /// crowdb-kv-server main `PxKvStore` listener (port pool).
+    /// crowdb-kv-server main `PxKvStore` listener (port pool; hosts
+    /// both consensus and client crowdb-rpc).
     KvServerListen,
-    /// crowdb-kv-server crowdb-rpc consensus listener (R32 migration).
-    KvServerRpc,
-    /// crowdb-kv-server crowdb-rpc client-facing listener (R117 migration).
-    KvServerClientRpc,
     /// crowdb-diskdb main listener.
     DiskdbListen,
     /// crowdb-diskdb HTTP management API.
     DiskdbHttp,
-    /// crowdb-chunkdb main listener.
+    /// crowdb-diskdb crowdb-rpc listener.
+    DiskdbRpc,
+    /// crowdb-chunkdb main listener (vestigial — range reserved).
     ChunkdbListen,
     /// crowdb-chunkdb HTTP management API.
     ChunkdbHttp,
-    /// crowdb-chunkdb crowdb-rpc listener (R116 migration).
+    /// crowdb-chunkdb crowdb-rpc listener.
     ChunkdbRpc,
+    /// crowdb-diskio crowdb-rpc listener.
+    DiskioRpc,
     /// crowdb-web HTTP service.
     Web,
 }
@@ -114,32 +114,23 @@ impl ServicePort {
         match self {
             Self::KvServerMgmt => KV_SERVER_MGMT_BASE,
             Self::KvServerListen => KV_SERVER_LISTEN_BASE,
-            Self::KvServerRpc => KV_RPC_BASE,
-            Self::KvServerClientRpc => KV_CLIENT_RPC_BASE,
             Self::DiskdbListen => DISKDB_LISTEN_BASE,
             Self::DiskdbHttp => DISKDB_HTTP_BASE,
+            Self::DiskdbRpc => DISKDB_RPC_BASE,
             Self::ChunkdbListen => CHUNKDB_LISTEN_BASE,
             Self::ChunkdbHttp => CHUNKDB_HTTP_BASE,
             Self::ChunkdbRpc => CHUNKDB_RPC_BASE,
+            Self::DiskioRpc => DISKIO_RPC_BASE,
             Self::Web => WEB_BASE,
         }
     }
 
     /// Port stride between consecutive instances of the same service
-    /// type on one node.
+    /// type on one node. All services use stride 1.
     #[must_use]
     pub const fn stride(self) -> u16 {
-        match self {
-            Self::KvServerMgmt
-            | Self::KvServerListen
-            | Self::KvServerRpc
-            | Self::KvServerClientRpc
-            | Self::Web
-            | Self::ChunkdbRpc => 1,
-            // diskdb and chunkdb use paired ports (listener + HTTP); each
-            // instance consumes two consecutive ports.
-            Self::DiskdbListen | Self::DiskdbHttp | Self::ChunkdbListen | Self::ChunkdbHttp => 2,
-        }
+        let _ = self;
+        1
     }
 
     /// Port for the `instance`-th instance of this service type on a
@@ -147,5 +138,13 @@ impl ServicePort {
     #[must_use]
     pub const fn port(self, instance: u16) -> u16 {
         self.base() + instance * self.stride()
+    }
+
+    /// Sub-range size (number of ports) for this service type's
+    /// listener kind. Each listener kind gets 100 ports.
+    #[must_use]
+    pub const fn range_size(self) -> u16 {
+        let _ = self;
+        100
     }
 }

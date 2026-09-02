@@ -109,13 +109,24 @@ pub async fn start_test_server_at(
     args: &[&str],
     ports: &[u16],
 ) -> std_io::Result<ServerHandle> {
-    let ports_str = ports.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
-
-    // `parse_id_list` dedupes via a HashSet, so `0,0` collapses to a single
-    // port and fails the `--ports`/`--stores` length check. When every port is
-    // 0, omit `--ports` entirely — the server defaults to one OS-assigned
-    // (port 0) slot per store, which is what the caller asked for.
-    let all_zero = ports.iter().all(|&p| p == 0);
+    // Allocate ports via the flock-coordinated port allocator.
+    // Port 0 is not allowed — allocate from the service ranges.
+    let mgmt_port = crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::KvServerMgmt);
+    let alloc_ports: Vec<u16> = ports
+        .iter()
+        .map(|&p| {
+            if p == 0 {
+                crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::KvServerListen)
+            } else {
+                p
+            }
+        })
+        .collect();
+    let ports_str = alloc_ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
 
     let bin = crowdb_kv_server_bin();
     let mut cmd = Command::new(bin);
@@ -125,10 +136,9 @@ pub async fn start_test_server_at(
         .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
-        .arg("0");
-    if !all_zero {
-        cmd.arg("--ports").arg(&ports_str);
-    }
+        .arg(mgmt_port.to_string())
+        .arg("--ports")
+        .arg(&ports_str);
     cmd.arg("--election-profile")
         .arg("e2e")
         .stdout(Stdio::piped())

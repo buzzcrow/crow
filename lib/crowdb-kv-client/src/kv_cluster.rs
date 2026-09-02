@@ -284,7 +284,7 @@ impl KVClusterMetaClient {
 /// the kv-server HTTP mgmt API for live runtime state.
 ///
 /// The `base_url` is the kv-server's HTTP management base URL
-/// (e.g. `http://127.0.0.1:9910`).
+/// (e.g. `http://127.0.0.1:10000`).
 pub struct KVClusterAdmin {
     meta: KVClusterMetaClient,
     http: reqwest::Client,

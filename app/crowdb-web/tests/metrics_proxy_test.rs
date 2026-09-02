@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use crowdb_console_shared::cluster::NodeHealth as _NodeHealth;
 
 fn pick_free_port() -> u16 {
-    crowdb_console_shared::test_ports::unique_test_port()
+    crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::Web)
 }
 
 struct Upstream {

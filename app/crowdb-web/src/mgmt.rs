@@ -194,7 +194,7 @@ pub(crate) fn strip_scheme(s: String) -> String {
     }
 }
 
-/// Parse `port` out of a URL like `http://host:9910` or `host:9910`.
+/// Parse `port` out of a URL like `http://host:10000` or `host:10000`.
 /// Returns `None` on any shape we don't recognise.
 #[must_use]
 pub(crate) fn port_of(url: &str) -> Option<u16> {

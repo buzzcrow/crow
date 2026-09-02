@@ -105,7 +105,7 @@ where
 // ── HardwareClient FFI ────────────────────────────────────────────
 
 /// Create a `HardwareClient` from kv-server management seeds.
-/// `seeds`: array of null-terminated C strings (e.g. "<http://127.0.0.1:9910>").
+/// `seeds`: array of null-terminated C strings (e.g. "<http://127.0.0.1:10000>").
 /// `num_seeds`: number of seeds.
 /// Returns an opaque handle, or null on error.
 #[no_mangle]

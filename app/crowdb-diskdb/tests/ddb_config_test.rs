@@ -101,10 +101,10 @@ fn config_load_from_file_roundtrip() {
 #[test]
 fn minimal_server_only_config_uses_section_defaults() {
     let toml = "[server]\n\
-         listen_addr = \"0.0.0.0:50051\"\n\
-         http_listen_addr = \"0.0.0.0:50052\"\n\
-         rpc_listen_addr = \"0.0.0.0:9931\"\n\
-         kv_server_mgmt_seeds = [\"http://127.0.0.1:9910\"]\n";
+         listen_addr = \"0.0.0.0:11000\"\n\
+         http_listen_addr = \"0.0.0.0:11100\"\n\
+         rpc_listen_addr = \"0.0.0.0:11200\"\n\
+         kv_server_mgmt_seeds = [\"http://127.0.0.1:10000\"]\n";
     let config: DdbConfig = toml::from_str(toml).expect("minimal config parses");
     config.validate().expect("minimal config validates");
     // Defaults filled in for the omitted sections.

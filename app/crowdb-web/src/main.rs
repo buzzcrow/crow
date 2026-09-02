@@ -19,8 +19,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         #[arg(long, default_value = "0.0.0.0")]
         bind: String,
 
-        /// Port for the web server (default: 9920)
-        #[arg(long, default_value_t = WEB_BASE)]
+        /// Port for the web server (default: 14000)
+        #[arg(long, default_value_t = WEB_BASE, value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
 
         /// Use an in-memory registry instead of the persisted console config.

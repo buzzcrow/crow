@@ -18,6 +18,14 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize)]
 pub struct DeployDiskdbBody {
     pub rpc_port: u16,
+    /// Main listener port. When omitted, derived from `rpc_port` (old
+    /// paired-port behavior: listen = `rpc_port`).
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    /// HTTP management port. When omitted, derived from `rpc_port`
+    /// (old paired-port behavior: http = `rpc_port` + 1).
+    #[serde(default)]
+    pub http_port: Option<u16>,
 }
 
 /// `POST /api/nodes/:id/diskdb/deploy` — spawn `crowdb-diskdb` on the
@@ -80,9 +88,17 @@ pub async fn http_deploy_diskdb(
             .collect()
     };
 
+    // Backward-compat: when listen_port/http_port are not provided,
+    // derive from the old paired-port scheme (listen=rpc, http=rpc+1,
+    // crowdb-rpc=rpc+2).
+    let listen_port = body.listen_port.unwrap_or(body.rpc_port);
+    let http_port = body.http_port.unwrap_or(body.rpc_port.saturating_add(1));
+    let rpc_listen_port = body.rpc_port.saturating_add(2);
     let req = DiskdbDeployRequest {
         server_id: format!("diskdb-{node_id}"),
-        rpc_port: body.rpc_port,
+        listen_port,
+        http_port,
+        rpc_port: rpc_listen_port,
         kv_server_mgmt_seeds,
     };
 
@@ -211,9 +227,15 @@ pub async fn http_restart_diskdb(
             .collect()
     };
 
+    // Backward-compat: derive from the old paired-port scheme.
+    let listen_port = rpc_port;
+    let http_port = rpc_port.saturating_add(1);
+    let rpc_listen_port = rpc_port.saturating_add(2);
     let req = DiskdbDeployRequest {
         server_id: format!("diskdb-{node_id}"),
-        rpc_port,
+        listen_port,
+        http_port,
+        rpc_port: rpc_listen_port,
         kv_server_mgmt_seeds,
     };
     let workspace_dir = state

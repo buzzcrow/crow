@@ -29,7 +29,7 @@ impl Drop for ProcessGuard {
 }
 
 fn pick_free_port() -> u16 {
-    crowdb_console_shared::test_ports::unique_test_port()
+    crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::Web)
 }
 
 async fn spawn_web_with_path(path: std::path::PathBuf) -> SocketAddr {

@@ -24,7 +24,7 @@ use crate::config::{NodeEntry, RackEntry, ServerEntry};
 use crate::error::{Error, Result};
 
 /// Thin wrapper around `reqwest::Client` bound to one `crowdb-web`
-/// console base URL (default `http://127.0.0.1:9920`).
+/// console base URL (default `http://127.0.0.1:14000`).
 #[derive(Debug, Clone)]
 pub struct ConsoleClient {
     base_url: String,
@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn trims_trailing_slashes_in_base_url() {
-        let c = ConsoleClient::new("http://127.0.0.1:9920///").unwrap();
-        assert_eq!(c.base_url(), "http://127.0.0.1:9920");
+        let c = ConsoleClient::new("http://127.0.0.1:14000///").unwrap();
+        assert_eq!(c.base_url(), "http://127.0.0.1:14000");
     }
 }

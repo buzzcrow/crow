@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::snapshot::{HealthInfo, MetricsResponse, StoreView, TopologyResponse, WipeResult};
 
 /// Thin wrapper around a `reqwest::Client` bound to one `crowdb-kv-server`
-/// management base URL (e.g. `http://127.0.0.1:9910`).
+/// management base URL (e.g. `http://127.0.0.1:10000`).
 #[derive(Debug, Clone)]
 pub struct ServerClient {
     base_url: String,

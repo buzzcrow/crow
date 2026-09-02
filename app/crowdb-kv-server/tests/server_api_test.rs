@@ -256,8 +256,8 @@ async fn add_and_list_remote_replicas() {
     let resp = client()
         .post(format!("{}/stores/0/groups/1/remotes", server.base_url()))
         .json(&serde_json::json!([
-            {"replica_id": 2, "endpoint": "192.168.1.2:28001"},
-            {"replica_id": 3, "endpoint": "192.168.1.3:28001"}
+            {"replica_id": 2, "endpoint": "192.168.1.2:10100"},
+            {"replica_id": 3, "endpoint": "192.168.1.3:10100"}
         ]))
         .send()
         .await
@@ -293,8 +293,8 @@ async fn remove_remote_replica() {
     client()
         .post(format!("{}/stores/0/groups/1/remotes", server.base_url()))
         .json(&serde_json::json!([
-            {"replica_id": 2, "endpoint": "192.168.1.2:28001"},
-            {"replica_id": 3, "endpoint": "192.168.1.3:28001"}
+            {"replica_id": 2, "endpoint": "192.168.1.2:10100"},
+            {"replica_id": 3, "endpoint": "192.168.1.3:10100"}
         ]))
         .send()
         .await

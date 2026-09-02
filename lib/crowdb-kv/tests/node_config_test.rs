@@ -20,7 +20,7 @@ fn node_config_upsert_group_creates_store_if_missing() {
         term: 3,
         members: vec![PxGroupMember {
             replica_id: 1,
-            endpoint: "127.0.0.1:28001".to_string(),
+            endpoint: "127.0.0.1:10100".to_string(),
             voting: true,
         }],
         membership_epoch: 2,
@@ -43,7 +43,7 @@ fn node_config_upsert_group_updates_existing() {
         term: 1,
         members: vec![PxGroupMember {
             replica_id: 1,
-            endpoint: "127.0.0.1:28001".to_string(),
+            endpoint: "127.0.0.1:10100".to_string(),
             voting: true,
         }],
         membership_epoch: 0,
@@ -55,12 +55,12 @@ fn node_config_upsert_group_updates_existing() {
         members: vec![
             PxGroupMember {
                 replica_id: 1,
-                endpoint: "127.0.0.1:28001".to_string(),
+                endpoint: "127.0.0.1:10100".to_string(),
                 voting: true,
             },
             PxGroupMember {
                 replica_id: 2,
-                endpoint: "127.0.0.1:28002".to_string(),
+                endpoint: "127.0.0.1:10101".to_string(),
                 voting: true,
             },
         ],
@@ -136,12 +136,12 @@ async fn node_config_store_save_then_load_roundtrip() {
         members: vec![
             PxGroupMember {
                 replica_id: 1,
-                endpoint: "127.0.0.1:28001".to_string(),
+                endpoint: "127.0.0.1:10100".to_string(),
                 voting: true,
             },
             PxGroupMember {
                 replica_id: 2,
-                endpoint: "127.0.0.1:28002".to_string(),
+                endpoint: "127.0.0.1:10101".to_string(),
                 voting: true,
             },
         ],

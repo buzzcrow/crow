@@ -5,11 +5,9 @@
 //!
 //! Defines the [`KvServer`] trait (start / join / stop / `listen_addr`)
 //! and implements it on `Arc<PxKvStore>`. The trait's `start` binds a
-//! TCP listener to record the listen address (used for endpoint
-//! derivation by the crowdb-rpc servers and peer discovery), then the
-//! crowdb-rpc servers (`start_rpc_server` for consensus,
-//! `start_client_rpc_server` for client-facing) handle the actual
-//! request serving. Server state (join handle, shutdown sender, bound
+//! single crowdb-rpc server on the listen port that hosts both
+//! consensus (`PxRpcService`) and client-facing (`KvRpcService`)
+//! handlers. Server state (join handle, shutdown sender, bound
 //! address) lives on [`RpcTaskState`] inside the store so
 //! [`PxKvStore::shutdown_server`] can drive a timed graceful stop from
 //! the cascade shutdown path.
@@ -22,8 +20,6 @@ use crowdb_rpc_ffi::RpcServer;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::runtime::Handle;
 use tracing::{debug, error, info};
 
 #[allow(async_fn_in_trait)]
@@ -51,8 +47,9 @@ pub(crate) struct RpcServerState {
     pub(crate) server: Option<Arc<RpcServer>>,
     pub(crate) transport: Option<Arc<PxRpcTransport>>,
 }
-
+#[allow(async_fn_in_trait)]
 impl KvServer for Arc<PxKvStore> {
+    #[allow(clippy::unused_async_trait_impl)]
     async fn start(&self) -> Result<(), String> {
         {
             let state = self.server_state.lock();
@@ -65,22 +62,7 @@ impl KvServer for Arc<PxKvStore> {
             }
         }
 
-        // Bind a TCP listener to determine the actual port (supports
-        // port 0 for OS-assigned), then immediately drop it — the
-        // crowdb-rpc server will re-bind the same port.
-        let bound_addr = match TcpListener::bind(self.listen_addr).await {
-            Ok(tcp) => tcp
-                .local_addr()
-                .map_err(|e| format!("failed to read bound kv server address: {e}"))?,
-            Err(error) => {
-                let msg = format!(
-                    "failed to bind kv server on {}: {error}; next step: choose an available listen_addr or stop the conflicting process",
-                    self.listen_addr
-                );
-                error!(store_id = self.store_id, listen_addr = %self.listen_addr, error = %error, "{msg}");
-                return Err(msg);
-            }
-        };
+        let bound_addr = self.listen_addr;
 
         // Start a single crowdb-rpc server on the listen port. Both
         // consensus (PxRpcService) and client (KvRpcService) handlers
@@ -95,7 +77,13 @@ impl KvServer for Arc<PxKvStore> {
         server.set_send_queue_capacity(self.send_queue_capacity);
         server
             .listen(&bound_addr.ip().to_string(), i32::from(bound_addr.port()))
-            .map_err(|e| format!("crowdb-rpc listen on {bound_addr}: {e:?}"))?;
+            .map_err(|e| {
+                let msg = format!(
+                    "failed to bind kv server on {bound_addr}: {e:?}; next step: choose an available listen_addr or stop the conflicting process"
+                );
+                error!(store_id = self.store_id, listen_addr = %bound_addr, error = ?e, "{msg}");
+                msg
+            })?;
         server.start();
         server.register_conn_count_gauge("rpc.server.connections");
 
@@ -125,7 +113,15 @@ impl KvServer for Arc<PxKvStore> {
 
         {
             let mut state = self.server_state.lock();
-            state.listen_addr = Some(bound_addr);
+            // If the listen addr used port 0 (OS-assigned), read the
+            // actual bound port from the RPC server.
+            let actual_addr = if bound_addr.port() == 0 {
+                let actual_port = u16::try_from(server.port()).unwrap_or(0);
+                SocketAddr::new(bound_addr.ip(), actual_port)
+            } else {
+                bound_addr
+            };
+            state.listen_addr = Some(actual_addr);
             state.handle = Some(handle);
             state.shutdown_tx = Some(tx);
         }
@@ -242,22 +238,8 @@ impl PxKvStore {
         }
     }
 
-    /// Start the crowdb-rpc consensus server.
-    ///
-    /// This is now a no-op — `start()` starts a single crowdb-rpc server
-    /// that hosts both consensus and client handlers on the listen port.
-    /// Kept for backward compatibility with callers that call it
-    /// explicitly (e.g. `rpc_migration_test`).
-    #[allow(clippy::missing_errors_doc)]
-    pub fn start_rpc_server(self: &Arc<Self>, _rt: Handle) -> Result<(), String> {
-        if self.rpc_server_state.lock().server.is_some() {
-            return Ok(());
-        }
-        Err("start_rpc_server is a no-op; start() already starts the server".to_string())
-    }
-
     /// Get the shared `PxRpcTransport` for outbound RPCs. Returns
-    /// `None` if `start_rpc_server` has not been called.
+    /// `None` if `start()` has not been called.
     pub fn rpc_transport(&self) -> Option<Arc<PxRpcTransport>> {
         self.rpc_server_state.lock().transport.clone()
     }
@@ -275,7 +257,7 @@ impl PxKvStore {
 
     /// Wire the shared `PxRpcTransport` into all existing remote
     /// replicas across all groups. Must be called after
-    /// [`Self::start_rpc_server`]. Remote replicas added later (via
+    /// [`KvServer::start`]. Remote replicas added later (via
     /// the management API) get the transport via
     /// [`Self::rpc_transport`] at construction time.
     pub fn wire_rpc_transport(&self) {
@@ -301,24 +283,6 @@ impl PxKvStore {
             server.stop();
             info!(store_id = self.store_id, "crowdb-rpc server stopped");
         }
-    }
-
-    /// Start the client-facing crowdb-rpc server.
-    ///
-    /// This is now a no-op — `start()` starts a single crowdb-rpc server
-    /// that hosts both consensus and client handlers on the listen port.
-    /// Kept for backward compatibility.
-    ///
-    /// # Errors
-    /// Returns an error string if the client-facing crowdb-rpc port is
-    /// out of range or the server fails to listen on the derived port.
-    /// Start the client-facing crowdb-rpc server.
-    ///
-    /// This is now a no-op — `start()` starts a single crowdb-rpc server
-    /// that hosts both consensus and client handlers on the listen port.
-    /// Kept for backward compatibility.
-    pub fn start_client_rpc_server(self: &Arc<Self>, _rt: Handle) -> Result<(), String> {
-        Ok(())
     }
 
     /// Stop the client-facing crowdb-rpc server. Called from

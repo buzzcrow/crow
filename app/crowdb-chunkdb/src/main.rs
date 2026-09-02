@@ -31,13 +31,21 @@ struct Cli {
     #[arg(long)]
     config: String,
 
-    /// crowdb-rpc listen address (overrides config).
-    #[arg(long)]
-    listen_addr: Option<String>,
-
     /// HTTP management listen address (overrides config).
     #[arg(long)]
     http_addr: Option<String>,
+
+    /// crowdb-rpc listener address (overrides config `rpc_listen_addr`).
+    #[arg(long)]
+    rpc_listen_addr: Option<String>,
+
+    /// HTTP management port (overrides the port in config `http_listen_addr`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    http_port: Option<u16>,
+
+    /// crowdb-rpc listener port (overrides the port in config `rpc_listen_addr`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    rpc_port: Option<u16>,
 
     /// Number of crowdb-rpc I/O worker threads. Default: 2.
     #[arg(long, default_value_t = 2)]
@@ -63,7 +71,6 @@ async fn main() {
     let config = load_config(&args);
     info!(config = ?config, "crowdb-chunkdb starting");
 
-    let listen_addr: SocketAddr = config.server.listen_addr.parse().expect("valid listen_addr");
     let http_listen_addr: SocketAddr = config
         .server
         .http_listen_addr
@@ -192,8 +199,6 @@ async fn main() {
 
     // Start HTTP health + metrics + cache invalidation server.
     let http_handle = tokio::spawn(run_http_server(http_listen_addr, Arc::clone(&lock_map)));
-
-    info!(%listen_addr, "RPC server listening");
 
     let rpc_server_stop = Arc::clone(&rpc_server);
     let _ = tokio::signal::ctrl_c().await;
@@ -329,14 +334,29 @@ fn load_config(args: &Cli) -> ChunkdbConfig {
         crowdb_common::config::load_from_file::<ChunkdbConfig>(std::path::Path::new(config_path))
             .unwrap_or_else(|e| panic!("failed to load config file {config_path}: {e}"));
 
-    if let Some(addr) = &args.listen_addr {
-        config.server.listen_addr.clone_from(addr);
-    }
     if let Some(addr) = &args.http_addr {
         config.server.http_listen_addr.clone_from(addr);
     }
+    if let Some(addr) = &args.rpc_listen_addr {
+        config.server.rpc_listen_addr.clone_from(addr);
+    }
+    if let Some(port) = args.http_port {
+        config.server.http_listen_addr = replace_port(&config.server.http_listen_addr, port);
+    }
+    if let Some(port) = args.rpc_port {
+        config.server.rpc_listen_addr = replace_port(&config.server.rpc_listen_addr, port);
+    }
 
     config
+}
+
+/// Replace the port portion of a `host:port` address string.
+fn replace_port(addr: &str, port: u16) -> String {
+    if let Some(idx) = addr.rfind(':') {
+        format!("{}:{port}", &addr[..idx])
+    } else {
+        format!("0.0.0.0:{port}")
+    }
 }
 
 /// Request body for `POST /invalidate_chunk`.

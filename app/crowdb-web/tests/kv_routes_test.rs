@@ -18,7 +18,7 @@ use crowdb_web::{router, AppState};
 use serde_json::json;
 
 fn pick_free_port() -> u16 {
-    crowdb_console_shared::test_ports::unique_test_port()
+    crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::Web)
 }
 
 struct Upstream {

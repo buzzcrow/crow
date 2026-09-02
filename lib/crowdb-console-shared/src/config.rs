@@ -279,13 +279,13 @@ pub enum ServiceType {
 pub struct ServerEntry {
     /// Console-side identifier; must be unique within the file.
     pub id: String,
-    /// `crowdb-kv-server` management base URL, e.g. `http://127.0.0.1:9910`.
+    /// `crowdb-kv-server` management base URL, e.g. `http://127.0.0.1:10000`.
     pub url: String,
     /// Owning node id; populated for console-deployed instances. `None`
     /// for plain "registered external server" entries from C2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<NodeId>,
-    /// crowdb-rpc base URL, e.g. `http://127.0.0.1:28001`. Populated for
+    /// crowdb-rpc base URL, e.g. `http://127.0.0.1:10100`. Populated for
     /// console-deployed instances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
@@ -1162,16 +1162,16 @@ mod tests {
         let path = dir.join("console.toml");
 
         let mut cfg = ConsoleConfig::default();
-        let mut a = ServerEntry::new("a", "http://127.0.0.1:9910");
+        let mut a = ServerEntry::new("a", "http://127.0.0.1:10000");
         a.node_id = Some(1);
         a.rpc_url = Some("http://127.0.0.1:9921".into());
-        a.rest_port = Some(9910);
+        a.rest_port = Some(10000);
         a.rpc_port = Some(9921);
         a.auto_start = true;
         a.election_profile = Some("test".into());
         a.pid = Some(12345);
         cfg.add_server(a).unwrap();
-        cfg.add_server(ServerEntry::new("b", "http://127.0.0.1:9911"))
+        cfg.add_server(ServerEntry::new("b", "http://127.0.0.1:10001"))
             .unwrap();
         cfg.stores.push(StoreEntry {
             store_id: 7,
@@ -1204,7 +1204,7 @@ mod tests {
         let path = dir.join("console.toml");
 
         let mut cfg = ConsoleConfig::default();
-        let mut entry = ServerEntry::new("a", "http://127.0.0.1:9910");
+        let mut entry = ServerEntry::new("a", "http://127.0.0.1:10000");
         entry.pid = Some(4242);
         cfg.add_server(entry).unwrap();
 
@@ -1228,7 +1228,7 @@ mod tests {
         let engine = TomlFileEngine::new(path.clone());
 
         let mut cfg = ConsoleConfig::default();
-        cfg.add_server(ServerEntry::new("a", "http://127.0.0.1:9910"))
+        cfg.add_server(ServerEntry::new("a", "http://127.0.0.1:10000"))
             .unwrap();
 
         cfg.save_with_engine(&engine).unwrap();

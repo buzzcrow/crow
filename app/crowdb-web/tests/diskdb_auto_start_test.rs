@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use crowdb_console_shared::config::{ConsoleConfig, NodeEntry, RackEntry, ServerEntry, ServiceType};
 use crowdb_console_shared::lifecycle::{crowdb_diskdb_bin, stop_pid_with_timeout};
-use crowdb_console_shared::test_ports::unique_test_port_range;
+use crowdb_protocol::port_alloc;
+use crowdb_protocol::ServicePort;
 use crowdb_web::mgmt::startup_topology_check;
 use crowdb_web::AppState;
 
@@ -50,9 +51,12 @@ async fn diskdb_auto_starts_on_console_restart() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let node_id: u64 = 7777;
-    // The diskdb needs 3 consecutive ports: rpc_port, http_port
-    // (rpc_port+1), rpc_listen_port (rpc_port+2).
-    let rpc_port = unique_test_port_range(3);
+    // Allocate independent ports for the diskdb's listen, http, and
+    // rpc listeners. The auto-start path derives listen/http from
+    // rpc_port, so we only store rpc_port + http in the config.
+    let _listen_port = port_alloc::alloc_test_port(ServicePort::DiskdbListen);
+    let http_port = port_alloc::alloc_test_port(ServicePort::DiskdbHttp);
+    let rpc_port = port_alloc::alloc_test_port(ServicePort::DiskdbRpc);
 
     let mut cfg = ConsoleConfig::default();
     cfg.add_rack(RackEntry {
@@ -74,7 +78,7 @@ async fn diskdb_auto_starts_on_console_restart() {
     let rpc_url = format!("http://127.0.0.1:{rpc_port}");
     cfg.add_server(ServerEntry {
         id: format!("diskdb-{node_id}"),
-        url: format!("http://127.0.0.1:{}", rpc_port + 1),
+        url: format!("http://127.0.0.1:{http_port}"),
         node_id: Some(node_id),
         rpc_url: Some(rpc_url),
         rest_port: None,

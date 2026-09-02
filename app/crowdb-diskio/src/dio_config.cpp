@@ -234,7 +234,7 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
         }
         else if (arg == "--kv-seeds" && i + 1 < argc) {
             // Comma-separated list of kv-server management endpoints.
-            // e.g. --kv-seeds http://127.0.0.1:9910,http://127.0.0.1:9911
+            // e.g. --kv-seeds http://127.0.0.1:10000,http://127.0.0.1:10001
             std::string seeds = argv[++i];
             size_t      pos   = 0;
             while (pos < seeds.size()) {
@@ -288,8 +288,8 @@ bool DioConfig::parse_args(int argc, char *argv[], DioConfig &out, std::string &
 
 bool DioConfig::validate(std::string &err) const
 {
-    if (listen_port < 0 || listen_port > 65535) {
-        err = "invalid listen port";
+    if (listen_port <= 0 || listen_port > 65535) {
+        err = "invalid listen port (must be 1-65535, 0 is not allowed)";
         return false;
     }
     if (thread_pool_size == 0) {

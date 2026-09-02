@@ -206,7 +206,7 @@ impl PxRemoteReplica {
     }
 
     /// Set the crowdb-rpc transport on an already-constructed replica.
-    /// Used by the server after `start_rpc_server` to wire the shared
+    /// Used by the server after `start()` to wire the shared
     /// transport into existing remote replicas.
     pub fn set_rpc_transport(&self, transport: Arc<PxRpcTransport>) {
         let _ = self.rpc_transport.set(transport);

@@ -568,14 +568,15 @@ async fn setup_cluster(tag: &str, rack_nodes: &[(u64, u64)], bin: &Path, electio
         create_node(&client, &base, *node_id, *rack_id).await;
         node_ids.push(*node_id);
     }
-    // Batch-allocate all deploy ports atomically before concurrent
-    // deploys. unique_test_port() binds :0, reads the port, and drops
-    // the listener immediately — calling it concurrently (once per
-    // node) creates a TOCTOU race where one pick's dropped port is
-    // reassigned to another pick's :0 bind, causing EADDRINUSE when the
-    // kv-server later binds store 0. Batch-binding all listeners at
-    // once guarantees distinct ports with no inter-pick reuse.
-    let ports = crowdb_console_shared::test_ports::unique_test_ports(node_ids.len() * 2);
+    // Batch-allocate all deploy ports via the flock-coordinated port
+    // allocator. Each node needs a mgmt port + a listen port, allocated
+    // from the respective service ranges. The claim file + flock
+    // guarantees no TOCTOU between concurrent deploys.
+    let n = u16::try_from(node_ids.len()).unwrap_or(u16::MAX);
+    let rest_ports =
+        crowdb_protocol::port_alloc::alloc_test_port_range(crowdb_protocol::ServicePort::KvServerMgmt, n);
+    let rpc_ports =
+        crowdb_protocol::port_alloc::alloc_test_port_range(crowdb_protocol::ServicePort::KvServerListen, n);
     // Deploy all nodes concurrently — each deploy polls /health until
     // ready, so parallel deploy overlaps the readiness waits.
     let deploy_futs: Vec<_> = node_ids
@@ -588,8 +589,8 @@ async fn setup_cluster(tag: &str, rack_nodes: &[(u64, u64)], bin: &Path, electio
                 nid,
                 bin,
                 election_profile,
-                ports[i * 2],
-                ports[i * 2 + 1],
+                rest_ports[i],
+                rpc_ports[i],
             )
         })
         .collect();

@@ -33,9 +33,10 @@ struct DiskEntry
 // Server configuration.
 struct DioConfig
 {
-    // RPC listen.
+    // RPC listen. Default port 13000 matches DISKIO_RPC_BASE in
+    // lib/crowdb-protocol/src/ports.rs — keep in sync.
     std::string bind_address = "127.0.0.1";
-    int         listen_port  = 0;
+    int         listen_port  = 13000;
 
     // Node identity (64-bit; each diskio service manages one node).
     uint64_t node_id = 0;

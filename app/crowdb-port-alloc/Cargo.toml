@@ -1,0 +1,20 @@
+[package]
+name = "crowdb-port-alloc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI port allocator for CROWDB tests and cluster bootstrap (flock + bind probe)."
+autobenches = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crowdb-port-alloc"
+path = "src/main.rs"
+
+[dependencies]
+crowdb-protocol = { path = "../../lib/crowdb-protocol" }
+clap = { version = "4", features = ["derive"] }

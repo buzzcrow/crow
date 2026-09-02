@@ -629,12 +629,18 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 /// Inputs for a diskdb deploy (R77). The binary and config file are
 /// pre-copied to the node workspace (`<workspace>/bin/crowdb-diskdb`
-/// and `<workspace>/conf/crowdb_diskdb_config.toml`); the deploy only
-/// needs the crowdb-rpc port to override `--listen-addr`. The HTTP port is
-/// read from the config file for readiness checking.
+/// and `<workspace>/conf/crowdb_diskdb_config.toml`); the deploy
+/// overrides listen, http, and rpc ports independently (no paired-
+/// port invariant). The HTTP port is read from the config file for
+/// readiness checking.
 #[derive(Debug, Clone, Default)]
 pub struct DiskdbDeployRequest {
     pub server_id: String,
+    /// Main listener port (diskdb `listen_addr`).
+    pub listen_port: u16,
+    /// HTTP management port (diskdb `http_listen_addr`).
+    pub http_port: u16,
+    /// crowdb-rpc listener port (diskdb `rpc_listen_addr`).
     pub rpc_port: u16,
     /// KV-server management URLs for group-0 discovery. If non-empty,
     /// the auto-generated config uses these instead of the default port.
@@ -709,12 +715,15 @@ pub fn crowdb_rpc_fb_server_bin() -> Option<PathBuf> {
 /// pre-copied config at `<workspace>/conf/crowdb_diskdb_config.toml`.
 /// Falls back to a minimal auto-generated config with all required
 /// sections if the file is missing. The auto-generated config sets
-/// `http_listen_addr` to `0.0.0.0:{rpc_port + 1}` so each instance
-/// gets a unique HTTP port. When `kv_server_mgmt_seeds` is non-empty,
-/// the config is always (re)written so the diskdb can discover group-0
-/// on the actual kv-server management port.
+/// `listen_addr`, `http_listen_addr`, and `rpc_listen_addr`
+/// independently (no paired-port invariant). When
+/// `kv_server_mgmt_seeds` is non-empty, the config is always
+/// (re)written so the diskdb can discover group-0 on the actual
+/// kv-server management port.
 fn resolve_diskdb_config_path(
     workspace_dir: &std::path::Path,
+    listen_port: u16,
+    http_port: u16,
     rpc_port: u16,
     kv_server_mgmt_seeds: &[String],
 ) -> Result<PathBuf> {
@@ -724,7 +733,6 @@ fn resolve_diskdb_config_path(
     if path.exists() && kv_server_mgmt_seeds.is_empty() {
         return Ok(path);
     }
-    let http_port = rpc_port.saturating_add(1);
     let seeds = if kv_server_mgmt_seeds.is_empty() {
         format!("\"http://127.0.0.1:{}\"", crowdb_protocol::KV_SERVER_MGMT_BASE)
     } else {
@@ -737,12 +745,11 @@ fn resolve_diskdb_config_path(
     // Minimal valid config — only [server] is required; all other
     // sections default via `#[serde(default)]` on `DdbConfig` fields
     // (values match `DdbConfig::default()`).
-    let rpc_listen_port = rpc_port.saturating_add(2);
     let config = format!(
         "[server]\n\
-         listen_addr = \"0.0.0.0:{rpc_port}\"\n\
+         listen_addr = \"0.0.0.0:{listen_port}\"\n\
          http_listen_addr = \"0.0.0.0:{http_port}\"\n\
-         rpc_listen_addr = \"0.0.0.0:{rpc_listen_port}\"\n\
+         rpc_listen_addr = \"0.0.0.0:{rpc_port}\"\n\
          kv_server_mgmt_seeds = [{seeds}]\n",
     );
     std::fs::write(&path, config).map_err(Error::Io)?;
@@ -795,10 +802,10 @@ pub async fn deploy_diskdb_local(
     node: &NodeEntry,
     workspace_dir: &std::path::Path,
 ) -> Result<DeployedServer> {
-    if req.rpc_port == 0 {
+    if req.listen_port == 0 || req.http_port == 0 || req.rpc_port == 0 {
         return Err(Error::Validation {
             field: "port".into(),
-            message: "rpc_port must be non-zero".into(),
+            message: "listen_port, http_port, and rpc_port must all be non-zero".into(),
         });
     }
 
@@ -815,13 +822,20 @@ pub async fn deploy_diskdb_local(
         stage_server_binary(&binary, workspace_dir)?
     };
 
-    let config_path = resolve_diskdb_config_path(workspace_dir, req.rpc_port, &req.kv_server_mgmt_seeds)?;
-    let rpc_url = format!("http://{}:{}", node.host, req.rpc_port);
+    let config_path = resolve_diskdb_config_path(
+        workspace_dir,
+        req.listen_port,
+        req.http_port,
+        req.rpc_port,
+        &req.kv_server_mgmt_seeds,
+    )?;
+    // rpc_url points to the main listener (listen_port), which is the
+    // endpoint clients connect to for disk-block allocation.
+    let rpc_url = format!("http://{}:{}", node.host, req.listen_port);
 
     // Read the HTTP listen address from the config file for readiness
-    // checking. If absent, the diskdb binary uses its default HTTP
-    // port (DISKDB_HTTP_BASE = 9942). Replace 0.0.0.0 with the node
-    // host so the readiness check can actually connect.
+    // checking. Replace 0.0.0.0 with the node host so the readiness
+    // check can actually connect.
     let http_addr = http_listen_addr_from_config(&config_path);
     let mgmt_url = match &http_addr {
         Some(addr) if addr.starts_with("http") => addr.replace("0.0.0.0", &node.host),
@@ -832,6 +846,10 @@ pub async fn deploy_diskdb_local(
     let mut cmd = Command::new(&launch_binary);
     cmd.arg("--config").arg(&config_path);
     cmd.arg("--listen-addr")
+        .arg(format!("{}:{}", node.host, req.listen_port));
+    cmd.arg("--http-addr")
+        .arg(format!("{}:{}", node.host, req.http_port));
+    cmd.arg("--rpc-listen-addr")
         .arg(format!("{}:{}", node.host, req.rpc_port));
     cmd.kill_on_drop(false);
     let log_dir = workspace_dir.join("log");

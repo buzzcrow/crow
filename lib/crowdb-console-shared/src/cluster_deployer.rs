@@ -16,6 +16,9 @@
 
 use std::time::{Duration, Instant};
 
+use crowdb_protocol::port_alloc::{self, PortAllocConfig};
+use crowdb_protocol::ServicePort;
+
 use crate::clients::console::{
     AddDiskBody, AddDiskGroupBody, AddRackBody, ConsoleClient, CreateGroupBody, CreateStoreBody,
     DeployNodeServerBody, ResetResult,
@@ -24,7 +27,6 @@ use crate::cluster::{NodeId, RackId};
 use crate::config::NodeEntry;
 use crate::diskdb::DeployDiskdbBody;
 use crate::error::{Error, Result};
-use crate::test_ports::unique_test_port;
 
 /// Threshold above which a phase is considered slow (warning).
 const SLOW_THRESHOLD: Duration = Duration::from_secs(2);
@@ -348,10 +350,26 @@ impl CrowdbClusterDeployer {
         nodes: &[NodeId],
         topo: &TopologyDescriptor,
     ) -> Result<Vec<NodeInfo>> {
+        let port_cfg = PortAllocConfig::default();
+        let n = u16::try_from(nodes.len()).unwrap_or(u16::MAX);
+        let rest_ports =
+            port_alloc::alloc_port_range(ServicePort::KvServerMgmt, 0, n, &port_cfg).map_err(|e| {
+                Error::Validation {
+                    field: "port_alloc".into(),
+                    message: e.to_string(),
+                }
+            })?;
+        let rpc_ports =
+            port_alloc::alloc_port_range(ServicePort::KvServerListen, 0, n, &port_cfg).map_err(|e| {
+                Error::Validation {
+                    field: "port_alloc".into(),
+                    message: e.to_string(),
+                }
+            })?;
         let mut deploy_handles = Vec::with_capacity(nodes.len());
-        for &node_id in nodes {
-            let rest_port = unique_test_port();
-            let rpc_port = unique_test_port();
+        for (i, &node_id) in nodes.iter().enumerate() {
+            let rest_port = rest_ports[i];
+            let rpc_port = rpc_ports[i];
             let body = DeployNodeServerBody {
                 rest_port,
                 rpc_port,
@@ -448,11 +466,41 @@ impl CrowdbClusterDeployer {
     ) -> Result<Vec<DiskdbInfo>> {
         let mut diskdb_instances = Vec::new();
         if topo.deploy_diskdb {
-            for &node_id in nodes {
-                let rpc_port = unique_test_port();
+            let port_cfg = PortAllocConfig::default();
+            let n = u16::try_from(nodes.len()).unwrap_or(u16::MAX);
+            let listen_ports = port_alloc::alloc_port_range(ServicePort::DiskdbListen, 0, n, &port_cfg)
+                .map_err(|e| Error::Validation {
+                    field: "port_alloc".into(),
+                    message: e.to_string(),
+                })?;
+            let http_ports =
+                port_alloc::alloc_port_range(ServicePort::DiskdbHttp, 0, n, &port_cfg).map_err(|e| {
+                    Error::Validation {
+                        field: "port_alloc".into(),
+                        message: e.to_string(),
+                    }
+                })?;
+            let rpc_ports =
+                port_alloc::alloc_port_range(ServicePort::DiskdbRpc, 0, n, &port_cfg).map_err(|e| {
+                    Error::Validation {
+                        field: "port_alloc".into(),
+                        message: e.to_string(),
+                    }
+                })?;
+            for (i, &node_id) in nodes.iter().enumerate() {
+                let rpc_port = rpc_ports[i];
+                let listen_port = listen_ports[i];
+                let http_port = http_ports[i];
                 let result = self
                     .client
-                    .deploy_diskdb(node_id, &DeployDiskdbBody { rpc_port })
+                    .deploy_diskdb(
+                        node_id,
+                        &DeployDiskdbBody {
+                            rpc_port,
+                            listen_port: Some(listen_port),
+                            http_port: Some(http_port),
+                        },
+                    )
                     .await?;
                 diskdb_instances.push(DiskdbInfo {
                     node_id,

@@ -16,6 +16,8 @@ use serde_json::Value;
 
 #[cfg(feature = "kv-client")]
 use crowdb_kv_client::{ClientConfig, CrowdbKvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
+use crowdb_protocol::port_alloc;
+use crowdb_protocol::ServicePort;
 
 // ── process management ──────────────────────────────────────────
 
@@ -266,6 +268,16 @@ impl KvCluster {
         kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
         ServiceRegistryClient::new(kv)
     }
+
+    /// Build a `ServiceDiscoveryClient` seeded with the group-0 leader.
+    /// Used by R128 service-discovery tests.
+    #[cfg(feature = "kv-client")]
+    #[must_use]
+    pub fn make_service_discovery_client(&self) -> crowdb_kv_client::ServiceDiscoveryClient {
+        let kv = CrowdbKvClient::new(test_client_config(self.mgmt_endpoints.clone()));
+        kv.seed_leader(0, 0, self.group0_leader_endpoint.clone());
+        crowdb_kv_client::ServiceDiscoveryClient::from_shared_kv(std::sync::Arc::new(kv))
+    }
 }
 
 /// Build a `ClientConfig` with a generous retry budget for E2E tests,
@@ -295,6 +307,8 @@ async fn start_kv_node_with_groups(
     let bin = crowdb_kv_server_bin().ok_or_else(|| {
         std_io::Error::new(std_io::ErrorKind::NotFound, "crowdb-kv-server binary not found")
     })?;
+    let mgmt_port = port_alloc::alloc_test_port(ServicePort::KvServerMgmt);
+    let listen_port = port_alloc::alloc_test_port(ServicePort::KvServerListen);
     let mut cmd = Command::new(bin);
     cmd.args([
         "--root",
@@ -308,7 +322,9 @@ async fn start_kv_node_with_groups(
         "--management-addr",
         "127.0.0.1",
         "--management-port",
-        "0",
+        &mgmt_port.to_string(),
+        "--ports",
+        &listen_port.to_string(),
         "--election-profile",
         "e2e",
     ])

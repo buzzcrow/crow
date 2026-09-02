@@ -20,21 +20,22 @@ use crowdb_console_shared::lifecycle::{self, crowdb_kv_server_bin, DeployRequest
 use crowdb_console_shared::{ConsoleConfig, ConsoleConfigEngine};
 use crowdb_test_harness::test_dirs;
 
-/// Grab an ephemeral TCP port by binding and immediately dropping.
+/// Allocate a free mgmt port for a kv-server.
 #[must_use]
-pub fn pick_free_port() -> u16 {
-    crowdb_console_shared::test_ports::unique_test_port()
+pub fn pick_mgmt_port() -> u16 {
+    crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::KvServerMgmt)
 }
 
-/// Grab two distinct ephemeral TCP ports.
+/// Allocate a free listen port for a kv-server.
+#[must_use]
+pub fn pick_rpc_port() -> u16 {
+    crowdb_protocol::port_alloc::alloc_test_port(crowdb_protocol::ServicePort::KvServerListen)
+}
+
+/// Grab two distinct ephemeral TCP ports (mgmt + listen).
 #[must_use]
 pub fn pick_two_distinct_free_ports() -> (u16, u16) {
-    let first = pick_free_port();
-    let mut second = pick_free_port();
-    while second == first {
-        second = pick_free_port();
-    }
-    (first, second)
+    (pick_mgmt_port(), pick_rpc_port())
 }
 
 /// Locate the compiled `crowdb-cli` binary next to the test runner.
@@ -102,7 +103,7 @@ pub async fn spawn_group0() -> Option<Group0> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos(),
-        pick_free_port()
+        pick_mgmt_port()
     ));
     std::fs::create_dir_all(&workspace).ok()?;
     std::fs::create_dir_all(workspace.join("bin")).ok()?;

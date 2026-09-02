@@ -34,7 +34,7 @@ typedef void (*crowdb_kv_on_complete)(int status, const char *result_json, void 
 // ── HardwareClient ────────────────────────────────────────────────
 
 // Create a HardwareClient from kv-server management seeds.
-// seeds: array of null-terminated C strings (e.g. "http://127.0.0.1:9910").
+// seeds: array of null-terminated C strings (e.g. "http://127.0.0.1:10000").
 // Returns NULL on error.
 crowdb_hw_client_t crowdb_hw_client_create(const char *const *seeds, size_t num_seeds);
 

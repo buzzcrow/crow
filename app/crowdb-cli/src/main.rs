@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use crowdb_protocol::KV_SERVER_MGMT_BASE;
 
 use commands::{
     run_bench_verb, run_chunk_diskdb_verb, run_chunk_stub_verb, run_cluster_verb, run_group_verb,
@@ -30,7 +31,7 @@ struct Cli {
     sysmd_ip: String,
 
     /// Group-0 leader's port (the sysmd endpoint's mgmt port).
-    #[arg(long, global = true, env = "CROWDB_SYSMD_PORT", default_value_t = 9910)]
+    #[arg(long, global = true, env = "CROWDB_SYSMD_PORT", default_value_t = KV_SERVER_MGMT_BASE, value_parser = clap::value_parser!(u16).range(1..))]
     sysmd_port: u16,
 
     /// Path to the console config file. Defaults to

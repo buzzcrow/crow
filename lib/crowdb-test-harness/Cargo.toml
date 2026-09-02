@@ -16,7 +16,7 @@ default = []
 # KvCluster client helpers (make_hardware_client, make_service_registry_client).
 kv-client = ["dep:crowdb-kv-client"]
 # Hardware seeding (seed_hardware). Implies kv-client.
-hardware = ["kv-client", "dep:crowdb-protocol"]
+hardware = ["kv-client"]
 # Diskio test harness (DiskioProcess, test_io_round, etc.). Implies hardware.
 diskio = ["hardware", "dep:crowdb-diskio-client", "dep:crowdb-rpc-ffi", "dep:crowdb-tree-ffi"]
 # Diskdb test harness (DiskdbProcess, etc.). Implies hardware.
@@ -31,7 +31,7 @@ tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 
 # Optional, feature-gated
 crowdb-kv-client = { path = "../crowdb-kv-client", optional = true }
-crowdb-protocol = { path = "../crowdb-protocol", optional = true }
+crowdb-protocol = { path = "../crowdb-protocol" }
 crowdb-diskio-client = { path = "../crowdb-diskio-client", optional = true }
 crowdb-rpc-ffi = { path = "../crowdb-rpc/ffi", optional = true }
 crowdb-tree-ffi = { path = "../crowdb-tree/ffi", optional = true }

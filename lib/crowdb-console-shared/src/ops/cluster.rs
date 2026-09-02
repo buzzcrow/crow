@@ -13,13 +13,14 @@ use std::collections::HashSet;
 
 use crowdb_protocol::common::{HwStatus, NodeValue, RackValue, ReplicaValue};
 use crowdb_protocol::mgmt::{RemoteReplicaInfo, SystemInitRequest};
+use crowdb_protocol::port_alloc::{self, PortAllocConfig};
+use crowdb_protocol::ServicePort;
 
 use crate::clients::http::ServerClient;
 use crate::config::{NodeEntry, RackEntry, ReplicaEntry, ServerEntry, ServiceType};
 use crate::error::{Error, Result};
 use crate::lifecycle::{self, crowdb_kv_server_bin, DeployRequest};
 use crate::ops::OpContext;
-use crate::test_ports;
 
 /// Summary of a completed cluster init.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -716,11 +717,25 @@ async fn deploy_servers(
     node_ids: &[u64],
     tunables: Option<&KvDeployTunables>,
 ) -> Result<()> {
-    let port_base = test_ports::unique_test_port_range(u16::try_from(node_ids.len() * 2).unwrap_or(u16::MAX));
+    let port_cfg = PortAllocConfig::new(workspace);
+    let n = u16::try_from(node_ids.len()).unwrap_or(u16::MAX);
+    let rest_ports =
+        port_alloc::alloc_port_range(ServicePort::KvServerMgmt, 0, n, &port_cfg).map_err(|e| {
+            Error::Validation {
+                field: "port_alloc".into(),
+                message: e.to_string(),
+            }
+        })?;
+    let rpc_ports =
+        port_alloc::alloc_port_range(ServicePort::KvServerListen, 0, n, &port_cfg).map_err(|e| {
+            Error::Validation {
+                field: "port_alloc".into(),
+                message: e.to_string(),
+            }
+        })?;
     for (i, nid) in node_ids.iter().enumerate() {
-        let offset = u16::try_from(i * 2).unwrap_or(u16::MAX);
-        let rest_port = port_base + offset;
-        let rpc_port = port_base + offset + 1;
+        let rest_port = rest_ports[i];
+        let rpc_port = rpc_ports[i];
 
         // Skip if a server is already deployed on this node.
         if ctx.config().server_for_node(*nid).is_some() {
@@ -847,13 +862,17 @@ pub async fn local_deploy_rpc(
         });
     }
 
+    let workspace = workspace_dir.map_or_else(default_workspace, std::path::PathBuf::from);
+
     let port = if cfg.port == 0 {
-        test_ports::unique_test_port()
+        let port_cfg = PortAllocConfig::new(&workspace);
+        port_alloc::alloc_port(ServicePort::KvServerListen, 0, &port_cfg).map_err(|e| Error::Validation {
+            field: "port_alloc".into(),
+            message: e.to_string(),
+        })?
     } else {
         cfg.port
     };
-
-    let workspace = workspace_dir.map_or_else(default_workspace, std::path::PathBuf::from);
     let log_dir = workspace.join("log");
     std::fs::create_dir_all(&log_dir)?;
 

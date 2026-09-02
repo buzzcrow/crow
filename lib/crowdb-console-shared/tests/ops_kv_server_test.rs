@@ -35,8 +35,8 @@ async fn deploy_unknown_node_not_found() {
     let ctx = ctx_with_node();
     let req = DeployRequest {
         server_id: "99".into(),
-        rest_port: 9910,
-        rpc_port: 28001,
+        rest_port: 10000,
+        rpc_port: 10100,
         ..Default::default()
     };
     let err = ops::kv_server::deploy(&ctx, &req, None).await.unwrap_err();
@@ -58,11 +58,11 @@ async fn stop_no_pid_not_found() {
         let mut cfg = ctx.config_mut();
         cfg.add_server(ServerEntry {
             id: "10".into(),
-            url: "http://127.0.0.1:9910".into(),
+            url: "http://127.0.0.1:10000".into(),
             node_id: Some(10),
             rpc_url: None,
-            rest_port: Some(9910),
-            rpc_port: Some(28001),
+            rest_port: Some(10000),
+            rpc_port: Some(10100),
             auto_start: true,
             binary: None,
             election_profile: None,
@@ -84,11 +84,11 @@ async fn list_returns_all_servers() {
         let mut cfg = ctx.config_mut();
         cfg.add_server(ServerEntry {
             id: "10".into(),
-            url: "http://127.0.0.1:9910".into(),
+            url: "http://127.0.0.1:10000".into(),
             node_id: Some(10),
             rpc_url: None,
-            rest_port: Some(9910),
-            rpc_port: Some(28001),
+            rest_port: Some(10000),
+            rpc_port: Some(10100),
             auto_start: true,
             binary: None,
             election_profile: None,
@@ -119,11 +119,11 @@ async fn delete_with_server_succeeds_when_no_replicas() {
         let mut cfg = ctx.config_mut();
         cfg.add_server(ServerEntry {
             id: "10".into(),
-            url: "http://127.0.0.1:9910".into(),
+            url: "http://127.0.0.1:10000".into(),
             node_id: Some(10),
             rpc_url: None,
-            rest_port: Some(9910),
-            rpc_port: Some(28001),
+            rest_port: Some(10000),
+            rpc_port: Some(10100),
             auto_start: true,
             binary: None,
             election_profile: None,

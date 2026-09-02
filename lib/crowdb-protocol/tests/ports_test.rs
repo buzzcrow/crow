@@ -2,12 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Tests for `crowdb-protocol::ports` — default port allocation,
-// stride rules, and non-overlap across service types.
+//! stride rules, and non-overlap across service types.
 
 use crowdb_protocol::ports::ServicePort;
 use crowdb_protocol::{
     CHUNKDB_HTTP_BASE, CHUNKDB_LISTEN_BASE, CHUNKDB_RPC_BASE, DISKDB_HTTP_BASE, DISKDB_LISTEN_BASE,
-    KV_SERVER_LISTEN_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
+    DISKDB_RPC_BASE, DISKIO_RPC_BASE, KV_SERVER_LISTEN_BASE, KV_SERVER_MGMT_BASE, WEB_BASE,
 };
 
 // ── base constants match enum ──────────────────────────────────
@@ -18,42 +18,48 @@ fn base_constants_match_enum_base() {
     assert_eq!(ServicePort::KvServerListen.base(), KV_SERVER_LISTEN_BASE);
     assert_eq!(ServicePort::DiskdbListen.base(), DISKDB_LISTEN_BASE);
     assert_eq!(ServicePort::DiskdbHttp.base(), DISKDB_HTTP_BASE);
+    assert_eq!(ServicePort::DiskdbRpc.base(), DISKDB_RPC_BASE);
     assert_eq!(ServicePort::ChunkdbListen.base(), CHUNKDB_LISTEN_BASE);
     assert_eq!(ServicePort::ChunkdbHttp.base(), CHUNKDB_HTTP_BASE);
     assert_eq!(ServicePort::ChunkdbRpc.base(), CHUNKDB_RPC_BASE);
+    assert_eq!(ServicePort::DiskioRpc.base(), DISKIO_RPC_BASE);
     assert_eq!(ServicePort::Web.base(), WEB_BASE);
 }
 
-// ── known defaults ─────────────────────────────────────────────
+// ── known defaults (new port map, all >10000) ──────────────────
 
 #[test]
 fn known_base_ports() {
-    assert_eq!(KV_SERVER_MGMT_BASE, 9910);
-    assert_eq!(KV_SERVER_LISTEN_BASE, 28001);
-    assert_eq!(DISKDB_LISTEN_BASE, 9941);
-    assert_eq!(DISKDB_HTTP_BASE, 9942);
-    assert_eq!(CHUNKDB_LISTEN_BASE, 9971);
-    assert_eq!(CHUNKDB_HTTP_BASE, 9972);
-    assert_eq!(CHUNKDB_RPC_BASE, 9961);
-    assert_eq!(WEB_BASE, 9920);
+    assert_eq!(KV_SERVER_MGMT_BASE, 10000);
+    assert_eq!(KV_SERVER_LISTEN_BASE, 10100);
+    assert_eq!(DISKDB_LISTEN_BASE, 11000);
+    assert_eq!(DISKDB_HTTP_BASE, 11100);
+    assert_eq!(DISKDB_RPC_BASE, 11200);
+    assert_eq!(CHUNKDB_LISTEN_BASE, 12000);
+    assert_eq!(CHUNKDB_HTTP_BASE, 12100);
+    assert_eq!(CHUNKDB_RPC_BASE, 12200);
+    assert_eq!(DISKIO_RPC_BASE, 13000);
+    assert_eq!(WEB_BASE, 14000);
 }
 
-// ── stride ─────────────────────────────────────────────────────
+// ── stride (all stride 1 — no paired-port logic) ───────────────
 
 #[test]
-fn single_port_services_have_stride_one() {
-    assert_eq!(ServicePort::KvServerMgmt.stride(), 1);
-    assert_eq!(ServicePort::KvServerListen.stride(), 1);
-    assert_eq!(ServicePort::Web.stride(), 1);
-    assert_eq!(ServicePort::ChunkdbRpc.stride(), 1);
-}
-
-#[test]
-fn diskdb_paired_ports_have_stride_two() {
-    assert_eq!(ServicePort::DiskdbListen.stride(), 2);
-    assert_eq!(ServicePort::DiskdbHttp.stride(), 2);
-    assert_eq!(ServicePort::ChunkdbListen.stride(), 2);
-    assert_eq!(ServicePort::ChunkdbHttp.stride(), 2);
+fn all_services_have_stride_one() {
+    for svc in [
+        ServicePort::KvServerMgmt,
+        ServicePort::KvServerListen,
+        ServicePort::DiskdbListen,
+        ServicePort::DiskdbHttp,
+        ServicePort::DiskdbRpc,
+        ServicePort::ChunkdbListen,
+        ServicePort::ChunkdbHttp,
+        ServicePort::ChunkdbRpc,
+        ServicePort::DiskioRpc,
+        ServicePort::Web,
+    ] {
+        assert_eq!(svc.stride(), 1, "{svc:?} must have stride 1");
+    }
 }
 
 // ── port(instance) computation ─────────────────────────────────
@@ -65,9 +71,11 @@ fn port_instance_zero_is_base() {
         ServicePort::KvServerListen,
         ServicePort::DiskdbListen,
         ServicePort::DiskdbHttp,
+        ServicePort::DiskdbRpc,
         ServicePort::ChunkdbListen,
         ServicePort::ChunkdbHttp,
         ServicePort::ChunkdbRpc,
+        ServicePort::DiskioRpc,
         ServicePort::Web,
     ] {
         assert_eq!(svc.port(0), svc.base());
@@ -75,68 +83,69 @@ fn port_instance_zero_is_base() {
 }
 
 #[test]
-fn diskdb_paired_ports_stay_adjacent_across_instances() {
-    for i in 0..10_u16 {
-        let listen = ServicePort::DiskdbListen.port(i);
-        let http = ServicePort::DiskdbHttp.port(i);
-        assert_eq!(http, listen + 1, "instance {i}: http must be listen + 1");
-    }
-}
+fn port_increments_by_one() {
+    assert_eq!(ServicePort::KvServerMgmt.port(0), 10000);
+    assert_eq!(ServicePort::KvServerMgmt.port(1), 10001);
+    assert_eq!(ServicePort::KvServerMgmt.port(99), 10099);
 
-#[test]
-fn kv_server_rpc_port_increments_by_one() {
-    assert_eq!(ServicePort::KvServerListen.port(0), 28001);
-    assert_eq!(ServicePort::KvServerListen.port(1), 28002);
-    assert_eq!(ServicePort::KvServerListen.port(199), 28200);
-}
+    assert_eq!(ServicePort::KvServerListen.port(0), 10100);
+    assert_eq!(ServicePort::KvServerListen.port(1), 10101);
+    assert_eq!(ServicePort::KvServerListen.port(99), 10199);
 
-#[test]
-fn chunkdb_rpc_port_increments_by_one() {
-    assert_eq!(ServicePort::ChunkdbRpc.port(0), 9961);
-    assert_eq!(ServicePort::ChunkdbRpc.port(1), 9962);
-    assert_eq!(ServicePort::ChunkdbRpc.port(9), 9970);
-}
+    assert_eq!(ServicePort::DiskdbRpc.port(0), 11200);
+    assert_eq!(ServicePort::DiskdbRpc.port(1), 11201);
+    assert_eq!(ServicePort::DiskdbRpc.port(99), 11299);
 
-#[test]
-fn chunkdb_rpc_does_not_overlap_listen() {
-    // RPC: 9961-9970, listen: 9971-9990 (stride 2, 10 instances).
-    let rpc: std::collections::HashSet<u16> = (0..10_u16).map(|i| ServicePort::ChunkdbRpc.port(i)).collect();
-    let listen: std::collections::HashSet<u16> =
-        (0..10_u16).map(|i| ServicePort::ChunkdbListen.port(i)).collect();
-    assert!(
-        rpc.is_disjoint(&listen),
-        "chunkdb rpc and listen must not overlap"
-    );
+    assert_eq!(ServicePort::DiskioRpc.port(0), 13000);
+    assert_eq!(ServicePort::DiskioRpc.port(1), 13001);
+    assert_eq!(ServicePort::DiskioRpc.port(99), 13099);
 }
 
 // ── non-overlap across service types ───────────────────────────
 
 #[test]
 fn port_ranges_do_not_overlap() {
-    // Each service type's first 10 instances.
-    let kv_mgmt: Vec<u16> = (0..10).map(|i| ServicePort::KvServerMgmt.port(i)).collect();
-    let web: Vec<u16> = (0..10).map(|i| ServicePort::Web.port(i)).collect();
-    let diskdb_listen: Vec<u16> = (0..10).map(|i| ServicePort::DiskdbListen.port(i)).collect();
-    let diskdb_http: Vec<u16> = (0..10).map(|i| ServicePort::DiskdbHttp.port(i)).collect();
+    // Each service type's first 100 instances (full sub-range).
+    let all_services = [
+        ServicePort::KvServerMgmt,
+        ServicePort::KvServerListen,
+        ServicePort::DiskdbListen,
+        ServicePort::DiskdbHttp,
+        ServicePort::DiskdbRpc,
+        ServicePort::ChunkdbListen,
+        ServicePort::ChunkdbHttp,
+        ServicePort::ChunkdbRpc,
+        ServicePort::DiskioRpc,
+        ServicePort::Web,
+    ];
 
-    // diskdb listen and http are intentionally adjacent (paired), so
-    // they overlap with each other by design — check them as a union.
-    let diskdb_all: std::collections::HashSet<u16> =
-        diskdb_listen.iter().chain(diskdb_http.iter()).copied().collect();
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for svc in all_services {
+        let ports: std::collections::HashSet<u16> = (0..100_u16).map(|i| svc.port(i)).collect();
+        assert!(
+            seen.is_disjoint(&ports),
+            "{svc:?} ports overlap with a prior service type",
+        );
+        seen.extend(ports);
+    }
+}
 
-    let kv_mgmt_set: std::collections::HashSet<u16> = kv_mgmt.iter().copied().collect();
-    let web_set: std::collections::HashSet<u16> = web.iter().copied().collect();
+// ── range_size ─────────────────────────────────────────────────
 
-    assert!(
-        kv_mgmt_set.is_disjoint(&web_set),
-        "kv-server mgmt and web ports must not overlap"
-    );
-    assert!(
-        kv_mgmt_set.is_disjoint(&diskdb_all),
-        "kv-server mgmt and diskdb ports must not overlap"
-    );
-    assert!(
-        web_set.is_disjoint(&diskdb_all),
-        "web and diskdb ports must not overlap"
-    );
+#[test]
+fn range_size_is_100_for_all_services() {
+    for svc in [
+        ServicePort::KvServerMgmt,
+        ServicePort::KvServerListen,
+        ServicePort::DiskdbListen,
+        ServicePort::DiskdbHttp,
+        ServicePort::DiskdbRpc,
+        ServicePort::ChunkdbListen,
+        ServicePort::ChunkdbHttp,
+        ServicePort::ChunkdbRpc,
+        ServicePort::DiskioRpc,
+        ServicePort::Web,
+    ] {
+        assert_eq!(svc.range_size(), 100, "{svc:?} range_size must be 100");
+    }
 }

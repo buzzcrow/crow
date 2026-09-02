@@ -26,5 +26,7 @@ crc32fast = "1"
 getrandom = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 utoipa = { version = "5", optional = true }
+fs2 = "0.4"
+thiserror = { workspace = true }
 
 [build-dependencies]

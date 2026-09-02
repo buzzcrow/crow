@@ -5,18 +5,18 @@ use crowdb_diskdb_client::client::normalize_endpoint;
 
 #[test]
 fn normalize_endpoint_adds_scheme() {
-    assert_eq!(normalize_endpoint("127.0.0.1:9941"), "http://127.0.0.1:9941");
+    assert_eq!(normalize_endpoint("127.0.0.1:11100"), "http://127.0.0.1:11100");
 }
 
 #[test]
 fn normalize_endpoint_rewrites_wildcard() {
-    assert_eq!(normalize_endpoint("0.0.0.0:9941"), "http://127.0.0.1:9941");
+    assert_eq!(normalize_endpoint("0.0.0.0:11100"), "http://127.0.0.1:11100");
 }
 
 #[test]
 fn normalize_endpoint_preserves_scheme() {
     assert_eq!(
-        normalize_endpoint("http://127.0.0.1:9941"),
-        "http://127.0.0.1:9941"
+        normalize_endpoint("http://127.0.0.1:11100"),
+        "http://127.0.0.1:11100"
     );
 }

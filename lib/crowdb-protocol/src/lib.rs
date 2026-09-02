@@ -276,6 +276,9 @@ pub use bitmap::{create_usage_bitmap, UsageBitmap};
 pub mod ports;
 pub use ports::{
     ServicePort, CHUNKDB_HTTP_BASE, CHUNKDB_LISTEN_BASE, CHUNKDB_RPC_BASE, DISKDB_HTTP_BASE,
-    DISKDB_LISTEN_BASE, DISKDB_RPC_BASE, KV_CLIENT_RPC_BASE, KV_RPC_BASE, KV_SERVER_LISTEN_BASE,
-    KV_SERVER_MGMT_BASE, WEB_BASE,
+    DISKDB_LISTEN_BASE, DISKDB_RPC_BASE, DISKIO_RPC_BASE, KV_SERVER_LISTEN_BASE, KV_SERVER_MGMT_BASE,
+    WEB_BASE,
 };
+
+pub mod port_alloc;
+pub use port_alloc::{PortAllocConfig, PortAllocError};

@@ -89,7 +89,7 @@ build = { cmd = "cargo build --release --workspace --exclude crowdb-kv-client &&
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
-web = { cmd = "echo 'CROWDB console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowdb-web", depends-on = ["build"] }
+web = { cmd = "echo 'CROWDB console starting at: http://127.0.0.1:14000/' && cargo run --release -p crowdb-web", depends-on = ["build"] }
 
 # ── Benchmark ────────────────────────────────────────────────────
 bench = { cmd = "cargo run --release -p crowdb-cli -- bench kv --mode mem --duration-secs 12 --loader-num 2 --connections 1 --workload write", depends-on = ["build"] }

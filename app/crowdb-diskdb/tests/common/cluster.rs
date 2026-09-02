@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use crowdb_diskdb::ddb_kv_client::DdbKvClient;
 use crowdb_kv_client::{ClientConfig, CrowdbKvClient, HardwareClient, RetryConfig, ServiceRegistryClient};
+use crowdb_protocol::port_alloc;
+use crowdb_protocol::ServicePort;
 use serde_json::Value;
 
 // ── process management ──────────────────────────────────────────
@@ -316,6 +318,8 @@ async fn start_kv_node_with_groups(
     let bin = crowdb_kv_server_bin().ok_or_else(|| {
         std_io::Error::new(std_io::ErrorKind::NotFound, "crowdb-kv-server binary not found")
     })?;
+    let mgmt_port = port_alloc::alloc_test_port(ServicePort::KvServerMgmt);
+    let listen_port = port_alloc::alloc_test_port(ServicePort::KvServerListen);
     let mut cmd = Command::new(bin);
     cmd.args([
         "--root",
@@ -329,7 +333,9 @@ async fn start_kv_node_with_groups(
         "--management-addr",
         "127.0.0.1",
         "--management-port",
-        "0",
+        &mgmt_port.to_string(),
+        "--ports",
+        &listen_port.to_string(),
         "--election-profile",
         "e2e",
     ])

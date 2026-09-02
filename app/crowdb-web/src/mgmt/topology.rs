@@ -303,9 +303,15 @@ async fn ensure_diskdb_running(
             .map(|s| s.url.clone())
             .collect()
     };
+    // Backward-compat: derive from the old paired-port scheme.
+    let listen_port = rpc_port;
+    let http_port = rpc_port.saturating_add(1);
+    let rpc_listen_port = rpc_port.saturating_add(2);
     let req = DiskdbDeployRequest {
         server_id: server.id.clone(),
-        rpc_port,
+        listen_port,
+        http_port,
+        rpc_port: rpc_listen_port,
         kv_server_mgmt_seeds,
     };
     let workspace_dir = state
