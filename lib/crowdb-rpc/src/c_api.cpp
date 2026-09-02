@@ -1004,12 +1004,23 @@ void crowdb_rpc_server_register_conn_count_gauge(crowdb_rpc_server_t server, con
         if (server == nullptr || name == nullptr) {
             return;
         }
-        auto *transport = server->server->transport();
+        auto *srv       = server->server;
+        auto *transport = srv->transport();
         if (transport == nullptr) {
             return;
         }
+        // Capture the server's alive flag (shared_ptr) so the callback
+        // returns 0 after the server is destroyed (transport freed in
+        // ~RpcServer). The shared_ptr keeps the atomic alive even after
+        // the server is deleted.
+        auto alive = srv->alive_flag();
         crowdb::common::metrics::MetricsRegistry::global().register_callback_gauge(
-            std::string(name), [transport]() { return static_cast<uint64_t>(transport->connection_count()); });
+            std::string(name), [transport, alive]() {
+                if (!alive->load(std::memory_order_acquire)) {
+                    return uint64_t{0};
+                }
+                return static_cast<uint64_t>(transport->connection_count());
+            });
     }
     catch (...) {
     }

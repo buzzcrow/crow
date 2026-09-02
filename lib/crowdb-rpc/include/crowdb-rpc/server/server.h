@@ -78,6 +78,13 @@ class RpcServer
         return pool_;
     }
 
+    // Alive flag (for callback gauges to check before accessing transport).
+    // Shared so the callback can safely check it after the server is deleted.
+    std::shared_ptr<std::atomic<bool>> alive_flag()
+    {
+        return alive_;
+    }
+
   private:
     BufferPool                      *pool_;
     bool                             owns_pool_;
@@ -85,10 +92,11 @@ class RpcServer
     HandlerRegistry                  handlers_;
     RpcClient                       *request_client_{nullptr}; // server-initiated request-response
 
-    int               listen_fd_   = -1;
-    int               listen_port_ = 0;
-    std::atomic<bool> running_{false};
-    std::thread       acceptor_thread_;
+    int                                listen_fd_   = -1;
+    int                                listen_port_ = 0;
+    std::atomic<bool>                  running_{false};
+    std::shared_ptr<std::atomic<bool>> alive_{std::make_shared<std::atomic<bool>>(true)};
+    std::thread                        acceptor_thread_;
 
     void acceptor_loop(std::promise<void> ready);
     void dispatch(Frame *frame, Connection *conn);

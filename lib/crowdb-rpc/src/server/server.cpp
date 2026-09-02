@@ -38,6 +38,10 @@ RpcServer::RpcServer(BufferPool *pool, uint32_t io_engines, uint32_t io_workers)
 RpcServer::~RpcServer()
 {
     stop();
+    // Mark as dead before destroying the transport so that any
+    // callback gauge (e.g. conn_count_gauge) that captures a raw
+    // transport pointer returns 0 instead of accessing freed memory.
+    alive_->store(false, std::memory_order_release);
     if (owns_pool_) {
         delete pool_;
     }
