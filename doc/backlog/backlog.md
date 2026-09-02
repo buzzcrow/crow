@@ -401,13 +401,13 @@ R32 KV consensus, R117 KV client-facing, R116 chunkdb) are DONE.
   requirement. Low complexity; verifies R67's coverage extends to
   writes.
 - **[R120](R120-kv-ignored-test-migration.md)** — revive crowdb-rpc migrated
-  ignored tests — Area: kv / tests — Two `#[ignore]`d test stubs in
-  `group_test.rs` cover real contracts with no other coverage at the
-  `crowdb-kv` layer: the forwarded-flag loop guard on `Get`/`Scan` (a
-  follower must not re-forward an already-forwarded request) and malformed
-  `Accept` rejection on the LearnerStream bidi path. Both have empty
-  bodies pending crowdb-rpc migration; the infrastructure now exists — write
-  the test bodies and un-ignore. Low complexity; no dependencies.
+  ignored tests — Area: kv / tests — One `#[ignore]`d test stub remains in
+  `group_test.rs` with no other coverage at the `crowdb-kv` layer: malformed
+  `Accept` rejection at the crowdb-rpc flatbuffer boundary (corrupted
+  `EAcceptRequest` frame must return `InvalidArgument`, no panic). The
+  sibling forwarded-flag loop-guard stub was already implemented. The
+  infrastructure now exists — write the test body and un-ignore. Low
+  complexity; no dependencies.
 ---
 
 ## Implementation Process

@@ -201,22 +201,59 @@ FFI bridge exists, so the remaining work is smaller than when this
 doc was written. The unification target is clear (every server
 exposes `--log-dir` / `--log` / `--log-max-file-mb` / `--log-max-
 files` CLI flags; C++ log level driven by the same source as Rust;
-crowdb-rpc logging wired in diskdb/chunkdb; `ops_log` rotation; one
-log directory convention; log content reviewed for meaning), but
-the specific decisions — whether to unify Rust and C++ into one
-file or keep per-stack files, how to propagate log level from CLI
-to both stacks, whether `ops_log` adopts the shared rotation or
-stays separate, and what the log content guidelines say — need a
-design draft informed by the audit. The audit (work item 1) is the
-prerequisite: its findings determine the remediation scope.
+crowdb-rpc logging wired in diskdb/chunkdb; one log directory
+convention; log content reviewed for meaning), and the open
+design questions have been resolved (see Decisions below). The
+audit (work item 1) is still the prerequisite for the remediation
+scope: its findings determine which log lines need fixing.
+
+**Decisions** (resolved from the open-questions review):
+
+- **D1 — Per-stack files, not merged.** Rust and C++ write to
+  separate files in the same directory, both using
+  `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`. The shared
+  timestamp + PID suffix lets the operator interleave files from
+  one process by sort order; no cross-FFI write coordination
+  needed. The merged-file option is rejected.
+- **D2 — Metrics log is the one combined file.** Only the metrics
+  log is combined into a single file per process: Rust queries
+  the metrics and writes the content (already the landed pattern
+  via `MetricsRunner`).
+- **D3 — `info` by default; optional err-to-stderr.** Both Rust
+  and C++ stacks default to `info`. A server option (CLI flag or
+  env) mirrors `error` + `warn` lines to the process stderr so
+  operators tailing stderr see failures without grepping the file.
+  Enable this during UT runs to surface failures in test output.
+- **D4 — Drop `ops_log` as a separate file.** `ops_log` is folded
+  into the default server log; CROWDB is an IO server, not a web
+  app, and management traffic is low. The exception is
+  `crowdb-web` (the console web server), which keeps an ops log
+  because that *is* its primary workload; `kv-server` API calls
+  may also write ops-style lines into the server log. No separate
+  `ops_log` rotation work — the server log's rotation covers it.
+- **D5 — `crowdb-cli` is console-only except `bench`.** Most CLI
+  commands are short-lived and write to the console only — no
+  per-invocation log directory creation cost. `bench` is the
+  exception: it writes to both the console and a log file so the
+  operator keeps run history. Other commands can opt in later if a
+  detached use case appears.
+- **D6 — Log content: readable and rich, not strictly templated.**
+  No strict `component=` field requirement. Guidelines: every
+  line should be clear and readable, carry enough context to
+  locate the code position and the surrounding state, and bring
+  rich info for identifying bugs. Machine-parseability is a
+  plus — AI agents do the real log-digging, so structured fields
+  where they fit naturally are welcome, but author flexibility
+  wins over a rigid template.
 
 **One-line summary**: Audit log infrastructure and log content
 across all servers and C++ libraries (code review + e2e log
 inspection), then unify the remaining gaps: add `--log-*` CLI flags
-to diskdb/chunkdb/web, drive C++ log level from CLI/env, wire
-crowdb-rpc logging in diskdb/chunkdb, add `ops_log` rotation, adopt
-one log directory convention, and fix log lines that are not
-meaningful or self-explaining.
+to diskdb/chunkdb/web, drive C++ log level from CLI/env (info
+default), wire crowdb-rpc logging in diskdb/chunkdb, fold `ops_log`
+into the server log (except crowdb-web), make crowdb-cli
+console-only except `bench`, adopt one log directory convention,
+and fix log lines that are not meaningful or self-explaining.
 
 Numbered work items:
 
@@ -237,15 +274,22 @@ Numbered work items:
    per-service log-content findings list that drives work item 7.
 3. **Observability design section** —
    `doc/design/kv/design-crowdb-kv-observability.md` (new "Logging"
-   section). Anchor the unified scheme: log directory convention
-   (CLI `--log-dir` / config field, default under `--root`/log or
-   a platform default), rotation + compression policy (reuse
-   `RotatingLogWriter` / `compressing_file_sink` defaults), Rust
-   vs C++ file layout (one file per stack per process vs. merged),
-  timestamp + field format for cross-stack correlation, log level
-  propagation (CLI flag / env → both stacks), and log content
-  guidelines (what every line must carry: component, event,
-  identifiers, outcome). Closes the design gap flagged above.
+   section). Anchor the unified scheme per the resolved decisions:
+   log directory convention (CLI `--log-dir` / config field,
+   default under `--root`/log or a platform default); rotation +
+   compression policy (reuse `RotatingLogWriter` /
+   `compressing_file_sink` defaults, 30 MiB / 5 files); **per-stack
+   files** (D1) — Rust and C++ each write
+   `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log` in the same dir, no
+   merged file; **metrics log is the one combined file** (D2),
+   written by Rust; **`info` default level** (D3) for both stacks
+   driven from the same CLI flag / env, plus an err-to-stderr
+   mirror option; **no separate `ops_log`** (D4) — ops lines fold
+   into the server log, except `crowdb-web` which keeps its own;
+   **`crowdb-cli` console-only except `bench`** (D5); **log
+   content guidelines** (D6) — readable, rich, self-locating, no
+   strict template, machine-parseable where natural. Closes the
+   design gap flagged above.
 4. **`crowdb-diskdb` logging CLI flags + crowdb-rpc wiring** —
    `app/crowdb-diskdb/src/main.rs` + `app/crowdb-diskdb/src/ddb_config.rs`.
    File logging is already wired (`init_file_and_console_logging_split`,
@@ -261,15 +305,18 @@ Numbered work items:
    is already wired, same shape as diskdb. Same remaining work: add
    CLI flags, wire `crowdb_rpc_ffi::init_logging` with prefix
    `"crowdb-chunkdb-rpc"`.
-6. **`crowdb-web` + `crowdb-cli` logging CLI flags + ops_log rotation** —
+6. **`crowdb-web` + `crowdb-cli` logging CLI flags + ops_log folding** —
    `app/crowdb-web/src/main.rs`, `app/crowdb-cli/src/main.rs`,
    `lib/crowdb-console-shared/src/ops_log.rs`. File logging is
    already wired on `crowdb-web` (to `~/.crowdb-kv/log`). Remaining:
-   add `--log-dir` / `--log-*` CLI flags; decide (in design) whether
-   `ops_log` adopts `RotatingLogWriter` or stays a separate
-   append-only JSON-Lines file with its own rotation/size cap
-   (currently unbounded). `crowdb-cli` is short-lived so its logging
-   may be console-only by design — the audit + design decide.
+   add `--log-dir` / `--log-*` CLI flags. Per D4: drop the separate
+   `ops_log` file on `crowdb-cli` and `kv-server` API paths — fold
+   ops lines into the default server log; `crowdb-web` keeps its
+   own ops log because the console *is* its workload, but it adopts
+   the same rotation as the server log (no unbounded file). Per D5:
+   `crowdb-cli` is console-only by default; only `bench` writes to
+   both console and a log file under the configured log dir for
+   run-history retention.
 7. **`crowdb-rpc` C++ logging — wire diskdb/chunkdb** —
    `lib/crowdb-rpc/ffi/src/logging.rs` (FFI wrapper already exists),
    `app/crowdb-diskdb/src/main.rs`, `app/crowdb-chunkdb/src/main.rs`.
@@ -283,17 +330,26 @@ Numbered work items:
 8. **`crowdb-kv-server` logging cleanup** —
    `app/crowdb-kv-server/src/main.rs` ~lines 57-74. Drive the C++
    crowdb-tree AND crowdb-rpc level from the same source as the Rust
-   level (CLI flag / `RUST_LOG`), not the hardcoded `"info"`. Adopt
-   the unified `--log-dir` convention. crowdb-rpc logging is already
-   initialized — only the level and log-dir are stale.
+   level (CLI flag / `RUST_LOG`), defaulting to `info` (D3) — not
+   the hardcoded `"info"`. Add the err-to-stderr mirror option
+   (D3): `error` + `warn` lines also go to the process stderr so
+   operators tailing stderr see failures without grepping the file;
+   enable during UT runs. Adopt the unified `--log-dir` convention.
+   crowdb-rpc logging is already initialized — only the level,
+   log-dir, and err-to-stderr wiring are stale.
 9. **Log content remediation** — every `tracing::*` / `CRB_LOG_*`
-   call site flagged by the audit (work items 1 + 2). Fix lines
-   that are opaque (add component + event + identifiers), remove
-   or downgrade noise (move chatty lines to `debug`), add missing
-   context to state-transition logs, and ensure each line
-   self-explains the behavior. Per the observability design §1,
-   consensus-event logs must carry `node_id`, `group_id`, `slot`,
-   `term` where applicable.
+   call site flagged by the audit (work items 1 + 2). Per D6: no
+   strict `component=` template, but every line should be clear,
+   readable, and carry enough context to locate the code position
+   and the surrounding state — fix lines that are opaque (add
+   component + event + identifiers), remove or downgrade noise
+   (move chatty lines to `debug`), add missing context to
+   state-transition logs, and ensure each line self-explains the
+   behavior. Machine-parseable structured fields are welcome where
+   they fit naturally (AI agents do the real log-digging), but
+   author flexibility wins over a rigid template. Per the
+   observability design §1, consensus-event logs must carry
+   `node_id`, `group_id`, `slot`, `term` where applicable.
 10. **E2e log verification harness** —
     `lib/crowdb-test-harness/src/{diskdb,chunkdb,diskio}.rs` + the
     e2e test files. After remediation, each service's e2e test
@@ -348,16 +404,17 @@ Edge cases at a glance:
   `logging_enabled()` gate), never crashes, never writes to an
   unexpected location.
 - `RUST_LOG` set but no C++ level flag → C++ level derives from
-  a documented mapping (e.g. `info` default, or a `CROWDB_CPP_LOG`
-  env) so the two stacks stay roughly in sync without forcing the
-  operator to set two knobs.
+  the same source as Rust (D3), defaulting to `info`; the two
+  stacks stay in sync without forcing the operator to set two
+  knobs.
 - Rotated file compression fails (disk full mid-rotate) → the
   current file is still closed and a new one opened; the
   un-compressed rotated file is kept (not deleted) so no log data
   is silently lost.
-- `ops_log` grows unbounded (long-running `crowdb-web` session) →
-  rotation or size cap applies (pending design decision on
-  whether `ops_log` adopts `RotatingLogWriter`).
+- `ops_log` folded into the server log (D4) → the server log's
+  rotation covers ops lines; no separate unbounded file. The
+  exception is `crowdb-web`, whose ops log adopts the same
+  rotation as its server log.
 - Two processes with the same prefix start in the same second →
   PID suffix in the filename prevents collision (already the
   case; the audit verifies this holds everywhere).
@@ -411,9 +468,13 @@ Edge cases at a glance:
   Integration test.
 - `crowdb-chunkdb` equivalent of the above three bullets. E2E /
   Integration test.
-- `crowdb-web` started → a service log file exists (not just the
-  `ops_log`); `ops_log` either rotates or has a documented size
-  cap. E2E test.
+- `crowdb-web` started → a service log file exists; the `ops_log`
+  (kept for crowdb-web per D4) rotates with the same policy as the
+  server log — no unbounded file. E2E test.
+- `crowdb-cli bench` run → both console output and a log file
+  under the configured log dir are produced (D5); other `crowdb-cli`
+  subcommands produce console output only and create no log file.
+  Integration test.
 - `crowdb-diskdb` / `crowdb-chunkdb` started with a log directory
   that cannot be created → startup fails with a clear error
   naming the path; no silent console-only fallback. Integration
@@ -430,6 +491,10 @@ Edge cases at a glance:
   run at `debug`, not the hardcoded `info`. Integration test
   (grep the C++ log for a debug-level line that would be
   suppressed at `info`).
+- `crowdb-kv-server` started with the err-to-stderr option enabled
+  (D3) → `error` and `warn` lines appear on the process stderr in
+  addition to the log file; `info`/`debug` lines do not. Enable in
+  UT runs so failures surface in test output. Integration test.
 - `crowdb-diskdb` / `crowdb-chunkdb` started → a
   `crowdb-diskdb-rpc-*.log` / `crowdb-chunkdb-rpc-*.log` exists
   (crowdb-rpc logging initialized). E2E test.
@@ -493,61 +558,3 @@ integration), `pixi run cargo test -p crowdb-rpc-ffi` (FFI logging
 wrapper unit tests), `pixi run test-tree-ct` only if C++ logging
 code changes, plus `pixi run cargo fmt --all -- --check` and
 `pixi run cargo clippy --all-targets -- -D warnings`.
-
-**Open Questions**
-
-1. **Rust vs C++ log file layout** — one merged file per process
-   (Rust and C++ write to the same file, requiring a shared
-   writer or a merge tool) vs. one file per stack per process
-   (`crowdb-kv-server.log` + `crowdb-kv-server-tree.log` +
-   `crowdb-kv-server-rpc.log`). Merged gives a single chronological
-   view but requires cross-language file coordination (a mutex
-   across FFI or a post-merge step); per-stack is simpler and
-   matches today's crowdb-tree pattern but the operator must
-   interleave three files to follow a request. Trade-off:
-   operator experience vs. implementation complexity. Needs a
-   human decision on the operator workflow.
-2. **Log level propagation across stacks** — a single CLI flag /
-   env that maps to both `tracing` `EnvFilter` and spdlog level,
-   vs. separate knobs (`RUST_LOG` + `CROWDB_CPP_LOG`). Single-knob
-   is simpler for operators but the level granularities do not
-   map 1:1 (spdlog `trace` vs. tracing `trace`; `RUST_LOG`
-   per-target directives have no spdlog equivalent). Separate
-   knobs preserve full power but risk the stacks drifting out of
-   sync. Trade-off: simplicity vs. control. Needs a decision on
-   whether per-target filtering matters for C++.
-3. **`ops_log` rotation** — adopt `RotatingLogWriter` for
-   `ops_log` (unified rotation, but `ops_log` is JSON-Lines and
-   `RotatingLogWriter` is line-oriented text — compatible) vs.
-   keep it as a separate append-only file with its own size cap
-   vs. leave it unbounded (it is a session-scoped audit trail,
-   not a runtime log). Trade-off: consistency vs. the audit-trail
-   semantics of `ops_log`. Needs a decision on whether `ops_log`
-   is a log or an audit record.
-4. **`crowdb-cli` logging** — `crowdb-cli` is short-lived (one
-   command then exit); does it need file logging at all, or is
-   console output + `ops_log` sufficient? File logging adds a
-   log directory creation cost per invocation for a process that
-   exits in seconds. Trade-off: completeness vs. startup cost.
-   Needs a decision on whether the CLI is ever run detached.
-5. **Log content guidelines granularity** — the design section
-   must state what every log line carries (component, event,
-   identifiers, outcome), but how prescriptive should it be?
-   A strict template (every line must have a `component=` field)
-   enables machine parsing but constrains free-form diagnostic
-   messages; a loose guideline ("every line must be
-   self-explanatory") is subjective and hard to test. Trade-off:
-   machine-parseability vs. author flexibility. Needs a decision
-   on whether logs are for humans, scripts, or both.
-6. **Should the merged-file option (Q1) be rejected outright?** —
-   per-stack files (`crowdb-kv-server.log` +
-   `crowdb-kv-server-tree.log` + `crowdb-kv-server-rpc.log`) are
-   already the landed pattern and work well; the operator
-   interleaves by timestamp (both stacks use
-   `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log` naming with PID
-   suffix, so files from one process are grouped). Merging Rust +
-   C++ into one file requires cross-FFI write coordination (a
-   shared mutex or a single writer thread) for marginal operator
-   convenience. Recommendation: reject the merged-file option,
-   keep per-stack files, and document the interleaving workflow.
-   Needs confirmation.

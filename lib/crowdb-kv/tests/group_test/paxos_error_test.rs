@@ -77,12 +77,13 @@ async fn prepare_rejection_blocks_low_ballot_until_retry_uses_higher_ballot() {
     cluster.shutdown().await;
 }
 
-// The unary `Accept` boundary-rejection test relied on the retired
-// tonic `PxService::accept` RPC returning `tonic::Code::Unimplemented`.
-// Unary Accept is gone (proposers use the LearnerStream bidi path), and
-// the tonic client no longer exists, so this needs a crowdb-rpc rewrite
-// against the bidi stream's `handle_accept_inner` validation. Tracked
-// for a follow-up migration.
+// The original tonic-based `Accept` boundary-rejection test relied on
+// the retired `PxService::accept` RPC. The crowdb-rpc migration replaced
+// it with the unary `EAcceptRequest` → `PxRpcService::handle_accept`
+// path, which rejects malformed frames at the
+// `flatbuffers::root::<FBAcceptRequest>` deserialization guard. This
+// needs a test that sends a raw corrupted `EAcceptRequest` frame and
+// asserts `InvalidArgument` is returned. Tracked by R120.
 #[tokio::test]
-#[ignore = "needs migration to crowdb-rpc LearnerStream accept path"]
+#[ignore = "needs raw-frame test against crowdb-rpc Accept handler (R120)"]
 async fn malformed_accept_request_is_rejected_by_rpc_boundary() {}

@@ -302,9 +302,10 @@ self-contained sidebar + center panel.
 ### 12.1 Three domains
 
 The shell keeps the same three-pane structure (sidebar / center /
-inspector) but the header's domain toggle switches between three
-domains instead of three view-modes. The `bench` domain is omitted
-from the UI (CLI-only — load injection is not a UI workflow).
+inspector). The header's domain toggle switches between three
+domains; `bench` is CLI-only (load injection is not a UI workflow).
+The inspector is unchanged across all domains — Details + Activity
+scoped to the current selection.
 
 ```
 ┌─ Header ───────────────────────────────────────────────────────────┐
@@ -318,20 +319,7 @@ from the UI (CLI-only — load injection is not a UI workflow).
 └───────────────┴────────────────────────────┴────────────────────────┘
 ```
 
-The right inspector panel is unchanged across all three domains: it
-shows Details + Activity tabs scoped to the currently selected item
-(rack, node, disk-group, disk, server, store, group, replica,
-chunkdb, diskdb, diskio — whichever the operator clicked).
-
 **Domain 1 — Cluster (hardware topology)**
-
-Sidebar shows the full hardware hierarchy: rack → node → disk-group →
-disk. Right-click on each layer opens the CRUD context menu. Cluster-
-level ops (init / reset / clean / status) are triggered from the
-header or a toolbar above the canvas. Center panel shows a hierarchy
-chart of the hardware topology — rack and node render as standard
-tree/canvas nodes; disk-groups render as boxes containing disk
-elements (cylinder icon + short UUID prefix).
 
 ```
 ┌─ Sidebar ─────┐┌─ Center: hierarchy chart ─────────────────────────┐
@@ -346,30 +334,12 @@ elements (cylinder icon + short UUID prefix).
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
-Context menus:
-- Rack: Add Node, Delete Rack.
-- Node: Ping, Delete Node, Deploy Server (if none).
-- DiskGroup: Add Disk (batch), Remove Disk Group, Set Status.
-- Disk: Remove Disk, Move Disk, Set Disk Status.
+Context menus: Rack (Add Node, Delete Rack) · Node (Ping, Delete
+Node, Deploy Server) · DiskGroup (Add Disk batch, Remove, Set Status)
+· Disk (Remove, Move, Set Status). Cluster-level ops (init / reset /
+clean) are triggered from the header or a toolbar above the canvas.
 
 **Domain 2 — KV (server lifecycle + logical + data-plane)**
-
-Sidebar shows rack → node only (disk-groups and disks are hidden —
-not relevant to KV management). Right-click on a node opens the
-KV-server context menu (deploy / restart / stop / delete). Under a
-deployed KV-server, the sidebar shows the logical sub-tree (store →
-group → replica). Center panel uses a tab bar to switch between two
-views — no top/bottom split:
-
-- **Cluster tab** — logical view: the cluster's store → group →
-  replica hierarchy rendered as a topology canvas (React Flow).
-- **KV tab** — KV operation panel: put / get / delete / scan controls
-  targeting the selected store/group.
-
-Only one tab is visible at a time. The selected store/group persists
-across tab switches so the operator can inspect a group in the
-Cluster tab, switch to the KV tab, and operate on it without
-re-selecting.
 
 ```
 ┌─ Sidebar ─────┐┌─ Center: [Cluster] [KV] ──────────────────────────┐
@@ -393,27 +363,12 @@ KV tab active:
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
-Context menus:
-- Node: Deploy / Restart / Stop / Delete Server.
-- Store: Add Group, Delete Store.
-- Group: Add Replica, Delete Group.
-- Replica: Delete Replica.
+Context menus: Node (Deploy / Restart / Stop / Delete Server) · Store
+(Add Group, Delete) · Group (Add Replica, Delete) · Replica (Delete).
+Selection persists across tab switches — inspect a group in Cluster,
+switch to KV, operate on it without re-selecting.
 
 **Domain 3 — Chunk (chunkdb / diskdb / diskio management)**
-
-Sidebar shows rack → node, with chunkdb / diskdb / diskio server
-instances under each node. Under a diskdb server, the sidebar expands
-to show the owned disk-group and its disks (read-only — managed from
-the Cluster domain). Center panel has a button toggle with two
-sub-views:
-
-- **Capacity** — the capacity canvas visualization: disk-group usage,
-  disk health, allocation heatmaps.
-- **Chunk** — chunk-level view for chunkdb instances, bound ranges,
-  and chunk metadata. Initially empty but clickable — the tab renders
-  with no content until `ops::chunk` is implemented. No placeholder
-  text; the panel is blank so future content drops in without UI
-  changes.
 
 ```
 ┌─ Sidebar ─────┐┌─ Center: [Capacity] [Chunk] ──────────────────────┐
@@ -431,18 +386,15 @@ sub-views:
 └───────────────┘└───────────────────────────────────────────────────┘
 ```
 
+Disk-groups under a diskdb server are read-only (managed from
+Cluster). The Chunk sub-view is blank until `ops::chunk` is
+implemented — no placeholder text, so future content drops in without
+UI changes.
+
 `DomainContext` (renamed from `ViewModeContext`) holds the active
-domain. The sidebar tree data hook switches on the active domain; the
-center panel content changes per domain.
-
-**Cross-domain behaviors**
-
-- Selection is shared across all three domains via the same
-  `SelectionContext`. Clicking a node in the Cluster domain, switching
-  to the KV domain, and right-clicking that node shows the KV-server
-  context menu for the same node.
-- The inspector (right panel) is domain-agnostic — it renders details
-  for whatever is selected, regardless of which domain is active.
+domain. Selection is shared across all three domains via
+`SelectionContext` — clicking a node in Cluster, switching to KV,
+right-clicking shows the KV-server context menu for the same node.
 
 ### 12.2 Why three domains (not view-modes)
 
