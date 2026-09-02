@@ -117,6 +117,34 @@ Connection::Connection(int64_t id, std::string name, BufferPool *pool, uint32_t 
     parser_.set_pool(pool);
 }
 
+Connection::~Connection()
+{
+    // Release any frames still in the queues + pending partials.
+    // close() may have skipped draining if in_send_ was held by
+    // another thread; at destruction time no other thread can be
+    // accessing the connection (shared_ptr ref count is 0), so it's
+    // safe to drain unconditionally.
+    for (int i = 0; i < pending_count_; i++) {
+        release_frame(pending_frames_[i]);
+    }
+    pending_count_ = 0;
+    OutFrame *discarded[BATCH_MAX];
+    int       n = drain_overflow(discarded, BATCH_MAX);
+    while (n > 0) {
+        for (int i = 0; i < n; i++) {
+            release_frame(discarded[i]);
+        }
+        n = drain_overflow(discarded, BATCH_MAX);
+    }
+    n = drain_send_queue(discarded, BATCH_MAX);
+    while (n > 0) {
+        for (int i = 0; i < n; i++) {
+            release_frame(discarded[i]);
+        }
+        n = drain_send_queue(discarded, BATCH_MAX);
+    }
+}
+
 bool Connection::enqueue_send(OutFrame *frame)
 {
     if (!is_open()) {

@@ -21,10 +21,30 @@ namespace crowdb::common::metrics
 
 // ── MetricsRegistry ─────────────────────────────────────────────
 
+// File-scope pointer + function for atexit (lambdas with captures
+// can't be passed to std::atexit — it requires a plain function ptr).
+static MetricsRegistry *g_metrics_registry = nullptr;
+
+static void stop_metrics_registry()
+{
+    if (g_metrics_registry != nullptr) {
+        g_metrics_registry->stop();
+    }
+}
+
 MetricsRegistry &MetricsRegistry::global()
 {
-    static MetricsRegistry instance;
-    return instance;
+    // Heap-allocated + atexit(stop): the registry is never destroyed,
+    // so its counters remain valid for threads (e.g. the RPC reaper)
+    // that may still access them during process exit. A Meyers
+    // singleton destructor would free the counters before those
+    // threads stop, causing a use-after-free.
+    static MetricsRegistry *instance = [] {
+        g_metrics_registry = new MetricsRegistry();
+        std::atexit(stop_metrics_registry);
+        return g_metrics_registry;
+    }();
+    return *instance;
 }
 
 MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)

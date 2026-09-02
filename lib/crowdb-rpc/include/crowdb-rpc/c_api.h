@@ -74,8 +74,11 @@ void crowdb_rpc_server_set_quickack(crowdb_rpc_server_t server, int enabled);
 // Event-write mode. Default 0 (direct writev on caller thread).
 // Set to 1 to notify I/O worker to drain + writev (better batching,
 // adds epoll-wake latency).
-void              crowdb_rpc_server_set_event_write(crowdb_rpc_server_t server, int enabled);
-void              crowdb_rpc_server_destroy(crowdb_rpc_server_t server);
+void crowdb_rpc_server_set_event_write(crowdb_rpc_server_t server, int enabled);
+void crowdb_rpc_server_destroy(crowdb_rpc_server_t server);
+// Clear all registered handlers. Called during shutdown to break
+// reference cycles (Rust handler closures capture Arc<RpcServer>).
+void              crowdb_rpc_server_clear_handlers(crowdb_rpc_server_t server);
 crowdb_rpc_status crowdb_rpc_server_listen(crowdb_rpc_server_t server, const char *addr, int port);
 void              crowdb_rpc_server_start(crowdb_rpc_server_t server);
 void              crowdb_rpc_server_stop(crowdb_rpc_server_t server);
@@ -178,6 +181,12 @@ crowdb_rpc_status crowdb_rpc_client_send_conn(crowdb_rpc_client_t client, crowdb
 
 // ── Connection (for client-side use) ──────────────────────────────
 crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *addr, int port);
+// Destroy a connection wrapper created by crowdb_rpc_connect. Releases
+// the shared_ptr<Connection> held inside the wrapper, allowing the
+// transport to reclaim the connection when all references are gone.
+// No-op on null. Do NOT call this on handler conn_handle values (those
+// are raw Connection* pointers, not crowdb_rpc_conn_t).
+void crowdb_rpc_conn_destroy(crowdb_rpc_conn_t conn);
 
 // ── Built-in handlers ─────────────────────────────────────────────
 
@@ -256,6 +265,9 @@ crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t s
 // captures the server handle). The callback must be non-blocking.
 void crowdb_rpc_client_register_handler(crowdb_rpc_client_t client, uint16_t msg_type, crowdb_rpc_handler_fn callback,
                                         void *user_data);
+// Clear all registered client-side handlers. Called during shutdown
+// to break reference cycles (Rust handler closures capture Arcs).
+void crowdb_rpc_client_clear_handlers(crowdb_rpc_client_t client);
 
 // Set the transport on a client for submitting UnknownMessage responses
 // when no handler matches an incoming request msg_type. The transport

@@ -400,6 +400,10 @@ void RpcClient::stop_reaper()
     if (reaper_thread_.joinable()) {
         reaper_thread_.join();
     }
+    // Fail all in-flight requests so their callbacks (and the
+    // user_data allocations behind them) are freed. Without this,
+    // pending requests leak their user_data on shutdown.
+    fail_all(nullptr, RpcError::ConnectionClosed);
 }
 
 void RpcClient::reaper_loop()

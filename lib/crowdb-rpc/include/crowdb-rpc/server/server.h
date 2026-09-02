@@ -43,6 +43,13 @@ class RpcServer
     // Register a handler for a msg_type.
     void register_handler(uint16_t msg_type, HandlerFn handler);
 
+    // Clear all registered handlers. Called during shutdown to break
+    // reference cycles (Rust handler closures capture Arc<RpcServer>).
+    void clear_handlers()
+    {
+        handlers_.clear();
+    }
+
     // Wire an RpcClient into the server for server-initiated request-
     // response (e.g. WatchNotify). The server's dispatch tries the
     // request client's on_response first (to route ack responses);

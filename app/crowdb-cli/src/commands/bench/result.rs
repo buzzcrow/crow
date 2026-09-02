@@ -120,6 +120,7 @@ pub struct ServerMetrics {
 
 /// Server-side per-request-type RPC latency, averaged across nodes.
 #[derive(Debug, Default, Serialize)]
+#[allow(clippy::struct_field_names)]
 pub struct ServerRpcLatency {
     pub put_avg_us: u64,
     pub put_p50_us: u64,
@@ -213,7 +214,7 @@ impl fmt::Display for BenchResult {
                 sm.replica.r2, sm.replica.r2_tps, sm.replica.r3, sm.replica.r3_tps,
             )?;
             if let Some(rl) = &sm.rpc_latency {
-                writeln!(f, "  server_rpc_latency (avg/p50/p99 us):",)?;
+                writeln!(f, "  server_rpc_latency (avg/p50/p99 us):")?;
                 writeln!(
                     f,
                     "    put:    {}/{}/{}",

@@ -27,6 +27,9 @@ pub struct Response {
 /// a future that resolves when the response arrives (or on error).
 pub struct RpcClient {
     handle: sys::crowdb_rpc_client_t,
+    // Raw pointers from Box::into_raw in register_handler. Freed in
+    // Drop to avoid leaking the Rust handler closures.
+    handler_ptrs: std::sync::Mutex<Vec<*mut std::ffi::c_void>>,
 }
 
 impl std::fmt::Debug for RpcClient {
@@ -41,7 +44,10 @@ impl RpcClient {
     /// Create a new RpcClient.
     pub fn new() -> Self {
         let handle = unsafe { sys::crowdb_rpc_client_create() };
-        RpcClient { handle }
+        RpcClient {
+            handle,
+            handler_ptrs: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     /// Attach the client to a connection so responses are routed to the
@@ -80,7 +86,29 @@ impl RpcClient {
     /// Stop the timeout reaper thread. Called automatically by `Drop`.
     /// No-op if not running.
     pub fn stop_reaper(&self) {
+        // Clear handlers before stopping to break reference cycles
+        // (handler closures may capture Arcs that keep the client alive).
+        self.clear_handlers();
         unsafe { sys::crowdb_rpc_client_stop_reaper(self.handle) };
+    }
+
+    /// Clear all registered handlers and free the Rust closures.
+    /// Called automatically by `stop_reaper`. Safe to call multiple times.
+    pub fn clear_handlers(&self) {
+        // Clear the C++ handler registry first so no dispatch can
+        // access the closures after we free them.
+        unsafe { sys::crowdb_rpc_client_clear_handlers(self.handle) };
+        // Free the Rust handler closures.
+        let ptrs = std::mem::take(&mut *self.handler_ptrs.lock().unwrap());
+        for user_data in ptrs {
+            if !user_data.is_null() {
+                unsafe {
+                    drop(Box::from_raw(
+                        user_data.cast::<Box<dyn Fn(ClientRequest) + Send + 'static>>(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Dump all pending request IDs + deadlines to the C++ log. For
@@ -334,14 +362,16 @@ impl RpcClient {
     {
         let box_ptr: *mut Box<dyn Fn(ClientRequest) + Send + 'static> =
             Box::into_raw(Box::new(Box::new(handler)));
+        let user_data = box_ptr.cast::<std::ffi::c_void>();
         unsafe {
             sys::crowdb_rpc_client_register_handler(
                 self.handle,
                 msg_type,
                 Some(rust_client_handler_trampoline),
-                box_ptr.cast::<std::ffi::c_void>(),
+                user_data,
             );
         }
+        self.handler_ptrs.lock().unwrap().push(user_data);
     }
 }
 
@@ -354,6 +384,18 @@ impl Default for RpcClient {
 impl Drop for RpcClient {
     fn drop(&mut self) {
         if !self.handle.is_null() {
+            // Free any handler closures not already freed by
+            // clear_handlers/stop_reaper (e.g. if stop was never called).
+            let ptrs = std::mem::take(&mut *self.handler_ptrs.lock().unwrap());
+            for user_data in ptrs {
+                if !user_data.is_null() {
+                    unsafe {
+                        drop(Box::from_raw(
+                            user_data.cast::<Box<dyn Fn(ClientRequest) + Send + 'static>>(),
+                        ));
+                    }
+                }
+            }
             unsafe { sys::crowdb_rpc_client_destroy(self.handle) };
             self.handle = ptr::null_mut();
         }

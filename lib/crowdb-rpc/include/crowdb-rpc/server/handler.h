@@ -56,6 +56,12 @@ class HandlerRegistry
         return nullptr;
     }
 
+    void clear()
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        handlers_.clear();
+    }
+
   private:
     std::mutex                              mu_;
     std::unordered_map<uint16_t, HandlerFn> handlers_;

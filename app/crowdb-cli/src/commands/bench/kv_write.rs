@@ -257,6 +257,29 @@ async fn fetch_server_metrics(cli: &Cli, store_id: u64, group_id: u64) -> Option
         }
     }
 
+    Some(build_server_metrics(
+        wal_append_count,
+        inflight_enqueued,
+        inflight_wait_sum,
+        inflight_wait_count,
+        rpc_s2w_sum,
+        rpc_s2w_count,
+        &rpc_lat,
+        peer_totals,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_server_metrics(
+    wal_append_count: u64,
+    inflight_enqueued: u64,
+    inflight_wait_sum: u64,
+    inflight_wait_count: u64,
+    rpc_s2w_sum: u64,
+    rpc_s2w_count: u64,
+    rpc_lat: &RpcLatencyAcc,
+    mut peer_totals: Vec<(u64, u64, u64)>,
+) -> ServerMetrics {
     // Aggregate peer totals by peer_id (sum across nodes), then pick
     // the top 2 by total round-trips as r2/r3.
     peer_totals.sort_by_key(|&(_, _, total)| std::cmp::Reverse(total));
@@ -274,7 +297,7 @@ async fn fetch_server_metrics(cli: &Cli, store_id: u64, group_id: u64) -> Option
     // exposed via the metrics registry — they live in the crowdb-rpc
     // FFI transport and are not yet surfaced to the management API.
     // Reported as 0; the regression script tolerates this via jq `// 0`.
-    Some(ServerMetrics {
+    ServerMetrics {
         wal_append_count,
         rpc: TransportStats {
             writev_calls: 0,
@@ -292,7 +315,7 @@ async fn fetch_server_metrics(cli: &Cli, store_id: u64, group_id: u64) -> Option
         inflight_enqueued,
         inflight_wait_avg_us,
         rpc_latency: rpc_lat.finalize(),
-    })
+    }
 }
 
 fn field_map(fields: &[MetricFieldView]) -> std::collections::HashMap<&str, f64> {
@@ -313,7 +336,7 @@ fn get_u64(map: &std::collections::HashMap<&str, f64>, key: &str) -> u64 {
 }
 
 /// Accumulator for one op-type's RPC latency across nodes. Histograms
-/// report avg_ns/p50_ns/p99_ns; we sum and divide by node count.
+/// report `avg_ns`/`p50_ns`/`p99_ns`; we sum and divide by node count.
 #[derive(Default)]
 struct RpcLatencyAccOp {
     avg_ns: u64,

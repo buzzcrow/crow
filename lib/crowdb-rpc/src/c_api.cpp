@@ -308,6 +308,18 @@ void crowdb_rpc_server_destroy(crowdb_rpc_server_t server)
     }
 }
 
+void crowdb_rpc_server_clear_handlers(crowdb_rpc_server_t server)
+{
+    try {
+        if (server == nullptr) {
+            return;
+        }
+        server->server->clear_handlers();
+    }
+    catch (...) {
+    }
+}
+
 static void copy_latency(crowdb_rpc_latency_stats_t *out, const crowdb::rpc::LatencyHistogram &h)
 {
     out->count  = h.count.load(std::memory_order_relaxed);
@@ -667,6 +679,18 @@ crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *add
     }
 }
 
+void crowdb_rpc_conn_destroy(crowdb_rpc_conn_t conn)
+{
+    try {
+        if (conn == nullptr) {
+            return;
+        }
+        delete conn;
+    }
+    catch (...) {
+    }
+}
+
 // ── Built-in echo handler ─────────────────────────────────────────
 
 // Echo handler: returns the request data as the response data, with a
@@ -879,6 +903,18 @@ void crowdb_rpc_client_register_handler(crowdb_rpc_client_t client, uint16_t msg
             return;
         }
         client->client->register_handler(msg_type, callback, user_data);
+    }
+    catch (...) {
+    }
+}
+
+void crowdb_rpc_client_clear_handlers(crowdb_rpc_client_t client)
+{
+    try {
+        if (client == nullptr) {
+            return;
+        }
+        client->client->clear_handlers();
     }
     catch (...) {
     }

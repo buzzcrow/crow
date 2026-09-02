@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crowdb_kv_client::{GetOutcome, ReadEndpointPolicy, ReadMode};
+use crowdb_kv_client::{CrowdbKvClient, GetOutcome, ReadEndpointPolicy, ReadMode};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
@@ -63,48 +63,14 @@ pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
         recorder,
         args.loader_num,
         duration,
-        move |rec: Arc<BenchRecorder>| {
-            let client = Arc::clone(&client);
-            let key_space = key_space;
-            let verify_bytes = verify_bytes;
-            let value_size = value_size;
-            let read_mode = read_mode;
-            let min_slot_arg = min_slot_arg;
-            async move {
-                let mut rng = SmallRng::from_entropy();
-                let id = rng.gen_range(0..key_space);
-                let key = format!("k{id:020}");
-                let min_slot = match min_slot_arg {
-                    BenchMinSlot::Auto => None,
-                    BenchMinSlot::Zero => Some(0),
-                };
-                let t0 = Instant::now();
-                match client
-                    .get(STORE_ID, GROUP_ID, key.as_bytes(), read_mode, min_slot)
-                    .await
-                {
-                    Ok(GetOutcome::Found { value, .. }) => {
-                        rec.record_ok(
-                            t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
-                            value.len() as u64,
-                        );
-                        if verify_bytes > 0 {
-                            let expected = expected_value(id, value_size, verify_bytes);
-                            if value.len() < verify_bytes || value[..verify_bytes] != expected[..] {
-                                rec.record_correctness_err();
-                            }
-                        }
-                    }
-                    Ok(GetOutcome::NotFound) => {
-                        rec.record_err();
-                        if verify_bytes > 0 {
-                            rec.record_correctness_err();
-                        }
-                    }
-                    Err(_) => rec.record_err(),
-                }
-            }
-        },
+        make_read_workload(
+            client,
+            key_space,
+            verify_bytes,
+            value_size,
+            read_mode,
+            min_slot_arg,
+        ),
         || {},
     )
     .await;
@@ -133,6 +99,53 @@ pub async fn run(cli: &Cli, args: ReadArgs) -> ExitCode {
     let json = serde_json::to_value(&result).unwrap_or_default();
     tracing::info!(report = %json, "bench_report");
     crate::commands::print_json(cli, &result)
+}
+
+fn make_read_workload(
+    client: Arc<CrowdbKvClient>,
+    key_space: u64,
+    verify_bytes: usize,
+    value_size: usize,
+    read_mode: ReadMode,
+    min_slot_arg: BenchMinSlot,
+) -> impl Fn(Arc<BenchRecorder>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    move |rec: Arc<BenchRecorder>| {
+        let client = Arc::clone(&client);
+        Box::pin(async move {
+            let mut rng = SmallRng::from_entropy();
+            let id = rng.gen_range(0..key_space);
+            let key = format!("k{id:020}");
+            let min_slot = match min_slot_arg {
+                BenchMinSlot::Auto => None,
+                BenchMinSlot::Zero => Some(0),
+            };
+            let t0 = Instant::now();
+            match client
+                .get(STORE_ID, GROUP_ID, key.as_bytes(), read_mode, min_slot)
+                .await
+            {
+                Ok(GetOutcome::Found { value, .. }) => {
+                    rec.record_ok(
+                        t0.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+                        value.len() as u64,
+                    );
+                    if verify_bytes > 0 {
+                        let expected = expected_value(id, value_size, verify_bytes);
+                        if value.len() < verify_bytes || value[..verify_bytes] != expected[..] {
+                            rec.record_correctness_err();
+                        }
+                    }
+                }
+                Ok(GetOutcome::NotFound) => {
+                    rec.record_err();
+                    if verify_bytes > 0 {
+                        rec.record_correctness_err();
+                    }
+                }
+                Err(_) => rec.record_err(),
+            }
+        })
+    }
 }
 
 /// Build the expected first `verify` bytes for key `id`: byte `i` =

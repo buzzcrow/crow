@@ -146,6 +146,7 @@ extern "C" {
         io_workers: u32,
     ) -> crowdb_rpc_server_t;
     pub fn crowdb_rpc_server_destroy(server: crowdb_rpc_server_t);
+    pub fn crowdb_rpc_server_clear_handlers(server: crowdb_rpc_server_t);
     pub fn crowdb_rpc_server_listen(
         server: crowdb_rpc_server_t,
         addr: *const c_char,
@@ -209,6 +210,8 @@ extern "C" {
         port: c_int,
     ) -> crowdb_rpc_conn_t;
 
+    pub fn crowdb_rpc_conn_destroy(conn: crowdb_rpc_conn_t);
+
     pub fn crowdb_rpc_server_register_echo_handler(server: crowdb_rpc_server_t, msg_type: u16);
 
     pub fn crowdb_rpc_frame_release(frame_handle: *mut c_void);
@@ -247,6 +250,7 @@ extern "C" {
         callback: crowdb_rpc_handler_fn,
         user_data: *mut c_void,
     );
+    pub fn crowdb_rpc_client_clear_handlers(client: crowdb_rpc_client_t);
 
     pub fn crowdb_rpc_client_set_transport(client: crowdb_rpc_client_t, server: crowdb_rpc_server_t);
 
