@@ -25,23 +25,6 @@ complexity, and dependency. Before implementation, follow the
   design — open questions on domain navigation, chunk/bench handling,
   and migration sequencing.
 
-- **[R118](R118-cluster-unify-port-usage.md)** — unify port usage &
-  test port prober — Area: cluster / protocol / server —
-  `crowdb-protocol/src/ports.rs` already defines base ports + stride +
-  `ServicePort` for all services, but adoption is incomplete:
-  `crowdb-kv-server` has no CLI flag for the consensus (`KV_RPC_BASE`) or
-  client-facing (`KV_CLIENT_RPC_BASE`) RPC ports; `crowdb-diskdb` takes
-  listen addrs from TOML config (not CLI flags with `ports.rs` defaults);
-  and `KvServer::start` still supports port 0 (OS-assigned), contradicting
-  the project flow. Wire every server to accept explicit per-listener
-  port flags (defaults from `crowdb-protocol::ports`), reject port 0, and
-  add an in-process port-prober + flock-coordinated claim file (library
-  + `crowdb-port-alloc` CLI binary, no daemon) that is the single place
-  picking ports, so tests and cluster bootstrap run in parallel without
-  `Address already in use`. Console UI E2E shells out to the CLI binary
-  to replace its private `freePort()` counter. Open questions: claim-to-
-  bind TOCTOU mitigation, claim-file path/format, probe port range,
-  cross-host scope, paired-port override semantics.
 - **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
   review & unification — Area: cluster / observability — CROWDB has
   two logging stacks (Rust `tracing` in `crowdb-common/rust`, C++
