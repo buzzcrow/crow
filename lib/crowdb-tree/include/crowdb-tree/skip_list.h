@@ -24,6 +24,7 @@
 #include "crowdb-tree/slice.h"
 
 #include <atomic>
+#include <thread>
 #include <cstdint>
 #include <random>
 #include <string>
@@ -229,8 +230,19 @@ class ConcurrentSkipList
 
         explicit SpinlockGuard(std::atomic<bool> &l) : lock(l)
         {
+            uint32_t attempts = 0;
             while (lock.exchange(true, std::memory_order_acquire)) {
-                // spin
+                if (++attempts < 16) {
+#if defined(__x86_64__) || defined(_M_X64)
+                    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+                    asm volatile("yield");
+#endif
+                }
+                else {
+                    std::this_thread::yield();
+                    attempts = 0;
+                }
             }
         }
 

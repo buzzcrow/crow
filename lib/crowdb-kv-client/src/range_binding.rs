@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use tracing::warn;
 
 use crowdb_protocol::chunk_id::ChunkIdParts;
@@ -93,9 +93,9 @@ pub enum RangeRouteError {
 pub struct RangeBindingClient {
     kv: Arc<CrowdbKvClient>,
     /// Cached binding table, sorted by `sub_range_index` (the
-    /// canonical key). Protected by a `RwLock` — reads (routing) take
-    /// a read lock, refreshes take a write lock.
-    bindings: Arc<RwLock<Vec<ChunkdbRangeBinding>>>,
+    /// canonical key). Refreshes publish a complete immutable snapshot;
+    /// routes load it without locking.
+    bindings: Arc<ArcSwap<Vec<ChunkdbRangeBinding>>>,
 }
 
 impl RangeBindingClient {
@@ -105,7 +105,7 @@ impl RangeBindingClient {
     pub fn from_shared(kv: Arc<CrowdbKvClient>) -> Self {
         Self {
             kv,
-            bindings: Arc::new(RwLock::new(Vec::new())),
+            bindings: Arc::new(ArcSwap::from_pointee(Vec::new())),
         }
     }
 
@@ -160,7 +160,7 @@ impl RangeBindingClient {
         }
         // Sort by sub_range_index — the canonical key, matching `replace`.
         new_bindings.sort_by_key(|b| b.sub_range_index);
-        *self.bindings.write() = new_bindings;
+        self.bindings.store(Arc::new(new_bindings));
         Ok(())
     }
 
@@ -170,7 +170,7 @@ impl RangeBindingClient {
         &self,
         chunk_id: &ChunkId,
     ) -> std::result::Result<ChunkdbRangeBinding, RangeRouteError> {
-        if self.bindings.read().is_empty() {
+        if self.bindings.load().is_empty() {
             self.refresh()
                 .await
                 .map_err(|e| RangeRouteError::Refresh(e.to_string()))?;
@@ -200,7 +200,7 @@ impl RangeBindingClient {
     /// 1024 sub-ranges this is cheap; a denser layout could switch to
     /// binary search on `range_start` later if needed.
     pub fn route_bucket(&self, bucket: u16) -> std::result::Result<ChunkdbRangeBinding, RangeRouteError> {
-        let bindings = self.bindings.read();
+        let bindings = self.bindings.load();
         if bindings.is_empty() {
             return Err(RangeRouteError::NoBinding);
         }
@@ -241,13 +241,13 @@ impl RangeBindingClient {
     /// Check if the binding cache is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bindings.read().is_empty()
+        self.bindings.load().is_empty()
     }
 
     /// Get a snapshot of the cached binding table.
     #[must_use]
     pub fn snapshot(&self) -> Vec<ChunkdbRangeBinding> {
-        self.bindings.read().clone()
+        self.bindings.load().as_ref().clone()
     }
 
     /// Replace the cached binding table (for watch/notify updates or
@@ -256,7 +256,7 @@ impl RangeBindingClient {
     pub fn replace(&self, bindings: Vec<ChunkdbRangeBinding>) {
         let mut sorted = bindings;
         sorted.sort_by_key(|b| b.sub_range_index);
-        *self.bindings.write() = sorted;
+        self.bindings.store(Arc::new(sorted));
     }
 
     /// Spawn a watch/notify subscriber that refreshes the binding
@@ -316,7 +316,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(vec![
+            bindings: Arc::new(ArcSwap::from_pointee(vec![
                 binding(0, 32_767, 1, "http://a:1"),
                 binding(32_768, u16::MAX, 2, "http://b:1"),
             ])),
@@ -335,7 +335,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(Vec::new())),
+            bindings: Arc::new(ArcSwap::from_pointee(Vec::new())),
         };
         assert!(matches!(client.route_bucket(0), Err(RangeRouteError::NoBinding)));
     }
@@ -346,7 +346,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(vec![binding(0, 1000, 1, "http://a:1")])),
+            bindings: Arc::new(ArcSwap::from_pointee(vec![binding(0, 1000, 1, "http://a:1")])),
         };
         // Bucket 5000 is outside [0, 1000).
         assert!(matches!(
@@ -361,7 +361,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(Vec::new())),
+            bindings: Arc::new(ArcSwap::from_pointee(Vec::new())),
         };
         let mut b1 = binding(32_768, u16::MAX, 2, "http://b:1");
         b1.sub_range_index = 1;
@@ -380,7 +380,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(Vec::new())),
+            bindings: Arc::new(ArcSwap::from_pointee(Vec::new())),
         };
         assert!(client.is_empty());
         client.replace(vec![binding(0, u16::MAX, 1, "http://a:1")]);
@@ -423,7 +423,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(vec![binding(0, 1000, 1, "http://a:1")])),
+            bindings: Arc::new(ArcSwap::from_pointee(vec![binding(0, 1000, 1, "http://a:1")])),
         };
         let r = client.route_with_fallback(500).unwrap();
         assert_eq!(r.primary.instance_id, 1);
@@ -436,7 +436,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(vec![binding_in_transition(
+            bindings: Arc::new(ArcSwap::from_pointee(vec![binding_in_transition(
                 0,
                 1000,
                 2,
@@ -458,7 +458,7 @@ mod tests {
             kv: Arc::new(CrowdbKvClient::new(crate::ClientConfig::new(vec![
                 "http://127.0.0.1:1".into(),
             ]))),
-            bindings: Arc::new(RwLock::new(vec![{
+            bindings: Arc::new(ArcSwap::from_pointee(vec![{
                 let mut b = binding(0, 1000, 1, "http://a:1");
                 b.status = RangeStatus::InTransition;
                 b
