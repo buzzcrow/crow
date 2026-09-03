@@ -264,7 +264,10 @@ void Worker::run_loop()
                     }
                     break;
                 case SocketEvent::Accept:
-                    // Acceptor only — handled by the server (Phase 4).
+                    // Listen socket readable — accept new connections.
+                    // The server's accept handler loops accept() until
+                    // EAGAIN, creating connections and registering them.
+                    transport_->on_accept(ev.fd);
                     break;
                 }
             }
@@ -493,6 +496,33 @@ void SocketTransport::stop()
     }
     for (auto &w : workers_) {
         w->join();
+    }
+}
+
+void SocketTransport::add_listen_fd(int fd)
+{
+    // Register the listen socket with the first engine. The engine
+    // monitors it via epoll/kqueue (level-triggered, no ONESHOT) and
+    // delivers Accept events to a worker thread. This avoids the
+    // dedicated acceptor thread, which can be starved under CPU
+    // contention (the worker's epoll loop is already being woken
+    // by other I/O events).
+    if (!engines_.empty()) {
+        engines_[0]->add_listen_fd(fd);
+    }
+}
+
+void SocketTransport::remove_listen_fd(int fd)
+{
+    if (!engines_.empty()) {
+        engines_[0]->remove_listen_fd(fd);
+    }
+}
+
+void SocketTransport::on_accept(int listen_fd)
+{
+    if (accept_handler_) {
+        accept_handler_(listen_fd);
     }
 }
 

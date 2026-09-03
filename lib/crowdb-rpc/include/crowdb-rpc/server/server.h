@@ -9,10 +9,8 @@
 #include "crowdb-rpc/transport/socket_transport.h"
 
 #include <atomic>
-#include <future>
 #include <memory>
 #include <string>
-#include <thread>
 
 namespace crowdb::rpc
 {
@@ -96,9 +94,10 @@ class RpcServer
     int                                listen_port_ = 0;
     std::atomic<bool>                  running_{false};
     std::shared_ptr<std::atomic<bool>> alive_{std::make_shared<std::atomic<bool>>(true)};
-    std::thread                        acceptor_thread_;
 
-    void acceptor_loop(std::promise<void> ready);
+    // Accept handler called by the I/O worker when the listen fd is
+    // readable. Loops accept() until EAGAIN, creating connections.
+    void handle_accept(int listen_fd);
     void dispatch(Frame *frame, Connection *conn);
 };
 

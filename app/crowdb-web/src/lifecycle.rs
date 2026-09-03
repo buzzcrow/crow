@@ -249,11 +249,16 @@ pub async fn http_remove_node(
     // targets the new leader instead of a stale hint pointing at the
     // just-stopped node (which would trigger a 5s transport-error
     // retry cycle in the KV client).
-    state.refresh_group0_leader(Some(id)).await;
+    let leader_found = state.refresh_group0_leader(Some(id)).await;
     let t_refresh = t0.elapsed().as_millis() - t_stop - t_cfg;
     // Best-effort sysdata sync (non-blocking — config already committed).
-    if let (Some(rack_id), Ok(ctx)) = (rack_id, state.op_context().await) {
-        let _ = ctx.sysmd().remove_node_cascade(rack_id, id).await;
+    // Skip when refresh_group0_leader found no leader — e.g. deleting the
+    // last node leaves no group-0 endpoint, and the RPC would retry against
+    // a dead endpoint for 5s+ per attempt, blocking the DELETE response.
+    if leader_found {
+        if let (Some(rack_id), Ok(ctx)) = (rack_id, state.op_context().await) {
+            let _ = ctx.sysmd().remove_node_cascade(rack_id, id).await;
+        }
     }
     let t_sysmd = t0.elapsed().as_millis() - t_stop - t_cfg - t_refresh;
     state.monitor_cache.drop_node(&id).await;
@@ -883,19 +888,39 @@ pub async fn http_stop_node_server(
     Path(node_id): Path<u64>,
 ) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
     let pid = state.runtime_pid(node_id);
-    let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
-    let sent = ops::kv_server::stop(&ctx, node_id, pid)
-        .await
-        .map_err(map_config_err)?;
-    // Apply PID clearing directly to state.config (avoid commit_op_context
-    // snapshot-replace race).
-    {
-        let mut cfg = state.config.write().unwrap();
-        if let Some(s) = cfg.server_for_node_mut(node_id) {
-            s.pid = None;
+    let node = {
+        let cfg = state.config.read().unwrap();
+        cfg.node(node_id).cloned()
+    };
+    // Send SIGTERM without blocking — the server's graceful shutdown can
+    // take up to 10s (shutdown_timeout_ms), and blocking here delays the
+    // stop response. The process is reaped in the background (SIGKILL
+    // after 15s if needed) so ports/WAL files are released for reuse.
+    let sent = if let Some(pid) = pid {
+        match node {
+            Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
+                .await
+                .map_err(|e| err_502(format!("ssh stop: {e}")))?,
+            _ => {
+                tokio::task::spawn_blocking(move || {
+                    crowdb_console_shared::lifecycle::stop_pid(pid).unwrap_or(false)
+                });
+                true
+            }
         }
-    }
-    state.persist().map_err(map_persist_err)?;
+    } else {
+        // No runtime PID — check config for a persisted PID (e.g. server
+        // was deployed by a prior web-server instance).
+        let ctx = state.op_context().await.map_err(|e| err_502(format!("{e}")))?;
+        ops::kv_server::stop(&ctx, node_id, pid)
+            .await
+            .map_err(map_config_err)?
+    };
+    // Clear only the in-memory runtime PID — the config PID is left
+    // intact so ops::kv_server::restart() can stop the old process
+    // (blocking wait) before redeploying on the same port. The config
+    // PID is cleared by resetAll (which removes the server entry) or
+    // by the next deploy (which overwrites it with the new PID).
     state.clear_runtime_pid(node_id);
     // Clear cached KV RPC connections — the server is stopping, so any
     // cached TCP connection is now dead. The next KV request (after a
@@ -913,6 +938,10 @@ pub async fn http_stop_node_server(
     if state.diskdb_runtime_pid(node_id).is_none() {
         state.monitor_cache.mark_down(node_id, "server stopped").await;
     }
+    // Refresh group-0 leader so the next op_context targets the
+    // post-election leader instead of the stopped node (which would
+    // trigger a 5s transport-error retry cycle in the KV client).
+    state.refresh_group0_leader(Some(node_id)).await;
     Ok(Json(StopResult { sent }))
 }
 
@@ -944,15 +973,26 @@ async fn stop_and_remove_server_for_node(state: &AppState, node_id: u64) -> bool
     // process was spawned by a prior web-server instance.
     let pid = state.runtime_pid(node_id).or(config_pid);
     if let Some(pid) = pid {
-        let _ = match node {
-            Some(n) if n.ssh_enabled() => crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
-                .await
-                .unwrap_or(false),
-            _ => matches!(
-                tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
-                Ok(Ok(true))
-            ),
-        };
+        match node {
+            Some(n) if n.ssh_enabled() => {
+                let _ = crowdb_console_shared::ssh::stop_via_ssh(&n, pid)
+                    .await
+                    .unwrap_or(false);
+            }
+            _ => {
+                // Send SIGTERM and reap the process in the background.
+                // The server's graceful shutdown can take up to 10s
+                // (shutdown_timeout_ms), and blocking here delays the
+                // DELETE response until the process fully exits. The
+                // node is removed from config below regardless — the
+                // tree updates immediately. The background task ensures
+                // the process is reaped (SIGKILL after 15s if needed)
+                // so ports/WAL files are released for reuse.
+                tokio::task::spawn_blocking(move || {
+                    let _ = lifecycle::stop_pid(pid);
+                });
+            }
+        }
     }
     {
         let mut cfg = state.config.write().unwrap();
@@ -1100,9 +1140,16 @@ pub async fn http_internal_reset(
 
     // 8. Clear caches and workspace directories.
     state.clear_kv_client().await;
-    state
-        .clear_workspaces()
-        .map_err(|e| err_500(format!("clear workspaces: {e}")))?;
+    // Defer workspace cleanup to a background task — the KV server
+    // processes are still shutting down (async SIGTERM in
+    // stop_all_services), and removing their WAL/engine files while
+    // they are open would fail or race. The background task removes
+    // the dirs best-effort; the next deploy recreates them as needed.
+    // Defer workspace cleanup — processes may still be shutting down.
+    let state_clone = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = state_clone.clear_workspaces();
+    });
     state.persist().map_err(map_persist_err)?;
 
     Ok(Json(ResetResult { stopped }))
@@ -1301,6 +1348,11 @@ async fn stop_all_services(state: &AppState) -> Vec<String> {
 
     for nid in &node_ids {
         // Stop the KV server process if a PID is tracked.
+        // Send SIGTERM and reap in the background — the server's
+        // graceful shutdown can take up to 10s (shutdown_timeout_ms),
+        // and blocking here serializes N nodes × 10s = N×10s delays.
+        // The process is reaped in the background (SIGKILL after 15s
+        // if needed) so ports/WAL files are released for reuse.
         if let Some(pid) = state.runtime_pid(nid) {
             let ssh = state
                 .config
@@ -1308,23 +1360,23 @@ async fn stop_all_services(state: &AppState) -> Vec<String> {
                 .unwrap()
                 .node(*nid)
                 .is_some_and(crowdb_console_shared::config::NodeEntry::ssh_enabled);
-            let sent = if ssh {
-                false
+            if ssh {
+                let node = state.config.read().unwrap().node(*nid).cloned().unwrap();
+                let _ = crowdb_console_shared::ssh::stop_via_ssh(&node, pid).await;
             } else {
-                matches!(
-                    tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
-                    Ok(Ok(true))
-                )
-            };
-            if sent {
-                stopped.push(nid.to_string());
+                tokio::task::spawn_blocking(move || {
+                    let _ = lifecycle::stop_pid(pid);
+                });
             }
+            stopped.push(nid.to_string());
             state.clear_runtime_pid(nid);
         }
 
         // Stop the DDB process if a PID is tracked.
         if let Some(pid) = state.diskdb_runtime_pid(nid) {
-            let _ = tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await;
+            tokio::task::spawn_blocking(move || {
+                let _ = lifecycle::stop_pid(pid);
+            });
             state.clear_diskdb_runtime_pid(nid);
         }
     }

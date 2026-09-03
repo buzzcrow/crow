@@ -214,6 +214,11 @@ export async function deployNodeServer(baseURL: string, nodeId: number, restPort
         rpc_port: rpcPort,
         binary: DEFAULT_SERVER_BINARY,
         election_profile: 'e2e',
+        // Skip fsync on every write + shutdown. Data is still in the OS
+        // page cache (visible to a restart on the same host), just not
+        // forced to durable storage. Avoids slow macOS fsync and reduces
+        // SSD wear during long E2E sessions.
+        no_fsync: true,
       },
     });
     expect(response.status(), await response.text()).toBe(201);

@@ -96,11 +96,20 @@ void EpollEngine::mod_fd_write(int fd, uint32_t events, Connection *conn)
 
 void EpollEngine::add_listen_fd(int fd)
 {
+    listen_fd_ = fd;
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     ev.events  = EPOLLIN;
     ev.data.fd = fd; // listen socket: use fd (no Connection*)
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
+}
+
+void EpollEngine::remove_listen_fd(int fd)
+{
+    if (fd == listen_fd_) {
+        listen_fd_ = -1;
+    }
+    ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 }
 
 void EpollEngine::add_connection(int read_fd, int write_fd, Connection *conn)
@@ -225,6 +234,14 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
             uint64_t val;
             ::read(timer_fd_, &val, sizeof(val));
             out_events[out++] = {SocketEvent::Timer, -1, nullptr};
+            continue;
+        }
+        // Listen socket: data.fd was set (not data.ptr). Must check
+        // before the connection path — data.fd and data.ptr share a
+        // union, so data.ptr is non-null when data.fd is set, which
+        // would produce a garbage Connection* pointer.
+        if (fd == listen_fd_ && listen_fd_ >= 0) {
+            out_events[out++] = {SocketEvent::Accept, fd, nullptr};
             continue;
         }
 

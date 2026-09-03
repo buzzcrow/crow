@@ -441,6 +441,16 @@ impl AppState {
             exclude_node,
             group0_nodes
         );
+        // No alive group-0 nodes to query — don't waste 2.25s on backoff
+        // retries that can never find a leader (e.g. deleting the last
+        // node, or cluster not yet initialized).
+        if alive.is_empty() {
+            tracing::debug!(
+                "refresh_group0_leader: no alive nodes, skipping retries in {}ms",
+                t0.elapsed().as_millis()
+            );
+            return false;
+        }
         for attempt in 0..10u32 {
             futures::future::join_all(alive.iter().map(|&n| crate::mgmt::refresh_node_cache(self, n))).await;
             if self.monitor_cache.group0_leader_endpoint().await.is_some() {
