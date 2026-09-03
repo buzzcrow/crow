@@ -166,7 +166,10 @@ lowest broken layer. Detailed per-layer coverage checklists live in
   snapshot install, WAL replay ordering.
 - **Group** — `PxGroup` with 1 local + N remote replicas over real loopback
   crowdb-rpc (no mocks): full Paxos rounds, leader election, KV through the
-  group, durability under crash/restart.
+  group, durability under crash/restart. Includes RPC boundary rejection
+  tests: malformed `EAcceptRequest` frames (wrong table type, missing
+  required `value` field) are rejected with `InvalidArgument` via the
+  `test-util`-gated `send_raw_request` on `PxRpcTransport`.
 - **Store** — `PxKvStore`: multi-group routing, node identity, lifecycle,
   topology status. Uses embedded crowdb-rpc server via `PxKvStore::start`.
 - **Client E2E** — `CrowdbClient` against embedded `PxKvStore` crowdb-rpc
