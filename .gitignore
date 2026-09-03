@@ -89,3 +89,6 @@ app/crowdb-diskio/build/
 app/crowdb-diskio/build*/
 app/crowdb-diskio/.cache/
 lib/crowdb-chunk-client/log/
+
+# port allocator claim files (runtime-generated)
+.crowdb-port-alloc/
