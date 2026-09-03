@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::trace;
+use tracing::{info_span, trace, Instrument};
 
 /// R63: bounded batch size for the background apply loop. Limits the number
 /// of entries processed in one iteration before re-checking cancellation and
@@ -47,6 +47,7 @@ impl PxLocalReplica {
     /// learner's `apply_entry` is idempotent, and the frontier/dedup
     /// updates are atomic, so a delayed apply is safe.
     pub fn spawn_learn_chosen(&self, entry: PxLogEntry, dedup_tags: &[DedupTag]) {
+        let slot = entry.slot;
         let learner = Arc::clone(&self.learner);
         // Sync: chosen frontier + dedup (cheap atomics; must precede
         // `propose` returning `Chosen` for read-your-writes).
@@ -55,11 +56,14 @@ impl PxLocalReplica {
         // Deferred: engine apply + applied frontier (the FFI/memtable insert
         // moved off the write critical path; the apply fence gates reads).
         // Gap 2: only advance `contiguous_applied` if the apply succeeded.
-        tokio::spawn(async move {
-            if learner.apply_entry(entry.slot, &entry.payload).await.is_ok() {
-                learner.advance_applied_frontier(entry.slot);
+        tokio::spawn(
+            async move {
+                if learner.apply_entry(entry.slot, &entry.payload).await.is_ok() {
+                    learner.advance_applied_frontier(entry.slot);
+                }
             }
-        });
+            .instrument(info_span!("learn_chosen", replica = self.id, slot)),
+        );
     }
 
     /// R63: advance `known_commit_slot` to at least `slot` via `fetch_max`.
@@ -97,18 +101,21 @@ impl PxLocalReplica {
         let gap_slots = Arc::clone(&self.gap_slots);
         let apply_loop_skip = self.replication_handles.get().map(|h| h.apply_loop_skip.clone());
         let cancel = self.apply_loop_cancel.clone();
-        let handle = tokio::spawn(async move {
-            apply_loop_task(
-                known,
-                learner,
-                acceptor,
-                notify,
-                gap_slots,
-                apply_loop_skip,
-                cancel,
-            )
-            .await;
-        });
+        let handle = tokio::spawn(
+            async move {
+                apply_loop_task(
+                    known,
+                    learner,
+                    acceptor,
+                    notify,
+                    gap_slots,
+                    apply_loop_skip,
+                    cancel,
+                )
+                .await;
+            }
+            .instrument(info_span!("replica_apply", replica = self.id)),
+        );
         *self.apply_loop_handle.lock() = Some(handle);
     }
 

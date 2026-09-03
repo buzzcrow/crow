@@ -178,6 +178,12 @@ on whitespace, parse as numbers).
 state. Enables future `/metrics` HTTP endpoint and GUI integration. No need
 to parse log files to get metric values.
 
+Management status is a curated view, not a second metrics system. Each status
+field names one registry metric and reads it through exact-name lookup. Missing
+or not-yet-registered names are omitted. The status path never registers a
+metric or retains duplicate hot-path counters; `/metrics` remains the endpoint
+for the complete registry.
+
 ### 2.8 FFI Boundary
 
 C++ owns its own `MetricsRegistry` per `Crowdbtree` instance. Rust triggers C++
@@ -454,14 +460,24 @@ later if a detached use case appears.
 
 ### 3.9 Log Content Guidelines
 
-No strict `component=` field template (D6). Guidelines:
+Server and client logs use the same context field names:
 
-- Every line should be clear and readable, carrying enough context to
-  locate the code position and the surrounding state.
-- Bring rich info for identifying bugs — structured fields where they
-  fit naturally, but author flexibility wins over a rigid template.
-- Consensus-event logs must carry `node_id`, `group_id`, `slot`,
-  `term` where applicable (per §1 mandatory signals).
+- `s`: store ID when known.
+- `g`: group ID when known.
+- `replica`: the replica executing or receiving an operation.
+- `leader`: the server's current leader or the client's currently believed
+  leader. Omit it when unknown; do not copy a merely targeted replica into it.
+
+Stable `s`, `g`, and `replica` context belongs in tracing spans at task and RPC
+boundaries. Spawned futures are explicitly instrumented because Tokio tasks do
+not inherit the caller's active span. Leadership is dynamic, so `leader` or
+`role` is recorded on the event whose interpretation needs it instead of being
+captured in a long-lived span.
+
+- Every line should carry enough context to locate the code position and the
+  surrounding state.
+- Consensus-event logs must carry `replica`, `g`, `slot`, and `term` where
+  applicable (per §1 mandatory signals).
 - Machine-parseability is a plus — AI agents do the real log-digging.
 
 ### 3.10 Extension Path

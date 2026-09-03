@@ -106,6 +106,7 @@ const CROWDB_RPC_LIVENESS_CHECK: Duration = Duration::from_secs(5);
 /// connection liveness. On `FBWatchNotifyError` with
 /// `not_leader_hint` or liveness-check failure, reconnect.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(level = "debug", skip_all, fields(s = store_id, g = group_id))]
 async fn crowdb_rpc_reader_loop(
     kv: Arc<CrowdbKvClient>,
     store_id: u64,
@@ -122,11 +123,7 @@ async fn crowdb_rpc_reader_loop(
             continue;
         }
         let Some(endpoint) = kv.topology.leader(store_id, group_id) else {
-            tracing::warn!(
-                store_id,
-                group_id,
-                "watch_notify(crowdb-rpc): leader still unknown after refresh"
-            );
+            tracing::warn!("watch_notify(crowdb-rpc): leader still unknown after refresh");
             sleep_backoff(&mut backoff).await;
             continue;
         };
@@ -199,7 +196,7 @@ async fn crowdb_rpc_reader_loop(
         // Reset backoff on successful subscribe.
         backoff = Duration::from_millis(50);
         tracing::info!(
-            store_id, group_id, endpoint = %endpoint,
+            leader = %endpoint,
             "watch_notify(crowdb-rpc): subscribed, waiting for push frames"
         );
 

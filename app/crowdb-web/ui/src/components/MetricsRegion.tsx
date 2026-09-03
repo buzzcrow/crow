@@ -105,7 +105,9 @@ export function MetricsRegion({ data }: { data: MetricsResponse | null }) {
 export function ElectionStateRegion({ state }: { state: ElectionState }) {
   const rows: { label: string; value: string }[] = [
     { label: 'Term', value: String(state.current_term) },
-    { label: 'Elections', value: String(state.election_count) },
+    ...(state.election_count != null
+      ? [{ label: 'Elections', value: String(state.election_count) }]
+      : []),
     ...(state.last_heartbeat_age_ms != null
       ? [{ label: 'Heartbeat Age', value: `${state.last_heartbeat_age_ms}ms` }]
       : []),
@@ -113,9 +115,15 @@ export function ElectionStateRegion({ state }: { state: ElectionState }) {
       ? [{ label: 'Lease Remaining', value: `${state.lease_remaining_ms}ms` }]
       : []),
     { label: 'Phase 1 In-Flight', value: String(state.bulk_phase1_in_flight_slots) },
-    { label: 'Step-downs (higher term)', value: String(state.step_downs_higher_term) },
-    { label: 'Step-downs (lease)', value: String(state.step_downs_lease_unrenewable) },
-    { label: 'Step-downs (admin)', value: String(state.step_downs_admin) },
+    ...(state.step_downs_higher_term != null
+      ? [{ label: 'Step-downs (higher term)', value: String(state.step_downs_higher_term) }]
+      : []),
+    ...(state.step_downs_lease_unrenewable != null
+      ? [{ label: 'Step-downs (lease)', value: String(state.step_downs_lease_unrenewable) }]
+      : []),
+    ...(state.step_downs_admin != null
+      ? [{ label: 'Step-downs (admin)', value: String(state.step_downs_admin) }]
+      : []),
   ];
   return (
     <Section title="Election State">

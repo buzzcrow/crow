@@ -9,9 +9,6 @@
 //! exports them and hosts the two conversions that must stay local to
 //! `crowdb-kv`:
 //!
-//! - `From<ElectionMetricsSnapshot> for ElectionStateView` —
-//!   `ElectionMetricsSnapshot` is local to `crowdb-kv`, so the orphan
-//!   rule permits the impl here.
 //! - `crowdb_tree_stats_to_view` — a free function converting
 //!   `CrowdbTreeStats` (from `crowdb-tree-ffi`) to `CrowdbTreeStatsView`
 //!   (from `crowdb-protocol`). Both are foreign, so a `From` impl would
@@ -23,24 +20,14 @@ pub use crowdb_protocol::mgmt::{
 };
 pub(crate) use crowdb_protocol::mgmt::{ElectionStateView, ReadStateView};
 
-use crate::common::metrics::ElectionMetricsSnapshot;
 use crate::kv::CrowdbTreeStats;
 
-/// Convert the local `ElectionMetricsSnapshot` (mutex-guarded gauges +
-/// atomic counters) into the wire-serializable `ElectionStateView`.
-impl From<ElectionMetricsSnapshot> for ElectionStateView {
-    fn from(s: ElectionMetricsSnapshot) -> Self {
-        Self {
-            election_count: s.election_count,
-            current_term: s.current_term,
-            last_heartbeat_age_ms: s.last_heartbeat_age_ms,
-            lease_remaining_ms: s.lease_remaining_ms,
-            bulk_phase1_in_flight_slots: s.bulk_phase1_in_flight_slots,
-            step_downs_higher_term: s.step_downs_higher_term,
-            step_downs_lease_unrenewable: s.step_downs_lease_unrenewable,
-            step_downs_admin: s.step_downs_admin,
-        }
-    }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ElectionCounters {
+    pub(crate) elections: Option<u64>,
+    pub(crate) step_downs_higher_term: Option<u64>,
+    pub(crate) step_downs_lease: Option<u64>,
+    pub(crate) step_downs_admin: Option<u64>,
 }
 
 /// Convert `CrowdbTreeStats` (from `crowdb-tree-ffi`, not `Serialize`) into

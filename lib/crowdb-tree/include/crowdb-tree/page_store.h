@@ -288,6 +288,11 @@ class FaultyPageStore : public PageStore
         return inner_->iu_size();
     }
 
+    [[nodiscard]] uint64_t block_size() const override
+    {
+        return inner_->block_size();
+    }
+
     [[nodiscard]] int write_count() const
     {
         return write_count_;

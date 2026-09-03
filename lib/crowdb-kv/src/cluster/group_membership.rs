@@ -9,6 +9,17 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
+use crate::metrics::{MetricPoint, MetricsRegistry};
+
+fn counter_total(registry: Option<&MetricsRegistry>, name: &str) -> Option<u64> {
+    registry
+        .and_then(|r| r.snapshot_named(name, 1.0))
+        .and_then(|point| match point {
+            MetricPoint::Counter { total, .. } => Some(total),
+            _ => None,
+        })
+}
+
 use crate::cluster::group::{PxGroup, RemoteReplicaKind};
 use crate::cluster::group_config::{PxGroupConfig, PxGroupMember};
 use crate::cluster::local_replica::PxLocalReplica;
@@ -378,12 +389,31 @@ impl PxGroup {
     /// Used by `/topology`.
     #[must_use]
     pub fn status(&self) -> GroupStatus {
-        let local_replica = self.local_replica.status();
+        self.status_with_metrics(0, None)
+    }
+
+    #[must_use]
+    pub(crate) fn status_with_metrics(
+        &self,
+        store_id: u64,
+        registry: Option<&MetricsRegistry>,
+    ) -> GroupStatus {
+        let prefix = format!("s.{store_id}.g.{}", self.group_id);
+        let counters = crate::cluster::status::ElectionCounters {
+            elections: counter_total(registry, &format!("{prefix}.paxos.elections.c")),
+            step_downs_higher_term: counter_total(
+                registry,
+                &format!("{prefix}.paxos.step_downs.higher_term.c"),
+            ),
+            step_downs_lease: counter_total(registry, &format!("{prefix}.paxos.step_downs.lease.c")),
+            step_downs_admin: counter_total(registry, &format!("{prefix}.paxos.step_downs.admin.c")),
+        };
+        let local_replica = self.local_replica.status(counters);
         let remotes: Vec<_> = self
             .remote_replicas
             .iter()
             .filter_map(|r| match r {
-                RemoteReplicaKind::Real(r) => Some(r.status()),
+                RemoteReplicaKind::Real(r) => Some(r.status(registry, store_id, self.group_id)),
                 RemoteReplicaKind::Placeholder => None,
             })
             .collect();

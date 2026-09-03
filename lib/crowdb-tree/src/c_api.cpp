@@ -410,16 +410,17 @@ void ct_set_gc_watermark(ct_tree *t, uint64_t snapshot_slot, uint64_t safe_slot)
     }
 }
 
-ct_status ct_collect_garbage(ct_tree *t, ct_gc_stats *out_stats)
+ct_status ct_compact_sparse_blocks(ct_tree *t, ct_merge_gc_stats *out_stats)
 {
     if (t == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    GcStats stats = t->tree->collect_garbage();
+    MergeGcStats stats = t->tree->compact_sparse_blocks();
     if (out_stats != nullptr) {
-        out_stats->tombstones_dropped = stats.tombstones_dropped;
-        out_stats->pages_freed        = stats.pages_freed;
-        out_stats->bytes_freed        = stats.bytes_freed;
+        out_stats->blocks_selected = stats.blocks_selected;
+        out_stats->pages_relocated = stats.pages_relocated;
+        out_stats->bytes_relocated = stats.bytes_relocated;
+        out_stats->blocks_deleted  = stats.blocks_deleted;
     }
     return static_cast<ct_status>(Code::kOk);
 }

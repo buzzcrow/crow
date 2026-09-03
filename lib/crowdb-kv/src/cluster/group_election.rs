@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace, warn, Instrument};
 
 use crate::cluster::group::{AcceptAttempt, PrepareAttempt, PxGroup, RemoteReplicaKind};
 use crate::cluster::local_replica::PxLocalReplicaRole;
@@ -390,23 +390,19 @@ impl PxGroup {
             ?reason,
             "stepping down from leader"
         );
-        let metrics = self.local_replica().election_metrics();
         let handles = self.local_replica().election_registry_handles();
         match reason {
             StepDownReason::HigherTerm(_) => {
-                metrics.record_step_down_higher_term();
                 if let Some(h) = handles {
                     h.step_downs_higher_term.inc();
                 }
             }
             StepDownReason::LeaseUnrenewable => {
-                metrics.record_step_down_lease_unrenewable();
                 if let Some(h) = handles {
                     h.step_downs_lease.inc();
                 }
             }
             StepDownReason::Admin => {
-                metrics.record_step_down_admin();
                 if let Some(h) = handles {
                     h.step_downs_admin.inc();
                 }
@@ -448,7 +444,14 @@ impl PxGroup {
 /// fails.
 #[must_use]
 pub fn spawn(group: Weak<PxGroup>, cfg: PxElectionConfig, cancel: CancellationToken) -> JoinHandle<()> {
-    tokio::spawn(PxGroup::run_election_driver(group, cfg, cancel))
+    let span = group.upgrade().map_or_else(tracing::Span::none, |group| {
+        tracing::info_span!(
+            "election_driver",
+            g = group.group_id(),
+            replica = group.local_replica().id
+        )
+    });
+    tokio::spawn(PxGroup::run_election_driver(group, cfg, cancel).instrument(span))
 }
 
 /// Tiny xorshift64* PRNG used to randomize the per-replica election

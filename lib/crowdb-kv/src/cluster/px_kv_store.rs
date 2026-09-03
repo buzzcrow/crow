@@ -199,7 +199,7 @@ impl PxKvStore {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(store_id = self.store_id, timeout_ms = per_layer_timeout.as_millis() as u64)
+        fields(s = self.store_id, timeout_ms = per_layer_timeout.as_millis() as u64)
     )]
     pub async fn shutdown(&self, per_layer_timeout: Duration) -> OperationReport {
         // Idempotency gate: only the first caller proceeds.
@@ -274,12 +274,17 @@ impl PxKvStore {
             }
         }
 
+        let metrics_guard = self
+            .metrics_registry
+            .as_ref()
+            .and_then(|registry| registry.lock().ok());
+        let registry = metrics_guard.as_deref();
         let mut groups: Vec<GroupStatus> = self
             .groups
             .iter()
             .map(|entry| {
                 let group_id = *entry.key();
-                let group = entry.value().status();
+                let group = entry.value().status_with_metrics(self.store_id, registry);
                 status = StatusLevel::worst(status, group.status);
                 messages.extend(
                     group

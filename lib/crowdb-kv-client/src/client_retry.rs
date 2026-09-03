@@ -48,6 +48,7 @@ impl CrowdbKvClient {
     /// replica ("100ms-then-retry"). Logs refresh failures instead of
     /// silently swallowing them; the caller's `count_other` surfaces
     /// `RetriesExhausted` if the endpoint stays stale.
+    #[tracing::instrument(level = "debug", skip_all, fields(s = store_id, g = group_id, leader = endpoint))]
     pub(crate) async fn wait_and_refresh_leader(
         &self,
         store_id: u64,
@@ -80,6 +81,7 @@ impl CrowdbKvClient {
     /// On `NoSeeds` (configuration error, not transient), skips the
     /// backoff sleep so the caller's `count_other` exhausts the retry
     /// budget immediately instead of waiting seconds.
+    #[tracing::instrument(level = "debug", skip_all, fields(s = store_id, g = group_id, leader = current))]
     pub(crate) async fn handle_transport_err(
         &self,
         store_id: u64,

@@ -11,7 +11,6 @@ use crate::cluster::replica::{
     StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
 use crate::cluster::status::{ElectionStateView, KvStoreStatus, ReplicaStatus, StatusLevel};
-use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::common::report::OperationReport;
 use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
 use crate::metrics::{Counter, Gauge, MetricsRegistry};
@@ -227,8 +226,6 @@ pub struct PxLocalReplica {
     shutdown_started: AtomicBool,
     /// Per-replica leader-election counters. Cheap `Relaxed` atomic
     /// increments on the election hot path; consumed by
-    /// `election_metrics_snapshot` for health / management API.
-    pub(super) election_metrics: ElectionMetrics,
     /// Wall-clock-monotonic instant of the most recent accepted
     /// heartbeat (follower side; `None` before the first one). Read
     /// by `election_metrics_snapshot` to compute
@@ -399,7 +396,6 @@ impl PxLocalReplica {
             admin_step_down_signal: tokio::sync::Notify::new(),
             deadline_reset_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
-            election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
             replication_handles: OnceLock::new(),
@@ -466,7 +462,6 @@ impl PxLocalReplica {
             admin_step_down_signal: tokio::sync::Notify::new(),
             deadline_reset_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
-            election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
             replication_handles: OnceLock::new(),
@@ -779,14 +774,6 @@ impl PxLocalReplica {
         self.lease_duration_ms.load(Ordering::Acquire)
     }
 
-    /// Borrow the per-replica election counter handle so the election
-    /// driver / step-down sequence can bump counters without going
-    /// through additional accessor noise.
-    #[must_use]
-    pub(crate) fn election_metrics(&self) -> &ElectionMetrics {
-        &self.election_metrics
-    }
-
     /// Borrow optional registry handles for election counters. Returns
     /// `None` when no metrics registry is wired (tests / no-registry mode).
     #[must_use]
@@ -855,8 +842,11 @@ impl PxLocalReplica {
     /// gauges computed at read time so we don't have to keep extra
     /// atomics in sync with the canonical mutex-guarded state.
     #[must_use]
-    pub fn election_metrics_snapshot(&self, bulk_phase1_in_flight_slots: u64) -> ElectionMetricsSnapshot {
-        let counters = self.election_metrics.counters();
+    pub fn election_state_view(
+        &self,
+        bulk_phase1_in_flight_slots: u64,
+        counters: crate::cluster::status::ElectionCounters,
+    ) -> ElectionStateView {
         let now = Instant::now();
         let last_heartbeat_age_ms = self.last_heartbeat_at.lock().map(|inst| {
             now.saturating_duration_since(inst)
@@ -885,14 +875,14 @@ impl PxLocalReplica {
         if let Some(h) = self.election_handles.get() {
             h.inflight_slots.set(bulk_phase1_in_flight_slots);
         }
-        ElectionMetricsSnapshot {
-            election_count: counters.election_count,
+        ElectionStateView {
+            election_count: counters.elections,
             current_term: self.current_term_snapshot(),
             last_heartbeat_age_ms,
             lease_remaining_ms,
             bulk_phase1_in_flight_slots,
             step_downs_higher_term: counters.step_downs_higher_term,
-            step_downs_lease_unrenewable: counters.step_downs_lease_unrenewable,
+            step_downs_lease_unrenewable: counters.step_downs_lease,
             step_downs_admin: counters.step_downs_admin,
         }
     }
@@ -909,7 +899,7 @@ impl PxLocalReplica {
     /// (`O(1)`) data: the kv-store key count via `DashMap::len`.
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
-    pub fn status(&self) -> ReplicaStatus {
+    pub fn status(&self, counters: crate::cluster::status::ElectionCounters) -> ReplicaStatus {
         let mut status = StatusLevel::Ok;
         let mut messages = Vec::new();
         if self.shutdown_started.load(Ordering::Acquire) {
@@ -942,9 +932,7 @@ impl PxLocalReplica {
             .election_handles
             .get()
             .map_or(0, |h| h.inflight_slots.snapshot());
-        let election = Some(ElectionStateView::from(
-            self.election_metrics_snapshot(bulk_inflight),
-        ));
+        let election = Some(self.election_state_view(bulk_inflight, counters));
         ReplicaStatus {
             id: self.id,
             role: role.to_string(),

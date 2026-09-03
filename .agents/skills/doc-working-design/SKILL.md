@@ -1,0 +1,1 @@
+../../../.devin/skills/doc-working-design/SKILL.md

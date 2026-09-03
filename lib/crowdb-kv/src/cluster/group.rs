@@ -204,6 +204,10 @@ pub struct PxGroup {
     /// `run_pass` to gate periodic WAL durable flushes on
     /// `wal_flush_interval_ms`.
     pub(crate) last_wal_flush_time: parking_lot::Mutex<std::time::Instant>,
+    /// Wall-clock time of the last `compact_sparse_blocks` pass. Used by
+    /// `run_pass` to gate cadence-driven block compaction on
+    /// `merge_gc_interval_ms` (R129).
+    pub(crate) last_merge_gc_time: parking_lot::Mutex<std::time::Instant>,
     /// Gap 5 step 2: notified when a memtable freeze happens in the C++
     /// engine, so the maintenance loop can flush immediately instead of
     /// waiting for the next tick. Shared with the learner's apply path
@@ -373,6 +377,7 @@ impl PxGroup {
                     .unwrap_or_else(std::time::Instant::now),
             ),
             last_wal_flush_time: parking_lot::Mutex::new(std::time::Instant::now()),
+            last_merge_gc_time: parking_lot::Mutex::new(std::time::Instant::now()),
             flush_notify: Arc::new(tokio::sync::Notify::new()),
             flushes_since_snapshot: AtomicU64::new(0),
             read_handles: OnceLock::new(),

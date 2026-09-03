@@ -330,6 +330,12 @@ pub struct PxElectionConfig {
     /// is detected within the deadline rather than stalling the proposer
     /// indefinitely.
     pub learner_stream_rpc_timeout_ms: u64,
+    /// Cadence for block-level merge GC (R129): wall-clock interval
+    /// between `compact_sparse_blocks` passes in the maintenance loop.
+    /// `0` disables the cadence (snapshot folding still runs). The
+    /// per-pass byte budget and sparse-block threshold are wired into
+    /// the crowdb-tree engine options at startup.
+    pub merge_gc_interval_ms: u64,
 }
 
 impl PxElectionConfig {
@@ -371,6 +377,7 @@ impl PxElectionConfig {
         snapshot_flush_count_threshold: 10,
         wal_flush_interval_ms: 60_000,
         learner_stream_rpc_timeout_ms: 2000,
+        merge_gc_interval_ms: 0,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -397,6 +404,7 @@ impl PxElectionConfig {
             snapshot_flush_count_threshold: 2,
             wal_flush_interval_ms: 0,
             learner_stream_rpc_timeout_ms: 500,
+            merge_gc_interval_ms: 0,
         }
     }
 
@@ -432,6 +440,7 @@ impl PxElectionConfig {
             snapshot_flush_count_threshold: 0, // disabled for bench (slot threshold is high)
             wal_flush_interval_ms: 0,
             learner_stream_rpc_timeout_ms: 1000,
+            merge_gc_interval_ms: 0,
         }
     }
 

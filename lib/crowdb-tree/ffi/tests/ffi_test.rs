@@ -36,36 +36,45 @@ fn mem_apply_get_scan() {
 }
 
 #[test]
-fn mem_gc_watermark_and_collect_garbage() {
+fn mem_gc_watermark_and_snapshot_folding() {
     let t = Crowdbtree::open(&Options::default()).unwrap();
     t.apply_put(1, b"a", b"A").unwrap();
     t.apply_delete(2, b"a").unwrap();
     t.flush().unwrap();
     assert_eq!(t.get(b"a").unwrap(), None);
 
-    // Below the (default zero) watermark: nothing eligible yet.
-    let stats = t.collect_garbage().unwrap();
-    assert_eq!(stats, crowdb_tree_ffi::GcStats::default());
+    // Below the (default zero) watermark: a snapshot does not fold the
+    // tombstone — it is not yet eligible.
+    t.snapshot().unwrap();
+    assert_eq!(t.get(b"a").unwrap(), None);
 
     // gc_slot = min(snapshot_slot, safe_slot): a low snapshot_slot still holds
     // the floor down even though safe_slot alone would allow the drop.
     t.set_gc_watermark(0, 2);
-    let stats = t.collect_garbage().unwrap();
-    assert_eq!(stats, crowdb_tree_ffi::GcStats::default());
-
-    t.set_gc_watermark(2, 2);
-    let stats = t.collect_garbage().unwrap();
-    assert_eq!(stats.tombstones_dropped, 1);
-    assert!(stats.pages_freed >= 1);
-    assert!(stats.bytes_freed > 0);
-
-    // Idempotent: nothing left to reclaim on a second sweep.
-    let stats2 = t.collect_garbage().unwrap();
-    assert_eq!(stats2, crowdb_tree_ffi::GcStats::default());
-
-    // The tombstone drop is a physical/resident-only change; the logical read
-    // path (already gc_floor-filtered) is unaffected either way.
+    t.snapshot().unwrap();
     assert_eq!(t.get(b"a").unwrap(), None);
+
+    // With the watermark past the tombstone's slot, the next snapshot folds
+    // it into a fresh clean leaf. The logical read path is unaffected.
+    t.set_gc_watermark(2, 2);
+    t.snapshot().unwrap();
+    assert_eq!(t.get(b"a").unwrap(), None);
+
+    // A second snapshot has nothing left to fold (idempotent).
+    t.snapshot().unwrap();
+    assert_eq!(t.get(b"a").unwrap(), None);
+}
+
+#[test]
+fn mem_compact_sparse_blocks_noop_on_mem_store() {
+    let t = Crowdbtree::open(&Options::default()).unwrap();
+    t.apply_put(1, b"a", b"A").unwrap();
+    t.flush().unwrap();
+    t.snapshot().unwrap();
+
+    // A non-block store returns an empty stats result with no snapshot write.
+    let stats = t.compact_sparse_blocks().unwrap();
+    assert_eq!(stats, crowdb_tree_ffi::MergeGcStats::default());
 }
 
 #[test]

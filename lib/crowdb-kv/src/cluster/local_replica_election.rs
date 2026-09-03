@@ -76,7 +76,6 @@ impl PxLocalReplica {
         self.role_atomic
             .store(PxLocalReplicaRole::Candidate.as_u8(), Ordering::Release);
         // One election attempt initiated.
-        self.election_metrics.record_election();
         if let Some(h) = self.election_handles.get() {
             h.elections.inc();
         }

@@ -423,3 +423,19 @@ async fn wal_fsync_and_write_bw_counts_match() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+#[test]
+fn exact_name_lookup_returns_registered_metric_only() {
+    let mut registry = MetricsRegistry::new();
+    let selected = registry.register_counter("s.1.g.2.paxos.elections.c");
+    registry.register_counter("s.1.g.2.paxos.elections.c.extra");
+    selected.inc_by(3);
+
+    let point = registry
+        .snapshot_named("s.1.g.2.paxos.elections.c", 1.0)
+        .expect("selected metric must exist");
+    assert!(matches!(
+        point,
+        crowdb_kv::metrics::MetricPoint::Counter { total: 3, .. }
+    ));
+    assert!(registry.snapshot_named("s.1.g.2.missing.c", 1.0).is_none());
+}

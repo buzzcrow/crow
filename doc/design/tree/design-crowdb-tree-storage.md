@@ -123,44 +123,64 @@ coordination. The v1 target is `TextPageStore` for debugging and
 
 ### 2.5 Block Compaction
 
-After GC retires dead pages, their addresses become gaps in `SpaceAllocator`.
-Over time, a block file (`.blk-{NNNN}`) may accumulate so many gaps that most
-of its physical space is free. **Online block compaction** reclaims this space
-without a separate compaction pass by controlling *where* new allocations land
-during snapshot.
+Block compaction reclaims physical space from sparse block files (`.blk-{NNNN}`)
+through two cooperating mechanisms: **gap filtering** controls where new
+allocations land during every snapshot, and **cadence-driven relocation**
+(`compact_sparse_blocks`) force-moves live extents out of the sparsest blocks
+on a configured interval. Both share the same free-ratio threshold and operate
+only in array-of-blocks mode (`open_blocks`, `block_size > 0`).
 
-**Mechanism — gap filtering in `SpaceAllocator`.**
+**Gap filtering in `SpaceAllocator`.**
 
 `SpaceAllocator` is rebuilt every snapshot from the committed anchor's live
 extents (`build_allocator()` in `persist.cpp`). Its gap list is the complement
-of live extents within `[region_base, file_size)`. The compaction mechanism is
-simple: when `block_size > 0` (array-of-blocks mode), compute each block's free
-ratio (`gap_bytes / block_size`) and **exclude gaps in blocks above a
-threshold** (compile-time constant, 70%) from the allocator's gap list.
+of live extents within `[region_base, file_size)`. When `block_size > 0`,
+compute each block's free ratio (`gap_bytes / block_size`) and exclude gaps in
+blocks above `merge_gc_block_free_threshold` (default 70%) from the allocator's
+gap list.
 
 Filtered-out gaps are invisible to `alloc()`, so new writes never reuse space
 in sparse blocks. They land in dense blocks' gaps or append past EOF (which
 may trigger `allocate_new_block()`). Over successive snapshots, as dirty pages
 are rewritten, sparse blocks lose their live pages.
 
-**What gets relocated.**
+**Cadence-driven relocation — `compact_sparse_blocks`.**
 
-Only **dirty pages** are rewritten during snapshot; clean pages keep their
-existing durable address. So a single snapshot only relocates pages modified
-since the last snapshot. Over multiple snapshots, as pages are touched and
-rewritten, sparse blocks gradually drain. For high-churn workloads, this is
-fast (most pages are dirty each snapshot). For low-churn workloads, blocks are
-aturally dense; compaction rarely needed.
+Gap filtering drains sparse blocks gradually through normal write churn. When
+disk space is urgent or churn is low, `compact_sparse_blocks` force-relocates
+live extents out of the sparsest blocks in a single snapshot pass.
+
+Selection: compute each block's current free ratio from the newest valid
+anchor's live extents. Blocks whose free ratio is strictly greater than
+`merge_gc_block_free_threshold` are candidates. Sort by descending free ratio,
+then ascending block index. Accumulate candidate live bytes until the sum
+exceeds `merge_gc_max_relocation_bytes`; the first eligible block is always
+allowed even when it exceeds the budget so progress is possible. Block zero
+(anchor slots) is never selected.
+
+Prefetch: before taking `write_mutex_`, read every unloaded mapping slot in
+the selected blocks from the store. Retain the original packed mapping word
+with the decoded frame. Preparation rechecks that word under `write_mutex_`;
+a mismatch discards the prefetched candidate and the page is skipped for this
+pass. This keeps disk reads out of the writer critical section and adds no
+lock.
+
+Relocation: for each selected page (resident or validated prefetched
+unloaded), encode its durable blob, allocate a new address outside every
+source block, and queue the write through the normal prepared-snapshot
+pipeline. The owning mapping segment image is forced into the prepared
+generation. Unloaded relocations update the mapping word in the segment image
+directly. `PreparedSnapshot` tracks `blocks_selected`, `pages_relocated`, and
+`bytes_relocated`.
+
+Commit: the standard two-barrier snapshot protocol applies — page writes,
+segment images, directory, durability barrier, anchor, durability barrier.
+`finalize_prepared_snapshot` rereads both valid anchors, derives the protected
+block set, and deletes only nonzero blocks referenced by neither generation.
+`blocks_deleted` is recorded in the `PreparedSnapshot` and reported in
+`MergeGcStats`.
 
 **Block deletion.**
-
-After snapshot commit, compute per-block live page count from the
-`PreparedSnapshot` (in-memory, no disk re-read). A block with zero live pages
-is a deletion candidate. Deletion follows the **two-generation rule** (same
-as old image cleanup, §6): a block is only deleted after it has zero live
-pages in **both** the current snapshot and the previous one. This ensures a
-crash mid-deletion falls back to the prior anchor, which still references the
-block.
 
 `BlockPageStore::delete_block(idx)` closes the fd, removes the `BlockExtent`
 from `extents_`, and unlinks the `.blk-{NNNN}` file. The global address space
@@ -170,35 +190,30 @@ its index is not re-opened.
 
 **Crash safety.**
 
-Identical to normal snapshot crash safety. If the process dies mid-snapshot:
-- Old blocks still exist → old addresses still valid.
-- New block has copied pages → new addresses valid.
-- Recovery uses the anchor's snapshot to determine which addresses are live.
+Identical to normal snapshot crash safety. If the process dies mid-compaction:
+- Old blocks still exist; old addresses still valid.
+- New block has copied pages; new addresses valid.
+- Recovery uses whichever anchor is valid; the other references the old blocks.
 
-Block deletion is safe because it only happens after two consecutive snapshots
-confirm zero live pages; the crash fallback anchor always references the
-block.
+Block deletion only happens after the finalizer confirms neither valid anchor
+references the block. A crash before the finalizer leaves all blocks in place;
+the next snapshot or compaction pass will retry.
 
 **Cost.**
 
-- Zero additional I/O beyond what snapshot already does. The page would be
-  written anyway; we just choose a different destination address.
-- O(gaps) for per-block free ratio computation during `build_allocator()`.
-- O(live_pages) for per-block live page counting after commit.
+- Gap filtering: zero additional I/O. O(gaps) for per-block free ratio
+  computation during `build_allocator()`.
+- Cadence-driven relocation: one snapshot pass worth of I/O for the relocated
+  pages, plus O(live_extents) for selection and O(anchors) for finalization.
+  The byte budget bounds the per-pass I/O burst.
 
 **Scope.**
 
 Only applies to `BlockPageStore` in array-of-blocks mode (`open_blocks`).
 Single-medium mode (`open`, `open_mem`) and `TextPageStore` have no multiple
-blocks; `block_size()` returns 0, gap filtering is skipped, behavior is
-unchanged.
-
-**Future extension — explicit compaction.**
-
-If disk space is urgent and natural drain is too slow, an explicit
-`compact_blocks()` API can force-rewrite all live pages from sparse blocks
-(not just dirty ones) in a single snapshot. This is higher I/O burst and more
-complex. Deferred; the online mechanism handles the common case.
+blocks; `block_size()` returns 0, gap filtering is skipped, and
+`compact_sparse_blocks` returns an empty `MergeGcStats` with no snapshot
+write.
 
 ### 2.1 TextPageStore — On-Disk Layout (Debug)
 
@@ -566,7 +581,7 @@ snapshot always exports the current, latest durable state).
 The exact C ABI (`ct_snapshot_export_begin/next/end`,
 `ct_snapshot_import*`, and the rest of the surface: `ct_open`, `ct_apply`,
 `ct_get`, `ct_scan`, `ct_snapshot_view`, `ct_set_gc_watermark`,
-`ct_collect_garbage`, ...) is specified in
+`ct_compact_sparse_blocks`, ...) is specified in
 [`lib/crowdb-tree/include/lib/crowdb-tree/c_api.h`](../../../lib/crowdb-tree/include/lib/crowdb-tree/c_api.h).
 That header is the single source of truth for signatures; this document
 only records the shape and rationale.
@@ -703,25 +718,31 @@ overlapping reader guards drain.
 
 ## 9. Garbage Collection
 
-`collect_garbage()` reclaims two kinds of space, both gated by
-`gc_slot = min(snapshot_slot, safe_slot)` (§7):
+Logical retention GC folds tombstones and stale versions during snapshot
+preparation, gated by `gc_slot = min(snapshot_slot, safe_slot)` (§7). There
+is no standalone resident-tree sweep; `set_gc_watermark` advances the floor
+and the next snapshot does the folding.
 
-1. **Tombstones.** A tombstone cell written at slot `t` is dropped during
-   consolidation when `t < gc_slot`.
+1. **Tombstones.** A tombstone cell written at slot `t` is folded during
+   snapshot preparation when `t <= gc_slot`. The snapshot walk inspects
+   clean resident `LeafBase` pages and rebuilds only those containing
+   eligible tombstones via `resolve_leaf_chain_for_rebuild`.
 2. **Stale root versions.** A `RootVersion` with `refcount == 0` and
    `last_applied_slot < gc_slot` is retired, and pages reachable only from
    it are freed.
 
-Triggers: the maintenance loop calls `collect_garbage()` on every tick
-(default ~50ms), gated by `gc_floor_ > last_gc_floor_` (the watermark
-must have advanced since the last sweep). A backend low-free-space
-pressure signal triggers a focused sweep / eager snapshot+GC.
-Post-snapshot, eligible tombstones below the new `snapshot_slot` are
-swept. The gate only suppresses re-sweeps at the same watermark — it
-does not check whether the tree has any tombstones, so the full tree
-walk runs on every watermark advance even in write-only workloads with
-nothing to reclaim. `GcStats` reports tombstones dropped, versions
-retired, pages/bytes freed.
+Triggers: the maintenance loop calls `set_gc_watermark` on every tick
+(default ~50ms) with `group_snapshot_slot` and `group_safe_slot`. Snapshot
+preparation folds eligible tombstones whenever a snapshot runs (either the
+periodic persist-snapshot cadence or a `compact_sparse_blocks` pass, §2.5).
+Physical block reclamation is handled by `compact_sparse_blocks` on a
+separate cadence (`merge_gc_interval_ms`, default 0 = disabled). EBR
+remains automatic memory reclamation for retired pages.
+
+`MergeGcStats` reports blocks selected, pages relocated, bytes relocated,
+and blocks deleted from `compact_sparse_blocks`. Tombstone folding counts
+are not separately reported; the snapshot's `pages_written` reflects
+rebuilt leaves.
 
 ---
 
@@ -750,7 +771,7 @@ learner.learn(entry) -> engine.apply(slot, batch)         // in-memory deltas
 ... every snapshot_every_slots / dirty threshold ...
 engine.persist_snapshot() -> last_applied_slot advances    // durable + new RootVersion
 learner observes safe_slot/snapshot_slot advance -> engine.set_gc_watermark(...)
-background -> engine.collect_garbage()                     // tombstones + stale versions
+background -> engine.compact_sparse_blocks()                // block relocation + deletion
 ```
 
 These flows require no change to the learner's public contract beyond the

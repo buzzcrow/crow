@@ -39,13 +39,14 @@ using ct_buf = struct
 
 void ct_free_buf(ct_buf *buf);
 
-// Result of an explicit ct_collect_garbage sweep (plan-tree #21); mirrors
-// crowdb::tree::GcStats.
-using ct_gc_stats = struct
+// Result of a cadence-driven ct_compact_sparse_blocks pass (R129); mirrors
+// crowdb::tree::MergeGcStats.
+using ct_merge_gc_stats = struct
 {
-    uint64_t tombstones_dropped;
-    uint64_t pages_freed;
-    uint64_t bytes_freed;
+    uint64_t blocks_selected;
+    uint64_t pages_relocated;
+    uint64_t bytes_relocated;
+    uint64_t blocks_deleted;
 };
 
 // Batched diagnostics snapshot; mirrors crowdb::tree::EngineStats. Every field
@@ -135,10 +136,12 @@ uint64_t  ct_last_applied_slot(const ct_tree *t);
 size_t    ct_frozen_table_count(const ct_tree *t);
 // gc_slot = min(snapshot_slot, safe_slot); see crowdb::tree::set_gc_watermark.
 void ct_set_gc_watermark(ct_tree *t, uint64_t snapshot_slot, uint64_t safe_slot);
-// Explicit in-memory tombstone-retention sweep (crowdb::tree::collect_garbage);
-// does NOT persist -- call ct_snapshot separately for durable GC of dead
-// on-disk extents. out_stats may be null.
-ct_status ct_collect_garbage(ct_tree *t, ct_gc_stats *out_stats);
+// Cadence-driven block compaction (R129). Selects sparse source blocks,
+// relocates their live extents through a snapshot, and deletes blocks
+// unreachable from any retained anchor. Non-block stores and disabled
+// configurations return an empty stats result with no snapshot write.
+// out_stats may be null.
+ct_status ct_compact_sparse_blocks(ct_tree *t, ct_merge_gc_stats *out_stats);
 // Latched media-fault flag: 1 if a demand-load hit an I/O error or CRC mismatch
 // on a committed page (the read degraded to a miss). ct_clear_io_error resets it.
 int32_t ct_io_failed(const ct_tree *t);

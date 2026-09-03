@@ -179,16 +179,19 @@ pub trait KVEngine: Send + Sync {
 
     /// Set the logical retention watermark: `gc_slot =
     /// min(snapshot_slot, safe_slot)`. Tombstones and stale versions with
-    /// slot `<= gc_slot` become eligible for reclamation on the next
-    /// [`Self::collect_garbage`] call. Default is a no-op (`InMemKV` does
-    /// not track a retention watermark or drop tombstones today).
+    /// slot `<= gc_slot` become eligible for folding during the next
+    /// [`Self::persist_snapshot`] or [`Self::compact_sparse_blocks`] call.
+    /// Default is a no-op (`InMemKV` does not track a retention watermark
+    /// or drop tombstones today).
     fn set_gc_watermark(&self, snapshot_slot: u64, safe_slot: u64) {
         let _ = (snapshot_slot, safe_slot);
     }
 
-    /// Best-effort reclamation sweep below the watermark set by the last
-    /// [`Self::set_gc_watermark`] call. Default is a no-op.
-    fn collect_garbage(&self) {}
+    /// Cadence-driven block compaction (R129). Selects sparse source blocks,
+    /// relocates their live extents through a snapshot, and deletes blocks
+    /// unreachable from any retained anchor. Non-block stores and disabled
+    /// configurations return a no-op result. Default is a no-op.
+    fn compact_sparse_blocks(&self) {}
 
     /// Export this engine's entire current state as an opaque,
     /// engine-specific byte stream, for the new-member join flow: a fresh/far-lagging

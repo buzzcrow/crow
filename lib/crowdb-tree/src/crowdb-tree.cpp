@@ -900,108 +900,6 @@ void Crowdbtree::set_gc_watermark(uint64_t snapshot_slot, uint64_t safe_slot)
     }
 }
 
-GcStats Crowdbtree::collect_garbage()
-{
-    auto                        t0 = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lk(write_mutex_);
-    GcStats                     stats;
-    uint64_t                    gc = gc_floor_.load();
-
-    // Skip the full tree walk when gc_floor_ hasn't advanced since the last
-    // sweep — no tombstone can have become newly eligible, so the walk would
-    // visit every resident leaf only to find dropped== 0 on each. The floor
-    // advances only when set_gc_watermark raises it (snapshot_slot or
-    // safe_slot moved forward), so this gates the walk on actual progress.
-    if (gc <= last_gc_floor_.load(std::memory_order_relaxed)) {
-        if (metrics_.gc_l != nullptr) {
-            auto ns =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-            metrics_.gc_l->observe(static_cast<uint64_t>(ns));
-        }
-        return stats;
-    }
-
-    std::function<void(uint64_t)> walk = [&](uint64_t page_id) {
-        // Peek without demand-loading (mapping_.get_word, not resident()): only
-        // leaves are ever evicted, so an unloaded slot here means a cold
-        // leaf. A periodic background sweep must not page it back in just to
-        // check GC eligibility -- that would defeat eviction (#17). It becomes
-        // eligible again next sweep after it's next touched/reloaded.
-        uint64_t w = mapping_.get_word(page_id);
-        if (slot_word::is_empty(w) || slot_word::is_unloaded(w)) {
-            return;
-        }
-        PageBase *head = slot_word::resident_ptr(w);
-        PageBase *base = head;
-        while (base != nullptr && base->type == page_type::kBatchDelta) {
-            base = base->next;
-        }
-        if (base == nullptr) {
-            return; // malformed chain (delta-only, no terminal base); should not happen
-        }
-        if (base->type == page_type::kInnerBase) {
-            for (uint64_t child : static_cast<InnerBase *>(base)->children()) {
-                walk(child);
-            }
-            return;
-        }
-
-        // Leaf: check whether the resolved (highest-slot-wins) state actually
-        // has a tombstone to drop before paying for a rebuild -- most leaves on
-        // most sweeps have nothing to reclaim, and rebuilding unconditionally
-        // would allocate + retire a fresh LeafBase for every resident leaf on
-        // every sweep for no reason.
-        if (metrics_.gc_leaves_checked_c != nullptr) {
-            metrics_.gc_leaves_checked_c->inc();
-        }
-        size_t                  dropped       = 0;
-        size_t                  dropped_bytes = 0;
-        std::vector<uint64_t>   dead_overflow;
-        std::vector<leaf_entry> fresh =
-            resolve_leaf_chain_for_rebuild(head, gc, &dead_overflow, &dropped, &dropped_bytes);
-        if (dropped == 0) {
-            return;
-        }
-        if (metrics_.gc_leaves_reclaimed_c != nullptr) {
-            metrics_.gc_leaves_reclaimed_c->inc();
-        }
-        uint64_t  right    = static_cast<LeafBase *>(base)->right_sibling();
-        LeafBase *new_leaf = build_leaf_spilling_locked(std::move(fresh), right);
-        store_preserving_parent_locked(page_id, new_leaf);
-
-        uint64_t freed = 0;
-        for (PageBase *n = head; n != nullptr;) {
-            PageBase *nx = n->next;
-            retire_page(n);
-            ++freed;
-            n = nx;
-        }
-        for (uint64_t h : dead_overflow) {
-            retire_overflow_chain_locked(h);
-        }
-
-        stats.tombstones_dropped += dropped;
-        stats.pages_freed += freed;
-        stats.bytes_freed += dropped_bytes;
-    };
-    if (root_page_id_.load() != kInvalidPageId) {
-        walk(root_page_id_.load());
-    }
-    last_gc_floor_.store(gc, std::memory_order_relaxed);
-
-    if (metrics_.gc_tombstones_c != nullptr && stats.tombstones_dropped > 0) {
-        metrics_.gc_tombstones_c->inc_by(stats.tombstones_dropped);
-    }
-    if (metrics_.gc_pages_c != nullptr && stats.pages_freed > 0) {
-        metrics_.gc_pages_c->inc_by(stats.pages_freed);
-    }
-    if (metrics_.gc_l != nullptr) {
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-        metrics_.gc_l->observe(static_cast<uint64_t>(ns));
-    }
-    return stats;
-}
-
 Status Crowdbtree::put(Slice key, Slice value)
 {
     Batch b;
@@ -3781,19 +3679,19 @@ void Crowdbtree::init_metrics(const std::string &prefix, const std::string &back
         r->register_callback_gauge(prefix + ".page.map.total_pids.g", [this] { return mapping_.next_page_id(); });
     metrics_.page_map_segments_g = r->register_callback_gauge(
         prefix + ".page.map.segments.g", [this] { return static_cast<uint64_t>(mapping_.segments_allocated()); });
-    metrics_.snapshot_l            = r->register_summary(prefix + ".snapshot.l");
-    metrics_.snapshot_pages_c      = r->register_counter(prefix + ".snapshot.pages.c");
-    metrics_.scan_entries_c        = r->register_counter(prefix + ".scan.entries.c");
-    metrics_.scan_l                = r->register_summary(prefix + ".scan.l");
-    metrics_.scan_l0_l             = r->register_summary(prefix + ".scan.l0.l");
-    metrics_.scan_l1_l             = r->register_summary(prefix + ".scan.l1.l");
-    metrics_.scan_merge_l          = r->register_summary(prefix + ".scan.merge.l");
-    metrics_.scan_retry_c          = r->register_counter(prefix + ".scan.retry.c");
-    metrics_.gc_tombstones_c       = r->register_counter(prefix + ".gc.tombstones.c");
-    metrics_.gc_pages_c            = r->register_counter(prefix + ".gc.pages.c");
-    metrics_.gc_leaves_checked_c   = r->register_counter(prefix + ".gc.leaves.checked.c");
-    metrics_.gc_leaves_reclaimed_c = r->register_counter(prefix + ".gc.leaves.reclaimed.c");
-    metrics_.gc_l                  = r->register_summary(prefix + ".gc.l");
+    metrics_.snapshot_l           = r->register_summary(prefix + ".snapshot.l");
+    metrics_.snapshot_pages_c     = r->register_counter(prefix + ".snapshot.pages.c");
+    metrics_.scan_entries_c       = r->register_counter(prefix + ".scan.entries.c");
+    metrics_.scan_l               = r->register_summary(prefix + ".scan.l");
+    metrics_.scan_l0_l            = r->register_summary(prefix + ".scan.l0.l");
+    metrics_.scan_l1_l            = r->register_summary(prefix + ".scan.l1.l");
+    metrics_.scan_merge_l         = r->register_summary(prefix + ".scan.merge.l");
+    metrics_.scan_retry_c         = r->register_counter(prefix + ".scan.retry.c");
+    metrics_.gc_tombstones_c      = r->register_counter(prefix + ".gc.tombstones.c");
+    metrics_.merge_gc_blocks_c    = r->register_counter(prefix + ".merge_gc.blocks.c");
+    metrics_.merge_gc_relocated_c = r->register_counter(prefix + ".merge_gc.relocated.c");
+    metrics_.merge_gc_deleted_c   = r->register_counter(prefix + ".merge_gc.deleted.c");
+    metrics_.merge_gc_l           = r->register_summary(prefix + ".merge_gc.l");
 
     // ── Backend I/O metrics ──
     metrics_.page_find_c                 = r->register_counter(io + ".page.find.c");

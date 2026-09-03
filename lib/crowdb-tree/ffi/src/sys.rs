@@ -77,10 +77,12 @@ pub struct ct_ext_op {
 }
 
 #[repr(C)]
-pub struct ct_gc_stats {
-    pub tombstones_dropped: u64,
-    pub pages_freed: u64,
-    pub bytes_freed: u64,
+#[derive(Default)]
+pub struct ct_merge_gc_stats {
+    pub blocks_selected: u64,
+    pub pages_relocated: u64,
+    pub bytes_relocated: u64,
+    pub blocks_deleted: u64,
 }
 
 #[repr(C)]
@@ -149,7 +151,7 @@ extern "C" {
     pub fn ct_last_applied_slot(t: *const ct_tree) -> u64;
     pub fn ct_frozen_table_count(t: *const ct_tree) -> usize;
     pub fn ct_set_gc_watermark(t: *mut ct_tree, snapshot_slot: u64, safe_slot: u64);
-    pub fn ct_collect_garbage(t: *mut ct_tree, out_stats: *mut ct_gc_stats) -> c_int;
+    pub fn ct_compact_sparse_blocks(t: *mut ct_tree, out_stats: *mut ct_merge_gc_stats) -> c_int;
     pub fn ct_io_failed(t: *const ct_tree) -> c_int;
     pub fn ct_clear_io_error(t: *mut ct_tree);
     pub fn ct_clear(t: *mut ct_tree) -> c_int;

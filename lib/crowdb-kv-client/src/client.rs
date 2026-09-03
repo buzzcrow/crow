@@ -394,6 +394,7 @@ impl CrowdbKvClient {
     /// queried may be transiently down while others are fine. Bounded by
     /// the same `RetryConfig::max_retries` budget used for post-request
     /// retries.
+    #[tracing::instrument(level = "debug", skip_all, fields(s = store_id, g = group_id))]
     async fn resolve_leader(&self, store_id: u64, group_id: u64) -> Result<String> {
         if let Some(ep) = self.topology.leader(store_id, group_id) {
             return Ok(ep);
@@ -411,8 +412,6 @@ impl CrowdbKvClient {
             self.metrics.record_topology_refresh();
             if let Err(Error::NoSeeds) = self.topology.refresh().await {
                 tracing::warn!(
-                    store_id,
-                    group_id,
                     "resolve_leader: no mgmt seeds configured — call set_mgmt_seeds before KV ops"
                 );
                 return Err(Error::NoSeeds);

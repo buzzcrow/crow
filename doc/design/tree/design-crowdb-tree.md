@@ -155,7 +155,7 @@ pub trait KVEngine: Send + Sync {
     fn last_applied_slot(&self) -> u64;
     async fn persist_snapshot(&self) -> Result<u64, EngineError>;
     fn set_gc_watermark(&self, snapshot_slot: u64, safe_slot: u64);
-    async fn collect_garbage(&self) -> Result<GcStats, EngineError>;
+    async fn compact_sparse_blocks(&self) -> Result<MergeGcStats, EngineError>;
 
     fn snapshot_export(&self) -> BoxStream<'_, Result<Chunk, EngineError>>;
     async fn snapshot_import(&self, chunks: BoxStream<'_, Chunk>) -> Result<(), EngineError>;
@@ -176,8 +176,8 @@ pub trait EngineView: Send + Sync {   // compare / iter_all / range read on a fi
   quiescence" requirement `compare`/`iter_all`/range reads previously needed —
   they run on a pinned version instead.
 - **`last_applied_slot` / `persist_snapshot` / `set_gc_watermark` /
-  `collect_garbage`** make the state-machine self-persistence and the logical
-  retention-GC policy explicit interface methods (semantics in §3.1).
+  `compact_sparse_blocks`** make the state-machine self-persistence and the
+  logical retention-GC policy explicit interface methods (semantics in §3.1).
 
 ### 3.1 Out-of-order apply, snapshots, and the two GCs
 
@@ -224,9 +224,9 @@ trivial: the receiver imports the root at `S`, then replays the WAL from
 1. *Data-retention GC.* The learner/replicator advances `safe_slot` (every
    member applied through here) and `snapshot_slot` (state durable on a
    quorum) and calls `set_gc_watermark(snapshot_slot, safe_slot)`. crowdb-tree
-   computes `gc_slot = min(safe_slot, snapshot_slot)` and, on the next
-   `collect_garbage()` / consolidation, physically drops tombstones and
-   superseded cells whose slot `< gc_slot`. **Policy is owned by the WAL/slot
+   computes `gc_slot = min(safe_slot, snapshot_slot)` and, during the next
+   snapshot preparation, physically folds tombstones and
+   superseded cells whose slot `<= gc_slot`. **Policy is owned by the WAL/slot
    layer; crowdb-tree only enforces the floor.** This is the same `gc_slot` the
    consensus-WAL GC uses ([`design-crowdb-tree-storage.md §7`](design-crowdb-tree-storage.md#7-interaction-with-consensus-wal-gc)).
 2. *Page reclamation.* Freeing B+tree pages and retired root versions once no
@@ -286,7 +286,7 @@ cross-engine parity, sanitizer) is documented in [`../kv/design-crowdb-kv-test.m
 | D4 | **Tree family = COW B+tree + per-leaf delta chain + local consolidation.** | A "mini bw-tree without the lock-free machinery": leaf-level deltas give LSM-like write batching with low write amplification, while a single B+tree locate keeps reads cheap and snapshots clean. |
 | D5 | **Slot is inlined into the value cell.** | Single-version, highest-slot-wins semantics require each entry to carry `(slot, kind, value)`. Slot is **not** in the key (that would create multiple versions). A batch at slot `S` fans out into one cell per key, scattered across possibly many leaves/pages, all carrying the same `S` — this many-cells-share-one-slot case is the *common* case (§3.1). |
 | D6 | **Page lifecycle via epoch-based reclamation, owned per-`Crowdbtree`.** | This is the *physical* page-reclamation GC, internal and automatic: readers do a nanosecond-scale epoch enter/exit; the writer retires replaced pages; a GC thread reclaims after readers drain. The epoch manager is per-tree because the buffer pool (and therefore all retired pages) is already tree-private — there is no cross-tree page sharing, so a per-tree epoch is simpler and makes zero-copy borrowed reads fully tree-scoped. There is no shared cross-tree environment object. |
-| D7 | **Engine abstraction is async and adds snapshot/retention-GC/`last_applied_slot`/consistent views.** | Persistence can fail and is async (io_uring / RDMA); `compare`/`iter_all` move onto a pinned consistent view instead of a quiescent global stop. `set_gc_watermark`/`collect_garbage` drive the **logical, slot-driven data-retention GC** (tombstone drop), *not* internal page reclamation (§3.1). |
+| D7 | **Engine abstraction is async and adds snapshot/retention-GC/`last_applied_slot`/consistent views.** | Persistence can fail and is async (io_uring / RDMA); `compare`/`iter_all` move onto a pinned consistent view instead of a quiescent global stop. `set_gc_watermark`/`compact_sparse_blocks` drive the **logical, slot-driven data-retention GC** (tombstone folding during snapshot) and **physical block compaction** (sparse-block relocation), *not* internal page reclamation (§3.1). |
 | D8 | **Unified `buffer` memory model; single-allocation zero-copy pipeline.** | Key/value bytes are allocated once at the API boundary and moved down to the MemTable and into the frame; reads return borrowed views into resident frames (L1) or copies (L0). Replaces per-write `std::string`. Full design in [`design-crowdb-tree-engine.md §2`](design-crowdb-tree-engine.md#2-memory-and-buffer-management). |
 | D9 | **MemTable ordered map = `absl::btree_map`.** | Chosen over `std::map` (poor cache locality) and skip list (cache-miss-heavy at MemTable scale). B-tree fanout gives 2–3× faster point lookups; ordered iteration is preserved for drain/snapshot. |
 | D10 | **Snapshot/flush unified terminology + dual flush trigger.** | `flush` (drain L0→L1 + publish a new COW root) *is* snapshot creation. Trigger = MemTable size (primary) **OR** a long time interval (secondary safety net, default ~2 h) so a slow-write workload cannot leave L0 un-flushed and make crash recovery replay unbounded (§3.1). |

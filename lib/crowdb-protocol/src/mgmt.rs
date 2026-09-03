@@ -240,9 +240,10 @@ impl StatusLevel {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct MetricsSnapshot {
-    pub rpc_count: u64,
-    pub err_count: u64,
-    pub last_rtt_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub err_count: Option<u64>,
 }
 
 /// `GET /topology` response wrapper.
@@ -305,7 +306,8 @@ pub struct InflightStatus {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct ElectionStateView {
-    pub election_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub election_count: Option<u64>,
     pub current_term: u64,
     /// Milliseconds since the most recent heartbeat. `None` before the
     /// first heartbeat has been observed.
@@ -317,9 +319,12 @@ pub struct ElectionStateView {
     pub lease_remaining_ms: Option<u64>,
     /// Number of slots currently being repaired by bulk Phase 1.
     pub bulk_phase1_in_flight_slots: u64,
-    pub step_downs_higher_term: u64,
-    pub step_downs_lease_unrenewable: u64,
-    pub step_downs_admin: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_downs_higher_term: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_downs_lease_unrenewable: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_downs_admin: Option<u64>,
 }
 
 /// Read-path state gauges for `/topology` and the GUI.
@@ -409,7 +414,8 @@ pub struct RemoteStatus {
     pub status: StatusLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
-    pub metrics: MetricsSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<MetricsSnapshot>,
 }
 
 /// `GET /health` response.

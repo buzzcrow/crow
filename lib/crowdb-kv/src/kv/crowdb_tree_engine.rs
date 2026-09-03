@@ -342,8 +342,8 @@ impl KVEngine for CrowdbTreeEngine {
         self.inner.handle().set_gc_watermark(snapshot_slot, safe_slot);
     }
 
-    fn collect_garbage(&self) {
-        let _ = self.inner.handle().collect_garbage();
+    fn compact_sparse_blocks(&self) {
+        let _ = self.inner.handle().compact_sparse_blocks();
     }
 
     fn snapshot_export(&self) -> Result<(u64, Vec<u8>), String> {

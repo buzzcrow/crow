@@ -6,12 +6,15 @@ use crate::sys;
 use crate::tree::Crowdbtree;
 use crate::CtError;
 
-/// Result of an explicit [`Crowdbtree::collect_garbage`] sweep.
+/// Result of a cadence-driven [`Crowdbtree::compact_sparse_blocks`] pass
+/// (R129). Snapshot folding drops eligible tombstones during every snapshot;
+/// this struct reports the block-level relocation and deletion outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct GcStats {
-    pub tombstones_dropped: u64,
-    pub pages_freed: u64,
-    pub bytes_freed: u64,
+pub struct MergeGcStats {
+    pub blocks_selected: u64,
+    pub pages_relocated: u64,
+    pub bytes_relocated: u64,
+    pub blocks_deleted: u64,
 }
 
 /// Point-in-time diagnostics snapshot; see [`Crowdbtree::stats`]. Every field
@@ -45,19 +48,18 @@ pub struct Stats {
 }
 
 impl Crowdbtree {
-    /// Explicit in-memory tombstone-retention sweep; does not persist. See
-    /// `crow::tree::Crowdbtree::collect_garbage`.
-    pub fn collect_garbage(&self) -> Result<GcStats, CtError> {
-        let mut stats = sys::ct_gc_stats {
-            tombstones_dropped: 0,
-            pages_freed: 0,
-            bytes_freed: 0,
-        };
-        check(unsafe { sys::ct_collect_garbage(self.as_ptr(), &mut stats) })?;
-        Ok(GcStats {
-            tombstones_dropped: stats.tombstones_dropped,
-            pages_freed: stats.pages_freed,
-            bytes_freed: stats.bytes_freed,
+    /// Cadence-driven block compaction (R129). Selects sparse source blocks,
+    /// relocates their live extents through a snapshot, and deletes blocks
+    /// unreachable from any retained anchor. Non-block stores and disabled
+    /// configurations return an empty stats result with no snapshot write.
+    pub fn compact_sparse_blocks(&self) -> Result<MergeGcStats, CtError> {
+        let mut stats = sys::ct_merge_gc_stats::default();
+        check(unsafe { sys::ct_compact_sparse_blocks(self.as_ptr(), &mut stats) })?;
+        Ok(MergeGcStats {
+            blocks_selected: stats.blocks_selected,
+            pages_relocated: stats.pages_relocated,
+            bytes_relocated: stats.bytes_relocated,
+            blocks_deleted: stats.blocks_deleted,
         })
     }
 

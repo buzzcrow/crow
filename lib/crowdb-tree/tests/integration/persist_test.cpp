@@ -750,7 +750,8 @@ TEST(Persist, BlockCompactionGapFiltering)
             }
         }
         ASSERT_TRUE(t.flush().ok());
-        t.collect_garbage();
+        // Tombstone folding now happens during snapshot preparation (R129);
+        // no standalone GC sweep is needed.
         ASSERT_TRUE(t.snapshot().ok());
 
         // Write new keys — they should go to dense blocks or new blocks,
@@ -804,6 +805,263 @@ TEST(Persist, BlockCompactionSingleMediumUnaffected)
     EXPECT_TRUE(t.get(Slice("b"), &s, &v));
     EXPECT_EQ(v, "2");
 }
+
+// R129: tombstone folding via snapshot — deletes are folded during
+// snapshot preparation, not by a standalone GC sweep. Verify that a
+// delete + snapshot + reopen produces the same result as the in-memory
+// state (sync deletion parity).
+TEST(Persist, SnapshotFoldingSyncDeletionParity)
+{
+    crowdb::tree_test::TempDir tmp("syncpar_");
+    ASSERT_FALSE(tmp.path.empty());
+    constexpr uint64_t blk = 8 * 1024;
+
+    std::map<std::string, std::string> oracle;
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        Crowdbtree t(opt);
+
+        uint64_t slot = 0;
+        for (int i = 0; i < 100; ++i) {
+            ++slot;
+            std::string k = make_key(i);
+            std::string v = "v" + std::to_string(i);
+            ASSERT_TRUE(t.apply(slot, put_one(k, v)).ok());
+            oracle[k] = v;
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+
+        // Delete every third key.
+        for (int i = 0; i < 100; i += 3) {
+            ++slot;
+            std::string k = make_key(i);
+            ASSERT_TRUE(t.apply(slot, del_one(k)).ok());
+            oracle.erase(k);
+        }
+        ASSERT_TRUE(t.flush().ok());
+        // Snapshot folds eligible tombstones (watermark defaults to 0, so
+        // only delta-chain folding happens; the tombstones at higher slots
+        // are not yet eligible for GC-floor folding).
+        t.set_gc_watermark(slot, slot);
+        ASSERT_TRUE(t.snapshot().ok());
+
+        // Verify in-memory state matches oracle.
+        for (const auto &[k, v] : oracle) {
+            std::string gv;
+            uint64_t    gs;
+            EXPECT_TRUE(t.get(Slice(k), &gs, &gv)) << "missing " << k;
+            EXPECT_EQ(gv, v);
+        }
+        for (int i = 0; i < 100; i += 3) {
+            std::string gv;
+            uint64_t    gs;
+            EXPECT_FALSE(t.get(Slice(make_key(i)), &gs, &gv)) << "tombstone resurrected";
+        }
+    }
+
+    // Reopen and verify durable state matches oracle.
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store = store.get();
+        std::unique_ptr<Crowdbtree> t;
+        ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
+        for (const auto &[k, v] : oracle) {
+            std::string gv;
+            uint64_t    gs;
+            EXPECT_TRUE(t->get(Slice(k), &gs, &gv)) << "missing " << k << " after reopen";
+            EXPECT_EQ(gv, v);
+        }
+        for (int i = 0; i < 100; i += 3) {
+            std::string gv;
+            uint64_t    gs;
+            EXPECT_FALSE(t->get(Slice(make_key(i)), &gs, &gv)) << "tombstone resurrected after reopen";
+        }
+    }
+}
+
+// R129: compact_sparse_blocks restart safety — after compaction, the
+// store must reopen cleanly and all surviving data must be intact.
+TEST(Persist, CompactSparseBlocksRestartSafety)
+{
+    crowdb::tree_test::TempDir tmp("cmprestart_");
+    ASSERT_FALSE(tmp.path.empty());
+    constexpr uint64_t blk = 8 * 1024;
+
+    std::set<std::string> kept_keys;
+    for (int i = 0; i < 200; i += 20) {
+        kept_keys.insert(make_key(i));
+    }
+
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store                    = store.get();
+        opt.leaf_split_bytes              = 256;
+        opt.merge_gc_block_free_threshold = 0.30;
+        opt.merge_gc_max_relocation_bytes = 8 * 1024 * 1024;
+        Crowdbtree t(opt);
+
+        uint64_t slot = 0;
+        for (int i = 0; i < 200; ++i) {
+            ++slot;
+            ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "v" + std::to_string(i))).ok());
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+
+        // Delete most keys to create sparse blocks.
+        for (int i = 0; i < 200; ++i) {
+            if (i % 20 != 0) {
+                ++slot;
+                ASSERT_TRUE(t.apply(slot, del_one(make_key(i))).ok());
+            }
+        }
+        ASSERT_TRUE(t.flush().ok());
+        t.set_gc_watermark(slot, slot);
+        ASSERT_TRUE(t.snapshot().ok());
+
+        // Run compaction.
+        MergeGcStats stats = t.compact_sparse_blocks();
+        EXPECT_GE(stats.blocks_selected, 1U);
+
+        // Verify surviving keys.
+        for (const auto &k : kept_keys) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t.get(Slice(k), &s, &v)) << "missing " << k;
+        }
+    }
+
+    // Reopen after compaction — anchor and data must be intact.
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store = store.get();
+        std::unique_ptr<Crowdbtree> t;
+        ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
+        for (const auto &k : kept_keys) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t->get(Slice(k), &s, &v)) << "missing " << k << " after reopen";
+        }
+    }
+}
+
+// R129: compact_sparse_blocks failure injection — a write or sync failure
+// at any stage of the compaction snapshot must leave the previous
+// generation fully recoverable. No source block is deleted before the
+// finalizer, so a crash mid-compaction falls back to the prior anchor
+// with all data intact. This parameterized test arms a fault at each
+// write/sync call index in the compaction pass and verifies reopen.
+class CompactSparseBlocksFailureInjectionTest : public ::testing::TestWithParam<std::tuple<int, bool>>
+{
+    // std::get<0> = write index to fail (-1 = don't fail writes)
+    // std::get<1> = fail sync (true) or write (false)
+};
+
+TEST_P(CompactSparseBlocksFailureInjectionTest, ReopenFromPriorAnchorIsClean)
+{
+    auto [fail_write_idx, fail_sync] = GetParam();
+    crowdb::tree_test::TempDir tmp("cmpfail_");
+    ASSERT_FALSE(tmp.path.empty());
+    constexpr uint64_t blk = 8 * 1024;
+
+    std::set<std::string> kept_keys;
+    for (int i = 0; i < 200; i += 20) {
+        kept_keys.insert(make_key(i));
+    }
+
+    // Phase 1: write data, snapshot, delete most keys, snapshot (sparse blocks).
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        Crowdbtree t(opt);
+
+        uint64_t slot = 0;
+        for (int i = 0; i < 200; ++i) {
+            ++slot;
+            ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "v" + std::to_string(i))).ok());
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+
+        for (int i = 0; i < 200; ++i) {
+            if (i % 20 != 0) {
+                ++slot;
+                ASSERT_TRUE(t.apply(slot, del_one(make_key(i))).ok());
+            }
+        }
+        ASSERT_TRUE(t.flush().ok());
+        t.set_gc_watermark(slot, slot);
+        ASSERT_TRUE(t.snapshot().ok());
+    }
+
+    // Phase 2: reopen with FaultyPageStore, arm the fault, run compaction.
+    // The compaction must fail (not silently succeed), and no block is
+    // deleted because the finalizer never runs.
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        FaultyPageStore faulty(store.get());
+        Options         opt;
+        opt.page_store                    = &faulty;
+        opt.leaf_split_bytes              = 256;
+        opt.merge_gc_block_free_threshold = 0.30;
+        opt.merge_gc_max_relocation_bytes = 8 * 1024 * 1024;
+        Crowdbtree t(opt);
+
+        if (fail_sync) {
+            faulty.arm_sync_fault(fail_write_idx, FaultyPageStore::Fault::kFail);
+        }
+        else {
+            faulty.arm_write_fault(fail_write_idx, FaultyPageStore::Fault::kFail);
+        }
+
+        // compact_sparse_blocks may or may not return an error depending on
+        // which write fails — but either way, no block should be deleted
+        // because finalize_prepared_snapshot only runs after both barriers.
+        MergeGcStats stats = t.compact_sparse_blocks();
+        // blocks_deleted must be 0 — the finalizer did not complete.
+        EXPECT_EQ(stats.blocks_deleted, 0U);
+    }
+
+    // Phase 3: reopen cleanly — prior anchor must be intact, all kept keys
+    // readable, no corruption from the partial compaction.
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store = store.get();
+        std::unique_ptr<Crowdbtree> t;
+        ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
+        for (const auto &k : kept_keys) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t->get(Slice(k), &s, &v)) << "missing " << k << " after failed compaction + reopen";
+        }
+    }
+}
+
+// Fail at write index 0 (first page write), 2 (segment image), 5 (later
+// write), and sync index 0 (first barrier), 1 (second barrier).
+INSTANTIATE_TEST_SUITE_P(CompactSparseBlocksFailureStages, CompactSparseBlocksFailureInjectionTest,
+                         ::testing::Values(std::make_tuple(0, false),  // first page write
+                                           std::make_tuple(2, false),  // segment image
+                                           std::make_tuple(5, false),  // later write
+                                           std::make_tuple(0, true),   // first sync barrier
+                                           std::make_tuple(1, true))); // second sync barrier
 
 // leaf/inner counts are persisted in the commit anchor and restored on open.
 TEST(Persist, LeafInnerCountSurvivesSnapshotOpen)

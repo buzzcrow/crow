@@ -44,8 +44,7 @@ pub enum MetricPoint {
 impl MetricPoint {
     /// The metric name (e.g. `s.1.g.2.kv.put.c`).
     #[must_use]
-    #[cfg(test)]
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match self {
             Self::Counter { name, .. }
             | Self::Gauge { name, .. }

@@ -168,6 +168,23 @@ struct Options
     // so C++ metrics are tagged with their storage backend.
     std::string backend_label;
 
+    // ── Block compaction (R129) ──
+    // Cadence-driven merge GC reclaims sparse array-of-blocks source blocks
+    // by relocating their live extents during a snapshot. Defaults: disabled
+    // cadence (interval 0), 70% free-ratio threshold, one block of relocation
+    // per pass. See design-crowdb-tree-storage.md §2.5.
+    // merge_gc_interval_ms: wall-clock cadence for compact_sparse_blocks; 0
+    // disables the cadence-driven pass (snapshot folding still runs).
+    uint64_t merge_gc_interval_ms = 0;
+    // merge_gc_block_free_threshold: shared by allocation gap filtering and
+    // source-block selection. A block whose free ratio is strictly greater
+    // than this value is a compaction candidate. (0.0, 1.0).
+    double merge_gc_block_free_threshold = 0.70;
+    // merge_gc_max_relocation_bytes: per-pass byte budget; 0 disables
+    // relocation (selection returns empty). The first eligible block is
+    // always allowed even when it exceeds the budget so progress is possible.
+    uint64_t merge_gc_max_relocation_bytes = 0;
+
     // ── Logging ──
     // These fields are no longer used by Crowdbtree::open() — logging is now
     // process-global and must be initialized by the application via

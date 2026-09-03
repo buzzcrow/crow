@@ -194,12 +194,16 @@ class GetView
     }
 };
 
-// Result of an explicit collect_garbage() sweep (plan-tree #21).
-struct GcStats
+// Result of a cadence-driven compact_sparse_blocks() pass (R129). Snapshot
+// folding drops eligible tombstones during every snapshot; this struct
+// reports the block-level relocation and deletion outcome of one compaction
+// pass.
+struct MergeGcStats
 {
-    uint64_t tombstones_dropped = 0; // tombstone cells physically dropped
-    uint64_t pages_freed        = 0; // resident pages (deltas + old leaf bases) retired
-    uint64_t bytes_freed        = 0; // logical key+cell bytes of the dropped tombstones
+    uint64_t blocks_selected = 0; // sparse source blocks chosen for relocation
+    uint64_t pages_relocated = 0; // resident + unloaded pages moved
+    uint64_t bytes_relocated = 0; // bytes written for relocated extents
+    uint64_t blocks_deleted  = 0; // source blocks unlinked after commit
 };
 
 // Point-in-time diagnostics snapshot: batches every
@@ -318,6 +322,23 @@ struct PreparedSegmentWrite
     std::vector<uint8_t> blob;               // already IU-padded
 };
 
+struct PreparedUnloadedRelocation
+{
+    uint64_t page_id  = 0;
+    uint64_t old_word = slot_word::kEmpty;
+    uint64_t new_word = slot_word::kEmpty;
+};
+
+// A prefetched unloaded page read outside write_mutex_ (R129). The mapping
+// word is revalidated under the mutex during prepare; a mismatch discards
+// the prefetched blob and the page is skipped for this pass.
+struct PrefetchedPage
+{
+    uint64_t             page_id  = 0;
+    uint64_t             old_word = slot_word::kEmpty;
+    std::vector<uint8_t> blob; // IU-padded page content read from the store
+};
+
 // Output of prepare_snapshot_locked(): every byte this snapshot generation
 // needs written, computed synchronously under write_mutex_ (the segment
 // scan + delta-fold + page/segment-image/directory encode is CPU/memory-only
@@ -331,11 +352,12 @@ struct PreparedSegmentWrite
 // the new version.
 struct PreparedSnapshot
 {
-    std::vector<PreparedPageWrite>    page_writes;
-    std::vector<PreparedSegmentWrite> segment_writes;
-    PreparedSnapshotWrite             directory_write;
-    PreparedSnapshotWrite             anchor_write;
-    uint64_t                          last_applied_slot = 0;
+    std::vector<PreparedPageWrite>          page_writes;
+    std::vector<PreparedSegmentWrite>       segment_writes;
+    std::vector<PreparedUnloadedRelocation> unloaded_relocations;
+    PreparedSnapshotWrite                   directory_write;
+    PreparedSnapshotWrite                   anchor_write;
+    uint64_t                                last_applied_slot = 0;
     // Diagnostics for the "snapshot committed" log line (matches the
     // pre-refactor synchronous snapshot()'s log fields exactly).
     uint64_t           seq             = 0;
@@ -343,6 +365,15 @@ struct PreparedSnapshot
     uint64_t           pages_written   = 0;
     uint64_t           segdir_len      = 0;
     std::set<uint32_t> empty_blocks; // block indices with zero live bytes (block compaction)
+    // Block compaction stats (R129). blocks_selected is the count of source
+    // blocks chosen for relocation this pass; pages_relocated and
+    // bytes_relocated count only pages that were actually moved (not clean
+    // pages that kept their durable address). blocks_deleted is filled by
+    // finalize_prepared_snapshot after the finalizer runs.
+    uint64_t blocks_selected = 0;
+    uint64_t pages_relocated = 0;
+    uint64_t bytes_relocated = 0;
+    uint64_t blocks_deleted  = 0;
 };
 
 // One page's raw frame bytes, tagged with its logical PID (plan-tree #16
@@ -470,13 +501,13 @@ class Crowdbtree
 
     // Logical retention GC watermark:
     // stores both slots and computes gc_floor_ = min(snapshot_slot, safe_slot).
-    // Tombstones with slot <= gc_floor_ may be dropped, during consolidation or
-    // by an explicit collect_garbage() sweep. Using the min of the two (rather
-    // than safe_slot alone) is what makes it safe to call this before #20's
-    // learner wiring: a tombstone whose deletion isn't yet durable on a quorum
-    // (snapshot_slot) is never dropped early just because every member has
-    // locally applied it (safe_slot). Monotonic: gc_floor_ never regresses even
-    // if a later call passes a smaller min.
+    // Tombstones with slot <= gc_floor_ may be dropped during snapshot
+    // preparation (folding) and block compaction. Using the min of the two
+    // (rather than safe_slot alone) is what makes it safe to call this before
+    // #20's learner wiring: a tombstone whose deletion isn't yet durable on a
+    // quorum (snapshot_slot) is never dropped early just because every member
+    // has locally applied it (safe_slot). Monotonic: gc_floor_ never regresses
+    // even if a later call passes a smaller min.
     void set_gc_watermark(uint64_t snapshot_slot, uint64_t safe_slot);
 
     [[nodiscard]] uint64_t gc_watermark() const
@@ -484,20 +515,17 @@ class Crowdbtree
         return gc_floor_.load();
     }
 
-    // Explicit tombstone-retention GC sweep (plan-tree #21). Force-consolidates
-    // every *resident* leaf holding a tombstone <= gc_watermark(), independent
-    // of the delta-chain-length/bytes consolidation trigger and of snapshot()'s
-    // dirty-only rebuild -- both of those only touch a leaf that's already
-    // dirty, so a leaf that receives a delete and then no further writes would
-    // otherwise keep its tombstone past gc_floor_ indefinitely. Skips a leaf
-    // whose resolved state has no tombstone to drop (cheap no-op sweep once the
-    // tree is fully swept), and skips evicted (demand-load-unloaded) leaves
-    // without paging them back in -- a background sweep must not defeat
-    // eviction (#17); a cold leaf becomes eligible again once next reloaded.
-    // Same retire_page()/epoch-guard mechanism as consolidate(), so it is safe
-    // to run concurrently with lock-free readers (get/scan/snapshot_view).
-    // Serialized against writers by write_mutex_.
-    GcStats collect_garbage();
+    // Cadence-driven block compaction (R129). Selects the sparsest source
+    // blocks above the configured free-ratio threshold, capped by the
+    // per-pass byte budget, and runs one snapshot that relocates their live
+    // extents (resident + unloaded pages and current mapping metadata) to
+    // destinations outside every selected source block. Eligible tombstones
+    // are folded during the same snapshot. After the second durability
+    // barrier and prepared-state commit, the shared finalizer deletes only
+    // blocks unreachable from any retained anchor. Non-block stores and
+    // disabled configurations return an empty stats result with no snapshot
+    // write. Uses the existing snapshot gate; no new mutex or blocking lock.
+    MergeGcStats compact_sparse_blocks();
 
     // Drain the contiguous-applied prefix of every live MemTable (active_ +
     // any queued frozen_ buffers, plan-tree #3) into L1 and publish the
@@ -940,8 +968,8 @@ class Crowdbtree
     // higher-slot write supersedes is appended to *dead_overflow (if non-null) so
     // the caller can retire it. If out_tombstones_dropped/out_bytes_dropped are
     // non-null, they are set to the number of tombstones dropped and their total
-    // key+cell byte size (collect_garbage() uses the count to skip rebuilding a
-    // leaf that has nothing to reclaim, and the bytes for GcStats::bytes_freed --
+    // key+cell byte size (snapshot folding uses the count to skip rebuilding a
+    // leaf that has nothing to reclaim, and the bytes for diagnostics --
     // the resident *frame* size is a poor proxy since pool-backed frames are
     // fixed-size regardless of live content). Caller holds write_mutex_.
     [[nodiscard]] static std::vector<leaf_entry>
@@ -1083,7 +1111,7 @@ class Crowdbtree
     // whatever garbage/stale content actually occupies that address today.
     // commit_prepared_snapshot() sets it instead, only once each page's
     // specific write has actually landed.
-    Status prepare_snapshot_locked(PreparedSnapshot *out);
+    Status prepare_snapshot_locked(PreparedSnapshot *out, std::vector<PrefetchedPage> prefetched = {});
 
     // Marks every PreparedSnapshot::page_writes/segment_writes entry
     // durable (see prepare_snapshot_locked's doc comment) and publishes the
@@ -1093,6 +1121,7 @@ class Crowdbtree
     // doc comments for why a mismatch (skip, not an error) is possible and
     // safe.
     void commit_prepared_snapshot(const PreparedSnapshot &prepared);
+    void finalize_prepared_snapshot(PreparedSnapshot &prepared);
 
     // Cross-thread-safe (unlike write_mutex_) spin-gate serializing this
     // snapshot generation's prepare-through-commit sequence against a
@@ -1214,7 +1243,6 @@ class Crowdbtree
     std::atomic<uint64_t>     last_applied_slot_{0};
     std::atomic<uint64_t>     version_{0};
     std::atomic<uint64_t>     gc_floor_{0};
-    std::atomic<uint64_t>     last_gc_floor_{0};             // gc_floor_ at the last collect_garbage sweep
     std::atomic<uint64_t>     snapshot_pages_written_{0};    // pages written by last snapshot
     std::atomic<uint64_t>     snapshot_pages_total_{0};      // cumulative pages written across all snapshots
     std::atomic<uint64_t>     snapshot_segments_written_{0}; // segment images written by last snapshot
@@ -1263,7 +1291,6 @@ class Crowdbtree
     // Block indices that were empty in the previous snapshot (two-generation
     // rule for block deletion). A block is only deleted after it's empty in
     // two consecutive snapshots — the crash fallback anchor still references it.
-    std::set<uint32_t> prev_empty_blocks_;
 
     // Tree-owned epoch-based reclamation (plan-tree #7; formerly on CrowdbtreeEnv).
     // Declared last so it is destroyed first: ~Crowdbtree frees the live tree via
@@ -1337,12 +1364,12 @@ class Crowdbtree
         LatencySummary *scan_l1_l      = nullptr;
         LatencySummary *scan_merge_l   = nullptr;
         Counter        *scan_retry_c   = nullptr;
-        // GC
-        Counter        *gc_tombstones_c       = nullptr;
-        Counter        *gc_pages_c            = nullptr;
-        Counter        *gc_leaves_checked_c   = nullptr;
-        Counter        *gc_leaves_reclaimed_c = nullptr;
-        LatencySummary *gc_l                  = nullptr;
+        // GC (snapshot folding + block compaction)
+        Counter        *gc_tombstones_c      = nullptr; // tombstones dropped by snapshot folding
+        Counter        *merge_gc_blocks_c    = nullptr; // source blocks selected per compaction pass
+        Counter        *merge_gc_relocated_c = nullptr; // pages relocated per compaction pass
+        Counter        *merge_gc_deleted_c   = nullptr; // blocks deleted per compaction pass
+        LatencySummary *merge_gc_l           = nullptr; // compaction pass latency
     };
 
     MetricsHandles metrics_;

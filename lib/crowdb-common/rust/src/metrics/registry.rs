@@ -306,6 +306,68 @@ impl MetricsRegistry {
         }
         out
     }
+
+    /// Snapshot one metric by its complete registered name.
+    ///
+    /// Returns `None` without registering anything when the name is absent.
+    #[must_use]
+    pub fn snapshot_named(&self, name: &str, window_secs: f64) -> Option<MetricPoint> {
+        if let Some(e) = self.counters.iter().find(|e| e.name == name) {
+            let s = e.handle.snapshot();
+            let tps = if window_secs > 0.0 {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    s.count as f64 / window_secs
+                }
+            } else {
+                0.0
+            };
+            return Some(MetricPoint::Counter {
+                name: e.name.clone(),
+                count: s.count,
+                tps,
+                total: s.total,
+            });
+        }
+        if let Some(e) = self.gauges.iter().find(|e| e.name == name) {
+            return Some(MetricPoint::Gauge {
+                name: e.name.clone(),
+                value: e.handle.snapshot(),
+            });
+        }
+        if let Some(e) = self.bandwidths.iter().find(|e| e.name == name) {
+            let s = e.handle.snapshot(window_secs);
+            return Some(MetricPoint::Bandwidth {
+                name: e.name.clone(),
+                count: s.count,
+                avg_size: s.avg_size,
+                rate: s.rate,
+                total_bytes: s.total_bytes,
+            });
+        }
+        if let Some(e) = self.histograms.iter().find(|e| e.name == name) {
+            let s = e.handle.snapshot();
+            return Some(MetricPoint::Histogram {
+                name: e.name.clone(),
+                count: s.count,
+                avg_ns: s.avg,
+                p50_ns: s.p50,
+                p99_ns: s.p99,
+                max_ns: s.max,
+                total: s.total_count,
+            });
+        }
+        self.summaries.iter().find(|e| e.name == name).map(|e| {
+            let s = e.handle.snapshot();
+            MetricPoint::Summary {
+                name: e.name.clone(),
+                count: s.count,
+                avg_ns: s.avg,
+                max_ns: s.max,
+                total: s.total_count,
+            }
+        })
+    }
 }
 
 impl Default for MetricsRegistry {

@@ -21,11 +21,13 @@
 //!    `time-since-last-wal-flush >= wal_flush_interval_ms`, so WAL data
 //!    is persisted even with `--no-fsync`. `0` disables (WAL is still
 //!    flushed on shutdown).
-//! 4. Advances the engine's GC retention watermark and sweeps it
-//!    ([`KVEngine::set_gc_watermark`](crate::kv::KVEngine::set_gc_watermark)/
-//!    [`collect_garbage`](crate::kv::KVEngine::collect_garbage)), and runs a
-//!    WAL segment GC pass ([`crate::wal::gc::run_gc_with_watermark`]) --
-//!    these two *are* cross-replica-safety sensitive, so they stay gated on
+//! 4. Advances the engine's GC retention watermark
+//!    ([`KVEngine::set_gc_watermark`](crate::kv::KVEngine::set_gc_watermark)),
+//!    conditionally runs cadence-driven block compaction
+//!    ([`KVEngine::compact_sparse_blocks`](crate::kv::KVEngine::compact_sparse_blocks)),
+//!    and runs a WAL segment GC pass
+//!    ([`crate::wal::gc::run_gc_with_watermark`]) -- these *are*
+//!    cross-replica-safety sensitive, so they stay gated on
 //!    [`PxGroup::group_safe_slot`] (`0` — not yet established, or this
 //!    replica is a follower that doesn't track it; see that method's own
 //!    doc — means "nothing yet provably safe to reclaim").
@@ -48,9 +50,10 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::group::PxGroup;
+use super::group_election::LeaderElection;
 use crate::wal::gc::run_gc_with_watermark;
 
 /// Start the per-group maintenance loop on `group`, unless already running
@@ -79,7 +82,14 @@ pub(crate) async fn start(group: &Arc<PxGroup>) {
 /// fails or `cancel` fires.
 #[must_use]
 pub(crate) fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) -> JoinHandle<()> {
-    tokio::spawn(maintenance_loop(group, tick, cancel))
+    let span = group.upgrade().map_or_else(tracing::Span::none, |group| {
+        info_span!(
+            "group_maintenance",
+            g = group.group_id(),
+            replica = group.local_replica().id
+        )
+    });
+    tokio::spawn(maintenance_loop(group, tick, cancel).instrument(span))
 }
 
 async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) {
@@ -315,30 +325,41 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
         }
     }
 
-    // 4. GC: set watermark + sweep every tick. The B-tree's own
-    //    dropped-count check makes a no-op tick cheap.
+    // 4. GC: set watermark every tick; run cadence-driven block compaction
+    //    when the configured interval has elapsed. Tombstone folding is now
+    //    part of snapshot preparation (R129), so there is no standalone
+    //    resident-tree GC sweep.
     // `set_gc_watermark` is a cheap atomic store and stays inline;
-    // `collect_garbage` holds the C++ write_mutex_ and runs on a blocking thread.
+    // `compact_sparse_blocks` holds the C++ write_mutex_ and runs on a
+    // blocking thread.
     let safe_slot = group.group_safe_slot();
     let snapshot_slot = group.group_snapshot_slot();
     engine.set_gc_watermark(snapshot_slot, safe_slot);
-    let gc_start = std::time::Instant::now();
-    let engine_arc = group.local_replica().learner.engine_arc();
-    tokio::task::spawn_blocking(move || engine_arc.collect_garbage())
-        .await
-        .unwrap_or_else(|e| {
-            error!(
+    let merge_gc_interval_ms = group.election_config().merge_gc_interval_ms;
+    if merge_gc_interval_ms > 0 {
+        let last_compact = *group.last_merge_gc_time.lock();
+        let elapsed = last_compact.elapsed();
+        if elapsed >= Duration::from_millis(merge_gc_interval_ms) {
+            let compact_start = std::time::Instant::now();
+            let engine_arc = group.local_replica().learner.engine_arc();
+            tokio::task::spawn_blocking(move || engine_arc.compact_sparse_blocks())
+                .await
+                .unwrap_or_else(|e| {
+                    error!(
+                        group_id = group.group_id(),
+                        error = %e,
+                        "maintenance: compact_sparse_blocks blocking task panicked"
+                    );
+                });
+            *group.last_merge_gc_time.lock() = std::time::Instant::now();
+            debug!(
                 group_id = group.group_id(),
-                error = %e,
-                "maintenance: collect_garbage blocking task panicked"
+                replica_id = group.local_replica().id,
+                elapsed_ms = u64::try_from(compact_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "maintenance: block compaction phase complete"
             );
-        });
-    debug!(
-        group_id = group.group_id(),
-        replica_id = group.local_replica().id,
-        elapsed_ms = u64::try_from(gc_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "maintenance: GC phase complete"
-    );
+        }
+    }
 
     // 5. WAL GC: only advance snapshot_slot when we actually persisted.
     let Some(wal) = group.local_replica().wal() else {

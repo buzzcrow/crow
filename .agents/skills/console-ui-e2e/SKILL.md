@@ -1,0 +1,1 @@
+../../../.devin/skills/console-ui-e2e/SKILL.md

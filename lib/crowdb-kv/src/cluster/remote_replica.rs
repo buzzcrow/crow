@@ -18,9 +18,8 @@ use crate::cluster::replica::{
 };
 use crate::cluster::status::{RemoteStatus, StatusLevel};
 use crate::common::config::PxElectionConfig;
-use crate::common::metrics::LayerMetrics;
 use crate::common::report::OperationReport;
-use crate::metrics::{Counter, LatencySummary, MetricsRegistry};
+use crate::metrics::{Counter, LatencySummary, MetricPoint, MetricsRegistry};
 use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::PxRpcTransport;
@@ -38,8 +37,6 @@ pub struct PxRemoteReplica {
     /// `PxElectionConfig::learner_stream_rpc_timeout_ms`.
     rpc_timeout: Duration,
     pub(crate) voting: bool,
-    /// Per-remote RPC counters consumed by `/topology`.
-    metrics: LayerMetrics,
     /// Optional registry handles mirroring RPC stats to the metrics log.
     /// Set via [`Self::set_metrics_registry`] when a registry is wired.
     rpc_handles: OnceLock<RpcRegistryHandles>,
@@ -179,7 +176,6 @@ impl PxRemoteReplica {
             endpoint,
             rpc_timeout: Duration::from_millis(PxElectionConfig::DEFAULT.learner_stream_rpc_timeout_ms),
             voting: true,
-            metrics: LayerMetrics::new(),
             rpc_handles: OnceLock::new(),
             shutdown_started: AtomicBool::new(false),
             rpc_transport: OnceLock::new(),
@@ -358,17 +354,15 @@ impl PxRemoteReplica {
         }
     }
 
-    /// Record a successful RPC to both legacy and registry handles.
+    /// Record a successful RPC.
     fn record_ok(&self, rtt_ns: u64) {
-        self.metrics.record_ok(rtt_ns);
         if let Some(h) = self.rpc_handles.get() {
             h.latency.observe(rtt_ns);
         }
     }
 
-    /// Record a failed RPC to both legacy and registry handles.
+    /// Record a failed RPC.
     fn record_err(&self) {
-        self.metrics.record_err();
         if let Some(h) = self.rpc_handles.get() {
             h.errors.inc();
         }
@@ -411,7 +405,12 @@ impl PxRemoteReplica {
 
     /// Read this remote's RPC metrics for the topology endpoint.
     #[must_use]
-    pub(crate) fn status(&self) -> RemoteStatus {
+    pub(crate) fn status(
+        &self,
+        registry: Option<&MetricsRegistry>,
+        store_id: u64,
+        group_id: u64,
+    ) -> RemoteStatus {
         let mut status = StatusLevel::Ok;
         let mut messages = Vec::new();
         if self.rpc_transport.get().is_none() {
@@ -421,13 +420,28 @@ impl PxRemoteReplica {
                 self.node_id, self.endpoint
             ));
         }
+        let prefix = format!("s.{store_id}.g.{group_id}");
+        let rpc_count = registry
+            .and_then(|r| r.snapshot_named(&format!("{prefix}.rpc.l@{}", self.node_id), 1.0))
+            .and_then(|point| match point {
+                MetricPoint::Summary { total, .. } => Some(total),
+                _ => None,
+            });
+        let err_count = registry
+            .and_then(|r| r.snapshot_named(&format!("{prefix}.rpc.errors.c@{}", self.node_id), 1.0))
+            .and_then(|point| match point {
+                MetricPoint::Counter { total, .. } => Some(total),
+                _ => None,
+            });
+        let metrics = (rpc_count.is_some() || err_count.is_some())
+            .then_some(crowdb_protocol::mgmt::MetricsSnapshot { rpc_count, err_count });
         RemoteStatus {
             id: self.node_id,
             endpoint: self.endpoint.clone(),
             voting: self.voting,
             status,
             messages,
-            metrics: self.metrics.snapshot(),
+            metrics,
         }
     }
 

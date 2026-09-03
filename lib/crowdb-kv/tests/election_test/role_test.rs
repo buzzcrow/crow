@@ -110,18 +110,6 @@ fn become_candidate_extends_vote_lockout() {
     // due to lockout (tested in vote_test.rs).
 }
 
-#[test]
-fn become_candidate_bumps_election_count() {
-    let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
-    let before = replica.election_metrics_snapshot(0).election_count;
-
-    replica.become_candidate(1);
-    replica.become_candidate(2);
-
-    let after = replica.election_metrics_snapshot(0).election_count;
-    assert_eq!(after - before, 2);
-}
-
 // ── become_leader ────────────────────────────────────────────
 
 #[test]

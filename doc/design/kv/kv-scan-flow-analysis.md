@@ -216,7 +216,7 @@ for reverse scan.
 
 ### Large-value durability fix
 
-Maintenance-loop `persist_snapshot` / `flush` / `collect_garbage` held the
+Maintenance-loop `persist_snapshot` / `flush` / `compact_sparse_blocks` held the
 C++ `write_mutex_` and blocked the async runtime, starving the election
 driver (300–600ms timeout) when snapshots took 0.6–2.2s for 100k × 16KiB
 values (1.6 GB). All three calls now run via `tokio::task::spawn_blocking`.

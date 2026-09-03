@@ -237,14 +237,14 @@ export interface ApiError {
 
 // Election/lease state (mirrors crowdb-kv's ElectionStateView)
 export interface ElectionState {
-  election_count: number;
+  election_count?: number;
   current_term: number;
   last_heartbeat_age_ms?: number;
   lease_remaining_ms?: number;
   bulk_phase1_in_flight_slots: number;
-  step_downs_higher_term: number;
-  step_downs_lease_unrenewable: number;
-  step_downs_admin: number;
+  step_downs_higher_term?: number;
+  step_downs_lease_unrenewable?: number;
+  step_downs_admin?: number;
 }
 
 // Read-path state gauges (mirrors crowdb-kv's ReadStateView)
