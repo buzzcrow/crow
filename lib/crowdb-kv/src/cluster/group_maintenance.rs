@@ -45,6 +45,7 @@
 //! let reclaim run *more* conservatively than the old `safe_slot`
 //! approximation, never less.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -337,9 +338,9 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     engine.set_gc_watermark(snapshot_slot, safe_slot);
     let merge_gc_interval_ms = group.election_config().merge_gc_interval_ms;
     if merge_gc_interval_ms > 0 {
-        let last_compact = *group.last_merge_gc_time.lock();
-        let elapsed = last_compact.elapsed();
-        if elapsed >= Duration::from_millis(merge_gc_interval_ms) {
+        let now_ms = crate::common::time::instant_to_anchor_ms(std::time::Instant::now());
+        let last_compact_ms = group.last_merge_gc_time_ms.load(Ordering::Acquire);
+        if now_ms.saturating_sub(last_compact_ms) >= merge_gc_interval_ms {
             let compact_start = std::time::Instant::now();
             let engine_arc = group.local_replica().learner.engine_arc();
             tokio::task::spawn_blocking(move || engine_arc.compact_sparse_blocks())
@@ -351,7 +352,10 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
                         "maintenance: compact_sparse_blocks blocking task panicked"
                     );
                 });
-            *group.last_merge_gc_time.lock() = std::time::Instant::now();
+            group.last_merge_gc_time_ms.store(
+                crate::common::time::instant_to_anchor_ms(std::time::Instant::now()),
+                Ordering::Release,
+            );
             debug!(
                 group_id = group.group_id(),
                 replica_id = group.local_replica().id,

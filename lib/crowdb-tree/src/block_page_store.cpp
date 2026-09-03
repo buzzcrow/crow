@@ -408,6 +408,9 @@ Status BlockPageStore::delete_block(uint32_t block_idx)
 
     ext.medium.reset();
     ext.deleted = true;
+    while (!extents_.empty() && extents_.back().deleted) {
+        extents_.pop_back();
+    }
     return Status::Ok();
 }
 

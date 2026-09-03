@@ -1111,7 +1111,8 @@ class Crowdbtree
     // whatever garbage/stale content actually occupies that address today.
     // commit_prepared_snapshot() sets it instead, only once each page's
     // specific write has actually landed.
-    Status prepare_snapshot_locked(PreparedSnapshot *out, std::vector<PrefetchedPage> prefetched = {});
+    Status prepare_snapshot_locked(PreparedSnapshot *out, std::vector<PrefetchedPage> prefetched = {},
+                                   bool relocate_sparse_blocks = false);
 
     // Marks every PreparedSnapshot::page_writes/segment_writes entry
     // durable (see prepare_snapshot_locked's doc comment) and publishes the

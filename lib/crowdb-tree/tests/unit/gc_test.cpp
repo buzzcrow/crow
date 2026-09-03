@@ -168,6 +168,25 @@ TEST(Gc, CompactSparseBlocksNoOpOnMemStore)
     EXPECT_EQ(stats.blocks_deleted, 0U);
 }
 
+TEST(Gc, NormalSnapshotDoesNotRelocateSparseBlocks)
+{
+    crowdb::tree_test::TempDir tmp("snapshot_no_relocate_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::unique_ptr<BlockPageStore> store;
+    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, 8 * 1024, 1, &store).ok());
+    Options opt;
+    opt.page_store                    = store.get();
+    opt.merge_gc_block_free_threshold = 0.01;
+    opt.merge_gc_max_relocation_bytes = 8 * 1024 * 1024;
+    Crowdbtree t(opt);
+    ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
+    ASSERT_TRUE(t.flush().ok());
+    ASSERT_TRUE(t.snapshot().ok());
+
+    ASSERT_TRUE(t.snapshot().ok());
+    EXPECT_EQ(t.stats().snapshot_pages_written, 0U);
+}
+
 // Anchor protection: block 0 holds the dual anchors and must never be
 // selected for relocation. We verify this by writing data, running
 // compaction, and then reopening the store — if block 0 had been
@@ -318,6 +337,11 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
     // Some blocks should be selected and relocated.
     EXPECT_GE(stats.blocks_selected, 1U);
 
+    ++slot;
+    ASSERT_TRUE(t.apply(slot, put_one("after-compaction", "still-writable")).ok());
+    ASSERT_TRUE(t.flush().ok());
+    ASSERT_TRUE(t.snapshot().ok());
+
     // All surviving keys must be readable after compaction.
     for (int i = 0; i < 200; i += 20) {
         std::string v;
@@ -325,6 +349,10 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
         EXPECT_TRUE(t.get(Slice("k" + std::to_string(i)), &s, &v)) << "key " << i << " lost";
         EXPECT_EQ(v, std::string(128, 'x'));
     }
+    std::string appended;
+    uint64_t    appended_slot;
+    EXPECT_TRUE(t.get(Slice("after-compaction"), &appended_slot, &appended));
+    EXPECT_EQ(appended, "still-writable");
 
     // A second compaction pass should be idempotent (no more sparse blocks
     // or at least no data loss).

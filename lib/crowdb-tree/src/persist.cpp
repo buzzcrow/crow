@@ -298,17 +298,17 @@ bool collect_live_extents_from_directory(const PageStore &store, const CommitAnc
     return true;
 }
 
-// Sparse-block threshold: blocks with >70% gap space are excluded from gap
-// reuse so new writes land in dense blocks instead (online compaction).
+// Default sparse-block threshold used when the configured value is zero.
 constexpr double kSparseBlockThreshold = 0.70;
 
 // build the allocator: free = the complement of `live` within
 // [kRegionBase, file_size); append grows past EOF. When block_size > 0
-// (array-of-blocks mode), gaps in sparse blocks (>70% free) are excluded
-// from the gap list so new writes don't reuse space in nearly-empty blocks.
+// (array-of-blocks mode), gaps above the configured sparse-block threshold
+// are excluded so new writes don't reuse space in nearly-empty blocks.
 // Also populates `empty_blocks` with block indices that have zero live bytes.
 SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, uint64_t file_size, uint32_t iu,
-                               uint64_t region_base, uint64_t block_size, const std::string &name)
+                               uint64_t region_base, uint64_t block_size, double sparse_block_threshold,
+                               const std::string &name)
 {
     SpaceAllocator a;
     a.iu = iu;
@@ -368,7 +368,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
                     auto     blk        = static_cast<uint32_t>(addr / block_size);
                     uint64_t live_bytes = live_per_block.contains(blk) ? live_per_block.at(blk) : 0;
                     double   free_ratio = 1.0 - (static_cast<double>(live_bytes) / static_cast<double>(block_size));
-                    if (free_ratio <= kSparseBlockThreshold) {
+                    if (free_ratio <= sparse_block_threshold) {
                         filtered.emplace_back(addr, len);
                     }
                     addr += len;
@@ -378,7 +378,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
             size_t gaps_before = a.gaps.size();
             a.gaps             = std::move(filtered);
             CRB_LOG_INFO("[{}] build_allocator: gap filtering {} -> {} (sparse-block threshold {})", name, gaps_before,
-                         a.gaps.size(), kSparseBlockThreshold);
+                         a.gaps.size(), sparse_block_threshold);
         }
     }
 
@@ -387,7 +387,8 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
 
 } // namespace
 
-Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<PrefetchedPage> prefetched)
+Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<PrefetchedPage> prefetched,
+                                           bool relocate_sparse_blocks)
 {
     PageStore *store = opt_.page_store;
     if (store == nullptr) {
@@ -421,12 +422,15 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
             }
         }
     }
-    SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base, store->block_size(), name_);
-    out->empty_blocks    = alloc.empty_blocks;
+    double sparse_threshold =
+        opt_.merge_gc_block_free_threshold > 0.0 ? opt_.merge_gc_block_free_threshold : kSparseBlockThreshold;
+    SpaceAllocator alloc =
+        build_allocator(std::move(live), store->size(), iu, region_base, store->block_size(), sparse_threshold, name_);
+    out->empty_blocks = alloc.empty_blocks;
 
     std::set<uint32_t> relocation_blocks;
     const uint64_t     block_size = store->block_size();
-    if (block_size > 0 && have_prev) {
+    if (relocate_sparse_blocks && block_size > 0 && have_prev) {
         std::unordered_map<uint32_t, uint64_t>     current_live_bytes;
         std::vector<std::pair<uint64_t, uint64_t>> current_live;
         if (!collect_live_extents_from_directory(*store, prev, iu, &current_live)) {
@@ -449,8 +453,6 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
         // block index. The first eligible block is always allowed even when
         // it exceeds the budget so progress is possible. Block 0 is reserved
         // for anchor slots and never selected.
-        double sparse_threshold =
-            opt_.merge_gc_block_free_threshold > 0.0 ? opt_.merge_gc_block_free_threshold : kSparseBlockThreshold;
         uint64_t                                   budget = opt_.merge_gc_max_relocation_bytes;
         std::vector<std::pair<uint32_t, uint64_t>> candidates; // (block, live_bytes)
         for (const auto &[block, bytes] : current_live_bytes) {
@@ -894,10 +896,12 @@ void Crowdbtree::finalize_prepared_snapshot(PreparedSnapshot &prepared)
             return;
         }
     }
-    SpaceAllocator state =
-        build_allocator(std::move(live), opt_.page_store->size(), opt_.page_store->iu_size(),
-                        region_base_for(opt_.page_store->iu_size()), opt_.page_store->block_size(), name_);
-    uint64_t deleted = 0;
+    double sparse_threshold =
+        opt_.merge_gc_block_free_threshold > 0.0 ? opt_.merge_gc_block_free_threshold : kSparseBlockThreshold;
+    SpaceAllocator state   = build_allocator(std::move(live), opt_.page_store->size(), opt_.page_store->iu_size(),
+                                             region_base_for(opt_.page_store->iu_size()), opt_.page_store->block_size(),
+                                             sparse_threshold, name_);
+    uint64_t       deleted = 0;
     for (uint32_t block : state.empty_blocks) {
         Status ds = bps->delete_block(block);
         if (ds.ok()) {
@@ -1281,7 +1285,7 @@ MergeGcStats Crowdbtree::compact_sparse_blocks()
     Status           ps;
     {
         std::lock_guard<std::mutex> lk(write_mutex_);
-        ps = prepare_snapshot_locked(&prepared, std::move(prefetched));
+        ps = prepare_snapshot_locked(&prepared, std::move(prefetched), true);
     }
     if (!ps.ok()) {
         CRB_LOG_ERROR("[{}] compact_sparse_blocks: prepare failed: {}", name_, ps.to_string());
