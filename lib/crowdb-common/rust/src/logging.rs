@@ -444,9 +444,19 @@ pub fn init_file_and_console_logging(
 #[cfg(test)]
 mod tests {
     use super::cpp_level_from_rust_log;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serialize tests that mutate the process-global `RUST_LOG` env
+    /// var — without this, parallel tests race on `set_var`/`remove_var`
+    /// and flake.
+    fn rust_log_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn cpp_level_global_directive() {
+        let _guard = rust_log_lock().lock().unwrap();
         std::env::set_var("RUST_LOG", "debug");
         assert_eq!(cpp_level_from_rust_log("info"), "debug");
         std::env::remove_var("RUST_LOG");
@@ -454,6 +464,7 @@ mod tests {
 
     #[test]
     fn cpp_level_target_directive_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
         std::env::set_var("RUST_LOG", "crowdb_kv=info");
         assert_eq!(cpp_level_from_rust_log("info"), "info");
         std::env::remove_var("RUST_LOG");
@@ -461,6 +472,7 @@ mod tests {
 
     #[test]
     fn cpp_level_empty_rust_log_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
         std::env::set_var("RUST_LOG", "");
         assert_eq!(cpp_level_from_rust_log("info"), "info");
         std::env::remove_var("RUST_LOG");
@@ -468,12 +480,14 @@ mod tests {
 
     #[test]
     fn cpp_level_unset_rust_log_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
         std::env::remove_var("RUST_LOG");
         assert_eq!(cpp_level_from_rust_log("warn"), "warn");
     }
 
     #[test]
     fn cpp_level_invalid_level_uses_fallback() {
+        let _guard = rust_log_lock().lock().unwrap();
         std::env::set_var("RUST_LOG", "bogus");
         assert_eq!(cpp_level_from_rust_log("info"), "info");
         std::env::remove_var("RUST_LOG");

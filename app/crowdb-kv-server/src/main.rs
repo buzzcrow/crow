@@ -473,7 +473,7 @@ async fn create_and_start_stores(
     for (i, &store_id) in store_ids.iter().enumerate() {
         // Port priority: explicit CLI port > persisted config file > OS-assigned (0).
         let port = if ports[i] > 0 {
-            ports[i]
+            registry.next_port().unwrap_or(ports[i])
         } else {
             persisted_port_for_store(&registry.config.config_root, store_id)
                 .await
