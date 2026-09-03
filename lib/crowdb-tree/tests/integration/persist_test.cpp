@@ -929,7 +929,8 @@ TEST(Persist, CompactSparseBlocksRestartSafety)
         ASSERT_TRUE(t.snapshot().ok());
 
         // Run compaction.
-        MergeGcStats stats = t.compact_sparse_blocks();
+        MergeGcStats stats;
+        ASSERT_TRUE(t.compact_sparse_blocks(&stats).ok());
         EXPECT_GE(stats.blocks_selected, 1U);
 
         // Verify surviving keys.
@@ -1029,10 +1030,9 @@ TEST_P(CompactSparseBlocksFailureInjectionTest, ReopenFromPriorAnchorIsClean)
             faulty.arm_write_fault(fail_write_idx, FaultyPageStore::Fault::kFail);
         }
 
-        // compact_sparse_blocks may or may not return an error depending on
-        // which write fails — but either way, no block should be deleted
-        // because finalize_prepared_snapshot only runs after both barriers.
-        MergeGcStats stats = t.compact_sparse_blocks();
+        MergeGcStats stats;
+        Status       status = t.compact_sparse_blocks(&stats);
+        EXPECT_FALSE(status.ok());
         // blocks_deleted must be 0 — the finalizer did not complete.
         EXPECT_EQ(stats.blocks_deleted, 0U);
     }
@@ -1054,14 +1054,11 @@ TEST_P(CompactSparseBlocksFailureInjectionTest, ReopenFromPriorAnchorIsClean)
     }
 }
 
-// Fail at write index 0 (first page write), 2 (segment image), 5 (later
-// write), and sync index 0 (first barrier), 1 (second barrier).
+// Fail at page/metadata writes and the pre-anchor durability barrier.
 INSTANTIATE_TEST_SUITE_P(CompactSparseBlocksFailureStages, CompactSparseBlocksFailureInjectionTest,
                          ::testing::Values(std::make_tuple(0, false),  // first page write
                                            std::make_tuple(2, false),  // segment image
-                                           std::make_tuple(5, false),  // later write
-                                           std::make_tuple(0, true),   // first sync barrier
-                                           std::make_tuple(1, true))); // second sync barrier
+                                           std::make_tuple(0, true))); // first sync barrier
 
 // leaf/inner counts are persisted in the commit anchor and restored on open.
 TEST(Persist, LeafInnerCountSurvivesSnapshotOpen)

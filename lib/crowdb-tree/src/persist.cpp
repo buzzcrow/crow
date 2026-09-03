@@ -385,6 +385,48 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
     return a;
 }
 
+std::set<uint32_t> select_sparse_blocks(const std::vector<std::pair<uint64_t, uint64_t>> &live, uint64_t block_size,
+                                        double sparse_threshold, uint64_t byte_budget)
+{
+    std::unordered_map<uint32_t, uint64_t> live_bytes;
+    for (const auto &[extent_addr, extent_len] : live) {
+        uint64_t addr = extent_addr;
+        uint64_t left = extent_len;
+        while (left > 0) {
+            auto     block = static_cast<uint32_t>(addr / block_size);
+            uint64_t end   = (static_cast<uint64_t>(block) + 1) * block_size;
+            uint64_t len   = std::min(left, end - addr);
+            live_bytes[block] += len;
+            addr += len;
+            left -= len;
+        }
+    }
+
+    std::vector<std::pair<uint32_t, uint64_t>> candidates;
+    for (const auto &[block, bytes] : live_bytes) {
+        double free_ratio = 1.0 - static_cast<double>(bytes) / static_cast<double>(block_size);
+        if (block != 0 && free_ratio > sparse_threshold) {
+            candidates.emplace_back(block, bytes);
+        }
+    }
+    std::ranges::sort(candidates, [block_size](const auto &a, const auto &b) {
+        double free_a = 1.0 - static_cast<double>(a.second) / static_cast<double>(block_size);
+        double free_b = 1.0 - static_cast<double>(b.second) / static_cast<double>(block_size);
+        return free_a == free_b ? a.first < b.first : free_a > free_b;
+    });
+
+    std::set<uint32_t> selected;
+    uint64_t           accumulated = 0;
+    for (const auto &[block, bytes] : candidates) {
+        if (!selected.empty() && byte_budget > 0 && accumulated + bytes > byte_budget) {
+            break;
+        }
+        selected.insert(block);
+        accumulated += bytes;
+    }
+    return selected;
+}
+
 } // namespace
 
 Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<PrefetchedPage> prefetched,
@@ -431,56 +473,12 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
     std::set<uint32_t> relocation_blocks;
     const uint64_t     block_size = store->block_size();
     if (relocate_sparse_blocks && block_size > 0 && have_prev) {
-        std::unordered_map<uint32_t, uint64_t>     current_live_bytes;
         std::vector<std::pair<uint64_t, uint64_t>> current_live;
         if (!collect_live_extents_from_directory(*store, prev, iu, &current_live)) {
             return Status::corruption("snapshot: current segment directory unreadable");
         }
-        for (const auto &[extent_addr, extent_len] : current_live) {
-            uint64_t addr = extent_addr;
-            uint64_t left = extent_len;
-            while (left > 0) {
-                auto     block = static_cast<uint32_t>(addr / block_size);
-                uint64_t end   = (static_cast<uint64_t>(block) + 1) * block_size;
-                uint64_t len   = std::min(left, end - addr);
-                current_live_bytes[block] += len;
-                addr += len;
-                left -= len;
-            }
-        }
-        // Select sparsest blocks above the threshold, capped by the per-pass
-        // byte budget (R129). Sort by descending free ratio, then ascending
-        // block index. The first eligible block is always allowed even when
-        // it exceeds the budget so progress is possible. Block 0 is reserved
-        // for anchor slots and never selected.
-        uint64_t                                   budget = opt_.merge_gc_max_relocation_bytes;
-        std::vector<std::pair<uint32_t, uint64_t>> candidates; // (block, live_bytes)
-        for (const auto &[block, bytes] : current_live_bytes) {
-            if (block == 0) {
-                continue;
-            }
-            double live_ratio = static_cast<double>(bytes) / static_cast<double>(block_size);
-            double free_ratio = 1.0 - live_ratio;
-            if (free_ratio > sparse_threshold) {
-                candidates.emplace_back(block, bytes);
-            }
-        }
-        std::ranges::sort(candidates, [block_size](const auto &a, const auto &b) {
-            double free_a = 1.0 - (static_cast<double>(a.second) / static_cast<double>(block_size));
-            double free_b = 1.0 - (static_cast<double>(b.second) / static_cast<double>(block_size));
-            if (free_a != free_b) {
-                return free_a > free_b; // descending free ratio
-            }
-            return a.first < b.first; // ascending block index
-        });
-        uint64_t accumulated = 0;
-        for (const auto &[block, bytes] : candidates) {
-            if (budget > 0 && !relocation_blocks.empty() && accumulated + bytes > budget) {
-                break;
-            }
-            relocation_blocks.insert(block);
-            accumulated += bytes;
-        }
+        relocation_blocks =
+            select_sparse_blocks(current_live, block_size, sparse_threshold, opt_.merge_gc_max_relocation_bytes);
         out->blocks_selected = relocation_blocks.size();
     }
 
@@ -885,8 +883,7 @@ void Crowdbtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
 void Crowdbtree::finalize_prepared_snapshot(PreparedSnapshot &prepared)
 {
     commit_prepared_snapshot(prepared);
-    auto *bps = dynamic_cast<BlockPageStore *>(opt_.page_store);
-    if (bps == nullptr || opt_.page_store->block_size() == 0) {
+    if (opt_.page_store->block_size() == 0) {
         return;
     }
     std::vector<std::pair<uint64_t, uint64_t>> live;
@@ -903,7 +900,7 @@ void Crowdbtree::finalize_prepared_snapshot(PreparedSnapshot &prepared)
                                              sparse_threshold, name_);
     uint64_t       deleted = 0;
     for (uint32_t block : state.empty_blocks) {
-        Status ds = bps->delete_block(block);
+        Status ds = opt_.page_store->delete_block(block);
         if (ds.ok()) {
             ++deleted;
         }
@@ -1006,6 +1003,7 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied)
         metrics_.fsync_l->observe(static_cast<uint64_t>(ns));
     }
     if (!sync2.ok()) {
+        commit_prepared_snapshot(prepared);
         release_snapshot_slot();
         return sync2;
     }
@@ -1143,6 +1141,7 @@ void Crowdbtree::snapshot_write_next_async(                    // NOLINT(readabi
                         Status fs2 =
                             opt_.async_page_store->submit_fsync([this, prepared, on_done](const Status &st4) mutable {
                                 if (!st4.ok()) {
+                                    commit_prepared_snapshot(*prepared);
                                     release_snapshot_slot();
                                     on_done(st4, 0);
                                     return;
@@ -1153,6 +1152,7 @@ void Crowdbtree::snapshot_write_next_async(                    // NOLINT(readabi
                                 on_done(Status::Ok(), last_applied);
                             });
                         if (!fs2.ok()) {
+                            commit_prepared_snapshot(*prepared);
                             release_snapshot_slot();
                             on_done(fs2, 0);
                         }
@@ -1166,20 +1166,24 @@ void Crowdbtree::snapshot_write_next_async(                    // NOLINT(readabi
 #endif
 }
 
-MergeGcStats Crowdbtree::compact_sparse_blocks()
+Status Crowdbtree::compact_sparse_blocks(MergeGcStats *out_stats)
 {
     auto         t0 = std::chrono::steady_clock::now();
     MergeGcStats stats;
 
-    if (opt_.page_store == nullptr) {
-        return stats;
+    if (out_stats == nullptr) {
+        return Status::invalid_argument("compact_sparse_blocks: null output");
     }
-    auto *bps = dynamic_cast<BlockPageStore *>(opt_.page_store);
-    if (bps == nullptr || opt_.page_store->block_size() == 0) {
-        return stats;
+    *out_stats = stats;
+
+    if (opt_.page_store == nullptr) {
+        return Status::invalid_argument("compact_sparse_blocks: no page_store");
+    }
+    if (opt_.page_store->block_size() == 0) {
+        return Status::Ok();
     }
     if (opt_.merge_gc_max_relocation_bytes == 0) {
-        return stats;
+        return Status::Ok();
     }
 
     const uint32_t iu          = opt_.page_store->iu_size();
@@ -1193,59 +1197,21 @@ MergeGcStats Crowdbtree::compact_sparse_blocks()
     // captured here is revalidated under the mutex during prepare.
     std::vector<CommitAnchor> anchors = read_valid_anchors(*opt_.page_store, iu);
     if (anchors.empty()) {
-        return stats;
+        return Status::Ok();
     }
     CommitAnchor prev = anchors.back();
 
     double sparse_threshold =
         opt_.merge_gc_block_free_threshold > 0.0 ? opt_.merge_gc_block_free_threshold : kSparseBlockThreshold;
-    std::unordered_map<uint32_t, uint64_t>     current_live_bytes;
     std::vector<std::pair<uint64_t, uint64_t>> current_live;
     if (!collect_live_extents_from_directory(*opt_.page_store, prev, iu, &current_live)) {
         CRB_LOG_WARN("[{}] compact_sparse_blocks: current anchor unreadable", name_);
-        return stats;
+        return Status::corruption("compact_sparse_blocks: current anchor unreadable");
     }
-    for (const auto &[addr, len] : current_live) {
-        uint64_t a    = addr;
-        uint64_t left = len;
-        while (left > 0) {
-            auto     block = static_cast<uint32_t>(a / block_size);
-            uint64_t end   = (static_cast<uint64_t>(block) + 1) * block_size;
-            uint64_t bytes = std::min(left, end - a);
-            current_live_bytes[block] += bytes;
-            a += bytes;
-            left -= bytes;
-        }
-    }
-    std::vector<std::pair<uint32_t, uint64_t>> candidates;
-    for (const auto &[block, bytes] : current_live_bytes) {
-        if (block == 0) {
-            continue;
-        }
-        double free_ratio = 1.0 - static_cast<double>(bytes) / static_cast<double>(block_size);
-        if (free_ratio > sparse_threshold) {
-            candidates.emplace_back(block, bytes);
-        }
-    }
-    std::ranges::sort(candidates, [block_size](const auto &a, const auto &b) {
-        double free_a = 1.0 - (static_cast<double>(a.second) / static_cast<double>(block_size));
-        double free_b = 1.0 - (static_cast<double>(b.second) / static_cast<double>(block_size));
-        if (free_a != free_b) {
-            return free_a > free_b;
-        }
-        return a.first < b.first;
-    });
-    std::set<uint32_t> selected_blocks;
-    uint64_t           accumulated = 0;
-    for (const auto &[block, bytes] : candidates) {
-        if (!selected_blocks.empty() && accumulated + bytes > opt_.merge_gc_max_relocation_bytes) {
-            break;
-        }
-        selected_blocks.insert(block);
-        accumulated += bytes;
-    }
+    std::set<uint32_t> selected_blocks =
+        select_sparse_blocks(current_live, block_size, sparse_threshold, opt_.merge_gc_max_relocation_bytes);
     if (selected_blocks.empty()) {
-        return stats;
+        return Status::Ok();
     }
 
     // Prefetch unloaded pages in selected blocks (outside write_mutex_).
@@ -1290,43 +1256,44 @@ MergeGcStats Crowdbtree::compact_sparse_blocks()
     if (!ps.ok()) {
         CRB_LOG_ERROR("[{}] compact_sparse_blocks: prepare failed: {}", name_, ps.to_string());
         release_snapshot_slot();
-        return stats;
+        return ps;
     }
     for (auto &w : prepared.page_writes) {
         Status s = opt_.page_store->write_at(w.addr, w.blob.data(), w.blob.size());
         if (!s.ok()) {
             release_snapshot_slot();
-            return stats;
+            return s;
         }
     }
     for (auto &sw : prepared.segment_writes) {
         Status s = opt_.page_store->write_at(sw.addr, sw.blob.data(), sw.blob.size());
         if (!s.ok()) {
             release_snapshot_slot();
-            return stats;
+            return s;
         }
     }
     Status dw = opt_.page_store->write_at(prepared.directory_write.addr, prepared.directory_write.blob.data(),
                                           prepared.directory_write.blob.size());
     if (!dw.ok()) {
         release_snapshot_slot();
-        return stats;
+        return dw;
     }
     Status sync1 = opt_.page_store->sync();
     if (!sync1.ok()) {
         release_snapshot_slot();
-        return stats;
+        return sync1;
     }
     Status aw = opt_.page_store->write_at(prepared.anchor_write.addr, prepared.anchor_write.blob.data(),
                                           prepared.anchor_write.blob.size());
     if (!aw.ok()) {
         release_snapshot_slot();
-        return stats;
+        return aw;
     }
     Status sync2 = opt_.page_store->sync();
     if (!sync2.ok()) {
+        commit_prepared_snapshot(prepared);
         release_snapshot_slot();
-        return stats;
+        return sync2;
     }
     finalize_prepared_snapshot(prepared);
     release_snapshot_slot();
@@ -1351,7 +1318,8 @@ MergeGcStats Crowdbtree::compact_sparse_blocks()
     }
     CRB_LOG_INFO("[{}] compact_sparse_blocks: selected={} relocated={} bytes={} deleted={}", name_,
                  stats.blocks_selected, stats.pages_relocated, stats.bytes_relocated, stats.blocks_deleted);
-    return stats;
+    *out_stats = stats;
+    return Status::Ok();
 }
 
 Status Crowdbtree::open(const Options &opt, std::unique_ptr<Crowdbtree> *out)

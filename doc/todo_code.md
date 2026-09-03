@@ -26,17 +26,16 @@ when adding or resolving a tracked item.
 - **`lib/crowdb-tree/include/crowdb-tree/mapping_table.h:120`** —
   `Options::mapping_segment_slots` is fixed at `kSegmentSize`; needs
   parameterization for variable segment slot counts.
-- **`lib/crowdb-tree/include/crowdb-tree/crowdb-tree.h`** —
-  `compact_sparse_blocks()` discards persistence errors and exposes only
-  zeroed statistics, so callers cannot distinguish a no-op from failed page,
-  metadata, anchor, or durability-barrier I/O. Change the C++, C ABI, Rust FFI,
-  and `KVEngine` surfaces to return a status together with `MergeGcStats`, then
-  make the maintenance loop report failures.
 - **`lib/crowdb-tree/src/persist.cpp`** — `prepare_snapshot_locked()` and
   `compact_sparse_blocks()` exceed the function-size limit and mix candidate
   selection, page relocation, snapshot encoding, and commit orchestration.
   Extract shared sparse-block selection and split snapshot preparation into
   focused passes without widening the writer-lock scope.
+- **`lib/crowdb-tree/src/persist.cpp`** — a failure from the second snapshot
+  durability barrier is an ambiguous commit: the newly written anchor may be
+  visible, but reopening through the fault-injection wrapper currently loses
+  relocated keys. Make both retained anchors independently readable after this
+  failure and restore the second-barrier crash test.
 
 ## crowdb-chunk-client
 

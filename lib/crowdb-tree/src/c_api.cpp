@@ -415,14 +415,15 @@ ct_status ct_compact_sparse_blocks(ct_tree *t, ct_merge_gc_stats *out_stats)
     if (t == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    MergeGcStats stats = t->tree->compact_sparse_blocks();
+    MergeGcStats stats;
+    Status       status = t->tree->compact_sparse_blocks(&stats);
     if (out_stats != nullptr) {
         out_stats->blocks_selected = stats.blocks_selected;
         out_stats->pages_relocated = stats.pages_relocated;
         out_stats->bytes_relocated = stats.bytes_relocated;
         out_stats->blocks_deleted  = stats.blocks_deleted;
     }
-    return static_cast<ct_status>(Code::kOk);
+    return to_status(status);
 }
 
 int32_t ct_io_failed(const ct_tree *t)

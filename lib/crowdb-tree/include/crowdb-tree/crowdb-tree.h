@@ -525,7 +525,7 @@ class Crowdbtree
     // blocks unreachable from any retained anchor. Non-block stores and
     // disabled configurations return an empty stats result with no snapshot
     // write. Uses the existing snapshot gate; no new mutex or blocking lock.
-    MergeGcStats compact_sparse_blocks();
+    Status compact_sparse_blocks(MergeGcStats *out_stats);
 
     // Drain the contiguous-applied prefix of every live MemTable (active_ +
     // any queued frozen_ buffers, plan-tree #3) into L1 and publish the

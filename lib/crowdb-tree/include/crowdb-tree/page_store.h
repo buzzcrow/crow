@@ -69,6 +69,11 @@ class PageStore
         return 0;
     }
 
+    virtual Status delete_block(uint32_t)
+    {
+        return Status::invalid_argument("delete_block: unsupported page store");
+    }
+
     // ── Async API ────────────────────────────────────────────────────
     // submit_read/submit_write/submit_fsync return an opaque op id usable
     // with cancel(). The callback fires exactly once with the outcome.
@@ -291,6 +296,11 @@ class FaultyPageStore : public PageStore
     [[nodiscard]] uint64_t block_size() const override
     {
         return inner_->block_size();
+    }
+
+    Status delete_block(uint32_t block_idx) override
+    {
+        return inner_->delete_block(block_idx);
     }
 
     [[nodiscard]] int write_count() const

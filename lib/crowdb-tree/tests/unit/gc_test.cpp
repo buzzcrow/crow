@@ -161,7 +161,8 @@ TEST(Gc, CompactSparseBlocksNoOpOnMemStore)
     ASSERT_TRUE(t.flush().ok());
     ASSERT_TRUE(t.snapshot().ok());
 
-    MergeGcStats stats = t.compact_sparse_blocks();
+    MergeGcStats stats;
+    ASSERT_TRUE(t.compact_sparse_blocks(&stats).ok());
     EXPECT_EQ(stats.blocks_selected, 0U);
     EXPECT_EQ(stats.pages_relocated, 0U);
     EXPECT_EQ(stats.bytes_relocated, 0U);
@@ -219,7 +220,8 @@ TEST(Gc, CompactSparseBlocksProtectsAnchorBlock)
         ASSERT_TRUE(t.flush().ok());
         ASSERT_TRUE(t.snapshot().ok());
         // Run compaction — must not touch block 0 (anchor).
-        MergeGcStats stats = t.compact_sparse_blocks();
+        MergeGcStats stats;
+        ASSERT_TRUE(t.compact_sparse_blocks(&stats).ok());
         EXPECT_GE(stats.blocks_selected, 0U);
         // Surviving keys readable.
         for (int i = 0; i < 50; i += 10) {
@@ -282,7 +284,8 @@ TEST(Gc, CompactSparseBlocksRespectsByteBudget)
     ASSERT_TRUE(t.flush().ok());
     ASSERT_TRUE(t.snapshot().ok());
 
-    MergeGcStats stats = t.compact_sparse_blocks();
+    MergeGcStats stats;
+    ASSERT_TRUE(t.compact_sparse_blocks(&stats).ok());
     // At least one block selected (the first eligible is always allowed).
     EXPECT_GE(stats.blocks_selected, 1U);
     // Surviving keys are still readable.
@@ -333,7 +336,8 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
     ASSERT_TRUE(t.snapshot().ok());
 
     // Run compaction.
-    MergeGcStats stats = t.compact_sparse_blocks();
+    MergeGcStats stats;
+    ASSERT_TRUE(t.compact_sparse_blocks(&stats).ok());
     // Some blocks should be selected and relocated.
     EXPECT_GE(stats.blocks_selected, 1U);
 
@@ -356,7 +360,8 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
 
     // A second compaction pass should be idempotent (no more sparse blocks
     // or at least no data loss).
-    MergeGcStats stats2 = t.compact_sparse_blocks();
+    MergeGcStats stats2;
+    ASSERT_TRUE(t.compact_sparse_blocks(&stats2).ok());
     (void)stats2;
     for (int i = 0; i < 200; i += 20) {
         std::string v;

@@ -191,7 +191,14 @@ pub trait KVEngine: Send + Sync {
     /// relocates their live extents through a snapshot, and deletes blocks
     /// unreachable from any retained anchor. Non-block stores and disabled
     /// configurations return a no-op result. Default is a no-op.
-    fn compact_sparse_blocks(&self) {}
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when snapshot preparation, persistence, or a
+    /// durability barrier fails.
+    fn compact_sparse_blocks(&self) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Export this engine's entire current state as an opaque,
     /// engine-specific byte stream, for the new-member join flow: a fresh/far-lagging

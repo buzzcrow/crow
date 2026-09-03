@@ -343,15 +343,22 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
         if now_ms.saturating_sub(last_compact_ms) >= merge_gc_interval_ms {
             let compact_start = std::time::Instant::now();
             let engine_arc = group.local_replica().learner.engine_arc();
-            tokio::task::spawn_blocking(move || engine_arc.compact_sparse_blocks())
-                .await
-                .unwrap_or_else(|e| {
+            match tokio::task::spawn_blocking(move || engine_arc.compact_sparse_blocks()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
                     error!(
                         group_id = group.group_id(),
-                        error = %e,
+                        error, "maintenance: compact_sparse_blocks failed"
+                    );
+                }
+                Err(error) => {
+                    error!(
+                        group_id = group.group_id(),
+                        %error,
                         "maintenance: compact_sparse_blocks blocking task panicked"
                     );
-                });
+                }
+            }
             group.last_merge_gc_time_ms.store(
                 crate::common::time::instant_to_anchor_ms(std::time::Instant::now()),
                 Ordering::Release,
