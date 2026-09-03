@@ -15,30 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R119](R119-cluster-log-file-usage-review.md)** — log file usage
-  review & unification — Area: cluster / observability — CROWDB has
-  two logging stacks (Rust `tracing` in `crowdb-common/rust`, C++
-  `spdlog` in `crowdb-common/cpp`) and four servers + `crowdb-cli`, but
-  only `crowdb-kv-server` wires up file logging with rotation +
-  compression; `crowdb-diskdb`, `crowdb-chunkdb`, and `crowdb-web`
-  initialize console-only `tracing_subscriber::fmt().init()` and
-  lose every log line when daemonized. The `crowdb-rpc` C++ library
-  ships a `crowdb_rpc_init_logging` C API that no Rust caller ever
-  invokes (no FFI wrapper, no call site), so the consensus
-  transport layer is silent. Log directories diverge (`"log"`,
-  `~/.crowdb-kv/log`, temp paths), log formats differ between Rust
-  and C++, and no audit has been done of whether log lines are
-  meaningful and self-explaining. R119 does a two-prong audit
-  (code review of every logging call site + run each service's
-  e2e test and read the real log output), then unifies every
-  server on the shared rotating-file logging stack, wires the
-  crowdb-rpc C++ logging through an FFI bridge, adopts one log
-  directory + format convention, adds a "Logging" section to
-  `design-crowdb-kv-observability.md` (current design gap — the doc
-  covers metrics only), and fixes log lines that are opaque,
-  noisy, or missing context. Verification: each service's e2e
-  test asserts its log file exists, is non-empty, and contains
-  self-explaining key lines.
 - **[R103](R103-chunkdb-range-migration.md)** — chunkdb range ownership
   migration — Area: chunkdb / kv — Implement the full
   `Copying`/`Cutover`/`Complete` migration flow for transferring chunkdb
