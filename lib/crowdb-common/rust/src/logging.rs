@@ -168,6 +168,34 @@ pub fn timestamp_secs() -> String {
     format_secs(secs)
 }
 
+/// Derive the C++ log level string from `RUST_LOG` or a fallback.
+///
+/// If `RUST_LOG` is set and non-empty, the first global directive (the
+/// part before any `=`) is used — e.g. `RUST_LOG=debug` → `"debug"`,
+/// `RUST_LOG=crowdb_kv=info` → `"info"`. If `RUST_LOG` is unset or
+/// empty, `fallback` is used. If the derived level is not a valid
+/// spdlog level, `"info"` is returned.
+#[must_use]
+pub fn cpp_level_from_rust_log(fallback: &str) -> String {
+    let valid = ["trace", "debug", "info", "warn", "error", "off"];
+    if let Some(rust_log) = std::env::var("RUST_LOG").ok().filter(|s| !s.is_empty()) {
+        // Take the first comma-separated directive; if it has no '=',
+        // it is a global level; otherwise it is target-specific and
+        // we fall back to the default.
+        let first = rust_log.split(',').next().unwrap_or(&rust_log);
+        if let Some((level, _)) = first.split_once('=') {
+            // target=level — not a global level; use fallback
+            let _ = level; // target name, unused
+            return fallback.to_string();
+        }
+        let candidate = first.trim();
+        if valid.contains(&candidate) {
+            return candidate.to_string();
+        }
+    }
+    fallback.to_string()
+}
+
 /// Format epoch millis as `YYYYMMDD-HHMMSS.mmm` (UTC).
 fn format_timestamp(millis: u128) -> String {
     let secs = u64::try_from(millis / 1000).unwrap_or(u64::MAX);
@@ -411,4 +439,43 @@ pub fn init_file_and_console_logging(
         .map_err(|e| format!("failed to initialize tracing subscriber; next step: initialize logging only once per process: {e}"))?;
 
     Ok(LogGuards { _file: file_guard })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cpp_level_from_rust_log;
+
+    #[test]
+    fn cpp_level_global_directive() {
+        std::env::set_var("RUST_LOG", "debug");
+        assert_eq!(cpp_level_from_rust_log("info"), "debug");
+        std::env::remove_var("RUST_LOG");
+    }
+
+    #[test]
+    fn cpp_level_target_directive_uses_fallback() {
+        std::env::set_var("RUST_LOG", "crowdb_kv=info");
+        assert_eq!(cpp_level_from_rust_log("info"), "info");
+        std::env::remove_var("RUST_LOG");
+    }
+
+    #[test]
+    fn cpp_level_empty_rust_log_uses_fallback() {
+        std::env::set_var("RUST_LOG", "");
+        assert_eq!(cpp_level_from_rust_log("info"), "info");
+        std::env::remove_var("RUST_LOG");
+    }
+
+    #[test]
+    fn cpp_level_unset_rust_log_uses_fallback() {
+        std::env::remove_var("RUST_LOG");
+        assert_eq!(cpp_level_from_rust_log("warn"), "warn");
+    }
+
+    #[test]
+    fn cpp_level_invalid_level_uses_fallback() {
+        std::env::set_var("RUST_LOG", "bogus");
+        assert_eq!(cpp_level_from_rust_log("info"), "info");
+        std::env::remove_var("RUST_LOG");
+    }
 }

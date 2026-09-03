@@ -53,6 +53,22 @@ pub struct Cli {
     #[arg(short = 'l', long)]
     pub log: bool,
 
+    /// Log directory. If omitted, uses `config.log_dir` (default
+    /// `<root>/log`). All Rust and C++ logs land under this directory.
+    #[arg(long)]
+    pub log_dir: Option<String>,
+
+    /// Log level for both Rust and C++ stacks. If omitted, derives
+    /// from `RUST_LOG` (first global directive) or defaults to
+    /// `"info"`. Valid: trace, debug, info, warn, error, off.
+    #[arg(long)]
+    pub log_level: Option<String>,
+
+    /// Mirror C++ log lines at this level or above to stderr (e.g.
+    /// `"warn"` mirrors warn+error). Off by default.
+    #[arg(long)]
+    pub log_stderr: Option<String>,
+
     #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e"])]
     pub election_profile: String,
 

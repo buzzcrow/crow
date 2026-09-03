@@ -26,6 +26,17 @@ Satisfies: [`design-crowdb-kv.md`](design-crowdb-kv.md) §16
   - [2.14 Rust/C++ Metric Deduplication](#214-rustc-metric-deduplication)
   - [2.15 C++ flush_to Format Alignment](#215-c-flush_to-format-alignment)
   - [2.16 Shared Column Width](#216-shared-column-width)
+- [3. Logging](#3-logging)
+  - [3.1 Log Directory Convention](#31-log-directory-convention)
+  - [3.2 Rotation and Compression](#32-rotation-and-compression)
+  - [3.3 Per-Stack Files](#33-per-stack-files)
+  - [3.4 Metrics Log](#34-metrics-log)
+  - [3.5 Level Unification](#35-level-unification)
+  - [3.6 C++ Logger Additivity](#36-c-logger-additivity)
+  - [3.7 No Separate ops_log](#37-no-separate-ops_log)
+  - [3.8 CLI Logging](#38-cli-logging)
+  - [3.9 Log Content Guidelines](#39-log-content-guidelines)
+  - [3.10 Extension Path](#310-extension-path)
 
 ## 1. Mandatory Signals
 
@@ -329,3 +340,138 @@ max name length via `ct_max_name_len()`, computes
 `shared_width = max(rust_max, max(cpp_maxes))`, and passes it to both its
 own `flush()` and C++ `flush_metrics_str()`. This adapts automatically as
 handles are added dynamically.
+
+## 3. Logging
+
+CROWDB has two logging stacks — a Rust `tracing` stack
+(`crowdb-common/rust/src/logging.rs`) and a C++ `spdlog` stack
+(`crowdb-common/cpp/src/log.cpp` + `compressing_sink.cpp`). Both
+produce rotating, gzip-compressed log files with the same naming
+convention. This section anchors the unified scheme across all
+server binaries.
+
+### 3.1 Log Directory Convention
+
+Every server binary accepts a `--log-dir <DIR>` CLI flag. All Rust
+and C++ logs for a process land under that directory. Defaults:
+
+- `crowdb-kv-server`, `crowdb-diskdb`, `crowdb-chunkdb` — `"log"`
+  (relative to CWD). `crowdb-kv-server` also falls back to
+  `CrowDBConfig.log_dir` (config field, default `root/log`) when
+  `--log-dir` is not given.
+- `crowdb-web` — `~/.crowdb-kv/log`.
+- `crowdb-cli` — `cli-log/{command-slug}-{timestamp}/` (per-invocation
+  directory, controlled by `--log-root`).
+
+The test harness passes `--log-dir <test_log_dir>` so child-process
+file logs land in `test-logs/` alongside redirected stderr.
+
+### 3.2 Rotation and Compression
+
+Both stacks use the same defaults:
+
+- Max file size: 30 MiB (`DEFAULT_LOG_MAX_FILE_MB`).
+- Max rotated files: 5 (`DEFAULT_LOG_MAX_FILES`).
+- Tunable via `--log-max-file-mb` and `--log-max-files` CLI flags.
+
+Rotation: when the current file exceeds the size cap, it is closed,
+gzip-compressed to `.log.gz`, and a new file is opened. The oldest
+`.log.gz` files beyond the retention count are deleted.
+
+File naming: `{prefix}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`. The PID
+suffix prevents collision when two processes with the same prefix
+start in the same second.
+
+### 3.3 Per-Stack Files
+
+Rust and C++ write to separate files in the same directory (D1).
+Prefixes:
+
+- `{server}` — Rust tracing log (e.g. `crowdb-kv-server`).
+- `{server}-tree` — C++ crowdb-tree spdlog (e.g.
+  `crowdb-kv-server-tree`).
+- `{server}-rpc` — C++ crowdb-rpc spdlog (e.g.
+  `crowdb-kv-server-rpc`).
+- `{server}-metrics` — metrics log (Rust, via `MetricsRunner`).
+
+The shared timestamp + PID suffix lets the operator interleave files
+from one process by sort order; no cross-FFI write coordination
+needed. The merged-file option is rejected — per-stack files keep the
+two stacks independent and avoid cross-FFI write contention.
+
+### 3.4 Metrics Log
+
+The metrics log is the one combined file per process (D2). Rust
+queries the metrics registry (including C++ metrics via FFI) and
+writes the content via `MetricsRunner`. The C++ stack does not write
+to the metrics log directly.
+
+### 3.5 Level Unification
+
+Both Rust and C++ stacks default to `info` (D3). The `--log-level`
+CLI flag drives both stacks. If `RUST_LOG` is set, the Rust
+`EnvFilter` uses it directly; for the C++ side, the first global
+directive is extracted via `cpp_level_from_rust_log()` (e.g.
+`RUST_LOG=debug` → C++ `"debug"`, `RUST_LOG=crowdb_kv=info` → C++
+`"info"`). Valid levels: `trace`, `debug`, `info`, `warn`, `error`,
+`off`.
+
+The `--log-stderr <LEVEL>` flag mirrors C++ log lines at the given
+level or above to the process stderr (via `ct_add_log_stderr` /
+`crowdb_rpc_ffi::add_log_stderr`). This lets operators tail stderr
+for failures without grepping the file. `crowdb-web` defaults this to
+`"warn"`; other servers default to off.
+
+### 3.6 C++ Logger Additivity
+
+When `ct_init_logging` runs first (as in `crowdb-kv-server`),
+`crowdb_rpc_init_logging` calls `add_log_file` — it adds a second
+file sink to the same `crowdb::common` logger rather than creating a
+new one. The rpc sink inherits the tree logger's level. The
+`--log-level` flag sets the tree logger's level, which the rpc sink
+inherits. This is the expected behavior: both C++ stacks run at the
+same level and write to separate files via separate sinks on the same
+async logger.
+
+When `ct_init_logging` has NOT run (as in `crowdb-web`,
+`crowdb-diskdb`, `crowdb-chunkdb`, `crowdb-cli`),
+`crowdb_rpc_init_logging` creates a fresh logger with the given level.
+
+### 3.7 No Separate ops_log
+
+The former `ops_log` module has been deleted (D4). Operations lines
+(HTTP/RPC/SSH call records) are folded into the normal tracing log
+via `log_ops_http` in `crowdb-console-shared/src/clients.rs`. The
+server log's rotation covers ops lines — no separate unbounded file.
+
+### 3.8 CLI Logging
+
+`crowdb-cli` writes file logs for all commands to a per-invocation
+directory `cli-log/{command-slug}-{timestamp}/` (D5, revised). The
+`bench` subcommand additionally opens a metrics log via
+`BenchMetrics::new`. Other commands can opt into additional logging
+later if a detached use case appears.
+
+### 3.9 Log Content Guidelines
+
+No strict `component=` field template (D6). Guidelines:
+
+- Every line should be clear and readable, carrying enough context to
+  locate the code position and the surrounding state.
+- Bring rich info for identifying bugs — structured fields where they
+  fit naturally, but author flexibility wins over a rigid template.
+- Consensus-event logs must carry `node_id`, `group_id`, `slot`,
+  `term` where applicable (per §1 mandatory signals).
+- Machine-parseability is a plus — AI agents do the real log-digging.
+
+### 3.10 Extension Path
+
+Any future server (e.g. `diskio` server) follows the same scheme:
+
+- `--log-dir` / `--log-level` / `--log-max-file-mb` / `--log-max-files`
+  / `--log` / `--log-stderr` CLI flags.
+- Rust tracing init via `init_file_logging` or
+  `init_file_and_console_logging_split`.
+- C++ FFI init for each linked C++ library (`ct_init_logging` for
+  crowdb-tree, `crowdb_rpc_ffi::init_logging` for crowdb-rpc).
+- Per-stack file prefixes: `{server}`, `{server}-tree`, `{server}-rpc`.

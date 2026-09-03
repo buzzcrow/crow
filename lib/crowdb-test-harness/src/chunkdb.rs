@@ -149,7 +149,10 @@ lock_hold_warn_threshold_ms = 1000
         let log_file2 = log_file.try_clone().expect("clone log file");
 
         let mut cmd = Command::new(&bin);
+        let test_log_dir = crate::test_dirs::test_log_dir();
         cmd.args(["--config", config_path.to_str().unwrap()])
+            .arg("--log-dir")
+            .arg(test_log_dir.to_str().unwrap())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file2));
 
