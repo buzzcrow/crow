@@ -83,21 +83,33 @@ async fn seed_leader_after_init(
                     if store.store_id == 0 {
                         for group in &store.groups {
                             if group.group_id == 0 && group.leader_id > 0 {
-                                for remote in &group.remotes {
-                                    if remote.id == group.leader_id {
-                                        let ep = remote.endpoint.clone();
-                                        let stripped = ep
-                                            .strip_prefix("http://")
-                                            .or_else(|| ep.strip_prefix("https://"))
-                                            .unwrap_or(&ep);
-                                        let remapped = stripped.strip_prefix("0.0.0.0:").map_or_else(
-                                            || stripped.to_string(),
-                                            |port| format!("127.0.0.1:{port}"),
-                                        );
-                                        ctx.kv().seed_leader(0, 0, remapped);
-                                        break;
-                                    }
+                                // The leader is either the local replica
+                                // (leader_id == local_replica_id) or a
+                                // remote replica. When local, the endpoint
+                                // is the store's own listen_addr (not in
+                                // the remotes list). When remote, find the
+                                // matching remote's endpoint.
+                                let leader_ep = if group.leader_id == group.local_replica_id {
+                                    store.listen_addr.clone()
+                                } else {
+                                    group
+                                        .remotes
+                                        .iter()
+                                        .find(|r| r.id == group.leader_id)
+                                        .map(|r| r.endpoint.clone())
+                                };
+                                if let Some(ep) = leader_ep {
+                                    let stripped = ep
+                                        .strip_prefix("http://")
+                                        .or_else(|| ep.strip_prefix("https://"))
+                                        .unwrap_or(&ep);
+                                    let remapped = stripped.strip_prefix("0.0.0.0:").map_or_else(
+                                        || stripped.to_string(),
+                                        |port| format!("127.0.0.1:{port}"),
+                                    );
+                                    ctx.kv().seed_leader(0, 0, remapped);
                                 }
+                                break;
                             }
                         }
                     }

@@ -20,8 +20,9 @@ use crate::error::{Error, Result};
 use crate::ops::OpContext;
 
 /// Retry a sysdata write with backoff. Group-0 leader election may not
-/// have settled when `cluster_init` returns, causing "not leader" errors
-/// on the first attempt. Up to 5 attempts with 50ms backoff.
+/// have settled when `cluster_init` returns, causing "not leader" or
+/// "no known leader" errors on the first attempt. Up to 5 attempts with
+/// 50ms backoff.
 async fn retry_sysmd<F, Fut, T, E>(label: &str, f: F) -> Result<T>
 where
     F: Fn() -> Fut,
@@ -34,7 +35,10 @@ where
             Ok(v) => return Ok(v),
             Err(e) => {
                 let msg = format!("{e}");
-                if !msg.contains("not leader") && !msg.contains("retries exhausted") {
+                if !msg.contains("not leader")
+                    && !msg.contains("retries exhausted")
+                    && !msg.contains("no known leader")
+                {
                     return Err(e.into());
                 }
                 last_err = Some(e);
