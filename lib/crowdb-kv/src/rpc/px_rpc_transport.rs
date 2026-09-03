@@ -718,6 +718,28 @@ impl PxRpcTransport {
     pub(crate) fn alloc_id(&self) -> u64 {
         self.next_id()
     }
+
+    /// Test-only: send a frame with arbitrary control bytes and a
+    /// caller-chosen `msg_type`, bypassing the flatbuffer build step.
+    /// Returns the raw `Response` so the test can inspect the control
+    /// buffer. Used by R120 to verify the server's deserialization
+    /// guard rejects malformed `EAcceptRequest` frames.
+    #[cfg(feature = "test-util")]
+    pub async fn send_raw_request(
+        &self,
+        rpc_endpoint: &str,
+        msg_type: u16,
+        control: Buffer,
+    ) -> Result<crowdb_rpc_ffi::Response, PxReplicaError> {
+        let req_id = self.next_id();
+        let conn = self.conn_for(rpc_endpoint)?;
+        let fut = self
+            .rpc
+            .call(&self.server, &conn, req_id, control, None, msg_type)
+            .map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        let resp = fut.await.map_err(|e| self.map_rpc_err(e, rpc_endpoint))?;
+        Ok(resp)
+    }
 }
 
 impl Default for PxRpcTransport {
