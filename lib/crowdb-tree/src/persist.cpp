@@ -490,8 +490,10 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
     // was read outside write_mutex_; revalidation under the mutex checks
     // that the mapping word still matches before using the prefetched blob.
     std::unordered_map<uint64_t, const PrefetchedPage *> prefetch_by_page_id;
+    std::set<uint64_t>                                   forced_segment_images;
     for (const auto &pf : prefetched) {
         prefetch_by_page_id[pf.page_id] = &pf;
+        forced_segment_images.insert(pf.page_id / MappingTable::kSegmentSize);
     }
 
     // Persist one page's content (write its blob only when dirty, PT10).
@@ -511,8 +513,12 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
             // NOT pg->durable_addr = addr here -- see this function's doc
             // comment on crowdb-tree.h: that must wait until commit_prepared_
             // snapshot() confirms the byte write actually landed.
-            out->page_writes.push_back(PreparedPageWrite{
-                .page_id = the_page_id, .page = pg, .addr = addr, .logical_len = logical, .blob = std::move(blob)});
+            out->page_writes.push_back(PreparedPageWrite{.page_id     = the_page_id,
+                                                         .page        = pg,
+                                                         .prior_addr  = pg->durable_addr,
+                                                         .addr        = addr,
+                                                         .logical_len = logical,
+                                                         .blob        = std::move(blob)});
             *out_addr = addr;
             *out_len  = logical;
             ++pages_written;
@@ -659,6 +665,9 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
             }
             if (page->durable_addr == kNoAddr || relocate) {
                 pending_addr[page_id] = {addr, len};
+                if (relocate) {
+                    forced_segment_images.insert(seg_idx);
+                }
             }
         }
     }
@@ -680,7 +689,7 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
         if (seg == nullptr) {
             continue;
         }
-        if (!seg->is_dirty()) {
+        if (!seg->is_dirty() && !forced_segment_images.contains(seg_idx)) {
             directory_entries.push_back(DirEntry{.seg_idx    = static_cast<uint32_t>(seg_idx),
                                                  .generation = seg->generation.load(std::memory_order_relaxed),
                                                  .image_addr = seg->image_addr,
@@ -738,11 +747,13 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
                 uint64_t new_word = slot_word::pack_unloaded(iu_index, iu_count);
                 out->page_writes.push_back(PreparedPageWrite{.page_id     = page_id,
                                                              .page        = nullptr,
+                                                             .prior_addr  = old_addr,
                                                              .addr        = new_addr,
                                                              .logical_len = padded_len,
                                                              .blob        = std::move(blob)});
                 out->unloaded_relocations.push_back(
                     PreparedUnloadedRelocation{.page_id = page_id, .old_word = w, .new_word = new_word});
+                forced_segment_images.insert(seg_idx);
                 words[i] = new_word;
                 ++live;
                 ++pages_relocated;
@@ -752,17 +763,17 @@ Status Crowdbtree::prepare_snapshot_locked(PreparedSnapshot *out, std::vector<Pr
             PageBase *page = slot_word::resident_ptr(w);
             uint64_t  addr;
             uint32_t  plen;
-            if (page->durable_addr != kNoAddr) {
+            auto      pending = pending_addr.find(page_id);
+            if (pending != pending_addr.end()) {
+                addr = pending->second.first;
+                plen = pending->second.second;
+            }
+            else if (page->durable_addr != kNoAddr) {
                 addr = page->durable_addr;
                 plen = page->durable_plen;
             }
             else {
-                auto it = pending_addr.find(page_id);
-                if (it == pending_addr.end()) {
-                    return Status::internal_error("snapshot: dirty resident page missing pending write");
-                }
-                addr = it->second.first;
-                plen = it->second.second;
+                return Status::internal_error("snapshot: dirty resident page missing pending write");
             }
             uint64_t iu_index = addr / iu;
             auto     iu_count = static_cast<uint32_t>(round_up_to_iu(plen, iu) / iu);
@@ -854,7 +865,7 @@ void Crowdbtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
             // consolidate/flush/split replaced this page_id's mapping entry
             // since prepare_snapshot_locked() ran -- see PreparedPageWrite's
             // doc comment. A mismatch just skips this entry (harmless).
-            if (v == pw.page && v->durable_addr == kNoAddr) {
+            if (pw.page != nullptr && v == pw.page && v->durable_addr == pw.prior_addr) {
                 v->durable_addr = pw.addr;
                 v->durable_plen = pw.logical_len;
             }
@@ -1291,7 +1302,15 @@ Status Crowdbtree::compact_sparse_blocks(MergeGcStats *out_stats)
     }
     Status sync2 = opt_.page_store->sync();
     if (!sync2.ok()) {
-        commit_prepared_snapshot(prepared);
+        // The anchor write may be visible even though its commit barrier
+        // failed. Invalidate that candidate slot and durably restore the
+        // previous anchor as the only recoverable generation.
+        std::vector<uint8_t> invalid_anchor(prepared.anchor_write.blob.size(), 0);
+        Status               rollback_write =
+            opt_.page_store->write_at(prepared.anchor_write.addr, invalid_anchor.data(), invalid_anchor.size());
+        if (rollback_write.ok()) {
+            (void)opt_.page_store->sync();
+        }
         release_snapshot_slot();
         return sync2;
     }

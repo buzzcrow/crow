@@ -297,6 +297,7 @@ struct PreparedPageWrite
 {
     uint64_t             page_id     = 0;
     PageBase            *page        = nullptr; // opaque identity only
+    uint64_t             prior_addr  = kNoAddr;
     uint64_t             addr        = 0;
     uint32_t             logical_len = 0; // unpadded; mirrors PageBase::durable_plen
     std::vector<uint8_t> blob;            // already IU-padded

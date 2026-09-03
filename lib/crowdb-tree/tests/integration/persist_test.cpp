@@ -1054,11 +1054,12 @@ TEST_P(CompactSparseBlocksFailureInjectionTest, ReopenFromPriorAnchorIsClean)
     }
 }
 
-// Fail at page/metadata writes and the pre-anchor durability barrier.
+// Fail at page/metadata writes and either durability barrier.
 INSTANTIATE_TEST_SUITE_P(CompactSparseBlocksFailureStages, CompactSparseBlocksFailureInjectionTest,
                          ::testing::Values(std::make_tuple(0, false),  // first page write
                                            std::make_tuple(2, false),  // segment image
-                                           std::make_tuple(0, true))); // first sync barrier
+                                           std::make_tuple(0, true),   // first sync barrier
+                                           std::make_tuple(1, true))); // second sync barrier
 
 // leaf/inner counts are persisted in the commit anchor and restored on open.
 TEST(Persist, LeafInnerCountSurvivesSnapshotOpen)
